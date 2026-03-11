@@ -12,6 +12,10 @@ import ontologyRouter from "./routes/ontology";
 import objectTypeRouter from "./routes/objectTypes";
 import propertyRouter from "./routes/properties";
 import datasourceRouter from "./routes/datasources";
+import indexingRouter from "./routes/indexing";
+import linkRouter from "./routes/links";
+import healthRouter from "./routes/health";
+import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
 // ---------------------------------------------------------------------------
 // Config validation — fail fast if required env vars are missing
@@ -117,6 +121,15 @@ app.use(
   "/api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource",
   datasourceRouter
 );
+app.use(
+  "/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index",
+  indexingRouter
+);
+app.use(
+  "/api/v2/ontologies/:ontologyId/linkTypes",
+  linkRouter
+);
+app.use(healthRouter);
 
 // Global error handler — MUST be last in the middleware chain
 app.use(errorHandler);
@@ -145,6 +158,19 @@ async function start(): Promise<void> {
   try {
     // Verify the database is reachable before accepting requests.
     await pool.query("SELECT NOW()");
+
+    // Ensure the OpenSearch index template is in place before any indexing
+    // operations. This is a best-effort call — if OpenSearch is not yet
+    // reachable the server still starts (indexing will fail later with a
+    // clear error), but the template will be applied on next restart.
+    try {
+      await ensureIndexTemplate();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `WARNING: Could not ensure OpenSearch index template: ${msg}`
+      );
+    }
 
     server = app.listen(PORT, () => {
       console.log(
