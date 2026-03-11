@@ -24,6 +24,8 @@ import {
   validateListQuery,
   validateAggregateQuery,
 } from "../services/queryValidator";
+import { resolveLinks, countLinks, searchAround, validateForeignKeys } from "../services/linkResolverService";
+import linkTypeModel from "../models/linkType";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { appError } from "../utils/appError";
 
@@ -215,6 +217,178 @@ router.get(
       );
 
       return sendSuccess(res, result);
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/v2/objects/:objectType/searchAround (Task 13-14)
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/api/v2/objects/:objectType/searchAround",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectType } = req.params;
+      await ensureObjectTypeExists(objectType);
+
+      const { linkType: linkTypeApiName, direction, sourceFilter, targetFilter, pageSize, pageToken, $direction } = req.body;
+
+      if (!linkTypeApiName) {
+        throw appError("QUERY_VALIDATION_ERROR", "linkType is required in request body.");
+      }
+      if (!direction && !$direction) {
+        throw appError("QUERY_VALIDATION_ERROR", "direction is required.");
+      }
+
+      // Find the link type — need ontology for this object type
+      const otResult = await query(
+        "SELECT ontology_id FROM object_type WHERE api_name = $1",
+        [objectType]
+      );
+      if (otResult.rows.length === 0) {
+        throw appError("OBJECT_TYPE_NOT_FOUND", `Object type '${objectType}' not found.`);
+      }
+      const ontologyId = otResult.rows[0].ontology_id;
+
+      const linkType = await linkTypeModel.getByApiName(ontologyId, linkTypeApiName);
+      if (!linkType) {
+        throw appError("LINK_TYPE_NOT_FOUND", `Link type '${linkTypeApiName}' not found.`);
+      }
+
+      const effectiveDirection = (direction || $direction) as "forward" | "reverse";
+      const result = await searchAround(linkType, effectiveDirection, {
+        sourceFilter, targetFilter, pageSize, pageToken,
+      });
+
+      return sendSuccess(res, result);
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/v2/objects/:objectType/validateForeignKeys (Task 20)
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/api/v2/objects/:objectType/validateForeignKeys",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectType } = req.params;
+      await ensureObjectTypeExists(objectType);
+
+      const otResult = await query(
+        "SELECT object_type_id, ontology_id FROM object_type WHERE api_name = $1",
+        [objectType]
+      );
+      const { object_type_id, ontology_id } = otResult.rows[0];
+
+      const result = await validateForeignKeys(object_type_id, req.body, ontology_id);
+      return sendSuccess(res, result);
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/v2/objects/:objectType/:primaryKey/links/:linkType (Task 12)
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/api/v2/objects/:objectType/:primaryKey/links/:linkType",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectType, primaryKey, linkType: linkTypeApiName } = req.params;
+      const { direction, pageSize, pageToken, select } = req.query;
+
+      await ensureObjectTypeExists(objectType);
+
+      // Resolve ontology
+      const otResult = await query(
+        "SELECT object_type_id, ontology_id FROM object_type WHERE api_name = $1",
+        [objectType]
+      );
+      if (otResult.rows.length === 0) {
+        throw appError("OBJECT_TYPE_NOT_FOUND", `Object type '${objectType}' not found.`);
+      }
+      const { object_type_id, ontology_id } = otResult.rows[0];
+
+      const linkType = await linkTypeModel.getByApiName(ontology_id, linkTypeApiName);
+      if (!linkType) {
+        throw appError("LINK_TYPE_NOT_FOUND", `Link type '${linkTypeApiName}' not found.`);
+      }
+
+      // Determine direction: if not explicit, infer from object type position
+      let effectiveDirection: "forward" | "reverse" = "forward";
+      if (direction) {
+        effectiveDirection = direction as "forward" | "reverse";
+      } else if (linkType.target_object_type === object_type_id && linkType.source_object_type !== object_type_id) {
+        effectiveDirection = "reverse";
+      }
+
+      const result = await resolveLinks(linkType, primaryKey, effectiveDirection, {
+        pageSize: pageSize ? parseInt(pageSize as string, 10) : undefined,
+        pageToken: pageToken as string,
+        select: select ? (select as string).split(",") : undefined,
+      });
+
+      // Format based on cardinality
+      const isSingle = (
+        (linkType.cardinality === "ONE_TO_ONE") ||
+        (linkType.cardinality === "MANY_TO_ONE" && effectiveDirection === "forward")
+      );
+
+      if (isSingle) {
+        return sendSuccess(res, {
+          linkedObject: result.linkedObjects.length > 0 ? result.linkedObjects[0] : null,
+        });
+      }
+
+      return sendSuccess(res, result);
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/v2/objects/:objectType/:primaryKey/links/:linkType/count (Task 15)
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/api/v2/objects/:objectType/:primaryKey/links/:linkType/count",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectType, primaryKey, linkType: linkTypeApiName } = req.params;
+      const { direction } = req.query;
+
+      await ensureObjectTypeExists(objectType);
+
+      const otResult = await query(
+        "SELECT object_type_id, ontology_id FROM object_type WHERE api_name = $1",
+        [objectType]
+      );
+      const { object_type_id, ontology_id } = otResult.rows[0];
+
+      const linkType = await linkTypeModel.getByApiName(ontology_id, linkTypeApiName);
+      if (!linkType) {
+        throw appError("LINK_TYPE_NOT_FOUND", `Link type '${linkTypeApiName}' not found.`);
+      }
+
+      let effectiveDirection: "forward" | "reverse" = "forward";
+      if (direction) {
+        effectiveDirection = direction as "forward" | "reverse";
+      } else if (linkType.target_object_type === object_type_id && linkType.source_object_type !== object_type_id) {
+        effectiveDirection = "reverse";
+      }
+
+      const count = await countLinks(linkType, primaryKey, effectiveDirection);
+      return sendSuccess(res, { linkTypeApiName, direction: effectiveDirection, count });
     } catch (err: any) {
       return handleError(err, res, next);
     }
