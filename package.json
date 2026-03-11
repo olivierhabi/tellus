@@ -1,0 +1,42 @@
+{
+  "name": "ontology-engine",
+  "version": "0.1.0",
+  "description": "Ontology Engine - a robust PostgreSQL-backed API server",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "nodemon --exec tsx src/server.ts",
+    "migrate": "tsx src/migrate.ts",
+    "seed": "tsx src/seed.ts",
+    "test": "tsx tests/index.ts",
+    "test:all": "tsx tests/index.ts && bash tests/monday/e2e/suite.sh",
+    "test:monday": "tsx tests/monday/index.ts",
+    "test:monday:unit": "tsx tests/monday/unit/index.ts",
+    "test:monday:integration": "tsx tests/monday/integration/index.ts",
+    "test:monday:e2e": "bash tests/monday/e2e/suite.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "csv-parse": "^5.6.0",
+    "dotenv": "^17.3.1",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^25.4.0",
+    "@types/pg": "^8.18.0",
+    "nodemon": "^3.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
