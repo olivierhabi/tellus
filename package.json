@@ -20,6 +20,10 @@
     "test:tuesday:unit": "vitest run tests/tuesday/unit",
     "test:tuesday:integration": "vitest run tests/tuesday/integration",
     "test:tuesday:e2e": "bash tests/tuesday/e2e/suite.sh",
+    "test:wednesday": "vitest run tests/wednesday",
+    "test:wednesday:unit": "vitest run tests/wednesday/unit",
+    "test:wednesday:integration": "vitest run tests/wednesday/integration",
+    "test:wednesday:e2e": "bash tests/wednesday/e2e/suite.sh",
     "test:legacy": "tsx tests/index.ts"
   },
   "keywords": [],
