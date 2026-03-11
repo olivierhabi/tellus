@@ -238,6 +238,11 @@ export const ERROR_CODES: Record<string, number> = {
   DATASOURCE_FILE_NOT_FOUND: 400,
   COLUMN_MAPPING_INVALID: 400,
   REQUIRED_FIELD_MISSING: 400,
+  OPENSEARCH_CONNECTION_ERROR: 503,
+  NO_BACKING_DATASOURCE: 400,
+  INDEXING_IN_PROGRESS: 409,
+  DATA_VALIDATION_ERROR: 400,
+  LINK_TYPE_NOT_FOUND: 404,
   INTERNAL_ERROR: 500,
 };
 
@@ -391,11 +396,11 @@ function runSelfTests(): void {
     "formatError has code, message, details, timestamp"
   );
 
-  // Additional: ERROR_CODES has exactly 18 entries
+  // Additional: ERROR_CODES has exactly 19 entries
   const errorCodeCount = Object.keys(ERROR_CODES).length;
   assert(
-    errorCodeCount === 18,
-    `ERROR_CODES has ${errorCodeCount} entries (expected 18)`
+    errorCodeCount === 23,
+    `ERROR_CODES has ${errorCodeCount} entries (expected 23)`
   );
 
   // Additional: snakeToCamel handles null, arrays, nested objects

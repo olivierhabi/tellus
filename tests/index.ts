@@ -19,7 +19,7 @@ const ROOT = path.resolve(__dirname, "..");
 
 const days: string[] = [
   "monday",
-  // "tuesday",
+  "tuesday",
   // "wednesday",
   // "thursday",
   // "friday",
@@ -38,7 +38,7 @@ for (const day of days) {
     execSync(`npx tsx "${dayIndex}"`, {
       cwd: ROOT,
       encoding: "utf-8",
-      timeout: 180000,
+      timeout: 600000, // 10 min per day
       stdio: "inherit",
     });
   } catch {

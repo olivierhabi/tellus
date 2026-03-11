@@ -5,7 +5,9 @@ import { PoolClient } from "pg";
 // ---------------------------------------------------------------------------
 // Complete migration order (all tables):
 // Week 1: ontology, object_type, property, backing_datasource, funnel_state
-// Future: link_type, link_join_table, action_type, ontology_edit,
+// Week 2: funnel_pipeline_state
+// Week 3: ontology_edit
+// Future: link_join_table, action_type,
 //         action_audit_log, interface, object_type_interface
 // ---------------------------------------------------------------------------
 
@@ -266,9 +268,138 @@ async function migrate(): Promise<void> {
 
     logTableStatus("funnel_state", funnelStateExisted);
 
+    // ------------------------------------------------------------------
+    // funnel_pipeline_state
+    //
+    // Detailed pipeline execution metrics for the indexing engine.
+    // Coexists with `funnel_state` (which is the lightweight UI-facing
+    // status). This table uses `object_type_api_name` as a TEXT PK
+    // (not a UUID FK) because the indexing engine identifies object
+    // types by API name throughout the pipeline.
+    //
+    // State machine:
+    //   idle    -> running  (indexing starts)
+    //   running -> success  (indexing completes)
+    //   running -> failed   (indexing encounters error)
+    //   success -> running  (re-indexing starts)
+    //   failed  -> running  (retry)
+    // ------------------------------------------------------------------
+    const funnelPipelineStateExisted = await tableExists(
+      client,
+      "funnel_pipeline_state"
+    );
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS funnel_pipeline_state (
+        object_type_api_name  TEXT        PRIMARY KEY,
+        status                TEXT        NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running', 'success', 'failed')),
+        last_indexed_at       TIMESTAMPTZ,
+        objects_indexed       INT,
+        duration_ms           INT,
+        datasource_version    TEXT,
+        error_message         TEXT,
+        retry_count           INT         DEFAULT 0,
+        created_at            TIMESTAMPTZ DEFAULT now(),
+        updated_at            TIMESTAMPTZ DEFAULT now()
+      );
+    `);
+
+    logTableStatus("funnel_pipeline_state", funnelPipelineStateExisted);
+
+    // ------------------------------------------------------------------
+    // link_type
+    //
+    // Defines relationships between object types. Each link type connects
+    // a source object type to a target object type via foreign-key
+    // properties. Cardinality determines resolution behavior.
+    //
+    // In Palantir's Ontology, Link Types are first-class resources that
+    // define typed, directed edges between Object Types. The FK-based
+    // approach mirrors how Palantir resolves "backing links" from
+    // datasource foreign keys.
+    // ------------------------------------------------------------------
+    const linkTypeExisted = await tableExists(client, "link_type");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS link_type (
+        link_type_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id         UUID        NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        api_name            TEXT        NOT NULL,
+        display_name        TEXT        NOT NULL CHECK (char_length(display_name) BETWEEN 1 AND 256),
+        description         TEXT,
+        cardinality         TEXT        NOT NULL CHECK (cardinality IN ('ONE_TO_ONE', 'ONE_TO_MANY', 'MANY_TO_ONE', 'MANY_TO_MANY')),
+        source_object_type  UUID        NOT NULL REFERENCES object_type(object_type_id) ON DELETE CASCADE,
+        target_object_type  UUID        NOT NULL REFERENCES object_type(object_type_id) ON DELETE CASCADE,
+        source_property_id  UUID        REFERENCES property(property_id) ON DELETE SET NULL,
+        target_property_id  UUID        REFERENCES property(property_id) ON DELETE SET NULL,
+        created_at          TIMESTAMPTZ DEFAULT now(),
+        updated_at          TIMESTAMPTZ DEFAULT now(),
+        UNIQUE(ontology_id, api_name)
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_type_ontology
+        ON link_type(ontology_id);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_type_source
+        ON link_type(source_object_type);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_type_target
+        ON link_type(target_object_type);
+    `);
+
+    logTableStatus("link_type", linkTypeExisted);
+
+    // ------------------------------------------------------------------
+    // ontology_edit
+    //
+    // Stores user edits created by the Action execution engine. During
+    // reindexing, the Edit Merger (Stage 6 of the indexing pipeline)
+    // reads unindexed edits from this table and merges them with
+    // datasource data — user edits always win over datasource values
+    // for the same primary key.
+    //
+    // After successful indexing, the pipeline marks rows as indexed
+    // so they are not re-applied on the next run (though persistent
+    // update/create edits are always re-applied to prevent datasource
+    // refreshes from overwriting user changes).
+    // ------------------------------------------------------------------
+    const ontologyEditExisted = await tableExists(client, "ontology_edit");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ontology_edit (
+        edit_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        object_type_api_name   TEXT        NOT NULL,
+        primary_key            TEXT        NOT NULL,
+        operation              TEXT        NOT NULL CHECK (operation IN ('create', 'update', 'delete')),
+        property_values        JSONB,
+        executed_by            TEXT,
+        executed_at            TIMESTAMPTZ DEFAULT now(),
+        indexed                BOOLEAN     DEFAULT false,
+        indexed_at             TIMESTAMPTZ
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_ontology_edit_object_type
+        ON ontology_edit(object_type_api_name);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_ontology_edit_unindexed
+        ON ontology_edit(indexed) WHERE indexed = false;
+    `);
+
+    logTableStatus("ontology_edit", ontologyEditExisted);
+
     await client.query("COMMIT");
     console.log(
-      "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state"
+      "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit"
     );
   } catch (err) {
     await client.query("ROLLBACK");
