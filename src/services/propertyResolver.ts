@@ -16,6 +16,7 @@
 
 import { query } from "../db";
 import { appError } from "../utils/appError";
+import { PROPERTY_CACHE_TTL_MS } from "../utils/constants";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,7 +42,7 @@ export interface PropertyMeta {
 // Constants
 // ---------------------------------------------------------------------------
 
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = PROPERTY_CACHE_TTL_MS;
 
 /** Numeric base types that support range queries and term queries directly. */
 const NUMERIC_TYPES = new Set([

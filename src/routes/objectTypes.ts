@@ -394,7 +394,8 @@ router.get(
         result.objectType,
         result.properties,
         result.datasource,
-        result.funnelState
+        result.funnelState,
+        result.linkTypes || []
       );
 
       sendSuccess(res, formatted);

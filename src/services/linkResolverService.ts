@@ -856,17 +856,22 @@ export async function analyzeLinkType(
 
   const cardinality = linkType.cardinality as Cardinality;
 
+  let targetsWithNoLinks = 0;
+
   if (cardinality === "MANY_TO_MANY" && linkType.join_table_file_path) {
     // For M2M with join table, parse the CSV
     const rows = parseJoinTableCSV(linkType.join_table_file_path);
     totalLinkCount = rows.length;
 
     const sourceCountMap = new Map<string, number>();
+    const targetCountMap = new Map<string, number>();
     for (const row of rows) {
       sourceCountMap.set(row.source, (sourceCountMap.get(row.source) || 0) + 1);
+      targetCountMap.set(row.target, (targetCountMap.get(row.target) || 0) + 1);
     }
     const counts = Array.from(sourceCountMap.values()).sort((a, b) => a - b);
     sourcesWithNoLinks = Math.max(0, totalSourceObjects - sourceCountMap.size);
+    targetsWithNoLinks = Math.max(0, totalTargetObjects - targetCountMap.size);
 
     if (counts.length > 0) {
       distribution = computeDistribution(counts);
@@ -896,13 +901,78 @@ export async function analyzeLinkType(
       // Count objects with non-null FK
       totalLinkCount = await countIndex(fkIndex, { exists: { field: fkField } });
 
-      // Count objects without the FK field
-      const totalInIndex = await countIndex(fkIndex, { match_all: {} });
-      const withLinks = await countIndex(fkIndex, { exists: { field: fkField } });
-      sourcesWithNoLinks = totalInIndex - withLinks;
+      // Count objects without the FK field (sources with no links)
+      const totalInFkIndex = await countIndex(fkIndex, { match_all: {} });
+      const withFk = await countIndex(fkIndex, { exists: { field: fkField } });
+      sourcesWithNoLinks = totalInFkIndex - withFk;
 
-      // Simple distribution estimate
-      distribution = { min: 0, max: totalLinkCount > 0 ? 1 : 0, avg: totalInIndex > 0 ? totalLinkCount / totalInIndex : 0, p50: totalLinkCount > 0 ? 1 : 0, p90: totalLinkCount > 0 ? 1 : 0, p99: totalLinkCount > 0 ? 1 : 0 };
+      // Compute targetsWithNoLinks: objects on the non-FK side that nobody points to
+      // For ONE_TO_MANY: fkIndex=target, "other side" = source. Count sources not referenced.
+      // For MANY_TO_ONE: fkIndex=source, "other side" = target. Count targets not referenced.
+      try {
+        if (cardinality === "ONE_TO_MANY") {
+          // FK is on target side; sources with no links = sources not referenced by any target FK value
+          // Use terms agg on FK field to find unique FK values (= unique source PKs referenced)
+          const aggBody: Record<string, unknown> = {
+            size: 0,
+            aggs: {
+              unique_refs: { cardinality: { field: termField(fkField) } },
+            },
+            query: { exists: { field: fkField } },
+          };
+          const { body: aggResp } = await client.search({ index: fkIndex, body: aggBody });
+          const uniqueRefs = (aggResp as any).aggregations?.unique_refs?.value ?? 0;
+          // Sources that no target points to
+          sourcesWithNoLinks = Math.max(0, totalSourceObjects - uniqueRefs);
+          // Targets that have no FK value
+          targetsWithNoLinks = totalInFkIndex - withFk;
+        } else if (cardinality === "MANY_TO_ONE") {
+          // FK is on source side; targets with no links = targets not referenced by any source FK value
+          const aggBody: Record<string, unknown> = {
+            size: 0,
+            aggs: {
+              unique_refs: { cardinality: { field: termField(fkField) } },
+            },
+            query: { exists: { field: fkField } },
+          };
+          const { body: aggResp } = await client.search({ index: fkIndex, body: aggBody });
+          const uniqueRefs = (aggResp as any).aggregations?.unique_refs?.value ?? 0;
+          targetsWithNoLinks = Math.max(0, totalTargetObjects - uniqueRefs);
+        } else {
+          // ONE_TO_ONE or fallback
+          targetsWithNoLinks = Math.max(0, totalTargetObjects - totalLinkCount);
+        }
+      } catch {
+        targetsWithNoLinks = Math.max(0, totalTargetObjects - totalLinkCount);
+      }
+
+      // Use OpenSearch terms aggregation for real distribution
+      try {
+        const aggBody: Record<string, unknown> = {
+          size: 0,
+          aggs: {
+            fk_distribution: {
+              terms: {
+                field: termField(fkField),
+                size: 10000,
+              },
+            },
+          },
+          query: { exists: { field: fkField } },
+        };
+        const { body: aggResp } = await client.search({ index: fkIndex, body: aggBody });
+        const buckets = (aggResp as any).aggregations?.fk_distribution?.buckets ?? [];
+        if (buckets.length > 0) {
+          const counts = buckets.map((b: any) => b.doc_count as number).sort((a: number, b: number) => a - b);
+          distribution = computeDistribution(counts);
+        } else {
+          distribution = { min: 0, max: 0, avg: 0, p50: 0, p90: 0, p99: 0 };
+        }
+      } catch {
+        // Fallback to simple estimate if aggregation fails
+        const totalInIndex = await countIndex(fkIndex, { match_all: {} });
+        distribution = { min: 0, max: totalLinkCount > 0 ? 1 : 0, avg: totalInIndex > 0 ? totalLinkCount / totalInIndex : 0, p50: totalLinkCount > 0 ? 1 : 0, p90: totalLinkCount > 0 ? 1 : 0, p99: totalLinkCount > 0 ? 1 : 0 };
+      }
     }
   }
 
@@ -915,7 +985,7 @@ export async function analyzeLinkType(
     totalTargetObjects,
     totalLinkCount,
     sourcesWithNoLinks,
-    targetsWithNoLinks: 0, // simplified
+    targetsWithNoLinks,
     distribution,
   };
 }

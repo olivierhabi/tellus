@@ -251,13 +251,33 @@ export async function executeFullTextSearch(
     return { data: [], nextPageToken: null, totalCount: 0 };
   }
 
-  // Build multi_match query across all text fields
+  // Build multi_match query across all text fields.
+  // Use cross_fields for multi-term cross-field matching. Fuzziness is applied
+  // via a separate bool/should clause because cross_fields does not support
+  // fuzziness in OpenSearch. The primary clause uses cross_fields + operator:and
+  // for exact token matching; the secondary clause uses best_fields + fuzziness
+  // for typo tolerance.
   const fullTextQuery: Record<string, unknown> = {
-    multi_match: {
-      query: searchText,
-      fields: textFields,
-      type: "best_fields",
-      operator: "and",
+    bool: {
+      should: [
+        {
+          multi_match: {
+            query: searchText,
+            fields: textFields,
+            type: "cross_fields",
+            operator: "and",
+          },
+        },
+        {
+          multi_match: {
+            query: searchText,
+            fields: textFields,
+            type: "best_fields",
+            fuzziness: "AUTO",
+          },
+        },
+      ],
+      minimum_should_match: 1,
     },
   };
 
@@ -284,8 +304,8 @@ export async function executeFullTextSearch(
     track_total_hits: true,
     highlight: {
       fields: Object.fromEntries(textFields.map((f) => [f, {}])),
-      pre_tags: ["<em>"],
-      post_tags: ["</em>"],
+      pre_tags: ["<mark>"],
+      post_tags: ["</mark>"],
     },
   };
 

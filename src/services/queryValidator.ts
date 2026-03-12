@@ -16,6 +16,15 @@ import {
   type PropertyMeta,
 } from "./propertyResolver";
 import { appError } from "../utils/appError";
+import {
+  MAX_PAGE_SIZE,
+  DEFAULT_PAGE_SIZE,
+  MAX_ORDER_BY_FIELDS,
+  MAX_IN_CLAUSE_VALUES,
+  MAX_COMPOUND_FILTER_CHILDREN,
+  MAX_FILTER_NESTING_DEPTH,
+  SUPPORTED_FILTER_TYPES as FILTER_TYPES_ARRAY,
+} from "../utils/constants";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -23,13 +32,7 @@ import { appError } from "../utils/appError";
 
 const ALLOWED_TOP_LEVEL = new Set(["where", "$orderBy", "$pageSize", "$pageToken", "$select"]);
 
-const SUPPORTED_FILTER_TYPES = new Set([
-  "eq", "gt", "gte", "lt", "lte",
-  "contains", "startsWith",
-  "isNull", "isNotNull",
-  "in",
-  "and", "or", "not",
-]);
+const SUPPORTED_FILTER_TYPES = new Set(FILTER_TYPES_ARRAY);
 
 const LEAF_FILTER_TYPES = new Set([
   "eq", "gt", "gte", "lt", "lte",
@@ -42,12 +45,9 @@ const COMPOUND_FILTER_TYPES = new Set(["and", "or", "not"]);
 
 const UNARY_FILTERS = new Set(["isNull", "isNotNull"]);
 
-const MAX_NESTING_DEPTH = 10;
-const MAX_PAGE_SIZE = 10_000;
-const DEFAULT_PAGE_SIZE = 100;
-const MAX_ORDER_BY_FIELDS = 5;
-const MAX_IN_VALUES = 10_000;
-const MAX_COMPOUND_ELEMENTS = 100;
+const MAX_NESTING_DEPTH = MAX_FILTER_NESTING_DEPTH;
+const MAX_IN_VALUES = MAX_IN_CLAUSE_VALUES;
+const MAX_COMPOUND_ELEMENTS = MAX_COMPOUND_FILTER_CHILDREN;
 
 const UNSORTABLE_TYPES = new Set(["geopoint", "geoshape", "struct"]);
 
@@ -472,7 +472,46 @@ export async function validateAggregateQuery(
       );
     }
     if (agg.field) {
-      await resolveProperty(objectTypeApiName, agg.field);
+      const meta = await resolveProperty(objectTypeApiName, agg.field);
+      // --- Type-compatibility checks for aggregation types ---
+      const bt = meta.baseType.endsWith("_array")
+        ? meta.baseType.replace("_array", "")
+        : meta.baseType;
+
+      const NUMERIC = new Set(["integer", "long", "double", "float", "byte", "short", "decimal"]);
+      const DATE = new Set(["date", "timestamp"]);
+      const GEO = new Set(["geopoint", "geoshape"]);
+
+      if ((agg.type === "avg" || agg.type === "sum") && !NUMERIC.has(bt)) {
+        throw validationError(
+          "INCOMPATIBLE_FILTER",
+          `Aggregation '${agg.name}': '${agg.type}' requires a numeric field, but '${agg.field}' is of type '${meta.baseType}'.`
+        );
+      }
+      if (agg.type === "date_histogram" && !DATE.has(bt)) {
+        throw validationError(
+          "INCOMPATIBLE_FILTER",
+          `Aggregation '${agg.name}': 'date_histogram' requires a date or timestamp field, but '${agg.field}' is of type '${meta.baseType}'.`
+        );
+      }
+      if ((agg.type === "min" || agg.type === "max") && !NUMERIC.has(bt) && !DATE.has(bt)) {
+        throw validationError(
+          "INCOMPATIBLE_FILTER",
+          `Aggregation '${agg.name}': '${agg.type}' requires a numeric or date field, but '${agg.field}' is of type '${meta.baseType}'.`
+        );
+      }
+      if (agg.type === "range" && !NUMERIC.has(bt)) {
+        throw validationError(
+          "INCOMPATIBLE_FILTER",
+          `Aggregation '${agg.name}': 'range' requires a numeric field, but '${agg.field}' is of type '${meta.baseType}'.`
+        );
+      }
+      if ((agg.type === "terms" || agg.type === "cardinality") && (GEO.has(bt) || bt === "struct")) {
+        throw validationError(
+          "INCOMPATIBLE_FILTER",
+          `Aggregation '${agg.name}': '${agg.type}' is not supported on '${meta.baseType}' fields.`
+        );
+      }
     }
   }
 
