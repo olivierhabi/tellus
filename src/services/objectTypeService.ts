@@ -10,6 +10,7 @@ import { query, getClient } from "../db";
 import { validateObjectTypeName } from "../utils/apiNameValidator";
 import { decodePageToken, encodePageToken } from "../utils/responseFormatter";
 import propertyService from "./propertyService";
+import linkTypeModel from "../models/linkType";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,11 +139,94 @@ async function getByApiName(ontologyId: string, apiName: string) {
     [objectType.object_type_id]
   );
 
+  // 5. Link types associated with this object type
+  let linkTypes: Array<Record<string, unknown>> = [];
+  try {
+    const ltRows = await linkTypeModel.listByObjectType(ontologyId, objectType.object_type_id);
+    const invertCardinality = (c: string): string => {
+      switch (c) {
+        case "ONE_TO_MANY": return "MANY_TO_ONE";
+        case "MANY_TO_ONE": return "ONE_TO_MANY";
+        default: return c;
+      }
+    };
+    linkTypes = ltRows
+      .map((lt: any) => {
+        const isSource = lt.source_object_type === objectType.object_type_id;
+        const isTarget = lt.target_object_type === objectType.object_type_id;
+        if (isSource && isTarget) {
+          // Self-referential — show as forward
+          return {
+            apiName: lt.api_name,
+            displayName: lt.display_name,
+            targetObjectType: apiName, // self-ref points to itself
+            cardinality: lt.cardinality,
+            direction: "forward",
+          };
+        } else if (isSource) {
+          return {
+            apiName: lt.api_name,
+            displayName: lt.display_name,
+            targetObjectType: lt._targetApiName, // resolved below
+            cardinality: lt.cardinality,
+            direction: "forward",
+          };
+        } else if (isTarget && lt.is_bidirectional) {
+          return {
+            apiName: lt.api_name,
+            displayName: lt.display_name,
+            targetObjectType: lt._sourceApiName, // resolved below
+            cardinality: invertCardinality(lt.cardinality),
+            direction: "reverse",
+          };
+        }
+        // Non-bidirectional link where this object is the target — skip
+        return null;
+      })
+      .filter((item: any) => item !== null) as Array<Record<string, unknown>>;
+
+    // Resolve object type API names for forward/reverse links
+    for (const lt of ltRows) {
+      const isSource = lt.source_object_type === objectType.object_type_id;
+      const isTarget = lt.target_object_type === objectType.object_type_id;
+      const isSelfRef = isSource && isTarget;
+
+      if (isSelfRef) continue; // already resolved
+
+      // Resolve target/source API names
+      try {
+        if (isSource) {
+          const tgtResult = await query(
+            "SELECT api_name FROM object_type WHERE object_type_id = $1",
+            [lt.target_object_type]
+          );
+          const targetApiName = tgtResult.rows[0]?.api_name || "unknown";
+          const match = linkTypes.find((l: any) => l.apiName === lt.api_name && l.direction === "forward");
+          if (match) (match as any).targetObjectType = targetApiName;
+        } else if (isTarget && lt.is_bidirectional) {
+          const srcResult = await query(
+            "SELECT api_name FROM object_type WHERE object_type_id = $1",
+            [lt.source_object_type]
+          );
+          const sourceApiName = srcResult.rows[0]?.api_name || "unknown";
+          const match = linkTypes.find((l: any) => l.apiName === lt.api_name && l.direction === "reverse");
+          if (match) (match as any).targetObjectType = sourceApiName;
+        }
+      } catch {
+        // If resolution fails, keep the placeholder
+      }
+    }
+  } catch {
+    // link_type table may not exist yet — return empty array
+    linkTypes = [];
+  }
+
   return {
     objectType,
     properties: propsResult.rows,
     datasource: dsResult.rows[0] || null,
     funnelState: fsResult.rows[0] || null,
+    linkTypes,
   };
 }
 

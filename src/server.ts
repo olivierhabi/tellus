@@ -14,6 +14,7 @@ import propertyRouter from "./routes/properties";
 import datasourceRouter from "./routes/datasources";
 import indexingRouter from "./routes/indexing";
 import linkRouter from "./routes/links";
+import objectsRouter from "./routes/objects";
 import healthRouter from "./routes/health";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
@@ -129,6 +130,7 @@ app.use(
   "/api/v2/ontologies/:ontologyId/linkTypes",
   linkRouter
 );
+app.use(objectsRouter);
 app.use(healthRouter);
 
 // Global error handler — MUST be last in the middleware chain

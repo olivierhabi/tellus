@@ -6,14 +6,16 @@
 // rather than creating its own connection. The @opensearch-project/opensearch
 // client handles connection pooling internally.
 //
-// In Palantir's architecture, Object Storage V2 maintains persistent
-// connections to the underlying search engine cluster. This module replicates
-// that pattern: a single client instance is shared across the entire
-// application, and the connection URL can be swapped for a multi-node cluster
-// in production without code changes.
+// Task 18: Enhanced with retry, error translation, query logging, and
+// wrapper functions (searchObjects, getObject, countObjects, indexExists).
 // ---------------------------------------------------------------------------
 
 import { Client } from "@opensearch-project/opensearch";
+import {
+  OPENSEARCH_MAX_RETRIES,
+  OPENSEARCH_RETRY_INITIAL_DELAY_MS,
+  OPENSEARCH_SLOW_QUERY_THRESHOLD_MS,
+} from "../../utils/constants";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,15 +89,174 @@ function extractErrorMessage(err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Retry logic for transient errors
+// ---------------------------------------------------------------------------
+
+function isTransientError(err: any): boolean {
+  if (!err) return false;
+  const statusCode = err.statusCode ?? err.meta?.statusCode;
+  if (statusCode === 503 || statusCode === 429) return true;
+  if (
+    err.name === "ConnectionError" ||
+    err.name === "TimeoutError" ||
+    err.code === "ECONNREFUSED" ||
+    err.code === "ECONNRESET" ||
+    err.code === "ETIMEDOUT"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  label: string
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 1; attempt <= OPENSEARCH_MAX_RETRIES; attempt++) {
+    try {
+      return await operation();
+    } catch (err: any) {
+      lastError = err;
+      if (!isTransientError(err) || attempt === OPENSEARCH_MAX_RETRIES) {
+        throw err;
+      }
+      const delay =
+        OPENSEARCH_RETRY_INITIAL_DELAY_MS * Math.pow(4, attempt - 1);
+      console.warn(
+        `[OpenSearch] ${label} attempt ${attempt} failed (${err.message}), retrying in ${delay}ms...`
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError;
+}
+
+// ---------------------------------------------------------------------------
+// Query logging helper
+// ---------------------------------------------------------------------------
+
+function logQuery(
+  method: string,
+  index: string,
+  body: any,
+  statusCode: number,
+  durationMs: number,
+  hitCount?: number
+): void {
+  const bodyStr = body ? JSON.stringify(body) : "";
+  const truncated =
+    bodyStr.length > 500 ? bodyStr.substring(0, 500) + "..." : bodyStr;
+
+  const entry: Record<string, unknown> = {
+    timestamp: new Date().toISOString(),
+    type: "opensearch_query",
+    method,
+    index,
+    body: truncated,
+    statusCode,
+    durationMs: Math.round(durationMs * 100) / 100,
+  };
+  if (hitCount !== undefined) entry.hitCount = hitCount;
+
+  console.debug(JSON.stringify(entry));
+
+  if (durationMs > OPENSEARCH_SLOW_QUERY_THRESHOLD_MS) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        type: "slow_opensearch_query",
+        method,
+        index,
+        durationMs: Math.round(durationMs * 100) / 100,
+        body: truncated,
+        timestamp: new Date().toISOString(),
+      })
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper: searchObjects
+// ---------------------------------------------------------------------------
+
+async function searchObjects(
+  index: string,
+  body: Record<string, unknown>
+): Promise<any> {
+  const start = performance.now();
+  const result = await withRetry(
+    () => client.search({ index, body }),
+    `search(${index})`
+  );
+  const durationMs = performance.now() - start;
+  const hitCount = result.body?.hits?.hits?.length ?? 0;
+  logQuery("search", index, body, result.statusCode ?? 200, durationMs, hitCount);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper: getObject
+// ---------------------------------------------------------------------------
+
+async function getObject(
+  index: string,
+  id: string,
+  sourceIncludes?: string[]
+): Promise<any> {
+  const start = performance.now();
+  const params: Record<string, unknown> = { index, id };
+  if (sourceIncludes) params._source_includes = sourceIncludes;
+  const result = await withRetry(
+    () => client.get(params as any),
+    `get(${index}/${id})`
+  );
+  const durationMs = performance.now() - start;
+  logQuery("get", index, { id }, result.statusCode ?? 200, durationMs);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper: countObjects
+// ---------------------------------------------------------------------------
+
+async function countObjects(
+  index: string,
+  body: Record<string, unknown>
+): Promise<any> {
+  const start = performance.now();
+  const result = await withRetry(
+    () => client.count({ index, body }),
+    `count(${index})`
+  );
+  const durationMs = performance.now() - start;
+  logQuery("count", index, body, result.statusCode ?? 200, durationMs);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper: indexExists
+// ---------------------------------------------------------------------------
+
+async function indexExists(index: string): Promise<boolean> {
+  const start = performance.now();
+  try {
+    const result = await withRetry(
+      () => client.indices.exists({ index }),
+      `indexExists(${index})`
+    );
+    const durationMs = performance.now() - start;
+    logQuery("indexExists", index, null, result.statusCode ?? 200, durationMs);
+    return result.statusCode === 200;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ping()
 // ---------------------------------------------------------------------------
 
-/**
- * Test the connection to OpenSearch by calling the cluster health API.
- *
- * @returns A PingResult indicating whether the connection succeeded along
- *          with cluster metadata, or a failure object with the error message.
- */
 async function ping(): Promise<PingResult> {
   try {
     const { body } = await client.cluster.health({});
@@ -119,15 +280,6 @@ async function ping(): Promise<PingResult> {
 // waitForConnection()
 // ---------------------------------------------------------------------------
 
-/**
- * Attempt to connect to OpenSearch with retries. This is necessary because
- * when the application starts, OpenSearch may not be ready yet (especially
- * in Docker environments where containers start in parallel).
- *
- * @param maxRetries - Maximum number of connection attempts (default: 10).
- * @param delayMs    - Milliseconds to wait between attempts (default: 2000).
- * @throws Error if all retries are exhausted.
- */
 async function waitForConnection(
   maxRetries: number = 10,
   delayMs: number = 2000
@@ -160,20 +312,10 @@ async function waitForConnection(
 // getClusterInfo()
 // ---------------------------------------------------------------------------
 
-/**
- * Return detailed information about the OpenSearch cluster including the
- * cluster name, status, node count, index count, total documents, and total
- * store size. Used by the status endpoint and for monitoring.
- *
- * @returns A ClusterInfo object on success.
- * @throws An OpenSearchError if the stats call fails.
- */
 async function getClusterInfo(): Promise<ClusterInfo> {
   try {
     const { body } = await client.cluster.stats({});
 
-    // The OpenSearch client types are strict objects; cast through unknown
-    // to access dynamic fields safely.
     const stats = body as unknown as Record<string, unknown>;
     const indices = stats.indices as Record<string, unknown>;
     const docs = indices.docs as Record<string, unknown>;
@@ -200,5 +342,14 @@ async function getClusterInfo(): Promise<ClusterInfo> {
 // Exports
 // ---------------------------------------------------------------------------
 
-export { client, ping, waitForConnection, getClusterInfo };
+export {
+  client,
+  ping,
+  waitForConnection,
+  getClusterInfo,
+  searchObjects,
+  getObject,
+  countObjects,
+  indexExists,
+};
 export default client;

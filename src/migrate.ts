@@ -353,6 +353,26 @@ async function migrate(): Promise<void> {
         ON link_type(target_object_type);
     `);
 
+    // Add join_table_file_path and is_bidirectional columns if missing (Thursday enhancement)
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'link_type' AND column_name = 'join_table_file_path') THEN
+          ALTER TABLE link_type ADD COLUMN join_table_file_path TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'link_type' AND column_name = 'is_bidirectional') THEN
+          ALTER TABLE link_type ADD COLUMN is_bidirectional BOOLEAN DEFAULT false;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'link_type' AND column_name = 'join_table_source_column') THEN
+          ALTER TABLE link_type ADD COLUMN join_table_source_column TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'link_type' AND column_name = 'join_table_target_column') THEN
+          ALTER TABLE link_type ADD COLUMN join_table_target_column TEXT;
+        END IF;
+      END
+      $$;
+    `);
+
     logTableStatus("link_type", linkTypeExisted);
 
     // ------------------------------------------------------------------

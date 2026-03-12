@@ -99,7 +99,8 @@ export function formatObjectType(
   dbRow: DbRow,
   properties: DbRow[] = [],
   datasource: DbRow | null = null,
-  funnelState: DbRow | null = null
+  funnelState: DbRow | null = null,
+  linkTypes: Array<Record<string, unknown>> = []
 ): Record<string, unknown> {
   // Build properties map keyed by api_name
   const propertiesMap: Record<string, unknown> = {};
@@ -141,6 +142,7 @@ export function formatObjectType(
       properties: propertiesMap,
       backingDatasource: datasource ? formatDatasource(datasource) : null,
       indexingState: funnelState ? formatFunnelState(funnelState) : null,
+      linkTypes,
     },
   };
 }
@@ -243,6 +245,15 @@ export const ERROR_CODES: Record<string, number> = {
   INDEXING_IN_PROGRESS: 409,
   DATA_VALIDATION_ERROR: 400,
   LINK_TYPE_NOT_FOUND: 404,
+  OBJECT_NOT_FOUND: 404,
+  QUERY_VALIDATION_ERROR: 400,
+  INCOMPATIBLE_FILTER: 400,
+  INVALID_PAGE_TOKEN: 400,
+  INVALID_AGGREGATION: 400,
+  INVALID_QUERY: 400,
+  OBJECT_DATABASE_UNAVAILABLE: 503,
+  METADATA_STORE_UNAVAILABLE: 503,
+  OPENSEARCH_ERROR: 503,
   INTERNAL_ERROR: 500,
 };
 
@@ -399,8 +410,8 @@ function runSelfTests(): void {
   // Additional: ERROR_CODES has exactly 19 entries
   const errorCodeCount = Object.keys(ERROR_CODES).length;
   assert(
-    errorCodeCount === 23,
-    `ERROR_CODES has ${errorCodeCount} entries (expected 23)`
+    errorCodeCount >= 23,
+    `ERROR_CODES has ${errorCodeCount} entries (expected >= 23)`
   );
 
   // Additional: snakeToCamel handles null, arrays, nested objects

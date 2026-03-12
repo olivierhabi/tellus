@@ -1,0 +1,689 @@
+openapi: "3.0.3"
+info:
+  title: Ontology Engine — Link Type API
+  version: "1.0.0"
+  description: |
+    API specification for the Link Type subsystem of the Ontology Engine.
+    Implements typed, directed relationships between Object Types with
+    four cardinalities: ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, MANY_TO_MANY.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+paths:
+  /api/v2/ontologies/{ontologyId}/linkTypes:
+    post:
+      summary: Create a link type
+      description: Create a new link type definition within an ontology.
+      tags: [Link Types]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLinkTypeRequest"
+      responses:
+        "201":
+          description: Link type created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkType"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+
+    get:
+      summary: List link types
+      description: List all link type definitions in an ontology with optional filters.
+      tags: [Link Types]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - name: sourceObjectType
+          in: query
+          schema: { type: string }
+        - name: targetObjectType
+          in: query
+          schema: { type: string }
+        - name: cardinality
+          in: query
+          schema: { $ref: "#/components/schemas/Cardinality" }
+        - name: pageSize
+          in: query
+          schema: { type: integer, default: 100, maximum: 1000 }
+        - name: pageToken
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated list of link types
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/LinkType" }
+                  totalCount: { type: integer }
+                  nextPageToken: { type: string, nullable: true }
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/export:
+    get:
+      summary: Export link types as JSON
+      tags: [Link Types]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+      responses:
+        "200":
+          description: JSON export file
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkTypeExport"
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/import:
+    post:
+      summary: Import link types from JSON
+      tags: [Link Types]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                linkTypes:
+                  type: array
+                  items: { $ref: "#/components/schemas/CreateLinkTypeRequest" }
+      responses:
+        "200":
+          description: Import results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/bulkCount:
+    post:
+      summary: Bulk count links across multiple link types
+      tags: [Link Counts]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    requests:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          linkTypeApiName: { type: string }
+                          objectPK: { type: string }
+                          direction: { $ref: "#/components/schemas/Direction" }
+                - type: object
+                  properties:
+                    objectTypeApiName: { type: string }
+                    objectPK: { type: string }
+      responses:
+        "200":
+          description: Bulk count results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        linkTypeApiName: { type: string }
+                        direction: { type: string }
+                        count: { type: integer, nullable: true }
+                        error: { type: string }
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/multiHop:
+    post:
+      summary: Multi-hop link traversal
+      tags: [Link Resolution]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startingPKs, steps]
+              properties:
+                startingPKs:
+                  type: array
+                  items: { type: string }
+                steps:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    properties:
+                      linkTypeApiName: { type: string }
+                      direction: { $ref: "#/components/schemas/Direction" }
+                pageSize: { type: integer }
+                pageToken: { type: string }
+                targetFilter: { type: object }
+      responses:
+        "200":
+          description: Multi-hop results
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ResolveResult"
+                  - type: object
+                    properties:
+                      hopsCompleted: { type: integer }
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}:
+    get:
+      summary: Get a single link type
+      tags: [Link Types]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      responses:
+        "200":
+          description: Link type details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkType"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+    put:
+      summary: Update a link type
+      tags: [Link Types]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateLinkTypeRequest"
+      responses:
+        "200":
+          description: Updated link type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkType"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+    delete:
+      summary: Delete a link type
+      tags: [Link Types]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      responses:
+        "200":
+          description: Deleted link type with metadata
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/LinkType"
+                  - type: object
+                    properties:
+                      deletedAt: { type: string, format: date-time }
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/resolve:
+    post:
+      summary: Resolve linked objects
+      tags: [Link Resolution]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [objectPK, direction]
+              properties:
+                objectPK: { type: string }
+                direction: { $ref: "#/components/schemas/Direction" }
+                pageSize: { type: integer }
+                pageToken: { type: string }
+                targetFilter: { type: object }
+                select: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Resolved linked objects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveResult"
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/count:
+    post:
+      summary: Count linked objects
+      tags: [Link Counts]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [objectPK, direction]
+              properties:
+                objectPK: { type: string }
+                direction: { $ref: "#/components/schemas/Direction" }
+      responses:
+        "200":
+          description: Link count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  linkTypeApiName: { type: string }
+                  direction: { type: string }
+                  count: { type: integer }
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/searchAround:
+    post:
+      summary: Search Around
+      tags: [Link Resolution]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [direction]
+              properties:
+                direction: { $ref: "#/components/schemas/Direction" }
+                sourceFilter: { type: object }
+                targetFilter: { type: object }
+                pageSize: { type: integer }
+                pageToken: { type: string }
+      responses:
+        "200":
+          description: Search Around results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveResult"
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/upload:
+    post:
+      summary: Upload join table CSV
+      tags: [Join Tables]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Upload summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  filePath: { type: string }
+                  totalRows: { type: integer }
+                  validRows: { type: integer }
+                  invalidRows: { type: integer }
+                  uniqueSourceKeys: { type: integer }
+                  uniqueTargetKeys: { type: integer }
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/validate:
+    post:
+      summary: Validate join table
+      tags: [Join Tables]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      responses:
+        "200":
+          description: Validation report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JoinTableValidation"
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/analysis:
+    get:
+      summary: Link type analysis
+      tags: [Link Analysis]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      responses:
+        "200":
+          description: Analysis statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkAnalysis"
+
+  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/validateMigration:
+    post:
+      summary: Validate cardinality migration
+      tags: [Link Analysis]
+      parameters:
+        - $ref: "#/components/parameters/ontologyId"
+        - $ref: "#/components/parameters/linkTypeApiName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetCardinality]
+              properties:
+                targetCardinality: { $ref: "#/components/schemas/Cardinality" }
+      responses:
+        "200":
+          description: Migration validation report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardinalityValidation"
+
+  /api/v2/objects/{objectType}/{primaryKey}/links/{linkType}:
+    get:
+      summary: Get linked objects from an object
+      tags: [Object Links]
+      parameters:
+        - name: objectType
+          in: path
+          required: true
+          schema: { type: string }
+        - name: primaryKey
+          in: path
+          required: true
+          schema: { type: string }
+        - name: linkType
+          in: path
+          required: true
+          schema: { type: string }
+        - name: direction
+          in: query
+          schema: { $ref: "#/components/schemas/Direction" }
+        - name: pageSize
+          in: query
+          schema: { type: integer }
+        - name: pageToken
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Linked objects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveResult"
+
+  /api/v2/objects/{objectType}/{primaryKey}/links/{linkType}/count:
+    get:
+      summary: Count linked objects from an object
+      tags: [Object Links]
+      parameters:
+        - name: objectType
+          in: path
+          required: true
+          schema: { type: string }
+        - name: primaryKey
+          in: path
+          required: true
+          schema: { type: string }
+        - name: linkType
+          in: path
+          required: true
+          schema: { type: string }
+        - name: direction
+          in: query
+          schema: { $ref: "#/components/schemas/Direction" }
+      responses:
+        "200":
+          description: Link count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  linkTypeApiName: { type: string }
+                  direction: { type: string }
+                  count: { type: integer }
+
+components:
+  parameters:
+    ontologyId:
+      name: ontologyId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    linkTypeApiName:
+      name: apiName
+      in: path
+      required: true
+      schema: { type: string }
+
+  schemas:
+    Cardinality:
+      type: string
+      enum: [ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, MANY_TO_MANY]
+
+    Direction:
+      type: string
+      enum: [forward, reverse]
+
+    LinkType:
+      type: object
+      properties:
+        linkTypeId: { type: string, format: uuid }
+        apiName: { type: string }
+        displayName: { type: string }
+        description: { type: string, nullable: true }
+        cardinality: { $ref: "#/components/schemas/Cardinality" }
+        sourceObjectType: { type: string }
+        targetObjectType: { type: string }
+        sourcePropertyId: { type: string, nullable: true }
+        targetPropertyId: { type: string, nullable: true }
+        joinTableFilePath: { type: string, nullable: true }
+        joinTableSourceColumn: { type: string, nullable: true }
+        joinTableTargetColumn: { type: string, nullable: true }
+        isBidirectional: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateLinkTypeRequest:
+      type: object
+      required: [apiName, displayName, cardinality, sourceObjectTypeApiName, targetObjectTypeApiName]
+      properties:
+        apiName: { type: string }
+        displayName: { type: string }
+        description: { type: string }
+        cardinality: { $ref: "#/components/schemas/Cardinality" }
+        sourceObjectTypeApiName: { type: string }
+        targetObjectTypeApiName: { type: string }
+        sourcePropertyApiName: { type: string }
+        targetPropertyApiName: { type: string }
+        joinTableFilePath: { type: string }
+        joinTableSourceColumn: { type: string }
+        joinTableTargetColumn: { type: string }
+        isBidirectional: { type: boolean }
+
+    UpdateLinkTypeRequest:
+      type: object
+      properties:
+        displayName: { type: string }
+        description: { type: string, nullable: true }
+        cardinality: { $ref: "#/components/schemas/Cardinality" }
+        sourcePropertyApiName: { type: string, nullable: true }
+        targetPropertyApiName: { type: string, nullable: true }
+        joinTableFilePath: { type: string, nullable: true }
+        isBidirectional: { type: boolean }
+
+    ResolveResult:
+      type: object
+      properties:
+        linkedObjects:
+          type: array
+          items: { type: object }
+        totalCount: { type: integer }
+        nextPageToken: { type: string, nullable: true }
+
+    LinkTypeExport:
+      type: object
+      properties:
+        ontologyId: { type: string }
+        exportedAt: { type: string, format: date-time }
+        count: { type: integer }
+        version: { type: string }
+        linkTypes:
+          type: array
+          items: { $ref: "#/components/schemas/CreateLinkTypeRequest" }
+
+    ImportResult:
+      type: object
+      properties:
+        created:
+          type: array
+          items: { $ref: "#/components/schemas/LinkType" }
+        skipped:
+          type: array
+          items: { type: string }
+        failed:
+          type: array
+          items:
+            type: object
+            properties:
+              apiName: { type: string }
+              error: { type: string }
+        summary:
+          type: object
+          properties:
+            total: { type: integer }
+            created: { type: integer }
+            skipped: { type: integer }
+            failed: { type: integer }
+
+    JoinTableValidation:
+      type: object
+      properties:
+        valid: { type: boolean }
+        totalRows: { type: integer }
+        uniqueSourceKeys: { type: integer }
+        uniqueTargetKeys: { type: integer }
+        orphanedSourceKeys: { type: array, items: { type: string } }
+        orphanedTargetKeys: { type: array, items: { type: string } }
+        duplicateRows: { type: integer }
+        warnings: { type: array, items: { type: string } }
+
+    LinkAnalysis:
+      type: object
+      properties:
+        linkTypeApiName: { type: string }
+        sourceObjectType: { type: string }
+        targetObjectType: { type: string }
+        cardinality: { type: string }
+        totalSourceObjects: { type: integer }
+        totalTargetObjects: { type: integer }
+        totalLinkCount: { type: integer }
+        sourcesWithNoLinks: { type: integer }
+        targetsWithNoLinks: { type: integer }
+        distribution:
+          type: object
+          properties:
+            min: { type: number }
+            max: { type: number }
+            avg: { type: number }
+            p50: { type: number }
+            p90: { type: number }
+            p99: { type: number }
+
+    CardinalityValidation:
+      type: object
+      properties:
+        canMigrate: { type: boolean }
+        warnings: { type: array, items: { type: string } }
+        errors: { type: array, items: { type: string } }
+        currentCardinality: { type: string }
+        targetCardinality: { type: string }
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object }
+            timestamp: { type: string, format: date-time }
+
+  responses:
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFoundError:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ConflictError:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
