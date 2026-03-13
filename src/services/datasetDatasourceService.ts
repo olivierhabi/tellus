@@ -320,11 +320,12 @@ export async function registerWithDataset(
 
   const upsertResult = await query(
     `INSERT INTO backing_datasource
-       (mapping_id, object_type_id, dataset_id, file_path,
+       (mapping_id, object_type_id, dataset_id, dataset_name, file_path,
         column_mapping, primary_key_column)
-     VALUES ($1, $2, $3, $4, $5, $6)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (object_type_id) DO UPDATE SET
        dataset_id = EXCLUDED.dataset_id,
+       dataset_name = EXCLUDED.dataset_name,
        file_path = EXCLUDED.file_path,
        column_mapping = EXCLUDED.column_mapping,
        primary_key_column = EXCLUDED.primary_key_column,
@@ -334,6 +335,7 @@ export async function registerWithDataset(
       mappingId,
       objectTypeId,
       resolvedDatasetId,
+      resolvedDatasetName || "unnamed",
       resolvedFilePath,
       JSON.stringify(columnMapping),
       effectivePkColumn,
