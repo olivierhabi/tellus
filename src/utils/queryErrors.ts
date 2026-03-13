@@ -1,9 +1,81 @@
 // ---------------------------------------------------------------------------
-// Query Error Classes (Task 15)
+// Query Error Classes (Task 15) + Standardized Error Module (Task 20)
 //
-// Error hierarchy for the Object Set Service. Each error class sets its own
+// Error hierarchy for the Ontology Engine. Each error class sets its own
 // HTTP status code and machine-readable error code.
+//
+// Task 20 enhancements:
+//   - ERROR_CODES registry mapping errorCode -> { status, name }
+//   - OntologyError now includes errorInstanceId, errorName, parameters
+//   - toResponse() produces the Palantir-compatible standardized format
 // ---------------------------------------------------------------------------
+
+import crypto from "crypto";
+
+// ---------------------------------------------------------------------------
+// ERROR_CODES Registry (Task 20)
+//
+// Maps each machine-readable error code to its HTTP status and human-
+// readable error class name. The OSDK relies on predictable error shapes,
+// so this registry is the single source of truth.
+// ---------------------------------------------------------------------------
+
+export const STANDARD_ERROR_CODES: Record<string, { status: number; name: string }> = {
+  // Action-specific errors (from Palantir's documented failure types)
+  INVALID_PARAMETER:          { status: 400, name: "InvalidParameterError" },
+  SCALE_LIMIT_EXCEEDED:       { status: 400, name: "ScaleLimitExceededError" },
+  AUTHENTICATION_FAILURE:     { status: 403, name: "AuthenticationError" },
+  OBJECT_NOT_FOUND:           { status: 404, name: "ObjectNotFoundError" },
+  DUPLICATE_PRIMARY_KEY:      { status: 409, name: "DuplicatePrimaryKeyError" },
+  REQUIRED_PROPERTY_MISSING:  { status: 400, name: "RequiredPropertyMissingError" },
+  TYPE_MISMATCH:              { status: 400, name: "TypeMismatchError" },
+  SIDE_EFFECT_FAILURE:        { status: 502, name: "SideEffectFailureError" },
+  FUNCTION_FAILURE:           { status: 500, name: "FunctionFailureError" },
+  CONCURRENCY_CONFLICT:       { status: 409, name: "ConcurrencyConflictError" },
+
+  // General API errors
+  NOT_FOUND:                  { status: 404, name: "NotFoundError" },
+  CONFLICT:                   { status: 409, name: "ConflictError" },
+  VALIDATION_ERROR:           { status: 400, name: "ValidationError" },
+  INTERNAL_ERROR:             { status: 500, name: "InternalError" },
+  ACTION_DISABLED:            { status: 400, name: "ActionDisabledError" },
+  ACTION_TYPE_NOT_FOUND:      { status: 404, name: "ActionTypeNotFoundError" },
+  OBJECT_TYPE_NOT_FOUND:      { status: 404, name: "ObjectTypeNotFoundError" },
+  LINK_TYPE_NOT_FOUND:        { status: 404, name: "LinkTypeNotFoundError" },
+  PROPERTY_NOT_FOUND:         { status: 404, name: "PropertyNotFoundError" },
+  INDEX_ERROR:                { status: 500, name: "IndexError" },
+
+  // Existing codes from the codebase that need backwards compatibility
+  VALIDATION_FAILED:          { status: 400, name: "ValidationError" },
+  ALREADY_EXISTS:             { status: 409, name: "ConflictError" },
+  ONTOLOGY_NOT_FOUND:         { status: 404, name: "NotFoundError" },
+  ONTOLOGY_ALREADY_EXISTS:    { status: 409, name: "ConflictError" },
+  OBJECT_TYPE_ALREADY_EXISTS: { status: 409, name: "ConflictError" },
+  PROPERTY_ALREADY_EXISTS:    { status: 409, name: "ConflictError" },
+  ACTION_TYPE_ALREADY_EXISTS: { status: 409, name: "ConflictError" },
+  DATASOURCE_NOT_FOUND:       { status: 404, name: "NotFoundError" },
+  DATASOURCE_ALREADY_REGISTERED: { status: 409, name: "ConflictError" },
+  INVALID_API_NAME:           { status: 400, name: "ValidationError" },
+  INVALID_BASE_TYPE:          { status: 400, name: "ValidationError" },
+  PRIMARY_KEY_NOT_SET:        { status: 400, name: "ValidationError" },
+  DATASOURCE_FILE_NOT_FOUND:  { status: 400, name: "ValidationError" },
+  COLUMN_MAPPING_INVALID:     { status: 400, name: "ValidationError" },
+  REQUIRED_FIELD_MISSING:     { status: 400, name: "RequiredPropertyMissingError" },
+  NO_BACKING_DATASOURCE:      { status: 400, name: "ValidationError" },
+  INDEXING_IN_PROGRESS:       { status: 409, name: "ConflictError" },
+  DATA_VALIDATION_ERROR:      { status: 400, name: "ValidationError" },
+  EDIT_NOT_FOUND:             { status: 404, name: "NotFoundError" },
+  AUDIT_ENTRY_NOT_FOUND:      { status: 404, name: "NotFoundError" },
+  QUERY_VALIDATION_ERROR:     { status: 400, name: "ValidationError" },
+  INCOMPATIBLE_FILTER:        { status: 400, name: "ValidationError" },
+  INVALID_PAGE_TOKEN:         { status: 400, name: "ValidationError" },
+  INVALID_AGGREGATION:        { status: 400, name: "ValidationError" },
+  INVALID_QUERY:              { status: 400, name: "ValidationError" },
+  OBJECT_DATABASE_UNAVAILABLE: { status: 503, name: "ServiceUnavailableError" },
+  METADATA_STORE_UNAVAILABLE: { status: 503, name: "ServiceUnavailableError" },
+  OPENSEARCH_CONNECTION_ERROR: { status: 503, name: "ServiceUnavailableError" },
+  OPENSEARCH_ERROR:           { status: 503, name: "ServiceUnavailableError" },
+};
 
 // ---------------------------------------------------------------------------
 // Levenshtein distance (for "did you mean?" suggestions)
@@ -26,20 +98,57 @@ function levenshteinDistance(a: string, b: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Base class
+// Base class (Task 15 + Task 20 enhancements)
 // ---------------------------------------------------------------------------
 
 export class OntologyError extends Error {
+  /** Machine-readable error code (e.g., "INVALID_PARAMETER"). */
   code: string;
+  /** HTTP status code for this error. */
   statusCode: number;
+  /** Backward-compatible details object (Task 15 format). */
   details: Record<string, unknown>;
+  /** Human-readable error class name (e.g., "InvalidParameterError"). */
+  errorName: string;
+  /** Unique ID for this specific error instance — for log correlation. */
+  errorInstanceId: string;
+  /** Structured parameters providing context about the error. */
+  parameters: Record<string, unknown>;
 
-  constructor(message: string, code: string, statusCode: number, details: Record<string, unknown> = {}) {
+  constructor(
+    message: string,
+    code: string,
+    statusCode?: number,
+    details: Record<string, unknown> = {}
+  ) {
     super(message);
     this.name = "OntologyError";
     this.code = code;
-    this.statusCode = statusCode;
+    // If statusCode is explicitly provided, use it; otherwise look up from registry
+    this.statusCode = statusCode ?? (STANDARD_ERROR_CODES[code]?.status || 500);
     this.details = details;
+    this.errorName = STANDARD_ERROR_CODES[code]?.name || "UnknownError";
+    this.errorInstanceId = crypto.randomUUID();
+    this.parameters = details; // alias — details and parameters are the same
+  }
+
+  /**
+   * Produce the Palantir-compatible standardized error response body.
+   */
+  toResponse(): {
+    errorCode: string;
+    errorName: string;
+    errorInstanceId: string;
+    parameters: Record<string, unknown>;
+    message: string;
+  } {
+    return {
+      errorCode: this.code,
+      errorName: this.errorName,
+      errorInstanceId: this.errorInstanceId,
+      parameters: this.parameters,
+      message: this.message,
+    };
   }
 }
 
@@ -164,6 +273,25 @@ if (require.main === module) {
   assert(dbErr.statusCode === 503, "DatabaseUnavailable is 503");
 
   assert(new OntologyError("test", "TEST", 500) instanceof Error, "OntologyError extends Error");
+
+  // Task 20: Test new standardized fields
+  const stdErr = new OntologyError("test error", "INVALID_PARAMETER", undefined, { param: "salary" });
+  assert(stdErr.statusCode === 400, "OntologyError looks up status from STANDARD_ERROR_CODES");
+  assert(stdErr.errorName === "InvalidParameterError", "OntologyError gets errorName from registry");
+  assert(typeof stdErr.errorInstanceId === "string" && stdErr.errorInstanceId.length > 0, "OntologyError has errorInstanceId");
+  assert(stdErr.parameters.param === "salary", "OntologyError has parameters");
+
+  const resp = stdErr.toResponse();
+  assert(resp.errorCode === "INVALID_PARAMETER", "toResponse() has errorCode");
+  assert(resp.errorName === "InvalidParameterError", "toResponse() has errorName");
+  assert(resp.errorInstanceId === stdErr.errorInstanceId, "toResponse() has errorInstanceId");
+  assert(resp.message === "test error", "toResponse() has message");
+  assert((resp.parameters as any).param === "salary", "toResponse() has parameters");
+
+  // Test unknown code fallback
+  const unkErr = new OntologyError("unknown", "UNKNOWN_CODE");
+  assert(unkErr.statusCode === 500, "Unknown code defaults to 500");
+  assert(unkErr.errorName === "UnknownError", "Unknown code defaults to UnknownError");
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);

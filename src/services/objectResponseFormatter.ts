@@ -203,6 +203,12 @@ function formatSingleSource(
     }
   }
 
+  // Always include __version for optimistic concurrency control (Task 22).
+  // Palantir objects always expose their version so clients can use OCC.
+  if (!("__version" in output)) {
+    output.__version = source.__version ?? 0;
+  }
+
   return output;
 }
 
@@ -231,7 +237,8 @@ if (require.main === module) {
   assert(single!.__objectType === "Employee", "Object type set");
   assert(single!.fullName === "Test", "User field preserved");
   assert(!("__pk" in single!), "__pk removed from output");
-  assert(!("__version" in single!), "__version removed from output");
+  assert("__version" in single!, "__version included in output (Task 22: OCC)");
+  assert(single!.__version === 3, "__version value preserved");
 
   // Test formatObjectList — empty
   const empty = formatObjectList(

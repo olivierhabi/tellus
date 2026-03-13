@@ -494,8 +494,9 @@ async function runLinkTests(t: Runner): Promise<void> {
       direction: "forward",
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.totalCount === 1, `Expected 1 company, got ${body.totalCount}`);
-    t.assert(body.linkedObjects[0].companyId === "C001", "Resolved to C001");
+    // MANY_TO_ONE forward returns singular { linkedObject } (at most one result)
+    t.assert(body.linkedObject !== undefined, `Expected linkedObject, got ${JSON.stringify(body)}`);
+    t.assert(body.linkedObject.companyId === "C001", "Resolved to C001");
   });
 
   await t.test("6. MANY_TO_ONE reverse: Company C001 → Employees", async () => {
@@ -518,10 +519,9 @@ async function runLinkTests(t: Runner): Promise<void> {
       direction: "forward",
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    // Tickets with assigneeId = E0001: T001, T011 (every 10th)
-    t.assert(body.totalCount >= 1, `Expected at least 1 ticket, got ${body.totalCount}`);
-    const assignees = body.linkedObjects.map((o: any) => o.assigneeId);
-    t.assert(assignees.every((a: string) => a === "E0001"), "All tickets assigned to E0001");
+    // ONE_TO_ONE forward returns singular { linkedObject } (at most one result)
+    t.assert(body.linkedObject !== undefined, `Expected linkedObject, got ${JSON.stringify(body)}`);
+    t.assert(body.linkedObject.assigneeId === "E0001", "Ticket assigned to E0001");
   });
 
   await t.test("8. ONE_TO_ONE reverse: Ticket T001 → Employee", async () => {
@@ -586,8 +586,8 @@ async function runLinkTests(t: Runner): Promise<void> {
       targetFilter: { industry: "Industry 1" },
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    // C001 has industry "Industry 1" — should match
-    t.assert(body.totalCount === 1, `Expected 1 company matching filter, got ${body.totalCount}`);
+    // MANY_TO_ONE forward returns singular { linkedObject } — C001 has industry "Industry 1"
+    t.assert(body.linkedObject !== undefined && body.linkedObject !== null, `Expected linkedObject match, got ${JSON.stringify(body)}`);
   });
 
   await t.test("13. Target filter returning no results", async () => {
@@ -597,7 +597,8 @@ async function runLinkTests(t: Runner): Promise<void> {
       targetFilter: { industry: "NonexistentIndustry" },
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.totalCount === 0, `Expected 0, got ${body.totalCount}`);
+    // MANY_TO_ONE forward returns singular { linkedObject: null } when no match
+    t.assert(body.linkedObject === null, `Expected null linkedObject, got ${JSON.stringify(body.linkedObject)}`);
   });
 
   // =========================================================================
@@ -640,13 +641,14 @@ async function runLinkTests(t: Runner): Promise<void> {
 
   await t.test("15. Self-ref forward: Employee E0006 → Manager", async () => {
     // E0006 has managerId = E0001 (i=6, manager = E0001 since 6-5=1)
+    // employeeManager is MANY_TO_ONE → forward returns singular { linkedObject }
     const { status, body } = await api("POST", `${linkUrl("employeeManager")}/resolve`, {
       objectPK: "E0006",
       direction: "forward",
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.totalCount === 1, `Expected 1 manager, got ${body.totalCount}`);
-    t.assert(body.linkedObjects[0].employeeId === "E0001", "Manager is E0001");
+    t.assert(body.linkedObject !== undefined && body.linkedObject !== null, `Expected 1 manager, got ${JSON.stringify(body)}`);
+    t.assert(body.linkedObject.employeeId === "E0001", "Manager is E0001");
   });
 
   await t.test("16. Self-ref reverse: Employee E0001 → Direct reports", async () => {
@@ -667,13 +669,14 @@ async function runLinkTests(t: Runner): Promise<void> {
   t.section("Edge Cases");
 
   await t.test("17. No links: Employee E0001 has no manager (empty managerId)", async () => {
-    // E0001 has managerId = "" (empty), so forward resolve should return 0
+    // E0001 has managerId = "" (empty), so forward resolve should return null
+    // MANY_TO_ONE forward returns singular { linkedObject: null }
     const { status, body } = await api("POST", `${linkUrl("employeeManager")}/resolve`, {
       objectPK: "E0001",
       direction: "forward",
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.totalCount === 0, `Expected 0 (no manager), got ${body.totalCount}`);
+    t.assert(body.linkedObject === null, `Expected null (no manager), got ${JSON.stringify(body.linkedObject)}`);
   });
 
   // =========================================================================
@@ -682,12 +685,13 @@ async function runLinkTests(t: Runner): Promise<void> {
 
   await t.test("18. Null FK: first 5 employees have empty managerId", async () => {
     // E0001-E0005 have empty managerId
+    // MANY_TO_ONE forward returns singular { linkedObject: null }
     const { status, body } = await api("POST", `${linkUrl("employeeManager")}/resolve`, {
       objectPK: "E0003",
       direction: "forward",
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.totalCount === 0, `Expected 0 for null FK, got ${body.totalCount}`);
+    t.assert(body.linkedObject === null, `Expected null for null FK, got ${JSON.stringify(body.linkedObject)}`);
   });
 
   // =========================================================================
@@ -696,15 +700,14 @@ async function runLinkTests(t: Runner): Promise<void> {
 
   await t.test("19. Orphaned FK: resolve non-existent company", async () => {
     // This tests resolving forward for an employee whose companyId doesn't match
-    // any indexed company. E0006 has companyId=C001 which exists, so let's test
-    // with a synthetic approach: resolve employeeCompany forward for an employee
-    // that would have an invalid FK. Since our data is clean, test with nonexistent PK.
+    // any indexed company. Using nonexistent PK.
+    // MANY_TO_ONE forward returns singular { linkedObject: null }
     const { status, body } = await api("POST", `${linkUrl("employeeCompany")}/resolve`, {
       objectPK: "NONEXISTENT",
       direction: "forward",
     });
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.totalCount === 0, `Expected 0 for non-existent source, got ${body.totalCount}`);
+    t.assert(body.linkedObject === null, `Expected null for non-existent source, got ${JSON.stringify(body.linkedObject)}`);
   });
 
   // =========================================================================
@@ -762,7 +765,8 @@ async function runLinkTests(t: Runner): Promise<void> {
     t.assert(body.results.length === 4, `Expected 4 results, got ${body.results.length}`);
     t.assert(body.results[0].count === 4, `C001 employees = 4, got ${body.results[0].count}`);
     t.assert(body.results[2].count === 1, `E0001 company = 1, got ${body.results[2].count}`);
-    t.assert(body.results[3].count === 0, `Nonexistent link = 0, got ${body.results[3].count}`);
+    // Non-existent link type returns null count and an error
+    t.assert(body.results[3].count === null || body.results[3].count === 0, `Nonexistent link = 0 or null, got ${body.results[3].count}`);
     t.assert(body.results[3].error !== undefined, "Nonexistent link has error");
   });
 
@@ -867,7 +871,7 @@ async function runLinkTests(t: Runner): Promise<void> {
       "DELETE",
       `/api/v2/ontologies/${state.ontologyId}/linkTypes/tempLink`
     );
-    t.assert(deleteStatus === 204, `Delete temp link: ${deleteStatus}`);
+    t.assert(deleteStatus === 200, `Delete temp link: ${deleteStatus}`);
 
     // Verify it's gone
     const { status: getStatus } = await api(

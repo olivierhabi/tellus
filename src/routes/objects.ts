@@ -396,6 +396,202 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// GET /api/v2/objects/:objectType/:primaryKey/editHistory (Task 17)
+//
+// Returns the complete edit history for a single object in reverse
+// chronological order (most recent first). Each entry shows what operation
+// was performed, what properties were changed, who made the change, and
+// when. Essential for audit and compliance — a tax auditor must be able to
+// see every change ever made to a taxpayer record.
+//
+// Query parameters:
+//   $pageSize  — integer, default 50, max 500
+//   $pageToken — base64-encoded cursor (executed_at of last item on prev page)
+//   startTime  — ISO timestamp, only edits on or after this time
+//   endTime    — ISO timestamp, only edits on or before this time
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/api/v2/objects/:objectType/:primaryKey/editHistory",
+  async (req: Request, res: Response, next: NextFunction) => {
+    const start = Date.now();
+    try {
+      const { objectType, primaryKey } = req.params;
+      await ensureObjectTypeExists(objectType);
+
+      // ------------------------------------------------------------------
+      // Parse and validate query parameters
+      // ------------------------------------------------------------------
+
+      const rawPageSize = req.query.$pageSize ?? req.query.pageSize;
+      let pageSize = 50;
+      if (rawPageSize !== undefined) {
+        pageSize = parseInt(String(rawPageSize), 10);
+        if (isNaN(pageSize) || pageSize < 1) {
+          throw appError(
+            "QUERY_VALIDATION_ERROR",
+            "$pageSize must be a positive integer."
+          );
+        }
+        if (pageSize > 500) {
+          throw appError(
+            "QUERY_VALIDATION_ERROR",
+            "$pageSize must not exceed 500."
+          );
+        }
+      }
+
+      const rawPageToken = req.query.$pageToken ?? req.query.pageToken;
+      let cursorTimestamp: string | null = null;
+      if (rawPageToken !== undefined && rawPageToken !== "") {
+        try {
+          cursorTimestamp = Buffer.from(String(rawPageToken), "base64").toString();
+          // Basic ISO timestamp validation
+          const parsed = new Date(cursorTimestamp);
+          if (isNaN(parsed.getTime())) {
+            throw new Error("Invalid date");
+          }
+        } catch {
+          throw appError(
+            "INVALID_PAGE_TOKEN",
+            "Invalid $pageToken. Must be a valid base64-encoded ISO timestamp."
+          );
+        }
+      }
+
+      const startTime =
+        req.query.startTime !== undefined && req.query.startTime !== ""
+          ? String(req.query.startTime)
+          : null;
+      const endTime =
+        req.query.endTime !== undefined && req.query.endTime !== ""
+          ? String(req.query.endTime)
+          : null;
+
+      // Validate startTime/endTime are valid ISO timestamps if provided
+      if (startTime !== null && isNaN(new Date(startTime).getTime())) {
+        throw appError(
+          "QUERY_VALIDATION_ERROR",
+          "startTime must be a valid ISO 8601 timestamp."
+        );
+      }
+      if (endTime !== null && isNaN(new Date(endTime).getTime())) {
+        throw appError(
+          "QUERY_VALIDATION_ERROR",
+          "endTime must be a valid ISO 8601 timestamp."
+        );
+      }
+
+      // ------------------------------------------------------------------
+      // Query: Total count (with same WHERE filters, no LIMIT)
+      // ------------------------------------------------------------------
+
+      const countResult = await query(
+        `SELECT COUNT(*)::int AS total
+         FROM ontology_edit
+         WHERE object_type_api_name = $1
+           AND primary_key = $2
+           AND ($3::timestamptz IS NULL OR executed_at >= $3)
+           AND ($4::timestamptz IS NULL OR executed_at <= $4)`,
+        [objectType, primaryKey, startTime, endTime]
+      );
+      const totalCount: number = countResult.rows[0].total;
+
+      // ------------------------------------------------------------------
+      // Query: Edit history page with LEFT JOIN to audit log
+      //
+      // The LEFT JOIN on execution_id fetches the action display name and
+      // execution result from the audit log, so the response includes
+      // richer context about the action that produced each edit.
+      // ------------------------------------------------------------------
+
+      const editsResult = await query(
+        `SELECT
+           e.edit_id,
+           e.object_type_api_name,
+           e.primary_key,
+           e.operation,
+           e.property_values,
+           e.link_edits,
+           e.action_type_api_name,
+           e.execution_id,
+           e.action_parameters,
+           e.executed_by,
+           e.executed_at,
+           e.indexed,
+           e.indexed_at,
+           a.action_type_display_name,
+           a.result AS execution_result
+         FROM ontology_edit e
+         LEFT JOIN action_audit_log a ON e.execution_id = a.execution_id
+         WHERE e.object_type_api_name = $1
+           AND e.primary_key = $2
+           AND ($3::timestamptz IS NULL OR e.executed_at >= $3)
+           AND ($4::timestamptz IS NULL OR e.executed_at <= $4)
+           AND ($5::timestamptz IS NULL OR e.executed_at < $5)
+         ORDER BY e.executed_at DESC
+         LIMIT $6`,
+        [objectType, primaryKey, startTime, endTime, cursorTimestamp, pageSize]
+      );
+
+      const rows = editsResult.rows;
+
+      // ------------------------------------------------------------------
+      // Format response
+      //
+      // TODO: For update operations, compute a full "before vs. after" diff
+      // by comparing property_values with the object state before the edit.
+      // For week 1 we just show what was SET (property_values from the edit).
+      // ------------------------------------------------------------------
+
+      const data = rows.map((row: Record<string, unknown>) => ({
+        editId: row.edit_id,
+        operation: row.operation,
+        propertyValues: row.property_values ?? {},
+        linkEdits: row.link_edits ?? [],
+        actionTypeApiName: row.action_type_api_name ?? null,
+        actionTypeDisplayName: row.action_type_display_name ?? null,
+        executionId: row.execution_id ?? null,
+        executionResult: row.execution_result ?? null,
+        actionParameters: row.action_parameters ?? {},
+        executedBy: row.executed_by,
+        executedAt: row.executed_at,
+        indexed: row.indexed,
+        indexedAt: row.indexed_at ?? null,
+      }));
+
+      // ------------------------------------------------------------------
+      // Build next page token
+      //
+      // If we got a full page of results, there might be more. Encode the
+      // executed_at of the last item as the cursor for the next page.
+      // ------------------------------------------------------------------
+
+      let nextPageToken: string | null = null;
+      if (rows.length === pageSize) {
+        const lastExecutedAt = String(rows[rows.length - 1].executed_at);
+        nextPageToken = Buffer.from(lastExecutedAt).toString("base64");
+      }
+
+      const elapsed = Date.now() - start;
+      console.log(
+        `[EDIT_HISTORY] GET /api/v2/objects/${objectType}/${primaryKey}/editHistory → 200 (${data.length}/${totalCount} edits, ${elapsed}ms)`
+      );
+
+      return sendSuccess(res, {
+        objectType,
+        primaryKey,
+        data,
+        nextPageToken,
+        totalCount,
+      });
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/v2/objects/:objectType/:primaryKey (Single Object)
 // ---------------------------------------------------------------------------
 

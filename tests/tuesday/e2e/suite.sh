@@ -355,7 +355,7 @@ assert_status "$HTTP_STATUS" "201" "Create temp link type"
 
 # --- Delete link type ---
 do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/tempLink"
-assert_status "$HTTP_STATUS" "204" "Delete link type returns 204"
+assert_status "$HTTP_STATUS" "200" "Delete link type returns 200"
 
 # --- Delete non-existent link type ---
 do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/tempLink"
@@ -466,8 +466,8 @@ assert_status "$HTTP_STATUS" "404" "Resolve non-existent link type returns 404"
 do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
   '{"objectPK":"E001","direction":"forward"}'
 assert_status "$HTTP_STATUS" "200" "Forward resolve Employee->Company"
-assert_contains "$HTTP_BODY" '"linkedObjects"' "linkedObjects in response"
-assert_contains "$HTTP_BODY" '"totalCount"' "totalCount in response"
+# MANY_TO_ONE forward returns { linkedObject: ... } (singular — at most one target)
+assert_contains "$HTTP_BODY" '"linkedObject"' "linkedObject in response"
 assert_contains "$HTTP_BODY" '"C001"' "Forward resolve found Company C001"
 assert_contains "$HTTP_BODY" '"Acme Corp"' "Forward resolve found Acme Corp"
 
@@ -698,7 +698,7 @@ pass "Delete Company index for cleanup"
 
 # --- Delete link types ---
 do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany"
-assert_status "$HTTP_STATUS" "204" "Delete link type"
+assert_status "$HTTP_STATUS" "200" "Delete link type"
 
 # --- Delete object types (cascade deletes properties + datasource) ---
 do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee"

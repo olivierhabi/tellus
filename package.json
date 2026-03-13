@@ -28,6 +28,13 @@
     "test:thursday:unit": "vitest run tests/thursday/unit",
     "test:thursday:integration": "vitest run tests/thursday/integration",
     "test:thursday:e2e": "bash tests/thursday/e2e/suite.sh",
+    "test:friday": "vitest run tests/friday",
+    "test:friday:unit": "vitest run tests/friday/unit",
+    "test:friday:integration": "vitest run tests/friday/integration",
+    "test:friday:e2e": "bash tests/friday/e2e/suite.sh",
+    "test:unit": "vitest run tests/monday/unit tests/tuesday/unit tests/wednesday/unit tests/thursday/unit tests/friday/unit",
+    "test:integration": "bash tests/integration/run-all.sh",
+    "test:e2e": "bash tests/e2e/run-all.sh",
     "test:legacy": "tsx tests/index.ts"
   },
   "keywords": [],
@@ -36,6 +43,7 @@
   "type": "commonjs",
   "dependencies": {
     "@opensearch-project/opensearch": "^3.5.1",
+    "@types/swagger-ui-express": "^4.1.8",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "csv-parse": "^5.6.0",
@@ -45,7 +53,8 @@
     "helmet": "^8.1.0",
     "multer": "^1.4.5-lts.1",
     "pg": "^8.20.0",
-    "seedrandom": "^3.0.5"
+    "seedrandom": "^3.0.5",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
