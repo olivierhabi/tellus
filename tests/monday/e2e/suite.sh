@@ -453,7 +453,7 @@ assert_status "$HTTP_STATUS" "404" "Non-existent property for PK returns 404"
 # ===========================================================================
 section "19. CSV Datasource Registration"
 
-DATA_DIR="$(cd "$(dirname "$0")/../../.." && pwd)/data"
+DATA_DIR="${DATA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)/data}"
 mkdir -p "$DATA_DIR"
 CSV_FILE="${DATA_DIR}/e2e-test-employees.csv"
 cat > "$CSV_FILE" <<'CSVEOF'

@@ -115,7 +115,7 @@ assert_status "$HTTP_STATUS" "201" "Create SatE2eCompany object type"
 # ===========================================================================
 section "4. Create Test Data Files"
 
-DATA_DIR="$(cd "$(dirname "$0")/../../.." && pwd)/data"
+DATA_DIR="${DATA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)/data}"
 mkdir -p "$DATA_DIR"
 
 EMPLOYEE_CSV="${DATA_DIR}/e2e-saturday-employees.csv"

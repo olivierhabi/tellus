@@ -32,7 +32,8 @@ echo -e "${BOLD}Restarting server with RATE_LIMIT_MAX=10000 ...${NC}"
 lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 sleep 1
 
-RATE_LIMIT_MAX=10000 nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>&1 &
+export DATA_DIR="${DATA_DIR:-${ROOT}/data}"
+RATE_LIMIT_MAX=10000 DATA_DIR="$DATA_DIR" nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>&1 &
 SERVER_PID=$!
 
 # Ensure server is killed on script exit
