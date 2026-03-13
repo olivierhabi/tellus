@@ -14,9 +14,22 @@ import propertyRouter from "./routes/properties";
 import datasourceRouter from "./routes/datasources";
 import indexingRouter from "./routes/indexing";
 import linkRouter from "./routes/links";
+import actionTypeRouter from "./routes/actionTypes";
+import actionsRouter, { validateRouter, batchRouter } from "./routes/actions";
+import { actionAuditRouter, globalAuditRouter } from "./routes/auditLog";
 import objectsRouter from "./routes/objects";
 import healthRouter from "./routes/health";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
+import { cleanupExpiredKeys } from "./actions/idempotency";
+import { limiter } from "./middleware/rateLimiter";
+import swaggerUi from "swagger-ui-express";
+import * as fs from "fs";
+import * as path from "path";
+
+// Load OpenAPI spec JSON at startup
+const openApiSpec = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "api-spec", "actions.openapi.json"), "utf-8")
+);
 
 // ---------------------------------------------------------------------------
 // Config validation — fail fast if required env vars are missing
@@ -45,11 +58,13 @@ app.use(helmet());
 // Compress responses (gzip/brotli)
 app.use(compression());
 
-// Rate limiting — 200 requests per minute per IP
+// Rate limiting — configurable requests per minute per IP
+// Default: 200 req/min. Override via RATE_LIMIT_MAX env var.
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "200", 10);
 app.use(
   rateLimit({
     windowMs: 60_000,
-    limit: 200,
+    limit: RATE_LIMIT_MAX,
     standardHeaders: "draft-7",
     legacyHeaders: false,
     message: { error: "Too many requests, please try again later." },
@@ -70,7 +85,8 @@ app.use(
   cors({
     origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
+    exposedHeaders: ["X-Idempotency-Cached"],
   })
 );
 
@@ -130,8 +146,38 @@ app.use(
   "/api/v2/ontologies/:ontologyId/linkTypes",
   linkRouter
 );
+app.use(
+  "/api/v2/ontologies/:ontologyId/actionTypes",
+  actionTypeRouter
+);
+app.use(
+  "/api/v2/ontologies/:ontologyId/actions",
+  actionsRouter
+);
+app.use(
+  "/api/v2/ontologies/:ontologyId/actions",
+  actionAuditRouter
+);
+app.use("/api/v2/actions", validateRouter);
+app.use("/api/v2/actions", batchRouter);
+app.use("/api/v2/audit", globalAuditRouter);
 app.use(objectsRouter);
 app.use(healthRouter);
+
+// ---------------------------------------------------------------------------
+// API Specification & Documentation
+// ---------------------------------------------------------------------------
+
+// GET /api/v2/spec — returns raw OpenAPI JSON
+app.get("/api/v2/spec", (_req: Request, res: Response) => {
+  res.json(openApiSpec);
+});
+
+// GET /api/v2/docs — renders Swagger UI
+app.use("/api/v2/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, {
+  customCss: ".swagger-ui .topbar { display: none }",
+  customSiteTitle: "Tellus Ontology Engine — API Docs",
+}));
 
 // Global error handler — MUST be last in the middleware chain
 app.use(errorHandler);
@@ -179,6 +225,20 @@ async function start(): Promise<void> {
         `Ontology Engine started on port ${PORT} | PostgreSQL connected`
       );
     });
+
+    // Clean up expired idempotency keys every 6 hours (Task 21)
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    setInterval(async () => {
+      try {
+        const deleted = await cleanupExpiredKeys();
+        if (deleted > 0) {
+          console.log(`Idempotency cleanup: removed ${deleted} expired keys`);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`Idempotency cleanup error: ${msg}`);
+      }
+    }, SIX_HOURS_MS);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`FATAL: Cannot connect to PostgreSQL: ${message}`);
@@ -198,6 +258,9 @@ async function shutdown(signal: string): Promise<void> {
       console.log("HTTP server closed");
     });
   }
+
+  // Destroy the action rate limiter to prevent dangling setInterval
+  limiter.destroy();
 
   try {
     await pool.end();

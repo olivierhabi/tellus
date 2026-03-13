@@ -6,9 +6,10 @@ import { PoolClient } from "pg";
 // Complete migration order (all tables):
 // Week 1: ontology, object_type, property, backing_datasource, funnel_state
 // Week 2: funnel_pipeline_state
-// Week 3: ontology_edit
-// Future: link_join_table, action_type,
-//         action_audit_log, interface, object_type_interface
+// Week 3: ontology_edit (base schema)
+// Week 4: action_type, ontology_edit (extended with link_edits, execution_id, etc.)
+// Week 4: action_audit_log
+// Future: link_join_table, interface, object_type_interface
 // ---------------------------------------------------------------------------
 
 /**
@@ -378,11 +379,16 @@ async function migrate(): Promise<void> {
     // ------------------------------------------------------------------
     // ontology_edit
     //
-    // Stores user edits created by the Action execution engine. During
-    // reindexing, the Edit Merger (Stage 6 of the indexing pipeline)
-    // reads unindexed edits from this table and merges them with
-    // datasource data — user edits always win over datasource values
-    // for the same primary key.
+    // Write-ahead log for all Ontology object modifications made through
+    // Actions. Each row represents a single create, update, or delete
+    // operation on one object. Pending edits (indexed=false) are
+    // processed by the indexer and merged with datasource data in
+    // OpenSearch. Mirrors Palantir Object Storage V2 edit handling.
+    //
+    // Key behavior: when a backing datasource is reindexed, user edits
+    // (from Actions) take precedence over datasource data for the same
+    // primary key. The edit store is the source of truth for user
+    // modifications.
     //
     // After successful indexing, the pipeline marks rows as indexed
     // so they are not re-applied on the next run (though persistent
@@ -393,18 +399,129 @@ async function migrate(): Promise<void> {
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS ontology_edit (
-        edit_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-        object_type_api_name   TEXT        NOT NULL,
-        primary_key            TEXT        NOT NULL,
-        operation              TEXT        NOT NULL CHECK (operation IN ('create', 'update', 'delete')),
-        property_values        JSONB,
-        executed_by            TEXT,
-        executed_at            TIMESTAMPTZ DEFAULT now(),
-        indexed                BOOLEAN     DEFAULT false,
-        indexed_at             TIMESTAMPTZ
+        edit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+        -- Which object type this edit targets. Stored as the api_name string
+        -- rather than a foreign key, because we need to be able to process
+        -- edits even if the object type schema changes between when the edit
+        -- was created and when it's indexed.
+        object_type_api_name TEXT NOT NULL,
+
+        -- The primary key of the specific object being edited.
+        primary_key TEXT NOT NULL,
+
+        -- The type of edit operation: 'create', 'update', or 'delete'.
+        operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'delete')),
+
+        -- The property values being set by this edit. JSON object where keys
+        -- are property api_names and values are the new values.
+        property_values JSONB DEFAULT '{}'::jsonb,
+
+        -- Link edits associated with this object edit. JSON array of link
+        -- operations: { linkTypeApiName, targetPrimaryKey, operation: add|remove }
+        link_edits JSONB DEFAULT '[]'::jsonb,
+
+        -- Which action type produced this edit (api_name for traceability).
+        action_type_api_name TEXT,
+
+        -- Groups all edits from a single action execution together.
+        execution_id UUID,
+
+        -- Snapshot of parameters passed to the action when this edit was produced.
+        action_parameters JSONB DEFAULT '{}'::jsonb,
+
+        -- Who executed the action that produced this edit.
+        executed_by TEXT NOT NULL DEFAULT 'system',
+
+        -- When this edit was created (not when it was indexed).
+        executed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+        -- Whether this edit has been indexed into OpenSearch.
+        indexed BOOLEAN NOT NULL DEFAULT false,
+
+        -- When the edit was indexed into OpenSearch. NULL until indexed.
+        indexed_at TIMESTAMPTZ DEFAULT NULL,
+
+        -- The branch this edit belongs to. NULL means the Main branch.
+        branch_id UUID DEFAULT NULL
       );
     `);
 
+    // Add new columns to existing table if they don't exist yet
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ontology_edit' AND column_name = 'link_edits') THEN
+          ALTER TABLE ontology_edit ADD COLUMN link_edits JSONB DEFAULT '[]'::jsonb;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ontology_edit' AND column_name = 'action_type_api_name') THEN
+          ALTER TABLE ontology_edit ADD COLUMN action_type_api_name TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ontology_edit' AND column_name = 'execution_id') THEN
+          ALTER TABLE ontology_edit ADD COLUMN execution_id UUID;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ontology_edit' AND column_name = 'action_parameters') THEN
+          ALTER TABLE ontology_edit ADD COLUMN action_parameters JSONB DEFAULT '{}'::jsonb;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ontology_edit' AND column_name = 'branch_id') THEN
+          ALTER TABLE ontology_edit ADD COLUMN branch_id UUID DEFAULT NULL;
+        END IF;
+      END
+      $$;
+    `);
+
+    // Update column defaults/constraints on existing table to match new schema
+    // (executed_by: NOT NULL DEFAULT 'system', executed_at: NOT NULL, indexed: NOT NULL)
+    await client.query(`
+      DO $$
+      BEGIN
+        -- Backfill any NULL executed_by values before making NOT NULL
+        UPDATE ontology_edit SET executed_by = 'system' WHERE executed_by IS NULL;
+        -- Alter executed_by to NOT NULL with default
+        ALTER TABLE ontology_edit ALTER COLUMN executed_by SET NOT NULL;
+        ALTER TABLE ontology_edit ALTER COLUMN executed_by SET DEFAULT 'system';
+        -- Alter executed_at to NOT NULL
+        ALTER TABLE ontology_edit ALTER COLUMN executed_at SET NOT NULL;
+        ALTER TABLE ontology_edit ALTER COLUMN executed_at SET DEFAULT now();
+        -- Alter indexed to NOT NULL
+        ALTER TABLE ontology_edit ALTER COLUMN indexed SET NOT NULL;
+        ALTER TABLE ontology_edit ALTER COLUMN indexed SET DEFAULT false;
+        -- Update property_values default
+        ALTER TABLE ontology_edit ALTER COLUMN property_values SET DEFAULT '{}'::jsonb;
+      EXCEPTION
+        WHEN others THEN
+          -- Ignore errors if constraints already set
+          NULL;
+      END
+      $$;
+    `);
+
+    // Index for the most critical query: "get all pending edits for an object type"
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_edit_pending
+        ON ontology_edit(object_type_api_name, indexed)
+        WHERE indexed = false;
+    `);
+
+    // Index for looking up all edits for a specific object (edit history)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_edit_object
+        ON ontology_edit(object_type_api_name, primary_key, executed_at DESC);
+    `);
+
+    // Index for looking up all edits from a specific action execution
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_edit_execution
+        ON ontology_edit(execution_id);
+    `);
+
+    // Index for looking up edits by the user who made them
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_edit_user
+        ON ontology_edit(executed_by, executed_at DESC);
+    `);
+
+    // Keep legacy indexes for backward compatibility
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_ontology_edit_object_type
         ON ontology_edit(object_type_api_name);
@@ -415,12 +532,328 @@ async function migrate(): Promise<void> {
         ON ontology_edit(indexed) WHERE indexed = false;
     `);
 
+    await client.query(`
+      COMMENT ON TABLE ontology_edit IS 'Write-ahead log for all Ontology object modifications made through Actions. Each row represents a single create, update, or delete operation on one object. Pending edits (indexed=false) are processed by the indexer and merged with datasource data in OpenSearch. Mirrors Palantir Object Storage V2 edit handling.';
+    `);
+
     logTableStatus("ontology_edit", ontologyEditExisted);
+
+    // ------------------------------------------------------------------
+    // action_type
+    //
+    // Stores action type definitions for the Ontology. Each action type
+    // defines a parameterized, auditable set of changes that can be
+    // applied to objects, properties, and links. Mirrors Palantir Foundry
+    // action type schema.
+    //
+    // An action type has:
+    //   - parameters: JSON array of input definitions the caller must provide
+    //   - rules: JSON array of edit rules (createObject, modifyObject, etc.)
+    //   - submission_criteria: who can execute the action (null = anyone)
+    //   - side_effects: webhooks/notifications after execution (null = none)
+    // ------------------------------------------------------------------
+    const actionTypeExisted = await tableExists(client, "action_type");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS action_type (
+        action_type_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id UUID NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        api_name TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+
+        -- Parameters: defines the inputs the caller must provide when executing this action.
+        -- This is a JSON array of parameter definition objects. Each parameter has:
+        --   apiName (string, required): The machine-readable name used in API calls, e.g., "employeeId"
+        --   displayName (string, required): The human-readable label shown in UIs, e.g., "Employee ID"
+        --   type (string, required): The data type of the parameter. Must be one of:
+        --     'string', 'boolean', 'integer', 'long', 'double', 'float', 'date', 'timestamp',
+        --     'object_reference' (a primary key of an existing object),
+        --     'object_set' (a filter that resolves to a set of objects),
+        --     'string_array', 'integer_array', 'double_array',
+        --     'struct' (a nested JSON object with a defined schema)
+        --   required (boolean, default false): Whether the parameter must be provided
+        --   objectType (string, optional): For 'object_reference' and 'object_set' types, specifies which object type
+        --   defaultValue (any, optional): The default value if the parameter is not provided
+        --   constraints (object, optional): Validation constraints like { "regex": "^EMP-\\d{6}$", "min": 0, "max": 1000000 }
+        parameters JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+        -- Rules: defines the logic that transforms parameters into Ontology edits.
+        -- This is a JSON array of rule objects. Each rule has a "type" field and type-specific fields.
+        -- Supported rule types (from Palantir docs):
+        --   "createObject": Creates a new object of a specified type
+        --   "modifyObject": Modifies properties on one or more existing objects
+        --   "deleteObject": Deletes one or more existing objects
+        --   "addLink": Creates a many-to-many link between two objects
+        --   "removeLink": Removes a many-to-many link between two objects
+        -- When multiple rules exist, Palantir's backend "compiles rules to generate a single edit per object"
+        -- This means if Rule A sets property X to "A" and Rule B sets property X to "B" on the same object,
+        -- the final result is property X = "B" (last rule wins).
+        rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+        -- Submission criteria: defines who can execute this action.
+        -- For week 1, this will be null (anyone can execute any action).
+        -- In production, this would contain conditions like:
+        --   { "type": "userInGroup", "groupId": "tax-auditors" }
+        --   { "type": "parameterCondition", "param": "amount", "operator": "lt", "value": 10000 }
+        submission_criteria JSONB DEFAULT NULL,
+
+        -- Side effects: webhooks and notifications triggered after successful execution.
+        -- For week 1, this will be null (no side effects).
+        -- Structure when implemented:
+        --   { "webhooks": [...], "notifications": [...] }
+        side_effects JSONB DEFAULT NULL,
+
+        -- Maximum number of objects that can be affected by a single execution of this action.
+        -- Palantir default is 10,000. If an action would affect more objects, it fails with a "scale limit failure".
+        -- This is documented in Palantir's Action Metrics page under failure types.
+        max_affected_objects INTEGER NOT NULL DEFAULT 10000,
+
+        -- Whether this action is enabled. Disabled actions cannot be executed but remain in the schema.
+        is_enabled BOOLEAN NOT NULL DEFAULT true,
+
+        -- Timestamps for audit and management purposes
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_by TEXT DEFAULT 'system',
+
+        -- Ensure action type API names are unique within an ontology.
+        -- Just as you cannot have two object types with the same api_name, you cannot have two action types
+        -- with the same api_name in the same ontology.
+        CONSTRAINT uq_action_type_api_name UNIQUE (ontology_id, api_name)
+      );
+    `);
+
+    // Create indexes for common query patterns
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_action_type_ontology ON action_type(ontology_id);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_action_type_api_name ON action_type(api_name);
+    `);
+
+    await client.query(`
+      COMMENT ON TABLE action_type IS 'Stores action type definitions for the Ontology. Each action type defines a parameterized, auditable set of changes that can be applied to objects, properties, and links. Mirrors Palantir Foundry action type schema.';
+    `);
+
+    logTableStatus("action_type", actionTypeExisted);
+
+    // ------------------------------------------------------------------
+    // action_audit_log
+    //
+    // Immutable audit log for all action execution attempts. Records
+    // every action execution with full parameter snapshots, affected
+    // objects, results, and timing. Once written, rows cannot be
+    // modified or deleted. Mirrors Palantir action audit system.
+    //
+    // Failure types tracked (from Palantir Action Metrics docs):
+    //   - invalid_parameter: submitted with invalid parameters
+    //   - scale_limit: affected more than max_affected_objects
+    //   - authentication: user failed security submission criteria
+    //   - object_not_found: modify/delete referenced nonexistent object
+    //   - duplicate_primary_key: create with existing PK
+    //   - required_property_missing: create missing required property
+    //   - type_mismatch: parameter/property value type mismatch
+    //   - side_effect: webhook/notification failure
+    //   - function_failure: function-backed action failure (future)
+    //   - unclassified: any other failure
+    // ------------------------------------------------------------------
+    const auditLogExisted = await tableExists(client, "action_audit_log");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS action_audit_log (
+        audit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+        -- The action type that was executed (or attempted). Stored as api_name.
+        action_type_api_name TEXT NOT NULL,
+
+        -- The display name of the action type at the time of execution.
+        -- Stored separately because the action type might be renamed later.
+        action_type_display_name TEXT NOT NULL,
+
+        -- A unique identifier for this specific execution attempt.
+        -- Links to ontology_edit.execution_id for traceability.
+        execution_id UUID NOT NULL UNIQUE,
+
+        -- The full set of parameters passed to the action.
+        parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+        -- The list of objects affected by this execution.
+        affected_objects JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+        -- The number of objects affected.
+        affected_object_count INTEGER NOT NULL DEFAULT 0,
+
+        -- The result of the execution: 'success', 'failed', or 'partial'.
+        result TEXT NOT NULL CHECK (result IN ('success', 'failed', 'partial')),
+
+        -- The type of failure, if result is 'failed'.
+        failure_type TEXT CHECK (failure_type IN (
+          'invalid_parameter', 'scale_limit', 'authentication',
+          'object_not_found', 'duplicate_primary_key', 'required_property_missing',
+          'type_mismatch', 'side_effect', 'function_failure', 'unclassified'
+        )),
+
+        -- Human-readable error message describing why the action failed.
+        error_message TEXT,
+
+        -- How long the action took to execute, in milliseconds.
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+
+        -- Who executed the action.
+        executed_by TEXT NOT NULL DEFAULT 'system',
+
+        -- When the action was executed.
+        executed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+        -- The branch this action was executed on. NULL = Main branch.
+        branch_id UUID DEFAULT NULL,
+
+        -- IP address of the caller, if available.
+        source_ip TEXT,
+
+        -- Additional metadata for debugging or analytics.
+        metadata JSONB DEFAULT '{}'::jsonb
+      );
+    `);
+
+    // Index for querying audit logs by action type
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_action_type
+        ON action_audit_log(action_type_api_name, executed_at DESC);
+    `);
+
+    // Index for querying audit logs by user
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_user
+        ON action_audit_log(executed_by, executed_at DESC);
+    `);
+
+    // Index for querying by result
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_result
+        ON action_audit_log(result, executed_at DESC);
+    `);
+
+    // Index for time-range queries
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_time
+        ON action_audit_log(executed_at DESC);
+    `);
+
+    await client.query(`
+      COMMENT ON TABLE action_audit_log IS 'Immutable audit log for all action execution attempts. Records every action execution with full parameter snapshots, affected objects, results, and timing. Once written, rows cannot be modified or deleted. Mirrors Palantir action audit system.';
+    `);
+
+    logTableStatus("action_audit_log", auditLogExisted);
+
+    // ------------------------------------------------------------------
+    // Table 11: link_edit
+    //
+    // Stores individual link operations (add/remove) for many-to-many
+    // link types. Each row represents a single link add or remove
+    // operation produced by an action execution. FK-based links
+    // (ONE_TO_MANY, MANY_TO_ONE) are handled as property updates on the
+    // ontology_edit table instead.
+    // ------------------------------------------------------------------
+    const linkEditExisted = (
+      await client.query(
+        "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'link_edit') AS exists"
+      )
+    ).rows[0].exists;
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS link_edit (
+        link_edit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        link_type_api_name TEXT NOT NULL,
+        source_primary_key TEXT NOT NULL,
+        target_primary_key TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('add', 'remove')),
+        execution_id UUID,
+        executed_at TIMESTAMPTZ DEFAULT now()
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_edit_execution
+        ON link_edit(execution_id);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_edit_link_type
+        ON link_edit(link_type_api_name);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_edit_source
+        ON link_edit(source_primary_key);
+    `);
+
+    await client.query(`
+      COMMENT ON TABLE link_edit IS 'Stores individual link add/remove operations for many-to-many link types. Each row represents a single link operation produced by an action execution. Mirrors Palantir link edit tracking in the Object Storage V2 edit store.';
+    `);
+
+    logTableStatus("link_edit", linkEditExisted);
+
+    // ------------------------------------------------------------------
+    // TABLE 12: idempotency_key (Task 21)
+    //
+    // Tracks idempotency keys for action execution. When a client includes
+    // an Idempotency-Key header, the server checks this table before
+    // executing. If a matching key exists (and is not expired), the cached
+    // result is returned instead of re-executing the action.
+    //
+    // Keys expire after 24 hours to prevent unbounded table growth.
+    // ------------------------------------------------------------------
+    const idempotencyKeyExisted = await tableExists(client, "idempotency_key");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS idempotency_key (
+        idempotency_key   TEXT        PRIMARY KEY,
+        action_type_api_name TEXT     NOT NULL,
+        execution_id      UUID        NOT NULL,
+        result            JSONB       NOT NULL,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at        TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '24 hours')
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_idempotency_expiry
+        ON idempotency_key(expires_at);
+    `);
+
+    await client.query(`
+      COMMENT ON TABLE idempotency_key IS 'Stores cached action execution results keyed by client-provided idempotency keys. Prevents duplicate action execution on client retries. Keys expire after 24 hours.';
+    `);
+
+    logTableStatus("idempotency_key", idempotencyKeyExisted);
 
     await client.query("COMMIT");
     console.log(
-      "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit"
+      "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key"
     );
+
+    // ------------------------------------------------------------------
+    // Post-transaction: REVOKE UPDATE/DELETE on action_audit_log
+    //
+    // REVOKE runs outside the main transaction because it is a DCL
+    // (Data Control Language) statement that takes effect immediately.
+    // This makes the audit log truly immutable — only INSERT is allowed.
+    // ------------------------------------------------------------------
+    try {
+      await client.query(
+        "REVOKE UPDATE, DELETE ON action_audit_log FROM PUBLIC"
+      );
+      console.log("Revoked UPDATE/DELETE on action_audit_log (immutable audit log)");
+    } catch (revokeErr) {
+      // Non-fatal: the table is still functional without the REVOKE.
+      // This may fail if the user doesn't have GRANT/REVOKE privileges.
+      const msg = revokeErr instanceof Error ? revokeErr.message : String(revokeErr);
+      console.warn("Warning: Could not REVOKE UPDATE/DELETE on action_audit_log:", msg);
+    }
+
   } catch (err) {
     await client.query("ROLLBACK");
     const message = err instanceof Error ? err.message : String(err);
