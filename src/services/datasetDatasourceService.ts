@@ -237,7 +237,15 @@ export async function registerWithDataset(
       Array.isArray(dataset.schema_definition)
     ) {
       availableColumns = dataset.schema_definition.map((col: any) =>
-        typeof col === "string" ? col : col.name || String(col)
+        typeof col === "string" ? col : col.name || col.columnName || String(col)
+      );
+    } else if (
+      dataset.schema_definition &&
+      dataset.schema_definition.columns &&
+      Array.isArray(dataset.schema_definition.columns)
+    ) {
+      availableColumns = dataset.schema_definition.columns.map((col: any) =>
+        typeof col === "string" ? col : col.name || col.columnName || String(col)
       );
     }
 
