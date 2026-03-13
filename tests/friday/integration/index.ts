@@ -92,7 +92,7 @@ async function run(): Promise<void> {
     }
 
     try {
-      const output = execSync(`npx tsx "${filePath}"`, {
+      const output = execSync(`npx vitest run "${filePath}"`, {
         cwd: ROOT,
         encoding: "utf-8",
         timeout: suite.timeout,

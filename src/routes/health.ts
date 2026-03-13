@@ -360,6 +360,65 @@ router.get("/api/v2/status", async (_req: Request, res: Response) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Kubernetes-style health endpoints (Sunday Task)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/v2/system/health — Full health check (same as /api/v2/status)
+ */
+router.get("/api/v2/system/health", async (_req: Request, res: Response) => {
+  try {
+    const deps = resolveDefaultDeps();
+    const { statusCode, body } = await buildHealthResponse(deps);
+    res.status(statusCode).json(body);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(503).json({
+      status: "unhealthy",
+      error: message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+/**
+ * GET /api/v2/system/readiness — Readiness probe
+ *
+ * Returns 200 if the system can handle requests (DB is reachable).
+ * Returns 503 if the database is unreachable.
+ */
+router.get("/api/v2/system/readiness", async (_req: Request, res: Response) => {
+  try {
+    await pool.query("SELECT 1");
+    res.status(200).json({
+      status: "ready",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(503).json({
+      status: "not_ready",
+      error: message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+/**
+ * GET /api/v2/system/liveness — Liveness probe
+ *
+ * Always returns 200 if the process is running. This is a simple
+ * liveness check that does not depend on external services.
+ */
+router.get("/api/v2/system/liveness", (_req: Request, res: Response) => {
+  res.status(200).json({
+    status: "alive",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
 export default router;
 
 // ---------------------------------------------------------------------------

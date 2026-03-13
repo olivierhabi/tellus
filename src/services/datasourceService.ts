@@ -93,10 +93,19 @@ async function register(objectTypeId: string, data: RegisterInput) {
     );
   }
 
-  // 4. Validate and resolve the file path (path traversal protection)
+  // 4. Validate file format before doing any filesystem work
+  const SUPPORTED_FORMATS = new Set(["csv", "json", "jsonl", "tsv"]);
+  if (!fileFormat || !SUPPORTED_FORMATS.has(fileFormat.toLowerCase())) {
+    throw appError(
+      "VALIDATION_FAILED",
+      `Unsupported file format: '${fileFormat}'. Supported: csv, json, jsonl, tsv.`
+    );
+  }
+
+  // 5. Validate and resolve the file path (path traversal protection)
   const resolvedPath = resolveAndValidatePath(filePath);
 
-  // 5. Check file exists on filesystem
+  // 6. Check file exists on filesystem
   if (!fs.existsSync(resolvedPath)) {
     throw appError(
       "DATASOURCE_FILE_NOT_FOUND",
@@ -104,7 +113,7 @@ async function register(objectTypeId: string, data: RegisterInput) {
     );
   }
 
-  // 6. Scan the file (async — does not block the event loop for large files)
+  // 7. Scan the file (async — does not block the event loop for large files)
   const scanResult = await scanFile(resolvedPath, fileFormat);
 
   // 6. Fetch properties and resolve primary key

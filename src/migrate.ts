@@ -9,7 +9,7 @@ import { PoolClient } from "pg";
 // Week 3: ontology_edit (base schema)
 // Week 4: action_type, ontology_edit (extended with link_edits, execution_id, etc.)
 // Week 4: action_audit_log
-// Future: link_join_table, interface, object_type_interface
+// Sunday: interface, interface_property, object_type_interface
 // ---------------------------------------------------------------------------
 
 /**
@@ -830,9 +830,255 @@ async function migrate(): Promise<void> {
 
     logTableStatus("idempotency_key", idempotencyKeyExisted);
 
+    // ------------------------------------------------------------------
+    // dataset
+    //
+    // Stores metadata for uploaded datasets. Each dataset represents a
+    // file (CSV, JSON, JSONL) that can be used as a backing datasource
+    // for object types. Supports transactional writes via the
+    // dataset_transaction table.
+    // ------------------------------------------------------------------
+    const datasetExisted = await tableExists(client, "dataset");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dataset (
+        dataset_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        description TEXT,
+        file_format TEXT NOT NULL CHECK (file_format IN ('csv', 'json', 'jsonl')),
+        schema_definition JSONB,
+        storage_path TEXT,
+        total_rows INTEGER DEFAULT 0,
+        total_size_bytes BIGINT DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_by TEXT NOT NULL DEFAULT 'system'
+      );
+    `);
+
+    // Add created_by column if missing (for existing installations)
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'dataset' AND column_name = 'created_by') THEN
+          ALTER TABLE dataset ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system';
+        END IF;
+      END
+      $$;
+    `);
+
+    logTableStatus("dataset", datasetExisted);
+
+    // ------------------------------------------------------------------
+    // dataset_transaction
+    //
+    // Tracks individual file upload transactions for a dataset. Each
+    // upload creates a transaction that moves through the lifecycle:
+    // open -> committed (or failed/aborted). Supports SNAPSHOT (full
+    // replacement) and APPEND (additive) transaction types.
+    // ------------------------------------------------------------------
+    const datasetTransactionExisted = await tableExists(
+      client,
+      "dataset_transaction"
+    );
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dataset_transaction (
+        transaction_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        dataset_id UUID NOT NULL REFERENCES dataset(dataset_id) ON DELETE CASCADE,
+        transaction_type TEXT NOT NULL CHECK (transaction_type IN ('SNAPSHOT', 'APPEND')),
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'committed', 'failed', 'aborted')),
+        file_path TEXT,
+        file_name TEXT,
+        file_size_bytes BIGINT DEFAULT 0,
+        row_count INTEGER DEFAULT 0,
+        schema_definition JSONB,
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        committed_at TIMESTAMPTZ
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_dataset_transaction_dataset_id
+        ON dataset_transaction(dataset_id);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_dataset_transaction_status
+        ON dataset_transaction(status);
+    `);
+
+    logTableStatus("dataset_transaction", datasetTransactionExisted);
+
+    // ------------------------------------------------------------------
+    // backing_datasource: add dataset_id column if missing
+    //
+    // Links a backing datasource to a dataset, enabling the datasource
+    // to reference uploaded dataset files rather than only local files.
+    // ------------------------------------------------------------------
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'backing_datasource' AND column_name = 'dataset_id') THEN
+          ALTER TABLE backing_datasource ADD COLUMN dataset_id UUID REFERENCES dataset(dataset_id);
+        END IF;
+      END
+      $$;
+    `);
+
+    console.log("Ensured backing_datasource has dataset_id column");
+
+    // ------------------------------------------------------------------
+    // reindex_history
+    //
+    // Audit log for re-indexing operations. Each row records a single
+    // reindex execution for an object type, including timing, counts,
+    // and error information. Used for monitoring and debugging the
+    // indexing pipeline.
+    // ------------------------------------------------------------------
+    const reindexHistoryExisted = await tableExists(client, "reindex_history");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS reindex_history (
+        reindex_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        object_type_api_name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('success', 'failed', 'partial')),
+        triggered_by TEXT NOT NULL DEFAULT 'manual',
+        started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at TIMESTAMPTZ,
+        duration_ms INTEGER,
+        transactions_processed INTEGER DEFAULT 0,
+        objects_from_datasource INTEGER DEFAULT 0,
+        edits_applied INTEGER DEFAULT 0,
+        total_objects_indexed INTEGER DEFAULT 0,
+        error_message TEXT,
+        metadata JSONB DEFAULT '{}'
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_reindex_history_object_type
+        ON reindex_history(object_type_api_name);
+    `);
+
+    logTableStatus("reindex_history", reindexHistoryExisted);
+
+    // ------------------------------------------------------------------
+    // interface
+    //
+    // Defines shared property contracts that Object Types can implement.
+    // An Interface declares a set of typed properties. When an Object
+    // Type implements an Interface, it maps its own properties to the
+    // Interface's properties, enabling polymorphic queries across
+    // heterogeneous Object Types. Mirrors Palantir Foundry's Interface
+    // system for cross-object-type abstraction.
+    //
+    // api_name must be PascalCase (same as Object Type naming) and
+    // globally unique across both Interfaces and Object Types within
+    // the same ontology to prevent naming collisions.
+    // ------------------------------------------------------------------
+    const interfaceExisted = await tableExists(client, "interface");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS interface (
+        interface_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id UUID NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        api_name TEXT NOT NULL UNIQUE CHECK (api_name ~ '^[A-Z][a-zA-Z0-9]*$'),
+        display_name TEXT NOT NULL,
+        description TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_interface_ontology_id ON interface(ontology_id);
+    `);
+
+    logTableStatus("interface", interfaceExisted);
+
+    // ------------------------------------------------------------------
+    // interface_property
+    //
+    // Defines the individual typed properties that belong to an Interface.
+    // Each property has a base_type from the standard Palantir type system.
+    // Object Types that implement the Interface must map their own
+    // properties to these Interface properties (via object_type_interface).
+    //
+    // api_name must be camelCase (same as Object Type property naming).
+    // The (interface_id, api_name) pair is unique — no duplicate property
+    // names within a single Interface.
+    // ------------------------------------------------------------------
+    const interfacePropertyExisted = await tableExists(
+      client,
+      "interface_property"
+    );
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS interface_property (
+        interface_property_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        interface_id UUID NOT NULL REFERENCES interface(interface_id) ON DELETE CASCADE,
+        api_name TEXT NOT NULL CHECK (api_name ~ '^[a-z][a-zA-Z0-9]*$'),
+        display_name TEXT NOT NULL,
+        base_type TEXT NOT NULL CHECK (base_type IN (
+          'string','boolean','integer','long','double','float','date','timestamp',
+          'byte','short','decimal','geopoint','geoshape',
+          'string_array','integer_array','long_array','double_array',
+          'boolean_array','timestamp_array','struct'
+        )),
+        is_required BOOLEAN NOT NULL DEFAULT false,
+        ordinal INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (interface_id, api_name)
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_interface_property_interface_id
+        ON interface_property(interface_id);
+    `);
+
+    logTableStatus("interface_property", interfacePropertyExisted);
+
+    // ------------------------------------------------------------------
+    // object_type_interface
+    //
+    // Junction table linking Object Types to the Interfaces they implement.
+    // Each row maps one Object Type to one Interface, with a property_mapping
+    // JSONB that records which Object Type property fulfills each Interface
+    // property. Example property_mapping:
+    //   { "employeeName": "fullName", "employeeId": "empId" }
+    //   (Interface property -> Object Type property)
+    //
+    // ON DELETE RESTRICT on interface_id prevents accidental deletion of
+    // Interfaces that are still implemented by Object Types. The Object
+    // Type must explicitly un-implement the Interface first.
+    // ------------------------------------------------------------------
+    const objectTypeInterfaceExisted = await tableExists(
+      client,
+      "object_type_interface"
+    );
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS object_type_interface (
+        object_type_id UUID NOT NULL REFERENCES object_type(object_type_id) ON DELETE CASCADE,
+        interface_id UUID NOT NULL REFERENCES interface(interface_id) ON DELETE RESTRICT,
+        property_mapping JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (object_type_id, interface_id)
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_oti_interface_id
+        ON object_type_interface(interface_id);
+    `);
+
+    logTableStatus("object_type_interface", objectTypeInterfaceExisted);
+
     await client.query("COMMIT");
     console.log(
-      "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key"
+      "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface"
     );
 
     // ------------------------------------------------------------------

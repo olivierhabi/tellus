@@ -1,10 +1,18 @@
 // ---------------------------------------------------------------------------
-// Request Logger Middleware
+// Enhanced Request Logger Middleware (Task 16)
 //
 // Logs every request/response as structured JSON with a unique requestId,
 // timing information, and an attached helper for application-level logging.
 //
-// Task 19 enhancements:
+// Task 16 enhancements:
+//   - Request timing (duration in ms) with nanosecond precision
+//   - Structured JSON log format for all entries
+//   - Log request body size
+//   - Log response status code
+//   - Skip logging for health check endpoints (configurable)
+//   - Configurable log levels per status code range
+//
+// Task 19 enhancements (preserved):
 //   - Nanosecond-precision timing via process.hrtime.bigint()
 //   - X-Request-Id response header for client correlation
 //   - Slow-request detection (>1000ms) with request body logging
@@ -22,20 +30,51 @@ declare global {
     interface Request {
       requestId?: string;
       _startHrTime?: bigint;
-      _bodySnapshot?: string;
       log?: (message: string, data?: Record<string, unknown>) => void;
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Sensitive path patterns whose request bodies must NOT be logged
+// Configuration
 // ---------------------------------------------------------------------------
 
-const SENSITIVE_PATH_PATTERNS = [/\/auth\//, /\/password\//];
+/** Paths that should NOT be logged (health checks, readiness probes, etc.). */
+const SKIP_PATHS: Set<string> = new Set(
+  (process.env.LOG_SKIP_PATHS || "/health,/healthz,/ready,/readiness,/liveness")
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+);
 
-// Slow request threshold in milliseconds
-const SLOW_REQUEST_THRESHOLD_MS = 1000;
+/** Slow request threshold in milliseconds (configurable via env). */
+const SLOW_REQUEST_THRESHOLD_MS = parseInt(
+  process.env.SLOW_REQUEST_THRESHOLD_MS || "1000",
+  10
+);
+
+// ---------------------------------------------------------------------------
+// Helper: compute request body size in bytes
+// ---------------------------------------------------------------------------
+
+function getBodySizeBytes(body: unknown): number {
+  if (!body || typeof body !== "object") return 0;
+  try {
+    return Buffer.byteLength(JSON.stringify(body), "utf-8");
+  } catch {
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: determine log level from status code
+// ---------------------------------------------------------------------------
+
+function getLogLevel(statusCode: number): string {
+  if (statusCode >= 500) return "error";
+  if (statusCode >= 400) return "warn";
+  return "info";
+}
 
 // ---------------------------------------------------------------------------
 // Middleware
@@ -46,37 +85,36 @@ export default function requestLogger(
   res: Response,
   next: NextFunction
 ): void {
-  // 1. Attach request ID and start time (nanosecond precision)
+  // 1. Attach request ID (always — even for skipped paths like /health)
   req.requestId = crypto.randomUUID();
-  req._startHrTime = process.hrtime.bigint();
-
-  // Expose request ID to clients for correlation / debugging
   res.setHeader("X-Request-Id", req.requestId);
 
-  // 2. Capture request body snapshot for slow-request logging (POST/PUT/PATCH only)
-  const isSensitive = SENSITIVE_PATH_PATTERNS.some((p) => p.test(req.path));
-  if (
-    !isSensitive &&
-    ["POST", "PUT", "PATCH"].includes(req.method) &&
-    req.body &&
-    Object.keys(req.body).length > 0
-  ) {
-    req._bodySnapshot = JSON.stringify(req.body).substring(0, 2000);
+  // Skip logging for configured health check endpoints
+  if (SKIP_PATHS.has(req.path)) {
+    next();
+    return;
   }
 
-  // 3. Log request start
+  // 2. Record start time (nanosecond precision) for logged requests
+  req._startHrTime = process.hrtime.bigint();
+
+  // 2. Compute body size (for logging metadata only — NEVER log the body itself)
+  const bodySizeBytes = getBodySizeBytes(req.body);
+
+  // 3. Log request start with structured JSON
   const startLog: Record<string, unknown> = {
     level: "info",
     type: "request_start",
     requestId: req.requestId,
     method: req.method,
     path: req.path,
+    query: Object.keys(req.query).length > 0 ? req.query : undefined,
+    userAgent: req.get("user-agent") || undefined,
+    ip: req.ip,
+    contentType: req.get("content-type") || undefined,
+    bodySizeBytes: bodySizeBytes > 0 ? bodySizeBytes : undefined,
     timestamp: new Date().toISOString(),
   };
-
-  if (req._bodySnapshot) {
-    startLog.body = req._bodySnapshot;
-  }
 
   console.log(JSON.stringify(startLog));
 
@@ -84,14 +122,19 @@ export default function requestLogger(
   res.on("finish", () => {
     const durationMs =
       Number(process.hrtime.bigint() - (req._startHrTime || 0n)) / 1_000_000;
-    const level = res.statusCode >= 400 ? "error" : "info";
+    const level = getLogLevel(res.statusCode);
 
     const completeLog: Record<string, unknown> = {
       level,
       type: "request_complete",
       requestId: req.requestId,
+      method: req.method,
+      path: req.path,
       statusCode: res.statusCode,
       durationMs: Math.round(durationMs * 100) / 100, // sub-millisecond precision
+      contentLength: res.get("content-length")
+        ? parseInt(res.get("content-length")!, 10)
+        : undefined,
       timestamp: new Date().toISOString(),
     };
 
@@ -105,12 +148,11 @@ export default function requestLogger(
         requestId: req.requestId,
         method: req.method,
         path: req.path,
+        statusCode: res.statusCode,
         durationMs: Math.round(durationMs * 100) / 100,
+        bodySizeBytes: bodySizeBytes > 0 ? bodySizeBytes : undefined,
         timestamp: new Date().toISOString(),
       };
-      if (req._bodySnapshot) {
-        slowLog.body = req._bodySnapshot;
-      }
       console.log(JSON.stringify(slowLog));
     }
   });

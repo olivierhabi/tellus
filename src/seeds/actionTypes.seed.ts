@@ -470,10 +470,19 @@ const ACTION_TYPES: ActionTypeDef[] = [
 async function main(): Promise<void> {
   console.log("=== Action Types Seed Script (Task 28) ===\n");
 
-  // 1. Find the ontology
-  const ontResult = await query(
-    "SELECT ontology_id FROM ontology ORDER BY created_at ASC LIMIT 1"
+  // 1. Find the RRA Tax Ontology (by name first, fallback to most recent)
+  let ontResult = await query(
+    "SELECT ontology_id FROM ontology WHERE display_name = 'RRA Tax Ontology' LIMIT 1"
   );
+  if (ontResult.rows.length === 0) {
+    // Fallback: pick the ontology with the most object types
+    ontResult = await query(
+      `SELECT o.ontology_id FROM ontology o
+       LEFT JOIN (SELECT ontology_id, COUNT(*) AS cnt FROM object_type GROUP BY ontology_id) ot
+         ON o.ontology_id = ot.ontology_id
+       ORDER BY ot.cnt DESC NULLS LAST, o.created_at DESC LIMIT 1`
+    );
+  }
   if (ontResult.rows.length === 0) {
     console.error("ERROR: No ontology found. Run the main seed script first (npm run seed).");
     process.exit(1);

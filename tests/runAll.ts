@@ -1,0 +1,572 @@
+// ---------------------------------------------------------------------------
+// Run All Tests — Consolidated Test Runner (Task 29)
+//
+// Discovers and runs all test suites in order, prints a consolidated report.
+//
+// Suite order:
+//   1. Unit self-tests (inline self-tests in src/ modules)
+//   2. Day-based test suites (monday → friday)
+//   3. Integration tests (vitest)
+//   4. Performance benchmarks (optional, requires running server)
+//
+// Run: npx tsx tests/runAll.ts
+//      npx tsx tests/runAll.ts --skip-perf    # skip performance benchmarks
+//      npx tsx tests/runAll.ts --only-unit     # only inline self-tests
+// ---------------------------------------------------------------------------
+
+import { execSync, spawn, ChildProcess } from "child_process";
+import * as path from "path";
+import * as fs from "fs";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface SuiteResult {
+  name: string;
+  category: string;
+  passed: boolean;
+  durationMs: number;
+  output: string;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const ROOT = path.resolve(__dirname, "..");
+const ARGS = process.argv.slice(2);
+const SKIP_PERF = ARGS.includes("--skip-perf");
+const ONLY_UNIT = ARGS.includes("--only-unit");
+const TIMEOUT_PER_SUITE = 120_000; // 2 minutes per suite
+
+// ---------------------------------------------------------------------------
+// Server management — start/stop/restart with elevated rate limits
+// ---------------------------------------------------------------------------
+
+let serverProcess: ChildProcess | null = null;
+
+/**
+ * Kill any process listening on port 3000, excluding the current process.
+ * Uses SIGTERM first for a clean shutdown, then SIGKILL after a brief wait.
+ */
+function killPort3000(): void {
+  try {
+    const pidsRaw = execSync("lsof -ti:3000 2>/dev/null || true", {
+      encoding: "utf-8",
+      stdio: "pipe",
+    }).trim();
+
+    if (!pidsRaw) return;
+
+    const myPid = process.pid;
+    const pids = pidsRaw
+      .split("\n")
+      .map((p) => parseInt(p.trim(), 10))
+      .filter((p) => !isNaN(p) && p !== myPid);
+
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // Process might already be dead
+      }
+    }
+
+    // Brief wait, then force-kill any survivors
+    if (pids.length > 0) {
+      try {
+        execSync("sleep 0.5", { stdio: "pipe" });
+      } catch { /* ignore */ }
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Process already dead — expected
+        }
+      }
+    }
+  } catch {
+    // Ignore — port might not be in use
+  }
+}
+
+async function startServer(): Promise<void> {
+  killPort3000();
+  // Brief pause to let the port free up
+  await new Promise((r) => setTimeout(r, 1500));
+
+  const serverPath = path.join(ROOT, "src/server.ts");
+
+  serverProcess = spawn("npx", ["tsx", serverPath], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      RATE_LIMIT_MAX: "10000",
+      ACTION_RATE_LIMIT_MAX: "10000",
+      USER_RATE_LIMIT_MAX: "50000",
+      GLOBAL_ACTION_RATE_LIMIT_MAX: "100000",
+      BATCH_RATE_LIMIT_MAX: "1000",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+  });
+
+  // Prevent the server from keeping the parent alive
+  serverProcess.unref();
+
+  // Wait for server to become healthy
+  for (let i = 0; i < 30; i++) {
+    try {
+      const res = await fetch("http://localhost:3000/health", {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) {
+        console.log(`  Server ready (PID ${serverProcess.pid}).`);
+        return;
+      }
+    } catch {
+      // Not ready yet
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  throw new Error("Server failed to start within 30 seconds");
+}
+
+function stopServer(): void {
+  if (serverProcess && serverProcess.pid) {
+    try {
+      // Kill the entire process group (negative PID) since detached=true
+      process.kill(-serverProcess.pid, "SIGTERM");
+    } catch {
+      // Process might already be dead
+    }
+    serverProcess = null;
+  }
+  killPort3000();
+}
+
+async function restartServer(): Promise<void> {
+  console.log("  Restarting server with elevated rate limits...");
+  stopServer();
+  await startServer();
+}
+
+// ---------------------------------------------------------------------------
+// Self-test modules (inline `if (require.main === module)` tests)
+// ---------------------------------------------------------------------------
+
+const SELF_TEST_MODULES = [
+  { name: "Response Formatter", file: "src/utils/responseFormatter.ts" },
+  { name: "Type System", file: "src/utils/typeSystem.ts" },
+  { name: "API Name Validator", file: "src/utils/apiNameValidator.ts" },
+  { name: "Column Mapping Validator", file: "src/utils/columnMappingValidator.ts" },
+  { name: "Struct Validator", file: "src/utils/structValidator.ts" },
+  { name: "Schema Diff", file: "src/utils/schemaDiff.ts" },
+  { name: "Type Coercion", file: "src/utils/typeCoercion.ts" },
+  { name: "Type Converter", file: "src/utils/typeConverter.ts" },
+  { name: "Health Check (Legacy)", file: "src/routes/health.ts" },
+  { name: "Health Check (Enhanced)", file: "src/routes/healthCheck.ts" },
+  { name: "Funnel State Model", file: "src/models/funnelState.ts" },
+  { name: "Action Type Model", file: "src/models/actionType.ts" },
+  { name: "Link Type Model", file: "src/models/linkType.ts" },
+  { name: "Ontology Edit Model", file: "src/models/ontologyEdit.ts" },
+  { name: "Action Audit Log", file: "src/models/actionAuditLog.ts" },
+  { name: "Property Validator", file: "src/actions/propertyValidator.ts" },
+  { name: "Parameter Validator", file: "src/actions/parameterValidator.ts" },
+  { name: "Object Checker", file: "src/actions/objectChecker.ts" },
+  { name: "Rule Compiler", file: "src/actions/ruleCompiler.ts" },
+  { name: "Action Validator", file: "src/actions/actionValidator.ts" },
+  { name: "Edit Applicator", file: "src/actions/editApplicator.ts" },
+  { name: "Idempotency", file: "src/actions/idempotency.ts" },
+  { name: "Schema Migration Validator", file: "src/actions/schemaMigrationValidator.ts" },
+  { name: "Query Validator", file: "src/services/queryValidator.ts" },
+  { name: "Query Translator", file: "src/services/queryTranslator.ts" },
+  { name: "Pagination Service", file: "src/services/paginationService.ts" },
+  { name: "Property Resolver", file: "src/services/propertyResolver.ts" },
+  { name: "Object Counter", file: "src/services/opensearch/objectCounter.ts" },
+  { name: "Mapping Diff", file: "src/services/opensearch/mappingDiff.ts" },
+  { name: "Index Mapping Generator", file: "src/services/opensearch/indexMappingGenerator.ts" },
+  { name: "Row Transformer", file: "src/services/indexing/rowTransformer.ts" },
+  { name: "Primary Key Validator", file: "src/services/indexing/primaryKeyValidator.ts" },
+  { name: "Error Collector", file: "src/services/indexing/errorCollector.ts" },
+  { name: "Progress Tracker", file: "src/services/indexing/progressTracker.ts" },
+  { name: "Datasource Validator", file: "src/services/indexing/datasourceValidator.ts" },
+  { name: "Batch Document Builder", file: "src/services/indexing/batchDocumentBuilder.ts" },
+  { name: "Edit Merger", file: "src/services/indexing/editMerger.ts" },
+  { name: "Data Sampler", file: "src/services/indexing/dataSampler.ts" },
+  { name: "Type Converter (Indexing)", file: "src/services/indexing/typeConverter.ts" },
+  { name: "Property Change Handler", file: "src/services/indexing/propertyChangeHandler.ts" },
+  { name: "Test Data Generator (src)", file: "src/tests/helpers/testDataGenerator.ts" },
+  { name: "API Doc Generator", file: "src/utils/generateApiDocs.ts" },
+  { name: "Test Data Generator (tests)", file: "tests/utils/testDataGenerator.ts" },
+];
+
+// ---------------------------------------------------------------------------
+// Day test suites
+// ---------------------------------------------------------------------------
+
+const DAY_SUITES = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+];
+
+// ---------------------------------------------------------------------------
+// Runner
+// ---------------------------------------------------------------------------
+
+// Env vars passed to all child processes — matches the elevated rate limits
+// used by the managed server so that tests can detect elevated limits and
+// skip rate-limiter-specific tests.
+const CHILD_ENV = {
+  ...process.env,
+  NODE_ENV: "test",
+  RATE_LIMIT_MAX: "10000",
+  ACTION_RATE_LIMIT_MAX: "10000",
+  USER_RATE_LIMIT_MAX: "50000",
+  GLOBAL_ACTION_RATE_LIMIT_MAX: "100000",
+  BATCH_RATE_LIMIT_MAX: "1000",
+};
+
+function runCommand(
+  command: string,
+  label: string,
+  timeoutMs: number = TIMEOUT_PER_SUITE
+): SuiteResult {
+  const start = Date.now();
+  try {
+    const output = execSync(command, {
+      cwd: ROOT,
+      encoding: "utf-8",
+      timeout: timeoutMs,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: CHILD_ENV,
+    });
+    const durationMs = Date.now() - start;
+
+    // Check output for failure indicators
+    const hasFail =
+      output.includes("FAIL") ||
+      output.includes("failed") ||
+      output.match(/\d+ failed/) !== null;
+    const hasPassedLine = output.match(/(\d+)\s+passed/) !== null;
+    const failMatch = output.match(/(\d+)\s+failed/);
+    const failCount = failMatch ? parseInt(failMatch[1], 10) : 0;
+
+    return {
+      name: label,
+      category: "self-test",
+      passed: failCount === 0,
+      durationMs,
+      output: output.trim(),
+    };
+  } catch (err: any) {
+    const durationMs = Date.now() - start;
+    const output = err.stdout?.toString() ?? "";
+    const stderr = err.stderr?.toString() ?? "";
+
+    return {
+      name: label,
+      category: "self-test",
+      passed: false,
+      durationMs,
+      output: output.trim(),
+      error: stderr.trim() || err.message || "Unknown error",
+    };
+  }
+}
+
+function runSelfTest(mod: { name: string; file: string }): SuiteResult {
+  const absolutePath = path.join(ROOT, mod.file);
+  if (!fs.existsSync(absolutePath)) {
+    return {
+      name: mod.name,
+      category: "self-test",
+      passed: true,
+      durationMs: 0,
+      output: `SKIP: file not found: ${mod.file}`,
+    };
+  }
+
+  return runCommand(`npx tsx "${absolutePath}"`, mod.name);
+}
+
+function runDaySuite(day: string): SuiteResult {
+  const dayIndex = path.join(__dirname, day, "index.ts");
+  if (!fs.existsSync(dayIndex)) {
+    return {
+      name: `${day} (day suite)`,
+      category: "day",
+      passed: true,
+      durationMs: 0,
+      output: `SKIP: ${dayIndex} not found`,
+    };
+  }
+
+  const result = runCommand(`npx tsx "${dayIndex}"`, `${day} (day suite)`, 600_000);
+  result.category = "day";
+  return result;
+}
+
+function runVitestSuite(pattern: string, label: string): SuiteResult {
+  const result = runCommand(`npx vitest run ${pattern} --reporter=verbose`, label, 300_000);
+  result.category = "vitest";
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function runAll(): Promise<void> {
+  const startTime = Date.now();
+
+  console.log("#".repeat(60));
+  console.log("  CONSOLIDATED TEST RUNNER");
+  console.log(`  Date: ${new Date().toISOString()}`);
+  console.log(`  Flags: ${ARGS.join(" ") || "(none)"}`);
+  console.log("#".repeat(60));
+
+  const results: SuiteResult[] = [];
+
+  // =========================================================================
+  // Phase 1: Inline self-tests
+  // =========================================================================
+  console.log("\n" + "=".repeat(60));
+  console.log("  PHASE 1: Inline Self-Tests");
+  console.log("=".repeat(60));
+
+  for (const mod of SELF_TEST_MODULES) {
+    process.stdout.write(`  Running ${mod.name}... `);
+    const result = runSelfTest(mod);
+    results.push(result);
+
+    const icon = result.passed ? "PASS" : result.output.startsWith("SKIP") ? "SKIP" : "FAIL";
+    console.log(`[${icon}] (${result.durationMs}ms)`);
+
+    if (!result.passed && result.error) {
+      // Show first few lines of error
+      const errorLines = result.error.split("\n").slice(0, 3);
+      for (const line of errorLines) {
+        console.log(`    ${line}`);
+      }
+    }
+  }
+
+  if (ONLY_UNIT) {
+    printReport(results, startTime);
+    return;
+  }
+
+  // =========================================================================
+  // Start server for Phases 2-4 (elevated rate limits)
+  // =========================================================================
+  console.log("\n" + "=".repeat(60));
+  console.log("  Starting server with elevated rate limits...");
+  console.log("=".repeat(60));
+  await startServer();
+
+  // =========================================================================
+  // Phase 2: Day test suites
+  // =========================================================================
+  console.log("\n" + "=".repeat(60));
+  console.log("  PHASE 2: Day Test Suites");
+  console.log("=".repeat(60));
+
+  for (const day of DAY_SUITES) {
+    process.stdout.write(`  Running ${day}... `);
+    const result = runDaySuite(day);
+    results.push(result);
+
+    const icon = result.passed ? "PASS" : result.output.startsWith("SKIP") ? "SKIP" : "FAIL";
+    console.log(`[${icon}] (${result.durationMs}ms)`);
+  }
+
+  // =========================================================================
+  // Phase 3: Vitest suites
+  //
+  // Restart the server to reset rate limit counters accumulated in Phase 2.
+  // The Tuesday rate-limiter test is excluded here — it deliberately
+  // exhausts the per-action rate limit and requires a dedicated server
+  // restart with default limits. It is fully covered by `test:integration`.
+  // =========================================================================
+  console.log("\n" + "=".repeat(60));
+  console.log("  PHASE 3: Vitest Test Suites");
+  console.log("=".repeat(60));
+
+  await restartServer();
+
+  // Files to exclude from Tuesday integration (rate-limiter needs default limits)
+  const TUESDAY_INTEGRATION_EXCLUDE = "rate-limiter-integration";
+
+  const vitestDays = ["monday", "tuesday", "wednesday", "thursday", "friday"];
+  for (const day of vitestDays) {
+    const unitPath = `tests/${day}/unit`;
+    const integrationPath = `tests/${day}/integration`;
+
+    if (fs.existsSync(path.join(ROOT, "tests", day, "unit"))) {
+      process.stdout.write(`  Running vitest ${day}/unit... `);
+      const result = runVitestSuite(unitPath, `vitest:${day}:unit`);
+      results.push(result);
+      const icon = result.passed ? "PASS" : "FAIL";
+      console.log(`[${icon}] (${result.durationMs}ms)`);
+    }
+
+    if (fs.existsSync(path.join(ROOT, "tests", day, "integration"))) {
+      if (day === "tuesday") {
+        // Run Tuesday integration tests individually, excluding rate-limiter
+        const integrationDir = path.join(ROOT, "tests", day, "integration");
+        const testFiles = fs.readdirSync(integrationDir)
+          .filter((f) => f.endsWith(".test.ts") && !f.includes(TUESDAY_INTEGRATION_EXCLUDE));
+
+        const filePaths = testFiles
+          .map((f) => path.join(integrationDir, f))
+          .join(" ");
+
+        process.stdout.write(`  Running vitest ${day}/integration (excl. rate-limiter)... `);
+        const result = runCommand(
+          `npx vitest run ${filePaths} --reporter=verbose`,
+          `vitest:${day}:integration`,
+          300_000
+        );
+        result.category = "vitest";
+        results.push(result);
+        const icon = result.passed ? "PASS" : "FAIL";
+        console.log(`[${icon}] (${result.durationMs}ms)`);
+      } else {
+        process.stdout.write(`  Running vitest ${day}/integration... `);
+        const result = runVitestSuite(integrationPath, `vitest:${day}:integration`);
+        results.push(result);
+        const icon = result.passed ? "PASS" : "FAIL";
+        console.log(`[${icon}] (${result.durationMs}ms)`);
+      }
+    }
+  }
+
+  // =========================================================================
+  // Phase 4: Performance benchmarks (optional)
+  //
+  // Restart the server to reset rate limit counters before benchmarks.
+  // =========================================================================
+  if (!SKIP_PERF) {
+    console.log("\n" + "=".repeat(60));
+    console.log("  PHASE 4: Performance Benchmarks");
+    console.log("=".repeat(60));
+
+    await restartServer();
+
+    process.stdout.write("  Running benchmarks... ");
+    const benchPath = path.join(__dirname, "performance", "benchmark.ts");
+    if (fs.existsSync(benchPath)) {
+      const result = runCommand(`npx tsx "${benchPath}"`, "Performance Benchmarks", 300_000);
+      result.category = "benchmark";
+      results.push(result);
+      const icon = result.passed ? "PASS" : "FAIL";
+      console.log(`[${icon}] (${result.durationMs}ms)`);
+    } else {
+      console.log("[SKIP] benchmark.ts not found");
+    }
+
+    const sundayBenchPath = path.join(__dirname, "performance", "sundayBenchmark.ts");
+    if (fs.existsSync(sundayBenchPath)) {
+      process.stdout.write("  Running Sunday benchmarks... ");
+      const result = runCommand(`npx tsx "${sundayBenchPath}"`, "Sunday Performance Benchmarks", 300_000);
+      result.category = "benchmark";
+      results.push(result);
+      const icon = result.passed ? "PASS" : "FAIL";
+      console.log(`[${icon}] (${result.durationMs}ms)`);
+    }
+  }
+
+  // =========================================================================
+  // Stop server
+  // =========================================================================
+  stopServer();
+
+  // =========================================================================
+  // Report
+  // =========================================================================
+  printReport(results, startTime);
+}
+
+function printReport(results: SuiteResult[], startTime: number): void {
+  const totalDuration = Date.now() - startTime;
+
+  console.log("\n" + "#".repeat(60));
+  console.log("  CONSOLIDATED TEST REPORT");
+  console.log("#".repeat(60));
+
+  // Group by category
+  const categories = ["self-test", "day", "vitest", "benchmark"];
+  const categoryLabels: Record<string, string> = {
+    "self-test": "Inline Self-Tests",
+    day: "Day Test Suites",
+    vitest: "Vitest Suites",
+    benchmark: "Performance Benchmarks",
+  };
+
+  let totalPassed = 0;
+  let totalFailed = 0;
+  let totalSkipped = 0;
+
+  for (const cat of categories) {
+    const catResults = results.filter((r) => r.category === cat);
+    if (catResults.length === 0) continue;
+
+    const catPassed = catResults.filter((r) => r.passed && !r.output.startsWith("SKIP")).length;
+    const catFailed = catResults.filter((r) => !r.passed && !r.output.startsWith("SKIP")).length;
+    const catSkipped = catResults.filter((r) => r.output.startsWith("SKIP")).length;
+
+    console.log(`\n  ${categoryLabels[cat] || cat}:`);
+    console.log(`    Passed: ${catPassed}  Failed: ${catFailed}  Skipped: ${catSkipped}`);
+
+    totalPassed += catPassed;
+    totalFailed += catFailed;
+    totalSkipped += catSkipped;
+
+    // Show failed suites
+    for (const r of catResults.filter((r) => !r.passed && !r.output.startsWith("SKIP"))) {
+      console.log(`    FAIL: ${r.name}`);
+      if (r.error) {
+        const firstLine = r.error.split("\n")[0];
+        console.log(`      ${firstLine}`);
+      }
+    }
+  }
+
+  console.log("\n" + "-".repeat(60));
+  console.log(`  Total: ${totalPassed} passed, ${totalFailed} failed, ${totalSkipped} skipped`);
+  console.log(`  Duration: ${(totalDuration / 1000).toFixed(1)}s`);
+  console.log("-".repeat(60));
+
+  if (totalFailed === 0) {
+    console.log("\n  ALL TESTS PASSED\n");
+  } else {
+    console.log(`\n  ${totalFailed} SUITE(S) FAILED\n`);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+if (require.main === module) {
+  // Ensure server is stopped on any exit
+  process.on("exit", () => stopServer());
+  process.on("SIGINT", () => { stopServer(); process.exit(1); });
+  process.on("SIGTERM", () => { stopServer(); process.exit(1); });
+
+  runAll().catch((err) => {
+    console.error("Test runner crashed:", err);
+    stopServer();
+    process.exit(1);
+  });
+}
+
+export { runAll };

@@ -113,7 +113,126 @@ async function getClient(): Promise<PoolClient> {
 }
 
 // ---------------------------------------------------------------------------
+// withTransaction helper (Task 23)
+// ---------------------------------------------------------------------------
+
+/**
+ * Execute a callback within a database transaction.
+ *
+ * Guarantees: BEGIN before callback, COMMIT on success, ROLLBACK on error,
+ * and the client is ALWAYS released back to the pool.
+ *
+ * @param callback - Async function receiving a PoolClient for transactional queries.
+ * @returns The result of the callback.
+ */
+async function withTransaction<T>(
+  callback: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await callback(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// queryWithRetry helper (Task 23)
+// ---------------------------------------------------------------------------
+
+/**
+ * Execute a parameterized SQL query with automatic retry on transient
+ * connection errors (ECONNREFUSED, ECONNRESET, admin_shutdown, etc.).
+ */
+async function queryWithRetry(
+  text: string,
+  values?: unknown[],
+  maxRetries: number = 2
+): Promise<QueryResult> {
+  const TRANSIENT_CODES = new Set([
+    "ECONNREFUSED", "ECONNRESET", "57P01", "57P03",
+  ]);
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await pool.query(text, values);
+    } catch (err: any) {
+      const isConnectionError = TRANSIENT_CODES.has(err.code) ||
+        (err.message && (
+          err.message.includes("ECONNREFUSED") ||
+          err.message.includes("ECONNRESET") ||
+          err.message.includes("connection terminated")
+        ));
+
+      if (isConnectionError && attempt < maxRetries) {
+        console.warn(JSON.stringify({
+          type: "pg_query_retry",
+          attempt: attempt + 1,
+          maxRetries,
+          error: err.message,
+          sql: text.substring(0, 100),
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+        continue;
+      }
+
+      // Log and re-throw
+      console.error("PostgreSQL query error:", {
+        sql: text,
+        params: values,
+        error: err.message,
+      });
+      throw err;
+    }
+  }
+
+  // Should never reach here, but TypeScript needs a return
+  throw new Error("queryWithRetry: unreachable");
+}
+
+// ---------------------------------------------------------------------------
+// checkPostgresHealth (Task 23)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check PostgreSQL connection health and return pool stats.
+ */
+async function checkPostgresHealth(): Promise<Record<string, unknown>> {
+  try {
+    const result = await pool.query(
+      "SELECT NOW() as time, current_database() as database"
+    );
+    return {
+      status: "connected",
+      database: result.rows[0].database,
+      serverTime: result.rows[0].time,
+      pool: {
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+      },
+    };
+  } catch (err: any) {
+    return {
+      status: "disconnected",
+      error: err.message,
+      pool: {
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
-export { pool, query, getClient };
+export { pool, query, getClient, withTransaction, queryWithRetry, checkPostgresHealth };
 export default pool;
