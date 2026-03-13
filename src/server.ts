@@ -1,17 +1,19 @@
 import "dotenv/config";
 import http from "http";
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { pool, query } from "./db";
 import requestLogger from "./middleware/requestLogger";
+import { inputSanitizer } from "./middleware/inputSanitizer";
+import { notFoundHandler, createDocsRouter } from "./middleware/notFoundHandler";
 import errorHandler from "./middleware/errorHandler";
 import ontologyRouter from "./routes/ontology";
 import objectTypeRouter from "./routes/objectTypes";
 import propertyRouter from "./routes/properties";
-import datasourceRouter from "./routes/datasources";
+import datasourceRouter, { suggestMappingRouter } from "./routes/datasources";
 import indexingRouter from "./routes/indexing";
 import linkRouter from "./routes/links";
 import actionTypeRouter from "./routes/actionTypes";
@@ -19,6 +21,15 @@ import actionsRouter, { validateRouter, batchRouter } from "./routes/actions";
 import { actionAuditRouter, globalAuditRouter } from "./routes/auditLog";
 import objectsRouter from "./routes/objects";
 import healthRouter from "./routes/health";
+import editsRouter from "./routes/edits";
+import bulkActionsRouter from "./routes/bulkActions";
+import reindexStatusRouter from "./routes/reindexStatus";
+import dataPreviewRouter from "./routes/dataPreview";
+import datasetRouter from "./routes/datasets";
+import reindexRouter from "./routes/reindex";
+import interfaceRouter from "./routes/interfaces";
+import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
+import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 import { cleanupExpiredKeys } from "./actions/idempotency";
 import { limiter } from "./middleware/rateLimiter";
@@ -90,8 +101,29 @@ app.use(
   })
 );
 
+// Input sanitization — trim, strip null bytes, normalize Unicode, XSS prevention
+app.use(inputSanitizer);
+
 // Structured JSON request/response logging
 app.use(requestLogger);
+
+// ---------------------------------------------------------------------------
+// In-flight request tracking + shutdown rejection (Task 21)
+// ---------------------------------------------------------------------------
+let activeRequests = 0;
+let isShuttingDown = false;
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (isShuttingDown) {
+    res.setHeader("Connection", "close");
+    return res.status(503).json({
+      error: { code: "SERVICE_UNAVAILABLE", message: "Server is shutting down" },
+    });
+  }
+  activeRequests++;
+  res.on("finish", () => { activeRequests--; });
+  next();
+});
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -139,6 +171,10 @@ app.use(
   datasourceRouter
 );
 app.use(
+  "/api/v2/ontology/:ontologyId/objectTypes/:apiName/suggestMapping",
+  suggestMappingRouter
+);
+app.use(
   "/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index",
   indexingRouter
 );
@@ -160,7 +196,35 @@ app.use(
 );
 app.use("/api/v2/actions", validateRouter);
 app.use("/api/v2/actions", batchRouter);
+app.use("/api/v2/actions", bulkActionsRouter);
 app.use("/api/v2/audit", globalAuditRouter);
+app.use(
+  "/api/v2/ontology/:ontologyId/objectTypes/:apiName/edits",
+  editsRouter
+);
+app.use(
+  "/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index",
+  reindexStatusRouter
+);
+app.use("/api/v2/datasets", datasetRouter);
+app.use("/api/v2/datasets", dataPreviewRouter);
+app.use(
+  "/api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex",
+  reindexRouter
+);
+app.use(
+  "/api/v2/ontology/:ontologyId/interfaces",
+  interfaceRouter
+);
+app.use(
+  "/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements",
+  objectTypeInterfacesRouter
+);
+app.use(
+  "/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName",
+  objectViewsRouter
+);
+app.use("/api/v2/objects/:objectType", objectViewsByTypeRouter);
 app.use(objectsRouter);
 app.use(healthRouter);
 
@@ -179,6 +243,12 @@ app.use("/api/v2/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, {
   customSiteTitle: "Tellus Ontology Engine — API Docs",
 }));
 
+// API endpoint listing (docs/endpoints)
+app.use(createDocsRouter(app));
+
+// 404 handler for unmatched routes — AFTER all route handlers
+app.use(notFoundHandler);
+
 // Global error handler — MUST be last in the middleware chain
 app.use(errorHandler);
 
@@ -187,12 +257,23 @@ app.use(errorHandler);
 // ---------------------------------------------------------------------------
 
 process.on("unhandledRejection", (reason: unknown) => {
-  console.error("Unhandled promise rejection:", reason);
+  console.error(JSON.stringify({
+    type: "unhandled_rejection",
+    timestamp: new Date().toISOString(),
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  }));
+  // Do NOT shutdown for unhandled rejections — log and continue
 });
 
 process.on("uncaughtException", (err: Error) => {
-  console.error("Uncaught exception — shutting down:", err);
-  process.exit(1);
+  console.error(JSON.stringify({
+    type: "uncaught_exception",
+    timestamp: new Date().toISOString(),
+    error: err.message,
+    stack: err.stack,
+  }));
+  shutdown("uncaughtException");
 });
 
 // ---------------------------------------------------------------------------
@@ -247,16 +328,40 @@ async function start(): Promise<void> {
 }
 
 /**
- * Graceful shutdown: stop accepting new connections, let in-flight requests
- * finish, then drain the PostgreSQL connection pool.
+ * Graceful shutdown: stop accepting new connections, wait for in-flight
+ * requests to complete, then drain the PostgreSQL connection pool.
  */
 async function shutdown(signal: string): Promise<void> {
-  console.log(`${signal} received — starting graceful shutdown`);
+  if (isShuttingDown) {
+    console.log(`${signal} received again — shutdown already in progress`);
+    return;
+  }
+
+  isShuttingDown = true;
+
+  console.log(JSON.stringify({
+    type: "shutdown_initiated",
+    timestamp: new Date().toISOString(),
+    signal,
+    activeRequests,
+  }));
 
   if (server) {
     server.close(() => {
-      console.log("HTTP server closed");
+      console.log(JSON.stringify({ type: "server_closed", timestamp: new Date().toISOString() }));
     });
+  }
+
+  // Wait for in-progress requests to complete (max 25 seconds)
+  const maxWait = 25_000;
+  const startWait = Date.now();
+  while (activeRequests > 0 && (Date.now() - startWait) < maxWait) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    console.log(JSON.stringify({ type: "shutdown_waiting", activeRequests, elapsed: Date.now() - startWait }));
+  }
+
+  if (activeRequests > 0) {
+    console.warn(JSON.stringify({ type: "shutdown_forced", activeRequests, message: "Forcing shutdown with active requests" }));
   }
 
   // Destroy the action rate limiter to prevent dangling setInterval
@@ -264,11 +369,12 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     await pool.end();
-    console.log("PostgreSQL pool drained");
+    console.log(JSON.stringify({ type: "postgresql_disconnected" }));
   } catch (err) {
-    console.error("Error draining pool:", err);
+    console.error(JSON.stringify({ type: "postgresql_disconnect_error", error: err instanceof Error ? err.message : String(err) }));
   }
 
+  console.log(JSON.stringify({ type: "shutdown_complete", timestamp: new Date().toISOString() }));
   process.exit(0);
 }
 

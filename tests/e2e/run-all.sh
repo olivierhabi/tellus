@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# Run ALL E2E Test Suites (Monday through Friday)
+# Run ALL E2E Test Suites (Monday through Sunday)
 #
 # This script:
 #   1. Kills any running server on port 3000
 #   2. Restarts the server with RATE_LIMIT_MAX=10000 to avoid rate-limit
 #      interference across suites
-#   3. Runs each day's E2E suite sequentially
-#   4. Stops the server on exit
+#   3. Re-seeds the database (idempotent) so tests have predictable state
+#   4. Runs each day's E2E suite sequentially
+#   5. Stops the server on exit
 #
 # Usage:
 #   pnpm run test:e2e
@@ -31,7 +32,8 @@ echo -e "${BOLD}Restarting server with RATE_LIMIT_MAX=10000 ...${NC}"
 lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 sleep 1
 
-RATE_LIMIT_MAX=10000 nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>&1 &
+export DATA_DIR="${DATA_DIR:-${ROOT}/data}"
+RATE_LIMIT_MAX=10000 DATA_DIR="$DATA_DIR" nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>&1 &
 SERVER_PID=$!
 
 # Ensure server is killed on script exit
@@ -64,9 +66,37 @@ done
 echo ""
 
 # ---------------------------------------------------------------------------
+# Re-seed the database so that tests have a clean, predictable state.
+# The seed scripts are idempotent (delete-then-recreate).
+# ---------------------------------------------------------------------------
+echo -e "${BOLD}Running migrations ...${NC}"
+npx tsx "${ROOT}/src/migrate.ts" > /tmp/tellus-migrate.log 2>&1 || {
+  echo -e "${RED}Migration failed. Log:${NC}"
+  tail -20 /tmp/tellus-migrate.log
+  exit 1
+}
+echo "  Migrations complete."
+
+echo -e "${BOLD}Re-seeding database ...${NC}"
+DATA_DIR=/tmp/ontology-testdata npx tsx "${ROOT}/src/seed.ts" > /tmp/tellus-seed.log 2>&1 || {
+  echo -e "${RED}Seed failed. Log:${NC}"
+  tail -20 /tmp/tellus-seed.log
+  exit 1
+}
+echo "  Base seed complete."
+
+DATA_DIR=/tmp/ontology-testdata npx tsx "${ROOT}/src/seeds/actionTypes.seed.ts" > /tmp/tellus-action-seed.log 2>&1 || {
+  echo -e "${RED}Action types seed failed. Log:${NC}"
+  tail -20 /tmp/tellus-action-seed.log
+  exit 1
+}
+echo "  Action types seed complete."
+echo ""
+
+# ---------------------------------------------------------------------------
 # Run each day's E2E suite
 # ---------------------------------------------------------------------------
-DAYS=(monday tuesday wednesday thursday friday)
+DAYS=(monday tuesday wednesday thursday friday saturday sunday)
 EXIT_CODE=0
 
 for day in "${DAYS[@]}"; do

@@ -140,8 +140,12 @@ echo -e "${BOLD}  Running tuesday integration suite${NC}"
 echo -e "${BOLD}========================================${NC}"
 
 # Phase 2a: rate-limiter test with default limits
+# Explicitly set ACTION_RATE_LIMIT_MAX=100 and BATCH_RATE_LIMIT_MAX=10 to ensure
+# default behavior even on CI where the workflow sets elevated global values.
 start_server "default rate limits for rate-limiter test" \
-  RATE_LIMIT_MAX=10000
+  RATE_LIMIT_MAX=10000 \
+  ACTION_RATE_LIMIT_MAX=100 \
+  BATCH_RATE_LIMIT_MAX=10
 
 echo -e "${YELLOW}  Phase 2a: rate-limiter integration test (default action limits)${NC}"
 if npx vitest run "${ROOT}/tests/tuesday/integration/rate-limiter-integration.test.ts" 2>&1; then

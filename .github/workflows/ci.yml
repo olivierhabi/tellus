@@ -1,0 +1,395 @@
+# =============================================================================
+# Ontology Engine — CI Pipeline
+#
+# Runs the full test suite on every push and pull request:
+#   1. Unit tests      (vitest, no services needed)
+#   2. Integration tests (requires PostgreSQL + OpenSearch + running server)
+#   3. E2E tests        (bash curl-based, requires PostgreSQL + OpenSearch + running server)
+#   4. Performance tests (benchmarks against running server)
+#   5. Full test runner  (test:all — consolidated runner)
+#
+# Services:
+#   - PostgreSQL 16 (port 5432)
+#   - OpenSearch 2.11 (port 9200)
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+env:
+  # PostgreSQL connection
+  PGHOST: localhost
+  PGPORT: 5432
+  PGDATABASE: tellus_db
+  PGUSER: tellus
+  PGPASSWORD: tellus123
+  POSTGRES_URL: postgresql://tellus:tellus123@localhost:5432/tellus_db
+
+  # OpenSearch connection
+  OPENSEARCH_URL: http://localhost:9200
+
+  # Test data directory (used by seed scripts)
+  DATA_DIR: /tmp/ontology-testdata
+
+  # Elevated rate limits for CI (prevents test interference)
+  RATE_LIMIT_MAX: 10000
+  ACTION_RATE_LIMIT_MAX: 10000
+  USER_RATE_LIMIT_MAX: 50000
+  GLOBAL_ACTION_RATE_LIMIT_MAX: 100000
+  BATCH_RATE_LIMIT_MAX: 1000
+
+jobs:
+  # ===========================================================================
+  # Job 1: Unit Tests (no services needed)
+  # ===========================================================================
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript compile check
+        run: pnpm run build
+
+      - name: Run unit tests
+        run: pnpm run test:unit
+
+  # ===========================================================================
+  # Job 2: Integration Tests (PostgreSQL + OpenSearch required)
+  # ===========================================================================
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      opensearch:
+        image: opensearchproject/opensearch:2.11.0
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run database migrations
+        run: pnpm run migrate
+
+      - name: Seed database
+        run: |
+          pnpm run seed
+          npx tsx src/seeds/actionTypes.seed.ts
+
+      - name: Run integration tests
+        run: pnpm run test:integration
+
+  # ===========================================================================
+  # Job 3: E2E Tests (PostgreSQL + OpenSearch required)
+  # ===========================================================================
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      opensearch:
+        image: opensearchproject/opensearch:2.11.0
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create test data directory
+        run: mkdir -p /tmp/ontology-testdata
+
+      - name: Run E2E tests
+        run: pnpm run test:e2e
+
+  # ===========================================================================
+  # Job 4: Performance Benchmarks (PostgreSQL + OpenSearch required)
+  # ===========================================================================
+  perf:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      opensearch:
+        image: opensearchproject/opensearch:2.11.0
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run database migrations
+        run: pnpm run migrate
+
+      - name: Seed database
+        run: |
+          pnpm run seed
+          npx tsx src/seeds/actionTypes.seed.ts
+
+      - name: Start server
+        run: |
+          nohup npx tsx src/server.ts > /tmp/tellus-server.log 2>&1 &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "Server ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Server failed to start. Log:"
+              tail -30 /tmp/tellus-server.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Run performance benchmarks
+        run: pnpm run test:perf
+
+      - name: Stop server
+        if: always()
+        run: kill $SERVER_PID 2>/dev/null || true
+
+      - name: Upload server log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-server-log
+          path: /tmp/tellus-server.log
+          retention-days: 7
+
+  # ===========================================================================
+  # Job 5: Full Test Runner (test:all)
+  # ===========================================================================
+  test-all:
+    name: Full Test Suite (test:all)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      opensearch:
+        image: opensearchproject/opensearch:2.11.0
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create test data directory
+        run: mkdir -p /tmp/ontology-testdata
+
+      - name: Run database migrations
+        run: pnpm run migrate
+
+      - name: Seed database
+        run: |
+          pnpm run seed
+          npx tsx src/seeds/actionTypes.seed.ts
+
+      - name: Start server
+        run: |
+          nohup npx tsx src/server.ts > /tmp/tellus-server.log 2>&1 &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "Server ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Server failed to start. Log:"
+              tail -30 /tmp/tellus-server.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Run full test suite
+        run: pnpm run test:all
+
+      - name: Stop server
+        if: always()
+        run: kill $SERVER_PID 2>/dev/null || true
+
+      - name: Upload server log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-all-server-log
+          path: /tmp/tellus-server.log
+          retention-days: 7

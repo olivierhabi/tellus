@@ -32,7 +32,9 @@ interface State {
   courseOtId: string;
 }
 
-const DATA_DIR = path.resolve(__dirname, "..", "data");
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.resolve(__dirname, "..", "data");
 const state: State = {
   ontologyId: "",
   companyOtId: "",

@@ -70,9 +70,20 @@ export type ValidationResult = ValidationSuccess | ValidationFailure;
  * null if no ontology exists.
  */
 export async function getDefaultOntologyId(): Promise<string | null> {
-  const result = await query(
-    "SELECT ontology_id FROM ontology ORDER BY created_at ASC LIMIT 1"
-  );
+  // Prefer the seed ontology by name, then the ontology with the most object
+  // types (most likely the real ontology, not a leftover test ontology), then
+  // fall back to the most recently created one.
+  const result = await query(`
+    SELECT o.ontology_id,
+           o.display_name,
+           (SELECT COUNT(*)::int FROM object_type ot WHERE ot.ontology_id = o.ontology_id) AS ot_count
+      FROM ontology o
+     ORDER BY
+       CASE WHEN o.display_name = 'RRA Tax Ontology' THEN 0 ELSE 1 END,
+       (SELECT COUNT(*) FROM object_type ot WHERE ot.ontology_id = o.ontology_id) DESC,
+       o.created_at DESC
+     LIMIT 1
+  `);
   if (result.rows.length === 0) return null;
   return result.rows[0].ontology_id;
 }

@@ -134,7 +134,7 @@ do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
 assert_status "$HTTP_STATUS" "201" "Create Employee object type"
 
 # --- Write CSV test data files ---
-DATA_DIR="$(cd "$(dirname "$0")/../../.." && pwd)/data"
+DATA_DIR="${DATA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)/data}"
 mkdir -p "$DATA_DIR"
 
 COMPANY_CSV="${DATA_DIR}/e2e-tuesday-companies.csv"
