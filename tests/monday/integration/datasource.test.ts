@@ -8,7 +8,9 @@ import { Runner } from "../../helpers/runner";
 import { api } from "../../helpers/api";
 import { TestContext } from "./context";
 
-const DATA_DIR = path.resolve(__dirname, "../../..", "data");
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.resolve(__dirname, "../../..", "data");
 const CSV_PATH = path.join(DATA_DIR, "test-employees.csv");
 
 export { CSV_PATH };
