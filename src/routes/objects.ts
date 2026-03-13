@@ -443,10 +443,20 @@ router.get(
 
       const rawPageToken = req.query.$pageToken ?? req.query.pageToken;
       let cursorTimestamp: string | null = null;
+      let cursorEditId: string | null = null;
       if (rawPageToken !== undefined && rawPageToken !== "") {
         try {
-          cursorTimestamp = Buffer.from(String(rawPageToken), "base64").toString();
-          // Basic ISO timestamp validation
+          const decoded = Buffer.from(String(rawPageToken), "base64").toString();
+          // Composite cursor format: "timestamp::edit_id"
+          // Legacy format (timestamp only) is also accepted for backward compat.
+          const separatorIdx = decoded.indexOf("::");
+          if (separatorIdx !== -1) {
+            cursorTimestamp = decoded.substring(0, separatorIdx);
+            cursorEditId = decoded.substring(separatorIdx + 2);
+          } else {
+            // Legacy format: timestamp only
+            cursorTimestamp = decoded;
+          }
           const parsed = new Date(cursorTimestamp);
           if (isNaN(parsed.getTime())) {
             throw new Error("Invalid date");
@@ -454,7 +464,7 @@ router.get(
         } catch {
           throw appError(
             "INVALID_PAGE_TOKEN",
-            "Invalid $pageToken. Must be a valid base64-encoded ISO timestamp."
+            "Invalid $pageToken. Must be a valid base64-encoded cursor."
           );
         }
       }
@@ -505,6 +515,9 @@ router.get(
       // richer context about the action that produced each edit.
       // ------------------------------------------------------------------
 
+      // Composite cursor pagination: use (executed_at, edit_id) to avoid
+      // duplicates or skips when multiple edits share the same timestamp
+      // (possible within a single PG transaction).
       const editsResult = await query(
         `SELECT
            e.edit_id,
@@ -528,10 +541,14 @@ router.get(
            AND e.primary_key = $2
            AND ($3::timestamptz IS NULL OR e.executed_at >= $3)
            AND ($4::timestamptz IS NULL OR e.executed_at <= $4)
-           AND ($5::timestamptz IS NULL OR e.executed_at < $5)
-         ORDER BY e.executed_at DESC
-         LIMIT $6`,
-        [objectType, primaryKey, startTime, endTime, cursorTimestamp, pageSize]
+           AND (
+             $5::timestamptz IS NULL
+             OR e.executed_at < $5
+             OR (e.executed_at = $5 AND $6::uuid IS NOT NULL AND e.edit_id < $6::uuid)
+           )
+         ORDER BY e.executed_at DESC, e.edit_id DESC
+         LIMIT $7`,
+        [objectType, primaryKey, startTime, endTime, cursorTimestamp, cursorEditId, pageSize]
       );
 
       const rows = editsResult.rows;
@@ -563,14 +580,16 @@ router.get(
       // ------------------------------------------------------------------
       // Build next page token
       //
-      // If we got a full page of results, there might be more. Encode the
-      // executed_at of the last item as the cursor for the next page.
+      // If we got a full page of results, there might be more. Encode a
+      // composite cursor "executed_at::edit_id" so pagination is stable
+      // even when multiple edits share the same timestamp.
       // ------------------------------------------------------------------
 
       let nextPageToken: string | null = null;
       if (rows.length === pageSize) {
-        const lastExecutedAt = String(rows[rows.length - 1].executed_at);
-        nextPageToken = Buffer.from(lastExecutedAt).toString("base64");
+        const lastRow = rows[rows.length - 1];
+        const cursor = `${String(lastRow.executed_at)}::${String(lastRow.edit_id)}`;
+        nextPageToken = Buffer.from(cursor).toString("base64");
       }
 
       const elapsed = Date.now() - start;

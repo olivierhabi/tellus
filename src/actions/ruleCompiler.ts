@@ -369,13 +369,26 @@ async function compileDeleteObject(
   }
   const primaryKey = String(pkValue);
 
-  // 2. Verify object exists
-  const existing = await objectFetcher(rule.objectType, primaryKey);
-  if (!existing) {
-    errors.push(
-      `deleteObject rule targets object '${primaryKey}' of type '${rule.objectType}' which does not exist`
-    );
-    return;
+  // 2. Verify object exists (check pending creates first, like compileModifyObject).
+  // A preceding create in the same action means the object will exist by the
+  // time this delete runs. The merge step (mergeEdits) will correctly detect
+  // the create+delete conflict and produce a single clean error, instead of
+  // the double error ("does not exist" + "Conflicting rules") that would
+  // occur if we queried objectFetcher for a not-yet-created object.
+  const pendingCreate = edits.find(
+    (e) =>
+      e.objectType === rule.objectType &&
+      e.primaryKey === primaryKey &&
+      e.operation === "create"
+  );
+  if (!pendingCreate) {
+    const existing = await objectFetcher(rule.objectType, primaryKey);
+    if (!existing) {
+      errors.push(
+        `deleteObject rule targets object '${primaryKey}' of type '${rule.objectType}' which does not exist`
+      );
+      return;
+    }
   }
 
   // 3. Generate edit

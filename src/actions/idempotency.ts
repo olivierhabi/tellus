@@ -16,9 +16,16 @@
 // Keys expire after 24 hours. After expiry, the key can be reused.
 //
 // Race condition (known limitation for week 1): If two identical requests
-// arrive simultaneously, both will execute. The ON CONFLICT DO NOTHING
-// prevents a duplicate insert but does not prevent double execution. In
-// production, use SELECT ... FOR UPDATE or PG advisory locks.
+// arrive simultaneously, both will execute. The ON CONFLICT DO UPDATE
+// ensures the result is cached regardless, but does not prevent double
+// execution. In production, use SELECT ... FOR UPDATE or PG advisory locks.
+//
+// Cross-action-type reuse: If a client reuses the same idempotency key
+// for a different action type, the cache is bypassed (the old result is
+// for the wrong action) and the new action executes. The store step
+// overwrites the cached entry with the new action type's result via
+// ON CONFLICT DO UPDATE, so subsequent retries are correctly served
+// from cache.
 // ---------------------------------------------------------------------------
 
 import { query } from "../db";
@@ -75,9 +82,19 @@ export async function checkIdempotencyKey(
 /**
  * Store the result of an action execution keyed by the idempotency key.
  *
- * Uses ON CONFLICT DO NOTHING to handle the race condition where two
- * concurrent requests both pass the check and try to insert. The first
- * insert wins; the second is silently ignored.
+ * Uses ON CONFLICT ... DO UPDATE to handle two scenarios:
+ *
+ *   1. Race condition (same action type): Two concurrent requests both pass
+ *      the check. The first insert wins; the second updates with the same
+ *      action type's result — functionally identical, no harm done.
+ *
+ *   2. Cross-action-type reuse: The client reuses the same idempotency key
+ *      for a different action type. `checkIdempotencyKey` bypasses the cache
+ *      (returns null) and the action executes normally. Without the UPDATE,
+ *      the new result would be silently dropped by DO NOTHING, meaning
+ *      subsequent retries for the second action type would re-execute every
+ *      time — defeating idempotency. The UPDATE overwrites the cached entry
+ *      with the new action type's result, restoring idempotency protection.
  *
  * @param key               - The idempotency key from the client header
  * @param actionTypeApiName - Which action type was executed
@@ -92,9 +109,13 @@ export async function storeIdempotencyKey(
 ): Promise<void> {
   await query(
     `INSERT INTO idempotency_key
-       (idempotency_key, action_type_api_name, execution_id, result)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (idempotency_key) DO NOTHING`,
+       (idempotency_key, action_type_api_name, execution_id, result, expires_at)
+     VALUES ($1, $2, $3, $4, now() + interval '24 hours')
+     ON CONFLICT (idempotency_key) DO UPDATE
+       SET action_type_api_name = EXCLUDED.action_type_api_name,
+           execution_id         = EXCLUDED.execution_id,
+           result               = EXCLUDED.result,
+           expires_at           = EXCLUDED.expires_at`,
     [key, actionTypeApiName, executionId, JSON.stringify(result)]
   );
 }

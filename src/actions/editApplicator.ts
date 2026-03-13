@@ -51,11 +51,30 @@ export interface FailedEdit {
   error: string;
 }
 
-/** Result of the applyEdits function. */
+/**
+ * Result of the applyEdits function.
+ *
+ * `success` reflects whether the PostgreSQL transaction committed. It is
+ * always `true` when this result is returned (PG failures throw and roll
+ * back, so the caller never sees `success: false` from a normal return).
+ *
+ * `indexingStatus` reflects OpenSearch indexing outcome:
+ *   - "success"  — all edits were indexed in OpenSearch
+ *   - "partial"  — some edits failed to index (will be retried by the indexer)
+ *   - "failed"   — ALL edits failed to index (data IS durably in PG; OS will
+ *                   catch up via the reindex pipeline)
+ *
+ * Callers should NOT treat `indexingStatus === "failed"` as data loss.
+ * The edits are always durable in PostgreSQL when `success` is `true`.
+ */
 export interface ApplyResult {
+  /** Whether the PostgreSQL transaction committed successfully. */
   success: boolean;
+  /** Edits that were durably written to PostgreSQL. */
   appliedEdits: AppliedEdit[];
+  /** Edits whose OpenSearch indexing failed (PG rows have indexed=false). */
   failedEdits: FailedEdit[];
+  /** OpenSearch indexing outcome — separate from PG durability. */
   indexingStatus: "success" | "partial" | "failed";
 }
 
@@ -335,7 +354,11 @@ export async function applyEdits(
   }
 
   return {
-    success: true, // PG transaction succeeded; indexing status is separate
+    // PG transaction committed — all edits are durably stored. OpenSearch
+    // indexing is best-effort and tracked separately via indexingStatus.
+    // Even when indexingStatus is "failed", data IS persisted in PG and
+    // the reindex pipeline will eventually sync it to OpenSearch.
+    success: true,
     appliedEdits,
     failedEdits,
     indexingStatus,

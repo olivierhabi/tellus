@@ -116,11 +116,20 @@ async function fetchObject(
  * Executes an action: validates parameters, compiles rules, applies edits,
  * and logs to audit. This is the main entry point for all action executions.
  *
+ * **Important control flow note:** On failure, this function throws an
+ * `OntologyError` from its `finally` block (after writing the audit log).
+ * The `Promise<ExecutionResult>` return type is only fulfilled on success
+ * paths. Callers must handle the thrown `OntologyError` in a catch block
+ * for failure responses — the route handler in `src/routes/actions.ts`
+ * is written to expect this pattern. The `finally` block intentionally
+ * defers the throw so the audit log is always written, even for failures.
+ *
  * @param ontologyId        - The ontology ID
  * @param actionTypeApiName - The api_name of the action type to execute
  * @param parameters        - The raw parameters provided by the caller
  * @param context           - Execution context: { executedBy, sourceIp, branchId }
- * @returns ExecutionResult
+ * @returns ExecutionResult on success; throws OntologyError on failure
+ * @throws {OntologyError} After audit logging, for validation/compilation/unexpected errors
  */
 export async function executeAction(
   ontologyId: string,
@@ -352,16 +361,19 @@ export async function executeAction(
 
     result.success = application.success;
 
-    if (application.success && application.failedEdits.length === 0) {
-      result.result = "success";
-    } else if (
-      application.success &&
-      application.failedEdits.length > 0 &&
-      application.appliedEdits.length > application.failedEdits.length
-    ) {
-      result.result = "partial";
-    } else {
+    if (!application.success) {
+      // PG transaction failed (should not happen — PG failures throw, but
+      // handle defensively in case applyEdits evolves).
       result.result = "failed";
+    } else if (application.failedEdits.length === 0) {
+      // PG committed + all OpenSearch writes succeeded
+      result.result = "success";
+    } else {
+      // PG committed but some or all OpenSearch writes failed. Data IS
+      // durably stored in PostgreSQL; the reindex pipeline will sync to
+      // OpenSearch. Report "partial" (not "failed") so clients know the
+      // action took effect even though search indexing is degraded.
+      result.result = "partial";
     }
 
     result.affectedObjects = application.appliedEdits.map((e) => ({
@@ -411,8 +423,12 @@ export async function executeAction(
       branch_id: context.branchId || null,
     });
 
-    // After audit logging, throw the OntologyError so the global error
-    // handler produces a standardized response
+    // After audit logging, throw the deferred OntologyError. This causes
+    // the Promise<ExecutionResult> to reject — the caller never receives
+    // the result object on failure paths. This is intentional: the global
+    // error handler in the route layer catches the OntologyError and
+    // produces a standardized HTTP error response. The result object was
+    // only used above to populate the audit log entry.
     if (pendingError) {
       throw pendingError;
     }

@@ -312,28 +312,30 @@ router.post(
 
           totalAffectedObjects += result.affectedObjects.length;
 
-          // Check if total affected objects exceeds the batch limit
+          // Check if total affected objects exceeds the batch limit.
+          // The action has already been executed and committed at this point,
+          // so we must record it as a success. Only skip remaining requests.
           if (totalAffectedObjects > MAX_BATCH_AFFECTED_OBJECTS) {
-            // Record this as a failure and stop processing further requests
-            failedCount++;
+            successCount++;
             results.push({
               index: i,
-              success: false,
+              success: true,
               executionId: result.executionId,
-              failureType: "scale_limit",
+              affectedObjects: result.affectedObjects,
+              scaleLimitReached: true,
               errorMessage:
                 `Total affected objects across batch (${totalAffectedObjects}) exceeds ` +
                 `the limit of ${MAX_BATCH_AFFECTED_OBJECTS}. Remaining requests skipped.`,
             });
 
-            // Skip remaining requests
+            // Skip remaining requests — these were never executed
             for (let j = i + 1; j < body.requests.length; j++) {
               failedCount++;
               results.push({
                 index: j,
                 success: false,
                 executionId: null,
-                failureType: "scale_limit",
+                failureType: "scale_limit_skipped",
                 errorMessage:
                   "Skipped: total affected objects limit reached by a prior request in the batch.",
               });
@@ -682,24 +684,30 @@ batchRouter.post(
 
           totalAffectedObjects += result.affectedObjects.length;
 
+          // Check if total affected objects exceeds the batch limit.
+          // The action has already been executed and committed at this point,
+          // so we must record it as a success. Only skip remaining requests.
           if (totalAffectedObjects > MAX_BATCH_AFFECTED_OBJECTS) {
-            failedCount++;
+            successCount++;
             results.push({
               index: i,
-              success: false,
+              success: true,
               executionId: result.executionId,
-              failureType: "scale_limit",
+              affectedObjects: result.affectedObjects,
+              scaleLimitReached: true,
               errorMessage:
                 `Total affected objects across batch (${totalAffectedObjects}) exceeds ` +
                 `the limit of ${MAX_BATCH_AFFECTED_OBJECTS}. Remaining requests skipped.`,
             });
+
+            // Skip remaining requests — these were never executed
             for (let j = i + 1; j < body.requests.length; j++) {
               failedCount++;
               results.push({
                 index: j,
                 success: false,
                 executionId: null,
-                failureType: "scale_limit",
+                failureType: "scale_limit_skipped",
                 errorMessage:
                   "Skipped: total affected objects limit reached by a prior request in the batch.",
               });

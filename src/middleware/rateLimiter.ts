@@ -87,7 +87,12 @@ export class RateLimiter {
   }
 
   /**
-   * Check if a request is allowed under the rate limit.
+   * Check if a request is allowed under the rate limit AND record it.
+   *
+   * NOTE: This method atomically checks and records in one step. If you are
+   * checking multiple scopes and need to ensure that no scope records a
+   * timestamp unless ALL scopes allow the request, use `tryCheck()` followed
+   * by `record()` instead.
    *
    * @param key         - The rate limit key (e.g., "action:updateSalary")
    * @param maxRequests - Maximum requests allowed in the window
@@ -119,6 +124,63 @@ export class RateLimiter {
       remaining: maxRequests - timestamps.length,
       resetAt: new Date(now + windowMs),
     };
+  }
+
+  /**
+   * Read-only check: returns whether a request would be allowed WITHOUT
+   * recording a timestamp. Use this to pre-check multiple scopes before
+   * committing any of them via `record()`.
+   *
+   * @param key         - The rate limit key (e.g., "action:updateSalary")
+   * @param maxRequests - Maximum requests allowed in the window
+   * @param windowMs    - Window size in milliseconds
+   * @returns { allowed, remaining, resetAt, retryAfterMs? }
+   */
+  tryCheck(key: string, maxRequests: number, windowMs: number): CheckResult {
+    const now = Date.now();
+    if (!this.windows.has(key)) this.windows.set(key, []);
+
+    // Remove expired timestamps
+    const timestamps = this.windows
+      .get(key)!
+      .filter((t) => t > now - windowMs);
+    this.windows.set(key, timestamps);
+
+    if (timestamps.length >= maxRequests) {
+      return {
+        allowed: false,
+        remaining: 0,
+        resetAt: new Date(timestamps[0] + windowMs),
+        retryAfterMs: timestamps[0] + windowMs - now,
+      };
+    }
+
+    // Do NOT push a timestamp — this is a read-only check
+    return {
+      allowed: true,
+      remaining: maxRequests - timestamps.length,
+      resetAt: new Date(now + windowMs),
+    };
+  }
+
+  /**
+   * Record a request timestamp for the given key. Call this after all
+   * `tryCheck()` calls have passed to atomically commit the request across
+   * all scopes.
+   *
+   * @param key      - The rate limit key
+   * @param windowMs - Window size in milliseconds (used to prune expired entries)
+   */
+  record(key: string, windowMs: number): void {
+    const now = Date.now();
+    if (!this.windows.has(key)) this.windows.set(key, []);
+
+    // Prune expired timestamps, then append the new one
+    const timestamps = this.windows
+      .get(key)!
+      .filter((t) => t > now - windowMs);
+    timestamps.push(now);
+    this.windows.set(key, timestamps);
   }
 
   /**
@@ -161,32 +223,20 @@ export function actionRateLimiter(
   const actionType = req.params.actionTypeApiName;
   const user = (req as any).user?.id || "anonymous";
 
-  const checks = [
-    {
-      ...limiter.check(
-        `action:${actionType}`,
-        RATE_LIMITS.perActionType.maxRequests,
-        RATE_LIMITS.perActionType.windowMs
-      ),
-      scope: "action_type",
-    },
-    {
-      ...limiter.check(
-        `user:${user}`,
-        RATE_LIMITS.perUser.maxRequests,
-        RATE_LIMITS.perUser.windowMs
-      ),
-      scope: "user",
-    },
-    {
-      ...limiter.check(
-        "global",
-        RATE_LIMITS.global.maxRequests,
-        RATE_LIMITS.global.windowMs
-      ),
-      scope: "global",
-    },
+  // Scope definitions: key, limit config, and human-readable scope name.
+  const scopes = [
+    { key: `action:${actionType}`, config: RATE_LIMITS.perActionType, scope: "action_type" },
+    { key: `user:${user}`,         config: RATE_LIMITS.perUser,       scope: "user" },
+    { key: "global",               config: RATE_LIMITS.global,        scope: "global" },
   ];
+
+  // Phase 1: Read-only check on ALL scopes. No timestamps are recorded yet,
+  // so a later scope blocking the request won't leave phantom counts on
+  // earlier scopes that passed.
+  const checks = scopes.map((s) => ({
+    ...limiter.tryCheck(s.key, s.config.maxRequests, s.config.windowMs),
+    ...s,
+  }));
 
   const blocked = checks.find((c) => !c.allowed);
   if (blocked) {
@@ -207,8 +257,16 @@ export function actionRateLimiter(
     return;
   }
 
-  // Set rate limit headers on successful requests
-  const minRemaining = Math.min(...checks.map((c) => c.remaining));
+  // Phase 2: All scopes allow the request — now record timestamps.
+  for (const s of scopes) {
+    limiter.record(s.key, s.config.windowMs);
+  }
+
+  // Remaining counts from tryCheck are still accurate (we just added 1 to
+  // each scope, so subtract 1 from each remaining value).
+  const minRemaining = Math.min(
+    ...checks.map((c) => Math.max(0, c.remaining - 1))
+  );
   res.set("X-RateLimit-Remaining", String(minRemaining));
 
   next();
@@ -228,30 +286,25 @@ export function batchRateLimiter(
 ): void {
   const user = (req as any).user?.id || "anonymous";
 
-  const checks = [
-    {
-      ...limiter.check(
-        `batch:${user}`,
-        RATE_LIMITS.batchPerUser.maxRequests,
-        RATE_LIMITS.batchPerUser.windowMs
-      ),
-      scope: "batch_per_user",
-    },
-    {
-      ...limiter.check(
-        "global",
-        RATE_LIMITS.global.maxRequests,
-        RATE_LIMITS.global.windowMs
-      ),
-      scope: "global",
-    },
+  // Scope definitions: key, limit config, and human-readable scope name.
+  const scopes = [
+    { key: `batch:${user}`, config: RATE_LIMITS.batchPerUser, scope: "batch_per_user" },
+    { key: "global",        config: RATE_LIMITS.global,       scope: "global" },
   ];
+
+  // Phase 1: Read-only check on ALL scopes. No timestamps are recorded yet,
+  // so a later scope blocking the request won't leave phantom counts on
+  // earlier scopes that passed.
+  const checks = scopes.map((s) => ({
+    ...limiter.tryCheck(s.key, s.config.maxRequests, s.config.windowMs),
+    ...s,
+  }));
 
   const blocked = checks.find((c) => !c.allowed);
   if (blocked) {
     const retryAfterSec = Math.ceil((blocked.retryAfterMs || 1000) / 1000);
     res.set("Retry-After", String(retryAfterSec));
-    res.set("X-RateLimit-Scope", blocked.scope || "batch_per_user");
+    res.set("X-RateLimit-Scope", blocked.scope);
     res.set("X-RateLimit-Remaining", "0");
     res.status(429).json({
       errorCode: "RATE_LIMIT_EXCEEDED",
@@ -266,7 +319,16 @@ export function batchRateLimiter(
     return;
   }
 
-  const minRemaining = Math.min(...checks.map((c) => c.remaining));
+  // Phase 2: All scopes allow the request — now record timestamps.
+  for (const s of scopes) {
+    limiter.record(s.key, s.config.windowMs);
+  }
+
+  // Remaining counts from tryCheck are still accurate (we just added 1 to
+  // each scope, so subtract 1 from each remaining value).
+  const minRemaining = Math.min(
+    ...checks.map((c) => Math.max(0, c.remaining - 1))
+  );
   res.set("X-RateLimit-Remaining", String(minRemaining));
 
   next();
