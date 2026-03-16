@@ -186,6 +186,17 @@ export class FolderService {
         if (isDescendant) throw new AppError('Cannot move a folder into its own subtree (circular reference)', 400, 'VALIDATION_ERROR');
       }
 
+      const nameToCheck = newName ?? folder.name;
+      const duplicate = await trx('folders')
+        .where({ name: nameToCheck, project_id: projectId })
+        .where(function () {
+          if (newParentFolderId) { this.where({ parent_folder_id: newParentFolderId }); }
+          else { this.whereNull('parent_folder_id'); }
+        })
+        .whereNot({ id: folderId })
+        .first();
+      if (duplicate) throw new AppError('A folder with this name already exists in the target location', 409, 'CONFLICT');
+
       const updateData: Record<string, unknown> = { parent_folder_id: newParentFolderId, updated_at: trx.fn.now() };
       if (newName !== undefined) updateData.name = newName;
       await trx('folders').where({ id: folderId }).update(updateData);
