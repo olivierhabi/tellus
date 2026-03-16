@@ -33,10 +33,10 @@ export async function authenticateJWT(req: Request, _res: Response, next: NextFu
   } catch (error) {
     if (error instanceof AppError) {
       next(error);
+    } else if (error instanceof jwt.TokenExpiredError) {
+      next(new AppError('Token expired', 401, 'TOKEN_EXPIRED'));
     } else if (error instanceof jwt.JsonWebTokenError) {
       next(new AppError('Invalid token', 401, 'UNAUTHORIZED'));
-    } else if (error instanceof jwt.TokenExpiredError) {
-      next(new AppError('Token expired', 401, 'UNAUTHORIZED'));
     } else {
       next(error);
     }

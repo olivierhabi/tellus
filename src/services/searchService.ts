@@ -44,7 +44,9 @@ export class SearchService {
 
   async suggest(q: string, ownerId: string): Promise<{ name: string; type: string }[]> {
     if (!q || q.trim().length === 0) return [];
-    const prefix = `${q.trim()}%`;
+    // Escape LIKE special characters to prevent wildcard injection
+    const escapedPrefix = q.trim().replace(/[\\%_]/g, '\\$&');
+    const prefix = `${escapedPrefix}%`;
     const suggestions: { name: string; type: string }[] = [];
 
     const projects = await this.knex('projects').where({ owner_id: ownerId }).where('name', 'ilike', prefix).select('name').limit(10);

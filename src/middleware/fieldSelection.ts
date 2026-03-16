@@ -19,7 +19,7 @@ export function fieldSelection(config: FieldSelectionConfig) {
     }
     const invalid = requested.filter(f => !config.allowedFields.includes(f));
     if (invalid.length > 0) {
-      throw new AppError(`Unknown fields: ${invalid.join(', ')}. Allowed: ${config.allowedFields.join(', ')}`, 400, 'VALIDATION_ERROR');
+      return next(new AppError(`Unknown fields: ${invalid.join(', ')}. Allowed: ${config.allowedFields.join(', ')}`, 400, 'VALIDATION_ERROR'));
     }
     if (!requested.includes('id')) requested.unshift('id');
     (req as any).selectedFields = requested;
