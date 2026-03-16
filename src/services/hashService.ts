@@ -63,7 +63,7 @@ export class HashService {
     const folder = await this.knex('folders').where({ id: dataset.folder_id }).first();
     if (!folder) throw new AppError('Dataset folder not found', 404, 'NOT_FOUND');
 
-    const duplicate = await this.knex('datasets as d')
+    const duplicate = await this.knex('foundry_datasets as d')
       .join('folders as f', 'd.folder_id', 'f.id')
       .where('f.project_id', folder.project_id)
       .where('d.content_hash', hash)

@@ -158,6 +158,7 @@ export class CsvParsingService {
       const previewRows: Record<string, string>[] = [];
       let columnNames: string[] = [];
       let rowCount = 0;
+      let settled = false;
 
       const ext = filePath.toLowerCase();
       const delimiter = ext.endsWith('.tsv') ? '\t' : ',';
@@ -171,6 +172,19 @@ export class CsvParsingService {
       });
 
       const readStream = fs.createReadStream(filePath);
+
+      const settle = () => {
+        if (!settled) {
+          settled = true;
+          const columns: ColumnStats[] = columnNames.map((name) => {
+            const acc = accumulators.get(name)!;
+            const stats = acc.getStats();
+            stats.name = name;
+            return stats;
+          });
+          resolve({ columns, rowCount, previewRows });
+        }
+      };
 
       parser.on('readable', () => {
         let record: Record<string, string>;
@@ -200,29 +214,18 @@ export class CsvParsingService {
 
       parser.on('error', (err) => {
         readStream.destroy();
-        reject(err);
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
       });
 
       parser.on('end', () => {
-        const columns: ColumnStats[] = columnNames.map((name) => {
-          const acc = accumulators.get(name)!;
-          const stats = acc.getStats();
-          stats.name = name;
-          return stats;
-        });
-        resolve({ columns, rowCount, previewRows });
+        settle();
       });
 
       parser.on('close', () => {
-        if (rowCount > 0) {
-          const columns: ColumnStats[] = columnNames.map((name) => {
-            const acc = accumulators.get(name)!;
-            const stats = acc.getStats();
-            stats.name = name;
-            return stats;
-          });
-          resolve({ columns, rowCount, previewRows });
-        }
+        settle();
       });
 
       readStream.pipe(parser);

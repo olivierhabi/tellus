@@ -13,7 +13,7 @@ export class DatasetService {
 
     let baseQuery = this.knex('foundry_datasets')
       .select(
-        'datasets.*',
+        'foundry_datasets.*',
         this.knex.raw('COUNT(*) OVER() AS total_count')
       )
       .where({ folder_id: folderId });
@@ -92,6 +92,7 @@ export class DatasetService {
     const previewRows = await new Promise<Record<string, string>[]>(
       (resolve, reject) => {
         const rows: Record<string, string>[] = [];
+        let settled = false;
         const ext = dataset.file_path.toLowerCase();
         const delimiter = ext.endsWith('.tsv') ? '\t' : ',';
 
@@ -104,6 +105,13 @@ export class DatasetService {
         });
 
         const readStream = fs.createReadStream(dataset.file_path);
+
+        const settle = () => {
+          if (!settled) {
+            settled = true;
+            resolve(rows);
+          }
+        };
 
         parser.on('readable', () => {
           let record: Record<string, string>;
@@ -118,17 +126,18 @@ export class DatasetService {
 
         parser.on('error', (err) => {
           readStream.destroy();
-          reject(err);
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
         });
 
         parser.on('end', () => {
-          resolve(rows);
+          settle();
         });
 
         parser.on('close', () => {
-          if (rows.length > 0) {
-            resolve(rows);
-          }
+          settle();
         });
 
         readStream.pipe(parser);

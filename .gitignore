@@ -28,3 +28,6 @@ coverage/
 
 # Data files (user-specific)
 data/
+
+# Uploaded files (test artifacts and user data)
+uploads/

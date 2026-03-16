@@ -92,7 +92,7 @@ export async function shutdown(
   // Step 3: Reset datasets stuck in "processing" to "pending"
   try {
     console.log('[shutdown] Resetting processing datasets...');
-    const resetCount = await db('datasets')
+    const resetCount = await db('foundry_datasets')
       .where({ status: 'processing' })
       .update({ status: 'pending' });
     if (resetCount > 0) {

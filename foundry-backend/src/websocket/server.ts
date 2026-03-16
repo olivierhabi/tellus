@@ -53,7 +53,7 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
   });
 
   // Forward EventBus events to subscribed WebSocket clients
-  eventBus.on('ws:broadcast', (data: { event: string; projectId: string | null; payload: unknown }) => {
+  eventBus.on('ws:event', (data: { event: string; projectId: string | null; payload: unknown }) => {
     clients.forEach((state) => {
       if (state.ws.readyState === WebSocket.OPEN) {
         if (!data.projectId || state.subscribedProjects.has(data.projectId)) {
