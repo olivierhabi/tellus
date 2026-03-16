@@ -116,6 +116,51 @@ export const openApiSpec = {
           created_at: { type: 'string' as const, format: 'date-time' },
         },
       },
+      ProjectStats: {
+        type: 'object' as const,
+        properties: {
+          folderCount: { type: 'integer' as const },
+          datasetCount: { type: 'integer' as const },
+          totalSizeBytes: { type: 'integer' as const },
+          memberCount: { type: 'integer' as const },
+        },
+      },
+      FolderTreeNode: {
+        type: 'object' as const,
+        properties: {
+          id: { type: 'string' as const, format: 'uuid' },
+          name: { type: 'string' as const },
+          parentFolderId: { type: 'string' as const, format: 'uuid', nullable: true },
+          children: {
+            type: 'array' as const,
+            items: { $ref: '#/components/schemas/FolderTreeNode' },
+          },
+        },
+      },
+      BreadcrumbEntry: {
+        type: 'object' as const,
+        properties: {
+          id: { type: 'string' as const, format: 'uuid' },
+          name: { type: 'string' as const },
+          type: { type: 'string' as const, enum: ['project', 'folder', 'dataset'] },
+        },
+      },
+      DatasetSummary: {
+        type: 'object' as const,
+        properties: {
+          id: { type: 'string' as const, format: 'uuid' },
+          name: { type: 'string' as const },
+          status: { type: 'string' as const, enum: ['pending', 'processing', 'ready', 'error'] },
+          file_size_bytes: { type: 'integer' as const },
+        },
+      },
+      UserPreference: {
+        type: 'object' as const,
+        properties: {
+          key: { type: 'string' as const, pattern: '^[a-z][a-z0-9_]*$' },
+          value: {},
+        },
+      },
     },
   },
   security: [{ bearerAuth: [] }],
@@ -186,6 +231,56 @@ export const openApiSpec = {
         },
       },
     },
+    '/auth/refresh': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Refresh an access token',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object' as const,
+                properties: {
+                  refreshToken: { type: 'string' as const, minLength: 1 },
+                },
+                required: ['refreshToken'],
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'New access token returned' },
+          '401': { description: 'Invalid or expired refresh token' },
+        },
+      },
+    },
+    '/auth/logout': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Logout and invalidate refresh token',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object' as const,
+                properties: {
+                  refreshToken: { type: 'string' as const, minLength: 1 },
+                },
+                required: ['refreshToken'],
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Logout successful' },
+          '401': { description: 'Invalid refresh token' },
+        },
+      },
+    },
     '/projects': {
       get: {
         tags: ['Projects'],
@@ -229,12 +324,26 @@ export const openApiSpec = {
           '404': { description: 'Project not found' },
         },
       },
-      patch: {
+      put: {
         tags: ['Projects'],
         summary: 'Update a project',
         parameters: [
           { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
         ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object' as const,
+                properties: {
+                  name: { type: 'string' as const, minLength: 1, maxLength: 255 },
+                  description: { type: 'string' as const, maxLength: 2000 },
+                },
+              },
+            },
+          },
+        },
         responses: {
           '200': { description: 'Project updated' },
         },
@@ -247,6 +356,22 @@ export const openApiSpec = {
         ],
         responses: {
           '204': { description: 'Project deleted' },
+        },
+      },
+    },
+    '/projects/{projectId}/stats': {
+      get: {
+        tags: ['Projects'],
+        summary: 'Get project statistics',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '200': {
+            description: 'Project statistics',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ProjectStats' } } },
+          },
+          '404': { description: 'Project not found' },
         },
       },
     },
@@ -286,13 +411,27 @@ export const openApiSpec = {
           '404': { description: 'Folder not found' },
         },
       },
-      patch: {
+      put: {
         tags: ['Folders'],
         summary: 'Update or move a folder',
         parameters: [
           { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
           { name: 'folderId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
         ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object' as const,
+                properties: {
+                  name: { type: 'string' as const, minLength: 1, maxLength: 255 },
+                  parentFolderId: { type: 'string' as const, format: 'uuid', nullable: true },
+                },
+              },
+            },
+          },
+        },
         responses: {
           '200': { description: 'Folder updated' },
         },
@@ -306,6 +445,66 @@ export const openApiSpec = {
         ],
         responses: {
           '204': { description: 'Folder deleted' },
+        },
+      },
+    },
+    '/projects/{projectId}/folders/tree': {
+      get: {
+        tags: ['Folders'],
+        summary: 'Get the full project folder tree',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '200': {
+            description: 'Nested folder tree',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'array' as const,
+                  items: { $ref: '#/components/schemas/FolderTreeNode' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/projects/{projectId}/folders/{folderId}/tree': {
+      get: {
+        tags: ['Folders'],
+        summary: 'Get folder subtree',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'folderId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '200': { description: 'Folder subtree' },
+          '404': { description: 'Folder not found' },
+        },
+      },
+    },
+    '/projects/{projectId}/folders/{folderId}/breadcrumb': {
+      get: {
+        tags: ['Folders'],
+        summary: 'Get breadcrumb trail for a folder',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'folderId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '200': {
+            description: 'Breadcrumb trail from project root to folder',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'array' as const,
+                  items: { $ref: '#/components/schemas/BreadcrumbEntry' },
+                },
+              },
+            },
+          },
+          '404': { description: 'Folder not found' },
         },
       },
     },
@@ -355,6 +554,19 @@ export const openApiSpec = {
         },
       },
     },
+    '/datasets/status-batch': {
+      get: {
+        tags: ['Datasets'],
+        summary: 'Get processing status for multiple datasets',
+        parameters: [
+          { name: 'ids', in: 'query' as const, required: true, schema: { type: 'string' as const }, description: 'Comma-separated list of dataset UUIDs (max 50)' },
+        ],
+        responses: {
+          '200': { description: 'Map of dataset IDs to their statuses' },
+          '400': { description: 'Invalid or too many IDs' },
+        },
+      },
+    },
     '/datasets/{datasetId}': {
       get: {
         tags: ['Datasets'],
@@ -364,6 +576,17 @@ export const openApiSpec = {
         ],
         responses: {
           '200': { description: 'Dataset details with columns' },
+          '404': { description: 'Dataset not found' },
+        },
+      },
+      delete: {
+        tags: ['Datasets'],
+        summary: 'Delete a dataset',
+        parameters: [
+          { name: 'datasetId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '204': { description: 'Dataset deleted' },
           '404': { description: 'Dataset not found' },
         },
       },
@@ -390,6 +613,22 @@ export const openApiSpec = {
         ],
         responses: {
           '200': { description: 'Dataset status' },
+        },
+      },
+    },
+    '/datasets/{datasetId}/summary': {
+      get: {
+        tags: ['Datasets'],
+        summary: 'Get dataset summary',
+        parameters: [
+          { name: 'datasetId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '200': {
+            description: 'Dataset summary',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/DatasetSummary' } } },
+          },
+          '404': { description: 'Dataset not found' },
         },
       },
     },
@@ -553,15 +792,109 @@ export const openApiSpec = {
         },
       },
     },
-    '/breadcrumb/{folderId}': {
+    '/search/suggest': {
       get: {
-        tags: ['Navigation'],
-        summary: 'Get breadcrumb trail for a folder',
+        tags: ['Search'],
+        summary: 'Get search suggestions and autocomplete',
         parameters: [
-          { name: 'folderId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'q', in: 'query' as const, required: false, schema: { type: 'string' as const }, description: 'Search query text' },
         ],
         responses: {
-          '200': { description: 'Breadcrumb trail' },
+          '200': { description: 'Search suggestions' },
+        },
+      },
+    },
+    '/breadcrumb/{type}/{id}': {
+      get: {
+        tags: ['Navigation'],
+        summary: 'Get breadcrumb trail for a project, folder, or dataset',
+        parameters: [
+          { name: 'type', in: 'path' as const, required: true, schema: { type: 'string' as const, enum: ['project', 'folder', 'dataset'] } },
+          { name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'includeChildren', in: 'query' as const, required: false, schema: { type: 'string' as const, enum: ['true', 'false'] }, description: 'Include children in breadcrumb result' },
+        ],
+        responses: {
+          '200': {
+            description: 'Breadcrumb trail',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'array' as const,
+                  items: { $ref: '#/components/schemas/BreadcrumbEntry' },
+                },
+              },
+            },
+          },
+          '404': { description: 'Resource not found' },
+        },
+      },
+    },
+    '/users/me/preferences': {
+      get: {
+        tags: ['User Preferences'],
+        summary: 'Get all user preferences',
+        responses: {
+          '200': {
+            description: 'List of user preferences',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'array' as const,
+                  items: { $ref: '#/components/schemas/UserPreference' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/users/me/preferences/{key}': {
+      get: {
+        tags: ['User Preferences'],
+        summary: 'Get a single user preference by key',
+        parameters: [
+          { name: 'key', in: 'path' as const, required: true, schema: { type: 'string' as const, pattern: '^[a-z][a-z0-9_]*$' } },
+        ],
+        responses: {
+          '200': {
+            description: 'User preference',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/UserPreference' } } },
+          },
+          '404': { description: 'Preference not found' },
+        },
+      },
+      put: {
+        tags: ['User Preferences'],
+        summary: 'Update a user preference',
+        parameters: [
+          { name: 'key', in: 'path' as const, required: true, schema: { type: 'string' as const, pattern: '^[a-z][a-z0-9_]*$' } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object' as const,
+                properties: {
+                  value: {},
+                },
+                required: ['value'],
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Preference updated' },
+        },
+      },
+      delete: {
+        tags: ['User Preferences'],
+        summary: 'Delete (reset) a user preference',
+        parameters: [
+          { name: 'key', in: 'path' as const, required: true, schema: { type: 'string' as const, pattern: '^[a-z][a-z0-9_]*$' } },
+        ],
+        responses: {
+          '204': { description: 'Preference deleted' },
         },
       },
     },
@@ -580,8 +913,14 @@ export function setupSwagger(app: Express): void {
     res.json(openApiSpec);
   });
 
-  // Serve a minimal Swagger UI HTML page
+  // Serve a minimal Swagger UI HTML page.
+  // Override Content-Security-Policy so the browser allows the unpkg CDN
+  // assets and the small inline bootstrap script.
   app.get('/api/docs', (_req, res) => {
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self' https://unpkg.com 'unsafe-inline'; style-src 'self' https://unpkg.com 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://unpkg.com",
+    );
     const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
