@@ -39,9 +39,20 @@ export class FolderService {
     return query.orderBy('name', 'asc');
   }
 
+  private static readonly ALLOWED_SORT_COLUMNS = new Set([
+    'name', 'status', 'file_size_bytes', 'row_count', 'column_count',
+    'original_filename', 'mime_type', 'created_at', 'updated_at',
+  ]);
+
   async getFolderById(projectId: string, folderId: string, sortBy = 'name', sortOrder: 'asc' | 'desc' = 'asc') {
     const folder = await this.knex('folders').where({ id: folderId, project_id: projectId }).first();
     if (!folder) return null;
+
+    // Defense-in-depth: validate sortBy and sortOrder at the service layer
+    if (!FolderService.ALLOWED_SORT_COLUMNS.has(sortBy)) {
+      sortBy = 'name';
+    }
+    const safeSortOrder = sortOrder === 'desc' ? 'desc' : 'asc';
 
     const [childFolders, childDatasets] = await Promise.all([
       this.knex('folders')
@@ -56,7 +67,7 @@ export class FolderService {
         .select('id', 'name', 'status', 'file_size_bytes', 'row_count', 'column_count',
                 'original_filename', 'mime_type', 'created_at', 'updated_at')
         .where({ folder_id: folderId })
-        .orderByRaw(`${sortBy} ${sortOrder} NULLS LAST, id ASC`),
+        .orderByRaw(`?? ${safeSortOrder} NULLS LAST, id ASC`, [sortBy]),
     ]);
 
     return { ...folder, children: { folders: childFolders, datasets: childDatasets } };

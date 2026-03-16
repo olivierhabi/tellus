@@ -344,7 +344,7 @@ fi
 assert_not_empty "$ROOT_FOLDER_ID" "Root folder ID returned"
 
 # Create nested folder
-do_request POST "/api/projects/${PROJECT_ID}/folders" "{\"name\":\"Nested Folder\",\"parentId\":\"${ROOT_FOLDER_ID}\"}"
+do_request POST "/api/projects/${PROJECT_ID}/folders" "{\"name\":\"Nested Folder\",\"parentFolderId\":\"${ROOT_FOLDER_ID}\"}"
 assert_status "$HTTP_STATUS" "201" "Create nested folder"
 NESTED_FOLDER_ID=$(json_field "$HTTP_BODY" "id")
 if [[ -z "$NESTED_FOLDER_ID" ]]; then
@@ -1440,7 +1440,7 @@ if [[ -n "$AGG_PROJ" ]]; then
 
   if [[ -n "$AGG_PARENT" ]]; then
     # Create a child folder under Parent
-    do_request POST "/api/projects/${AGG_PROJ}/folders" "{\"name\":\"Child\",\"parentId\":\"${AGG_PARENT}\"}"
+    do_request POST "/api/projects/${AGG_PROJ}/folders" "{\"name\":\"Child\",\"parentFolderId\":\"${AGG_PARENT}\"}"
 
     # Get folder by ID — should include children with aggregation
     do_request GET "/api/projects/${AGG_PROJ}/folders/${AGG_PARENT}"

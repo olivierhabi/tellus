@@ -19,13 +19,22 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-    const [user] = await this.knex('users')
-      .insert({
-        email: email.toLowerCase(),
-        password_hash: passwordHash,
-        display_name: displayName,
-      })
-      .returning(['id', 'email', 'display_name', 'created_at']);
+    let user;
+    try {
+      [user] = await this.knex('users')
+        .insert({
+          email: email.toLowerCase(),
+          password_hash: passwordHash,
+          display_name: displayName,
+        })
+        .returning(['id', 'email', 'display_name', 'created_at']);
+    } catch (error: any) {
+      // Handle unique constraint violation (race condition: concurrent registration with same email)
+      if (error.code === '23505' && error.constraint?.includes('email')) {
+        throw new AppError('A user with this email already exists', 409, 'CONFLICT');
+      }
+      throw error;
+    }
 
     const tokens = await this.generateTokens(user.id);
     return { user, ...tokens };

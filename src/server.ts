@@ -45,12 +45,13 @@ import foundryColumnStatsRouter from "./routes/columnStats";
 import foundryVersionsRouter from "./routes/versions";
 import { projectDuplicatesRouter, datasetDeduplicateRouter } from "./routes/duplicates";
 import foundryPreferencesRouter from "./routes/preferences";
-import { initWebSocketServer } from "./websocket/server";
+import { initWebSocketServer, getWss } from "./websocket/server";
 import { setupSwagger as setupFoundrySwagger } from "./docs/openapi";
 import { cleanupExpiredKeys } from "./actions/idempotency";
 import { limiter } from "./middleware/rateLimiter";
 import { serverTiming } from './middleware/serverTiming';
 import { contentLanguage } from './middleware/contentLanguage';
+import foundryDb from "./config/foundryDb";
 import swaggerUi from "swagger-ui-express";
 import * as fs from "fs";
 import * as path from "path";
@@ -413,6 +414,37 @@ async function shutdown(signal: string): Promise<void> {
 
   // Destroy the action rate limiter to prevent dangling setInterval
   limiter.destroy();
+
+  // Close foundry WebSocket connections
+  const wss = getWss();
+  if (wss) {
+    console.log(JSON.stringify({ type: "foundry_ws_closing" }));
+    for (const client of wss.clients) {
+      if (client.readyState === 1 /* WebSocket.OPEN */) {
+        client.close(1001, 'Server shutting down');
+      }
+    }
+  }
+
+  // Reset foundry datasets stuck in "processing" to "pending"
+  try {
+    const resetCount = await foundryDb('foundry_datasets')
+      .where({ status: 'processing' })
+      .update({ status: 'pending' });
+    if (resetCount > 0) {
+      console.log(JSON.stringify({ type: "foundry_datasets_reset", count: resetCount }));
+    }
+  } catch (err) {
+    console.error(JSON.stringify({ type: "foundry_datasets_reset_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // Drain foundry database connection pool
+  try {
+    await foundryDb.destroy();
+    console.log(JSON.stringify({ type: "foundry_db_disconnected" }));
+  } catch (err) {
+    console.error(JSON.stringify({ type: "foundry_db_disconnect_error", error: err instanceof Error ? err.message : String(err) }));
+  }
 
   try {
     await pool.end();

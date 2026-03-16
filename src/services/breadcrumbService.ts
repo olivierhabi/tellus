@@ -10,10 +10,10 @@ interface BreadcrumbSegment {
 }
 
 export class BreadcrumbService {
-  private cache: LRUCache<string, BreadcrumbSegment[]>;
+  private cache: LRUCache<string, { breadcrumb: BreadcrumbSegment[]; children: unknown }>;
 
   constructor(private knex: Knex) {
-    this.cache = new LRUCache<string, BreadcrumbSegment[]>({
+    this.cache = new LRUCache<string, { breadcrumb: BreadcrumbSegment[]; children: unknown }>({
       max: 1000,
       ttl: 60 * 1000,
     });
@@ -22,7 +22,7 @@ export class BreadcrumbService {
   async getBreadcrumb(type: string, id: string, includeChildren = false) {
     const cacheKey = `${type}:${id}:${includeChildren}`;
     const cached = this.cache.get(cacheKey);
-    if (cached) return { breadcrumb: cached, children: null };
+    if (cached) return { breadcrumb: cached.breadcrumb, children: cached.children };
 
     let breadcrumb: BreadcrumbSegment[] = [];
     let children = null;
@@ -90,7 +90,7 @@ export class BreadcrumbService {
       throw new AppError('Invalid resource type. Use: project, folder, or dataset', 400, 'VALIDATION_ERROR');
     }
 
-    this.cache.set(cacheKey, breadcrumb);
+    this.cache.set(cacheKey, { breadcrumb, children });
     return { breadcrumb, children };
   }
 

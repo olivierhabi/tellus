@@ -122,24 +122,39 @@ export class VersionService {
       .orderBy('ordinal_position', 'asc')
       .select('column_name', 'column_type', 'ordinal_position', 'nullable');
 
-    // Insert the version record
-    const [version] = await this.knex('dataset_versions')
-      .insert({
-        dataset_id: datasetId,
-        version_number: nextVersionNumber,
-        file_path: versionFilePath,
-        file_size_bytes: dataset.file_size_bytes,
-        row_count: dataset.row_count,
-        column_count: dataset.column_count,
-        content_hash: dataset.content_hash,
-        schema_snapshot: JSON.stringify(columns),
-        change_summary: input.changeSummary || null,
-        created_by: input.createdBy || null,
-      })
-      .returning('*');
+    // Insert the version record; clean up copied file if insert fails
+    let version: DatasetVersion;
+    try {
+      [version] = await this.knex('dataset_versions')
+        .insert({
+          dataset_id: datasetId,
+          version_number: nextVersionNumber,
+          file_path: versionFilePath,
+          file_size_bytes: dataset.file_size_bytes,
+          row_count: dataset.row_count,
+          column_count: dataset.column_count,
+          content_hash: dataset.content_hash,
+          schema_snapshot: JSON.stringify(columns),
+          change_summary: input.changeSummary || null,
+          created_by: input.createdBy || null,
+        })
+        .returning('*');
+    } catch (error) {
+      // Clean up the copied file if the database insert fails
+      try {
+        await fs.promises.unlink(versionFilePath);
+      } catch {
+        // Ignore cleanup errors
+      }
+      throw error;
+    }
+
+    // Resolve project_id from folder for correct WebSocket event delivery
+    const folder = await this.knex('folders').where({ id: dataset.folder_id }).first();
+    const projectId = folder?.project_id ?? dataset.folder_id;
 
     // Emit version created event
-    emitDatasetEvent('dataset:version:created', dataset.folder_id, {
+    emitDatasetEvent('dataset:version:created', projectId, {
       datasetId,
       versionNumber: nextVersionNumber,
     });
@@ -203,12 +218,14 @@ export class VersionService {
       await fs.promises.mkdir(versionDir, { recursive: true });
 
       const snapshotFileName = `${path.basename(dataset.file_path, ext)}_v${nextVersionNumber}_${crypto.randomBytes(4).toString('hex')}${ext}`;
-      const snapshotFilePath = path.join(versionDir, snapshotFileName);
+      let snapshotFilePath: string | null = path.join(versionDir, snapshotFileName);
 
       try {
         await fs.promises.copyFile(dataset.file_path, snapshotFilePath);
       } catch {
         // If current file doesn't exist, skip pre-restore snapshot
+        // and don't record the non-existent path in the version record
+        snapshotFilePath = null;
       }
 
       // Copy the target version file to the current file path
@@ -253,11 +270,12 @@ export class VersionService {
         .orderBy('ordinal_position', 'asc')
         .select('column_name', 'column_type', 'ordinal_position', 'nullable');
 
+      // Use the target version's file_path as fallback if pre-restore snapshot failed
       const [restoreVersion] = await trx('dataset_versions')
         .insert({
           dataset_id: datasetId,
           version_number: nextVersionNumber,
-          file_path: snapshotFilePath,
+          file_path: snapshotFilePath ?? targetVersion.file_path,
           file_size_bytes: targetVersion.file_size_bytes,
           row_count: targetVersion.row_count,
           column_count: targetVersion.column_count,
@@ -268,8 +286,12 @@ export class VersionService {
         })
         .returning('*');
 
+      // Resolve project_id from folder for correct WebSocket event delivery
+      const folder = await trx('folders').where({ id: dataset.folder_id }).first();
+      const projectId = folder?.project_id ?? dataset.folder_id;
+
       // Emit version restored event
-      emitDatasetEvent('dataset:version:restored', dataset.folder_id, {
+      emitDatasetEvent('dataset:version:restored', projectId, {
         datasetId,
         restoredFromVersion: versionNumber,
         newVersionNumber: nextVersionNumber,

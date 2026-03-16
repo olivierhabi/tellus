@@ -166,9 +166,12 @@ async function migrateFoundry(): Promise<void> {
         dataset_id UUID NOT NULL REFERENCES foundry_datasets(id) ON DELETE CASCADE,
         version_number INTEGER NOT NULL,
         file_path TEXT NOT NULL,
+        file_size_bytes BIGINT,
         row_count INTEGER,
         column_count INTEGER,
-        schema_info JSONB,
+        content_hash VARCHAR(64),
+        schema_snapshot JSONB,
+        change_summary TEXT,
         created_by UUID,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         CONSTRAINT uq_dataset_version UNIQUE (dataset_id, version_number)

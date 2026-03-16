@@ -30,10 +30,12 @@ export class PreferenceService {
   }
 
   async setPreference(userId: string, key: string, value: any): Promise<void> {
+    // Knex pg driver auto-serializes objects for JSONB columns;
+    // wrapping in JSON.stringify() would double-serialize the value.
     await this.knex('user_preferences')
-      .insert({ user_id: userId, preference_key: key, preference_value: JSON.stringify(value) })
+      .insert({ user_id: userId, preference_key: key, preference_value: value })
       .onConflict(['user_id', 'preference_key'])
-      .merge({ preference_value: JSON.stringify(value), updated_at: this.knex.fn.now() });
+      .merge({ preference_value: value, updated_at: this.knex.fn.now() });
   }
 
   async deletePreference(userId: string, key: string): Promise<boolean> {

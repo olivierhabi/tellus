@@ -13,7 +13,9 @@ export class SearchService {
     }
 
     const searchTerm = q.trim();
-    const ilikeTerm = `%${searchTerm}%`;
+    // Escape LIKE special characters to prevent wildcard injection
+    const escapedTerm = searchTerm.replace(/[\\%_]/g, '\\$&');
+    const ilikeTerm = `%${escapedTerm}%`;
     const results: Record<string, unknown>[] = [];
 
     if (!type || type === 'project') {

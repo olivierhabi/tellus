@@ -8,7 +8,7 @@ const router = Router();
 const authService = new AuthService(foundryDb);
 const authController = new AuthController(authService);
 
-const AUTH_RATE_LIMIT_MAX = parseInt(process.env.AUTH_RATE_LIMIT_MAX || '20', 10);
+const AUTH_RATE_LIMIT_MAX = parseInt(process.env.AUTH_RATE_LIMIT_MAX || '5', 10);
 const authLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: AUTH_RATE_LIMIT_MAX,
