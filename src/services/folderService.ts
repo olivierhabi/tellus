@@ -44,6 +44,11 @@ export class FolderService {
     'original_filename', 'mime_type', 'created_at', 'updated_at',
   ]);
 
+  async folderExists(projectId: string, folderId: string): Promise<boolean> {
+    const row = await this.knex('folders').where({ id: folderId, project_id: projectId }).select('id').first();
+    return !!row;
+  }
+
   async getFolderById(projectId: string, folderId: string, sortBy = 'name', sortOrder: 'asc' | 'desc' = 'asc') {
     const folder = await this.knex('folders').where({ id: folderId, project_id: projectId }).first();
     if (!folder) return null;

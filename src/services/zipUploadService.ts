@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { AppError } from '../utils/foundryAppError';
+import { foundryEnv } from '../config/foundryEnv';
 import { scheduleParseJob } from '../jobs/parseDatasetJob';
 
 const execFileAsync = promisify(execFile);
@@ -85,9 +86,10 @@ export class ZipUploadService {
         if (!ALLOWED_EXTENSIONS.has(ext)) { result.skipped.push(entry.name); continue; }
 
         try {
-          const uploadDir = path.dirname(fullPath);
+          const targetDir = path.join(foundryEnv.UPLOAD_DIR, projectId, parentFolderId);
+          await fs.promises.mkdir(targetDir, { recursive: true });
           const uniqueName = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}${ext}`;
-          const destPath = path.join(uploadDir, uniqueName);
+          const destPath = path.join(targetDir, uniqueName);
           await fs.promises.copyFile(fullPath, destPath);
           const fileStat = await fs.promises.stat(destPath);
 

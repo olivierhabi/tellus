@@ -39,8 +39,8 @@ export class UploadController {
       }
 
       // Validate folder exists
-      const folder = await this.folderService.getFolderById(projectId, folderId);
-      if (!folder) {
+      const folderExists = await this.folderService.folderExists(projectId, folderId);
+      if (!folderExists) {
         throw new AppError('Folder not found', 404, 'NOT_FOUND');
       }
 
