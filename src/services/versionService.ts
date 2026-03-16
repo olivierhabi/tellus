@@ -58,17 +58,22 @@ export class VersionService {
     const versionFilePath = path.join(versionDir, versionFileName);
     await fs.promises.copyFile(dataset.file_path, versionFilePath);
 
-    const columns = await this.knex('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
+    try {
+      const columns = await this.knex('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
 
-    const [version] = await this.knex('dataset_versions')
-      .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: versionFilePath, file_size_bytes: dataset.file_size_bytes, row_count: dataset.row_count, column_count: dataset.column_count, content_hash: dataset.content_hash, schema_snapshot: JSON.stringify(columns), change_summary: input.changeSummary || null, created_by: input.createdBy || null })
-      .returning('*');
+      const [version] = await this.knex('dataset_versions')
+        .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: versionFilePath, file_size_bytes: dataset.file_size_bytes, row_count: dataset.row_count, column_count: dataset.column_count, content_hash: dataset.content_hash, schema_snapshot: JSON.stringify(columns), change_summary: input.changeSummary || null, created_by: input.createdBy || null })
+        .returning('*');
 
-    // Resolve project_id from folder for correct WebSocket event delivery
-    const folder = await this.knex('folders').where({ id: dataset.folder_id }).first();
-    const projectId = folder?.project_id ?? dataset.folder_id;
-    emitDatasetEvent('dataset:version:created', projectId, { datasetId, versionNumber: nextVersionNumber });
-    return version;
+      // Resolve project_id from folder for correct WebSocket event delivery
+      const folder = await this.knex('folders').where({ id: dataset.folder_id }).first();
+      const projectId = folder?.project_id ?? dataset.folder_id;
+      emitDatasetEvent('dataset:version:created', projectId, { datasetId, versionNumber: nextVersionNumber });
+      return version;
+    } catch (error) {
+      await fs.promises.unlink(versionFilePath).catch(() => {});
+      throw error;
+    }
   }
 
   async restoreVersion(datasetId: string, versionNumber: number, restoredBy?: string): Promise<DatasetVersion> {
@@ -95,31 +100,38 @@ export class VersionService {
       try { await fs.promises.copyFile(dataset.file_path, snapshotFilePath); }
       catch { snapshotFilePath = null; /* If current file doesn't exist, skip pre-restore snapshot */ }
 
-      await fs.promises.copyFile(targetVersion.file_path, dataset.file_path);
+      try {
+        await fs.promises.copyFile(targetVersion.file_path, dataset.file_path);
 
-      await trx('foundry_datasets').where({ id: datasetId }).update({ row_count: targetVersion.row_count, column_count: targetVersion.column_count, content_hash: targetVersion.content_hash, file_size_bytes: targetVersion.file_size_bytes, status: 'ready' });
+        await trx('foundry_datasets').where({ id: datasetId }).update({ row_count: targetVersion.row_count, column_count: targetVersion.column_count, content_hash: targetVersion.content_hash, file_size_bytes: targetVersion.file_size_bytes, status: 'ready' });
 
-      if (targetVersion.schema_snapshot) {
-        const schemaColumns = typeof targetVersion.schema_snapshot === 'string' ? JSON.parse(targetVersion.schema_snapshot) : targetVersion.schema_snapshot;
-        if (Array.isArray(schemaColumns)) {
-          await trx('dataset_columns').where({ dataset_id: datasetId }).delete();
-          for (const col of schemaColumns) {
-            await trx('dataset_columns').insert({ dataset_id: datasetId, column_name: col.column_name, column_type: col.column_type, ordinal_position: col.ordinal_position, nullable: col.nullable });
+        if (targetVersion.schema_snapshot) {
+          const schemaColumns = typeof targetVersion.schema_snapshot === 'string' ? JSON.parse(targetVersion.schema_snapshot) : targetVersion.schema_snapshot;
+          if (Array.isArray(schemaColumns)) {
+            await trx('dataset_columns').where({ dataset_id: datasetId }).delete();
+            for (const col of schemaColumns) {
+              await trx('dataset_columns').insert({ dataset_id: datasetId, column_name: col.column_name, column_type: col.column_type, ordinal_position: col.ordinal_position, nullable: col.nullable });
+            }
           }
         }
+
+        const currentColumns = await trx('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
+
+        const [restoreVersion] = await trx('dataset_versions')
+          .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: snapshotFilePath ?? targetVersion.file_path, file_size_bytes: targetVersion.file_size_bytes, row_count: targetVersion.row_count, column_count: targetVersion.column_count, content_hash: targetVersion.content_hash, schema_snapshot: JSON.stringify(currentColumns), change_summary: `Restored from version ${versionNumber}`, created_by: restoredBy || null })
+          .returning('*');
+
+        // Resolve project_id from folder for correct WebSocket event delivery
+        const folder = await trx('folders').where({ id: dataset.folder_id }).first();
+        const projectId = folder?.project_id ?? dataset.folder_id;
+        emitDatasetEvent('dataset:version:restored', projectId, { datasetId, restoredFromVersion: versionNumber, newVersionNumber: nextVersionNumber });
+        return restoreVersion;
+      } catch (error) {
+        if (snapshotFilePath) {
+          await fs.promises.unlink(snapshotFilePath).catch(() => {});
+        }
+        throw error;
       }
-
-      const currentColumns = await trx('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
-
-      const [restoreVersion] = await trx('dataset_versions')
-        .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: snapshotFilePath ?? targetVersion.file_path, file_size_bytes: targetVersion.file_size_bytes, row_count: targetVersion.row_count, column_count: targetVersion.column_count, content_hash: targetVersion.content_hash, schema_snapshot: JSON.stringify(currentColumns), change_summary: `Restored from version ${versionNumber}`, created_by: restoredBy || null })
-        .returning('*');
-
-      // Resolve project_id from folder for correct WebSocket event delivery
-      const folder = await trx('folders').where({ id: dataset.folder_id }).first();
-      const projectId = folder?.project_id ?? dataset.folder_id;
-      emitDatasetEvent('dataset:version:restored', projectId, { datasetId, restoredFromVersion: versionNumber, newVersionNumber: nextVersionNumber });
-      return restoreVersion;
     });
   }
 }

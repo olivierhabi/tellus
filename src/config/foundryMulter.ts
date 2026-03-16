@@ -6,6 +6,7 @@ import { Request } from 'express';
 import { AppError } from '../utils/foundryAppError';
 
 const ALLOWED_EXTENSIONS = ['.csv', '.tsv', '.txt'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Factory function that creates a configured multer upload middleware.
@@ -16,6 +17,14 @@ export function createUploadMiddleware(uploadDir: string, maxSizeMB: number) {
       const req = _req as Request;
       const projectId = req.params.projectId as string;
       const folderId = req.params.folderId as string;
+
+      if (!projectId || !UUID_RE.test(projectId)) {
+        return cb(new AppError('Invalid project ID', 400, 'VALIDATION_ERROR'), '');
+      }
+      if (!folderId || !UUID_RE.test(folderId)) {
+        return cb(new AppError('Invalid folder ID', 400, 'VALIDATION_ERROR'), '');
+      }
+
       const dest = path.join(uploadDir, projectId, folderId);
       fs.mkdirSync(dest, { recursive: true });
       cb(null, dest);

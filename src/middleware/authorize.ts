@@ -12,7 +12,7 @@ export function authorizeRoles(...allowedRoles: string[]) {
 
       const projectId = (req.params.projectId || req.params.id) as string;
       if (!projectId) {
-        return next();
+        throw new AppError('Access denied: project context is required for authorization', 403, 'FORBIDDEN');
       }
 
       const membership = await foundryDb('project_members')
