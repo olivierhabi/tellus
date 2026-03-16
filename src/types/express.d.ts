@@ -1,7 +1,3 @@
-import 'express-serve-static-core';
-
-declare module 'express-serve-static-core' {
-  interface Request {
-    correlationId?: string;
-  }
-}
+// Express Request type extension
+// The correlationId property is set via (req as any).correlationId
+// in src/middleware/correlationId.ts
