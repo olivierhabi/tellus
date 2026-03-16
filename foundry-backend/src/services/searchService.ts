@@ -27,7 +27,9 @@ export class SearchService {
     }
 
     const searchTerm = q.trim();
-    const ilikeTerm = `%${searchTerm}%`;
+    // Escape LIKE special characters to prevent wildcard injection
+    const escapedTerm = searchTerm.replace(/[\\%_]/g, '\\$&');
+    const ilikeTerm = `%${escapedTerm}%`;
     const results: Record<string, unknown>[] = [];
 
     if (!type || type === 'project') {
@@ -72,7 +74,9 @@ export class SearchService {
 
   async suggest(q: string, ownerId: string): Promise<{ name: string; type: string }[]> {
     if (!q || q.trim().length === 0) return [];
-    const prefix = `${q.trim()}%`;
+    // Escape LIKE special characters to prevent wildcard injection
+    const escapedPrefix = q.trim().replace(/[\\%_]/g, '\\$&');
+    const prefix = `${escapedPrefix}%`;
     const suggestions: { name: string; type: string }[] = [];
 
     const projects = await this.knex('projects')
