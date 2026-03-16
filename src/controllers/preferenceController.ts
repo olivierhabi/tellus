@@ -7,7 +7,10 @@ export class PreferenceController {
 
   private getUserId(req: Request): string {
     const user = (req as any).user;
-    return user?.id ?? '550e8400-e29b-41d4-a716-446655440000';
+    if (!user?.id) {
+      throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+    }
+    return user.id;
   }
 
   getAll = async (req: Request, res: Response, next: NextFunction) => {
