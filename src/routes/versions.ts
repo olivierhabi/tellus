@@ -10,8 +10,8 @@ const versionController = new VersionController(versionService);
 const router = Router();
 
 router.get('/:datasetId/versions', authenticate, versionController.listVersions);
+router.post('/:datasetId/versions/restore', authenticate, versionController.restoreVersion);
 router.get('/:datasetId/versions/:versionNumber', authenticate, versionController.getVersion);
 router.post('/:datasetId/versions', authenticate, versionController.createVersion);
-router.post('/:datasetId/versions/restore', authenticate, versionController.restoreVersion);
 
 export default router;
