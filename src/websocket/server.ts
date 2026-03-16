@@ -9,10 +9,16 @@ interface ClientState {
 }
 
 let wss: WebSocketServer | null = null;
+let currentEventHandler: ((...args: unknown[]) => void) | null = null;
 
 export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
   if (wss) {
     console.warn('[websocket] WebSocket server already initialized, closing previous instance');
+    // Remove the stale eventBus listener before closing
+    if (currentEventHandler) {
+      eventBus.removeListener('ws:event', currentEventHandler);
+      currentEventHandler = null;
+    }
     wss.close();
   }
   wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -56,18 +62,27 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
     ws.on('error', () => { clients.delete(ws); });
   });
 
-  // Forward EventBus events to subscribed WebSocket clients
-  eventBus.on('ws:event', (data: { event: string; projectId: string | null; payload: unknown }) => {
+  // Forward EventBus events to subscribed WebSocket clients.
+  // Store the handler reference so it can be removed on re-initialization.
+  currentEventHandler = (data: unknown) => {
+    const event = data as { event: string; projectId: string | null; payload: unknown };
     clients.forEach((state) => {
       if (state.ws.readyState === WebSocket.OPEN) {
-        if (!data.projectId || state.subscribedProjects.has(data.projectId)) {
-          state.ws.send(JSON.stringify(data));
+        if (!event.projectId || state.subscribedProjects.has(event.projectId)) {
+          state.ws.send(JSON.stringify(event));
         }
       }
     });
-  });
+  };
+  eventBus.on('ws:event', currentEventHandler);
 
-  wss.on('close', () => { clearInterval(heartbeatInterval); });
+  wss.on('close', () => {
+    clearInterval(heartbeatInterval);
+    if (currentEventHandler) {
+      eventBus.removeListener('ws:event', currentEventHandler);
+      currentEventHandler = null;
+    }
+  });
 
   console.log('[websocket] WebSocket server initialized on /ws');
   return wss;

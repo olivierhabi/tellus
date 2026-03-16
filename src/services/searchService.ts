@@ -19,56 +19,58 @@ export class SearchService {
     const escapedTerm = searchTerm.replace(/[\\%_]/g, '\\$&');
     const ilikeTerm = `%${escapedTerm}%`;
 
-    // Use a UNION ALL query to count and paginate at the database level
-    const subqueries: Knex.Raw[] = [];
+    // Build a UNION ALL with proper parameterized bindings.
+    // Collect SQL fragments (with ? placeholders) and their bindings separately,
+    // then pass everything to a single knex.raw() call.
+    const sqlParts: string[] = [];
+    const allBindings: unknown[] = [];
 
     if (!type || type === 'project') {
-      subqueries.push(this.knex.raw(
-        `SELECT id, name, 'project' AS "resourceType", updated_at FROM projects WHERE owner_id = ? AND name ILIKE ?`,
-        [ownerId, ilikeTerm]
-      ));
+      sqlParts.push(`(SELECT id, name, 'project' AS "resourceType", updated_at FROM projects WHERE owner_id = ? AND name ILIKE ?)`);
+      allBindings.push(ownerId, ilikeTerm);
     }
 
     if (!type || type === 'folder') {
-      const folderBindings: unknown[] = [ownerId, ilikeTerm];
-      let folderWhere = '';
+      let folderSql = `(SELECT folders.id, folders.name, 'folder' AS "resourceType", folders.updated_at FROM folders JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND folders.name ILIKE ?`;
+      allBindings.push(ownerId, ilikeTerm);
       if (projectId) {
-        folderWhere = ' AND folders.project_id = ?';
-        folderBindings.push(projectId);
+        folderSql += ' AND folders.project_id = ?';
+        allBindings.push(projectId);
       }
-      subqueries.push(this.knex.raw(
-        `SELECT folders.id, folders.name, 'folder' AS "resourceType", folders.updated_at FROM folders JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND folders.name ILIKE ?${folderWhere}`,
-        folderBindings
-      ));
+      folderSql += ')';
+      sqlParts.push(folderSql);
     }
 
     if (!type || type === 'dataset') {
-      const dsBindings: unknown[] = [ownerId, ilikeTerm];
-      let dsWhere = '';
+      let dsSql = `(SELECT foundry_datasets.id, foundry_datasets.name, 'dataset' AS "resourceType", foundry_datasets.updated_at FROM foundry_datasets JOIN folders ON foundry_datasets.folder_id = folders.id JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND foundry_datasets.name ILIKE ?`;
+      allBindings.push(ownerId, ilikeTerm);
       if (projectId) {
-        dsWhere = ' AND folders.project_id = ?';
-        dsBindings.push(projectId);
+        dsSql += ' AND folders.project_id = ?';
+        allBindings.push(projectId);
       }
-      subqueries.push(this.knex.raw(
-        `SELECT foundry_datasets.id, foundry_datasets.name, 'dataset' AS "resourceType", foundry_datasets.updated_at FROM foundry_datasets JOIN folders ON foundry_datasets.folder_id = folders.id JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND foundry_datasets.name ILIKE ?${dsWhere}`,
-        dsBindings
-      ));
+      dsSql += ')';
+      sqlParts.push(dsSql);
     }
 
-    if (subqueries.length === 0) {
+    if (sqlParts.length === 0) {
       return { results: [], meta: { page, limit, total: 0, totalPages: 0 } };
     }
 
-    const unionSql = subqueries.map((sq) => `(${sq.toQuery()})`).join(' UNION ALL ');
+    const unionSql = sqlParts.join(' UNION ALL ');
 
-    // Get total count
-    const countResult = await this.knex.raw(`SELECT COUNT(*) AS cnt FROM (${unionSql}) AS search_results`);
+    // Get total count with proper parameterization
+    const countBindings = [...allBindings];
+    const countResult = await this.knex.raw(
+      `SELECT COUNT(*) AS cnt FROM (${unionSql}) AS search_results`,
+      countBindings
+    );
     const total = Number(countResult.rows[0]?.cnt ?? 0);
 
-    // Get paginated results
+    // Get paginated results with proper parameterization
+    const dataBindings = [...allBindings, limit, offset];
     const dataResult = await this.knex.raw(
       `SELECT * FROM (${unionSql}) AS search_results ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
-      [limit, offset]
+      dataBindings
     );
 
     const results = dataResult.rows as Record<string, unknown>[];
