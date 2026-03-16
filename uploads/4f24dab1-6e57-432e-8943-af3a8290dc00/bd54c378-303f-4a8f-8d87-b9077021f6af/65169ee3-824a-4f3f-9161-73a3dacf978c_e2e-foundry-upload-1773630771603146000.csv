@@ -1,0 +1,6 @@
+id,name,department,salary,start_date,is_active
+1,Alice Smith,Engineering,95000.50,2024-01-15,true
+2,Bob Jones,Marketing,82000.00,2024-02-20,true
+3,Carol Lee,Engineering,91000.75,2024-03-10,false
+4,Dave Kim,Sales,67500.25,2024-04-05,true
+5,Eve Park,Engineering,105000.00,2024-05-01,true

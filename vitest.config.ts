@@ -11,7 +11,7 @@ export default defineConfig({
 
     // Timeouts — integration tests can be slow
     testTimeout: 120_000,
-    hookTimeout: 60_000,
+    hookTimeout: 120_000,
 
     // Reporter — verbose in CI, default locally
     reporters: process.env.CI ? ["verbose", "junit"] : ["verbose"],

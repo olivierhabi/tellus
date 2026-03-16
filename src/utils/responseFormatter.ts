@@ -283,6 +283,14 @@ export const ERROR_CODES: Record<string, number> = {
   DUPLICATE_MAPPING_TARGET: 400,
   INVALID_FORMAT: 400,
   NOT_IMPLEMENTED: 404,
+  // Foundry data ingestion layer error codes (BE-001 through BE-030)
+  VALIDATION_ERROR: 400,
+  NOT_FOUND: 404,
+  CONFLICT: 409,
+  UNAUTHORIZED: 401,
+  FORBIDDEN: 403,
+  UNSUPPORTED_FILE: 415,
+  RATE_LIMITED: 429,
 };
 
 // ---------------------------------------------------------------------------
