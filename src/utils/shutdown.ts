@@ -140,8 +140,4 @@ export async function shutdown(
 
   clearTimeout(forceExitTimer);
   console.log('[shutdown] Graceful shutdown complete');
-
-  // Exit the process so it doesn't hang. Callers should not need to
-  // chain their own process.exit() after awaiting shutdown().
-  process.exit(0);
 }

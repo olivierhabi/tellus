@@ -8,6 +8,8 @@ interface ClientState {
   isAlive: boolean;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 let wss: WebSocketServer | null = null;
 let currentEventHandler: ((...args: unknown[]) => void) | null = null;
 
@@ -47,11 +49,19 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
       try {
         const msg = JSON.parse(raw.toString());
         if (msg.action === 'subscribe' && msg.projectId) {
-          state.subscribedProjects.add(msg.projectId);
-          ws.send(JSON.stringify({ type: 'subscribed', projectId: msg.projectId }));
+          if (!UUID_RE.test(msg.projectId)) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid projectId format' }));
+          } else {
+            state.subscribedProjects.add(msg.projectId);
+            ws.send(JSON.stringify({ type: 'subscribed', projectId: msg.projectId }));
+          }
         } else if (msg.action === 'unsubscribe' && msg.projectId) {
-          state.subscribedProjects.delete(msg.projectId);
-          ws.send(JSON.stringify({ type: 'unsubscribed', projectId: msg.projectId }));
+          if (!UUID_RE.test(msg.projectId)) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid projectId format' }));
+          } else {
+            state.subscribedProjects.delete(msg.projectId);
+            ws.send(JSON.stringify({ type: 'unsubscribed', projectId: msg.projectId }));
+          }
         }
       } catch {
         ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));

@@ -83,13 +83,14 @@ class ColumnAccumulator {
     }
     if (BOOLEAN_VALUES.has(trimmed)) {
       this.booleanCount++;
-    }
-    const numVal = Number(trimmed);
-    if (trimmed !== '' && !isNaN(numVal) && isFinite(numVal)) {
-      this.numericCount++;
-      this.welford.addValue(numVal);
-      if (Number.isInteger(numVal) && !trimmed.includes('.')) {
-        this.integerCount++;
+    } else {
+      const numVal = Number(trimmed);
+      if (trimmed !== '' && !isNaN(numVal) && isFinite(numVal)) {
+        this.numericCount++;
+        this.welford.addValue(numVal);
+        if (Number.isInteger(numVal) && !trimmed.includes('.')) {
+          this.integerCount++;
+        }
       }
     }
     if (isTimestamp(trimmed)) {
@@ -158,6 +159,7 @@ export class CsvParsingService {
       const previewRows: Record<string, string>[] = [];
       let columnNames: string[] = [];
       let rowCount = 0;
+      let doneAnalyzing = false;
       let settled = false;
 
       const ext = filePath.toLowerCase();
@@ -196,18 +198,19 @@ export class CsvParsingService {
               accumulators.set(col, new ColumnAccumulator());
             }
           }
-          if (previewRows.length < PREVIEW_ROWS) {
-            previewRows.push({ ...record });
-          }
-          for (const col of columnNames) {
-            const acc = accumulators.get(col);
-            if (acc) {
-              acc.addValue(record[col] ?? '');
+          if (!doneAnalyzing) {
+            if (previewRows.length < PREVIEW_ROWS) {
+              previewRows.push({ ...record });
             }
-          }
-          if (rowCount >= MAX_SAMPLE_ROWS) {
-            parser.destroy();
-            break;
+            for (const col of columnNames) {
+              const acc = accumulators.get(col);
+              if (acc) {
+                acc.addValue(record[col] ?? '');
+              }
+            }
+            if (rowCount >= MAX_SAMPLE_ROWS) {
+              doneAnalyzing = true;
+            }
           }
         }
       });

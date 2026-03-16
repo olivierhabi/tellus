@@ -29,6 +29,7 @@ import membersRouter from './routes/members';
 import columnStatsRouter from './routes/columnStats';
 import versionsRouter from './routes/versions';
 import { projectDuplicatesRouter, datasetDeduplicateRouter } from './routes/duplicates';
+import foundryPreferencesRouter from './routes/preferences';
 import { initWebSocketServer } from './websocket/server';
 import { setupSwagger } from './docs/openapi';
 import { shutdown } from './utils/shutdown';
@@ -65,6 +66,7 @@ app.use('/api/datasets', columnStatsRouter);
 app.use('/api/datasets', versionsRouter);
 app.use('/api/datasets', datasetDeduplicateRouter);
 app.use('/api/projects', projectDuplicatesRouter);
+app.use('/api/users/me/preferences', foundryPreferencesRouter);
 
 // OpenAPI/Swagger Documentation
 setupSwagger(app);
