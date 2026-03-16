@@ -26,12 +26,12 @@ export class SearchService {
     const allBindings: unknown[] = [];
 
     if (!type || type === 'project') {
-      sqlParts.push(`(SELECT id, name, 'project' AS "resourceType", updated_at FROM projects WHERE owner_id = ? AND name ILIKE ?)`);
+      sqlParts.push(`(SELECT id, name, 'project' AS "resourceType", updated_at FROM projects WHERE owner_id = ? AND name ILIKE ? ESCAPE '\\')`);
       allBindings.push(ownerId, ilikeTerm);
     }
 
     if (!type || type === 'folder') {
-      let folderSql = `(SELECT folders.id, folders.name, 'folder' AS "resourceType", folders.updated_at FROM folders JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND folders.name ILIKE ?`;
+      let folderSql = `(SELECT folders.id, folders.name, 'folder' AS "resourceType", folders.updated_at FROM folders JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND folders.name ILIKE ? ESCAPE '\\'`;
       allBindings.push(ownerId, ilikeTerm);
       if (projectId) {
         folderSql += ' AND folders.project_id = ?';
@@ -42,7 +42,7 @@ export class SearchService {
     }
 
     if (!type || type === 'dataset') {
-      let dsSql = `(SELECT foundry_datasets.id, foundry_datasets.name, 'dataset' AS "resourceType", foundry_datasets.updated_at FROM foundry_datasets JOIN folders ON foundry_datasets.folder_id = folders.id JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND foundry_datasets.name ILIKE ?`;
+      let dsSql = `(SELECT foundry_datasets.id, foundry_datasets.name, 'dataset' AS "resourceType", foundry_datasets.updated_at FROM foundry_datasets JOIN folders ON foundry_datasets.folder_id = folders.id JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND foundry_datasets.name ILIKE ? ESCAPE '\\'`;
       allBindings.push(ownerId, ilikeTerm);
       if (projectId) {
         dsSql += ' AND folders.project_id = ?';
@@ -84,16 +84,16 @@ export class SearchService {
     const prefix = `${escapedPrefix}%`;
     const suggestions: { name: string; type: string }[] = [];
 
-    const projects = await this.knex('projects').where({ owner_id: ownerId }).where('name', 'ilike', prefix).select('name').limit(10);
+    const projects = await this.knex('projects').where({ owner_id: ownerId }).whereRaw("name ILIKE ? ESCAPE '\\'", [prefix]).select('name').limit(10);
     suggestions.push(...projects.map((p: Record<string, unknown>) => ({ name: p.name as string, type: 'project' })));
 
     if (suggestions.length < 10) {
-      const folders = await this.knex('folders').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).where('folders.name', 'ilike', prefix).select('folders.name').limit(10 - suggestions.length);
+      const folders = await this.knex('folders').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).whereRaw("folders.name ILIKE ? ESCAPE '\\'", [prefix]).select('folders.name').limit(10 - suggestions.length);
       suggestions.push(...folders.map((f: Record<string, unknown>) => ({ name: f.name as string, type: 'folder' })));
     }
 
     if (suggestions.length < 10) {
-      const datasets = await this.knex('foundry_datasets').join('folders', 'foundry_datasets.folder_id', 'folders.id').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).where('foundry_datasets.name', 'ilike', prefix).select('foundry_datasets.name').limit(10 - suggestions.length);
+      const datasets = await this.knex('foundry_datasets').join('folders', 'foundry_datasets.folder_id', 'folders.id').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).whereRaw("foundry_datasets.name ILIKE ? ESCAPE '\\'", [prefix]).select('foundry_datasets.name').limit(10 - suggestions.length);
       suggestions.push(...datasets.map((d: Record<string, unknown>) => ({ name: d.name as string, type: 'dataset' })));
     }
 
