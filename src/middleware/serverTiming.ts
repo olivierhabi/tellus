@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 
 export function serverTiming(req: Request, res: Response, next: NextFunction) {
   const start = process.hrtime.bigint();
-  const originalJson = res.json;
+  const originalJson = res.json.bind(res);
 
   // Wrap res.json: restore the original after first call to prevent
   // stacking if another middleware or error handler also calls res.json.
