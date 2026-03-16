@@ -1,7 +1,7 @@
 import { Knex } from 'knex';
 import * as fs from 'fs';
 import { parse } from 'csv-parse';
-import { AppError } from '../utils/foundryAppError';
+import { AppError, NotFoundError, ConflictError } from '../utils/foundryAppError';
 import { DatasetListQuery } from '../types/dataset';
 
 export class DatasetService {
@@ -196,5 +196,74 @@ export class DatasetService {
       originalFilename: dataset.original_filename,
       mimeType: dataset.mime_type,
     };
+  }
+
+  async updateDataset(datasetId: string, updates: { name?: string; folderId?: string }): Promise<any> {
+    const dataset = await this.knex('foundry_datasets').where({ id: datasetId }).first();
+    if (!dataset) throw NotFoundError('Dataset not found');
+
+    const updateData: any = { updated_at: new Date() };
+    if (updates.name !== undefined) {
+      // Check for duplicate name in same folder
+      const existing = await this.knex('foundry_datasets')
+        .where({ folder_id: updates.folderId ?? dataset.folder_id, name: updates.name })
+        .whereNot({ id: datasetId })
+        .first();
+      if (existing) throw ConflictError('A dataset with this name already exists in this folder');
+      updateData.name = updates.name;
+    }
+    if (updates.folderId !== undefined) {
+      updateData.folder_id = updates.folderId;
+    }
+
+    const [updated] = await this.knex('foundry_datasets').where({ id: datasetId }).update(updateData).returning('*');
+    return updated;
+  }
+
+  async deleteDataset(datasetId: string): Promise<void> {
+    const dataset = await this.knex('foundry_datasets').where({ id: datasetId }).first();
+    if (!dataset) throw NotFoundError('Dataset not found');
+
+    // Delete columns first (FK)
+    await this.knex('dataset_columns').where({ dataset_id: datasetId }).delete();
+    // Delete versions
+    await this.knex('dataset_versions').where({ dataset_id: datasetId }).delete();
+    // Delete dataset
+    await this.knex('foundry_datasets').where({ id: datasetId }).delete();
+  }
+
+  async duplicateDataset(datasetId: string): Promise<any> {
+    const dataset = await this.knex('foundry_datasets').where({ id: datasetId }).first();
+    if (!dataset) throw NotFoundError('Dataset not found');
+
+    const newName = dataset.name.replace(/(\.[^.]+)$/, ' (copy)$1');
+    const [dup] = await this.knex('foundry_datasets').insert({
+      name: newName,
+      folder_id: dataset.folder_id,
+      file_path: dataset.file_path,
+      original_filename: dataset.original_filename,
+      mime_type: dataset.mime_type,
+      file_size_bytes: dataset.file_size_bytes,
+      row_count: dataset.row_count,
+      column_count: dataset.column_count,
+      schema_info: dataset.schema_info ? JSON.stringify(dataset.schema_info) : null,
+      status: dataset.status,
+      content_hash: dataset.content_hash,
+    }).returning('*');
+
+    // Copy columns
+    const columns = await this.knex('dataset_columns').where({ dataset_id: datasetId });
+    if (columns.length > 0) {
+      await this.knex('dataset_columns').insert(columns.map((c: any) => ({
+        dataset_id: dup.id,
+        column_name: c.column_name,
+        column_type: c.column_type,
+        ordinal_position: c.ordinal_position,
+        nullable: c.nullable,
+        sample_values: JSON.stringify(c.sample_values ?? []),
+      })));
+    }
+
+    return dup;
   }
 }

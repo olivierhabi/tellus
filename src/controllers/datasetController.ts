@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { DatasetService } from '../services/datasetService';
 import { DatasetListQuerySchema, DatasetPreviewQuerySchema } from '../types/dataset';
 import { AppError } from '../utils/foundryAppError';
+import { sendSuccess, sendCreated, sendError } from '../utils/foundryResponse';
 import { z } from 'zod';
 
 const UuidParam = z.string().uuid('Invalid UUID format');
@@ -150,5 +151,50 @@ export class DatasetController {
     } catch (error) {
       next(error);
     }
+  };
+
+  /**
+   * Update a dataset (name and/or folderId).
+   */
+  update = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { datasetId } = req.params;
+      const uuidParse = z.string().uuid().safeParse(datasetId);
+      if (!uuidParse.success) return sendError(res, 400, 'VALIDATION_ERROR', 'Invalid dataset ID');
+
+      const { name, folderId } = req.body;
+      if (!name && folderId === undefined) return sendError(res, 400, 'VALIDATION_ERROR', 'At least one field (name or folderId) is required');
+
+      const updated = await this.datasetService.updateDataset(datasetId, { name, folderId });
+      return sendSuccess(res, updated);
+    } catch (err) { next(err); }
+  };
+
+  /**
+   * Delete a dataset.
+   */
+  delete = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { datasetId } = req.params;
+      const uuidParse = z.string().uuid().safeParse(datasetId);
+      if (!uuidParse.success) return sendError(res, 400, 'VALIDATION_ERROR', 'Invalid dataset ID');
+
+      await this.datasetService.deleteDataset(datasetId);
+      return res.status(204).send();
+    } catch (err) { next(err); }
+  };
+
+  /**
+   * Duplicate a dataset.
+   */
+  duplicate = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { datasetId } = req.params;
+      const uuidParse = z.string().uuid().safeParse(datasetId);
+      if (!uuidParse.success) return sendError(res, 400, 'VALIDATION_ERROR', 'Invalid dataset ID');
+
+      const dup = await this.datasetService.duplicateDataset(datasetId);
+      return sendCreated(res, dup);
+    } catch (err) { next(err); }
   };
 }

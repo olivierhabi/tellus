@@ -45,6 +45,8 @@ import foundryColumnStatsRouter from "./routes/columnStats";
 import foundryVersionsRouter from "./routes/versions";
 import { projectDuplicatesRouter, datasetDeduplicateRouter } from "./routes/duplicates";
 import foundryPreferencesRouter from "./routes/preferences";
+import { devRouter } from "./routes/devTools";
+import { healthDetailedRouter } from "./routes/healthDetailed";
 import { initWebSocketServer, getWss } from "./websocket/server";
 import { setupSwagger as setupFoundrySwagger } from "./docs/openapi";
 import { cleanupExpiredKeys } from "./actions/idempotency";
@@ -117,8 +119,8 @@ app.use(
   cors({
     origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
-    exposedHeaders: ["X-Idempotency-Cached", "X-Total-Count", "Server-Timing", "Retry-After", "Content-Language"],
+    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "X-Request-ID"],
+    exposedHeaders: ["X-Idempotency-Cached", "X-Total-Count", "Server-Timing", "Retry-After", "Content-Language", "X-Request-ID"],
   })
 );
 
@@ -149,6 +151,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
+
+// Detailed health check (must be before the foundry /health route)
+app.use("/health", healthDetailedRouter);
 
 /**
  * GET /health
@@ -282,6 +287,9 @@ app.use("/api/v2/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, {
   customCss: ".swagger-ui .topbar { display: none }",
   customSiteTitle: "Tellus Ontology Engine — API Docs",
 }));
+
+// Dev tools (seed/reset/status) — only active in non-production
+app.use("/api/dev", devRouter);
 
 // Foundry API docs (BE-029) — must be before notFoundHandler
 setupFoundrySwagger(app);

@@ -10,12 +10,9 @@ export interface DatasetVersion {
   dataset_id: string;
   version_number: number;
   file_path: string;
-  file_size_bytes: number;
   row_count: number | null;
   column_count: number | null;
-  content_hash: string | null;
-  schema_snapshot: unknown;
-  change_summary: string | null;
+  schema_info: unknown;
   created_by: string | null;
   created_at: string;
 }
@@ -62,7 +59,7 @@ export class VersionService {
       const columns = await this.knex('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
 
       const [version] = await this.knex('dataset_versions')
-        .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: versionFilePath, file_size_bytes: dataset.file_size_bytes, row_count: dataset.row_count, column_count: dataset.column_count, content_hash: dataset.content_hash, schema_snapshot: JSON.stringify(columns), change_summary: input.changeSummary || null, created_by: input.createdBy || null })
+        .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: versionFilePath, row_count: dataset.row_count, column_count: dataset.column_count, schema_info: JSON.stringify(columns), created_by: input.createdBy || null })
         .returning('*');
 
       // Resolve project_id from folder for correct WebSocket event delivery
@@ -103,10 +100,10 @@ export class VersionService {
       try {
         await fs.promises.copyFile(targetVersion.file_path, dataset.file_path);
 
-        await trx('foundry_datasets').where({ id: datasetId }).update({ row_count: targetVersion.row_count, column_count: targetVersion.column_count, content_hash: targetVersion.content_hash, file_size_bytes: targetVersion.file_size_bytes, status: 'ready' });
+        await trx('foundry_datasets').where({ id: datasetId }).update({ row_count: targetVersion.row_count, column_count: targetVersion.column_count, status: 'ready' });
 
-        if (targetVersion.schema_snapshot) {
-          const schemaColumns = typeof targetVersion.schema_snapshot === 'string' ? JSON.parse(targetVersion.schema_snapshot) : targetVersion.schema_snapshot;
+        if (targetVersion.schema_info) {
+          const schemaColumns = typeof targetVersion.schema_info === 'string' ? JSON.parse(targetVersion.schema_info) : targetVersion.schema_info;
           if (Array.isArray(schemaColumns)) {
             await trx('dataset_columns').where({ dataset_id: datasetId }).delete();
             for (const col of schemaColumns) {
@@ -118,7 +115,7 @@ export class VersionService {
         const currentColumns = await trx('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
 
         const [restoreVersion] = await trx('dataset_versions')
-          .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: snapshotFilePath ?? targetVersion.file_path, file_size_bytes: targetVersion.file_size_bytes, row_count: targetVersion.row_count, column_count: targetVersion.column_count, content_hash: targetVersion.content_hash, schema_snapshot: JSON.stringify(currentColumns), change_summary: `Restored from version ${versionNumber}`, created_by: restoredBy || null })
+          .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: snapshotFilePath ?? targetVersion.file_path, row_count: targetVersion.row_count, column_count: targetVersion.column_count, schema_info: JSON.stringify(currentColumns), created_by: restoredBy || null })
           .returning('*');
 
         // Resolve project_id from folder for correct WebSocket event delivery

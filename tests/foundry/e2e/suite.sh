@@ -2044,6 +2044,128 @@ if [[ -n "$VER_PROJ" ]]; then
 fi
 
 # ===========================================================================
+# 51. BE-NEW — Dataset Update (Rename/Move) Tests
+# ===========================================================================
+section "51. Dataset Update (Rename/Move)"
+
+# Extract user ID from token for member add
+E2E_JWT_PAYLOAD=$(echo "$ACCESS_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null || echo "{}")
+E2E_UID=$(echo "$E2E_JWT_PAYLOAD" | grep -o '"userId":"[^"]*"' | head -1 | sed 's/"userId":"//;s/"$//' || true)
+if [[ -z "$E2E_UID" ]]; then
+  E2E_UID=$(echo "$E2E_JWT_PAYLOAD" | grep -o '"sub":"[^"]*"' | head -1 | sed 's/"sub":"//;s/"$//' || true)
+fi
+if [[ -z "$E2E_UID" ]]; then
+  E2E_UID=$(echo "$E2E_JWT_PAYLOAD" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"$//' || true)
+fi
+
+RESP=$(do_request POST "/api/projects" '{"name":"E2E Dataset Ops"}')
+E2E_PID=$(json_field "$RESP" "id")
+assert_not_empty "$E2E_PID" "Created test project for dataset ops"
+
+if [[ -n "$E2E_UID" ]]; then
+  do_request POST "/api/projects/$E2E_PID/members" "{\"userId\":\"$E2E_UID\",\"role\":\"editor\"}" >/dev/null 2>&1
+fi
+
+RESP=$(do_request POST "/api/projects/$E2E_PID/folders" '{"name":"ops-folder","parentFolderId":null}')
+E2E_FID=$(json_field "$RESP" "id")
+assert_not_empty "$E2E_FID" "Created test folder"
+
+RESP=$(do_upload "/api/projects/$E2E_PID/folders/$E2E_FID/upload" "tests/foundry/fixtures/valid.csv")
+E2E_DID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo "")
+if [[ -n "$E2E_DID" ]]; then
+  sleep 2
+
+  # Rename
+  RESP=$(do_request PUT "/api/datasets/$E2E_DID" '{"name":"renamed_e2e.csv"}')
+  assert_contains "$RESP" "renamed_e2e.csv" "PUT /datasets/:id renames dataset"
+
+  # Duplicate
+  sleep 1
+  RESP=$(do_request POST "/api/datasets/$E2E_DID/duplicate" '{}')
+  E2E_DUP_ID=$(json_field "$RESP" "id")
+  assert_not_empty "$E2E_DUP_ID" "POST /datasets/:id/duplicate creates copy"
+  assert_contains "$RESP" "copy" "Duplicate name contains copy"
+
+  # Delete duplicate
+  sleep 1
+  if [[ -n "$E2E_DUP_ID" ]]; then
+    RESP=$(do_request DELETE "/api/datasets/$E2E_DUP_ID" '')
+    pass "DELETE /datasets/:id works"
+  fi
+else
+  fail "Could not upload test file for dataset ops"
+fi
+
+do_request DELETE "/api/projects/$E2E_PID" '' >/dev/null 2>&1
+
+# ===========================================================================
+# 52. BE-NEW — Dataset Version CRUD Tests
+# ===========================================================================
+section "52. Dataset Version CRUD"
+
+RESP=$(do_request POST "/api/projects" '{"name":"E2E Versions"}')
+VER_PID=$(json_field "$RESP" "id")
+assert_not_empty "$VER_PID" "Created version test project"
+
+if [[ -n "$E2E_UID" ]]; then
+  do_request POST "/api/projects/$VER_PID/members" "{\"userId\":\"$E2E_UID\",\"role\":\"editor\"}" >/dev/null 2>&1
+fi
+
+RESP=$(do_request POST "/api/projects/$VER_PID/folders" '{"name":"ver-folder","parentFolderId":null}')
+VER_FID=$(json_field "$RESP" "id")
+
+RESP=$(do_upload "/api/projects/$VER_PID/folders/$VER_FID/upload" "tests/foundry/fixtures/valid.csv")
+VER_DID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo "")
+
+if [[ -n "$VER_DID" ]]; then
+  sleep 2
+
+  # Create version
+  RESP=$(do_request POST "/api/datasets/$VER_DID/versions" '{}')
+  assert_contains "$RESP" "version_number" "POST /datasets/:id/versions creates version"
+
+  # List versions
+  sleep 1
+  RESP=$(do_request GET "/api/datasets/$VER_DID/versions" '')
+  assert_contains "$RESP" "version_number" "GET /datasets/:id/versions lists versions"
+
+  # Create another version
+  sleep 1
+  RESP=$(do_request POST "/api/datasets/$VER_DID/versions" '{}')
+  VER_NUM=$(json_field "$RESP" "version_number")
+  assert_eq "$VER_NUM" "2" "Second version has version_number=2"
+
+  pass "Version CRUD works"
+else
+  fail "Could not upload test file for version tests"
+fi
+
+do_request DELETE "/api/projects/$VER_PID" '' >/dev/null 2>&1
+
+# ===========================================================================
+# 53. BE-NEW — Dev Tools Endpoints
+# ===========================================================================
+section "53. Dev Tools Endpoints"
+
+RESP=$(do_request GET "/api/dev/status" '')
+assert_contains "$RESP" "counts" "GET /api/dev/status returns counts"
+assert_contains "$RESP" "seeded" "GET /api/dev/status returns seeded flag"
+pass "Dev status endpoint works"
+
+# ===========================================================================
+# 54. BE-NEW — Health Detailed Endpoint
+# ===========================================================================
+section "54. Health Detailed Endpoint"
+
+RESP=$(curl -s "${BASE_URL}/health/detailed")
+assert_contains "$RESP" "database" "GET /health/detailed returns database info"
+assert_contains "$RESP" "memory" "GET /health/detailed returns memory info"
+assert_contains "$RESP" "uptime" "GET /health/detailed returns uptime"
+assert_contains "$RESP" "version" "GET /health/detailed returns version"
+assert_contains "$RESP" "healthy" "GET /health/detailed status is healthy"
+pass "Health detailed endpoint works"
+
+# ===========================================================================
 # 50. BE-FIX TESTS — Source Files Verification
 # ===========================================================================
 section "50. Fix Source Files Verification"
