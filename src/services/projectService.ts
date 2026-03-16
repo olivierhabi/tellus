@@ -76,10 +76,10 @@ export class ProjectService {
     const row = result.rows[0];
     if (!row) return null;
     return {
-      folderCount: parseInt(row.folder_count) || 0,
-      datasetCount: parseInt(row.dataset_count) || 0,
-      totalSizeBytes: parseInt(row.total_size_bytes) || 0,
-      memberCount: parseInt(row.member_count) || 0,
+      folderCount: Number(row.folder_count) || 0,
+      datasetCount: Number(row.dataset_count) || 0,
+      totalSizeBytes: Number(row.total_size_bytes) || 0,
+      memberCount: Number(row.member_count) || 0,
     };
   }
 }

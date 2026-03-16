@@ -136,6 +136,9 @@ export class DatasetService {
           settle();
         });
 
+        // 'close' fires after destroy(); 'end' fires on normal completion.
+        // The settle() guard ensures resolve is only called once regardless
+        // of which event fires first.
         parser.on('close', () => {
           settle();
         });

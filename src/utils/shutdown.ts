@@ -15,6 +15,14 @@ export function getIsShuttingDown(): boolean {
 }
 
 /**
+ * Reset the shutting-down flag. Only intended for use in tests
+ * where the module is reused across test runs without process exit.
+ */
+export function resetShuttingDown(): void {
+  shuttingDown = false;
+}
+
+/**
  * Graceful shutdown with connection draining.
  *
  * 1. Close HTTP server (stop accepting new connections)

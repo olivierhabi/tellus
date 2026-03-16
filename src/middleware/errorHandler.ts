@@ -294,9 +294,11 @@ export default function errorHandler(
   // -----------------------------------------------------------------
   // 2b. Foundry data ingestion layer AppError (duck-type detection)
   //     These have statusCode (number), code (string), isOperational (boolean)
+  //     Check error name to avoid catching third-party errors
   // -----------------------------------------------------------------
   if (
     typeof err === "object" && err !== null &&
+    ((err as any).name === "AppError" || (err as any).constructor?.name === "AppError") &&
     typeof (err as any).statusCode === "number" &&
     typeof (err as any).code === "string" &&
     typeof (err as any).isOperational === "boolean"

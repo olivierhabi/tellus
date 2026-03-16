@@ -8,38 +8,71 @@ export class SearchService {
     const offset = (page - 1) * limit;
 
     if (!q || q.trim() === '') {
-      const projects = await this.knex('projects').where({ owner_id: ownerId }).orderBy('updated_at', 'desc').limit(limit);
-      return { results: projects.map((p: Record<string, unknown>) => ({ ...p, resourceType: 'project' })), meta: { page, limit, total: projects.length } };
+      const countResult = await this.knex('projects').where({ owner_id: ownerId }).count('* as cnt').first();
+      const total = Number(countResult?.cnt ?? 0);
+      const projects = await this.knex('projects').where({ owner_id: ownerId }).orderBy('updated_at', 'desc').limit(limit).offset(offset);
+      return { results: projects.map((p: Record<string, unknown>) => ({ ...p, resourceType: 'project' })), meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
     }
 
     const searchTerm = q.trim();
     // Escape LIKE special characters to prevent wildcard injection
     const escapedTerm = searchTerm.replace(/[\\%_]/g, '\\$&');
     const ilikeTerm = `%${escapedTerm}%`;
-    const results: Record<string, unknown>[] = [];
+
+    // Use a UNION ALL query to count and paginate at the database level
+    const subqueries: Knex.Raw[] = [];
 
     if (!type || type === 'project') {
-      const projects = await this.knex('projects').where({ owner_id: ownerId }).where('name', 'ilike', ilikeTerm).orderBy('updated_at', 'desc');
-      results.push(...projects.map((p: Record<string, unknown>) => ({ ...p, resourceType: 'project' })));
+      subqueries.push(this.knex.raw(
+        `SELECT id, name, 'project' AS "resourceType", updated_at FROM projects WHERE owner_id = ? AND name ILIKE ?`,
+        [ownerId, ilikeTerm]
+      ));
     }
 
     if (!type || type === 'folder') {
-      let folderQuery = this.knex('folders').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).where('folders.name', 'ilike', ilikeTerm).select('folders.*');
-      if (projectId) folderQuery = folderQuery.where('folders.project_id', projectId);
-      const folders = await folderQuery.orderBy('folders.updated_at', 'desc');
-      results.push(...folders.map((f: Record<string, unknown>) => ({ ...f, resourceType: 'folder' })));
+      const folderBindings: unknown[] = [ownerId, ilikeTerm];
+      let folderWhere = '';
+      if (projectId) {
+        folderWhere = ' AND folders.project_id = ?';
+        folderBindings.push(projectId);
+      }
+      subqueries.push(this.knex.raw(
+        `SELECT folders.id, folders.name, 'folder' AS "resourceType", folders.updated_at FROM folders JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND folders.name ILIKE ?${folderWhere}`,
+        folderBindings
+      ));
     }
 
     if (!type || type === 'dataset') {
-      let datasetQuery = this.knex('foundry_datasets').join('folders', 'foundry_datasets.folder_id', 'folders.id').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).where('foundry_datasets.name', 'ilike', ilikeTerm).select('foundry_datasets.*');
-      if (projectId) datasetQuery = datasetQuery.where('folders.project_id', projectId);
-      const datasets = await datasetQuery.orderBy('foundry_datasets.updated_at', 'desc');
-      results.push(...datasets.map((d: Record<string, unknown>) => ({ ...d, resourceType: 'dataset' })));
+      const dsBindings: unknown[] = [ownerId, ilikeTerm];
+      let dsWhere = '';
+      if (projectId) {
+        dsWhere = ' AND folders.project_id = ?';
+        dsBindings.push(projectId);
+      }
+      subqueries.push(this.knex.raw(
+        `SELECT foundry_datasets.id, foundry_datasets.name, 'dataset' AS "resourceType", foundry_datasets.updated_at FROM foundry_datasets JOIN folders ON foundry_datasets.folder_id = folders.id JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND foundry_datasets.name ILIKE ?${dsWhere}`,
+        dsBindings
+      ));
     }
 
-    const total = results.length;
-    const paged = results.slice(offset, offset + limit);
-    return { results: paged, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+    if (subqueries.length === 0) {
+      return { results: [], meta: { page, limit, total: 0, totalPages: 0 } };
+    }
+
+    const unionSql = subqueries.map((sq) => `(${sq.toQuery()})`).join(' UNION ALL ');
+
+    // Get total count
+    const countResult = await this.knex.raw(`SELECT COUNT(*) AS cnt FROM (${unionSql}) AS search_results`);
+    const total = Number(countResult.rows[0]?.cnt ?? 0);
+
+    // Get paginated results
+    const dataResult = await this.knex.raw(
+      `SELECT * FROM (${unionSql}) AS search_results ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+      [limit, offset]
+    );
+
+    const results = dataResult.rows as Record<string, unknown>[];
+    return { results, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
   }
 
   async suggest(q: string, ownerId: string): Promise<{ name: string; type: string }[]> {

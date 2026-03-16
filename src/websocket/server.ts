@@ -11,6 +11,10 @@ interface ClientState {
 let wss: WebSocketServer | null = null;
 
 export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
+  if (wss) {
+    console.warn('[websocket] WebSocket server already initialized, closing previous instance');
+    wss.close();
+  }
   wss = new WebSocketServer({ server: httpServer, path: '/ws' });
   const clients = new Map<WebSocket, ClientState>();
 

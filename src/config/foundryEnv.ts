@@ -9,11 +9,22 @@ if (!process.env.JWT_SECRET) {
   }
 }
 
+function parseIntEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(`[foundryEnv] Invalid ${key}="${raw}", using default ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+
 export const foundryEnv = {
   UPLOAD_DIR: process.env.UPLOAD_DIR || './uploads',
-  MAX_FILE_SIZE_MB: parseInt(process.env.MAX_FILE_SIZE_MB || '50', 10),
+  MAX_FILE_SIZE_MB: parseIntEnv('MAX_FILE_SIZE_MB', 50),
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
   JWT_SECRET: process.env.JWT_SECRET || DEFAULT_JWT_SECRET,
   NODE_ENV: process.env.NODE_ENV || 'development',
-  PORT: parseInt(process.env.PORT || '3000', 10),
+  PORT: parseIntEnv('PORT', 3000),
 };

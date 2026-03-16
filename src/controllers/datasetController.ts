@@ -93,7 +93,10 @@ export class DatasetController {
 
       const status = await this.datasetService.getDatasetStatus(datasetId);
 
-      const etagSource = `${status.status}:${status.updated_at || status.row_count}`;
+      const updatedAtStr = status.updated_at instanceof Date
+        ? status.updated_at.toISOString()
+        : String(status.updated_at ?? '');
+      const etagSource = `${status.status}:${updatedAtStr}:${status.row_count}`;
       const etag = `"${crypto.createHash('md5').update(etagSource).digest('hex')}"`;
 
       if (req.headers['if-none-match'] === etag) {

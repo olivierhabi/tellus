@@ -40,7 +40,6 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
 /**
  * Authorization middleware.
  * Checks that the authenticated user has one of the required roles.
- * In development/test mode without real auth, this is permissive.
  */
 export function authorize(...roles: string[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -53,8 +52,31 @@ export function authorize(...roles: string[]) {
       return;
     }
 
-    // If roles check is needed and user has a role, verify it
-    // For now, allow through (role enforcement requires project-level role lookup)
-    next();
+    // If no roles specified, any authenticated user is allowed
+    if (roles.length === 0) {
+      next();
+      return;
+    }
+
+    // Enforce role check when the user has a role assigned
+    if (user.role && roles.includes(user.role)) {
+      next();
+      return;
+    }
+
+    // In non-production, if user has no role (e.g. hardcoded dev user), allow through
+    if (!user.role && process.env.NODE_ENV !== 'production') {
+      next();
+      return;
+    }
+
+    res.status(403).json({
+      success: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: `Insufficient permissions. Required role: ${roles.join(' or ')}`,
+        details: null,
+      },
+    });
   };
 }

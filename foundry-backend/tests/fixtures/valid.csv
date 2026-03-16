@@ -1,6 +1,0 @@
-order_id,item_name,quantity,price,status
-1001,Widget A,5,29.99,shipped
-1002,Widget B,3,49.50,pending
-1003,Gadget C,10,15.00,delivered
-1004,Widget A,2,29.99,shipped
-1005,Gadget D,1,99.99,cancelled

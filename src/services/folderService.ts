@@ -158,6 +158,9 @@ export class FolderService {
       }
       const updateData: Record<string, unknown> = {};
       if (updates.name !== undefined) updateData.name = updates.name;
+      if (Object.keys(updateData).length === 0) {
+        return folder; // Nothing to update — return existing folder
+      }
       const [updated] = await this.knex('folders').where({ id: folderId }).update(updateData).returning('*');
       return updated;
     }

@@ -71,7 +71,7 @@ export class FolderController {
       }
       const sortBy = (req.query.sortBy as string) || 'name';
       const sortOrder = (req.query.sortOrder as string) === 'desc' ? 'desc' : 'asc';
-      const allowedSorts = ['name', 'created_at', 'file_size_bytes', 'row_count', 'column_count'];
+      const allowedSorts = ['name', 'status', 'file_size_bytes', 'row_count', 'column_count', 'original_filename', 'mime_type', 'created_at', 'updated_at'];
       if (!allowedSorts.includes(sortBy)) {
         throw new AppError(`Invalid sortBy. Allowed: ${allowedSorts.join(', ')}`, 400, 'VALIDATION_ERROR');
       }
