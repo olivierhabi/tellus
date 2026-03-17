@@ -1,5 +1,4 @@
 import { CleanupService } from '../services/cleanupService';
-import { foundryEnv } from '../config/foundryEnv';
 import foundryDb from '../config/foundryDb';
 
 const cleanupService = new CleanupService(foundryDb);
@@ -13,7 +12,7 @@ export function startCleanupScheduler(): void {
     isRunning = true;
     
     try {
-      const fileResult = await cleanupService.cleanOrphanedFiles(foundryEnv.UPLOAD_DIR);
+      const fileResult = await cleanupService.cleanOrphanedFiles();
       const recordResult = await cleanupService.cleanOrphanedRecords();
       console.log('[cleanup] Orphaned files removed:', fileResult.removedFiles, 'Orphaned records removed:', recordResult.removedRecords);
     } catch (error) {

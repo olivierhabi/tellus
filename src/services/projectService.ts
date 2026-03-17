@@ -1,5 +1,6 @@
 import { Knex } from 'knex';
 import { AppError } from '../utils/foundryAppError';
+import { deletePrefix } from './storageService';
 
 export class ProjectService {
   constructor(private knex: Knex) {}
@@ -7,7 +8,15 @@ export class ProjectService {
   async createProject(name: string, ownerId: string) {
     const existing = await this.knex('projects').where({ name, owner_id: ownerId }).first();
     if (existing) throw new AppError('A project with this name already exists', 409, 'CONFLICT');
+
     const [project] = await this.knex('projects').insert({ name, owner_id: ownerId }).returning('*');
+
+    // Auto-add the creator as an owner member so authorizeRoles works
+    await this.knex('project_members')
+      .insert({ project_id: project.id, user_id: ownerId, role: 'owner' })
+      .onConflict(['project_id', 'user_id'])
+      .ignore();
+
     return project;
   }
 
@@ -17,6 +26,15 @@ export class ProjectService {
       query.select(fields.map(f => `projects.${f}`));
     }
     return query.orderBy('updated_at', 'desc');
+  }
+
+  /**
+   * Check if a project exists (no ownership filter).
+   * Used by endpoints where authorizeRoles already verified membership.
+   */
+  async projectExists(projectId: string): Promise<boolean> {
+    const row = await this.knex('projects').where({ id: projectId }).select('id').first();
+    return !!row;
   }
 
   async getProjectById(projectId: string, ownerId: string) {
@@ -42,21 +60,15 @@ export class ProjectService {
   }
 
   async deleteProject(projectId: string, ownerId: string) {
-    const datasets = await this.knex('foundry_datasets')
-      .join('folders', 'folders.id', 'foundry_datasets.folder_id')
-      .where('folders.project_id', projectId)
-      .select('foundry_datasets.file_path');
-
     const deleted = await this.knex('projects').where({ id: projectId, owner_id: ownerId }).delete();
     if (!deleted) return false;
 
-    const fs = require('fs');
-    const path = require('path');
-    for (const dataset of datasets) {
-      try { await fs.promises.unlink(dataset.file_path); } catch { /* ignore */ }
+    // Delete all S3 objects under this project prefix
+    try {
+      await deletePrefix(`projects/${projectId}/`);
+    } catch (err) {
+      console.error(`[projectService] Failed to delete S3 objects for project ${projectId}:`, err);
     }
-    const uploadDir = process.env.UPLOAD_DIR || './uploads';
-    try { await fs.promises.rm(path.join(uploadDir, projectId), { recursive: true, force: true }); } catch { /* ignore */ }
 
     return true;
   }

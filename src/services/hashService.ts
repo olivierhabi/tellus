@@ -1,7 +1,7 @@
 import { Knex } from 'knex';
-import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { AppError } from '../utils/foundryAppError';
+import { getObjectStream } from './storageService';
 
 export interface DuplicateGroup {
   contentHash: string;
@@ -13,12 +13,16 @@ export class HashService {
   constructor(private knex: Knex) {}
 
   async computeFileHash(filePath: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const hash = crypto.createHash('sha256');
-      const stream = fs.createReadStream(filePath);
-      stream.on('data', (chunk) => { hash.update(chunk); });
-      stream.on('end', () => { resolve(hash.digest('hex')); });
-      stream.on('error', (err) => { reject(err); });
+    return new Promise(async (resolve, reject) => {
+      try {
+        const hash = crypto.createHash('sha256');
+        const stream = await getObjectStream(filePath);
+        stream.on('data', (chunk) => { hash.update(chunk); });
+        stream.on('end', () => { resolve(hash.digest('hex')); });
+        stream.on('error', (err) => { reject(err); });
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 

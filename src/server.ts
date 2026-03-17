@@ -36,6 +36,7 @@ import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 import foundryProjectsRouter from "./routes/projects";
 import foundryFoldersRouter from "./routes/folders";
 import foundryUploadsRouter from "./routes/uploads";
+import foundryProjectUploadsRouter from "./routes/projectUploads";
 import { folderDatasetsRouter as foundryFolderDatasetsRouter, datasetRouter as foundryDatasetRouter } from "./routes/foundryDatasets";
 import foundrySearchRouter from "./routes/search";
 import foundryBreadcrumbRouter from "./routes/breadcrumb";
@@ -57,6 +58,7 @@ import foundryDb from "./config/foundryDb";
 import swaggerUi from "swagger-ui-express";
 import * as fs from "fs";
 import * as path from "path";
+import { ensureBucket, destroyStorageClient, storageHealthCheck } from "./services/storageService";
 
 // Load OpenAPI spec JSON at startup
 const openApiSpec = JSON.parse(
@@ -261,6 +263,7 @@ app.use(healthRouter);
 app.use("/api/projects", foundryProjectsRouter);
 app.use("/api/projects/:projectId/folders", foundryFoldersRouter);
 app.use("/api/projects/:projectId/folders/:folderId", foundryUploadsRouter);
+app.use("/api/projects/:projectId", foundryProjectUploadsRouter);
 app.use("/api/projects/:projectId/folders/:folderId/datasets", foundryFolderDatasetsRouter);
 app.use("/api/datasets", foundryDatasetRouter);
 app.use("/api/datasets", foundryColumnStatsRouter);
@@ -349,6 +352,17 @@ async function start(): Promise<void> {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(
         `WARNING: Could not ensure OpenSearch index template: ${msg}`
+      );
+    }
+
+    // Ensure the S3/MinIO bucket exists (creates if missing).
+    // Best-effort — server still starts if MinIO is unreachable.
+    try {
+      await ensureBucket();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `WARNING: Could not ensure S3/MinIO bucket: ${msg}`
       );
     }
 
@@ -444,6 +458,14 @@ async function shutdown(signal: string): Promise<void> {
     }
   } catch (err) {
     console.error(JSON.stringify({ type: "foundry_datasets_reset_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // Destroy S3/MinIO client
+  try {
+    destroyStorageClient();
+    console.log(JSON.stringify({ type: "s3_client_destroyed" }));
+  } catch (err) {
+    console.error(JSON.stringify({ type: "s3_client_destroy_error", error: err instanceof Error ? err.message : String(err) }));
   }
 
   // Drain foundry database connection pool

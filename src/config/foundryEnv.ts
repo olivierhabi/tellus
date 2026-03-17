@@ -21,10 +21,17 @@ function parseIntEnv(key: string, fallback: number): number {
 }
 
 export const foundryEnv = {
-  UPLOAD_DIR: process.env.UPLOAD_DIR || './uploads',
   MAX_FILE_SIZE_MB: parseIntEnv('MAX_FILE_SIZE_MB', 50),
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
   JWT_SECRET: process.env.JWT_SECRET || DEFAULT_JWT_SECRET,
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: parseIntEnv('PORT', 3000),
+
+  // MinIO / S3 object storage
+  S3_ENDPOINT: process.env.S3_ENDPOINT || 'http://localhost:9000',
+  S3_REGION: process.env.S3_REGION || 'us-east-1',
+  S3_BUCKET: process.env.S3_BUCKET || 'tellus-uploads',
+  S3_ACCESS_KEY_ID: process.env.S3_ACCESS_KEY_ID || 'minioadmin',
+  S3_SECRET_ACCESS_KEY: process.env.S3_SECRET_ACCESS_KEY || 'minioadmin',
+  S3_FORCE_PATH_STYLE: process.env.S3_FORCE_PATH_STYLE !== 'false',
 };

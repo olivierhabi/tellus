@@ -1,8 +1,6 @@
 import { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Knex } from 'knex';
-import * as fs from 'fs';
-import * as path from 'path';
 
 /** Guard flag to prevent double shutdown */
 let shuttingDown = false;
@@ -117,25 +115,6 @@ export async function shutdown(
     console.log('[shutdown] Database pool drained');
   } catch (err) {
     console.error('[shutdown] Error draining database pool:', (err as Error).message);
-  }
-
-  // Step 5: Clean up temp files in the uploads directory
-  try {
-    const uploadsDir = process.env.UPLOAD_DIR || './uploads';
-    const tempPattern = /^zip_extract_/;
-
-    if (fs.existsSync(uploadsDir)) {
-      const entries = await fs.promises.readdir(uploadsDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory() && tempPattern.test(entry.name)) {
-          const tempPath = path.join(uploadsDir, entry.name);
-          await fs.promises.rm(tempPath, { recursive: true, force: true });
-          console.log(`[shutdown] Cleaned up temp directory: ${entry.name}`);
-        }
-      }
-    }
-  } catch (err) {
-    console.error('[shutdown] Error cleaning temp files:', (err as Error).message);
   }
 
   clearTimeout(forceExitTimer);

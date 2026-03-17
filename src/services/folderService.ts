@@ -1,5 +1,4 @@
 import { Knex } from 'knex';
-import * as fs from 'fs';
 import { AppError } from '../utils/foundryAppError';
 
 export class FolderService {
@@ -10,9 +9,8 @@ export class FolderService {
     if (!project) throw new AppError('Project not found', 404, 'NOT_FOUND');
 
     if (parentFolderId) {
-      const parent = await this.knex('folders').where({ id: parentFolderId }).first();
+      const parent = await this.knex('folders').where({ id: parentFolderId, project_id: projectId }).first();
       if (!parent) throw new AppError('Parent folder not found', 404, 'NOT_FOUND');
-      if (parent.project_id !== projectId) throw new AppError('Parent folder belongs to a different project', 400, 'VALIDATION_ERROR');
     }
 
     const duplicate = await this.knex('folders')
@@ -27,12 +25,19 @@ export class FolderService {
     const [folder] = await this.knex('folders')
       .insert({ name, parent_folder_id: parentFolderId || null, project_id: projectId })
       .returning('*');
-    return folder;
+
+    // Return with has_children = false (newly created folder can't have children)
+    return { ...folder, has_children: false, child_count: 0, dataset_count: 0 };
   }
 
   async listFolders(projectId: string, parentId: string | null) {
     const query = this.knex('folders')
-      .select('folders.*', this.knex.raw('(SELECT COUNT(*) FROM folders f2 WHERE f2.parent_folder_id = folders.id)::integer AS child_count'))
+      .select(
+        'folders.*',
+        this.knex.raw('(SELECT COUNT(*) FROM folders f2 WHERE f2.parent_folder_id = folders.id)::integer AS child_count'),
+        this.knex.raw('(SELECT COUNT(*) FROM foundry_datasets d WHERE d.folder_id = folders.id)::integer AS dataset_count'),
+        this.knex.raw('EXISTS(SELECT 1 FROM folders f2 WHERE f2.parent_folder_id = folders.id) AS has_children'),
+      )
       .where({ project_id: projectId });
     if (parentId === null) { query.whereNull('parent_folder_id'); }
     else { query.where({ parent_folder_id: parentId }); }
@@ -49,8 +54,40 @@ export class FolderService {
     return !!row;
   }
 
+  /**
+   * Find or create an "Uploads" folder at the root level of a project.
+   * Used by project-level uploads to ensure files always have a folder.
+   */
+  async getOrCreateUploadsFolder(projectId: string, _ownerId: string): Promise<string> {
+    const UPLOADS_FOLDER_NAME = 'Uploads';
+
+    // Check if an "Uploads" folder already exists at root level
+    const existing = await this.knex('folders')
+      .where({ name: UPLOADS_FOLDER_NAME, project_id: projectId })
+      .whereNull('parent_folder_id')
+      .select('id')
+      .first();
+
+    if (existing) return existing.id;
+
+    // Create the "Uploads" folder at root level
+    const [folder] = await this.knex('folders')
+      .insert({ name: UPLOADS_FOLDER_NAME, parent_folder_id: null, project_id: projectId })
+      .returning('id');
+
+    return folder.id;
+  }
+
   async getFolderById(projectId: string, folderId: string, sortBy = 'name', sortOrder: 'asc' | 'desc' = 'asc') {
-    const folder = await this.knex('folders').where({ id: folderId, project_id: projectId }).first();
+    const folder = await this.knex('folders')
+      .select(
+        'folders.*',
+        this.knex.raw('(SELECT COUNT(*) FROM folders f2 WHERE f2.parent_folder_id = folders.id)::integer AS child_count'),
+        this.knex.raw('(SELECT COUNT(*) FROM foundry_datasets d WHERE d.folder_id = folders.id)::integer AS dataset_count'),
+        this.knex.raw('EXISTS(SELECT 1 FROM folders f2 WHERE f2.parent_folder_id = folders.id) AS has_children'),
+      )
+      .where({ id: folderId, project_id: projectId })
+      .first();
     if (!folder) return null;
 
     // Defense-in-depth: validate sortBy and sortOrder at the service layer
@@ -62,9 +99,11 @@ export class FolderService {
     const [childFolders, childDatasets] = await Promise.all([
       this.knex('folders')
         .select(
-          'folders.id', 'folders.name', 'folders.parent_folder_id', 'folders.created_at',
+          'folders.id', 'folders.name', 'folders.parent_folder_id', 'folders.project_id',
+          'folders.depth', 'folders.created_at', 'folders.updated_at',
           this.knex.raw('(SELECT COUNT(*) FROM folders f2 WHERE f2.parent_folder_id = folders.id)::integer AS child_folder_count'),
-          this.knex.raw('(SELECT COUNT(*) FROM foundry_datasets d WHERE d.folder_id = folders.id)::integer AS dataset_count')
+          this.knex.raw('(SELECT COUNT(*) FROM foundry_datasets d WHERE d.folder_id = folders.id)::integer AS dataset_count'),
+          this.knex.raw('EXISTS(SELECT 1 FROM folders f2 WHERE f2.parent_folder_id = folders.id) AS has_children'),
         )
         .where({ parent_folder_id: folderId, project_id: projectId })
         .orderBy('name', 'asc'),
@@ -104,7 +143,10 @@ export class FolderService {
 
   async getProjectFolderTree(projectId: string) {
     const rows = await this.knex('folders')
-      .select('id', 'name', 'parent_folder_id', 'path', 'depth', 'created_at')
+      .select(
+        'folders.id', 'folders.name', 'folders.parent_folder_id', 'folders.path', 'folders.depth', 'folders.created_at',
+        this.knex.raw('(SELECT COUNT(*) FROM foundry_datasets d WHERE d.folder_id = folders.id)::integer AS dataset_count'),
+      )
       .where({ project_id: projectId })
       .orderBy('depth', 'asc')
       .orderBy('name', 'asc');
@@ -118,6 +160,8 @@ export class FolderService {
         id: folder.id,
         name: folder.name,
         parentFolderId: folder.parent_folder_id,
+        depth: folder.depth,
+        datasetCount: folder.dataset_count,
         children: [],
       });
     }
@@ -219,17 +263,38 @@ export class FolderService {
     const folder = await this.knex('folders').where({ id: folderId, project_id: projectId }).first();
     if (!folder) throw new AppError('Folder not found', 404, 'NOT_FOUND');
 
+    // Count descendant folders and datasets for feedback
+    const [descendantStats] = await this.knex.raw(
+      `SELECT 
+        (SELECT COUNT(*)::integer FROM folders WHERE path <@ (SELECT path FROM folders WHERE id = ?) AND project_id = ? AND id != ?) AS subfolder_count,
+        (SELECT COUNT(*)::integer FROM foundry_datasets d INNER JOIN folders f ON d.folder_id = f.id WHERE f.path <@ (SELECT path FROM folders WHERE id = ?) AND f.project_id = ?) AS dataset_count`,
+      [folderId, projectId, folderId, folderId, projectId]
+    ).then((r: any) => r.rows);
+
     const fileRows = await this.knex.raw(
       `SELECT d.file_path FROM foundry_datasets d INNER JOIN folders f ON d.folder_id = f.id WHERE f.path <@ (SELECT path FROM folders WHERE id = ?) AND f.project_id = ?`,
       [folderId, projectId]
     );
 
-    for (const row of fileRows.rows) {
-      try { await fs.promises.unlink(row.file_path); }
-      catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Failed to delete file ${row.file_path}:`, err); }
+    // Delete files from S3 object storage
+    const { deleteObjects } = await import('./storageService');
+    const s3Keys = fileRows.rows.map((row: any) => row.file_path as string).filter(Boolean);
+    if (s3Keys.length > 0) {
+      try { await deleteObjects(s3Keys); }
+      catch (err) { console.error(`Failed to delete S3 objects during folder delete:`, err); }
     }
 
-    await this.knex('folders').where({ id: folderId, project_id: projectId }).delete();
-    return true;
+    // Delete entire subtree using ltree path (parent_folder_id has ON DELETE SET NULL,
+    // so we must explicitly delete all descendants, not just the root folder)
+    await this.knex.raw(
+      `DELETE FROM folders WHERE path <@ (SELECT path FROM folders WHERE id = ? AND project_id = ?) AND project_id = ?`,
+      [folderId, projectId, projectId]
+    );
+    return {
+      deleted: true,
+      folderName: folder.name,
+      subfolderCount: descendantStats?.subfolder_count ?? 0,
+      datasetCount: descendantStats?.dataset_count ?? 0,
+    };
   }
 }

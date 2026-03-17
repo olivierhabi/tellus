@@ -1,11 +1,21 @@
 import { Knex } from 'knex';
-import * as fs from 'fs';
 import { parse } from 'csv-parse';
 import { AppError, NotFoundError, ConflictError } from '../utils/foundryAppError';
 import { DatasetListQuery } from '../types/dataset';
+import { getObjectStream } from './storageService';
 
 export class DatasetService {
   constructor(private knex: Knex) {}
+
+  /**
+   * List datasets at the project root level (folder_id IS NULL).
+   */
+  async listProjectRootDatasets(projectId: string): Promise<Record<string, unknown>[]> {
+    return this.knex('foundry_datasets')
+      .where({ project_id: projectId })
+      .whereNull('folder_id')
+      .orderBy('name', 'asc');
+  }
 
   async listDatasets(folderId: string, query: DatasetListQuery) {
     const { status, sort, order, page, limit } = query;
@@ -89,6 +99,9 @@ export class DatasetService {
       );
     }
 
+    // Fetch the S3 stream before entering the Promise constructor
+    const readStream = await getObjectStream(dataset.file_path);
+
     const previewRows = await new Promise<Record<string, string>[]>(
       (resolve, reject) => {
         const rows: Record<string, string>[] = [];
@@ -103,8 +116,6 @@ export class DatasetService {
           trim: true,
           relax_column_count: true,
         });
-
-        const readStream = fs.createReadStream(dataset.file_path);
 
         const settle = () => {
           if (!settled) {
@@ -136,9 +147,6 @@ export class DatasetService {
           settle();
         });
 
-        // 'close' fires after destroy(); 'end' fires on normal completion.
-        // The settle() guard ensures resolve is only called once regardless
-        // of which event fires first.
         parser.on('close', () => {
           settle();
         });

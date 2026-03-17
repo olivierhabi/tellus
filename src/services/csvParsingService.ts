@@ -1,6 +1,7 @@
 import { Knex } from 'knex';
-import * as fs from 'fs';
 import { parse } from 'csv-parse';
+import { getObjectStream } from './storageService';
+import { Readable } from 'stream';
 
 const MAX_SAMPLE_ROWS = 10000;
 const PREVIEW_ROWS = 10;
@@ -150,92 +151,107 @@ function isDate(value: string): boolean {
   return !isNaN(d.getTime());
 }
 
+/**
+ * Parse a CSV/TSV file from a readable stream.
+ * Used internally — the public API is `parseFile` which fetches the stream from S3.
+ */
+function parseStream(readStream: Readable, filePath: string): Promise<ParseResult> {
+  return new Promise<ParseResult>((resolve, reject) => {
+    const accumulators: Map<string, ColumnAccumulator> = new Map();
+    const previewRows: Record<string, string>[] = [];
+    let columnNames: string[] = [];
+    let rowCount = 0;
+    let doneAnalyzing = false;
+    let settled = false;
+
+    const ext = filePath.toLowerCase();
+    const delimiter = ext.endsWith('.tsv') ? '\t' : ',';
+
+    const parser = parse({
+      delimiter,
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+      relax_column_count: true,
+    });
+
+    const settle = () => {
+      if (!settled) {
+        settled = true;
+        const columns: ColumnStats[] = columnNames.map((name) => {
+          const acc = accumulators.get(name)!;
+          const stats = acc.getStats();
+          stats.name = name;
+          return stats;
+        });
+        resolve({ columns, rowCount, previewRows });
+      }
+    };
+
+    parser.on('readable', () => {
+      let record: Record<string, string>;
+      while ((record = parser.read()) !== null) {
+        rowCount++;
+        if (columnNames.length === 0) {
+          columnNames = Object.keys(record);
+          for (const col of columnNames) {
+            accumulators.set(col, new ColumnAccumulator());
+          }
+        }
+        if (!doneAnalyzing) {
+          if (previewRows.length < PREVIEW_ROWS) {
+            previewRows.push({ ...record });
+          }
+          for (const col of columnNames) {
+            const acc = accumulators.get(col);
+            if (acc) {
+              acc.addValue(record[col] ?? '');
+            }
+          }
+          if (rowCount >= MAX_SAMPLE_ROWS) {
+            doneAnalyzing = true;
+          }
+        }
+      }
+    });
+
+    parser.on('error', (err) => {
+      readStream.destroy();
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+
+    parser.on('end', () => {
+      settle();
+    });
+
+    parser.on('close', () => {
+      settle();
+    });
+
+    readStream.pipe(parser);
+  });
+}
+
 export class CsvParsingService {
   constructor(private knex: Knex) {}
 
+  /**
+   * Parse a file from S3/MinIO object storage.
+   * @param filePath - The S3 object key (stored in foundry_datasets.file_path)
+   */
   async parseFile(filePath: string): Promise<ParseResult> {
-    return new Promise<ParseResult>((resolve, reject) => {
-      const accumulators: Map<string, ColumnAccumulator> = new Map();
-      const previewRows: Record<string, string>[] = [];
-      let columnNames: string[] = [];
-      let rowCount = 0;
-      let doneAnalyzing = false;
-      let settled = false;
+    const readStream = await getObjectStream(filePath);
+    return parseStream(readStream, filePath);
+  }
 
-      const ext = filePath.toLowerCase();
-      const delimiter = ext.endsWith('.tsv') ? '\t' : ',';
-
-      const parser = parse({
-        delimiter,
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-        relax_column_count: true,
-      });
-
-      const readStream = fs.createReadStream(filePath);
-
-      const settle = () => {
-        if (!settled) {
-          settled = true;
-          const columns: ColumnStats[] = columnNames.map((name) => {
-            const acc = accumulators.get(name)!;
-            const stats = acc.getStats();
-            stats.name = name;
-            return stats;
-          });
-          resolve({ columns, rowCount, previewRows });
-        }
-      };
-
-      parser.on('readable', () => {
-        let record: Record<string, string>;
-        while ((record = parser.read()) !== null) {
-          rowCount++;
-          if (columnNames.length === 0) {
-            columnNames = Object.keys(record);
-            for (const col of columnNames) {
-              accumulators.set(col, new ColumnAccumulator());
-            }
-          }
-          if (!doneAnalyzing) {
-            if (previewRows.length < PREVIEW_ROWS) {
-              previewRows.push({ ...record });
-            }
-            for (const col of columnNames) {
-              const acc = accumulators.get(col);
-              if (acc) {
-                acc.addValue(record[col] ?? '');
-              }
-            }
-            if (rowCount >= MAX_SAMPLE_ROWS) {
-              doneAnalyzing = true;
-            }
-          }
-        }
-      });
-
-      parser.on('error', (err) => {
-        readStream.destroy();
-        if (!settled) {
-          settled = true;
-          reject(err);
-        }
-      });
-
-      parser.on('end', () => {
-        settle();
-      });
-
-      // 'close' fires after destroy(); 'end' fires on normal completion.
-      // The settle() guard ensures resolve is only called once regardless
-      // of which event fires first.
-      parser.on('close', () => {
-        settle();
-      });
-
-      readStream.pipe(parser);
-    });
+  /**
+   * Parse a file from a readable stream (for preview purposes).
+   */
+  async parseFromStream(readStream: Readable, filePath: string): Promise<ParseResult> {
+    return parseStream(readStream, filePath);
   }
 }
 

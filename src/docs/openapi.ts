@@ -538,6 +538,80 @@ export const openApiSpec = {
         },
       },
     },
+    '/projects/{projectId}/upload': {
+      post: {
+        tags: ['Uploads'],
+        summary: 'Upload files to a project',
+        description: 'Upload files directly to a project. An "Uploads" folder is automatically created at the project root if one does not already exist. Files are placed into this folder.',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object' as const,
+                properties: {
+                  files: {
+                    type: 'array' as const,
+                    items: { type: 'string' as const, format: 'binary' },
+                    description: 'One or more files to upload (max 10). Supported: .csv, .tsv, .txt',
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': {
+            description: 'Files uploaded and processing started',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object' as const,
+                  properties: {
+                    success: { type: 'boolean' as const },
+                    data: {
+                      type: 'array' as const,
+                      items: { $ref: '#/components/schemas/Dataset' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'No files provided or validation error' },
+          '401': { description: 'Authentication required' },
+          '404': { description: 'Project not found' },
+          '413': { description: 'File too large' },
+        },
+      },
+    },
+    '/projects/{projectId}/datasets': {
+      get: {
+        tags: ['Datasets'],
+        summary: 'List datasets at the project root level',
+        description: 'Returns datasets uploaded directly to the project (not inside any folder). These are files with folder_id = NULL.',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '200': {
+            description: 'List of project-root datasets',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'array' as const,
+                  items: { $ref: '#/components/schemas/Dataset' },
+                },
+              },
+            },
+          },
+          '401': { description: 'Authentication required' },
+        },
+      },
+    },
     '/projects/{projectId}/folders/{folderId}/datasets': {
       get: {
         tags: ['Datasets'],

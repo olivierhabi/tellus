@@ -162,8 +162,17 @@ export class FolderController {
         throw new AppError('Invalid UUID format', 400, 'VALIDATION_ERROR');
       }
       const ownerId = this.getOwnerId(req);
-      await this.folderService.deleteFolder(projectId, folderId, ownerId);
-      res.status(204).send();
+      const result = await this.folderService.deleteFolder(projectId, folderId, ownerId);
+      // Return 200 with deletion stats instead of 204 to provide feedback
+      res.json({
+        success: true,
+        data: {
+          deleted: true,
+          folderName: result.folderName,
+          subfolderCount: result.subfolderCount,
+          datasetCount: result.datasetCount,
+        }
+      });
     } catch (error) {
       next(error);
     }

@@ -1,7 +1,7 @@
 import { Knex } from 'knex';
-import * as fs from 'fs';
 import { parse } from 'csv-parse';
 import { AppError } from '../utils/foundryAppError';
+import { getObjectStream } from './storageService';
 
 export type FilterOperator =
   | 'eq'
@@ -134,7 +134,9 @@ export class AdvancedPreviewService {
     };
   }
 
-  private readCsvFile(filePath: string): Promise<Record<string, string>[]> {
+  private async readCsvFile(filePath: string): Promise<Record<string, string>[]> {
+    const readStream = await getObjectStream(filePath);
+
     return new Promise((resolve, reject) => {
       const rows: Record<string, string>[] = [];
 
@@ -148,8 +150,6 @@ export class AdvancedPreviewService {
         trim: true,
         relax_column_count: true,
       });
-
-      const readStream = fs.createReadStream(filePath);
 
       parser.on('readable', () => {
         let record: Record<string, string>;

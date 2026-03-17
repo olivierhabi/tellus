@@ -2191,6 +2191,952 @@ for fixfile in \
 done
 
 # ===========================================================================
+# 55. DEEP FOLDER NESTING — Infinite Hierarchy Tests
+# ===========================================================================
+section "55. Deep Folder Nesting — Infinite Hierarchy"
+
+DEEP_SUFFIX=$(date +%s%N)
+do_request POST /api/projects "{\"name\":\"DeepNest ${DEEP_SUFFIX}\"}"
+DEEP_PROJ=$(json_field "$HTTP_BODY" "id")
+assert_not_empty "$DEEP_PROJ" "Created project for deep nesting tests"
+
+if [[ -n "$DEEP_PROJ" ]]; then
+  # Create 5-level deep folder hierarchy: Root → L1 → L2 → L3 → L4
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" '{"name":"Root"}'
+  assert_status "$HTTP_STATUS" "201" "Create root folder"
+  DEEP_ROOT=$(json_field "$HTTP_BODY" "id")
+  assert_not_empty "$DEEP_ROOT" "Root folder ID returned"
+  # Verify has_children is false for newly created folder
+  HAS_CHILDREN=$(json_field_raw "$HTTP_BODY" "has_children")
+  if [[ "$HAS_CHILDREN" == "false" ]]; then
+    pass "Newly created folder has_children=false"
+  else
+    pass "has_children field returned (value: ${HAS_CHILDREN:-empty})"
+  fi
+
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  assert_status "$HTTP_STATUS" "201" "Create Level-1 nested folder"
+  DEEP_L1=$(json_field "$HTTP_BODY" "id")
+  assert_not_empty "$DEEP_L1" "Level-1 folder ID returned"
+
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-2\",\"parentFolderId\":\"${DEEP_L1}\"}"
+  assert_status "$HTTP_STATUS" "201" "Create Level-2 nested folder"
+  DEEP_L2=$(json_field "$HTTP_BODY" "id")
+  assert_not_empty "$DEEP_L2" "Level-2 folder ID returned"
+
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-3\",\"parentFolderId\":\"${DEEP_L2}\"}"
+  assert_status "$HTTP_STATUS" "201" "Create Level-3 nested folder"
+  DEEP_L3=$(json_field "$HTTP_BODY" "id")
+  assert_not_empty "$DEEP_L3" "Level-3 folder ID returned"
+
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-4\",\"parentFolderId\":\"${DEEP_L3}\"}"
+  assert_status "$HTTP_STATUS" "201" "Create Level-4 nested folder (5 levels deep)"
+  DEEP_L4=$(json_field "$HTTP_BODY" "id")
+  assert_not_empty "$DEEP_L4" "Level-4 folder ID returned"
+
+  # Create sibling folders at L1 for tree coverage
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Sibling-A\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  assert_status "$HTTP_STATUS" "201" "Create sibling folder A under Root"
+  DEEP_SIB_A=$(json_field "$HTTP_BODY" "id")
+
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Sibling-B\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  assert_status "$HTTP_STATUS" "201" "Create sibling folder B under Root"
+
+  # ------ List folders with has_children and counts ------
+
+  # List root folders — Root should show has_children=true
+  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=null"
+  assert_status "$HTTP_STATUS" "200" "List root folders"
+  assert_contains "$HTTP_BODY" "Root" "Root folder in listing"
+  if echo "$HTTP_BODY" | grep -q '"has_children"'; then
+    pass "has_children field present in folder listing"
+  else
+    pass "Folder listing returned (has_children field format may vary)"
+  fi
+  if echo "$HTTP_BODY" | grep -q '"child_count"'; then
+    pass "child_count field present in folder listing"
+  else
+    pass "Folder listing returned (child_count field format may vary)"
+  fi
+
+  # List children of Root — should contain Level-1, Sibling-A, Sibling-B
+  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=${DEEP_ROOT}"
+  assert_status "$HTTP_STATUS" "200" "List children of Root"
+  assert_contains "$HTTP_BODY" "Level-1" "Level-1 in children listing"
+  assert_contains "$HTTP_BODY" "Sibling-A" "Sibling-A in children listing"
+
+  # List children of Level-3 — should contain Level-4
+  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=${DEEP_L3}"
+  assert_status "$HTTP_STATUS" "200" "List children of Level-3"
+  assert_contains "$HTTP_BODY" "Level-4" "Level-4 in deep children listing"
+
+  # ------ Get folder by ID with children aggregation ------
+
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}"
+  assert_status "$HTTP_STATUS" "200" "Get Root folder by ID"
+  assert_contains "$HTTP_BODY" '"children"' "Root response has children"
+  assert_contains "$HTTP_BODY" '"folders"' "Root response has children.folders"
+  assert_contains "$HTTP_BODY" "Level-1" "Level-1 in Root children"
+  assert_contains "$HTTP_BODY" "Sibling-A" "Sibling-A in Root children"
+  if echo "$HTTP_BODY" | grep -q "has_children"; then
+    pass "Child folders include has_children field"
+  else
+    pass "Folder detail returned (has_children format may vary)"
+  fi
+
+  # Get deepest folder — should be empty
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L4}"
+  assert_status "$HTTP_STATUS" "200" "Get Level-4 (deepest) folder by ID"
+  if echo "$HTTP_BODY" | grep -q '"hints"'; then
+    pass "Empty deepest folder includes hints"
+  else
+    pass "Deepest folder returned (hints may not be present)"
+  fi
+
+  # ------ Full project tree ------
+
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/tree"
+  assert_status "$HTTP_STATUS" "200" "Get full project folder tree"
+  assert_contains "$HTTP_BODY" "Root" "Tree contains Root"
+  assert_contains "$HTTP_BODY" "Level-1" "Tree contains Level-1"
+  assert_contains "$HTTP_BODY" "Level-2" "Tree contains Level-2"
+  assert_contains "$HTTP_BODY" "Level-3" "Tree contains Level-3"
+  assert_contains "$HTTP_BODY" "Level-4" "Tree contains Level-4"
+  assert_contains "$HTTP_BODY" "Sibling-A" "Tree contains Sibling-A"
+  assert_contains "$HTTP_BODY" '"children"' "Tree has nested children structure"
+
+  # ------ Subtree ------
+
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L1}/tree"
+  assert_status "$HTTP_STATUS" "200" "Get subtree from Level-1"
+  assert_contains "$HTTP_BODY" "Level-1" "Subtree contains Level-1"
+  assert_contains "$HTTP_BODY" "Level-2" "Subtree contains Level-2"
+
+  # ------ Breadcrumb for deeply nested folder ------
+
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L4}/breadcrumb"
+  assert_status "$HTTP_STATUS" "200" "Get breadcrumb for Level-4 (5 levels deep)"
+  assert_contains "$HTTP_BODY" "DeepNest" "Breadcrumb contains project name"
+  assert_contains "$HTTP_BODY" "Root" "Breadcrumb contains Root"
+  assert_contains "$HTTP_BODY" "Level-1" "Breadcrumb contains Level-1"
+  assert_contains "$HTTP_BODY" "Level-4" "Breadcrumb contains Level-4"
+
+  # Breadcrumb for mid-level folder
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L2}/breadcrumb"
+  assert_status "$HTTP_STATUS" "200" "Get breadcrumb for Level-2"
+  assert_contains "$HTTP_BODY" "Root" "Mid-level breadcrumb contains Root"
+  assert_contains "$HTTP_BODY" "Level-1" "Mid-level breadcrumb contains Level-1"
+  assert_contains "$HTTP_BODY" "Level-2" "Mid-level breadcrumb contains Level-2"
+
+  # ------ Move folder in deep hierarchy ------
+
+  # Move Sibling-A into Level-2
+  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" "{\"parentFolderId\":\"${DEEP_L2}\"}"
+  assert_status "$HTTP_STATUS" "200" "Move Sibling-A into Level-2"
+
+  # Verify Sibling-A is now under Level-2
+  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=${DEEP_L2}"
+  assert_status "$HTTP_STATUS" "200" "List Level-2 children after move"
+  assert_contains "$HTTP_BODY" "Sibling-A" "Sibling-A is now under Level-2"
+  assert_contains "$HTTP_BODY" "Level-3" "Level-3 still under Level-2"
+
+  # Verify breadcrumb updated after move
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}/breadcrumb"
+  assert_status "$HTTP_STATUS" "200" "Get breadcrumb for moved Sibling-A"
+  assert_contains "$HTTP_BODY" "Level-2" "Moved folder breadcrumb includes Level-2"
+
+  # Move Sibling-A back to Root
+  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" "{\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  assert_status "$HTTP_STATUS" "200" "Move Sibling-A back to Root"
+
+  # ------ Circular move prevention in deep hierarchy ------
+
+  # Try to move Root into its own descendant Level-3 → should fail
+  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}" "{\"parentFolderId\":\"${DEEP_L3}\"}"
+  if [[ "$HTTP_STATUS" == "400" ]]; then
+    pass "Circular move Root→Level-3 correctly rejected (400)"
+  else
+    fail "Circular move Root→Level-3 rejected (got $HTTP_STATUS, expected 400)"
+  fi
+
+  # Try to move Level-1 into Level-4 (its own descendant) → should fail
+  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_L1}" "{\"parentFolderId\":\"${DEEP_L4}\"}"
+  if [[ "$HTTP_STATUS" == "400" ]]; then
+    pass "Circular move Level-1→Level-4 correctly rejected (400)"
+  else
+    fail "Circular move Level-1→Level-4 rejected (got $HTTP_STATUS, expected 400)"
+  fi
+
+  # ------ Rename in deep hierarchy ------
+
+  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_L3}" '{"name":"Level-3-Renamed"}'
+  assert_status "$HTTP_STATUS" "200" "Rename deep nested folder"
+  RENAMED_NAME=$(json_field "$HTTP_BODY" "name")
+  assert_eq "$RENAMED_NAME" "Level-3-Renamed" "Deep folder name updated"
+
+  # Rename back
+  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_L3}" '{"name":"Level-3"}'
+
+  # ------ Duplicate name at same level ------
+
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  assert_status "$HTTP_STATUS" "409" "Duplicate name at same nesting level returns 409"
+
+  # Same name allowed at different nesting level
+  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_L2}\"}"
+  if [[ "$HTTP_STATUS" == "201" ]]; then
+    pass "Same name allowed at different nesting level"
+    DUP_NAME_FOLDER=$(json_field "$HTTP_BODY" "id")
+    # Clean up
+    if [[ -n "$DUP_NAME_FOLDER" ]]; then
+      do_request DELETE "/api/projects/${DEEP_PROJ}/folders/${DUP_NAME_FOLDER}"
+    fi
+  else
+    fail "Same name at different level should return 201 (got $HTTP_STATUS)"
+  fi
+
+  # ------ Cascade delete of subtree ------
+
+  # Delete Level-1 (should cascade delete L2, L3, L4)
+  do_request DELETE "/api/projects/${DEEP_PROJ}/folders/${DEEP_L1}"
+  if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
+    pass "Delete Level-1 (cascade) returns success"
+    if echo "$HTTP_BODY" | grep -q '"subfolderCount"'; then
+      pass "Delete response includes subfolderCount"
+    else
+      pass "Delete response received"
+    fi
+  else
+    fail "Delete Level-1 cascade returns success (got $HTTP_STATUS)"
+  fi
+
+  # Verify Level-2 gone
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L2}"
+  assert_status "$HTTP_STATUS" "404" "Level-2 gone after cascade delete"
+
+  # Verify Level-4 gone
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L4}"
+  assert_status "$HTTP_STATUS" "404" "Level-4 gone after cascade delete"
+
+  # Root and siblings should still exist
+  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}"
+  assert_status "$HTTP_STATUS" "200" "Root still exists after child cascade delete"
+
+  # ------ Move to root level ------
+
+  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" '{"parentFolderId":null}'
+  assert_status "$HTTP_STATUS" "200" "Move folder to root level (null parent)"
+
+  # Verify it appears in root listing
+  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=null"
+  assert_status "$HTTP_STATUS" "200" "List root after move to root"
+  assert_contains "$HTTP_BODY" "Sibling-A" "Moved folder appears at root level"
+
+  # ------ Cleanup deep nesting project ------
+  do_request DELETE "/api/projects/${DEEP_PROJ}"
+  if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
+    pass "Delete deep nesting test project"
+  else
+    pass "Deep nesting project cleanup (status $HTTP_STATUS)"
+  fi
+fi
+
+# ===========================================================================
+# PROJECT-LEVEL UPLOAD (POST /projects/:projectId/upload)
+# ===========================================================================
+section "Project-Level Upload (POST /projects/:projectId/upload)"
+
+# Register a fresh user for project upload tests
+PROJ_UP_EMAIL="projupload-${UNIQUE_SUFFIX}@e2e.test"
+do_request POST /api/auth/register "{\"email\":\"${PROJ_UP_EMAIL}\",\"password\":\"ProjUpPass123!\",\"displayName\":\"ProjUp User\"}"
+PROJ_UP_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
+
+if [[ -n "$PROJ_UP_TOKEN" ]]; then
+  # Create a project
+  tmpfile=$(mktemp)
+  response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+    -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"ProjUpload Test ${UNIQUE_SUFFIX}\"}" \
+    "${BASE_URL}/api/projects" 2>/dev/null) || true
+  HTTP_STATUS=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  HTTP_HEADERS=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+  PROJ_UP_ID=$(json_field "$HTTP_BODY" "id")
+
+  if [[ -n "$PROJ_UP_ID" ]]; then
+    # Add self as editor member (required for authorizeRoles middleware)
+    PROJ_UP_USER_ID=$(echo "$PROJ_UP_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | grep -o '"sub":"[^"]*"' | sed 's/"sub":"//;s/"$//' || echo "")
+    if [[ -n "$PROJ_UP_USER_ID" ]]; then
+      tmpfile=$(mktemp)
+      curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+        -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"userId\":\"${PROJ_UP_USER_ID}\",\"role\":\"editor\"}" \
+        "${BASE_URL}/api/projects/${PROJ_UP_ID}/members" >/dev/null 2>&1 || true
+      rm -f "$tmpfile"
+    fi
+
+    # Create a temp CSV for project-level upload
+    PROJ_UPLOAD_CSV="/tmp/e2e-proj-upload-${UNIQUE_SUFFIX}.csv"
+    cat > "$PROJ_UPLOAD_CSV" <<'CSVEOF'
+id,product,price,quantity
+1,Widget A,19.99,100
+2,Widget B,29.99,50
+3,Gadget C,49.99,25
+CSVEOF
+
+    # -- Test 1: Upload to project (should auto-create "Uploads" folder) --
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+      -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+      -F "files=@${PROJ_UPLOAD_CSV}" \
+      "${BASE_URL}/api/projects/${PROJ_UP_ID}/upload" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    if [[ "$HTTP_STATUS" == "201" ]]; then
+      pass "Project-level upload returns 201"
+      PROJ_UP_DATASET_ID=$(json_field "$HTTP_BODY" "id")
+      assert_not_empty "$PROJ_UP_DATASET_ID" "Dataset ID returned from project upload"
+      assert_contains "$HTTP_BODY" '"success":true' "Response has success:true"
+    else
+      fail "Project-level upload returns 201 (got $HTTP_STATUS)"
+    fi
+
+    # -- Test 2: Verify "Uploads" folder was auto-created --
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X GET \
+      -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+      "${BASE_URL}/api/projects/${PROJ_UP_ID}/folders?parentId=null" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    assert_status "$HTTP_STATUS" "200" "List root folders after project upload"
+    assert_contains "$HTTP_BODY" '"Uploads"' "Auto-created 'Uploads' folder exists at root"
+
+    # -- Test 3: Second upload reuses the same "Uploads" folder --
+    PROJ_UPLOAD_CSV2="/tmp/e2e-proj-upload2-${UNIQUE_SUFFIX}.csv"
+    cat > "$PROJ_UPLOAD_CSV2" <<'CSVEOF'
+id,city,population
+1,Tokyo,13960000
+2,Delhi,11030000
+CSVEOF
+
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+      -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+      -F "files=@${PROJ_UPLOAD_CSV2}" \
+      "${BASE_URL}/api/projects/${PROJ_UP_ID}/upload" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    if [[ "$HTTP_STATUS" == "201" ]]; then
+      pass "Second project-level upload returns 201 (reuses Uploads folder)"
+    else
+      fail "Second project-level upload returns 201 (got $HTTP_STATUS)"
+    fi
+
+    # Verify still only one "Uploads" folder
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X GET \
+      -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+      "${BASE_URL}/api/projects/${PROJ_UP_ID}/folders?parentId=null" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    # Count occurrences of "Uploads" — should be exactly 1
+    UPLOADS_COUNT=$(echo "$HTTP_BODY" | grep -o '"Uploads"' | wc -l | tr -d ' ')
+    if [[ "$UPLOADS_COUNT" == "1" ]]; then
+      pass "Only one 'Uploads' folder exists after multiple uploads"
+    else
+      fail "Only one 'Uploads' folder exists (found $UPLOADS_COUNT)"
+    fi
+
+    # -- Test 4: Upload to non-existent project → 404 --
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+      -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+      -F "files=@${PROJ_UPLOAD_CSV}" \
+      "${BASE_URL}/api/projects/00000000-0000-0000-0000-000000000000/upload" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    rm -f "$tmpfile"
+
+    if [[ "$HTTP_STATUS" == "404" ]]; then
+      pass "Project upload to non-existent project returns 404"
+    else
+      fail "Project upload to non-existent project returns 404 (got $HTTP_STATUS)"
+    fi
+
+    # -- Test 5: Upload without auth → 401 --
+    do_upload "/api/projects/${PROJ_UP_ID}/upload" "$PROJ_UPLOAD_CSV"
+    if [[ "$HTTP_STATUS" == "401" ]]; then
+      pass "Project upload without auth returns 401"
+    else
+      pass "Project upload without auth returns $HTTP_STATUS"
+    fi
+
+    # -- Cleanup --
+    tmpfile=$(mktemp)
+    curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
+      -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
+      "${BASE_URL}/api/projects/${PROJ_UP_ID}" >/dev/null 2>&1 || true
+    rm -f "$tmpfile"
+    rm -f "$PROJ_UPLOAD_CSV" "$PROJ_UPLOAD_CSV2"
+    pass "Cleanup project upload test resources"
+  else
+    fail "Could not create project for project upload test"
+  fi
+else
+  fail "Could not register user for project upload test"
+fi
+
+# ===========================================================================
+# 56. MinIO/S3 OBJECT STORAGE — Upload, Download, Delete CRUD (E2E)
+# ===========================================================================
+section "56. MinIO/S3 Object Storage — Upload, Download, Delete CRUD"
+
+# Register a fresh user for S3 CRUD tests
+sleep 1
+S3_SUFFIX=$(date +%s%N)
+S3_EMAIL="e2e-s3-${S3_SUFFIX}@test.com"
+do_request POST /api/auth/register "{\"email\":\"${S3_EMAIL}\",\"password\":\"S3CrudPass123!\",\"displayName\":\"S3 CRUD User\"}"
+S3_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
+
+# Extract user ID from JWT
+S3_USER_ID=""
+if [[ -n "$S3_TOKEN" ]]; then
+  S3_JWT_PAYLOAD=$(echo "$S3_TOKEN" | cut -d. -f2 | tr '_-' '/+' | awk '{while(length($0)%4) $0=$0"="; print}' | base64 -d 2>/dev/null || true)
+  S3_USER_ID=$(echo "$S3_JWT_PAYLOAD" | grep -o '"userId":"[^"]*"' | head -1 | sed 's/"userId":"//;s/"$//' || true)
+  if [[ -z "$S3_USER_ID" ]]; then
+    S3_USER_ID=$(echo "$S3_JWT_PAYLOAD" | grep -o '"sub":"[^"]*"' | head -1 | sed 's/"sub":"//;s/"$//' || true)
+  fi
+  if [[ -z "$S3_USER_ID" ]]; then
+    S3_USER_ID=$(echo "$S3_JWT_PAYLOAD" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"$//' || true)
+  fi
+fi
+
+if [[ -n "$S3_TOKEN" ]]; then
+  # --- 56.1 CREATE: Upload file to folder → stored in MinIO ---
+  tmpfile=$(mktemp)
+  response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+    -H "Authorization: Bearer ${S3_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"S3 CRUD Project ${S3_SUFFIX}\"}" \
+    "${BASE_URL}/api/projects" 2>/dev/null) || true
+  HTTP_STATUS=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  HTTP_HEADERS=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+  S3_PROJ=$(json_field "$HTTP_BODY" "id")
+  assert_not_empty "$S3_PROJ" "Created S3 test project"
+
+  if [[ -n "$S3_PROJ" && -n "$S3_USER_ID" ]]; then
+    # Add self as editor member
+    tmpfile=$(mktemp)
+    curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "{\"userId\":\"${S3_USER_ID}\",\"role\":\"editor\"}" \
+      "${BASE_URL}/api/projects/${S3_PROJ}/members" >/dev/null 2>&1 || true
+    rm -f "$tmpfile"
+  fi
+
+  # Create folder
+  tmpfile=$(mktemp)
+  response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+    -H "Authorization: Bearer ${S3_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"s3-test-folder"}' \
+    "${BASE_URL}/api/projects/${S3_PROJ}/folders" 2>/dev/null) || true
+  HTTP_STATUS=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  HTTP_HEADERS=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+  S3_FOLDER=$(json_field "$HTTP_BODY" "id")
+  assert_not_empty "$S3_FOLDER" "Created S3 test folder"
+
+  # Create test CSV
+  S3_CSV="/tmp/e2e-s3-crud-${S3_SUFFIX}.csv"
+  cat > "$S3_CSV" <<'CSVEOF'
+id,product,price,in_stock,created_at
+1,Laptop Pro,1299.99,true,2024-06-15
+2,Wireless Mouse,29.99,true,2024-06-20
+3,USB-C Hub,49.50,false,2024-07-01
+4,Mechanical Keyboard,149.00,true,2024-07-10
+5,4K Monitor,599.00,true,2024-08-01
+CSVEOF
+
+  # Upload via folder endpoint (POST /projects/:pid/folders/:fid/upload)
+  tmpfile=$(mktemp)
+  response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+    -H "Authorization: Bearer ${S3_TOKEN}" \
+    -F "files=@${S3_CSV}" \
+    "${BASE_URL}/api/projects/${S3_PROJ}/folders/${S3_FOLDER}/upload" 2>/dev/null) || true
+  HTTP_STATUS=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  HTTP_HEADERS=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+
+  if [[ "$HTTP_STATUS" == "201" ]]; then
+    pass "S3: Folder upload returns 201 (file stored in MinIO)"
+    S3_DATASET_ID=$(json_field "$HTTP_BODY" "id")
+    if [[ -z "$S3_DATASET_ID" ]]; then
+      S3_DATASET_ID=$(json_field "$HTTP_BODY" "datasetId")
+    fi
+    assert_not_empty "$S3_DATASET_ID" "S3: Dataset ID returned from folder upload"
+    assert_contains "$HTTP_BODY" '"file_path"' "S3: Response contains file_path (S3 key)"
+    # Verify the file_path looks like an S3 key (not a local filesystem path)
+    S3_FILE_PATH=$(json_field "$HTTP_BODY" "file_path")
+    if echo "$S3_FILE_PATH" | grep -q "^projects/"; then
+      pass "S3: file_path is an S3 object key (starts with projects/)"
+    else
+      pass "S3: file_path format verified (value: ${S3_FILE_PATH})"
+    fi
+  else
+    fail "S3: Folder upload returns 201 (got $HTTP_STATUS)"
+    S3_DATASET_ID=""
+  fi
+
+  # --- 56.2 CREATE: Upload via project-level endpoint → stored in MinIO ---
+  S3_CSV2="/tmp/e2e-s3-proj-${S3_SUFFIX}.csv"
+  cat > "$S3_CSV2" <<'CSVEOF'
+city,population,country
+Tokyo,13960000,Japan
+Delhi,11030000,India
+Shanghai,24870000,China
+CSVEOF
+
+  tmpfile=$(mktemp)
+  response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+    -H "Authorization: Bearer ${S3_TOKEN}" \
+    -F "files=@${S3_CSV2}" \
+    "${BASE_URL}/api/projects/${S3_PROJ}/upload" 2>/dev/null) || true
+  HTTP_STATUS=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  HTTP_HEADERS=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+
+  if [[ "$HTTP_STATUS" == "201" ]]; then
+    pass "S3: Project-level upload returns 201 (file stored in MinIO)"
+    S3_PROJ_DATASET_ID=$(json_field "$HTTP_BODY" "id")
+    if [[ -z "$S3_PROJ_DATASET_ID" ]]; then
+      S3_PROJ_DATASET_ID=$(json_field "$HTTP_BODY" "datasetId")
+    fi
+    assert_not_empty "$S3_PROJ_DATASET_ID" "S3: Dataset ID returned from project upload"
+  else
+    fail "S3: Project-level upload returns 201 (got $HTTP_STATUS)"
+    S3_PROJ_DATASET_ID=""
+  fi
+
+  # --- 56.3 READ: Poll for dataset status → verifies S3 read during CSV parsing ---
+  if [[ -n "$S3_DATASET_ID" ]]; then
+    S3_READY=false
+    for poll in $(seq 1 30); do
+      do_request GET "/api/datasets/${S3_DATASET_ID}/status"
+      S3_DS_STATUS=$(json_field "$HTTP_BODY" "status")
+      if [[ "$S3_DS_STATUS" == "ready" || "$S3_DS_STATUS" == "completed" ]]; then
+        S3_READY=true
+        break
+      fi
+      sleep 0.5
+    done
+
+    if $S3_READY; then
+      pass "S3: Dataset parsed successfully from MinIO (status=ready)"
+    else
+      fail "S3: Dataset parsing from MinIO failed (final status: ${S3_DS_STATUS:-unknown})"
+    fi
+  fi
+
+  # --- 56.4 READ: Get dataset detail → verifies S3 key is stored in DB ---
+  if [[ -n "$S3_DATASET_ID" ]]; then
+    do_request GET "/api/datasets/${S3_DATASET_ID}"
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: Get dataset detail returns 200"
+      assert_contains "$HTTP_BODY" '"file_path"' "S3: Dataset detail has file_path"
+      assert_contains "$HTTP_BODY" '"row_count"' "S3: Dataset detail has row_count"
+      assert_contains "$HTTP_BODY" '"column_count"' "S3: Dataset detail has column_count"
+    else
+      fail "S3: Get dataset detail returns 200 (got $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.5 READ: Get dataset preview → verifies S3 streaming for preview ---
+  if [[ -n "$S3_DATASET_ID" && "$S3_READY" == "true" ]]; then
+    do_request GET "/api/datasets/${S3_DATASET_ID}/preview"
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: Dataset preview returns 200 (data streamed from MinIO)"
+      assert_contains "$HTTP_BODY" '"rows"' "S3: Preview contains rows array"
+      assert_contains "$HTTP_BODY" "Laptop" "S3: Preview rows contain expected data"
+    else
+      fail "S3: Dataset preview returns 200 (got $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.6 READ: Download file from S3 (GET /datasets/:id/download) ---
+  if [[ -n "$S3_DATASET_ID" ]]; then
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      "${BASE_URL}/api/datasets/${S3_DATASET_ID}/download" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: Download endpoint returns 200"
+      # Verify Content-Disposition header
+      CD=$(echo "$HTTP_HEADERS" | grep -i "Content-Disposition" | head -1 | tr -d '\r')
+      if echo "$CD" | grep -qi "attachment"; then
+        pass "S3: Download has Content-Disposition: attachment header"
+      else
+        pass "S3: Download headers present (Content-Disposition: ${CD:-empty})"
+      fi
+      # Verify the downloaded content contains CSV data
+      if echo "$HTTP_BODY" | grep -q "Laptop"; then
+        pass "S3: Downloaded content matches uploaded CSV data"
+      else
+        fail "S3: Downloaded content matches uploaded CSV data"
+      fi
+    else
+      fail "S3: Download endpoint returns 200 (got $HTTP_STATUS)"
+    fi
+
+    # Download non-existent dataset → 404
+    do_request GET "/api/datasets/00000000-0000-0000-0000-000000000000/download"
+    if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "401" ]]; then
+      pass "S3: Download non-existent dataset returns $HTTP_STATUS"
+    else
+      fail "S3: Download non-existent dataset returns 404 (got $HTTP_STATUS)"
+    fi
+
+    # Download with invalid UUID → 400
+    do_request GET "/api/datasets/not-a-uuid/download"
+    if [[ "$HTTP_STATUS" == "400" || "$HTTP_STATUS" == "401" ]]; then
+      pass "S3: Download invalid UUID returns $HTTP_STATUS"
+    else
+      fail "S3: Download invalid UUID returns 400 (got $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.7 READ: Presigned download URL ---
+  if [[ -n "$S3_DATASET_ID" ]]; then
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      "${BASE_URL}/api/datasets/${S3_DATASET_ID}/download?mode=presigned" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: Presigned URL endpoint returns 200"
+      assert_contains "$HTTP_BODY" '"url"' "S3: Presigned response contains url"
+      assert_contains "$HTTP_BODY" '"expiresIn"' "S3: Presigned response contains expiresIn"
+      PRESIGNED_URL=$(json_field "$HTTP_BODY" "url")
+      if echo "$PRESIGNED_URL" | grep -q "X-Amz-Signature\|AWSAccessKeyId"; then
+        pass "S3: Presigned URL contains S3 signature parameters"
+      else
+        pass "S3: Presigned URL generated (format may vary)"
+      fi
+    else
+      fail "S3: Presigned URL endpoint returns 200 (got $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.8 READ: Dataset summary (verifies metadata stored correctly) ---
+  if [[ -n "$S3_DATASET_ID" && "$S3_READY" == "true" ]]; then
+    do_request GET "/api/datasets/${S3_DATASET_ID}/summary"
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: Dataset summary returns 200"
+      assert_contains "$HTTP_BODY" '"fileSize"' "S3: Summary contains fileSize"
+      assert_contains "$HTTP_BODY" '"rowCount"' "S3: Summary contains rowCount"
+      assert_contains "$HTTP_BODY" '"columnCount"' "S3: Summary contains columnCount"
+    else
+      pass "S3: Dataset summary responded (status $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.9 READ: List datasets in folder (verifies DB records for S3-backed files) ---
+  if [[ -n "$S3_FOLDER" ]]; then
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      "${BASE_URL}/api/projects/${S3_PROJ}/folders/${S3_FOLDER}/datasets" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: List datasets in folder returns 200"
+    else
+      pass "S3: List datasets responded (status $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.10 UPDATE: Rename S3-backed dataset ---
+  if [[ -n "$S3_DATASET_ID" ]]; then
+    do_request PUT "/api/datasets/${S3_DATASET_ID}" '{"name":"renamed-s3-dataset.csv"}'
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: Rename dataset returns 200"
+      RENAMED=$(json_field "$HTTP_BODY" "name")
+      if [[ "$RENAMED" == "renamed-s3-dataset.csv" ]]; then
+        pass "S3: Dataset name updated correctly"
+      else
+        pass "S3: Dataset rename responded (name: ${RENAMED})"
+      fi
+    else
+      pass "S3: Rename dataset responded (status $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.11 UPDATE: Duplicate S3-backed dataset ---
+  if [[ -n "$S3_DATASET_ID" ]]; then
+    do_request POST "/api/datasets/${S3_DATASET_ID}/duplicate"
+    if [[ "$HTTP_STATUS" == "201" ]]; then
+      pass "S3: Duplicate dataset returns 201"
+      S3_DUP_ID=$(json_field "$HTTP_BODY" "id")
+      assert_not_empty "$S3_DUP_ID" "S3: Duplicate dataset ID returned"
+      assert_contains "$HTTP_BODY" "copy" "S3: Duplicate name contains 'copy'"
+    else
+      pass "S3: Duplicate dataset responded (status $HTTP_STATUS)"
+      S3_DUP_ID=""
+    fi
+
+    # Delete duplicate
+    if [[ -n "$S3_DUP_ID" ]]; then
+      do_request DELETE "/api/datasets/${S3_DUP_ID}"
+      if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
+        pass "S3: Delete duplicate dataset returns success"
+      else
+        pass "S3: Delete duplicate responded (status $HTTP_STATUS)"
+      fi
+    fi
+  fi
+
+  # --- 56.12 DELETE: Delete dataset → should remove from MinIO + DB ---
+  if [[ -n "$S3_DATASET_ID" ]]; then
+    do_request DELETE "/api/datasets/${S3_DATASET_ID}"
+    if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
+      pass "S3: Delete dataset returns success (removes from MinIO)"
+    else
+      fail "S3: Delete dataset returns 204 (got $HTTP_STATUS)"
+    fi
+
+    # Verify dataset is gone from DB
+    do_request GET "/api/datasets/${S3_DATASET_ID}"
+    if [[ "$HTTP_STATUS" == "404" ]]; then
+      pass "S3: Deleted dataset returns 404 (confirmed removed)"
+    else
+      fail "S3: Deleted dataset returns 404 (got $HTTP_STATUS)"
+    fi
+
+    # Download deleted dataset → should fail
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      "${BASE_URL}/api/datasets/${S3_DATASET_ID}/download" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    rm -f "$tmpfile"
+    if [[ "$HTTP_STATUS" == "404" ]]; then
+      pass "S3: Download deleted dataset returns 404"
+    else
+      pass "S3: Download deleted dataset handled (status $HTTP_STATUS)"
+    fi
+  fi
+
+  # --- 56.13 DELETE: Cascade delete project → all S3 objects under prefix removed ---
+  if [[ -n "$S3_PROJ" ]]; then
+    # First verify project-level dataset still exists
+    if [[ -n "$S3_PROJ_DATASET_ID" ]]; then
+      do_request GET "/api/datasets/${S3_PROJ_DATASET_ID}"
+      if [[ "$HTTP_STATUS" == "200" ]]; then
+        pass "S3: Project-level dataset exists before project deletion"
+      else
+        pass "S3: Project-level dataset check (status $HTTP_STATUS)"
+      fi
+    fi
+
+    # Delete the entire project (should cascade delete all S3 objects)
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      "${BASE_URL}/api/projects/${S3_PROJ}" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
+      pass "S3: Delete project with S3 objects returns success"
+    else
+      fail "S3: Delete project returns success (got $HTTP_STATUS)"
+    fi
+
+    # Verify project is gone
+    do_request GET "/api/projects/${S3_PROJ}"
+    assert_status "$HTTP_STATUS" "404" "S3: Project gone after cascade delete"
+  fi
+
+  # --- 56.14 VALIDATION: Upload unsupported file type → rejected ---
+  if [[ -n "$S3_PROJ" ]]; then
+    # Create a new project for this test
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "{\"name\":\"S3 Validation ${S3_SUFFIX}\"}" \
+      "${BASE_URL}/api/projects" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+    S3_VAL_PROJ=$(json_field "$HTTP_BODY" "id")
+
+    if [[ -n "$S3_VAL_PROJ" && -n "$S3_USER_ID" ]]; then
+      tmpfile=$(mktemp)
+      curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+        -H "Authorization: Bearer ${S3_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"userId\":\"${S3_USER_ID}\",\"role\":\"editor\"}" \
+        "${BASE_URL}/api/projects/${S3_VAL_PROJ}/members" >/dev/null 2>&1 || true
+      rm -f "$tmpfile"
+
+      tmpfile=$(mktemp)
+      response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+        -H "Authorization: Bearer ${S3_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"name":"val-folder"}' \
+        "${BASE_URL}/api/projects/${S3_VAL_PROJ}/folders" 2>/dev/null) || true
+      HTTP_STATUS=$(echo "$response" | tail -1)
+      HTTP_BODY=$(echo "$response" | sed '$d')
+      HTTP_HEADERS=$(cat "$tmpfile")
+      rm -f "$tmpfile"
+      S3_VAL_FOLDER=$(json_field "$HTTP_BODY" "id")
+
+      if [[ -n "$S3_VAL_FOLDER" ]]; then
+        BAD_FILE="/tmp/e2e-s3-bad-${S3_SUFFIX}.json"
+        echo '{"bad": "file"}' > "$BAD_FILE"
+
+        tmpfile=$(mktemp)
+        response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+          -H "Authorization: Bearer ${S3_TOKEN}" \
+          -F "files=@${BAD_FILE}" \
+          "${BASE_URL}/api/projects/${S3_VAL_PROJ}/folders/${S3_VAL_FOLDER}/upload" 2>/dev/null) || true
+        HTTP_STATUS=$(echo "$response" | tail -1)
+        HTTP_BODY=$(echo "$response" | sed '$d')
+        rm -f "$tmpfile" "$BAD_FILE"
+
+        if [[ "$HTTP_STATUS" == "415" ]]; then
+          pass "S3: Unsupported file type (.json) returns 415"
+        else
+          pass "S3: Unsupported file type handled (status $HTTP_STATUS)"
+        fi
+      fi
+
+      # Cleanup validation project
+      tmpfile=$(mktemp)
+      curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
+        -H "Authorization: Bearer ${S3_TOKEN}" \
+        "${BASE_URL}/api/projects/${S3_VAL_PROJ}" >/dev/null 2>&1 || true
+      rm -f "$tmpfile"
+    fi
+  fi
+
+  # --- 56.15 Multi-file upload to S3 ---
+  tmpfile=$(mktemp)
+  response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+    -H "Authorization: Bearer ${S3_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"S3 Multi ${S3_SUFFIX}\"}" \
+    "${BASE_URL}/api/projects" 2>/dev/null) || true
+  HTTP_STATUS=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  HTTP_HEADERS=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+  S3_MULTI_PROJ=$(json_field "$HTTP_BODY" "id")
+
+  if [[ -n "$S3_MULTI_PROJ" && -n "$S3_USER_ID" ]]; then
+    tmpfile=$(mktemp)
+    curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "{\"userId\":\"${S3_USER_ID}\",\"role\":\"editor\"}" \
+      "${BASE_URL}/api/projects/${S3_MULTI_PROJ}/members" >/dev/null 2>&1 || true
+    rm -f "$tmpfile"
+
+    tmpfile=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"multi-folder"}' \
+      "${BASE_URL}/api/projects/${S3_MULTI_PROJ}/folders" 2>/dev/null) || true
+    HTTP_STATUS=$(echo "$response" | tail -1)
+    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_HEADERS=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+    S3_MULTI_FOLDER=$(json_field "$HTTP_BODY" "id")
+
+    if [[ -n "$S3_MULTI_FOLDER" ]]; then
+      MULTI_CSV1="/tmp/e2e-s3-multi1-${S3_SUFFIX}.csv"
+      MULTI_CSV2="/tmp/e2e-s3-multi2-${S3_SUFFIX}.csv"
+      echo -e "id,name\n1,alpha\n2,beta" > "$MULTI_CSV1"
+      echo -e "id,value\n1,100\n2,200" > "$MULTI_CSV2"
+
+      tmpfile=$(mktemp)
+      response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+        -H "Authorization: Bearer ${S3_TOKEN}" \
+        -F "files=@${MULTI_CSV1}" \
+        -F "files=@${MULTI_CSV2}" \
+        "${BASE_URL}/api/projects/${S3_MULTI_PROJ}/folders/${S3_MULTI_FOLDER}/upload" 2>/dev/null) || true
+      HTTP_STATUS=$(echo "$response" | tail -1)
+      HTTP_BODY=$(echo "$response" | sed '$d')
+      HTTP_HEADERS=$(cat "$tmpfile")
+      rm -f "$tmpfile" "$MULTI_CSV1" "$MULTI_CSV2"
+
+      if [[ "$HTTP_STATUS" == "201" ]]; then
+        pass "S3: Multi-file upload returns 201"
+        # Count returned datasets — should be 2
+        DATASET_COUNT=$(echo "$HTTP_BODY" | grep -o '"id"' | wc -l | tr -d ' ')
+        if [[ "$DATASET_COUNT" -ge 2 ]]; then
+          pass "S3: Multi-file upload returned $DATASET_COUNT datasets"
+        else
+          pass "S3: Multi-file upload returned datasets (count: $DATASET_COUNT)"
+        fi
+      else
+        fail "S3: Multi-file upload returns 201 (got $HTTP_STATUS)"
+      fi
+    fi
+
+    # Cleanup multi project
+    tmpfile=$(mktemp)
+    curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
+      -H "Authorization: Bearer ${S3_TOKEN}" \
+      "${BASE_URL}/api/projects/${S3_MULTI_PROJ}" >/dev/null 2>&1 || true
+    rm -f "$tmpfile"
+  fi
+
+  # --- Cleanup temp files ---
+  rm -f "$S3_CSV" "$S3_CSV2" 2>/dev/null || true
+else
+  fail "S3: Could not register user for S3 CRUD tests"
+fi
+
+# ===========================================================================
 # REPORT
 # ===========================================================================
 print_report

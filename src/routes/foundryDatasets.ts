@@ -16,6 +16,7 @@ datasetRouter.get('/:datasetId', authenticate, datasetController.getById);
 datasetRouter.get('/:datasetId/preview', authenticate, datasetController.preview);
 datasetRouter.get('/:datasetId/status', authenticate, datasetController.getStatus);
 datasetRouter.get('/:datasetId/summary', authenticate, datasetController.getSummary);
+datasetRouter.get('/:datasetId/download', authenticate, datasetController.download);
 datasetRouter.put('/:datasetId', authenticate, datasetController.update);
 datasetRouter.delete('/:datasetId', authenticate, datasetController.delete);
 datasetRouter.post('/:datasetId/duplicate', authenticate, datasetController.duplicate);

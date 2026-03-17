@@ -29,5 +29,5 @@ coverage/
 # Data files (user-specific)
 data/
 
-# Uploaded files (test artifacts and user data)
+# Legacy local uploads (now stored in MinIO/S3)
 uploads/

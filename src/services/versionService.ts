@@ -1,9 +1,9 @@
 import { Knex } from 'knex';
-import * as fs from 'fs';
-import * as path from 'path';
 import * as crypto from 'crypto';
+import * as path from 'path';
 import { AppError } from '../utils/foundryAppError';
 import { emitDatasetEvent } from '../utils/emitEvent';
+import { getObjectBuffer, uploadObject, objectExists } from './storageService';
 
 export interface DatasetVersion {
   id: string;
@@ -47,28 +47,33 @@ export class VersionService {
     const lastVersion = await this.knex('dataset_versions').where({ dataset_id: datasetId }).orderBy('version_number', 'desc').first();
     const nextVersionNumber = lastVersion ? lastVersion.version_number + 1 : 1;
 
+    // Copy the current file to a version key in S3
     const ext = path.extname(dataset.file_path);
-    const versionDir = path.join(path.dirname(dataset.file_path), 'versions');
-    await fs.promises.mkdir(versionDir, { recursive: true });
+    const baseName = path.basename(dataset.file_path, ext);
+    const parentDir = path.dirname(dataset.file_path);
+    const versionFileName = `${baseName}_v${nextVersionNumber}_${crypto.randomBytes(4).toString('hex')}${ext}`;
+    const versionKey = `${parentDir}/versions/${versionFileName}`;
 
-    const versionFileName = `${path.basename(dataset.file_path, ext)}_v${nextVersionNumber}_${crypto.randomBytes(4).toString('hex')}${ext}`;
-    const versionFilePath = path.join(versionDir, versionFileName);
-    await fs.promises.copyFile(dataset.file_path, versionFilePath);
+    // Read the current file from S3 and re-upload as a version snapshot
+    const fileBuffer = await getObjectBuffer(dataset.file_path);
+    await uploadObject(versionKey, fileBuffer, dataset.mime_type || 'text/csv');
 
     try {
       const columns = await this.knex('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
 
       const [version] = await this.knex('dataset_versions')
-        .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: versionFilePath, row_count: dataset.row_count, column_count: dataset.column_count, schema_info: JSON.stringify(columns), created_by: input.createdBy || null })
+        .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: versionKey, row_count: dataset.row_count, column_count: dataset.column_count, schema_info: JSON.stringify(columns), created_by: input.createdBy || null })
         .returning('*');
 
       // Resolve project_id from folder for correct WebSocket event delivery
-      const folder = await this.knex('folders').where({ id: dataset.folder_id }).first();
-      const projectId = folder?.project_id ?? dataset.folder_id;
+      const folder = dataset.folder_id ? await this.knex('folders').where({ id: dataset.folder_id }).first() : null;
+      const projectId = folder?.project_id ?? dataset.project_id ?? dataset.folder_id;
       emitDatasetEvent('dataset:version:created', projectId, { datasetId, versionNumber: nextVersionNumber });
       return version;
     } catch (error) {
-      await fs.promises.unlink(versionFilePath).catch(() => {});
+      // Cleanup: delete the version file if DB insert fails
+      const { deleteObject } = await import('./storageService');
+      await deleteObject(versionKey).catch(() => {});
       throw error;
     }
   }
@@ -80,25 +85,33 @@ export class VersionService {
     const targetVersion = await this.knex('dataset_versions').where({ dataset_id: datasetId, version_number: versionNumber }).first();
     if (!targetVersion) throw new AppError(`Version ${versionNumber} not found for this dataset`, 404, 'VERSION_NOT_FOUND');
 
-    try { await fs.promises.access(targetVersion.file_path, fs.constants.R_OK); }
-    catch { throw new AppError(`Version ${versionNumber} file is no longer accessible`, 410, 'VERSION_FILE_MISSING'); }
+    // Verify the version file exists in S3
+    const exists = await objectExists(targetVersion.file_path);
+    if (!exists) throw new AppError(`Version ${versionNumber} file is no longer accessible`, 410, 'VERSION_FILE_MISSING');
 
     return this.knex.transaction(async (trx) => {
       const lastVersion = await trx('dataset_versions').where({ dataset_id: datasetId }).orderBy('version_number', 'desc').first();
       const nextVersionNumber = lastVersion ? lastVersion.version_number + 1 : 1;
 
+      // Snapshot the current file before restoring
       const ext = path.extname(dataset.file_path);
-      const versionDir = path.join(path.dirname(dataset.file_path), 'versions');
-      await fs.promises.mkdir(versionDir, { recursive: true });
+      const baseName = path.basename(dataset.file_path, ext);
+      const parentDir = path.dirname(dataset.file_path);
+      const snapshotFileName = `${baseName}_v${nextVersionNumber}_${crypto.randomBytes(4).toString('hex')}${ext}`;
+      const snapshotKey = `${parentDir}/versions/${snapshotFileName}`;
 
-      const snapshotFileName = `${path.basename(dataset.file_path, ext)}_v${nextVersionNumber}_${crypto.randomBytes(4).toString('hex')}${ext}`;
-      let snapshotFilePath: string | null = path.join(versionDir, snapshotFileName);
-
-      try { await fs.promises.copyFile(dataset.file_path, snapshotFilePath); }
-      catch { snapshotFilePath = null; /* If current file doesn't exist, skip pre-restore snapshot */ }
+      let snapshotKeyFinal: string | null = snapshotKey;
+      try {
+        const currentBuffer = await getObjectBuffer(dataset.file_path);
+        await uploadObject(snapshotKey, currentBuffer, dataset.mime_type || 'text/csv');
+      } catch {
+        snapshotKeyFinal = null; // If current file doesn't exist, skip pre-restore snapshot
+      }
 
       try {
-        await fs.promises.copyFile(targetVersion.file_path, dataset.file_path);
+        // Copy the version file over the current dataset key
+        const versionBuffer = await getObjectBuffer(targetVersion.file_path);
+        await uploadObject(dataset.file_path, versionBuffer, dataset.mime_type || 'text/csv');
 
         await trx('foundry_datasets').where({ id: datasetId }).update({ row_count: targetVersion.row_count, column_count: targetVersion.column_count, status: 'ready' });
 
@@ -115,17 +128,18 @@ export class VersionService {
         const currentColumns = await trx('dataset_columns').where({ dataset_id: datasetId }).orderBy('ordinal_position', 'asc').select('column_name', 'column_type', 'ordinal_position', 'nullable');
 
         const [restoreVersion] = await trx('dataset_versions')
-          .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: snapshotFilePath ?? targetVersion.file_path, row_count: targetVersion.row_count, column_count: targetVersion.column_count, schema_info: JSON.stringify(currentColumns), created_by: restoredBy || null })
+          .insert({ dataset_id: datasetId, version_number: nextVersionNumber, file_path: snapshotKeyFinal ?? targetVersion.file_path, row_count: targetVersion.row_count, column_count: targetVersion.column_count, schema_info: JSON.stringify(currentColumns), created_by: restoredBy || null })
           .returning('*');
 
         // Resolve project_id from folder for correct WebSocket event delivery
-        const folder = await trx('folders').where({ id: dataset.folder_id }).first();
-        const projectId = folder?.project_id ?? dataset.folder_id;
+        const folder = dataset.folder_id ? await trx('folders').where({ id: dataset.folder_id }).first() : null;
+        const projectId = folder?.project_id ?? dataset.project_id ?? dataset.folder_id;
         emitDatasetEvent('dataset:version:restored', projectId, { datasetId, restoredFromVersion: versionNumber, newVersionNumber: nextVersionNumber });
         return restoreVersion;
       } catch (error) {
-        if (snapshotFilePath) {
-          await fs.promises.unlink(snapshotFilePath).catch(() => {});
+        if (snapshotKeyFinal) {
+          const { deleteObject } = await import('./storageService');
+          await deleteObject(snapshotKeyFinal).catch(() => {});
         }
         throw error;
       }

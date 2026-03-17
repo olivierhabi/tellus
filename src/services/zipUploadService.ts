@@ -5,8 +5,8 @@ import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { AppError } from '../utils/foundryAppError';
-import { foundryEnv } from '../config/foundryEnv';
 import { scheduleParseJob } from '../jobs/parseDatasetJob';
+import { buildObjectKey, uploadObject } from './storageService';
 
 const execFileAsync = promisify(execFile);
 const MAX_UNCOMPRESSED_SIZE = 1024 * 1024 * 1024;
@@ -86,15 +86,21 @@ export class ZipUploadService {
         if (!ALLOWED_EXTENSIONS.has(ext)) { result.skipped.push(entry.name); continue; }
 
         try {
-          const targetDir = path.join(foundryEnv.UPLOAD_DIR, projectId, parentFolderId);
-          await fs.promises.mkdir(targetDir, { recursive: true });
-          const uniqueName = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}${ext}`;
-          const destPath = path.join(targetDir, uniqueName);
-          await fs.promises.copyFile(fullPath, destPath);
-          const fileStat = await fs.promises.stat(destPath);
+          // Read extracted file from temp dir and upload to S3
+          const fileBuffer = await fs.promises.readFile(fullPath);
+          const uniqueName = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}_${entry.name}`;
+          const objectKey = buildObjectKey(projectId, parentFolderId, uniqueName);
+          const mimeType = ext === '.tsv' ? 'text/tab-separated-values' : 'text/csv';
+
+          await uploadObject(objectKey, fileBuffer, mimeType, {
+            'original-filename': entry.name,
+            'project-id': projectId,
+            'folder-id': parentFolderId,
+            'owner-id': ownerId,
+          });
 
           const [dataset] = await this.knex('foundry_datasets')
-            .insert({ name: entry.name, folder_id: parentFolderId, file_path: destPath, original_filename: entry.name, mime_type: ext === '.tsv' ? 'text/tab-separated-values' : 'text/csv', file_size_bytes: fileStat.size, status: 'pending' })
+            .insert({ name: entry.name, folder_id: parentFolderId, file_path: objectKey, original_filename: entry.name, mime_type: mimeType, file_size_bytes: fileBuffer.length, status: 'pending' })
             .returning('*');
           result.created.push(entry.name);
           scheduleParseJob(dataset.id as string);

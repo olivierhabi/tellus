@@ -8,13 +8,22 @@ export function scheduleParseJob(datasetId: string): void {
       const dataset = await foundryDb('foundry_datasets').where({ id: datasetId }).first();
       if (!dataset) { console.error(`[parseDatasetJob] Dataset ${datasetId} not found`); return; }
 
-      const folder = await foundryDb('folders').where({ id: dataset.folder_id }).first();
-      if (!folder) { console.error(`[parseDatasetJob] Folder ${dataset.folder_id} not found for dataset ${datasetId}`); return; }
-      const projectId = folder.project_id;
+      // Resolve project ID — folder-based or project-level upload
+      let projectId: string | null = null;
+      if (dataset.folder_id) {
+        const folder = await foundryDb('folders').where({ id: dataset.folder_id }).first();
+        if (!folder) { console.error(`[parseDatasetJob] Folder ${dataset.folder_id} not found for dataset ${datasetId}`); return; }
+        projectId = folder.project_id;
+      } else if (dataset.project_id) {
+        projectId = dataset.project_id;
+      }
 
       await foundryDb('foundry_datasets').where({ id: datasetId }).update({ status: 'processing' });
-      emitDatasetEvent('dataset:processing', projectId, { datasetId, status: 'processing' });
+      if (projectId) {
+        emitDatasetEvent('dataset:processing', projectId, { datasetId, status: 'processing' });
+      }
 
+      // file_path now stores the S3 object key — csvParsingService reads from S3
       const result = await csvParsingService.parseFile(dataset.file_path);
 
       await foundryDb('foundry_datasets').where({ id: datasetId }).update({
@@ -39,7 +48,9 @@ export function scheduleParseJob(datasetId: string): void {
         });
       }
 
-      emitDatasetEvent('dataset:ready', projectId, { datasetId, status: 'ready', rowCount: result.rowCount, columnCount: result.columns.length });
+      if (projectId) {
+        emitDatasetEvent('dataset:ready', projectId, { datasetId, status: 'ready', rowCount: result.rowCount, columnCount: result.columns.length });
+      }
       console.log(`[parseDatasetJob] Dataset ${datasetId} parsed successfully: ${result.rowCount} rows, ${result.columns.length} columns`);
     } catch (error) {
       console.error(`[parseDatasetJob] Error parsing dataset ${datasetId}:`, error);
@@ -48,8 +59,12 @@ export function scheduleParseJob(datasetId: string): void {
         const dataset = await foundryDb('foundry_datasets').where({ id: datasetId }).first();
         let projectId: string | null = null;
         if (dataset) {
-          const folder = await foundryDb('folders').where({ id: dataset.folder_id }).first();
-          projectId = folder?.project_id ?? null;
+          if (dataset.folder_id) {
+            const folder = await foundryDb('folders').where({ id: dataset.folder_id }).first();
+            projectId = folder?.project_id ?? null;
+          } else {
+            projectId = dataset.project_id ?? null;
+          }
         }
 
         await foundryDb('foundry_datasets').where({ id: datasetId }).update({

@@ -224,6 +224,42 @@ async function migrateFoundry(): Promise<void> {
     await client.query("DROP TRIGGER IF EXISTS trg_users_updated_at ON users");
     await client.query("CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()");
 
+    // Backfill: ensure every project owner has a project_members row
+    // Only for owners that exist in the users table (skip orphaned dev data)
+    await client.query(`
+      INSERT INTO project_members (project_id, user_id, role)
+      SELECT p.id, p.owner_id, 'owner'
+      FROM projects p
+      INNER JOIN users u ON u.id = p.owner_id
+      WHERE NOT EXISTS (
+        SELECT 1 FROM project_members pm
+        WHERE pm.project_id = p.id AND pm.user_id = p.owner_id
+      )
+      ON CONFLICT (project_id, user_id) DO NOTHING
+    `);
+
+    // -----------------------------------------------------------------------
+    // Schema evolution: add project_id to foundry_datasets, make folder_id
+    // nullable so datasets can live at the project root level.
+    // -----------------------------------------------------------------------
+    const colCheck = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'foundry_datasets' AND column_name = 'project_id'
+    `);
+    if (colCheck.rows.length === 0) {
+      await client.query(`ALTER TABLE foundry_datasets ADD COLUMN project_id UUID REFERENCES projects(id) ON DELETE CASCADE`);
+      await client.query(`ALTER TABLE foundry_datasets ALTER COLUMN folder_id DROP NOT NULL`);
+      // Backfill project_id from the folder's project
+      await client.query(`
+        UPDATE foundry_datasets d
+        SET project_id = f.project_id
+        FROM folders f
+        WHERE d.folder_id = f.id AND d.project_id IS NULL
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_foundry_datasets_project ON foundry_datasets(project_id)`);
+      console.log("  [schema] foundry_datasets.project_id added, folder_id made nullable");
+    }
+
     await client.query("COMMIT");
     console.log("\nFoundry migration complete — all tables created successfully.");
   } catch (err) {

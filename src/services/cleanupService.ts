@@ -1,6 +1,5 @@
 import { Knex } from 'knex';
-import * as fs from 'fs';
-import * as path from 'path';
+import { deleteObject, deleteObjects, listObjects } from './storageService';
 
 export class CleanupService {
   constructor(private knex: Knex) {}
@@ -12,11 +11,10 @@ export class CleanupService {
     await this.knex('foundry_datasets').where({ id: datasetId }).delete();
     
     try {
-      await fs.promises.unlink(dataset.file_path);
+      // file_path is now an S3 object key
+      await deleteObject(dataset.file_path);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error(`Failed to delete file ${dataset.file_path}:`, err);
-      }
+      console.error(`[cleanup] Failed to delete S3 object ${dataset.file_path}:`, err);
     }
     return true;
   }
@@ -31,52 +29,44 @@ export class CleanupService {
       await trx('foundry_datasets').whereIn('id', datasetIds).delete();
     });
     
-    await Promise.allSettled(
-      datasets.map((d: Record<string, unknown>) =>
-        fs.promises.unlink(d.file_path as string).catch(() => {})
-      )
-    );
+    // Batch delete S3 objects
+    const keys = datasets.map((d: Record<string, unknown>) => d.file_path as string);
+    if (keys.length > 0) {
+      const result = await deleteObjects(keys);
+      deleted = result.deleted;
+      failed = result.errors;
+    }
     
+    // Adjust counts if some datasets weren't found in DB
     deleted = datasets.length;
     failed = datasetIds.length - datasets.length;
     
     return { deleted, failed };
   }
 
-  async cleanOrphanedFiles(uploadDir: string): Promise<{ removedFiles: number }> {
+  /**
+   * Clean orphaned files in S3 that have no matching database record.
+   * Lists all objects under the configured bucket and compares with known file_path values.
+   */
+  async cleanOrphanedFiles(): Promise<{ removedFiles: number }> {
     let removedFiles = 0;
     
     const allDatasetPaths = await this.knex('foundry_datasets').select('file_path');
     const knownPaths = new Set(allDatasetPaths.map((d: Record<string, unknown>) => d.file_path as string));
     
-    const walkDir = async (dir: string): Promise<string[]> => {
-      const files: string[] = [];
-      try {
-        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          const fullPath = path.join(dir, entry.name);
-          if (entry.isDirectory()) {
-            files.push(...await walkDir(fullPath));
-          } else {
-            files.push(fullPath);
-          }
-        }
-      } catch {
-        // Directory doesn't exist
+    // List all objects under the projects/ prefix in S3
+    const allKeys = await listObjects('projects/');
+    const orphanKeys: string[] = [];
+
+    for (const key of allKeys) {
+      if (!knownPaths.has(key)) {
+        orphanKeys.push(key);
       }
-      return files;
-    };
-    
-    const allFiles = await walkDir(uploadDir);
-    for (const filePath of allFiles) {
-      if (!knownPaths.has(filePath)) {
-        try {
-          await fs.promises.unlink(filePath);
-          removedFiles++;
-        } catch {
-          // Ignore
-        }
-      }
+    }
+
+    if (orphanKeys.length > 0) {
+      const result = await deleteObjects(orphanKeys);
+      removedFiles = result.deleted;
     }
     
     return { removedFiles };
@@ -86,6 +76,7 @@ export class CleanupService {
     const orphaned = await this.knex('foundry_datasets')
       .leftJoin('folders', 'foundry_datasets.folder_id', 'folders.id')
       .whereNull('folders.id')
+      .whereNotNull('foundry_datasets.folder_id')
       .select('foundry_datasets.id');
     
     if (orphaned.length > 0) {

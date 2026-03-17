@@ -5,6 +5,7 @@ import { DatasetListQuerySchema, DatasetPreviewQuerySchema } from '../types/data
 import { AppError } from '../utils/foundryAppError';
 import { sendSuccess, sendCreated, sendError } from '../utils/foundryResponse';
 import { z } from 'zod';
+import { getObjectStream, getPresignedDownloadUrl, headObject } from '../services/storageService';
 
 const UuidParam = z.string().uuid('Invalid UUID format');
 
@@ -195,6 +196,54 @@ export class DatasetController {
 
       const dup = await this.datasetService.duplicateDataset(datasetId);
       return sendCreated(res, dup);
+    } catch (err) { next(err); }
+  };
+
+  /**
+   * Download a dataset file from S3/MinIO.
+   * Streams the file directly to the client with correct headers.
+   */
+  download = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { datasetId } = req.params;
+      const uuidParse = z.string().uuid().safeParse(datasetId);
+      if (!uuidParse.success) return sendError(res, 400, 'VALIDATION_ERROR', 'Invalid dataset ID');
+
+      const dataset = await this.datasetService.getDatasetById(datasetId);
+      if (!dataset) {
+        throw new AppError('Dataset not found', 404, 'NOT_FOUND');
+      }
+
+      const s3Key = dataset.file_path as string;
+
+      // Check if client wants a presigned URL redirect instead of a stream
+      const mode = req.query.mode as string;
+      if (mode === 'presigned') {
+        const url = await getPresignedDownloadUrl(s3Key, 3600);
+        return res.json({ success: true, data: { url, expiresIn: 3600 } });
+      }
+
+      // Get object metadata for Content-Length
+      const meta = await headObject(s3Key);
+
+      const fileName = (dataset.original_filename as string) || 'download.csv';
+
+      res.set({
+        'Content-Type': (dataset.mime_type as string) || 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${fileName}"`,
+        'Content-Length': String(meta.contentLength),
+        'Cache-Control': 'private, max-age=300',
+      });
+
+      const stream = await getObjectStream(s3Key);
+      stream.pipe(res);
+
+      stream.on('error', (err) => {
+        console.error(`[download] Stream error for dataset ${datasetId}:`, err);
+        if (!res.headersSent) {
+          next(new AppError('Failed to download file', 500, 'DOWNLOAD_ERROR'));
+        }
+      });
     } catch (err) { next(err); }
   };
 }
