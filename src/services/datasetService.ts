@@ -17,6 +17,37 @@ export class DatasetService {
       .orderBy('name', 'asc');
   }
 
+  /**
+   * List ALL datasets belonging to a project — across every folder and
+   * the project root. Used by the pipeline builder's "Add Foundry data"
+   * dialog to show every available dataset for selection.
+   *
+   * The query uses a LEFT JOIN on folders because datasets can live at the
+   * project root (folder_id IS NULL, project_id set directly) or inside a
+   * folder (folder_id references folders which has project_id).
+   */
+  async listAllProjectDatasets(projectId: string): Promise<Record<string, unknown>[]> {
+    return this.knex('foundry_datasets as d')
+      .leftJoin('folders as f', 'd.folder_id', 'f.id')
+      .where(function () {
+        this.where('f.project_id', projectId)
+          .orWhere('d.project_id', projectId);
+      })
+      .select(
+        'd.id',
+        'd.name',
+        'd.status',
+        'd.file_size_bytes',
+        'd.row_count',
+        'd.column_count',
+        'd.original_filename',
+        'd.mime_type',
+        'd.created_at',
+        'd.updated_at',
+      )
+      .orderBy('d.name', 'asc');
+  }
+
   async listDatasets(folderId: string, query: DatasetListQuery) {
     const { status, sort, order, page, limit } = query;
     const offset = (page - 1) * limit;
@@ -64,18 +95,22 @@ export class DatasetService {
         json_agg(
           json_build_object(
             'id', dc.id,
-            'columnName', dc.column_name,
-            'columnType', dc.column_type,
-            'ordinalPosition', dc.ordinal_position,
+            'name', dc.column_name,
+            'type', dc.column_type,
+            'ordinal_position', dc.ordinal_position,
             'nullable', dc.nullable,
-            'sampleValues', dc.sample_values
+            'sample_values', COALESCE(dc.sample_values, '[]'::jsonb)
           )
           ORDER BY dc.ordinal_position ASC
-        ) FILTER (WHERE dc.id IS NOT NULL) AS columns
+        ) FILTER (WHERE dc.id IS NOT NULL) AS columns,
+        uc.display_name AS created_by_display_name,
+        uu.display_name AS updated_by_display_name
       FROM foundry_datasets d
       LEFT JOIN dataset_columns dc ON dc.dataset_id = d.id
+      LEFT JOIN users uc ON uc.id = d.created_by
+      LEFT JOIN users uu ON uu.id = d.updated_by
       WHERE d.id = ?
-      GROUP BY d.id`,
+      GROUP BY d.id, uc.display_name, uu.display_name`,
       [datasetId]
     );
 
@@ -206,11 +241,11 @@ export class DatasetService {
     };
   }
 
-  async updateDataset(datasetId: string, updates: { name?: string; folderId?: string }): Promise<any> {
+  async updateDataset(datasetId: string, updates: { name?: string; folderId?: string }, userId?: string): Promise<any> {
     const dataset = await this.knex('foundry_datasets').where({ id: datasetId }).first();
     if (!dataset) throw NotFoundError('Dataset not found');
 
-    const updateData: any = { updated_at: new Date() };
+    const updateData: any = { updated_at: new Date(), updated_by: userId ?? null };
     if (updates.name !== undefined) {
       // Check for duplicate name in same folder
       const existing = await this.knex('foundry_datasets')
@@ -240,7 +275,7 @@ export class DatasetService {
     await this.knex('foundry_datasets').where({ id: datasetId }).delete();
   }
 
-  async duplicateDataset(datasetId: string): Promise<any> {
+  async duplicateDataset(datasetId: string, userId?: string): Promise<any> {
     const dataset = await this.knex('foundry_datasets').where({ id: datasetId }).first();
     if (!dataset) throw NotFoundError('Dataset not found');
 
@@ -257,6 +292,8 @@ export class DatasetService {
       schema_info: dataset.schema_info ? JSON.stringify(dataset.schema_info) : null,
       status: dataset.status,
       content_hash: dataset.content_hash,
+      created_by: userId ?? null,
+      updated_by: userId ?? null,
     }).returning('*');
 
     // Copy columns

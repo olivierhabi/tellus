@@ -166,7 +166,8 @@ export class DatasetController {
       const { name, folderId } = req.body;
       if (!name && folderId === undefined) return sendError(res, 400, 'VALIDATION_ERROR', 'At least one field (name or folderId) is required');
 
-      const updated = await this.datasetService.updateDataset(datasetId, { name, folderId });
+      const user = (req as unknown as { user?: { id: string } }).user;
+      const updated = await this.datasetService.updateDataset(datasetId, { name, folderId }, user?.id);
       return sendSuccess(res, updated);
     } catch (err) { next(err); }
   };
@@ -194,7 +195,8 @@ export class DatasetController {
       const uuidParse = z.string().uuid().safeParse(datasetId);
       if (!uuidParse.success) return sendError(res, 400, 'VALIDATION_ERROR', 'Invalid dataset ID');
 
-      const dup = await this.datasetService.duplicateDataset(datasetId);
+      const user = (req as unknown as { user?: { id: string } }).user;
+      const dup = await this.datasetService.duplicateDataset(datasetId, user?.id);
       return sendCreated(res, dup);
     } catch (err) { next(err); }
   };

@@ -46,6 +46,7 @@ import foundryColumnStatsRouter from "./routes/columnStats";
 import foundryVersionsRouter from "./routes/versions";
 import { projectDuplicatesRouter, datasetDeduplicateRouter } from "./routes/duplicates";
 import foundryPreferencesRouter from "./routes/preferences";
+import foundryPipelinesRouter from "./routes/pipelines";
 import { devRouter } from "./routes/devTools";
 import { healthDetailedRouter } from "./routes/healthDetailed";
 import { initWebSocketServer, getWss } from "./websocket/server";
@@ -275,6 +276,7 @@ app.use("/api/breadcrumb", foundryBreadcrumbRouter);
 app.use("/api/auth", foundryAuthRouter);
 app.use("/api/projects/:projectId/members", foundryMembersRouter);
 app.use("/api/users/me/preferences", foundryPreferencesRouter);
+app.use("/api/projects/:projectId/pipelines", foundryPipelinesRouter);
 
 // ---------------------------------------------------------------------------
 // API Specification & Documentation

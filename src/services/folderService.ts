@@ -96,7 +96,7 @@ export class FolderService {
     }
     const safeSortOrder = sortOrder === 'desc' ? 'desc' : 'asc';
 
-    const [childFolders, childDatasets] = await Promise.all([
+    const [childFolders, childDatasets, childPipelines] = await Promise.all([
       this.knex('folders')
         .select(
           'folders.id', 'folders.name', 'folders.parent_folder_id', 'folders.project_id',
@@ -112,9 +112,14 @@ export class FolderService {
                 'original_filename', 'mime_type', 'created_at', 'updated_at')
         .where({ folder_id: folderId })
         .orderByRaw(`?? ${safeSortOrder} NULLS LAST, id ASC`, [sortBy]),
+      this.knex('pipelines')
+        .select('id', 'name', 'description', 'pipeline_type', 'compute_type',
+                'status', 'created_by', 'created_at', 'updated_at')
+        .where({ folder_id: folderId, project_id: projectId })
+        .orderBy('name', 'asc'),
     ]);
 
-    return { ...folder, children: { folders: childFolders, datasets: childDatasets } };
+    return { ...folder, children: { folders: childFolders, datasets: childDatasets, pipelines: childPipelines } };
   }
 
   async getFolderTree(projectId: string, folderId: string) {

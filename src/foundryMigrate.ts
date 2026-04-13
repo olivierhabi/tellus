@@ -238,6 +238,66 @@ async function migrateFoundry(): Promise<void> {
       ON CONFLICT (project_id, user_id) DO NOTHING
     `);
 
+    // 9. Pipelines table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pipelines (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        name            VARCHAR(255) NOT NULL,
+        description     TEXT,
+        pipeline_type   VARCHAR(50) NOT NULL DEFAULT 'batch'
+                        CHECK (pipeline_type IN ('batch', 'streaming')),
+        compute_type    VARCHAR(50) NOT NULL DEFAULT 'standard'
+                        CHECK (compute_type IN ('standard', 'lightweight', 'external')),
+        status          VARCHAR(50) NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft', 'active', 'paused', 'failed', 'archived')),
+        config          JSONB DEFAULT '{}'::jsonb,
+        created_by      UUID REFERENCES users(id) ON DELETE SET NULL,
+        created_at      TIMESTAMPTZ DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ DEFAULT NOW(),
+        CONSTRAINT uq_pipelines_project_name UNIQUE (project_id, name)
+      )
+    `);
+    // Schema evolution: add folder_id to pipelines for folder-scoped listing
+    const pipelineFolderCol = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'pipelines' AND column_name = 'folder_id'
+    `);
+    if (pipelineFolderCol.rows.length === 0) {
+      await client.query(`ALTER TABLE pipelines ADD COLUMN folder_id UUID REFERENCES folders(id) ON DELETE SET NULL`);
+      console.log("  [schema] pipelines.folder_id added");
+    }
+
+    await client.query("CREATE INDEX IF NOT EXISTS idx_pipelines_project ON pipelines(project_id)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_pipelines_folder ON pipelines(folder_id)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_pipelines_status ON pipelines(status)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_pipelines_created_by ON pipelines(created_by)");
+    await client.query("DROP TRIGGER IF EXISTS trg_pipelines_updated_at ON pipelines");
+    await client.query("CREATE TRIGGER trg_pipelines_updated_at BEFORE UPDATE ON pipelines FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()");
+    console.log("  [9/10] pipelines table created");
+
+    // 10. Pipeline nodes table — stores individual nodes within a pipeline graph
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pipeline_nodes (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        dataset_id      UUID REFERENCES foundry_datasets(id) ON DELETE SET NULL,
+        node_type       VARCHAR(50) NOT NULL DEFAULT 'dataset'
+                        CHECK (node_type IN ('dataset', 'transform', 'join', 'union', 'output')),
+        label           VARCHAR(255) NOT NULL,
+        position_x      DOUBLE PRECISION NOT NULL DEFAULT 0,
+        position_y      DOUBLE PRECISION NOT NULL DEFAULT 0,
+        config          JSONB DEFAULT '{}'::jsonb,
+        created_at      TIMESTAMPTZ DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query("CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_pipeline ON pipeline_nodes(pipeline_id)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_dataset ON pipeline_nodes(dataset_id)");
+    await client.query("DROP TRIGGER IF EXISTS trg_pipeline_nodes_updated_at ON pipeline_nodes");
+    await client.query("CREATE TRIGGER trg_pipeline_nodes_updated_at BEFORE UPDATE ON pipeline_nodes FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()");
+    console.log("  [10/10] pipeline_nodes table created");
+
     // -----------------------------------------------------------------------
     // Schema evolution: add project_id to foundry_datasets, make folder_id
     // nullable so datasets can live at the project root level.
@@ -259,6 +319,47 @@ async function migrateFoundry(): Promise<void> {
       await client.query(`CREATE INDEX IF NOT EXISTS idx_foundry_datasets_project ON foundry_datasets(project_id)`);
       console.log("  [schema] foundry_datasets.project_id added, folder_id made nullable");
     }
+
+    // -----------------------------------------------------------------------
+    // Schema evolution: add created_by / updated_by to foundry_datasets
+    // so the API can return who created or last modified a dataset.
+    // -----------------------------------------------------------------------
+    const createdByCheck = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'foundry_datasets' AND column_name = 'created_by'
+    `);
+    if (createdByCheck.rows.length === 0) {
+      await client.query(`ALTER TABLE foundry_datasets ADD COLUMN created_by UUID REFERENCES users(id) ON DELETE SET NULL`);
+      await client.query(`ALTER TABLE foundry_datasets ADD COLUMN updated_by UUID REFERENCES users(id) ON DELETE SET NULL`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_foundry_datasets_created_by ON foundry_datasets(created_by)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_foundry_datasets_updated_by ON foundry_datasets(updated_by)`);
+      console.log("  [schema] foundry_datasets.created_by / updated_by added");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline deployments — tracks every deployment execution
+    // -----------------------------------------------------------------------
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pipeline_deployments (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        status          VARCHAR(50) NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
+        triggered_by    UUID REFERENCES users(id) ON DELETE SET NULL,
+        started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        finished_at     TIMESTAMPTZ,
+        duration_ms     INTEGER,
+        config          JSONB DEFAULT '{}'::jsonb,
+        error_message   TEXT,
+        build_results   JSONB DEFAULT '[]'::jsonb,
+        created_at      TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_pipeline ON pipeline_deployments(pipeline_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_project ON pipeline_deployments(project_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_status ON pipeline_deployments(status)`);
+    console.log("  [ok] pipeline_deployments");
 
     await client.query("COMMIT");
     console.log("\nFoundry migration complete — all tables created successfully.");
