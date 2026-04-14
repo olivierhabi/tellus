@@ -611,6 +611,71 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// GET /api/v2/objects/:objectType/export?format=csv — Export objects as CSV
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/api/v2/objects/:objectType/export",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectType } = req.params;
+      await ensureObjectTypeExists(objectType);
+
+      // Fetch all objects (limited to 10000 for safety)
+      const result = await executeSearch(objectType, {
+        where: {},
+        $pageSize: 10000,
+      });
+
+      const rows = result.data || [];
+      if (rows.length === 0) {
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${objectType}.csv"`);
+        return res.status(200).send("");
+      }
+
+      // Gather all property keys from all rows
+      const allKeys = new Set<string>();
+      for (const row of rows) {
+        const props = (row as any).properties || row;
+        if (typeof props === "object" && props !== null) {
+          for (const key of Object.keys(props)) {
+            allKeys.add(key);
+          }
+        }
+      }
+
+      const headers = Array.from(allKeys).sort();
+
+      // Build CSV
+      const escapeCsv = (val: unknown): string => {
+        if (val === null || val === undefined) return "";
+        const str = typeof val === "object" ? JSON.stringify(val) : String(val);
+        if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+
+      const csvLines: string[] = [headers.map(escapeCsv).join(",")];
+      for (const row of rows) {
+        const props = (row as any).properties || row;
+        const line = headers.map((h) => escapeCsv(props[h])).join(",");
+        csvLines.push(line);
+      }
+
+      const csv = csvLines.join("\n");
+
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${objectType}.csv"`);
+      return res.status(200).send(csv);
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/v2/objects/:objectType/:primaryKey (Single Object)
 // ---------------------------------------------------------------------------
 

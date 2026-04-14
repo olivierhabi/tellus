@@ -32,6 +32,14 @@ import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
 import objectViewsRouter, { objectViewsByTypeRouter, objectViewsConfigRouter } from "./routes/objectViews";
 import ontologySearchRouter from "./routes/ontologySearch";
 import favoritesRouter from "./routes/favorites";
+import branchesRouter from "./routes/branches";
+import groupsRouter from "./routes/groups";
+import webhooksRouter from "./routes/webhooks";
+import functionsRouter from "./routes/functions";
+import { usagePostRouter, usageQueryRouter } from "./routes/usage";
+import proposalsRouter from "./routes/proposals";
+import securityPoliciesRouter from "./routes/securityPolicies";
+import explorationsRouter from "./routes/explorations";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
@@ -267,6 +275,15 @@ app.use(
 );
 app.use("/api/v2/search", ontologySearchRouter);
 app.use("/api/v2/favorites", favoritesRouter);
+app.use("/api/v2/ontologies/:ontologyId/branches", branchesRouter);
+app.use("/api/v2/ontologies/:ontologyId/groups", groupsRouter);
+app.use("/api/v2/ontologies/:ontologyId/webhooks", webhooksRouter);
+app.use("/api/v2/ontologies/:ontologyId/functions", functionsRouter);
+app.use("/api/v2/usage", usagePostRouter);
+app.use("/api/v2/ontologies/:ontologyId/usage", usageQueryRouter);
+app.use("/api/v2/ontologies/:ontologyId/proposals", proposalsRouter);
+app.use("/api/v2/ontologies/:ontologyId/security-policies", securityPoliciesRouter);
+app.use("/api/v2/explorations", explorationsRouter);
 app.use(objectsRouter);
 app.use(healthRouter);
 

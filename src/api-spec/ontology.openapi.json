@@ -70,6 +70,42 @@
     {
       "name": "Object Views",
       "description": "Enriched object view endpoints for UI consumption"
+    },
+    {
+      "name": "Branches",
+      "description": "Ontology branching model"
+    },
+    {
+      "name": "Groups",
+      "description": "Object type grouping"
+    },
+    {
+      "name": "Webhooks",
+      "description": "Side-effect webhooks for ontology events"
+    },
+    {
+      "name": "Functions",
+      "description": "Function registry for ontology"
+    },
+    {
+      "name": "Usage",
+      "description": "Usage tracking and analytics"
+    },
+    {
+      "name": "Proposals",
+      "description": "Ontology change proposals"
+    },
+    {
+      "name": "Security Policies",
+      "description": "Row-level, column-level, and role security policies"
+    },
+    {
+      "name": "Explorations",
+      "description": "Saved data explorations"
+    },
+    {
+      "name": "Export",
+      "description": "Data export endpoints"
     }
   ],
   "paths": {
@@ -2192,6 +2228,1089 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/branches": {
+      "get": {
+        "tags": [
+          "Branches"
+        ],
+        "summary": "List branches",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of branches"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Branches"
+        ],
+        "summary": "Create a branch",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "parentBranch": {
+                    "type": "string"
+                  },
+                  "isDefault": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Branch created"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/branches/{branchId}": {
+      "put": {
+        "tags": [
+          "Branches"
+        ],
+        "summary": "Update a branch",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branchId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "isDefault": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Branch updated"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/groups": {
+      "get": {
+        "tags": [
+          "Groups"
+        ],
+        "summary": "List object type groups",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of groups"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Groups"
+        ],
+        "summary": "Create a group",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "icon": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Group created"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/groups/{groupId}": {
+      "put": {
+        "tags": [
+          "Groups"
+        ],
+        "summary": "Update a group",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group updated"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Groups"
+        ],
+        "summary": "Delete a group",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted successfully"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/groups/{groupId}/members": {
+      "post": {
+        "tags": [
+          "Groups"
+        ],
+        "summary": "Add member to group",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Member added"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Groups"
+        ],
+        "summary": "Remove member from group",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted successfully"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/webhooks": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List webhooks",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of webhooks"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Create a webhook",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url",
+                  "eventType"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "eventType": {
+                    "type": "string"
+                  },
+                  "actionTypeId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "active": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Webhook created"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/webhooks/{webhookId}": {
+      "delete": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Delete a webhook",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "webhookId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted successfully"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/functions": {
+      "get": {
+        "tags": [
+          "Functions"
+        ],
+        "summary": "List functions",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of functions"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Functions"
+        ],
+        "summary": "Register a function",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "apiName",
+                  "displayName"
+                ],
+                "properties": {
+                  "apiName": {
+                    "type": "string"
+                  },
+                  "displayName": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "inputSchema": {
+                    "type": "object"
+                  },
+                  "outputSchema": {
+                    "type": "object"
+                  },
+                  "codeRepositoryUrl": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Function registered"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/functions/{apiName}": {
+      "get": {
+        "tags": [
+          "Functions"
+        ],
+        "summary": "Get a function by apiName",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "apiName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Function details"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Functions"
+        ],
+        "summary": "Update a function",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "apiName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Function updated"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Functions"
+        ],
+        "summary": "Delete a function",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "apiName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted successfully"
+          }
+        }
+      }
+    },
+    "/api/v2/usage": {
+      "post": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Log a usage event",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "resourceType",
+                  "operation"
+                ],
+                "properties": {
+                  "ontologyId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "resourceType": {
+                    "type": "string"
+                  },
+                  "resourceId": {
+                    "type": "string"
+                  },
+                  "userId": {
+                    "type": "string"
+                  },
+                  "operation": {
+                    "type": "string"
+                  },
+                  "appId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Usage event logged"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/usage": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Query usage events",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "resource",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage events"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/proposals": {
+      "get": {
+        "tags": [
+          "Proposals"
+        ],
+        "summary": "List proposals",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of proposals"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Proposals"
+        ],
+        "summary": "Create a proposal",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "title"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "branchId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "reviewer": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Proposal created"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/proposals/{proposalId}": {
+      "put": {
+        "tags": [
+          "Proposals"
+        ],
+        "summary": "Update a proposal",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "proposalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Proposal updated"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/security-policies": {
+      "get": {
+        "tags": [
+          "Security Policies"
+        ],
+        "summary": "List security policies",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of policies"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Security Policies"
+        ],
+        "summary": "Create a security policy",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "policyType"
+                ],
+                "properties": {
+                  "objectTypeApiName": {
+                    "type": "string"
+                  },
+                  "policyType": {
+                    "type": "string",
+                    "enum": [
+                      "row_level",
+                      "column_level",
+                      "role"
+                    ]
+                  },
+                  "config": {
+                    "type": "object"
+                  },
+                  "active": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Policy created"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/security-policies/{policyId}": {
+      "put": {
+        "tags": [
+          "Security Policies"
+        ],
+        "summary": "Update a security policy",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "policyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy updated"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Security Policies"
+        ],
+        "summary": "Delete a security policy",
+        "parameters": [
+          {
+            "name": "ontologyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "policyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted successfully"
+          }
+        }
+      }
+    },
+    "/api/v2/explorations": {
+      "get": {
+        "tags": [
+          "Explorations"
+        ],
+        "summary": "List saved explorations",
+        "responses": {
+          "200": {
+            "description": "List of explorations"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Explorations"
+        ],
+        "summary": "Create an exploration",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "ontologyId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "objectType": {
+                    "type": "string"
+                  },
+                  "filters": {
+                    "type": "object"
+                  },
+                  "layout": {
+                    "type": "object"
+                  },
+                  "visibility": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Exploration created"
+          }
+        }
+      }
+    },
+    "/api/v2/explorations/{explorationId}": {
+      "put": {
+        "tags": [
+          "Explorations"
+        ],
+        "summary": "Update an exploration",
+        "parameters": [
+          {
+            "name": "explorationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exploration updated"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Explorations"
+        ],
+        "summary": "Delete an exploration",
+        "parameters": [
+          {
+            "name": "explorationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted successfully"
+          }
+        }
+      }
+    },
+    "/api/v2/objects/{objectType}/export": {
+      "get": {
+        "tags": [
+          "Export"
+        ],
+        "summary": "Export objects as CSV",
+        "parameters": [
+          {
+            "name": "objectType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "csv"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV file",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }

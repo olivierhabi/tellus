@@ -25,6 +25,26 @@ import {
 const router = Router({ mergeParams: true });
 
 // ---------------------------------------------------------------------------
+// Auto-migration: add point_of_contact column if missing (#17)
+// ---------------------------------------------------------------------------
+
+let pocMigrated = false;
+
+async function ensurePointOfContactColumn(): Promise<void> {
+  if (pocMigrated) return;
+  try {
+    const { query: dbQuery } = await import("../db");
+    await dbQuery(`ALTER TABLE object_type ADD COLUMN IF NOT EXISTS point_of_contact TEXT`);
+  } catch (_err) {
+    // Column may already exist or table not yet created — ignore
+  }
+  pocMigrated = true;
+}
+
+// Run migration on module load (best-effort)
+ensurePointOfContactColumn().catch(() => {});
+
+// ---------------------------------------------------------------------------
 // Known error codes handled in catch blocks
 // ---------------------------------------------------------------------------
 
@@ -417,7 +437,7 @@ router.put(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId, apiName } = req.params;
-      const { displayName, description, icon, iconColor, status } = req.body;
+      const { displayName, description, icon, iconColor, status, pointOfContact } = req.body;
 
       // At least one field must be provided
       if (
@@ -425,7 +445,8 @@ router.put(
         description === undefined &&
         icon === undefined &&
         iconColor === undefined &&
-        status === undefined
+        status === undefined &&
+        pointOfContact === undefined
       ) {
         return sendError(
           res,
@@ -440,6 +461,7 @@ router.put(
       if (icon !== undefined) updateData.icon = icon;
       if (iconColor !== undefined) updateData.iconColor = iconColor;
       if (status !== undefined) updateData.status = status;
+      if (pointOfContact !== undefined) updateData.pointOfContact = pointOfContact;
 
       await objectTypeService.update(ontologyId, apiName, updateData);
 

@@ -36,6 +36,7 @@ interface UpdateInput {
   icon?: string;
   iconColor?: string;
   status?: string;
+  pointOfContact?: string | null;
 }
 
 // AppError imported from shared module
@@ -302,6 +303,10 @@ async function update(ontologyId: string, apiName: string, data: UpdateInput) {
   if (data.status !== undefined) {
     setClauses.push(`status = $${paramIndex++}`);
     values.push(data.status);
+  }
+  if (data.pointOfContact !== undefined) {
+    setClauses.push(`point_of_contact = $${paramIndex++}`);
+    values.push(data.pointOfContact);
   }
 
   if (setClauses.length === 0) {

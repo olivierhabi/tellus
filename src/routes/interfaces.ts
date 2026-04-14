@@ -27,6 +27,25 @@ import {
 const router = Router({ mergeParams: true });
 
 // ---------------------------------------------------------------------------
+// Auto-migration: add parent_interface_id column if missing (#44)
+// ---------------------------------------------------------------------------
+
+let inheritanceMigrated = false;
+
+async function ensureParentInterfaceColumn(): Promise<void> {
+  if (inheritanceMigrated) return;
+  try {
+    await query(`ALTER TABLE interface ADD COLUMN IF NOT EXISTS parent_interface_id UUID REFERENCES interface(interface_id)`);
+  } catch (_err) {
+    // Column may already exist — ignore
+  }
+  inheritanceMigrated = true;
+}
+
+// Run migration on module load (best-effort)
+ensureParentInterfaceColumn().catch(() => {});
+
+// ---------------------------------------------------------------------------
 // Known error codes handled in catch blocks
 // ---------------------------------------------------------------------------
 
@@ -130,6 +149,7 @@ function groupInterfaceRows(rows: FlatRow[]): Record<string, unknown>[] {
         apiName: row.api_name,
         displayName: row.display_name,
         description: row.description,
+        parentInterfaceId: (row as any).parent_interface_id || null,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         properties: [] as Record<string, unknown>[],
@@ -218,7 +238,7 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;
-      const { apiName, displayName, description, properties } = req.body;
+      const { apiName, displayName, description, properties, parentInterfaceId } = req.body;
 
       // ---------------------------------------------------------------
       // Validation (13 rules)
@@ -384,10 +404,10 @@ router.post(
 
         // Insert the interface
         const insertInterfaceResult = await client.query(
-          `INSERT INTO interface (ontology_id, api_name, display_name, description)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO interface (ontology_id, api_name, display_name, description, parent_interface_id)
+           VALUES ($1, $2, $3, $4, $5)
            RETURNING *`,
-          [ontologyId, apiName, displayName, description || null]
+          [ontologyId, apiName, displayName, description || null, parentInterfaceId || null]
         );
         const interfaceRow = insertInterfaceResult.rows[0];
 
