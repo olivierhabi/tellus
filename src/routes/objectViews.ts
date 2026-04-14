@@ -706,4 +706,128 @@ objectViewsByTypeRouter.post(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Object Type Views — List & Create saved view configurations (Part D)
+//
+// These endpoints manage saved "views" (column sets, filters, sort orders)
+// for an object type. The object_type_view table is auto-created on first use.
+//
+// Mounted via objectViewsConfigRouter at:
+//   /api/v2/ontology/:ontologyId/objectTypes/:apiName/views
+// ---------------------------------------------------------------------------
+
+export const objectViewsConfigRouter = Router({ mergeParams: true });
+
+let viewsMigrated = false;
+
+async function ensureViewsTable(): Promise<void> {
+  if (viewsMigrated) return;
+  await query(`
+    CREATE TABLE IF NOT EXISTS object_type_view (
+      view_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      ontology_id        UUID         NOT NULL,
+      object_type_api_name VARCHAR(255) NOT NULL,
+      name               VARCHAR(255) NOT NULL,
+      description        TEXT,
+      columns            JSONB        NOT NULL DEFAULT '[]'::jsonb,
+      filters            JSONB        NOT NULL DEFAULT '{}'::jsonb,
+      sort_by            VARCHAR(255),
+      created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+      updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    )
+  `);
+  viewsMigrated = true;
+}
+
+// GET /views — List all views for an object type
+objectViewsConfigRouter.get(
+  "/",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      await ensureViewsTable();
+      const { ontologyId, objectTypeApiName } = req.params;
+      const apiName = objectTypeApiName || req.params.apiName;
+
+      // Verify object type exists
+      await ensureObjectTypeExists(ontologyId, apiName);
+
+      const result = await query(
+        `SELECT * FROM object_type_view
+         WHERE ontology_id = $1 AND object_type_api_name = $2
+         ORDER BY created_at DESC`,
+        [ontologyId, apiName]
+      );
+
+      const data = result.rows.map((row: any) => ({
+        viewId: row.view_id,
+        objectTypeApiName: row.object_type_api_name,
+        name: row.name,
+        description: row.description,
+        columns: row.columns,
+        filters: row.filters,
+        sortBy: row.sort_by,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+
+      return sendSuccess(res, { data });
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// POST /views — Create a new view for an object type
+objectViewsConfigRouter.post(
+  "/",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      await ensureViewsTable();
+      const { ontologyId, objectTypeApiName } = req.params;
+      const apiName = objectTypeApiName || req.params.apiName;
+
+      // Verify object type exists
+      await ensureObjectTypeExists(ontologyId, apiName);
+
+      const { name, description, columns, filters, sortBy } = req.body || {};
+
+      if (!name || typeof name !== "string" || name.trim().length === 0) {
+        throw appError("VALIDATION_FAILED", "name is required and must be a non-empty string.");
+      }
+
+      const result = await query(
+        `INSERT INTO object_type_view (ontology_id, object_type_api_name, name, description, columns, filters, sort_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [
+          ontologyId,
+          apiName,
+          name.trim(),
+          description || null,
+          JSON.stringify(columns || []),
+          JSON.stringify(filters || {}),
+          sortBy || null,
+        ]
+      );
+
+      const row = result.rows[0];
+      res.status(201).json({
+        data: {
+          viewId: row.view_id,
+          objectTypeApiName: row.object_type_api_name,
+          name: row.name,
+          description: row.description,
+          columns: row.columns,
+          filters: row.filters,
+          sortBy: row.sort_by,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        },
+      });
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
 export default router;

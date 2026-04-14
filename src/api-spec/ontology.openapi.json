@@ -1,7 +1,7 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "Tellus Ontology Engine — Full API",
+    "title": "Tellus Ontology Engine \u2014 Full API",
     "description": "Comprehensive API specification for the Tellus Ontology Engine. Covers ontology CRUD, object types, properties, link types, and action types.",
     "version": "2.0.0",
     "contact": {
@@ -38,6 +38,38 @@
     {
       "name": "Action Types",
       "description": "CRUD operations for action type definitions within an ontology"
+    },
+    {
+      "name": "Datasources",
+      "description": "Datasource registration and management for object types"
+    },
+    {
+      "name": "Indexing",
+      "description": "OpenSearch indexing operations for object types"
+    },
+    {
+      "name": "Interfaces",
+      "description": "Interface definitions \u2014 shared property contracts for object types"
+    },
+    {
+      "name": "Edits",
+      "description": "Edit tracking for objects modified via actions"
+    },
+    {
+      "name": "Actions",
+      "description": "Action execution and audit logging"
+    },
+    {
+      "name": "Search",
+      "description": "Global search across ontology resources"
+    },
+    {
+      "name": "Favorites",
+      "description": "User favorites (starred resources)"
+    },
+    {
+      "name": "Object Views",
+      "description": "Enriched object view endpoints for UI consumption"
     }
   ],
   "paths": {
@@ -46,14 +78,18 @@
         "operationId": "createOntology",
         "summary": "Create a new ontology",
         "description": "Creates a new ontology with the given display name and optional description.",
-        "tags": ["Ontologies"],
+        "tags": [
+          "Ontologies"
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["displayName"],
+                "required": [
+                  "displayName"
+                ],
                 "properties": {
                   "displayName": {
                     "type": "string",
@@ -76,16 +112,22 @@
             "description": "Ontology created successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Ontology" }
+                "schema": {
+                  "$ref": "#/components/schemas/Ontology"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/ValidationError" },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
           "409": {
             "description": "Ontology with that name already exists",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Error" }
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
               }
             }
           }
@@ -95,18 +137,25 @@
         "operationId": "listOntologies",
         "summary": "List all ontologies",
         "description": "Returns a paginated list of all ontologies.",
-        "tags": ["Ontologies"],
+        "tags": [
+          "Ontologies"
+        ],
         "parameters": [
           {
             "name": "pageSize",
             "in": "query",
-            "schema": { "type": "integer", "default": 100 },
+            "schema": {
+              "type": "integer",
+              "default": 100
+            },
             "description": "Maximum number of results per page"
           },
           {
             "name": "pageToken",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Opaque token for fetching the next page of results"
           }
         ],
@@ -120,7 +169,9 @@
                   "properties": {
                     "data": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/Ontology" }
+                      "items": {
+                        "$ref": "#/components/schemas/Ontology"
+                      }
                     },
                     "nextPageToken": {
                       "type": "string",
@@ -137,30 +188,40 @@
     },
     "/api/v2/ontologies/{ontologyId}": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        }
       ],
       "get": {
         "operationId": "getOntology",
         "summary": "Get a single ontology",
         "description": "Returns the ontology identified by the given UUID.",
-        "tags": ["Ontologies"],
+        "tags": [
+          "Ontologies"
+        ],
         "responses": {
           "200": {
             "description": "The requested ontology",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Ontology" }
+                "schema": {
+                  "$ref": "#/components/schemas/Ontology"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "put": {
         "operationId": "updateOntology",
         "summary": "Update an ontology",
         "description": "Updates the display name and/or description of an existing ontology.",
-        "tags": ["Ontologies"],
+        "tags": [
+          "Ontologies"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -187,21 +248,31 @@
             "description": "Ontology updated successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Ontology" }
+                "schema": {
+                  "$ref": "#/components/schemas/Ontology"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "delete": {
         "operationId": "deleteOntology",
         "summary": "Delete an ontology",
         "description": "Permanently deletes the ontology and all its child entities (object types, properties, link types, action types).",
-        "tags": ["Ontologies"],
+        "tags": [
+          "Ontologies"
+        ],
         "responses": {
-          "204": { "description": "Ontology deleted successfully" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "204": {
+            "description": "Ontology deleted successfully"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
@@ -210,7 +281,9 @@
         "operationId": "importOntology",
         "summary": "Import ontology from JSON",
         "description": "Creates an ontology and all its child entities from a JSON payload. Useful for migration or environment seeding.",
-        "tags": ["Ontologies"],
+        "tags": [
+          "Ontologies"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -227,23 +300,31 @@
             "description": "Ontology imported successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Ontology" }
+                "schema": {
+                  "$ref": "#/components/schemas/Ontology"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/ValidationError" }
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/export": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        }
       ],
       "get": {
         "operationId": "exportOntology",
         "summary": "Export ontology as JSON",
         "description": "Returns the full ontology including all object types, properties, link types, and action types as a JSON document.",
-        "tags": ["Ontologies"],
+        "tags": [
+          "Ontologies"
+        ],
         "responses": {
           "200": {
             "description": "Full ontology export",
@@ -256,26 +337,35 @@
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/objectTypes": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        }
       ],
       "post": {
         "operationId": "createObjectType",
         "summary": "Create a new object type",
         "description": "Creates a new object type within the specified ontology.",
-        "tags": ["Object Types"],
+        "tags": [
+          "Object Types"
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["apiName", "displayName"],
+                "required": [
+                  "apiName",
+                  "displayName"
+                ],
                 "properties": {
                   "apiName": {
                     "type": "string",
@@ -304,7 +394,11 @@
                   },
                   "status": {
                     "type": "string",
-                    "enum": ["active", "deprecated", "experimental"],
+                    "enum": [
+                      "active",
+                      "deprecated",
+                      "experimental"
+                    ],
                     "default": "active",
                     "description": "Lifecycle status of the object type"
                   }
@@ -318,17 +412,25 @@
             "description": "Object type created successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ObjectType" }
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectType"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/ValidationError" },
-          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "409": {
             "description": "Object type with that apiName already exists",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Error" }
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
               }
             }
           }
@@ -338,7 +440,9 @@
         "operationId": "listObjectTypes",
         "summary": "List object types",
         "description": "Returns all object types within the specified ontology.",
-        "tags": ["Object Types"],
+        "tags": [
+          "Object Types"
+        ],
         "responses": {
           "200": {
             "description": "A list of object types",
@@ -349,44 +453,60 @@
                   "properties": {
                     "data": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/ObjectType" }
+                      "items": {
+                        "$ref": "#/components/schemas/ObjectType"
+                      }
                     }
                   }
                 }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" },
-        { "$ref": "#/components/parameters/ObjectTypeApiName" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        }
       ],
       "get": {
         "operationId": "getObjectType",
         "summary": "Get a single object type",
         "description": "Returns the object type identified by apiName within the given ontology.",
-        "tags": ["Object Types"],
+        "tags": [
+          "Object Types"
+        ],
         "responses": {
           "200": {
             "description": "The requested object type",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ObjectType" }
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectType"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "put": {
         "operationId": "updateObjectType",
         "summary": "Update an object type",
         "description": "Updates an existing object type's display name, description, icon, or status.",
-        "tags": ["Object Types"],
+        "tags": [
+          "Object Types"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -394,13 +514,28 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "displayName": { "type": "string" },
-                  "description": { "type": "string", "nullable": true },
-                  "icon": { "type": "string", "nullable": true },
-                  "iconColor": { "type": "string", "nullable": true },
+                  "displayName": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "icon": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "iconColor": {
+                    "type": "string",
+                    "nullable": true
+                  },
                   "status": {
                     "type": "string",
-                    "enum": ["active", "deprecated", "experimental"]
+                    "enum": [
+                      "active",
+                      "deprecated",
+                      "experimental"
+                    ]
                   }
                 }
               }
@@ -412,41 +547,61 @@
             "description": "Object type updated successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ObjectType" }
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectType"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "delete": {
         "operationId": "deleteObjectType",
         "summary": "Delete an object type",
         "description": "Permanently deletes the object type and all its properties.",
-        "tags": ["Object Types"],
+        "tags": [
+          "Object Types"
+        ],
         "responses": {
-          "204": { "description": "Object type deleted successfully" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "204": {
+            "description": "Object type deleted successfully"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" },
-        { "$ref": "#/components/parameters/ObjectTypeApiName" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        }
       ],
       "post": {
         "operationId": "createProperty",
         "summary": "Create a new property",
         "description": "Creates a new property on the specified object type.",
-        "tags": ["Properties"],
+        "tags": [
+          "Properties"
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["apiName", "displayName", "baseType"],
+                "required": [
+                  "apiName",
+                  "displayName",
+                  "baseType"
+                ],
                 "properties": {
                   "apiName": {
                     "type": "string",
@@ -460,7 +615,16 @@
                   },
                   "baseType": {
                     "type": "string",
-                    "enum": ["string", "integer", "double", "boolean", "date", "timestamp", "geopoint", "geoshape"],
+                    "enum": [
+                      "string",
+                      "integer",
+                      "double",
+                      "boolean",
+                      "date",
+                      "timestamp",
+                      "geopoint",
+                      "geoshape"
+                    ],
                     "description": "Data type of the property"
                   },
                   "description": {
@@ -483,17 +647,25 @@
             "description": "Property created successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Property" }
+                "schema": {
+                  "$ref": "#/components/schemas/Property"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/ValidationError" },
-          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "409": {
             "description": "Property with that apiName already exists on this object type",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Error" }
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
               }
             }
           }
@@ -503,7 +675,9 @@
         "operationId": "listProperties",
         "summary": "List properties",
         "description": "Returns all properties for the specified object type.",
-        "tags": ["Properties"],
+        "tags": [
+          "Properties"
+        ],
         "responses": {
           "200": {
             "description": "A list of properties",
@@ -514,28 +688,40 @@
                   "properties": {
                     "data": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/Property" }
+                      "items": {
+                        "$ref": "#/components/schemas/Property"
+                      }
                     }
                   }
                 }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propertyApiName}": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" },
-        { "$ref": "#/components/parameters/ObjectTypeApiName" },
-        { "$ref": "#/components/parameters/PropertyApiName" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        },
+        {
+          "$ref": "#/components/parameters/PropertyApiName"
+        }
       ],
       "put": {
         "operationId": "updateProperty",
         "summary": "Update a property",
         "description": "Updates an existing property's display name, description, or other metadata.",
-        "tags": ["Properties"],
+        "tags": [
+          "Properties"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -543,13 +729,29 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "displayName": { "type": "string" },
-                  "description": { "type": "string", "nullable": true },
+                  "displayName": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string",
+                    "nullable": true
+                  },
                   "baseType": {
                     "type": "string",
-                    "enum": ["string", "integer", "double", "boolean", "date", "timestamp", "geopoint", "geoshape"]
+                    "enum": [
+                      "string",
+                      "integer",
+                      "double",
+                      "boolean",
+                      "date",
+                      "timestamp",
+                      "geopoint",
+                      "geoshape"
+                    ]
                   },
-                  "isArray": { "type": "boolean" }
+                  "isArray": {
+                    "type": "boolean"
+                  }
                 }
               }
             }
@@ -560,40 +762,60 @@
             "description": "Property updated successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Property" }
+                "schema": {
+                  "$ref": "#/components/schemas/Property"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "delete": {
         "operationId": "deleteProperty",
         "summary": "Delete a property",
         "description": "Permanently deletes the property from the object type.",
-        "tags": ["Properties"],
+        "tags": [
+          "Properties"
+        ],
         "responses": {
-          "204": { "description": "Property deleted successfully" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "204": {
+            "description": "Property deleted successfully"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/linkTypes": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        }
       ],
       "post": {
         "operationId": "createLinkType",
         "summary": "Create a new link type",
         "description": "Creates a new link type connecting two object types within the specified ontology.",
-        "tags": ["Link Types"],
+        "tags": [
+          "Link Types"
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["apiName", "displayName", "cardinality", "sourceObjectTypeApiName", "targetObjectTypeApiName"],
+                "required": [
+                  "apiName",
+                  "displayName",
+                  "cardinality",
+                  "sourceObjectTypeApiName",
+                  "targetObjectTypeApiName"
+                ],
                 "properties": {
                   "apiName": {
                     "type": "string",
@@ -607,7 +829,12 @@
                   },
                   "cardinality": {
                     "type": "string",
-                    "enum": ["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY"],
+                    "enum": [
+                      "ONE_TO_ONE",
+                      "ONE_TO_MANY",
+                      "MANY_TO_ONE",
+                      "MANY_TO_MANY"
+                    ],
                     "description": "Relationship cardinality between source and target object types"
                   },
                   "sourceObjectTypeApiName": {
@@ -635,17 +862,25 @@
             "description": "Link type created successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/LinkType" }
+                "schema": {
+                  "$ref": "#/components/schemas/LinkType"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/ValidationError" },
-          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "409": {
             "description": "Link type with that apiName already exists",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Error" }
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
               }
             }
           }
@@ -655,7 +890,9 @@
         "operationId": "listLinkTypes",
         "summary": "List link types",
         "description": "Returns all link types within the specified ontology.",
-        "tags": ["Link Types"],
+        "tags": [
+          "Link Types"
+        ],
         "responses": {
           "200": {
             "description": "A list of link types",
@@ -666,44 +903,60 @@
                   "properties": {
                     "data": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/LinkType" }
+                      "items": {
+                        "$ref": "#/components/schemas/LinkType"
+                      }
                     }
                   }
                 }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/linkTypes/{linkTypeApiName}": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" },
-        { "$ref": "#/components/parameters/LinkTypeApiName" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/LinkTypeApiName"
+        }
       ],
       "get": {
         "operationId": "getLinkType",
         "summary": "Get a single link type",
         "description": "Returns the link type identified by apiName within the given ontology.",
-        "tags": ["Link Types"],
+        "tags": [
+          "Link Types"
+        ],
         "responses": {
           "200": {
             "description": "The requested link type",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/LinkType" }
+                "schema": {
+                  "$ref": "#/components/schemas/LinkType"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "put": {
         "operationId": "updateLinkType",
         "summary": "Update a link type",
         "description": "Updates an existing link type's display name, description, or cardinality.",
-        "tags": ["Link Types"],
+        "tags": [
+          "Link Types"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -711,11 +964,21 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "displayName": { "type": "string" },
-                  "description": { "type": "string", "nullable": true },
+                  "displayName": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string",
+                    "nullable": true
+                  },
                   "cardinality": {
                     "type": "string",
-                    "enum": ["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY"]
+                    "enum": [
+                      "ONE_TO_ONE",
+                      "ONE_TO_MANY",
+                      "MANY_TO_ONE",
+                      "MANY_TO_MANY"
+                    ]
                   }
                 }
               }
@@ -727,40 +990,57 @@
             "description": "Link type updated successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/LinkType" }
+                "schema": {
+                  "$ref": "#/components/schemas/LinkType"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "delete": {
         "operationId": "deleteLinkType",
         "summary": "Delete a link type",
         "description": "Permanently deletes the link type.",
-        "tags": ["Link Types"],
+        "tags": [
+          "Link Types"
+        ],
         "responses": {
-          "204": { "description": "Link type deleted successfully" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "204": {
+            "description": "Link type deleted successfully"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/api/v2/ontologies/{ontologyId}/actionTypes": {
       "parameters": [
-        { "$ref": "#/components/parameters/OntologyId" }
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        }
       ],
       "post": {
         "operationId": "createActionType",
         "summary": "Create a new action type",
         "description": "Registers a new action type definition in the specified ontology. The action type defines parameters, rules (side effects), and constraints for a reusable action.",
-        "tags": ["Action Types"],
+        "tags": [
+          "Action Types"
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["apiName", "displayName"],
+                "required": [
+                  "apiName",
+                  "displayName"
+                ],
                 "properties": {
                   "apiName": {
                     "type": "string",
@@ -782,10 +1062,18 @@
                     "additionalProperties": {
                       "type": "object",
                       "properties": {
-                        "displayName": { "type": "string" },
-                        "baseType": { "type": "string" },
-                        "required": { "type": "boolean" },
-                        "description": { "type": "string" }
+                        "displayName": {
+                          "type": "string"
+                        },
+                        "baseType": {
+                          "type": "string"
+                        },
+                        "required": {
+                          "type": "boolean"
+                        },
+                        "description": {
+                          "type": "string"
+                        }
                       }
                     }
                   },
@@ -806,19 +1094,27 @@
             "description": "Action type created successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ActionType" }
+                "schema": {
+                  "$ref": "#/components/schemas/ActionType"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/ValidationError" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "get": {
         "operationId": "listActionTypes",
         "summary": "List action types",
         "description": "Returns all action types within the specified ontology.",
-        "tags": ["Action Types"],
+        "tags": [
+          "Action Types"
+        ],
         "responses": {
           "200": {
             "description": "A list of action types",
@@ -829,14 +1125,1074 @@
                   "properties": {
                     "data": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/ActionType" }
+                      "items": {
+                        "$ref": "#/components/schemas/ActionType"
+                      }
                     }
                   }
                 }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/actionTypes/{actionTypeApiName}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ActionTypeApiName"
+        }
+      ],
+      "get": {
+        "operationId": "getActionType",
+        "summary": "Get a single action type",
+        "description": "Returns the action type identified by the given API name within the specified ontology.",
+        "tags": [
+          "Action Types"
+        ],
+        "responses": {
+          "200": {
+            "description": "The requested action type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionType"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteActionType",
+        "summary": "Delete an action type",
+        "description": "Permanently deletes the specified action type.",
+        "tags": [
+          "Action Types"
+        ],
+        "responses": {
+          "204": {
+            "description": "Action type deleted successfully"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        }
+      ],
+      "get": {
+        "operationId": "getDatasource",
+        "summary": "Get datasource configuration",
+        "description": "Returns the registered datasource for the specified object type.",
+        "tags": [
+          "Datasources"
+        ],
+        "responses": {
+          "200": {
+            "description": "Datasource configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "registerDatasource",
+        "summary": "Register a datasource",
+        "description": "Registers or updates the backing datasource for the specified object type.",
+        "tags": [
+          "Datasources"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "datasetRid": {
+                    "type": "string",
+                    "description": "Dataset resource identifier"
+                  },
+                  "columnMapping": {
+                    "type": "object",
+                    "description": "Mapping of object type properties to dataset columns"
+                  },
+                  "primaryKeyColumn": {
+                    "type": "string",
+                    "description": "Column used as primary key"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Datasource registered successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index/status": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        }
+      ],
+      "get": {
+        "operationId": "getIndexingStatus",
+        "summary": "Get indexing status",
+        "description": "Returns the current indexing status for the specified object type.",
+        "tags": [
+          "Indexing"
+        ],
+        "responses": {
+          "200": {
+            "description": "Indexing status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "idle",
+                        "indexing",
+                        "completed",
+                        "failed"
+                      ]
+                    },
+                    "totalDocuments": {
+                      "type": "integer"
+                    },
+                    "indexedDocuments": {
+                      "type": "integer"
+                    },
+                    "lastIndexedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        }
+      ],
+      "post": {
+        "operationId": "triggerIndexing",
+        "summary": "Trigger indexing",
+        "description": "Triggers a full or incremental indexing of the specified object type into OpenSearch.",
+        "tags": [
+          "Indexing"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "full",
+                      "incremental"
+                    ],
+                    "default": "full"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Indexing triggered successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "jobId": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontology/{ontologyId}/interfaces": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        }
+      ],
+      "get": {
+        "operationId": "listInterfaces",
+        "summary": "List interfaces",
+        "description": "Returns all interfaces defined within the specified ontology.",
+        "tags": [
+          "Interfaces"
+        ],
+        "responses": {
+          "200": {
+            "description": "List of interfaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Interface"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createInterface",
+        "summary": "Create an interface",
+        "description": "Creates a new interface with typed property definitions within the specified ontology.",
+        "tags": [
+          "Interfaces"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "apiName",
+                  "displayName"
+                ],
+                "properties": {
+                  "apiName": {
+                    "type": "string",
+                    "description": "Unique programmatic name"
+                  },
+                  "displayName": {
+                    "type": "string",
+                    "description": "Human-readable name"
+                  },
+                  "description": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "properties": {
+                    "type": "object",
+                    "description": "Typed property definitions"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Interface created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Interface"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Interface with that apiName already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/edits": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        }
+      ],
+      "get": {
+        "operationId": "getEdits",
+        "summary": "Get edits for an object type",
+        "description": "Returns a paginated list of edits applied to objects of the specified type via actions.",
+        "tags": [
+          "Edits"
+        ],
+        "parameters": [
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "primaryKey",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by primary key"
+          },
+          {
+            "name": "actionType",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by action type"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of edits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "nextPageToken": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/linkTypes/{linkTypeApiName}/resolve": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/LinkTypeApiName"
+        }
+      ],
+      "get": {
+        "operationId": "resolveLinks",
+        "summary": "Resolve linked objects",
+        "description": "Resolves and returns linked objects for the specified link type.",
+        "tags": [
+          "Link Types"
+        ],
+        "parameters": [
+          {
+            "name": "primaryKey",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Primary key of the source object"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "forward",
+                "reverse"
+              ],
+              "default": "forward"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolved linked objects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "linkedObjects": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "totalCount": {
+                      "type": "integer"
+                    },
+                    "nextPageToken": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/linkTypes/{linkTypeApiName}/searchAround": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/LinkTypeApiName"
+        }
+      ],
+      "post": {
+        "operationId": "searchAround",
+        "summary": "Search around linked objects",
+        "description": "Searches for objects linked via the specified link type, with optional filtering and pagination.",
+        "tags": [
+          "Link Types"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "primaryKey"
+                ],
+                "properties": {
+                  "primaryKey": {
+                    "type": "string",
+                    "description": "Primary key of the source object"
+                  },
+                  "direction": {
+                    "type": "string",
+                    "enum": [
+                      "forward",
+                      "reverse"
+                    ],
+                    "default": "forward"
+                  },
+                  "filter": {
+                    "type": "object",
+                    "description": "Optional filter criteria"
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 100
+                  },
+                  "pageToken": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "totalCount": {
+                      "type": "integer"
+                    },
+                    "nextPageToken": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/linkTypes/{linkTypeApiName}/count": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/LinkTypeApiName"
+        }
+      ],
+      "get": {
+        "operationId": "countLinks",
+        "summary": "Count linked objects",
+        "description": "Returns the count of linked objects for the specified link type and primary key.",
+        "tags": [
+          "Link Types"
+        ],
+        "parameters": [
+          {
+            "name": "primaryKey",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Primary key of the source object"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "forward",
+                "reverse"
+              ],
+              "default": "forward"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Link count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/actions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        }
+      ],
+      "post": {
+        "operationId": "executeAction",
+        "summary": "Execute an action",
+        "description": "Executes the specified action with the given parameters.",
+        "tags": [
+          "Actions"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "actionType",
+                  "parameters"
+                ],
+                "properties": {
+                  "actionType": {
+                    "type": "string",
+                    "description": "API name of the action type to execute"
+                  },
+                  "parameters": {
+                    "type": "object",
+                    "description": "Action parameters"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Action executed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "edits": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontologies/{ontologyId}/actions/{actionApiName}/audit": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ActionApiName"
+        }
+      ],
+      "get": {
+        "operationId": "getActionAuditLog",
+        "summary": "Get action audit log",
+        "description": "Returns the audit log entries for the specified action.",
+        "tags": [
+          "Actions"
+        ],
+        "parameters": [
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit log entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AuditLogEntry"
+                      }
+                    },
+                    "nextPageToken": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/search": {
+      "get": {
+        "operationId": "globalSearch",
+        "summary": "Search across ontology resources",
+        "description": "Searches object types, link types, and action types by name or apiName using a query string.",
+        "tags": [
+          "Search"
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Search query string"
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated resource types to search (objectType, linkType, actionType). Defaults to all."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Categorized search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/v2/favorites": {
+      "get": {
+        "operationId": "listFavorites",
+        "summary": "List all favorites",
+        "description": "Returns all starred/favorited resources for the current user.",
+        "tags": [
+          "Favorites"
+        ],
+        "responses": {
+          "200": {
+            "description": "List of favorites",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Favorite"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createFavorite",
+        "summary": "Star a resource",
+        "description": "Adds a resource to the user's favorites.",
+        "tags": [
+          "Favorites"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "resourceType",
+                  "resourceId"
+                ],
+                "properties": {
+                  "resourceType": {
+                    "type": "string",
+                    "enum": [
+                      "objectType",
+                      "linkType",
+                      "actionType"
+                    ],
+                    "description": "Type of resource to star"
+                  },
+                  "resourceId": {
+                    "type": "string",
+                    "description": "Identifier of the resource (e.g. apiName)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Favorite created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Favorite"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/v2/favorites/{favoriteId}": {
+      "parameters": [
+        {
+          "name": "favoriteId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "description": "UUID of the favorite to remove"
+        }
+      ],
+      "delete": {
+        "operationId": "deleteFavorite",
+        "summary": "Unstar a resource",
+        "description": "Removes a resource from the user's favorites.",
+        "tags": [
+          "Favorites"
+        ],
+        "responses": {
+          "204": {
+            "description": "Favorite removed successfully"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/views": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/OntologyId"
+        },
+        {
+          "$ref": "#/components/parameters/ObjectTypeApiName"
+        }
+      ],
+      "get": {
+        "operationId": "listObjectViews",
+        "summary": "List views for an object type",
+        "description": "Returns all saved views (column configs, filters, sort orders) for the specified object type.",
+        "tags": [
+          "Object Views"
+        ],
+        "responses": {
+          "200": {
+            "description": "List of views",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ObjectView"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createObjectView",
+        "summary": "Create a view for an object type",
+        "description": "Creates a new saved view configuration for the specified object type.",
+        "tags": [
+          "Object Views"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "View name"
+                  },
+                  "description": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "columns": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Ordered list of property apiNames to display"
+                  },
+                  "filters": {
+                    "type": "object",
+                    "description": "Filter configuration"
+                  },
+                  "sortBy": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Property to sort by"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "View created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     }
@@ -857,103 +2213,420 @@
         "name": "apiName",
         "in": "path",
         "required": true,
-        "schema": { "type": "string" },
+        "schema": {
+          "type": "string"
+        },
         "description": "Programmatic name of the object type"
       },
       "PropertyApiName": {
         "name": "propertyApiName",
         "in": "path",
         "required": true,
-        "schema": { "type": "string" },
+        "schema": {
+          "type": "string"
+        },
         "description": "Programmatic name of the property"
       },
       "LinkTypeApiName": {
         "name": "linkTypeApiName",
         "in": "path",
         "required": true,
-        "schema": { "type": "string" },
+        "schema": {
+          "type": "string"
+        },
         "description": "Programmatic name of the link type"
+      },
+      "ActionTypeApiName": {
+        "name": "actionTypeApiName",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Programmatic name of the action type"
+      },
+      "ActionApiName": {
+        "name": "actionApiName",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Programmatic name of the action"
       }
     },
     "schemas": {
       "Ontology": {
         "type": "object",
         "properties": {
-          "ontologyId": { "type": "string", "format": "uuid" },
-          "displayName": { "type": "string" },
-          "description": { "type": "string", "nullable": true },
-          "objectTypeCount": { "type": "integer" },
-          "createdBy": { "type": "string" },
-          "createdAt": { "type": "string", "format": "date-time" },
-          "updatedAt": { "type": "string", "format": "date-time" }
+          "ontologyId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "objectTypeCount": {
+            "type": "integer"
+          },
+          "createdBy": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "ObjectType": {
         "type": "object",
         "properties": {
-          "objectTypeId": { "type": "string", "format": "uuid" },
-          "ontologyId": { "type": "string", "format": "uuid" },
-          "apiName": { "type": "string" },
-          "displayName": { "type": "string" },
-          "description": { "type": "string", "nullable": true },
-          "icon": { "type": "string", "nullable": true },
-          "iconColor": { "type": "string", "nullable": true },
-          "status": { "type": "string", "enum": ["active", "deprecated", "experimental"] },
-          "propertyCount": { "type": "integer" },
-          "createdAt": { "type": "string", "format": "date-time" },
-          "updatedAt": { "type": "string", "format": "date-time" }
+          "objectTypeId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ontologyId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "apiName": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "icon": {
+            "type": "string",
+            "nullable": true
+          },
+          "iconColor": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "deprecated",
+              "experimental"
+            ]
+          },
+          "propertyCount": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "Property": {
         "type": "object",
         "properties": {
-          "propertyId": { "type": "string", "format": "uuid" },
-          "objectTypeId": { "type": "string", "format": "uuid" },
-          "apiName": { "type": "string" },
-          "displayName": { "type": "string" },
-          "baseType": { "type": "string" },
-          "description": { "type": "string", "nullable": true },
-          "isArray": { "type": "boolean" },
-          "createdAt": { "type": "string", "format": "date-time" },
-          "updatedAt": { "type": "string", "format": "date-time" }
+          "propertyId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "objectTypeId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "apiName": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "baseType": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "isArray": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "LinkType": {
         "type": "object",
         "properties": {
-          "linkTypeId": { "type": "string", "format": "uuid" },
-          "ontologyId": { "type": "string", "format": "uuid" },
-          "apiName": { "type": "string" },
-          "displayName": { "type": "string" },
-          "description": { "type": "string", "nullable": true },
-          "cardinality": { "type": "string", "enum": ["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY"] },
-          "sourceObjectTypeApiName": { "type": "string" },
-          "targetObjectTypeApiName": { "type": "string" },
-          "createdAt": { "type": "string", "format": "date-time" },
-          "updatedAt": { "type": "string", "format": "date-time" }
+          "linkTypeId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ontologyId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "apiName": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "cardinality": {
+            "type": "string",
+            "enum": [
+              "ONE_TO_ONE",
+              "ONE_TO_MANY",
+              "MANY_TO_ONE",
+              "MANY_TO_MANY"
+            ]
+          },
+          "sourceObjectTypeApiName": {
+            "type": "string"
+          },
+          "targetObjectTypeApiName": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "ActionType": {
         "type": "object",
         "properties": {
-          "actionTypeId": { "type": "string", "format": "uuid" },
-          "ontologyId": { "type": "string", "format": "uuid" },
-          "apiName": { "type": "string" },
-          "displayName": { "type": "string" },
-          "description": { "type": "string", "nullable": true },
-          "parameters": { "type": "object" },
-          "rules": { "type": "array", "items": { "type": "object" } },
-          "createdAt": { "type": "string", "format": "date-time" },
-          "updatedAt": { "type": "string", "format": "date-time" }
+          "actionTypeId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ontologyId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "apiName": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "parameters": {
+            "type": "object"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "Error": {
         "type": "object",
         "properties": {
-          "errorCode": { "type": "string" },
-          "errorName": { "type": "string" },
-          "errorInstanceId": { "type": "string" },
-          "parameters": { "type": "object" }
+          "errorCode": {
+            "type": "string"
+          },
+          "errorName": {
+            "type": "string"
+          },
+          "errorInstanceId": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "properties": {
+          "objectTypes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObjectType"
+            }
+          },
+          "linkTypes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkType"
+            }
+          },
+          "actionTypes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActionType"
+            }
+          }
+        }
+      },
+      "Favorite": {
+        "type": "object",
+        "properties": {
+          "favoriteId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "resourceType": {
+            "type": "string",
+            "enum": [
+              "objectType",
+              "linkType",
+              "actionType"
+            ]
+          },
+          "resourceId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ObjectView": {
+        "type": "object",
+        "properties": {
+          "viewId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "objectTypeApiName": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "filters": {
+            "type": "object"
+          },
+          "sortBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Interface": {
+        "type": "object",
+        "properties": {
+          "interfaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ontologyId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "apiName": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "properties": {
+            "type": "object"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AuditLogEntry": {
+        "type": "object",
+        "properties": {
+          "auditId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "actionApiName": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "failure"
+            ]
+          },
+          "executedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "edits": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         }
       }
     },
@@ -962,7 +2635,9 @@
         "description": "Request validation failed",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/Error" }
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
           }
         }
       },
@@ -970,7 +2645,9 @@
         "description": "Resource not found",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/Error" }
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
           }
         }
       }

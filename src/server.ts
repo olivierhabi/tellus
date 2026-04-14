@@ -29,7 +29,9 @@ import datasetRouter from "./routes/datasets";
 import reindexRouter from "./routes/reindex";
 import interfaceRouter from "./routes/interfaces";
 import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
-import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
+import objectViewsRouter, { objectViewsByTypeRouter, objectViewsConfigRouter } from "./routes/objectViews";
+import ontologySearchRouter from "./routes/ontologySearch";
+import favoritesRouter from "./routes/favorites";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
@@ -259,6 +261,12 @@ app.use(
   objectViewsRouter
 );
 app.use("/api/v2/objects/:objectType", objectViewsByTypeRouter);
+app.use(
+  "/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/views",
+  objectViewsConfigRouter
+);
+app.use("/api/v2/search", ontologySearchRouter);
+app.use("/api/v2/favorites", favoritesRouter);
 app.use(objectsRouter);
 app.use(healthRouter);
 
