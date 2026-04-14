@@ -66,6 +66,11 @@ const openApiSpec = JSON.parse(
   fs.readFileSync(path.join(__dirname, "api-spec", "actions.openapi.json"), "utf-8")
 );
 
+// Load comprehensive ontology API spec (serves /api/docs)
+const ontologyApiSpec = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "api-spec", "ontology.openapi.json"), "utf-8")
+);
+
 // ---------------------------------------------------------------------------
 // Config validation — fail fast if required env vars are missing
 // ---------------------------------------------------------------------------
@@ -287,10 +292,16 @@ app.get("/api/v2/spec", (_req: Request, res: Response) => {
   res.json(openApiSpec);
 });
 
-// GET /api/v2/docs — renders Swagger UI
+// GET /api/v2/docs — renders Swagger UI (Actions API)
 app.use("/api/v2/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, {
   customCss: ".swagger-ui .topbar { display: none }",
   customSiteTitle: "Tellus Ontology Engine — API Docs",
+}));
+
+// GET /api/docs — renders Swagger UI (Full Ontology API)
+app.use("/api/docs", swaggerUi.serveFiles(ontologyApiSpec), swaggerUi.setup(ontologyApiSpec, {
+  customCss: ".swagger-ui .topbar { display: none }",
+  customSiteTitle: "Ontology Engine — API Docs",
 }));
 
 // Dev tools (seed/reset/status) — only active in non-production
