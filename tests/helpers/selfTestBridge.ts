@@ -127,15 +127,21 @@ function runInChildProcess(
   absolutePath: string,
   timeout: number
 ): SelfTestResult {
-  const output = execSync(`npx tsx "${absolutePath}"`, {
-    cwd: ROOT,
-    encoding: "utf-8",
-    timeout,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, NODE_ENV: "test" },
-  });
+  try {
+    const output = execSync(`npx tsx "${absolutePath}"`, {
+      cwd: ROOT,
+      encoding: "utf-8",
+      timeout,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, NODE_ENV: "test" },
+    });
 
-  return parseResults(output);
+    return parseResults(output);
+  } catch (err: any) {
+    // execSync throws on non-zero exit — extract stdout/stderr from the error
+    const output = err.stdout || err.stderr || String(err.message || err);
+    return parseResults(output);
+  }
 }
 
 /**
