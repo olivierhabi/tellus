@@ -20,11 +20,12 @@ export interface ApiResponse {
 export async function api(
   method: string,
   urlPath: string,
-  body?: unknown
+  body?: unknown,
+  extraHeaders?: Record<string, string>
 ): Promise<ApiResponse> {
   const opts: RequestInit = {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
   };
   if (body !== undefined) {
     opts.body = JSON.stringify(body);

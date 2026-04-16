@@ -21,13 +21,12 @@ import pg from "pg";
 let serverAvailable = false;
 let pool: pg.Pool;
 
-// Auth
-const AUTH_TIMESTAMP = Date.now();
-const AUTH_EMAIL = `foundry-test-${AUTH_TIMESTAMP}@test.com`;
-const AUTH_PASSWORD = "TestPass123!";
-const AUTH_DISPLAY_NAME = "Foundry Tester";
+// Auth — uses Keycloak test users created by bootstrap-keycloak.sh
+const KC_URL = process.env.KEYCLOAK_URL || "http://localhost:8086";
+const KC_REALM = process.env.KEYCLOAK_REALM || "tellus";
+const AUTH_EMAIL = process.env.KEYCLOAK_TEST_USER || "cypress@tellus.local";
+const AUTH_PASSWORD = process.env.KEYCLOAK_TEST_PASS || "Password123!";
 let accessToken = "";
-let refreshToken = "";
 
 // Project CRUD
 let createdProjectId = "";
@@ -208,141 +207,106 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   });
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  BE-013: Auth — Register, Login, Refresh, Logout
+  //  BE-013: Auth — Keycloak Login, Logout, Token-Info
   //  Runs FIRST because subsequent tests may need the accessToken.
   // ═══════════════════════════════════════════════════════════════════════
-  describe("BE-013: Auth Endpoints", () => {
-    it("POST /api/auth/register → 201 with user and tokens", async () => {
+  describe("BE-013: Auth Endpoints (Keycloak)", () => {
+    it("GET /api/v1/auth/health → 200", async () => {
       if (!serverAvailable) return;
-      const res = await api("POST", "/api/auth/register", {
-        email: AUTH_EMAIL,
-        password: AUTH_PASSWORD,
-        displayName: AUTH_DISPLAY_NAME,
-      });
-      expect(res.status).toBe(201);
+      const res = await api("GET", "/api/v1/auth/health");
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty("status");
+    });
+
+    it("POST /api/v1/auth/_test/login-bypass → 200 with accessToken", async () => {
+      if (!serverAvailable) return;
+      const res = await api(
+        "POST",
+        "/api/v1/auth/_test/login-bypass",
+        { username: AUTH_EMAIL, password: AUTH_PASSWORD },
+        { "X-Tellus-Test-Hook": "1" }
+      );
+      expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toHaveProperty("user");
       expect(res.body.data).toHaveProperty("accessToken");
-      expect(res.body.data).toHaveProperty("refreshToken");
-      expect(res.body.data.user.email).toBe(AUTH_EMAIL.toLowerCase());
       accessToken = res.body.data.accessToken;
-      refreshToken = res.body.data.refreshToken;
     });
 
-    it("POST /api/auth/register → 409 duplicate email", async () => {
+    it("POST /api/v1/auth/login → 200 with valid credentials", async () => {
       if (!serverAvailable) return;
-      const res = await api("POST", "/api/auth/register", {
-        email: AUTH_EMAIL,
-        password: AUTH_PASSWORD,
-        displayName: AUTH_DISPLAY_NAME,
-      });
-      expect(res.status).toBe(409);
-      expect(res.body).toHaveProperty("error");
-      expect(res.body.error.code).toBe("CONFLICT");
-    });
-
-    it("POST /api/auth/register → 400 missing fields", async () => {
-      if (!serverAvailable) return;
-      const res = await api("POST", "/api/auth/register", {
-        email: "bad",
-      });
-      expect(res.status).toBe(400);
-    });
-
-    it("POST /api/auth/register → 400 password too short", async () => {
-      if (!serverAvailable) return;
-      const res = await api("POST", "/api/auth/register", {
-        email: "short-pw@test.com",
-        password: "1234",
-        displayName: "Short PW",
-      });
-      expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe("VALIDATION_ERROR");
-    });
-
-    it("POST /api/auth/login → 200 with tokens", async () => {
-      if (!serverAvailable) return;
-      const res = await api("POST", "/api/auth/login", {
-        email: AUTH_EMAIL,
+      const res = await api("POST", "/api/v1/auth/login", {
+        username: AUTH_EMAIL,
         password: AUTH_PASSWORD,
       });
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toHaveProperty("accessToken");
-      expect(res.body.data).toHaveProperty("refreshToken");
-      expect(res.body.data.user).toHaveProperty("id");
-      // Save fresh tokens
-      accessToken = res.body.data.accessToken;
-      refreshToken = res.body.data.refreshToken;
+      expect(res.body.data).toBeDefined();
     });
 
-    it("POST /api/auth/login → 401 wrong password", async () => {
+    it("POST /api/v1/auth/login → 401 wrong password", async () => {
       if (!serverAvailable) return;
-      // Auth rate limiter is 5 req/60s — accept 429 as valid behavior
-      const res = await api("POST", "/api/auth/login", {
-        email: AUTH_EMAIL,
+      const res = await api("POST", "/api/v1/auth/login", {
+        username: AUTH_EMAIL,
         password: "WrongPassword!",
       });
       expect([401, 429]).toContain(res.status);
     });
 
-    it("POST /api/auth/login → 401 non-existent email", async () => {
+    it("POST /api/v1/auth/login → 401 non-existent user", async () => {
       if (!serverAvailable) return;
-      const res = await api("POST", "/api/auth/login", {
-        email: "ghost@nowhere.com",
+      const res = await api("POST", "/api/v1/auth/login", {
+        username: "ghost@nowhere.com",
         password: AUTH_PASSWORD,
       });
       expect([401, 429]).toContain(res.status);
     });
 
-    it("POST /api/auth/refresh → 200 with new tokens", async () => {
-      if (!serverAvailable || !refreshToken) return;
-      const res = await api("POST", "/api/auth/refresh", {
-        refreshToken,
+    it("POST /api/v1/auth/login → 400 missing fields", async () => {
+      if (!serverAvailable) return;
+      const res = await api("POST", "/api/v1/auth/login", {
+        username: "",
+        password: "",
+      });
+      expect([400, 401]).toContain(res.status);
+    });
+
+    it("GET /api/v1/auth/token-info → 200 with valid token", async () => {
+      if (!serverAvailable || !accessToken) return;
+      const res = await api("GET", "/api/v1/auth/token-info", undefined, {
+        Authorization: `Bearer ${accessToken}`,
       });
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data).toHaveProperty("accessToken");
-      expect(res.body.data).toHaveProperty("refreshToken");
-      // Old refresh token is invalidated; save new one
-      accessToken = res.body.data.accessToken;
-      refreshToken = res.body.data.refreshToken;
+      expect(res.body.data).toHaveProperty("sub");
     });
 
-    it("POST /api/auth/refresh → 401 reusing consumed token", async () => {
-      if (!serverAvailable) return;
-      const res = await api("POST", "/api/auth/refresh", {
-        refreshToken: "invalid-or-already-consumed-token",
-      });
-      expect(res.status).toBe(401);
-    });
-
-    it("POST /api/auth/logout → 200", async () => {
-      if (!serverAvailable || !refreshToken) return;
-      const logoutToken = refreshToken;
-      const res = await api("POST", "/api/auth/logout", {
-        refreshToken: logoutToken,
+    it("GET /api/v1/auth/me → 200 with valid token", async () => {
+      if (!serverAvailable || !accessToken) return;
+      const res = await api("GET", "/api/v1/auth/me", undefined, {
+        Authorization: `Bearer ${accessToken}`,
       });
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
+      expect(res.body.data).toHaveProperty("email");
     });
 
-    it("POST /api/auth/refresh → 401 after logout (token deleted)", async () => {
-      if (!serverAvailable) return;
-      // Re-login to get a fresh token for subsequent tests
-      const loginRes = await api("POST", "/api/auth/login", {
-        email: AUTH_EMAIL,
-        password: AUTH_PASSWORD,
+    it("POST /api/v1/auth/logout → 204 with valid session", async () => {
+      if (!serverAvailable || !accessToken) return;
+      const res = await api("POST", "/api/v1/auth/logout", undefined, {
+        Authorization: `Bearer ${accessToken}`,
       });
-      if (loginRes.status === 200) {
-        accessToken = loginRes.body.data.accessToken;
-        refreshToken = loginRes.body.data.refreshToken;
+      expect([200, 204]).toContain(res.status);
+    });
+
+    it("re-login via bypass for subsequent tests", async () => {
+      if (!serverAvailable) return;
+      const res = await api(
+        "POST",
+        "/api/v1/auth/_test/login-bypass",
+        { username: AUTH_EMAIL, password: AUTH_PASSWORD },
+        { "X-Tellus-Test-Hook": "1" }
+      );
+      if (res.status === 200) {
+        accessToken = res.body.data.accessToken;
       }
-      // The old logout-ed token should be rejected
-      const res = await api("POST", "/api/auth/refresh", {
-        refreshToken: "already-logged-out-token",
-      });
-      expect(res.status).toBe(401);
     });
   });
 
@@ -1061,19 +1025,16 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
       );
     });
 
-    it("auth user is persisted in users table", async () => {
+    it("Keycloak user is auto-provisioned in local users table", async () => {
       if (!serverAvailable) return;
-      // Skip if registration was rate-limited (accessToken would be empty)
       if (!accessToken) return;
+      // After login-bypass, ensureLocalUserForClaims creates a shadow row
       const result = await pool.query(
         "SELECT * FROM users WHERE email = $1",
         [AUTH_EMAIL.toLowerCase()]
       );
-      expect(result.rows).toHaveLength(1);
-      expect(result.rows[0].display_name).toBe(AUTH_DISPLAY_NAME);
-      // Password hash should never be the plain password
-      expect(result.rows[0].password_hash).not.toBe(AUTH_PASSWORD);
-      expect(result.rows[0].password_hash.length).toBeGreaterThan(20);
+      expect(result.rows.length).toBeGreaterThanOrEqual(1);
+      expect(result.rows[0]).toHaveProperty("id");
     });
 
     it("project deletion cascades to folders", async () => {

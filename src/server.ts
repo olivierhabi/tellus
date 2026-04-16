@@ -9,7 +9,7 @@ import rateLimit from "express-rate-limit";
 import { pool, query } from "./db";
 import requestLogger from "./middleware/requestLogger";
 import { inputSanitizer } from "./middleware/inputSanitizer";
-import { notFoundHandler, createDocsRouter } from "./middleware/notFoundHandler";
+import { notFoundHandler } from "./middleware/notFoundHandler";
 import errorHandler from "./middleware/errorHandler";
 import ontologyRouter from "./routes/ontology";
 import objectTypeRouter from "./routes/objectTypes";
@@ -506,9 +506,6 @@ app.use("/api/dev", devRouter);
 
 // Foundry API docs (BE-029) — must be before notFoundHandler
 setupFoundrySwagger(app);
-
-// API endpoint listing (docs/endpoints)
-app.use(createDocsRouter(app));
 
 // 404 handler for unmatched routes — AFTER all route handlers
 app.use(notFoundHandler);

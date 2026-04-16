@@ -11,6 +11,7 @@
 # Services:
 #   - PostgreSQL 16 (port 5432)
 #   - OpenSearch 2.11 (port 9200)
+#   - Keycloak 25 (port 8086) — SSO / OAuth 2.0 identity provider
 #   - MinIO (port 9000) — S3-compatible object storage for file uploads
 # =============================================================================
 
@@ -44,6 +45,16 @@ env:
   S3_ACCESS_KEY_ID: minioadmin
   S3_SECRET_ACCESS_KEY: minioadmin
   S3_FORCE_PATH_STYLE: "true"
+
+  # Keycloak (SSO / OAuth 2.0)
+  KEYCLOAK_URL: http://localhost:8086
+  KEYCLOAK_REALM: tellus
+  KEYCLOAK_CLIENT_ID: tellus-api
+  KEYCLOAK_FRONTEND_CLIENT_ID: tellus-frontend
+  KEYCLOAK_CONFIDENTIAL_CLIENT_ID: tellus-confidential
+  KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET: tellus-confidential-secret-change-me
+  KEYCLOAK_TEST_USER: cypress@tellus.local
+  KEYCLOAK_TEST_PASS: "Password123!"
 
   # Elevated rate limits for CI (prevents test interference)
   RATE_LIMIT_MAX: 10000
@@ -85,12 +96,12 @@ jobs:
         run: pnpm run test:unit
 
   # ===========================================================================
-  # Job 2: Integration Tests (PostgreSQL + OpenSearch required)
+  # Job 2: Integration Tests (PostgreSQL + OpenSearch + Keycloak required)
   # ===========================================================================
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -121,6 +132,10 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -137,6 +152,32 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
 
       - name: Run database migrations
         run: |
@@ -161,12 +202,12 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # Job 3: E2E Tests (PostgreSQL + OpenSearch + MinIO required)
+  # Job 3: E2E Tests (PostgreSQL + OpenSearch + Keycloak + MinIO required)
   # ===========================================================================
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -197,6 +238,10 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -213,6 +258,32 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -251,7 +322,7 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # Job 4: Performance Benchmarks (PostgreSQL + OpenSearch + MinIO required)
+  # Job 4: Performance Benchmarks (PostgreSQL + OpenSearch + Keycloak + MinIO required)
   # ===========================================================================
   perf:
     name: Performance Benchmarks
@@ -287,6 +358,10 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -303,6 +378,32 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -408,6 +509,10 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -424,6 +529,32 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |

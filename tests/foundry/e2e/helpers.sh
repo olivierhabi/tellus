@@ -22,6 +22,14 @@ TOTAL="${TOTAL:-0}"
 SECTION="${SECTION:-}"
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 
+# --- Keycloak configuration ---
+KC_URL="${KEYCLOAK_URL:-http://localhost:8086}"
+KC_ADMIN_USER="${KC_ADMIN_USER:-admin}"
+KC_ADMIN_PASS="${KC_ADMIN_PASS:-admin}"
+KC_REALM="${KEYCLOAK_REALM:-tellus}"
+KC_TEST_PASS="${KEYCLOAK_TEST_PASS:-Password123!}"
+KC_ADMIN_TOKEN=""
+
 # ---------------------------------------------------------------------------
 # Colors
 # ---------------------------------------------------------------------------
@@ -182,6 +190,121 @@ do_upload() {
 header_value() {
   local name="$1"
   echo "$HTTP_HEADERS" | grep -i "^${name}:" | head -1 | sed "s/^[^:]*:[[:space:]]*//" | tr -d '\r' || true
+}
+
+# ---------------------------------------------------------------------------
+# Keycloak Auth Helpers
+# ---------------------------------------------------------------------------
+
+# Get a Keycloak admin token (cached in KC_ADMIN_TOKEN).
+kc_admin_token() {
+  if [[ -n "$KC_ADMIN_TOKEN" ]]; then
+    echo "$KC_ADMIN_TOKEN"
+    return
+  fi
+  KC_ADMIN_TOKEN=$(curl -sf -X POST \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "username=${KC_ADMIN_USER}&password=${KC_ADMIN_PASS}&grant_type=password&client_id=admin-cli" \
+    "${KC_URL}/realms/master/protocol/openid-connect/token" 2>/dev/null \
+    | jq -r '.access_token // empty') || true
+  echo "$KC_ADMIN_TOKEN"
+}
+
+# Create a user in Keycloak via admin API. Idempotent — skips if the user
+# already exists.
+# Usage: kc_create_user EMAIL [ROLE]
+kc_create_user() {
+  local email="$1" role="${2:-ontology-editor}"
+  local token
+  token=$(kc_admin_token)
+
+  local uid
+  uid=$(curl -sf -H "Authorization: Bearer $token" \
+    "${KC_URL}/admin/realms/${KC_REALM}/users?username=${email}" 2>/dev/null \
+    | jq -r '.[0].id // empty') || true
+
+  if [[ -z "$uid" ]]; then
+    curl -sf -X POST \
+      -H "Authorization: Bearer $token" \
+      -H "Content-Type: application/json" \
+      -d "{\"username\":\"${email}\",\"email\":\"${email}\",\"enabled\":true,\"emailVerified\":true,\"firstName\":\"E2E\",\"lastName\":\"Test\"}" \
+      "${KC_URL}/admin/realms/${KC_REALM}/users" -o /dev/null 2>/dev/null || true
+
+    uid=$(curl -sf -H "Authorization: Bearer $token" \
+      "${KC_URL}/admin/realms/${KC_REALM}/users?username=${email}" 2>/dev/null \
+      | jq -r '.[0].id // empty') || true
+
+    # Set password
+    curl -sf -X PUT \
+      -H "Authorization: Bearer $token" \
+      -H "Content-Type: application/json" \
+      -d "{\"type\":\"password\",\"value\":\"${KC_TEST_PASS}\",\"temporary\":false}" \
+      "${KC_URL}/admin/realms/${KC_REALM}/users/${uid}/reset-password" -o /dev/null 2>/dev/null || true
+
+    # Assign role
+    local role_repr
+    role_repr=$(curl -sf -H "Authorization: Bearer $token" \
+      "${KC_URL}/admin/realms/${KC_REALM}/roles/${role}" 2>/dev/null) || true
+    if [[ -n "$role_repr" ]]; then
+      curl -sf -X POST \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d "[${role_repr}]" \
+        "${KC_URL}/admin/realms/${KC_REALM}/users/${uid}/role-mappings/realm" -o /dev/null 2>/dev/null || true
+    fi
+
+    # Clear required actions so direct-grant login works
+    curl -sf -X PUT \
+      -H "Authorization: Bearer $token" \
+      -H "Content-Type: application/json" \
+      -d '{"requiredActions":[]}' \
+      "${KC_URL}/admin/realms/${KC_REALM}/users/${uid}" -o /dev/null 2>/dev/null || true
+  fi
+}
+
+# Login via the dev-only login-bypass test hook (skips MFA + passkey gate).
+# Sets: HTTP_STATUS, HTTP_BODY, HTTP_HEADERS
+# Usage: kc_login USERNAME PASSWORD
+kc_login() {
+  local username="$1" password="$2"
+  do_request_with_header POST "/api/v1/auth/_test/login-bypass" \
+    "X-Tellus-Test-Hook: 1" \
+    "{\"username\":\"${username}\",\"password\":\"${password}\"}"
+}
+
+# Create a Keycloak user and log in via the test hook in one step.
+# Drop-in replacement for the old `/api/auth/register` call.
+# Sets: HTTP_STATUS, HTTP_BODY, HTTP_HEADERS
+# Extract token with: TOKEN=$(json_field "$HTTP_BODY" "accessToken")
+# Usage: kc_register_and_login EMAIL [ROLE]
+kc_register_and_login() {
+  local email="$1" role="${2:-ontology-editor}"
+  kc_create_user "$email" "$role"
+  kc_login "$email" "$KC_TEST_PASS"
+}
+
+# Usage: do_request_with_cookie_jar METHOD PATH COOKIE_JAR [DATA]
+# Like do_request but sends and saves cookies to/from a file.
+do_request_with_cookie_jar() {
+  local method="$1" path="$2" jar="$3" data="${4:-}"
+  local tmpfile
+  tmpfile=$(mktemp)
+
+  local curl_args=(-s -w "\n%{http_code}" -D "$tmpfile" -X "$method")
+  curl_args+=(-H "Content-Type: application/json")
+  curl_args+=(-b "$jar" -c "$jar")
+
+  if [[ -n "$data" ]]; then
+    curl_args+=(-d "$data")
+  fi
+
+  local response
+  response=$(curl "${curl_args[@]}" "${BASE_URL}${path}" 2>/dev/null) || true
+
+  HTTP_STATUS=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  HTTP_HEADERS=$(cat "$tmpfile")
+  rm -f "$tmpfile"
 }
 
 # ---------------------------------------------------------------------------
