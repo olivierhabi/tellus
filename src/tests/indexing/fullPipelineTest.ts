@@ -1528,11 +1528,13 @@ async function runTests(): Promise<void> {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/* v8 ignore start */
 if (require.main === module) {
   runTests().catch((err) => {
     console.error("Unexpected error:", err);
     process.exit(1);
   });
 }
+/* v8 ignore stop */
 
 export { runTests, generateEmployeeCSV };

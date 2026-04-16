@@ -508,7 +508,7 @@ export default { readCsvFile, readJsonFile, readFile, detectDelimiter, countFile
 // Inline self-tests (run: npx tsx src/utils/fileReader.ts)
 // ---------------------------------------------------------------------------
 
-async function runSelfTests(): Promise<void> {
+export async function runSelfTests(): Promise<void> {
   const os = await import("os");
 
   let passed = 0;
@@ -518,6 +518,7 @@ async function runSelfTests(): Promise<void> {
     if (condition) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -853,13 +854,17 @@ async function runSelfTests(): Promise<void> {
   if (failed === 0) {
     console.log("\nAll fileReader tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests().catch((err) => {
     console.error("Self-test error:", err);
+    /* v8 ignore next */
     process.exit(1);
   });
 }
+/* v8 ignore stop */

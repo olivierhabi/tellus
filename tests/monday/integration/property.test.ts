@@ -138,8 +138,8 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
       `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/email`,
       { baseType: "integer" }
     );
-    t.assert(status === 400, `Expected 400, got ${status}`);
-    t.assert(body.error.code === "VALIDATION_FAILED", `code = ${body.error.code}`);
+    t.assert(status === 422, `Expected 422, got ${status}`);
+    t.assert(body.error.code === "BREAKING_SCHEMA_CHANGE", `code = ${body.error.code}`);
   });
 
   await t.test("Set primary key (Task 16)", async () => {

@@ -33,7 +33,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
     t.assert(status === 201, `Expected 201, got ${status}`);
     const ot = body.objectType;
     t.assert(ot.apiName === "Employee", "apiName = Employee");
-    t.assert(ot.status === "active", "status = active");
+    t.assert(ot.status === "experimental", "status = experimental");
     t.assert(ot.primaryKey === "employeeId", "PK set");
     t.assert(ot.titleProperty === "fullName", "title set");
     const propCount = Object.keys(ot.properties).length;

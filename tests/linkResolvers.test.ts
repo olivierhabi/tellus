@@ -183,13 +183,13 @@ async function setup(t: Runner): Promise<void> {
   });
 
   // 3. Create Employee object type (with companyId FK and managerId self-ref FK)
-  await t.test("Create Employee object type", async () => {
+  await t.test("Create LREmployee object type", async () => {
     const { status, body } = await api(
       "POST",
       `/api/v2/ontologies/${oid()}/objectTypes/batch`,
       {
-        apiName: "Employee",
-        displayName: "Employee",
+        apiName: "LREmployee",
+        displayName: "LREmployee",
         properties: [
           { apiName: "employeeId", displayName: "Employee ID", baseType: "string", isRequired: true },
           { apiName: "name", displayName: "Name", baseType: "string" },
@@ -270,7 +270,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Register Employee datasource", async () => {
     const { status } = await api(
       "POST",
-      `/api/v2/ontologies/${oid()}/objectTypes/Employee/datasource`,
+      `/api/v2/ontologies/${oid()}/objectTypes/LREmployee/datasource`,
       {
         datasetName: "Employee DS",
         filePath: employeeCsvPath,
@@ -322,8 +322,8 @@ async function setup(t: Runner): Promise<void> {
     t.assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(body?.error || body?.status).substring(0, 200)}`);
   });
 
-  await t.test("Index Employee", async () => {
-    const { status, body } = await triggerIndex(oid(), "Employee");
+  await t.test("Index LREmployee", async () => {
+    const { status, body } = await triggerIndex(oid(), "LREmployee");
     t.assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(body?.error || body?.status).substring(0, 200)}`);
   });
 
@@ -354,7 +354,7 @@ async function setup(t: Runner): Promise<void> {
         displayName: "Company Employees",
         cardinality: "ONE_TO_MANY",
         sourceObjectTypeApiName: "Company",
-        targetObjectTypeApiName: "Employee",
+        targetObjectTypeApiName: "LREmployee",
         targetPropertyApiName: "companyId",
       }
     );
@@ -369,7 +369,7 @@ async function setup(t: Runner): Promise<void> {
         apiName: "employeeCompany",
         displayName: "Employee Company",
         cardinality: "MANY_TO_ONE",
-        sourceObjectTypeApiName: "Employee",
+        sourceObjectTypeApiName: "LREmployee",
         targetObjectTypeApiName: "Company",
         sourcePropertyApiName: "companyId",
       }
@@ -385,7 +385,7 @@ async function setup(t: Runner): Promise<void> {
         apiName: "employeeTicket",
         displayName: "Employee Ticket",
         cardinality: "ONE_TO_ONE",
-        sourceObjectTypeApiName: "Employee",
+        sourceObjectTypeApiName: "LREmployee",
         targetObjectTypeApiName: "Ticket",
         targetPropertyApiName: "assigneeId",
       }
@@ -401,7 +401,7 @@ async function setup(t: Runner): Promise<void> {
         apiName: "employeeCourses",
         displayName: "Employee Courses",
         cardinality: "MANY_TO_MANY",
-        sourceObjectTypeApiName: "Employee",
+        sourceObjectTypeApiName: "LREmployee",
         targetObjectTypeApiName: "Course",
         targetPropertyApiName: "instructorId",
       }
@@ -417,8 +417,8 @@ async function setup(t: Runner): Promise<void> {
         apiName: "employeeManager",
         displayName: "Employee Manager",
         cardinality: "MANY_TO_ONE",
-        sourceObjectTypeApiName: "Employee",
-        targetObjectTypeApiName: "Employee",
+        sourceObjectTypeApiName: "LREmployee",
+        targetObjectTypeApiName: "LREmployee",
         sourcePropertyApiName: "managerId",
       }
     );
@@ -828,7 +828,7 @@ async function runLinkTests(t: Runner): Promise<void> {
         displayName: "Duplicate",
         cardinality: "ONE_TO_MANY",
         sourceObjectTypeApiName: "Company",
-        targetObjectTypeApiName: "Employee",
+        targetObjectTypeApiName: "LREmployee",
       }
     );
     t.assert(status === 409, `Expected 409, got ${status}`);
@@ -843,7 +843,7 @@ async function runLinkTests(t: Runner): Promise<void> {
         displayName: "Bad",
         cardinality: "INVALID",
         sourceObjectTypeApiName: "Company",
-        targetObjectTypeApiName: "Employee",
+        targetObjectTypeApiName: "LREmployee",
       }
     );
     t.assert(status === 400, `Expected 400, got ${status}`);
@@ -864,7 +864,7 @@ async function runLinkTests(t: Runner): Promise<void> {
         displayName: "Temporary",
         cardinality: "ONE_TO_ONE",
         sourceObjectTypeApiName: "Company",
-        targetObjectTypeApiName: "Employee",
+        targetObjectTypeApiName: "LREmployee",
       }
     );
     t.assert(createStatus === 201, `Create temp link: ${createStatus}`);
@@ -892,7 +892,7 @@ async function teardown(t: Runner): Promise<void> {
   t.section("Teardown");
 
   // Delete OpenSearch indices
-  for (const apiName of ["Company", "Employee", "Ticket", "Course"]) {
+  for (const apiName of ["Company", "LREmployee", "Ticket", "Course"]) {
     try {
       await api(
         "DELETE",

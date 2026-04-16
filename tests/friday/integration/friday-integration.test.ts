@@ -266,7 +266,7 @@ describe("Friday Integration: Complete Action System", () => {
     // 2. Discover the seed ontology
     const ont = await request("GET", "/api/v2/ontologies");
     if (ont.status === 200 && ont.body?.data?.length > 0) {
-      const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology") || ont.body.data[0];
+      const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
       ontologyId = seedOnt.ontologyId;
     } else {
       console.warn("No ontologies found — skipping Friday integration tests");

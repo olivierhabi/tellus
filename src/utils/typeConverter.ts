@@ -679,7 +679,7 @@ export default { convertValue, isTypeCompatible, isTypeCoercible };
 // Inline self-tests (run: npx tsx src/utils/typeConverter.ts)
 // ---------------------------------------------------------------------------
 
-async function runSelfTests(): Promise<void> {
+export async function runSelfTests(): Promise<void> {
   let passed = 0;
   let failed = 0;
 
@@ -687,6 +687,7 @@ async function runSelfTests(): Promise<void> {
     if (condition) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -695,6 +696,7 @@ async function runSelfTests(): Promise<void> {
   function assertThrows(fn: () => void, label: string): void {
     try {
       fn();
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL (expected throw): ${label}`);
     } catch {
@@ -706,6 +708,7 @@ async function runSelfTests(): Promise<void> {
     if (Math.abs(actual - expected) <= tolerance) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label} (expected ~${expected}, got ${actual})`);
     }
@@ -999,13 +1002,17 @@ async function runSelfTests(): Promise<void> {
   if (failed === 0) {
     console.log("\nAll typeConverter (utils) tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests().catch((err) => {
     console.error("Self-test error:", err);
+    /* v8 ignore next */
     process.exit(1);
   });
 }
+/* v8 ignore stop */

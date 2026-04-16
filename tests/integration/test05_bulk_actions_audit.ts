@@ -150,7 +150,9 @@ async function main() {
 
   // Generate and upload CSV
   const csvContent = generateEmployeeCsv(50);
-  tmpCsvPath = path.join(process.cwd(), `test05_employees_${Date.now()}.csv`);
+  const tmpDir = path.join(__dirname, "tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  tmpCsvPath = path.join(tmpDir, `test05_employees_${Date.now()}.csv`);
   fs.writeFileSync(tmpCsvPath, csvContent);
 
   const uploadRes = await uploadFile(`${API}/api/v2/datasets/upload`, tmpCsvPath, {

@@ -96,7 +96,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Run each day's E2E suite
 # ---------------------------------------------------------------------------
-DAYS=(monday tuesday wednesday thursday friday saturday sunday)
+DAYS=(monday tuesday wednesday thursday friday saturday sunday coverage)
 EXIT_CODE=0
 
 for day in "${DAYS[@]}"; do

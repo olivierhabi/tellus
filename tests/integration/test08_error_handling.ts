@@ -119,7 +119,9 @@ async function cleanup() {
 }
 
 function writeTmpFile(name: string, content: string | Buffer, ext = ".csv"): string {
-  const p = path.join(process.cwd(), `${name}_${Date.now()}${ext}`);
+  const tmpDir = path.join(__dirname, "tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const p = path.join(tmpDir, `${name}_${Date.now()}${ext}`);
   fs.writeFileSync(p, content);
   tmpFiles.push(p);
   return p;

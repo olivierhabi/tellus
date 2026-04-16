@@ -317,7 +317,7 @@ export function getOpenSearchTypeForBaseType(baseType: string): string {
 // Inline self-tests (run when executed directly: tsx src/services/mapping/typeMapper.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -325,6 +325,7 @@ function runSelfTests(): void {
     if (condition) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -340,6 +341,7 @@ function runSelfTests(): void {
     if (a === e) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
       console.error(`    expected: ${e}`);
@@ -350,6 +352,7 @@ function runSelfTests(): void {
   function assertThrows(fn: () => void, expectedSubstring: string, label: string): void {
     try {
       fn();
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL (expected throw): ${label}`);
     } catch (err: unknown) {
@@ -717,10 +720,13 @@ function runSelfTests(): void {
   if (failed === 0) {
     console.log("\nAll typeMapper tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

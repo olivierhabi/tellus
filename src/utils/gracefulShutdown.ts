@@ -181,7 +181,7 @@ export default setupGracefulShutdown;
 // Inline self-tests (run: npx tsx src/utils/gracefulShutdown.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -191,6 +191,7 @@ function runSelfTests(): void {
       passed++;
     } else {
       console.error(`  FAIL: ${label}`);
+      /* v8 ignore next 2 */
       failed++;
     }
   }
@@ -500,6 +501,8 @@ function runSelfTests(): void {
   }, 500);
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

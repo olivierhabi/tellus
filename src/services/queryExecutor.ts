@@ -345,9 +345,11 @@ export async function executeFullTextSearch(
 // Self-test
 // ---------------------------------------------------------------------------
 
+/* v8 ignore start */
 if (require.main === module) {
   console.log("=== QueryExecutor self-test ===");
   console.log("  (No offline tests — requires OpenSearch. Tested via integration.)");
   console.log("\n0 passed, 0 failed");
   process.exit(0);
 }
+/* v8 ignore stop */

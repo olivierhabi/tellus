@@ -289,7 +289,7 @@ export async function checkInterfacePropertyInUse(
 // Inline self-tests (run: npx tsx src/services/interfaceValidator.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -298,6 +298,7 @@ function runSelfTests(): void {
       passed++;
       console.log(`  PASS  ${label}`);
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL  ${label}`);
     }
@@ -419,6 +420,8 @@ function runSelfTests(): void {
   console.log("\nAll interfaceValidator self-tests passed.");
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

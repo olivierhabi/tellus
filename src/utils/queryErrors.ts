@@ -248,7 +248,7 @@ export class AggregationError extends OntologyError {
 // Self-test
 // ---------------------------------------------------------------------------
 
-if (require.main === module) {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -301,5 +301,11 @@ if (require.main === module) {
   assert(unkErr.errorName === "UnknownError", "Unknown code defaults to UnknownError");
 
   console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
+  if (failed > 0) process.exit(1);
 }
+
+/* v8 ignore start */
+if (require.main === module) {
+  runSelfTests();
+}
+/* v8 ignore stop */
