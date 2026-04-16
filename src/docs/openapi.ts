@@ -1,5 +1,20 @@
 import { Express } from 'express';
 import { ontologyPaths, ontologySchemas } from './ontology-openapi';
+import actionsSpec from '../api-spec/actions.openapi.json';
+
+// Strip the `/api` prefix from actions.openapi.json paths so they are
+// relative to the OpenAPI server base URL (`/api`). Also drop the
+// `/api/docs/spec.json` self-reference path.
+const actionsPaths: Record<string, unknown> = {};
+for (const [key, value] of Object.entries(actionsSpec.paths ?? {})) {
+  if (key === '/api/docs/spec.json') continue;
+  const relative = key.replace(/^\/api/, '');
+  actionsPaths[relative] = value;
+}
+const actionsSchemas: Record<string, unknown> =
+  (actionsSpec as any).components?.schemas ?? {};
+const actionsTags: Array<{ name: string; description: string }> =
+  (actionsSpec as any).tags ?? [];
 
 /**
  * OpenAPI 3.0 specification for the Tellus Backend.
@@ -2705,6 +2720,13 @@ const orderedTags: Array<{ name: string; description?: string }> = [
   { name: 'Dev Tools', description: 'Development seed/reset utilities' },
 ];
 
+// Merge all tags: ordered base tags + actions tags (deduplicated).
+const mergedTagNames = new Set(orderedTags.map((t) => t.name));
+const mergedTags = [
+  ...orderedTags,
+  ...actionsTags.filter((t) => !mergedTagNames.has(t.name)),
+];
+
 // Merge Ontology + Actions paths/schemas into the spec exported to consumers.
 export const openApiSpec = {
   ...baseSpec,
@@ -2714,17 +2736,19 @@ export const openApiSpec = {
     description:
       'Combined Foundry data ingestion, Ontology Manager / Object Explorer, and Actions API.',
   },
-  tags: orderedTags,
+  tags: mergedTags,
   components: {
     ...baseSpec.components,
     schemas: {
       ...baseSpec.components.schemas,
       ...ontologySchemas,
+      ...actionsSchemas,
     },
   },
   paths: {
     ...baseSpec.paths,
     ...ontologyPaths,
+    ...actionsPaths,
   },
 };
 

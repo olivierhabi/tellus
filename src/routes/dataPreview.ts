@@ -406,7 +406,7 @@ router.get(
         previewRowCount: previewRows.length,
         requestedRows: rowLimit,
         columns,
-        preview: previewRows,
+        rows: previewRows,
         columnStats,
         schemaDefinition: dataset.schema_definition || null,
       });

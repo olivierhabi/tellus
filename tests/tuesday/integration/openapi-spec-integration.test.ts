@@ -67,19 +67,21 @@ describe("Task 29 — OpenAPI Specification", () => {
     const spec = await res.json();
     const paths = Object.keys(spec.paths);
 
+    // Paths in the spec are relative to the server base URL (`/api`),
+    // so they start with `/v1/...` not `/api/v1/...`.
     const expectedPaths = [
-      "/api/v1/ontologies/{ontologyId}/actionTypes",
-      "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}",
-      "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone",
-      "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact",
-      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply",
-      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate",
-      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch",
-      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit",
-      "/api/v1/audit/log",
-      "/api/v1/audit/log/{executionId}",
-      "/api/v1/audit/stats",
-      "/api/v1/objects/{objectType}/{primaryKey}/editHistory",
+      "/v1/ontologies/{ontologyId}/actionTypes",
+      "/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}",
+      "/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone",
+      "/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact",
+      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply",
+      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate",
+      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch",
+      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit",
+      "/v1/audit/log",
+      "/v1/audit/log/{executionId}",
+      "/v1/audit/stats",
+      "/v1/objects/{objectType}/{primaryKey}/editHistory",
     ];
 
     for (const p of expectedPaths) {
@@ -124,7 +126,7 @@ describe("Task 29 — OpenAPI Specification", () => {
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/api/v1/ontologies/{ontologyId}/actionTypes"] ?? {}
+      spec.paths["/v1/ontologies/{ontologyId}/actionTypes"] ?? {}
     );
     expect(methods).toContain("post");
     expect(methods).toContain("get");
@@ -138,7 +140,7 @@ describe("Task 29 — OpenAPI Specification", () => {
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}"] ?? {}
+      spec.paths["/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}"] ?? {}
     );
     expect(methods).toContain("get");
     expect(methods).toContain("put");
