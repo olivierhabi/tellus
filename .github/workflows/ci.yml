@@ -149,6 +149,14 @@ jobs:
       - name: Run integration tests
         run: pnpm run test:integration
 
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-server-log
+          path: /tmp/tellus-integration-server.log
+          retention-days: 7
+
   # ===========================================================================
   # Job 3: E2E Tests (PostgreSQL + OpenSearch + MinIO required)
   # ===========================================================================
@@ -230,6 +238,14 @@ jobs:
 
       - name: Run E2E tests
         run: pnpm run test:e2e
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-server-log
+          path: /tmp/tellus-e2e-server.log
+          retention-days: 7
 
   # ===========================================================================
   # Job 4: Performance Benchmarks (PostgreSQL + OpenSearch + MinIO required)
