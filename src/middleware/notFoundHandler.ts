@@ -280,7 +280,7 @@ export function runSelfTests(): void {
       /^\/api\/v1\/ontology\/(?:([^\/]+?))\/?(?=\/|$)/i,
       [{ name: "ontologyId" } as any]
     );
-    assert(withParams.includes("ontologies"), "extracts parameterized path");
+    assert(withParams.includes("ontology"), "extracts parameterized path");
   }
 
   // =========================================================================
