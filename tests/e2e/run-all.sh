@@ -75,6 +75,16 @@ npx tsx "${ROOT}/src/migrate.ts" > /tmp/tellus-migrate.log 2>&1 || {
   tail -20 /tmp/tellus-migrate.log
   exit 1
 }
+npx tsx "${ROOT}/src/foundryMigrate.ts" >> /tmp/tellus-migrate.log 2>&1 || {
+  echo -e "${RED}Foundry migration failed. Log:${NC}"
+  tail -20 /tmp/tellus-migrate.log
+  exit 1
+}
+npx tsx "${ROOT}/src/migrateAuth.ts" >> /tmp/tellus-migrate.log 2>&1 || {
+  echo -e "${RED}Auth migration failed. Log:${NC}"
+  tail -20 /tmp/tellus-migrate.log
+  exit 1
+}
 echo "  Migrations complete."
 
 echo -e "${BOLD}Re-seeding database ...${NC}"
