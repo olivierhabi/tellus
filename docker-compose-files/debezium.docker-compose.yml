@@ -3,9 +3,9 @@
 # ---------------------------------------------------------------------------
 # Spec equivalent: "Debezium + Kafka Connect" (techstack §CDC).
 # Streams every commit on the `tellus_db` postgres instance into Kafka
-# topics under `ontology.cdc.public.*`, where Apache Flink picks them up
-# and feeds the OpenSearch indexer (the "merge changes → indexing → hydration"
-# stages of the Object Data Funnel pipeline).
+# topics under `ontology.cdc.public.*`, which feed the OpenSearch indexer
+# (the "merge changes → indexing → hydration" stages of the Object Data
+# Funnel pipeline).
 #
 # After bringing this stack up, register the connector by POSTing
 # config/postgres-source.json to http://localhost:8085/connectors/.

@@ -13,7 +13,7 @@ Create `/tests/integration/test02_edit_preservation.js`:
 
 Test 2.1: Create an action type for salary updates
 ```
-POST /api/v2/ontology/{ontologyId}/actionTypes
+POST /api/v1/ontology/{ontologyId}/actionTypes
 Body: {
   "apiName": "updateEmployeeSalary",
   "displayName": "Update Employee Salary",
@@ -35,46 +35,46 @@ Assert: status 201
 
 Test 2.2: Record the original salary of EMP-0001
 ```
-GET /api/v2/objects/Employee/EMP-0001
+GET /api/v1/objects/Employee/EMP-0001
 Store: originalSalary = response.salary (should be whatever was in the CSV)
 Assert: salary is a number
 ```
 
 Test 2.3: Update EMP-0001's salary to 999999 via action
 ```
-POST /api/v2/actions/updateEmployeeSalary/apply
+POST /api/v1/actions/updateEmployeeSalary/apply
 Body: { "parameters": { "employeeRef": "EMP-0001", "newSalary": 999999 } }
 Assert: status 200, result === "success"
 ```
 
 Test 2.4: Verify the salary changed in the Ontology
 ```
-GET /api/v2/objects/Employee/EMP-0001
+GET /api/v1/objects/Employee/EMP-0001
 Assert: salary === 999999 (not the original CSV value)
 ```
 
 Test 2.5: Verify the edit is recorded
 ```
-GET /api/v2/ontology/{ontologyId}/objectTypes/Employee/edits?primaryKey=EMP-0001
+GET /api/v1/ontology/{ontologyId}/objectTypes/Employee/edits?primaryKey=EMP-0001
 Assert: at least 1 edit with operation "update" and propertyValues.salary === 999999
 ```
 
 Test 2.6: Reindex the object type (THIS IS THE CRITICAL TEST)
 ```
-POST /api/v2/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
+POST /api/v1/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
 Assert: status 200, result.editsApplied.updates >= 1
 ```
 
 Test 2.7: Verify the salary is STILL 999999 after reindex (EDIT PRESERVED!)
 ```
-GET /api/v2/objects/Employee/EMP-0001
+GET /api/v1/objects/Employee/EMP-0001
 Assert: salary === 999999
 Assert: salary !== originalSalary (the datasource value was NOT used)
 ```
 
 Test 2.8: Verify via the diff endpoint
 ```
-GET /api/v2/ontology/{ontologyId}/objectTypes/Employee/edits/diff/EMP-0001
+GET /api/v1/ontology/{ontologyId}/objectTypes/Employee/edits/diff/EMP-0001
 Assert: diff.salary.datasource === originalSalary
 Assert: diff.salary.ontology === 999999
 Assert: diff.salary.source === "user_edit"
@@ -82,7 +82,7 @@ Assert: diff.salary.source === "user_edit"
 
 Test 2.9a: Create an action type for creating employees
 ```
-POST /api/v2/ontology/{ontologyId}/actionTypes
+POST /api/v1/ontology/{ontologyId}/actionTypes
 Body: {
   "apiName": "createEmployee",
   "displayName": "Create Employee",
@@ -106,33 +106,33 @@ Assert: status 201
 
 Test 2.9b: Create a new employee via action (not in the CSV)
 ```
-POST /api/v2/actions/createEmployee/apply
+POST /api/v1/actions/createEmployee/apply
 Body: { "parameters": { "employeeId": "EMP-NEW-TEST", "fullName": "Test Created", "salary": 50000 } }
 Assert: status 200, result === "success"
 ```
 
 Test 2.10: Verify the new employee exists
 ```
-GET /api/v2/objects/Employee/EMP-NEW-TEST
+GET /api/v1/objects/Employee/EMP-NEW-TEST
 Assert: status 200, fullName === "Test Created"
 ```
 
 Test 2.11: Reindex again
 ```
-POST /api/v2/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
+POST /api/v1/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
 Assert: result.editsApplied.creates >= 1
 ```
 
 Test 2.12: Verify the action-created employee STILL exists after reindex
 ```
-GET /api/v2/objects/Employee/EMP-NEW-TEST
+GET /api/v1/objects/Employee/EMP-NEW-TEST
 Assert: status 200, fullName === "Test Created"
 Assert: This object is NOT in the CSV — it was created purely via action and must survive reindex
 ```
 
 Test 2.13a: Create an action type for deleting employees
 ```
-POST /api/v2/ontology/{ontologyId}/actionTypes
+POST /api/v1/ontology/{ontologyId}/actionTypes
 Body: {
   "apiName": "deleteEmployee",
   "displayName": "Delete Employee",
@@ -150,33 +150,33 @@ Assert: status 201
 
 Test 2.13b: Delete an employee via action
 ```
-POST /api/v2/actions/deleteEmployee/apply
+POST /api/v1/actions/deleteEmployee/apply
 Body: { "parameters": { "employeeRef": "EMP-0002" } }
 Assert: status 200, result === "success"
 ```
 
 Test 2.14: Verify the employee is gone
 ```
-GET /api/v2/objects/Employee/EMP-0002
+GET /api/v1/objects/Employee/EMP-0002
 Assert: status 404
 ```
 
 Test 2.15: Reindex again
 ```
-POST /api/v2/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
+POST /api/v1/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
 Assert: status 200, result.editsApplied.deletes >= 1
 ```
 
 Test 2.16: Verify the deleted employee is STILL gone after reindex
 ```
-GET /api/v2/objects/Employee/EMP-0002
+GET /api/v1/objects/Employee/EMP-0002
 Assert: status 404
 Assert: Even though EMP-0002 is in the CSV, the delete edit takes precedence
 ```
 
 Test 2.17: Verify total count is correct
 ```
-GET /api/v2/objects/Employee?$pageSize=1
+GET /api/v1/objects/Employee?$pageSize=1
 Assert: totalCount === 1000 (original) + 1 (created) - 1 (deleted) = 1000
 ```
 

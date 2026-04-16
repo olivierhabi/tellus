@@ -6,7 +6,7 @@
 // query endpoints in objects.ts — views are designed for UI consumption with
 // property metadata, interface implementations, and linked object summaries.
 //
-// Mounted at: /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName
+// Mounted at: /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName
 //
 // Endpoints:
 //   GET  .../objects/:primaryKey/view      — Single object view (Task 11)
@@ -467,7 +467,7 @@ router.post(
 
 // ---------------------------------------------------------------------------
 // Spec-compliant routes without ontologyId in path (Tasks 11-13)
-// Mounted at: /api/v2/objects/:objectType
+// Mounted at: /api/v1/objects/:objectType
 // ontologyId is resolved by looking up the Object Type in PostgreSQL.
 // ---------------------------------------------------------------------------
 
@@ -495,7 +495,7 @@ async function resolveObjectType(
   };
 }
 
-// GET /api/v2/objects/:objectType/:primaryKey/view
+// GET /api/v1/objects/:objectType/:primaryKey/view
 objectViewsByTypeRouter.get(
   "/:primaryKey/view",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -523,7 +523,7 @@ objectViewsByTypeRouter.get(
   }
 );
 
-// GET /api/v2/objects/:objectType/:primaryKey/linked
+// GET /api/v1/objects/:objectType/:primaryKey/linked
 objectViewsByTypeRouter.get(
   "/:primaryKey/linked",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -621,7 +621,7 @@ objectViewsByTypeRouter.get(
   }
 );
 
-// POST /api/v2/objects/:objectType/batchView
+// POST /api/v1/objects/:objectType/batchView
 objectViewsByTypeRouter.post(
   "/batchView",
   async (req: Request, res: Response, next: NextFunction) => {

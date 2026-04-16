@@ -16,7 +16,7 @@ The middleware must log TWO entries per request: one when the request arrives (w
   "timestamp": "2025-03-16T15:30:00.123Z",
   "requestId": "req-a1b2c3d4",
   "method": "POST",
-  "path": "/api/v2/objects/Employee/search",
+  "path": "/api/v1/objects/Employee/search",
   "query": {},
   "headers": {
     "content-type": "application/json",
@@ -35,7 +35,7 @@ The middleware must log TWO entries per request: one when the request arrives (w
   "timestamp": "2025-03-16T15:30:00.189Z",
   "requestId": "req-a1b2c3d4",
   "method": "POST",
-  "path": "/api/v2/objects/Employee/search",
+  "path": "/api/v1/objects/Employee/search",
   "statusCode": 200,
   "durationMs": 66,
   "responseSize": 4523
@@ -130,13 +130,13 @@ function sanitizeHeaders(headers) {
 5. The `X-Request-Id` response header allows clients to correlate their request with server-side logs.
 6. Use `process.hrtime.bigint()` for timing, NOT `Date.now()`. `hrtime` provides nanosecond precision and is monotonic (not affected by system clock adjustments). `Date.now()` can jump forward or backward if NTP adjusts the clock.
 
-**Health check endpoint exclusion:** If health check endpoints (`/api/v2/health`) generate excessive log volume, you may add a condition to skip logging for those paths. For week 1, log all requests including health checks.
+**Health check endpoint exclusion:** If health check endpoints (`/api/v1/health`) generate excessive log volume, you may add a condition to skip logging for those paths. For week 1, log all requests including health checks.
 
 Register this middleware in `server.js` BEFORE all route handlers (it must see every request):
 ```javascript
 app.use(requestLogger);  // FIRST
 app.use(express.json({ limit: '10mb' }));  // Parse JSON bodies
-app.use('/api/v2', routes);  // Routes
+app.use('/api/v1', routes);  // Routes
 app.use(errorHandler);  // Error handler LAST
 ```
 

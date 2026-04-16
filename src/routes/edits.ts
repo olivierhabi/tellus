@@ -5,7 +5,7 @@
 // table) that have been applied to objects via Actions.
 //
 // Mounted at:
-//   /api/v2/ontology/:ontologyId/objectTypes/:apiName/edits
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/edits
 //
 // Endpoints:
 //   GET /                    — List all edits with filtering and pagination

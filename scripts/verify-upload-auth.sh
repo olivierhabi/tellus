@@ -3,7 +3,7 @@
 # verify-upload-auth.sh
 # ---------------------
 # Reproduces the fix for the "not a member of this project" FORBIDDEN that
-# the frontend was hitting on POST /api/projects/:projectId/upload after the
+# the frontend was hitting on POST /api/v1/projects/:projectId/upload after the
 # Keycloak auth revamp.
 #
 # What it checks:
@@ -11,8 +11,8 @@
 #      cypress@tellus.local user.
 #   2. Hit POST /api/v1/auth/token-info and assert 200 — confirms the local
 #      user row was auto-provisioned by requireTellusAuth (ensureLocalUserForClaims).
-#   3. Create a fresh project owned by that user via POST /api/projects.
-#   4. Upload a tiny CSV to POST /api/projects/:id/upload and assert HTTP 2xx
+#   3. Create a fresh project owned by that user via POST /api/v1/projects.
+#   4. Upload a tiny CSV to POST /api/v1/projects/:id/upload and assert HTTP 2xx
 #      AND that the response body has `success: true`. A FORBIDDEN here means
 #      the membership fix regressed.
 #   5. Clean up the project.

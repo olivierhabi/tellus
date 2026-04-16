@@ -1,10 +1,10 @@
-# TASK 3: Create the GET `/api/v2/ontology/:ontologyId/linkTypes` Endpoint
+# TASK 3: Create the GET `/api/v1/ontology/:ontologyId/linkTypes` Endpoint
 
 **Objective:** Build the REST API endpoint that retrieves all link type definitions within an ontology. This endpoint is used by the Ontology Manager UI (when it's built later), by the Object Set Service (to know how to resolve links when performing Search Around queries), and by the OSDK code generator (to generate typed link traversal methods in the SDK). The response must include the full definition of each link type, including cardinality, foreign key configuration, and join table configuration.
 
 **Why this exists in Palantir:** In Palantir Foundry, the Ontology Manager's home page lists all object types and link types. The Object Explorer uses link type definitions to display the "Links" section on each object's detail page, showing which other object types are connected and the count of linked objects. The OSDK generates `.pivotTo()` methods for each link type so developers can write `client(Employee).where(...).pivotTo("employeeCompany")` to traverse links in code.
 
-**HTTP method and path:** `GET /api/v2/ontology/:ontologyId/linkTypes`
+**HTTP method and path:** `GET /api/v1/ontology/:ontologyId/linkTypes`
 
 **Path parameters:**
 - `ontologyId` (UUID): The ID of the ontology. Must reference an existing ontology. If not found, return HTTP 404 with `{ "error": "Ontology not found", "ontologyId": "${ontologyId}" }`.
@@ -71,7 +71,7 @@ The `totalCount` field should be the total number of link types matching the fil
 
 **Testing:**
 1. Create 3 link types (employeeCompany, employeeTickets, companyIndustry).
-2. Call `GET /api/v2/ontology/{id}/linkTypes` — verify all 3 are returned in the `data` array, `totalCount` is 3, `nextPageToken` is null.
+2. Call `GET /api/v1/ontology/{id}/linkTypes` — verify all 3 are returned in the `data` array, `totalCount` is 3, `nextPageToken` is null.
 3. Call `GET /linkTypes?sourceObjectType=Employee` — verify only the 2 Employee-related links are returned, `totalCount` is 2.
 4. Test pagination: set `$pageSize=1`, follow `nextPageToken` through 3 pages, verify all 3 link types received across pages with no duplicates.
 5. Call with non-existent `ontologyId` — verify HTTP 404.

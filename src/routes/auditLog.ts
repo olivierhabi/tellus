@@ -8,10 +8,10 @@
 // must be traceable.
 //
 // Two routers are exported:
-//   1. actionAuditRouter — mounted at /api/v2/ontologies/:ontologyId/actions
+//   1. actionAuditRouter — mounted at /api/v1/ontologies/:ontologyId/actions
 //      GET /:actionTypeApiName/audit — audit log for a specific action type
 //
-//   2. globalAuditRouter — mounted at /api/v2/audit
+//   2. globalAuditRouter — mounted at /api/v1/audit
 //      GET /log                 — global audit log across all action types
 //      GET /log/:executionId    — single audit entry by execution ID
 //      GET /stats               — aggregate statistics

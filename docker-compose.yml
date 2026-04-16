@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Docker Compose — Ontology Engine
 # Services: PostgreSQL, OpenSearch, Kafka, Zookeeper, Schema Registry,
-#           Keycloak, Flink JobManager, Flink TaskManager, App
+#           Keycloak, App
 # ---------------------------------------------------------------------------
 
 version: "3.8"
@@ -121,43 +121,6 @@ services:
       retries: 12
       start_period: 60s
 
-  flink-jobmanager:
-    image: flink:1.19-scala_2.12-java17
-    restart: unless-stopped
-    command: jobmanager
-    environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: flink-jobmanager
-        state.backend: filesystem
-        state.checkpoints.dir: file:///flink-data/checkpoints
-        state.savepoints.dir: file:///flink-data/savepoints
-        execution.checkpointing.interval: 60s
-    ports:
-      - "127.0.0.1:8082:8081"
-    volumes:
-      - flinkdata:/flink-data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  flink-taskmanager:
-    image: flink:1.19-scala_2.12-java17
-    restart: unless-stopped
-    command: taskmanager
-    depends_on:
-      flink-jobmanager:
-        condition: service_healthy
-    environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
-    volumes:
-      - flinkdata:/flink-data
-
   app:
     build: .
     restart: unless-stopped
@@ -182,7 +145,6 @@ services:
       KEYCLOAK_URL: http://keycloak:8086
       KEYCLOAK_REALM: tellus
       KEYCLOAK_CLIENT_ID: tellus-frontend
-      FLINK_JOBMANAGER_URL: http://flink-jobmanager:8081
       PORT: 3000
       NODE_ENV: production
     ports:
@@ -190,7 +152,7 @@ services:
     volumes:
       - appdata:/app/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/v1/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -199,5 +161,4 @@ volumes:
   pgdata:
   osdata:
   kcdata:
-  flinkdata:
   appdata:

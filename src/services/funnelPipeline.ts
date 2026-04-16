@@ -19,7 +19,6 @@
 
 import { query } from "../db";
 import { client as osClient } from "../services/opensearch/client";
-import { incrementCounter, observeHistogram, setGauge } from "../routes/metrics";
 
 export type FunnelStage = "changelog" | "merge" | "computed" | "indexing";
 export const STAGE_ORDER: FunnelStage[] = ["changelog", "merge", "computed", "indexing"];
@@ -89,17 +88,6 @@ async function runStage(stage: FunnelStage, runner: StageRunner): Promise<StageR
       rowsProcessed = out.rowsProcessed;
       pkViolations = out.pkViolations.slice(0, 1000);
       const duration = Date.now() - start;
-      observeHistogram(
-        "ontology_funnel_pipeline_duration_seconds",
-        duration / 1000
-      );
-      incrementCounter("ontology_funnel_documents_indexed_total", rowsProcessed);
-      if (pkViolations.length > 0) {
-        incrementCounter(
-          "ontology_funnel_pk_violations_total",
-          pkViolations.length
-        );
-      }
       return {
         stage,
         durationMs: duration,
@@ -145,7 +133,6 @@ export async function runFunnelPipeline(
 
   const startedAt = new Date().toISOString();
   const stages: StageResult[] = [];
-  setGauge("ontology_funnel_pipeline_status", 1);
 
   try {
     const index = `ontology-${objectTypeApiName.toLowerCase()}`;
@@ -216,7 +203,6 @@ export async function runFunnelPipeline(
     );
 
     const status = stages.every((s) => s.status === "ok") ? "ok" : "failed";
-    setGauge("ontology_funnel_pipeline_status", status === "ok" ? 0 : 2);
     return {
       objectTypeApiName,
       stages,

@@ -62,20 +62,20 @@ describe("Sunday Integration Tests", async () => {
         // Remove implementations first
         if (ctx.objectType1ApiName && ctx.interfaceApiName) {
           await api("DELETE",
-            `/api/v2/ontology/${ctx.ontologyId}/objectTypes/${ctx.objectType1ApiName}/implements/${ctx.interfaceApiName}`
+            `/api/v1/ontology/${ctx.ontologyId}/objectTypes/${ctx.objectType1ApiName}/implements/${ctx.interfaceApiName}`
           );
         }
         if (ctx.objectType2ApiName && ctx.interfaceApiName) {
           await api("DELETE",
-            `/api/v2/ontology/${ctx.ontologyId}/objectTypes/${ctx.objectType2ApiName}/implements/${ctx.interfaceApiName}`
+            `/api/v1/ontology/${ctx.ontologyId}/objectTypes/${ctx.objectType2ApiName}/implements/${ctx.interfaceApiName}`
           );
         }
         // Delete interface
         if (ctx.interfaceApiName) {
-          await api("DELETE", `/api/v2/ontology/${ctx.ontologyId}/interfaces/${ctx.interfaceApiName}`);
+          await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/interfaces/${ctx.interfaceApiName}`);
         }
         // Delete ontology (cascades OTs)
-        await api("DELETE", `/api/v2/ontologies/${ctx.ontologyId}`);
+        await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
       }
     } catch { /* ignore */ }
     stopServer();
@@ -86,7 +86,7 @@ describe("Sunday Integration Tests", async () => {
     const bf = runner.failed;
 
     await runner.test("Create ontology", async () => {
-      const { status, body } = await api("POST", "/api/v2/ontologies", {
+      const { status, body } = await api("POST", "/api/v1/ontologies", {
         displayName: "Sunday Integration Test",
         description: "Testing interface system",
       });
@@ -96,7 +96,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Create Airport object type", async () => {
-      const { status } = await api("POST", `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+      const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
         apiName: "SunAirport",
         displayName: "Sunday Airport",
         properties: [
@@ -114,7 +114,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Create Warehouse object type", async () => {
-      const { status } = await api("POST", `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+      const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
         apiName: "SunWarehouse",
         displayName: "Sunday Warehouse",
         properties: [
@@ -138,7 +138,7 @@ describe("Sunday Integration Tests", async () => {
     const bf = runner.failed;
 
     await runner.test("Create Interface HasLocation", async () => {
-      const { status, body } = await api("POST", `/api/v2/ontology/${ctx.ontologyId}/interfaces`, {
+      const { status, body } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/interfaces`, {
         apiName: "SunHasLocation",
         displayName: "Has Geographic Location",
         description: "Interface for objects with geographic coordinates",
@@ -154,7 +154,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Reject duplicate Interface apiName", async () => {
-      const { status } = await api("POST", `/api/v2/ontology/${ctx.ontologyId}/interfaces`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/interfaces`, {
         apiName: "SunHasLocation",
         displayName: "Duplicate",
         properties: [{ apiName: "prop1", displayName: "P1", baseType: "string" }],
@@ -163,7 +163,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Reject invalid apiName (lowercase)", async () => {
-      const { status } = await api("POST", `/api/v2/ontology/${ctx.ontologyId}/interfaces`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/interfaces`, {
         apiName: "hasLocation",
         displayName: "Bad Name",
         properties: [{ apiName: "prop1", displayName: "P1", baseType: "string" }],
@@ -172,7 +172,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Reject empty properties", async () => {
-      const { status } = await api("POST", `/api/v2/ontology/${ctx.ontologyId}/interfaces`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/interfaces`, {
         apiName: "EmptyProps",
         displayName: "Empty",
         properties: [],
@@ -181,26 +181,26 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("List interfaces", async () => {
-      const { status, body } = await api("GET", `/api/v2/ontology/${ctx.ontologyId}/interfaces`);
+      const { status, body } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}/interfaces`);
       runner.assert(status === 200, `Expected 200, got ${status}`);
       const data = body?.data || [];
       runner.assert(data.length >= 1, `Expected >= 1 interface, got ${data.length}`);
     });
 
     await runner.test("Get single interface", async () => {
-      const { status, body } = await api("GET", `/api/v2/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
+      const { status, body } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
       runner.assert(status === 200, `Expected 200, got ${status}`);
       const apiName = body?.data?.apiName;
       runner.assert(apiName === "SunHasLocation", `apiName mismatch: ${apiName}`);
     });
 
     await runner.test("404 for non-existent interface", async () => {
-      const { status } = await api("GET", `/api/v2/ontology/${ctx.ontologyId}/interfaces/NonExistent`);
+      const { status } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}/interfaces/NonExistent`);
       runner.assert(status === 404, `Expected 404, got ${status}`);
     });
 
     await runner.test("Update interface display name via PUT", async () => {
-      const { status, body } = await api("PUT", `/api/v2/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`, {
+      const { status, body } = await api("PUT", `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`, {
         displayName: "Has Geographic Location (Updated)",
         description: "Updated description",
         properties: [
@@ -214,7 +214,7 @@ describe("Sunday Integration Tests", async () => {
 
     // Create a second interface to test deletion
     await runner.test("Create temporary interface for delete test", async () => {
-      const { status } = await api("POST", `/api/v2/ontology/${ctx.ontologyId}/interfaces`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/interfaces`, {
         apiName: "SunTempInterface",
         displayName: "Temporary",
         properties: [{ apiName: "prop1", displayName: "P1", baseType: "string" }],
@@ -223,7 +223,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Delete interface with no implementations", async () => {
-      const { status } = await api("DELETE", `/api/v2/ontology/${ctx.ontologyId}/interfaces/SunTempInterface`);
+      const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunTempInterface`);
       runner.assert(status === 204, `Expected 204, got ${status}`);
     });
 
@@ -236,7 +236,7 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("Airport implements SunHasLocation", async () => {
       const { status, body } = await api("POST",
-        `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements`, {
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements`, {
           interfaceApiName: "SunHasLocation",
           propertyMapping: {
             latitude: "airportLatitude",
@@ -249,7 +249,7 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("Reject duplicate implementation", async () => {
       const { status } = await api("POST",
-        `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements`, {
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements`, {
           interfaceApiName: "SunHasLocation",
           propertyMapping: {
             latitude: "airportLatitude",
@@ -261,7 +261,7 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("Reject missing required mapping", async () => {
       const { status } = await api("POST",
-        `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SunWarehouse/implements`, {
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SunWarehouse/implements`, {
           interfaceApiName: "SunHasLocation",
           propertyMapping: {
             latitude: "warehouseLat",
@@ -273,7 +273,7 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("Warehouse implements SunHasLocation (correct mapping)", async () => {
       const { status } = await api("POST",
-        `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SunWarehouse/implements`, {
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SunWarehouse/implements`, {
           interfaceApiName: "SunHasLocation",
           propertyMapping: {
             latitude: "warehouseLat",
@@ -285,7 +285,7 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("List implementations for Airport", async () => {
       const { status, body } = await api("GET",
-        `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements`);
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements`);
       runner.assert(status === 200, `Expected 200, got ${status}`);
       const data = body?.data || [];
       runner.assert(data.length >= 1, `Expected >= 1, got ${data.length}`);
@@ -293,13 +293,13 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("Prevent deleting interface with implementations", async () => {
       const { status } = await api("DELETE",
-        `/api/v2/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
+        `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
       runner.assert(status === 409, `Expected 409, got ${status}`);
     });
 
     await runner.test("Prevent removing mapped property via PUT", async () => {
       const { status } = await api("PUT",
-        `/api/v2/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`, {
+        `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`, {
           displayName: "Has Geographic Location",
           properties: [
             // Removing latitude which is mapped
@@ -318,7 +318,7 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("GET interface shows implementors", async () => {
       const { status, body } = await api("GET",
-        `/api/v2/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
+        `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
       runner.assert(status === 200, `Expected 200, got ${status}`);
       const implementors = body?.data?.implementingObjectTypes || [];
       runner.assert(implementors.length >= 2, `Expected >= 2 implementors, got ${implementors.length}`);
@@ -332,17 +332,17 @@ describe("Sunday Integration Tests", async () => {
     const bf = runner.failed;
 
     await runner.test("System health endpoint", async () => {
-      const { status } = await api("GET", "/api/v2/system/health");
+      const { status } = await api("GET", "/api/v1/system/health");
       runner.assert(status === 200 || status === 503, `Expected 200/503, got ${status}`);
     });
 
     await runner.test("Readiness probe", async () => {
-      const { status } = await api("GET", "/api/v2/system/readiness");
+      const { status } = await api("GET", "/api/v1/system/readiness");
       runner.assert(status === 200 || status === 503, `Expected 200/503, got ${status}`);
     });
 
     await runner.test("Liveness probe", async () => {
-      const { status } = await api("GET", "/api/v2/system/liveness");
+      const { status } = await api("GET", "/api/v1/system/liveness");
       runner.assert(status === 200, `Expected 200, got ${status}`);
     });
 
@@ -355,24 +355,24 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("Remove Airport implementation", async () => {
       const { status } = await api("DELETE",
-        `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements/SunHasLocation`);
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SunAirport/implements/SunHasLocation`);
       runner.assert(status === 204, `Expected 204, got ${status}`);
     });
 
     await runner.test("Remove Warehouse implementation", async () => {
       const { status } = await api("DELETE",
-        `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SunWarehouse/implements/SunHasLocation`);
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SunWarehouse/implements/SunHasLocation`);
       runner.assert(status === 204, `Expected 204, got ${status}`);
     });
 
     await runner.test("Delete interface", async () => {
       const { status } = await api("DELETE",
-        `/api/v2/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
+        `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`);
       runner.assert(status === 204, `Expected 204, got ${status}`);
     });
 
     await runner.test("Delete ontology (cascade)", async () => {
-      const { status } = await api("DELETE", `/api/v2/ontologies/${ctx.ontologyId}`);
+      const { status } = await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
       runner.assert(status === 204, `Expected 204, got ${status}`);
       ctx.ontologyId = ""; // Prevent afterAll cleanup
     });

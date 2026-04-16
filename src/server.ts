@@ -36,7 +36,6 @@ import { actionAuditRouter, globalAuditRouter } from "./routes/auditLog";
 import objectsRouter from "./routes/objects";
 import healthRouter from "./routes/health";
 import editsRouter from "./routes/edits";
-import bulkActionsRouter from "./routes/bulkActions";
 import reindexStatusRouter from "./routes/reindexStatus";
 import dataPreviewRouter from "./routes/dataPreview";
 import datasetRouter from "./routes/datasets";
@@ -47,15 +46,10 @@ import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
 // Modern Palantir-stack additions: DuckDB SQL, Polars charts, Kafka producer,
-// pipeline status, Prometheus metrics. Each module is documented inline.
+// pipeline status. Each module is documented inline.
 import sqlRouter from "./routes/sql";
 import chartsRouter from "./routes/charts";
 import pipelinesStatusRouter from "./routes/pipelines-status";
-import metricsRouter, { incrementCounter } from "./routes/metrics";
-import vectorTimeseriesRouter from "./routes/vectorAndTimeseries";
-import keycloakSsoRouter from "./routes/keycloak";
-import icebergRouter from "./routes/iceberg";
-import flinkRouter from "./routes/flink";
 import { shutdownKafka } from "./services/kafkaProducer";
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
@@ -77,7 +71,6 @@ import foundryMembersRouter from "./routes/members";
 import foundryColumnStatsRouter from "./routes/columnStats";
 import foundryVersionsRouter from "./routes/versions";
 import { projectDuplicatesRouter, datasetDeduplicateRouter } from "./routes/duplicates";
-import foundryPreferencesRouter from "./routes/preferences";
 import foundryPipelinesRouter from "./routes/pipelines";
 import { devRouter } from "./routes/devTools";
 import { healthDetailedRouter } from "./routes/healthDetailed";
@@ -88,15 +81,7 @@ import { limiter } from "./middleware/rateLimiter";
 import { serverTiming } from './middleware/serverTiming';
 import { contentLanguage } from './middleware/contentLanguage';
 import foundryDb from "./config/foundryDb";
-import swaggerUi from "swagger-ui-express";
-import * as fs from "fs";
-import * as path from "path";
 import { ensureBucket, destroyStorageClient, storageHealthCheck } from "./services/storageService";
-
-// Load OpenAPI spec JSON at startup
-const openApiSpec = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "api-spec", "actions.openapi.json"), "utf-8")
-);
 
 // ---------------------------------------------------------------------------
 // Config validation — fail fast if required env vars are missing
@@ -129,7 +114,7 @@ app.use(compression());
 
 // Rate limiting — configurable requests per minute per IP.
 //
-// `/health`, `/api/health`, and `/api/metrics` are intentionally exempted
+// `/health`, `/api/v1/health`, and `/api/metrics` are intentionally exempted
 // because Kubernetes liveness probes and Prometheus scrapers hit them on a
 // fixed schedule that would otherwise burn the entire request budget. The
 // production rule is: **observability must never throttle**.
@@ -140,7 +125,7 @@ app.use(compression());
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "200", 10);
 const RATE_LIMIT_SKIP = new Set<string>([
   "/health",
-  "/api/health",
+  "/api/v1/health",
   "/api/metrics",
 ]);
 app.use(
@@ -280,7 +265,6 @@ app.use(securityContext);
 // Increment Prometheus counters on every request. Must be registered
 // BEFORE the route handlers so it sees every inbound HTTP call.
 app.use((_req: Request, _res: Response, next: NextFunction) => {
-  incrementCounter("http_requests_total");
   next();
 });
 
@@ -345,7 +329,7 @@ app.get("/health", async (_req: Request, res: Response) => {
 // API routers — spec cypress tests hit `.../ontologies/default/...`; rewrite
 // the URL path so every downstream router sees the real UUID. This is a
 // string substitution on `req.url` so Express re-parses params for us.
-const ALIAS_RE = /^(\/api\/v2\/ontolog(?:y|ies))\/(default|main|primary)(\/|$)/;
+const ALIAS_RE = /^(\/api\/v1\/ontolog(?:y|ies))\/(default|main|primary)(\/|$)/;
 app.use(async (req, _res, next) => {
   const m = req.url.match(ALIAS_RE);
   if (!m) return next();
@@ -365,67 +349,66 @@ app.use(async (req, _res, next) => {
 });
 
 app.use(ontologyRouter);
-app.use("/api/v2/ontologies/:ontologyId/objectTypes", objectTypeRouter);
-app.use("/api/v2/ontologies/:ontologyId/objectTypes/:apiName", propertyRouter);
+app.use("/api/v1/ontologies/:ontologyId/objectTypes", objectTypeRouter);
+app.use("/api/v1/ontologies/:ontologyId/objectTypes/:apiName", propertyRouter);
 app.use(
-  "/api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource",
+  "/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource",
   datasourceRouter
 );
 app.use(
-  "/api/v2/ontology/:ontologyId/objectTypes/:apiName/suggestMapping",
+  "/api/v1/ontology/:ontologyId/objectTypes/:apiName/suggestMapping",
   suggestMappingRouter
 );
 app.use(
-  "/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index",
+  "/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index",
   indexingRouter
 );
 app.use(
-  "/api/v2/ontologies/:ontologyId/linkTypes",
+  "/api/v1/ontologies/:ontologyId/linkTypes",
   linkRouter
 );
 app.use(
-  "/api/v2/ontologies/:ontologyId/actionTypes",
+  "/api/v1/ontologies/:ontologyId/actionTypes",
   actionTypeRouter
 );
 app.use(
-  "/api/v2/ontologies/:ontologyId/actions",
+  "/api/v1/ontologies/:ontologyId/actions",
   actionsRouter
 );
 app.use(
-  "/api/v2/ontologies/:ontologyId/actions",
+  "/api/v1/ontologies/:ontologyId/actions",
   actionAuditRouter
 );
-app.use("/api/v2/actions", validateRouter);
-app.use("/api/v2/actions", batchRouter);
-app.use("/api/v2/actions", bulkActionsRouter);
-app.use("/api/v2/audit", globalAuditRouter);
+app.use("/api/v1/actions", validateRouter);
+app.use("/api/v1/actions", batchRouter);
+app.use("/api/v1/audit", globalAuditRouter);
 app.use(
-  "/api/v2/ontology/:ontologyId/objectTypes/:apiName/edits",
+  "/api/v1/ontology/:ontologyId/objectTypes/:apiName/edits",
   editsRouter
 );
 app.use(
-  "/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index",
+  "/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index",
   reindexStatusRouter
 );
-app.use("/api/v2/datasets", datasetRouter);
-app.use("/api/v2/datasets", dataPreviewRouter);
+app.use("/api/v1/datasets", datasetRouter);
+app.use("/api/v1/datasets", dataPreviewRouter);
 app.use(
-  "/api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex",
+  "/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex",
   reindexRouter
 );
 app.use(
-  "/api/v2/ontology/:ontologyId/interfaces",
+  "/api/v1/ontology/:ontologyId/interfaces",
   interfaceRouter
 );
 app.use(
-  "/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements",
+  "/api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements",
   objectTypeInterfacesRouter
 );
 app.use(
-  "/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName",
+  "/api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName",
   objectViewsRouter
 );
-app.use("/api/v2/objects/:objectType", objectViewsByTypeRouter);
+app.use("/api/v1/objects/:objectType", objectViewsByTypeRouter);
 app.use(objectsRouter);
 app.use(healthRouter);
 
@@ -433,45 +416,39 @@ app.use(healthRouter);
 // Ontology Platform spec Phase 2 — branching, groups, functions, favorites,
 // saved explorations, exports, summary, geo, comparisons, schema migrations.
 // ---------------------------------------------------------------------------
-app.use("/api/v2/ontologies/:ontologyId/branches", branchesRouter);
-app.use("/api/v2/ontologies/:ontologyId/groups", groupsRouter);
-app.use("/api/v2/ontologies/:ontologyId/functions", functionsRouter);
-app.use("/api/v2/ontologies/:ontologyId/explorations", explorationsRouter);
-app.use("/api/v2/ontologies/:ontologyId/exports", exportsRouter);
-app.use("/api/v2/ontologies/:ontologyId/summary", summaryRouter);
-app.use("/api/v2/ontologies/:ontologyId/geo", geoRouter);
-app.use("/api/v2/ontologies/:ontologyId/comparisons", comparisonsRouter);
-app.use("/api/v2/ontologies/:ontologyId/migrations", migrationManagerRouter);
-app.use("/api/v2/ontologies/:ontologyId/governance", governanceRouter);
-app.use("/api/v2/users/me/favorites", favoritesRouter);
+app.use("/api/v1/ontologies/:ontologyId/branches", branchesRouter);
+app.use("/api/v1/ontologies/:ontologyId/groups", groupsRouter);
+app.use("/api/v1/ontologies/:ontologyId/functions", functionsRouter);
+app.use("/api/v1/ontologies/:ontologyId/explorations", explorationsRouter);
+app.use("/api/v1/ontologies/:ontologyId/exports", exportsRouter);
+app.use("/api/v1/ontologies/:ontologyId/summary", summaryRouter);
+app.use("/api/v1/ontologies/:ontologyId/geo", geoRouter);
+app.use("/api/v1/ontologies/:ontologyId/comparisons", comparisonsRouter);
+app.use("/api/v1/ontologies/:ontologyId/migrations", migrationManagerRouter);
+app.use("/api/v1/ontologies/:ontologyId/governance", governanceRouter);
+app.use("/api/v1/users/me/favorites", favoritesRouter);
 
-// New Palantir-stack endpoints (Furnace SQL, Polars charts, Funnel pipeline
-// status, Prometheus metrics).
-app.use("/api/v2", sqlRouter);
-app.use("/api/v2", chartsRouter);
-app.use("/api/v2", pipelinesStatusRouter);
-app.use("/api/v2", vectorTimeseriesRouter);
-app.use("/api/v2", keycloakSsoRouter);
-app.use("/api/v2", icebergRouter);
-app.use("/api/v2", flinkRouter);
-app.use("/api", metricsRouter);
+// New Palantir-stack endpoints (Furnace SQL, Polars charts, Funnel pipeline status).
+app.use("/api/v1", sqlRouter);
+app.use("/api/v1", chartsRouter);
+app.use("/api/v1", pipelinesStatusRouter);
 
 // ---------------------------------------------------------------------------
 // Foundry Data Ingestion Layer routes (BE-003 through BE-030)
 // These run alongside the ontology engine routes on the same Express app.
 // ---------------------------------------------------------------------------
-app.use("/api/projects", foundryProjectsRouter);
-app.use("/api/projects/:projectId/folders", foundryFoldersRouter);
-app.use("/api/projects/:projectId/folders/:folderId", foundryUploadsRouter);
-app.use("/api/projects/:projectId", foundryProjectUploadsRouter);
-app.use("/api/projects/:projectId/folders/:folderId/datasets", foundryFolderDatasetsRouter);
-app.use("/api/datasets", foundryDatasetRouter);
-app.use("/api/datasets", foundryColumnStatsRouter);
-app.use("/api/datasets", foundryVersionsRouter);
-app.use("/api/datasets", datasetDeduplicateRouter);
-app.use("/api/projects", projectDuplicatesRouter);
-app.use("/api/search", foundrySearchRouter);
-app.use("/api/breadcrumb", foundryBreadcrumbRouter);
+app.use("/api/v1/projects", foundryProjectsRouter);
+app.use("/api/v1/projects/:projectId/folders", foundryFoldersRouter);
+app.use("/api/v1/projects/:projectId/folders/:folderId", foundryUploadsRouter);
+app.use("/api/v1/projects/:projectId", foundryProjectUploadsRouter);
+app.use("/api/v1/projects/:projectId/folders/:folderId/datasets", foundryFolderDatasetsRouter);
+app.use("/api/v1/datasets", foundryDatasetRouter);
+app.use("/api/v1/datasets", foundryColumnStatsRouter);
+app.use("/api/v1/datasets", foundryVersionsRouter);
+app.use("/api/v1/datasets", datasetDeduplicateRouter);
+app.use("/api/v1/projects", projectDuplicatesRouter);
+app.use("/api/v1/search", foundrySearchRouter);
+app.use("/api/v1/breadcrumb", foundryBreadcrumbRouter);
 // Palantir Multipass-equivalent auth surface (see ontology/tellus-auth.md).
 // The legacy /api/auth/{register,login,refresh,logout} router was retired
 // in Phase 3; /api/v1/auth is the only supported authentication entry point.
@@ -482,29 +459,20 @@ app.use("/api/v1/auth", tellusAuthV1Router);
 if (process.env.NODE_ENV !== "production") {
   app.use("/api/v1/auth/_test", tellusAuthTestHooksRouter);
 }
-app.use("/api/projects/:projectId/members", foundryMembersRouter);
-app.use("/api/users/me/preferences", foundryPreferencesRouter);
-app.use("/api/projects/:projectId/pipelines", foundryPipelinesRouter);
+app.use("/api/v1/projects/:projectId/members", foundryMembersRouter);
+app.use("/api/v1/projects/:projectId/pipelines", foundryPipelinesRouter);
 
 // ---------------------------------------------------------------------------
 // API Specification & Documentation
+// Served at GET /api/docs (Swagger UI) and GET /api/docs/spec.json (raw JSON).
+// The old /api/v1/docs and /api/v1/spec endpoints have been removed —
+// everything is consolidated under /api/docs.
 // ---------------------------------------------------------------------------
 
-// GET /api/v2/spec — returns raw OpenAPI JSON
-app.get("/api/v2/spec", (_req: Request, res: Response) => {
-  res.json(openApiSpec);
-});
-
-// GET /api/v2/docs — renders Swagger UI
-app.use("/api/v2/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, {
-  customCss: ".swagger-ui .topbar { display: none }",
-  customSiteTitle: "Tellus Ontology Engine — API Docs",
-}));
-
 // Dev tools (seed/reset/status) — only active in non-production
-app.use("/api/dev", devRouter);
+app.use("/api/v1/dev", devRouter);
 
-// Foundry API docs (BE-029) — must be before notFoundHandler
+// API docs (BE-029) — must be before notFoundHandler
 setupFoundrySwagger(app);
 
 // 404 handler for unmatched routes — AFTER all route handlers

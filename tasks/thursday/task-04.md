@@ -1,4 +1,4 @@
-# TASK 4: Create the GET `/api/v2/ontology/:ontologyId/linkTypes/:apiName` Endpoint
+# TASK 4: Create the GET `/api/v1/ontology/:ontologyId/linkTypes/:apiName` Endpoint
 
 **Objective:** Build the REST API endpoint that retrieves a single link type definition by its api_name. This endpoint is used when a caller needs the full details of a specific link type — for example, when the Object Set Service needs to resolve a Search Around query and must know the cardinality and foreign key configuration of the link being traversed, or when the Object Explorer renders the link section on an object's detail page and needs the display name and description of each link type.
 
@@ -6,7 +6,7 @@
 
 **Prerequisites:** Tasks 1 and 2 must be complete.
 
-**HTTP method and path:** `GET /api/v2/ontology/:ontologyId/linkTypes/:apiName`
+**HTTP method and path:** `GET /api/v1/ontology/:ontologyId/linkTypes/:apiName`
 
 **Path parameters:**
 - `ontologyId` (UUID): Must reference an existing ontology. If not found, return HTTP 404 with `{ "error": "Ontology not found" }`.
@@ -70,7 +70,7 @@
 
 **Testing:**
 1. Create a MANY_TO_ONE link type (Employee → Company via Employee.companyId).
-2. Fetch it via `GET /api/v2/ontology/{ontologyId}/linkTypes/employeeCompany`.
+2. Fetch it via `GET /api/v1/ontology/{ontologyId}/linkTypes/employeeCompany`.
 3. Verify the `linkType` object has all fields including `createdAt` and `updatedAt`.
 4. Verify `sourceObjectTypeDetails.apiName` is "Employee" and `targetObjectTypeDetails.apiName` is "Company".
 5. Verify `estimatedLinkCount` matches the number of Employee objects with non-null `companyId`.

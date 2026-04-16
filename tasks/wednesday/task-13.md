@@ -7,7 +7,7 @@
 **Endpoint specification:**
 
 ```
-POST /api/v2/objects/:objectType/aggregate
+POST /api/v1/objects/:objectType/aggregate
 Content-Type: application/json
 ```
 

@@ -398,7 +398,7 @@ export async function registerWithDataset(
 // dataset" model: a row in the `dataset` table with at least one
 // committed `dataset_transaction` pointing to a file on the local
 // filesystem. That model is disconnected from the file uploads exposed
-// through `/api/projects/:id/upload`, which land in `foundry_datasets`
+// through `/api/v1/projects/:id/upload`, which land in `foundry_datasets`
 // with a schema scanned from an S3 object.
 //
 // This function lets the "Create a new object type" wizard — which

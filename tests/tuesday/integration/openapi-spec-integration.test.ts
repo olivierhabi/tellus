@@ -1,7 +1,7 @@
 /**
  * Task 29 — OpenAPI Specification Integration Tests
  *
- * Verifies that the /api/v2/spec and /api/v2/docs endpoints serve the
+ * Verifies that the /api/docs/spec.json and /api/docs endpoints serve the
  * correct OpenAPI specification and Swagger UI documentation.
  */
 import { describe, it, expect, beforeAll } from "vitest";
@@ -28,20 +28,20 @@ describe("Task 29 — OpenAPI Specification", () => {
   });
 
   // -----------------------------------------------------------------------
-  // 1. GET /api/v2/spec returns 200
+  // 1. GET /api/docs/spec.json returns 200
   // -----------------------------------------------------------------------
-  it("should return 200 from /api/v2/spec", async () => {
+  it("should return 200 from /api/docs/spec.json", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     expect(res.status).toBe(200);
   });
 
   // -----------------------------------------------------------------------
-  // 2. /api/v2/spec returns valid JSON with openapi field
+  // 2. /api/docs/spec.json returns valid JSON with openapi field
   // -----------------------------------------------------------------------
   it("should return valid JSON with openapi version", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     expect(spec.openapi).toBe("3.0.3");
   });
@@ -51,7 +51,7 @@ describe("Task 29 — OpenAPI Specification", () => {
   // -----------------------------------------------------------------------
   it("should include info block with title and version", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     expect(spec.info).toBeDefined();
     expect(spec.info.title).toContain("Tellus");
@@ -59,28 +59,27 @@ describe("Task 29 — OpenAPI Specification", () => {
   });
 
   // -----------------------------------------------------------------------
-  // 4. Spec contains all 15 documented paths
+  // 4. Spec contains Actions API paths (merged from actions.openapi.json)
   // -----------------------------------------------------------------------
-  it("should contain all expected endpoint paths", async () => {
+  it("should contain all expected Actions API paths", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const paths = Object.keys(spec.paths);
 
     const expectedPaths = [
-      "/api/v2/ontologies/{ontologyId}/actionTypes",
-      "/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}",
-      "/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone",
-      "/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact",
-      "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply",
-      "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate",
-      "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch",
-      "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit",
-      "/api/v2/audit/log",
-      "/api/v2/audit/log/{executionId}",
-      "/api/v2/audit/stats",
-      "/api/v2/objects/{objectType}/{primaryKey}/editHistory",
-      "/api/v2/spec",
+      "/api/v1/ontologies/{ontologyId}/actionTypes",
+      "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}",
+      "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone",
+      "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact",
+      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply",
+      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate",
+      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch",
+      "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit",
+      "/api/v1/audit/log",
+      "/api/v1/audit/log/{executionId}",
+      "/api/v1/audit/stats",
+      "/api/v1/objects/{objectType}/{primaryKey}/editHistory",
     ];
 
     for (const p of expectedPaths) {
@@ -93,7 +92,7 @@ describe("Task 29 — OpenAPI Specification", () => {
   // -----------------------------------------------------------------------
   it("should define reusable component schemas", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const schemas = Object.keys(spec.components?.schemas ?? {});
 
@@ -122,10 +121,10 @@ describe("Task 29 — OpenAPI Specification", () => {
   // -----------------------------------------------------------------------
   it("should define POST and GET on actionTypes path", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/api/v2/ontologies/{ontologyId}/actionTypes"] ?? {}
+      spec.paths["/api/v1/ontologies/{ontologyId}/actionTypes"] ?? {}
     );
     expect(methods).toContain("post");
     expect(methods).toContain("get");
@@ -136,10 +135,10 @@ describe("Task 29 — OpenAPI Specification", () => {
   // -----------------------------------------------------------------------
   it("should define GET, PUT, DELETE on single actionType path", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}"] ?? {}
+      spec.paths["/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}"] ?? {}
     );
     expect(methods).toContain("get");
     expect(methods).toContain("put");
@@ -151,7 +150,7 @@ describe("Task 29 — OpenAPI Specification", () => {
   // -----------------------------------------------------------------------
   it("should include tags for endpoint categorization", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     expect(Array.isArray(spec.tags)).toBe(true);
     const tagNames = spec.tags.map((t: { name: string }) => t.name);
@@ -162,11 +161,11 @@ describe("Task 29 — OpenAPI Specification", () => {
   });
 
   // -----------------------------------------------------------------------
-  // 9. GET /api/v2/docs returns HTML (Swagger UI)
+  // 9. GET /api/docs returns HTML (Swagger UI)
   // -----------------------------------------------------------------------
-  it("should serve Swagger UI HTML at /api/v2/docs", async () => {
+  it("should serve Swagger UI HTML at /api/docs", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/docs/`, {
+    const res = await fetch(`${BASE}/api/docs`, {
       redirect: "follow",
     });
     expect(res.status).toBe(200);
@@ -179,9 +178,9 @@ describe("Task 29 — OpenAPI Specification", () => {
   // -----------------------------------------------------------------------
   // 10. Spec content-type is application/json
   // -----------------------------------------------------------------------
-  it("should return application/json content-type for /api/v2/spec", async () => {
+  it("should return application/json content-type for /api/docs/spec.json", async () => {
     if (skip) return;
-    const res = await fetch(`${BASE}/api/v2/spec`);
+    const res = await fetch(`${BASE}/api/docs/spec.json`);
     const contentType = res.headers.get("content-type") ?? "";
     expect(contentType).toContain("application/json");
   });

@@ -4,7 +4,7 @@
 
 **Prerequisites:** Tasks 1 and 2 must be complete.
 
-**HTTP method and path:** `POST /api/v2/ontology/:ontologyId/linkTypes/:apiName/joinTable`
+**HTTP method and path:** `POST /api/v1/ontology/:ontologyId/linkTypes/:apiName/joinTable`
 
 **Content-Type:** `multipart/form-data`
 

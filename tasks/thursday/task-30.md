@@ -28,18 +28,18 @@ Document every link endpoint with:
 - One complete curl example with example response
 
 Endpoints to document (one subsection per endpoint):
-1. `POST /api/v2/ontology/:ontologyId/linkTypes` (Task 2)
-2. `GET /api/v2/ontology/:ontologyId/linkTypes` (Task 3)
-3. `GET /api/v2/ontology/:ontologyId/linkTypes/:apiName` (Task 4)
-4. `PUT /api/v2/ontology/:ontologyId/linkTypes/:apiName` (Task 5)
-5. `DELETE /api/v2/ontology/:ontologyId/linkTypes/:apiName` (Task 6)
-6. `GET /api/v2/objects/:objectType/:primaryKey/links/:linkType` (Task 12)
-7. `POST /api/v2/objects/:objectType/searchAround` (Task 13)
-8. `GET /api/v2/objects/:objectType/:primaryKey/links/:linkType/count` (Task 15)
-9. `GET /api/v2/objects/:objectType/:primaryKey/links` (Task 16)
-10. `POST /api/v2/ontology/:ontologyId/linkTypes/:apiName/joinTable` (Task 17)
-11. `GET /api/v2/ontology/:ontologyId/linkTypes/export` (Task 25)
-12. `POST /api/v2/ontology/:ontologyId/linkTypes/import` (Task 26)
+1. `POST /api/v1/ontology/:ontologyId/linkTypes` (Task 2)
+2. `GET /api/v1/ontology/:ontologyId/linkTypes` (Task 3)
+3. `GET /api/v1/ontology/:ontologyId/linkTypes/:apiName` (Task 4)
+4. `PUT /api/v1/ontology/:ontologyId/linkTypes/:apiName` (Task 5)
+5. `DELETE /api/v1/ontology/:ontologyId/linkTypes/:apiName` (Task 6)
+6. `GET /api/v1/objects/:objectType/:primaryKey/links/:linkType` (Task 12)
+7. `POST /api/v1/objects/:objectType/searchAround` (Task 13)
+8. `GET /api/v1/objects/:objectType/:primaryKey/links/:linkType/count` (Task 15)
+9. `GET /api/v1/objects/:objectType/:primaryKey/links` (Task 16)
+10. `POST /api/v1/ontology/:ontologyId/linkTypes/:apiName/joinTable` (Task 17)
+11. `GET /api/v1/ontology/:ontologyId/linkTypes/export` (Task 25)
+12. `POST /api/v1/ontology/:ontologyId/linkTypes/import` (Task 26)
 
 **Section 4: Performance Characteristics**
 

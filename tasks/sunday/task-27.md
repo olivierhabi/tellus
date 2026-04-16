@@ -22,7 +22,7 @@ The test file must start with a comment: `// Tests run in sequential order. Each
 **Describe Block: "Data Setup and Indexing"**
 
 Test 1: "should create a fresh ontology"
-- POST /api/v2/ontology with `{ "apiName": "E2ETest", "displayName": "E2E Test Ontology" }`
+- POST /api/v1/ontology with `{ "apiName": "E2ETest", "displayName": "E2E Test Ontology" }`
 - Assert: HTTP 201, save ontologyId for subsequent tests
 
 Test 2: "should create TestProduct object type"
@@ -166,11 +166,11 @@ Test 31: "should return 400 for invalid input"
 - Assert: HTTP 400
 
 Test 32: "should health endpoint return healthy"
-- GET /api/v2/health
+- GET /api/v1/health
 - Assert: HTTP 200, status === "healthy"
 
 Test 33: "should status endpoint return metrics"
-- GET /api/v2/status
+- GET /api/v1/status
 - Assert: HTTP 200, objectTypeCount >= 3
 
 Test 34: "should clean up all test data"

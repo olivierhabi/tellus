@@ -156,20 +156,20 @@ app.use(requestLogger);
 **Test the standardized errors:**
 ```javascript
 // Test 404 action type
-const res = await fetch('/api/v2/actions/nonExistent/apply', { method: 'POST', body: '{"parameters":{}}' });
+const res = await fetch('/api/v1/actions/nonExistent/apply', { method: 'POST', body: '{"parameters":{}}' });
 assert(res.status === 404);
 const err = await res.json();
 assert(err.errorCode === 'ACTION_TYPE_NOT_FOUND');
 assert(err.errorInstanceId !== undefined);
 
 // Test 400 invalid parameter
-const res2 = await fetch('/api/v2/actions/updateSalary/apply', { method: 'POST', body: '{"parameters":{"salary":"not-a-number"}}' });
+const res2 = await fetch('/api/v1/actions/updateSalary/apply', { method: 'POST', body: '{"parameters":{"salary":"not-a-number"}}' });
 assert(res2.status === 400);
 const err2 = await res2.json();
 assert(err2.errorCode === 'INVALID_PARAMETER');
 
 // Test 409 duplicate PK
-const res3 = await fetch('/api/v2/actions/createEmployee/apply', { method: 'POST',
+const res3 = await fetch('/api/v1/actions/createEmployee/apply', { method: 'POST',
     body: JSON.stringify({ parameters: { employeeId: 'EMP-001', fullName: 'Duplicate' } }) });
 assert(res3.status === 409);
 const err3 = await res3.json();

@@ -86,7 +86,7 @@ docs
 
 ## Verification
 1. `docker-compose up` → all 3 services start and become healthy
-2. `curl http://localhost:3000/api/v2/health` → returns 200 with all services connected
+2. `curl http://localhost:3000/api/v1/health` → returns 200 with all services connected
 3. Run the seed script against the Docker setup → all data loads correctly (requires Task 26 to be complete)
 4. `docker-compose down && docker-compose up` → data persists (volumes)
 5. The Docker image is less than 200MB

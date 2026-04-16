@@ -5,7 +5,7 @@ Build an endpoint that returns Object Views for multiple objects in a single req
 
 ## Exact Specification
 
-**Endpoint:** `POST /api/v2/objects/:objectType/views/batch`
+**Endpoint:** `POST /api/v1/objects/:objectType/views/batch`
 
 **Request Body:**
 ```json

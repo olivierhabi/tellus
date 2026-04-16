@@ -5,7 +5,7 @@ Build the API endpoint that enables querying objects from ALL Object Types that 
 
 ## Exact Specification
 
-**Endpoint:** `POST /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName/search`
+**Endpoint:** `POST /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName/search`
 
 **Request Body (same query DSL as the regular object search):**
 ```json

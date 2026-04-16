@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { api } from "../../helpers/api";
 
-const BASE = "/api/v2/objects";
+const BASE = "/api/v1/objects";
 let ONTOLOGY_ID: string;
 let READY = false;
 
@@ -21,14 +21,14 @@ describe("Query Pagination (Task 27)", () => {
       return;
     }
 
-    const { body } = await api("POST", "/api/v2/ontologies", {
+    const { body } = await api("POST", "/api/v1/ontologies", {
       displayName: "T27 Pagination Test",
       description: "Task 27",
     });
     ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
     if (!ONTOLOGY_ID) return;
 
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T27Employee",
       displayName: "T27 Employee",
       description: "Test",
@@ -41,16 +41,16 @@ describe("Query Pagination (Task 27)", () => {
       { apiName: "department", displayName: "Department", baseType: "string" },
     ];
     for (const p of props) {
-      await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/T27Employee/properties`, p);
+      await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/T27Employee/properties`, p);
     }
 
     // Create Company type for cross-type token test
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T27Company",
       displayName: "T27 Company",
       description: "Test",
     });
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/T27Company/properties`, {
+    await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/T27Company/properties`, {
       apiName: "companyId", displayName: "Company ID", baseType: "string",
     });
 
@@ -58,7 +58,7 @@ describe("Query Pagination (Task 27)", () => {
   }, 30_000);
 
   afterAll(async () => {
-    if (ONTOLOGY_ID) await api("DELETE", `/api/v2/ontologies/${ONTOLOGY_ID}`);
+    if (ONTOLOGY_ID) await api("DELETE", `/api/v1/ontologies/${ONTOLOGY_ID}`);
   }, 10_000);
 
   // 1. Paginate all objects (empty — verify pagination returns with no errors)

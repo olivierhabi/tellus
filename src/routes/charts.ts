@@ -1,5 +1,5 @@
 /**
- * /api/v2/charts — Polars-backed auto-chart aggregations.
+ * /api/v1/charts — Polars-backed auto-chart aggregations.
  *
  * Powers the Object Explorer "Auto-Generated Charts" feature (#73-78):
  * one listogram/histogram/date-histogram per prominent property.

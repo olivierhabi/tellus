@@ -2,7 +2,7 @@
 
 **File to create:** `/src/services/indexing/autoCreateHook.js`
 
-**Purpose:** When a backing datasource is registered for an object type (via the Day 1 API endpoint `POST /api/v2/ontology/:ontologyId/objectTypes/:apiName/datasource`), the OpenSearch index should be automatically created. In Palantir, registering a backing datasource automatically triggers index creation and the first sync. This module provides the hook function that creates the index.
+**Purpose:** When a backing datasource is registered for an object type (via the Day 1 API endpoint `POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/datasource`), the OpenSearch index should be automatically created. In Palantir, registering a backing datasource automatically triggers index creation and the first sync. This module provides the hook function that creates the index.
 
 **Specification:**
 

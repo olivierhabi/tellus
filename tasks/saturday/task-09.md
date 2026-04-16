@@ -59,7 +59,7 @@ async function checkAndTriggerAutoIndex(datasetId) {
 
 Critical design decision: If auto-indexing fails, the upload/append operation must still succeed. The data is in the dataset; it just hasn't been indexed into the Ontology yet. The user can manually retry the reindex. This matches Palantir's behavior — a failed Funnel sync doesn't delete the underlying data.
 
-**Update the upload endpoint (POST /api/v2/datasets/upload):**
+**Update the upload endpoint (POST /api/v1/datasets/upload):**
 
 Add an optional query parameter `autoIndex` (boolean, default false). The parameter is truthy if its value is `'true'` or `'1'`. All other values (including absent) are falsy. When truthy, after the dataset and transaction are committed, call `checkAndTriggerAutoIndex(datasetId)`.
 
@@ -114,7 +114,7 @@ If auto-indexing was requested but failed:
 }
 ```
 
-**Update the append endpoint (POST /api/v2/datasets/:datasetId/transactions):**
+**Update the append endpoint (POST /api/v1/datasets/:datasetId/transactions):**
 
 Add optional `autoIndex` query parameter (truthy if `'true'` or `'1'`). When truthy, trigger auto-indexing after the append transaction is committed. The response body is extended with the same `indexing` field as the upload endpoint, with all four possible shapes:
 

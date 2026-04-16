@@ -9,7 +9,7 @@ This is particularly important for the RRA use case because tax data often conta
 
 Add the following endpoint to `/src/routes/datasets.js` (or create a supporting service function in `/src/services/previewService.js`):
 
-**Endpoint: `GET /api/v2/datasets/:datasetId/preview`**
+**Endpoint: `GET /api/v1/datasets/:datasetId/preview`**
 
 Query parameters:
 - `rows` (integer, default: 50, max: 500): Number of rows to preview

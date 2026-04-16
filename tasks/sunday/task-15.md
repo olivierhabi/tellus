@@ -260,8 +260,8 @@ function handleOpenSearchError(err, req, res) {
 The error handler MUST be registered AFTER all route handlers:
 ```javascript
 // Routes
-app.use('/api/v2', ontologyRoutes);
-app.use('/api/v2', objectTypeRoutes);
+app.use('/api/v1', ontologyRoutes);
+app.use('/api/v1', objectTypeRoutes);
 // ... all other routes
 
 // Error handler (MUST be last)

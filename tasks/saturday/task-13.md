@@ -7,7 +7,7 @@ This is also a debugging tool — when something seems wrong after a reindex, th
 
 ### Exact Specification
 
-**Endpoint 1: `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/edits`**
+**Endpoint 1: `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/edits`**
 
 Returns all edits for the specified object type, with filtering and pagination.
 
@@ -73,7 +73,7 @@ Response:
 }
 ```
 
-**Endpoint 2: `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/edits/diff/:primaryKey`**
+**Endpoint 2: `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/edits/diff/:primaryKey`**
 
 This endpoint shows the difference between the datasource value and the current Ontology value (including edits) for a specific object. This lets users see exactly what edits are being preserved.
 

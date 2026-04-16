@@ -77,7 +77,7 @@ async function benchmarkInterfaceCrud(ontologyId: string): Promise<BenchmarkResu
   for (let i = 0; i < count; i++) {
     const ms = await timeMs(async () => {
       const name = `BenchIf${String(i).padStart(4, "0")}`;
-      await api("POST", `/api/v2/ontology/${ontologyId}/interfaces`, {
+      await api("POST", `/api/v1/ontology/${ontologyId}/interfaces`, {
         apiName: name,
         displayName: `Benchmark Interface ${i}`,
         properties: [
@@ -92,7 +92,7 @@ async function benchmarkInterfaceCrud(ontologyId: string): Promise<BenchmarkResu
   // Cleanup
   for (let i = 0; i < count; i++) {
     const name = `BenchIf${String(i).padStart(4, "0")}`;
-    await api("DELETE", `/api/v2/ontology/${ontologyId}/interfaces/${name}`);
+    await api("DELETE", `/api/v1/ontology/${ontologyId}/interfaces/${name}`);
   }
 
   return computeStats(timings, "Interface CRUD (create)", "p95 < 200ms", 200);
@@ -103,7 +103,7 @@ async function benchmarkInterfaceCrud(ontologyId: string): Promise<BenchmarkResu
 // ---------------------------------------------------------------------------
 async function benchmarkPolymorphicQuery(ontologyId: string): Promise<BenchmarkResult | null> {
   // Check if any interfaces exist
-  const { body: ifList } = await api("GET", `/api/v2/ontology/${ontologyId}/interfaces`);
+  const { body: ifList } = await api("GET", `/api/v1/ontology/${ontologyId}/interfaces`);
   if (!ifList?.data || ifList.data.length === 0) {
     console.log("  [SKIP] No interfaces found for polymorphic query benchmark");
     return null;
@@ -114,7 +114,7 @@ async function benchmarkPolymorphicQuery(ontologyId: string): Promise<BenchmarkR
 
   for (let i = 0; i < 50; i++) {
     const ms = await timeMs(async () => {
-      await api("POST", `/api/v2/ontology/${ontologyId}/interfaces/${ifName}/search`, {
+      await api("POST", `/api/v1/ontology/${ontologyId}/interfaces/${ifName}/search`, {
         $pageSize: 20,
       });
     });
@@ -129,7 +129,7 @@ async function benchmarkPolymorphicQuery(ontologyId: string): Promise<BenchmarkR
 // ---------------------------------------------------------------------------
 async function benchmarkObjectView(ontologyId: string): Promise<BenchmarkResult | null> {
   // Find an object type with indexed data
-  const { body: otList } = await api("GET", `/api/v2/ontologies/${ontologyId}/objectTypes`);
+  const { body: otList } = await api("GET", `/api/v1/ontologies/${ontologyId}/objectTypes`);
   if (!otList?.data || otList.data.length === 0) {
     console.log("  [SKIP] No object types found for view benchmark");
     return null;
@@ -137,7 +137,7 @@ async function benchmarkObjectView(ontologyId: string): Promise<BenchmarkResult 
 
   const otApiName = otList.data[0].apiName;
   // Try to get an object
-  const { status, body: searchResult } = await api("POST", `/api/v2/objects/${otApiName}/search`, {
+  const { status, body: searchResult } = await api("POST", `/api/v1/objects/${otApiName}/search`, {
     $pageSize: 1,
   });
 
@@ -151,7 +151,7 @@ async function benchmarkObjectView(ontologyId: string): Promise<BenchmarkResult 
 
   for (let i = 0; i < 50; i++) {
     const ms = await timeMs(async () => {
-      await api("GET", `/api/v2/ontology/${ontologyId}/objectTypes/${otApiName}/objects/${pk}/view`);
+      await api("GET", `/api/v1/ontology/${ontologyId}/objectTypes/${otApiName}/objects/${pk}/view`);
     });
     timings.push(ms);
   }
@@ -163,11 +163,11 @@ async function benchmarkObjectView(ontologyId: string): Promise<BenchmarkResult 
 // Benchmark 4: Batch Object View Throughput
 // ---------------------------------------------------------------------------
 async function benchmarkBatchView(ontologyId: string): Promise<BenchmarkResult | null> {
-  const { body: otList } = await api("GET", `/api/v2/ontologies/${ontologyId}/objectTypes`);
+  const { body: otList } = await api("GET", `/api/v1/ontologies/${ontologyId}/objectTypes`);
   if (!otList?.data || otList.data.length === 0) return null;
 
   const otApiName = otList.data[0].apiName;
-  const { status, body: searchResult } = await api("POST", `/api/v2/objects/${otApiName}/search`, {
+  const { status, body: searchResult } = await api("POST", `/api/v1/objects/${otApiName}/search`, {
     $pageSize: 50,
   });
 
@@ -181,7 +181,7 @@ async function benchmarkBatchView(ontologyId: string): Promise<BenchmarkResult |
 
   for (let i = 0; i < 20; i++) {
     const ms = await timeMs(async () => {
-      await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/${otApiName}/objects/batchView`, {
+      await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/${otApiName}/objects/batchView`, {
         primaryKeys: pks,
         include: ["properties"],
       });
@@ -212,11 +212,11 @@ async function main() {
 
   // Get or create an ontology
   let ontologyId: string;
-  const { body: ontList } = await api("GET", "/api/v2/ontologies?pageSize=1");
+  const { body: ontList } = await api("GET", "/api/v1/ontologies?pageSize=1");
   if (ontList?.data?.length > 0) {
     ontologyId = ontList.data[0].ontologyId;
   } else {
-    const { body: created } = await api("POST", "/api/v2/ontologies", {
+    const { body: created } = await api("POST", "/api/v1/ontologies", {
       displayName: "Sunday Benchmark Ontology",
     });
     ontologyId = created.data?.ontologyId || created.ontologyId;

@@ -3,9 +3,9 @@
 // ---------------------------------------------------------------------------
 // Spec: Ontology Platform tasks.md §2.3 "Optimistic Concurrency"
 //
-//   GET  /api/v2/.../flight -> ETag: "v17"
-//   PUT  /api/v2/.../flight  If-Match: "v17" -> 200 OK, ETag: "v18"
-//   PUT  /api/v2/.../flight  If-Match: "v17" -> 409 CONCURRENT_EDIT_CONFLICT
+//   GET  /api/v1/.../flight -> ETag: "v17"
+//   PUT  /api/v1/.../flight  If-Match: "v17" -> 200 OK, ETag: "v18"
+//   PUT  /api/v1/.../flight  If-Match: "v17" -> 409 CONCURRENT_EDIT_CONFLICT
 //
 // These helpers keep the contract enforcement on the route handlers themselves
 // (no global express-etag override — that would produce weak ETags from the

@@ -59,7 +59,7 @@ If no funnel_state exists, the `indexing` field is `null` and `health` is `"not_
 
 **Part 2: Add route to src/routes/objectTypes.js**
 
-`GET /api/v2/ontologies/:ontologyId/objectTypes/:apiName/statistics`
+`GET /api/v1/ontologies/:ontologyId/objectTypes/:apiName/statistics`
 
 Call `objectTypeService.getStatistics(ontologyId, apiName)`. Return HTTP 200 with `sendSuccess(res, result)`.
 

@@ -2,13 +2,13 @@
 // System Health Endpoints (Task 19)
 //
 // Comprehensive health check endpoints for production monitoring and
-// Kubernetes probes. These supplement the existing /api/v2/health and
-// /api/v2/status endpoints with more granular checks.
+// Kubernetes probes. These supplement the existing /api/v1/health and
+// /api/v1/status endpoints with more granular checks.
 //
 // Endpoints:
-//   GET /api/v2/system/health     - Detailed per-check health
-//   GET /api/v2/system/readiness  - Kubernetes readiness probe
-//   GET /api/v2/system/liveness   - Kubernetes liveness probe
+//   GET /api/v1/system/health     - Detailed per-check health
+//   GET /api/v1/system/readiness  - Kubernetes readiness probe
+//   GET /api/v1/system/liveness   - Kubernetes liveness probe
 //
 // Run self-tests: npx tsx src/routes/systemHealth.ts
 // ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ export function buildLivenessResponse(): {
 const router = Router();
 
 // Detailed health check
-router.get("/api/v2/system/health", async (_req: Request, res: Response) => {
+router.get("/api/v1/system/health", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildDetailedHealthResponse(deps);
@@ -342,7 +342,7 @@ router.get("/api/v2/system/health", async (_req: Request, res: Response) => {
 });
 
 // Kubernetes readiness probe
-router.get("/api/v2/system/readiness", async (_req: Request, res: Response) => {
+router.get("/api/v1/system/readiness", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildReadinessResponse(deps);
@@ -356,7 +356,7 @@ router.get("/api/v2/system/readiness", async (_req: Request, res: Response) => {
 });
 
 // Kubernetes liveness probe
-router.get("/api/v2/system/liveness", (_req: Request, res: Response) => {
+router.get("/api/v1/system/liveness", (_req: Request, res: Response) => {
   const { statusCode, body } = buildLivenessResponse();
   res.status(statusCode).json(body);
 });

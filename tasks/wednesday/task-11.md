@@ -7,7 +7,7 @@
 **Endpoint specification:**
 
 ```
-GET /api/v2/objects/:objectType/:primaryKey
+GET /api/v1/objects/:objectType/:primaryKey
 ```
 
 **URL parameters:**
@@ -83,8 +83,8 @@ GET /api/v2/objects/:objectType/:primaryKey
 - OpenSearch index not found → 404 with message "Object type 'Employee' has not been indexed yet. Please index the backing datasource first."
 
 **Test cases:**
-1. `GET /api/v2/objects/Employee/EMP-001` → Returns the full Employee object
-2. `GET /api/v2/objects/Employee/EMP-001?$select=fullName,salary` → Returns only fullName and salary (plus __primaryKey and __objectType)
-3. `GET /api/v2/objects/Employee/NONEXISTENT` → 404
-4. `GET /api/v2/objects/NonExistentType/EMP-001` → 404 with type not found message
-5. `GET /api/v2/objects/Employee/EMP-001` with no indexed data → 404
+1. `GET /api/v1/objects/Employee/EMP-001` → Returns the full Employee object
+2. `GET /api/v1/objects/Employee/EMP-001?$select=fullName,salary` → Returns only fullName and salary (plus __primaryKey and __objectType)
+3. `GET /api/v1/objects/Employee/NONEXISTENT` → 404
+4. `GET /api/v1/objects/NonExistentType/EMP-001` → 404 with type not found message
+5. `GET /api/v1/objects/Employee/EMP-001` with no indexed data → 404

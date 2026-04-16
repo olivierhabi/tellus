@@ -11,7 +11,7 @@ Create a new file `/src/routes/objectTypeInterfaces.js` for these endpoints (the
 
 ## Sub-task 6A: POST Endpoint for Declaring Interface Implementation
 
-**Endpoint 1:** `POST /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
+**Endpoint 1:** `POST /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
 
 This endpoint declares that an Object Type implements an Interface, with a property mapping that connects Interface properties to Object Type properties.
 
@@ -69,7 +69,7 @@ Where `$1` is the Object Type's UUID (looked up by api_name), `$2` is the Interf
 
 ## Sub-task 6B: DELETE and GET Endpoints for Interface Implementations
 
-**Endpoint 2:** `DELETE /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName`
+**Endpoint 2:** `DELETE /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName`
 
 Removes an Interface implementation from an Object Type. This simply deletes the row from `object_type_interface`.
 
@@ -79,7 +79,7 @@ Removes an Interface implementation from an Object Type. This simply deletes the
 
 **Success Response (HTTP 204 No Content).**
 
-**Endpoint 3:** `GET /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
+**Endpoint 3:** `GET /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
 
 Returns all Interfaces that this Object Type implements, with their property mappings.
 

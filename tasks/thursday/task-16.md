@@ -4,7 +4,7 @@
 
 **Prerequisites:** Tasks 1, 15 must be complete.
 
-**HTTP method and path:** `GET /api/v2/objects/:objectType/:primaryKey/links`
+**HTTP method and path:** `GET /api/v1/objects/:objectType/:primaryKey/links`
 
 **Implementation:**
 
@@ -78,7 +78,7 @@ const results = await Promise.allSettled(countPromises);
 
 **Testing:**
 1. Create an Employee with links to Company (MANY_TO_ONE), Tickets (ONE_TO_MANY, 3 tickets), and Courses (M2M, 2 courses).
-2. Call `GET /api/v2/objects/Employee/EMP-001/links`.
+2. Call `GET /api/v1/objects/Employee/EMP-001/links`.
 3. Verify the response contains all link types with correct counts and directions.
 4. Verify non-bidirectional link types where Employee is the target are NOT included.
 5. Test with an object type that has no link types — verify `{ "links": [] }`.

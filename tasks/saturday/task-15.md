@@ -34,7 +34,7 @@ CREATE INDEX idx_reindex_history_ot ON reindex_history(object_type_api_name, sta
 
 Update the reindex engine (Task 7) to write to this table at the start and end of every reindex.
 
-**Endpoint 1: `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex/status`**
+**Endpoint 1: `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/status`**
 
 Returns the current indexing status of the object type.
 
@@ -93,7 +93,7 @@ The `indexHealth` is:
 - `"failed"`: last reindex failed
 - `"never_indexed"`: no reindex has ever been run for this object type
 
-**Endpoint 2: `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex/history`**
+**Endpoint 2: `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/history`**
 
 Returns the history of all reindex operations for this object type.
 

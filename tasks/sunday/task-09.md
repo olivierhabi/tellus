@@ -5,7 +5,7 @@ Build the API endpoint for aggregating data across all Object Types that impleme
 
 ## Exact Specification
 
-**Endpoint:** `POST /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName/aggregate`
+**Endpoint:** `POST /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName/aggregate`
 
 **Request Body:**
 ```json

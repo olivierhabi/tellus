@@ -1,6 +1,6 @@
 # TASK 19: Create Link Type List on Object Type Detail Endpoint
 
-**Objective:** Modify the existing `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName` endpoint (built on Day 1) to include the link types associated with this object type. When a caller fetches an object type's definition, they should also see all link types where this object type is the source or target.
+**Objective:** Modify the existing `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName` endpoint (built on Day 1) to include the link types associated with this object type. When a caller fetches an object type's definition, they should also see all link types where this object type is the source or target.
 
 **Prerequisites:** Tasks 1 and the Day 1 object type detail endpoint must be complete.
 
@@ -116,7 +116,7 @@ Add a `linkTypes` field to the existing response:
 
 **Testing:**
 1. Create object types Company, Employee, Ticket. Create link types: `employeeCompany` (Employee → Company, MANY_TO_ONE), `companyEmployees` (Company → Employee, ONE_TO_MANY), `employeeTickets` (Employee → Ticket, ONE_TO_MANY).
-2. Fetch Employee object type detail: `GET /api/v2/ontology/{id}/objectTypes/Employee`.
+2. Fetch Employee object type detail: `GET /api/v1/ontology/{id}/objectTypes/Employee`.
 3. Verify `linkTypes` array contains:
    - `employeeCompany` with direction `"forward"`, targetObjectType `"Company"`, cardinality `"MANY_TO_ONE"`
    - `employeeTickets` with direction `"forward"`, targetObjectType `"Ticket"`, cardinality `"ONE_TO_MANY"`

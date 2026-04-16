@@ -5,14 +5,14 @@
 // primary interface for action execution — all action executions go through
 // this route.
 //
-// Mounted at: /api/v2/ontologies/:ontologyId/actions
+// Mounted at: /api/v1/ontologies/:ontologyId/actions
 //
 // Endpoints:
 //   POST /:actionTypeApiName/apply      — Execute an action
 //   POST /:actionTypeApiName/applyBatch — Bulk-execute an action (Task 25)
 //   POST /:actionTypeApiName/validate   — Dry-run validation (no edits applied)
 //
-// The /validate and /applyBatch endpoints are also mounted at /api/v2/actions
+// The /validate and /applyBatch endpoints are also mounted at /api/v1/actions
 // (without ontologyId) via the validateRouter and batchRouter exports. In
 // that case, the default ontology is used automatically.
 // ---------------------------------------------------------------------------
@@ -425,8 +425,8 @@ router.post(
   "/:actionTypeApiName/validate",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // ontologyId may come from the URL (/api/v2/ontologies/:ontologyId/actions)
-      // or be resolved from the default ontology (/api/v2/actions)
+      // ontologyId may come from the URL (/api/v1/ontologies/:ontologyId/actions)
+      // or be resolved from the default ontology (/api/v1/actions)
       let ontologyId = req.params.ontologyId;
       const { actionTypeApiName } = req.params;
 
@@ -495,7 +495,7 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// Validate-only router (mounted at /api/v2/actions — no ontologyId)
+// Validate-only router (mounted at /api/v1/actions — no ontologyId)
 // ---------------------------------------------------------------------------
 
 const validateRouter = Router({ mergeParams: true });
@@ -568,9 +568,9 @@ validateRouter.post(
 );
 
 // ---------------------------------------------------------------------------
-// Batch-only router (mounted at /api/v2/actions — no ontologyId)
+// Batch-only router (mounted at /api/v1/actions — no ontologyId)
 //
-// This allows clients to call POST /api/v2/actions/:actionTypeApiName/applyBatch
+// This allows clients to call POST /api/v1/actions/:actionTypeApiName/applyBatch
 // without specifying the ontologyId in the URL. The default ontology is used.
 // ---------------------------------------------------------------------------
 

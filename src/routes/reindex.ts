@@ -2,7 +2,7 @@
 // Reindex Routes — Express Router
 //
 // Routes for triggering and monitoring the reindex pipeline. Mounted at:
-//   /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex
 //
 // Provides endpoints:
 //   POST /          — Trigger a full reindex
@@ -139,7 +139,7 @@ router.post(
         return sendError(
           res,
           "NO_BACKING_DATASOURCE",
-          `Object type '${apiName}' has no registered backing datasource. Register one using POST /api/v2/ontology/${ontologyId}/objectTypes/${apiName}/datasource`
+          `Object type '${apiName}' has no registered backing datasource. Register one using POST /api/v1/ontology/${ontologyId}/objectTypes/${apiName}/datasource`
         );
       }
 

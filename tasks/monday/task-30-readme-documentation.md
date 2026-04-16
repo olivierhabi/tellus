@@ -37,10 +37,10 @@ PostgreSQL ← stores all metadata ← REST API (Express) ← Client (curl/UI)
   5. `npm run dev`
 - Include exactly 5 curl examples demonstrating the core workflow:
   1. `GET /health` — verify server is running
-  2. `POST /api/v2/ontologies` — create an ontology
-  3. `POST /api/v2/ontologies/:id/objectTypes/batch` — create object type with properties
-  4. `GET /api/v2/ontologies/:id/objectTypes` — list object types
-  5. `GET /api/v2/ontologies/:id/objectTypes/:apiName` — get object type with properties
+  2. `POST /api/v1/ontologies` — create an ontology
+  3. `POST /api/v1/ontologies/:id/objectTypes/batch` — create object type with properties
+  4. `GET /api/v1/ontologies/:id/objectTypes` — list object types
+  5. `GET /api/v1/ontologies/:id/objectTypes/:apiName` — get object type with properties
 
 **Section 4 — API Reference:** Document every implemented endpoint grouped by resource. For each endpoint include: HTTP method, path, request body example (JSON), response body example (JSON), and possible error codes with HTTP status. Groups:
 - Ontology: POST/GET(list)/GET(single)/PUT/DELETE

@@ -5,14 +5,14 @@
 **Add endpoint** to `src/routes/actions.js`:
 
 ```
-POST /api/v2/actions/:actionTypeApiName/validate
+POST /api/v1/actions/:actionTypeApiName/validate
 ```
 
 Request body: identical to `/apply`.
 
 **Implementation:** Create a separate `validateAction` function (do NOT reuse `executeAction` with a flag). This function runs Stages 1, 2, and 4 of the execution pipeline. Stage 3 (submission criteria) is intentionally skipped in week 1 because it is not yet implemented — add a `// TODO: Add submission criteria check here when implemented` comment. Stage 6 (edit application) and Stage 8 (audit logging) are not executed.
 
-**Where does `ontologyId` come from?** The action execution routes (`/api/v2/actions/:actionTypeApiName/...`) do NOT include `:ontologyId` in the URL path. For week 1, use the default ontology: query the `ontology` table for the single ontology and use its ID. In the route handler: `const ontologyId = await getDefaultOntologyId();` where `getDefaultOntologyId` returns the ID of the first (and only) ontology.
+**Where does `ontologyId` come from?** The action execution routes (`/api/v1/actions/:actionTypeApiName/...`) do NOT include `:ontologyId` in the URL path. For week 1, use the default ontology: query the `ontology` table for the single ontology and use its ID. In the route handler: `const ontologyId = await getDefaultOntologyId();` where `getDefaultOntologyId` returns the ID of the first (and only) ontology.
 
 **HTTP status codes:**
 - Action type not found: return **404** (not 400), consistent with `ACTION_TYPE_NOT_FOUND` error code from Task 20.
@@ -78,7 +78,7 @@ Failure (400):
 **Test cases:**
 ```javascript
 // Valid action preview
-const valid = await fetch('/api/v2/actions/updateSalary/validate', {
+const valid = await fetch('/api/v1/actions/updateSalary/validate', {
     method: 'POST', body: JSON.stringify({ parameters: { employeeRef: 'EMP-001', newSalary: 150000 } })
 });
 assert(valid.status === 200);
@@ -87,7 +87,7 @@ assert(body.valid === true);
 assert(body.preview.affectedObjectCount === 1);
 
 // Invalid parameters
-const invalid = await fetch('/api/v2/actions/updateSalary/validate', {
+const invalid = await fetch('/api/v1/actions/updateSalary/validate', {
     method: 'POST', body: JSON.stringify({ parameters: {} })
 });
 assert(invalid.status === 400);

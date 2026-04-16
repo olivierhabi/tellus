@@ -5,7 +5,7 @@ Task 7 built the reindex engine as an internal service function. This task expos
 
 ### Exact Specification
 
-**Endpoint: `POST /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex`**
+**Endpoint: `POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex`**
 
 This endpoint triggers a full reindex of the specified object type. It is synchronous for week 1 — the response is not returned until the reindex is complete. (A future improvement would be to make this asynchronous with a job ID and status polling endpoint.)
 
@@ -22,7 +22,7 @@ Step 2: Validate that the object type has a registered backing datasource. If no
 ```json
 {
   "error": "NO_BACKING_DATASOURCE",
-  "message": "Object type 'Employee' has no registered backing datasource. Register one using POST /api/v2/ontology/:id/objectTypes/Employee/datasource"
+  "message": "Object type 'Employee' has no registered backing datasource. Register one using POST /api/v1/ontology/:id/objectTypes/Employee/datasource"
 }
 ```
 

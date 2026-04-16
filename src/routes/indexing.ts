@@ -3,7 +3,7 @@
 //
 // Routes for triggering and monitoring the OpenSearch indexing pipeline.
 // Mounted at:
-//   /api/v2/ontologies/:ontologyId/objectTypes/:apiName/index
+//   /api/v1/ontologies/:ontologyId/objectTypes/:apiName/index
 //
 // Task 14: POST /           — Trigger a full reindex
 // Task 15: GET  /status     — Get indexing status
@@ -113,7 +113,7 @@ router.post(
         return sendError(
           res,
           "NO_BACKING_DATASOURCE",
-          `Object type '${apiName}' has no backing datasource. Register one first via POST /api/v2/ontologies/${ontologyId}/objectTypes/${apiName}/datasource.`
+          `Object type '${apiName}' has no backing datasource. Register one first via POST /api/v1/ontologies/${ontologyId}/objectTypes/${apiName}/datasource.`
         );
       }
 

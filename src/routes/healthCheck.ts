@@ -2,11 +2,11 @@
 // Enhanced Health & Status Endpoints (Task 25)
 //
 // Two endpoints:
-//   1. GET /api/v2/health  — Simple health check (responds < 500ms)
+//   1. GET /api/v1/health  — Simple health check (responds < 500ms)
 //      Checks PG (SELECT 1, 2s timeout) and OpenSearch (GET /, 2s timeout)
 //      Returns "healthy" (200) or "unhealthy" (503)
 //
-//   2. GET /api/v2/status  — Comprehensive system status (up to 10s)
+//   2. GET /api/v1/status  — Comprehensive system status (up to 10s)
 //      System: memory (heapUsed/heapTotal/rss), uptime, nodeVersion
 //      PostgreSQL: version, response time, table counts
 //      OpenSearch: version, cluster health, indices, documents, storage
@@ -423,7 +423,7 @@ export async function buildComprehensiveStatusResponse(
 
 const router = Router();
 
-router.get("/api/v2/health", async (_req: Request, res: Response) => {
+router.get("/api/v1/health", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildSimpleHealthResponse(deps);
@@ -438,7 +438,7 @@ router.get("/api/v2/health", async (_req: Request, res: Response) => {
   }
 });
 
-router.get("/api/v2/status", async (_req: Request, res: Response) => {
+router.get("/api/v1/status", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildComprehensiveStatusResponse(deps);

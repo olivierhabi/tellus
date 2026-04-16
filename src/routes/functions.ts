@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Function Registry — Ontology Platform spec Task 18
 // ---------------------------------------------------------------------------
-// Mounted at /api/v2/ontologies/:ontologyId/functions
+// Mounted at /api/v1/ontologies/:ontologyId/functions
 //   POST   /                            — register a new function
 //   GET    /                            — list registered functions
 //   GET    /:apiName                    — function detail with versions

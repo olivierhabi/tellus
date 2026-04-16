@@ -3,10 +3,10 @@
 # ---------------------------------------------------------------------------
 # Spec equivalent: "Apache Flink" (techstack §Streaming).
 # Roles:
-#   • Tail Kafka topic `ontology.cdc.public.*` (Debezium CDC events) and
+#   - Tail Kafka topic `ontology.cdc.public.*` (Debezium CDC events) and
 #     write merged change rows into the OpenSearch object indices —
-#     mirroring the Funnel "merge changes → indexing → hydration" stages.
-#   • Read `ontology.actions` topic and emit derived stream metrics that
+#     mirroring the Funnel "merge changes -> indexing -> hydration" stages.
+#   - Read `ontology.actions` topic and emit derived stream metrics that
 #     surface in the "Funnel Streaming Pipeline View" UI.
 #
 # This compose ships the JobManager + a single TaskManager. Submit jobs

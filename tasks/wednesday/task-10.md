@@ -7,7 +7,7 @@
 **Endpoint specification:**
 
 ```
-GET /api/v2/objects/:objectType
+GET /api/v1/objects/:objectType
 ```
 
 **Query parameters:**
@@ -64,14 +64,14 @@ GET /api/v2/objects/:objectType
 - If `$select` is specified with a small number of properties, use `_source` filtering to reduce the response size. This is especially important for object types with many properties or large text fields.
 - Set a reasonable timeout for the OpenSearch query (e.g., 30 seconds) to prevent long-running queries from tying up the server.
 
-**Logging:** Log every request with: timestamp, HTTP method, path, query parameters, response status code, response time in milliseconds, and the number of objects returned. Use `console.log` with a structured format: `[2025-03-12T10:30:00Z] GET /api/v2/objects/Employee ?$pageSize=50&$orderBy=salary:desc → 200 (50 objects, 45ms)`. This is essential for debugging query performance issues.
+**Logging:** Log every request with: timestamp, HTTP method, path, query parameters, response status code, response time in milliseconds, and the number of objects returned. Use `console.log` with a structured format: `[2025-03-12T10:30:00Z] GET /api/v1/objects/Employee ?$pageSize=50&$orderBy=salary:desc → 200 (50 objects, 45ms)`. This is essential for debugging query performance issues.
 
 **Test cases to verify:**
-1. `GET /api/v2/objects/Employee` → Returns first 100 employees, sorted by __pk ascending
-2. `GET /api/v2/objects/Employee?$pageSize=10` → Returns first 10
-3. `GET /api/v2/objects/Employee?$pageSize=10` then `GET /api/v2/objects/Employee?$pageSize=10&$pageToken={token from previous}` → Returns next 10, no overlap
-4. `GET /api/v2/objects/Employee?$orderBy=salary:desc` → Returns employees sorted by salary descending
-5. `GET /api/v2/objects/Employee?$select=employeeId,fullName` → Returns only those two properties plus __primaryKey and __objectType
-6. `GET /api/v2/objects/NonExistent` → 404 error
-7. `GET /api/v2/objects/Employee?$pageSize=999999` → 400 error (exceeds 10000)
-8. `GET /api/v2/objects/Employee?$orderBy=nonexistent:asc` → 400 error
+1. `GET /api/v1/objects/Employee` → Returns first 100 employees, sorted by __pk ascending
+2. `GET /api/v1/objects/Employee?$pageSize=10` → Returns first 10
+3. `GET /api/v1/objects/Employee?$pageSize=10` then `GET /api/v1/objects/Employee?$pageSize=10&$pageToken={token from previous}` → Returns next 10, no overlap
+4. `GET /api/v1/objects/Employee?$orderBy=salary:desc` → Returns employees sorted by salary descending
+5. `GET /api/v1/objects/Employee?$select=employeeId,fullName` → Returns only those two properties plus __primaryKey and __objectType
+6. `GET /api/v1/objects/NonExistent` → 404 error
+7. `GET /api/v1/objects/Employee?$pageSize=999999` → 400 error (exceeds 10000)
+8. `GET /api/v1/objects/Employee?$orderBy=nonexistent:asc` → 400 error

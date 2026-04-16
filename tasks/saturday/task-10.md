@@ -7,7 +7,7 @@ For our API-only week-1 implementation, we build a mapping suggestion engine tha
 
 ### Exact Specification
 
-**Endpoint: `POST /api/v2/ontology/:ontologyId/objectTypes/:apiName/suggestMapping`**
+**Endpoint: `POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/suggestMapping`**
 
 Request body:
 ```json

@@ -6,7 +6,7 @@
 
 **Relationship to Task 10:** Task 10 defines the endpoint specification (behavior, error cases, test cases). This task (Task 22) implements the actual route handler by wiring together the services. Do not implement the endpoint directly from Task 10's inline implementation steps — those were written before the service decomposition and are superseded by the service call pipeline below.
 
-**Purpose:** Write the route handler function for `GET /api/v2/objects/:objectType` that orchestrates the list-objects pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
+**Purpose:** Write the route handler function for `GET /api/v1/objects/:objectType` that orchestrates the list-objects pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
 
 **The handler must perform these steps in order, with each step being a single service call:**
 

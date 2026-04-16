@@ -71,7 +71,7 @@ async function run() {
     let mb = `--${boundary}\r\nContent-Disposition: form-data; name="type"\r\n\r\nAPPEND\r\n`;
     mb += `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: text/csv\r\n\r\n`;
     const buf = Buffer.concat([Buffer.from(mb), fc, Buffer.from(`\r\n--${boundary}--\r\n`)]);
-    const res = await fetch(`${BASE}/api/v2/datasets/${dsId}/transactions`, {
+    const res = await fetch(`${BASE}/api/v1/datasets/${dsId}/transactions`, {
       method: "POST",
       headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
       body: buf,
@@ -131,14 +131,14 @@ async function run() {
     // -----------------------------------------------------------------------
     // 4.1 Setup: ontology + Employee type + Company type
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v2/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontologies", {
       displayName: "Link Traversal Test",
       description: "Test 04 — link traversal after reindex",
     });
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
     // Create Employee type
-    const empOtRes = await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/batch`, {
+    const empOtRes = await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
       apiName: "Employee",
       displayName: "Employee",
       primaryKeyProperty: "employeeId",
@@ -153,7 +153,7 @@ async function run() {
     });
 
     // Create Company type
-    const compOtRes = await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/batch`, {
+    const compOtRes = await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
       apiName: "Company",
       displayName: "Company",
       primaryKeyProperty: "companyId",
@@ -182,13 +182,13 @@ async function run() {
     const compFile = tmpPath("companies");
     fs.writeFileSync(compFile, generateCompanyCSV());
 
-    const empUp = await uploadFile(`${BASE}/api/v2/datasets/upload`, empFile, {
+    const empUp = await uploadFile(`${BASE}/api/v1/datasets/upload`, empFile, {
       name: "link_test_employees",
       transactionType: "SNAPSHOT",
     });
     empDatasetId = empUp.body?.data?.dataset?.datasetId ?? null;
 
-    const compUp = await uploadFile(`${BASE}/api/v2/datasets/upload`, compFile, {
+    const compUp = await uploadFile(`${BASE}/api/v1/datasets/upload`, compFile, {
       name: "link_test_companies",
       transactionType: "SNAPSHOT",
     });
@@ -203,7 +203,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 4.3 Register datasources + reindex both
     // -----------------------------------------------------------------------
-    await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/Employee/datasource`, {
+    await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/Employee/datasource`, {
       datasetId: empDatasetId,
       columnMapping: {
         employeeId: "emp_id",
@@ -214,7 +214,7 @@ async function run() {
       },
     });
 
-    await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/Company/datasource`, {
+    await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/Company/datasource`, {
       datasetId: compDatasetId,
       columnMapping: {
         companyId: "company_id",
@@ -225,8 +225,8 @@ async function run() {
       },
     });
 
-    const empRix = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
-    const compRix = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Company/reindex?force=true`);
+    const empRix = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+    const compRix = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Company/reindex?force=true`);
 
     const empIndexed = empRix.body?.data?.result?.totalObjectsIndexed ?? -1;
     const compIndexed = compRix.body?.data?.result?.totalObjectsIndexed ?? -1;
@@ -240,7 +240,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 4.4 Create MANY_TO_ONE link type: Employee→Company
     // -----------------------------------------------------------------------
-    const linkRes = await api("POST", `/api/v2/ontologies/${ontologyId}/linkTypes`, {
+    const linkRes = await api("POST", `/api/v1/ontologies/${ontologyId}/linkTypes`, {
       apiName: "employeeCompany",
       displayName: "Employee Company",
       description: "Links employees to their company",
@@ -256,7 +256,7 @@ async function run() {
     // 4.5 Forward traversal: Employee→Company for EMP-0001
     //     EMP-0001 has companyId=COMP-001 (round-robin: (1-1)%5=0 → COMP-001)
     // -----------------------------------------------------------------------
-    const fwdRes = await api("GET", "/api/v2/objects/Employee/EMP-0001/links/employeeCompany?direction=forward");
+    const fwdRes = await api("GET", "/api/v1/objects/Employee/EMP-0001/links/employeeCompany?direction=forward");
     const linkedCompany = fwdRes.body?.data?.linkedObject ?? null;
     const linkedCompanyId = linkedCompany?.companyId ?? null;
     assert(
@@ -269,7 +269,7 @@ async function run() {
     // 4.6 Reverse traversal: Company→Employees for COMP-001
     //     COMP-001 gets employees at indices 1,6,11,16,21,26,31,36,41,46 = 10 employees
     // -----------------------------------------------------------------------
-    const revRes = await api("GET", "/api/v2/objects/Company/COMP-001/links/employeeCompany?direction=reverse&pageSize=100");
+    const revRes = await api("GET", "/api/v1/objects/Company/COMP-001/links/employeeCompany?direction=reverse&pageSize=100");
     const linkedEmployees = revRes.body?.data?.linkedObjects ?? [];
     const reverseCount = linkedEmployees.length;
     // 50 employees, round-robin across 5 companies = 10 per company
@@ -295,22 +295,22 @@ async function run() {
     assert(appendRes.status === 201, "4.7a Append 10 new employees", `status=${appendRes.status}`);
 
     // Reindex employees
-    const empRix2 = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+    const empRix2 = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
     const empIndexed2 = empRix2.body?.data?.result?.totalObjectsIndexed ?? -1;
     assert(empIndexed2 === 60, "4.7b Reindex employees after append (60)", `indexed=${empIndexed2}`);
 
     // Forward link still works for original employee
-    const fwdRes2 = await api("GET", "/api/v2/objects/Employee/EMP-0001/links/employeeCompany?direction=forward");
+    const fwdRes2 = await api("GET", "/api/v1/objects/Employee/EMP-0001/links/employeeCompany?direction=forward");
     const linkedId2 = fwdRes2.body?.data?.linkedObject?.companyId ?? null;
     assert(linkedId2 === "COMP-001", "4.7c Forward link still works after reindex", `companyId=${linkedId2}`);
 
     // Forward link works for new employee
-    const fwdNew = await api("GET", "/api/v2/objects/Employee/EMP-0055/links/employeeCompany?direction=forward");
+    const fwdNew = await api("GET", "/api/v1/objects/Employee/EMP-0055/links/employeeCompany?direction=forward");
     const linkedIdNew = fwdNew.body?.data?.linkedObject?.companyId ?? null;
     assert(linkedIdNew === "COMP-001", "4.7d New employee link resolves correctly", `companyId=${linkedIdNew}`);
 
     // Reverse count for COMP-001 should now be 10 original + 10 new = 20
-    const revRes2 = await api("GET", "/api/v2/objects/Company/COMP-001/links/employeeCompany?direction=reverse&pageSize=100");
+    const revRes2 = await api("GET", "/api/v1/objects/Company/COMP-001/links/employeeCompany?direction=reverse&pageSize=100");
     const revCount2 = revRes2.body?.data?.linkedObjects?.length ?? -1;
     assert(revCount2 === 20, "4.7e Reverse traversal after append (20)", `count=${revCount2}`);
 
@@ -319,9 +319,9 @@ async function run() {
     // Cleanup
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
-    if (ontologyId) await api("DELETE", `/api/v2/ontologies/${ontologyId}`).catch(() => {});
-    if (empDatasetId) await api("DELETE", `/api/v2/datasets/${empDatasetId}?force=true`).catch(() => {});
-    if (compDatasetId) await api("DELETE", `/api/v2/datasets/${compDatasetId}?force=true`).catch(() => {});
+    if (ontologyId) await api("DELETE", `/api/v1/ontologies/${ontologyId}`).catch(() => {});
+    if (empDatasetId) await api("DELETE", `/api/v1/datasets/${empDatasetId}?force=true`).catch(() => {});
+    if (compDatasetId) await api("DELETE", `/api/v1/datasets/${compDatasetId}?force=true`).catch(() => {});
     for (const f of tmpFiles) {
       if (fs.existsSync(f)) fs.unlinkSync(f);
     }

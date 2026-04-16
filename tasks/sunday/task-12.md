@@ -5,7 +5,7 @@ Build the endpoint that returns the full paginated list of objects linked to a g
 
 ## Exact Specification
 
-**Endpoint:** `GET /api/v2/objects/:objectType/:primaryKey/links/:linkTypeApiName`
+**Endpoint:** `GET /api/v1/objects/:objectType/:primaryKey/links/:linkTypeApiName`
 
 This endpoint already exists from Day 4 (the Search Around work). However, the Day 4 implementation may be basic. This task ENHANCES it with:
 

@@ -11,7 +11,7 @@ Build a comprehensive health check endpoint that reports the status of all syste
 
 ## Sub-task 19A: Simple Health Check Endpoint
 
-**Endpoint 1:** `GET /api/v2/health`
+**Endpoint 1:** `GET /api/v1/health`
 
 This is a simple "is the system alive" check for load balancers. It should return quickly (<100ms) and only check basic connectivity.
 
@@ -52,7 +52,7 @@ const [pgResult, osResult] = await Promise.allSettled([
 
 ## Sub-task 19B: Detailed Status Endpoint
 
-**Endpoint 2:** `GET /api/v2/status`
+**Endpoint 2:** `GET /api/v1/status`
 
 This is a detailed status endpoint for operators and monitoring dashboards. It returns comprehensive system information.
 

@@ -5,7 +5,7 @@
 // parameter sets in a single API call. Each request in the bulk is
 // independent and executed sequentially.
 //
-// Mounted at: /api/v2/actions
+// Mounted at: /api/v1/actions
 //
 // Endpoint:
 //   POST /:actionTypeApiName/applyBulk — Bulk-execute an action
@@ -53,7 +53,7 @@ router.post(
       const bulkId = crypto.randomUUID();
 
       // -----------------------------------------------------------------
-      // Resolve ontology — use default ontology for /api/v2/actions mount
+      // Resolve ontology — use default ontology for /api/v1/actions mount
       // -----------------------------------------------------------------
       let ontologyId = req.params.ontologyId;
       if (!ontologyId) {

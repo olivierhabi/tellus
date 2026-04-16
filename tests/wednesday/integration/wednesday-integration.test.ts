@@ -35,7 +35,7 @@ describe("Wednesday Integration Tests", () => {
     }
 
     // Create test ontology
-    const { body: ontBody } = await api("POST", "/api/v2/ontologies", {
+    const { body: ontBody } = await api("POST", "/api/v1/ontologies", {
       displayName: "WedIntTest",
       description: "Wednesday integration tests",
     });
@@ -43,7 +43,7 @@ describe("Wednesday Integration Tests", () => {
     if (!ONTOLOGY_ID) return;
 
     // Create Employee object type
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "WedEmployee",
       displayName: "Wed Employee",
       description: "Test employee",
@@ -59,14 +59,14 @@ describe("Wednesday Integration Tests", () => {
     ];
 
     for (const p of props) {
-      await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`, p);
+      await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`, p);
     }
 
     // Set PK property
-    const propsRes = await api("GET", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`);
+    const propsRes = await api("GET", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`);
     const employeeIdProp = (propsRes.body?.data || []).find((p: any) => p.apiName === "employeeId" || p.api_name === "employeeId");
     if (employeeIdProp) {
-      await api("PUT", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee`, {
+      await api("PUT", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee`, {
         primaryKeyPropertyId: employeeIdProp.propertyId || employeeIdProp.property_id,
       });
     }
@@ -76,39 +76,39 @@ describe("Wednesday Integration Tests", () => {
 
   afterAll(async () => {
     if (ONTOLOGY_ID) {
-      await api("DELETE", `/api/v2/ontologies/${ONTOLOGY_ID}`);
+      await api("DELETE", `/api/v1/ontologies/${ONTOLOGY_ID}`);
     }
   }, 10000);
 
   it("should return 404 for non-existent object type", async () => {
     if (!HAS_DATA) return;
-    const { status, body } = await api("GET", "/api/v2/objects/NonExistentType123");
+    const { status, body } = await api("GET", "/api/v1/objects/NonExistentType123");
     expect(status).toBe(404);
     expect(body?.error?.code).toBe("OBJECT_TYPE_NOT_FOUND");
   });
 
   it("should return empty data for unindexed object type", async () => {
     if (!HAS_DATA) return;
-    const { status, body } = await api("GET", "/api/v2/objects/WedEmployee");
+    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee");
     expect(status).toBe(200);
     expect(body?.data?.data || body?.data || []).toEqual([]);
   });
 
   it("should reject invalid $pageSize", async () => {
     if (!HAS_DATA) return;
-    const { status, body } = await api("GET", "/api/v2/objects/WedEmployee?$pageSize=0");
+    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=0");
     expect(status).toBe(400);
   });
 
   it("should reject $pageSize > 10000", async () => {
     if (!HAS_DATA) return;
-    const { status } = await api("GET", "/api/v2/objects/WedEmployee?$pageSize=10001");
+    const { status } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=10001");
     expect(status).toBe(400);
   });
 
   it("should validate search body — reject unexpected fields", async () => {
     if (!HAS_DATA) return;
-    const { status, body } = await api("POST", "/api/v2/objects/WedEmployee/search", {
+    const { status, body } = await api("POST", "/api/v1/objects/WedEmployee/search", {
       $pgeSize: 10,
     });
     expect(status).toBe(400);
@@ -117,7 +117,7 @@ describe("Wednesday Integration Tests", () => {
 
   it("should validate search body — reject unknown filter type", async () => {
     if (!HAS_DATA) return;
-    const { status, body } = await api("POST", "/api/v2/objects/WedEmployee/search", {
+    const { status, body } = await api("POST", "/api/v1/objects/WedEmployee/search", {
       where: { type: "unknownFilter" },
     });
     expect(status).toBe(400);
@@ -126,13 +126,13 @@ describe("Wednesday Integration Tests", () => {
 
   it("should validate search body — accept empty body", async () => {
     if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/search", {});
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/search", {});
     expect(status).toBe(200);
   });
 
   it("should validate search body — reject empty $select", async () => {
     if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/search", {
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/search", {
       $select: [],
     });
     expect(status).toBe(400);
@@ -140,13 +140,13 @@ describe("Wednesday Integration Tests", () => {
 
   it("should return 404 for non-existent object type on search", async () => {
     if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/FakeType999/search", {});
+    const { status } = await api("POST", "/api/v1/objects/FakeType999/search", {});
     expect(status).toBe(404);
   });
 
   it("should validate fulltext search — reject empty query", async () => {
     if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/searchFullText", {
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/searchFullText", {
       query: "",
     });
     expect(status).toBe(400);
@@ -154,7 +154,7 @@ describe("Wednesday Integration Tests", () => {
 
   it("should validate aggregate — reject empty aggregations", async () => {
     if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/aggregate", {
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/aggregate", {
       aggregations: [],
     });
     expect(status).toBe(400);
@@ -162,7 +162,7 @@ describe("Wednesday Integration Tests", () => {
 
   it("should return 404 for single object not found", async () => {
     if (!HAS_DATA) return;
-    const { status } = await api("GET", "/api/v2/objects/WedEmployee/NONEXISTENT");
+    const { status } = await api("GET", "/api/v1/objects/WedEmployee/NONEXISTENT");
     expect(status).toBe(404);
   });
 });

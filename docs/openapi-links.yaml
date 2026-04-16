@@ -12,7 +12,7 @@ servers:
     description: Local development
 
 paths:
-  /api/v2/ontologies/{ontologyId}/linkTypes:
+  /api/v1/ontologies/{ontologyId}/linkTypes:
     post:
       summary: Create a link type
       description: Create a new link type definition within an ontology.
@@ -74,7 +74,7 @@ paths:
                   totalCount: { type: integer }
                   nextPageToken: { type: string, nullable: true }
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/export:
+  /api/v1/ontologies/{ontologyId}/linkTypes/export:
     get:
       summary: Export link types as JSON
       tags: [Link Types]
@@ -91,7 +91,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/LinkTypeExport"
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/import:
+  /api/v1/ontologies/{ontologyId}/linkTypes/import:
     post:
       summary: Import link types from JSON
       tags: [Link Types]
@@ -117,7 +117,7 @@ paths:
         "400":
           $ref: "#/components/responses/ValidationError"
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/bulkCount:
+  /api/v1/ontologies/{ontologyId}/linkTypes/bulkCount:
     post:
       summary: Bulk count links across multiple link types
       tags: [Link Counts]
@@ -161,7 +161,7 @@ paths:
                         count: { type: integer, nullable: true }
                         error: { type: string }
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/multiHop:
+  /api/v1/ontologies/{ontologyId}/linkTypes/multiHop:
     post:
       summary: Multi-hop link traversal
       tags: [Link Resolution]
@@ -201,7 +201,7 @@ paths:
                     properties:
                       hopsCompleted: { type: integer }
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}:
     get:
       summary: Get a single link type
       tags: [Link Types]
@@ -262,7 +262,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFoundError"
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/resolve:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}/resolve:
     post:
       summary: Resolve linked objects
       tags: [Link Resolution]
@@ -291,7 +291,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ResolveResult"
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/count:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}/count:
     post:
       summary: Count linked objects
       tags: [Link Counts]
@@ -320,7 +320,7 @@ paths:
                   direction: { type: string }
                   count: { type: integer }
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/searchAround:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}/searchAround:
     post:
       summary: Search Around
       tags: [Link Resolution]
@@ -348,7 +348,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ResolveResult"
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/upload:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}/upload:
     post:
       summary: Upload join table CSV
       tags: [Join Tables]
@@ -381,7 +381,7 @@ paths:
                   uniqueSourceKeys: { type: integer }
                   uniqueTargetKeys: { type: integer }
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/validate:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}/validate:
     post:
       summary: Validate join table
       tags: [Join Tables]
@@ -396,7 +396,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/JoinTableValidation"
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/analysis:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}/analysis:
     get:
       summary: Link type analysis
       tags: [Link Analysis]
@@ -411,7 +411,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/LinkAnalysis"
 
-  /api/v2/ontologies/{ontologyId}/linkTypes/{apiName}/validateMigration:
+  /api/v1/ontologies/{ontologyId}/linkTypes/{apiName}/validateMigration:
     post:
       summary: Validate cardinality migration
       tags: [Link Analysis]
@@ -435,7 +435,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/CardinalityValidation"
 
-  /api/v2/objects/{objectType}/{primaryKey}/links/{linkType}:
+  /api/v1/objects/{objectType}/{primaryKey}/links/{linkType}:
     get:
       summary: Get linked objects from an object
       tags: [Object Links]
@@ -469,7 +469,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ResolveResult"
 
-  /api/v2/objects/{objectType}/{primaryKey}/links/{linkType}/count:
+  /api/v1/objects/{objectType}/{primaryKey}/links/{linkType}/count:
     get:
       summary: Count linked objects from an object
       tags: [Object Links]

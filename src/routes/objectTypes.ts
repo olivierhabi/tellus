@@ -2,7 +2,7 @@
 // Object Type Routes — Express Router
 //
 // All routes are nested under an ontology:
-//   /api/v2/ontologies/:ontologyId/objectTypes
+//   /api/v1/ontologies/:ontologyId/objectTypes
 //
 // Uses mergeParams: true to access :ontologyId from the parent mount.
 // ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ router.post(
       setEtag(res, version);
       res.setHeader(
         "Location",
-        `/api/v2/ontologies/${req.params.ontologyId}/objectTypes/${full.objectType.api_name}`
+        `/api/v1/ontologies/${req.params.ontologyId}/objectTypes/${full.objectType.api_name}`
       );
 
       sendCreated(res, formatted);

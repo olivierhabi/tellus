@@ -22,7 +22,7 @@ async function main() {
   runner.section("Setup");
 
   await runner.test("Create ontology", async () => {
-    const { status, body } = await api("POST", "/api/v2/ontologies", {
+    const { status, body } = await api("POST", "/api/v1/ontologies", {
       displayName: "Sunday Standalone Test",
     });
     runner.assert(status === 201, `Expected 201, got ${status}`);
@@ -30,7 +30,7 @@ async function main() {
   });
 
   await runner.test("Create Airport OT", async () => {
-    const { status } = await api("POST", `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+    const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
       apiName: "StandaloneAirport",
       displayName: "Airport",
       properties: [
@@ -48,7 +48,7 @@ async function main() {
   runner.section("Interface CRUD");
 
   await runner.test("Create Interface", async () => {
-    const { status, body } = await api("POST", `/api/v2/ontology/${ctx.ontologyId}/interfaces`, {
+    const { status, body } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/interfaces`, {
       apiName: "StandaloneLocation",
       displayName: "Location",
       properties: [
@@ -61,13 +61,13 @@ async function main() {
   });
 
   await runner.test("List interfaces", async () => {
-    const { status, body } = await api("GET", `/api/v2/ontology/${ctx.ontologyId}/interfaces`);
+    const { status, body } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}/interfaces`);
     runner.assert(status === 200, `Expected 200, got ${status}`);
     runner.assert((body?.data?.length || 0) >= 1, "At least 1 interface");
   });
 
   await runner.test("Get interface by name", async () => {
-    const { status } = await api("GET", `/api/v2/ontology/${ctx.ontologyId}/interfaces/StandaloneLocation`);
+    const { status } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}/interfaces/StandaloneLocation`);
     runner.assert(status === 200, `Expected 200, got ${status}`);
   });
 
@@ -76,7 +76,7 @@ async function main() {
 
   await runner.test("Implement interface", async () => {
     const { status } = await api("POST",
-      `/api/v2/ontology/${ctx.ontologyId}/objectTypes/StandaloneAirport/implements`, {
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/StandaloneAirport/implements`, {
         interfaceApiName: "StandaloneLocation",
         propertyMapping: { latitude: "lat", longitude: "lng" },
       });
@@ -85,7 +85,7 @@ async function main() {
 
   await runner.test("List implementations", async () => {
     const { status, body } = await api("GET",
-      `/api/v2/ontology/${ctx.ontologyId}/objectTypes/StandaloneAirport/implements`);
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/StandaloneAirport/implements`);
     runner.assert(status === 200, `Expected 200, got ${status}`);
     runner.assert((body?.data?.length || 0) >= 1, "At least 1 implementation");
   });
@@ -94,7 +94,7 @@ async function main() {
   runner.section("System Health");
 
   await runner.test("Liveness probe", async () => {
-    const { status } = await api("GET", "/api/v2/system/liveness");
+    const { status } = await api("GET", "/api/v1/system/liveness");
     runner.assert(status === 200, `Expected 200, got ${status}`);
   });
 
@@ -103,17 +103,17 @@ async function main() {
 
   await runner.test("Remove implementation", async () => {
     const { status } = await api("DELETE",
-      `/api/v2/ontology/${ctx.ontologyId}/objectTypes/StandaloneAirport/implements/StandaloneLocation`);
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/StandaloneAirport/implements/StandaloneLocation`);
     runner.assert(status === 204, `Expected 204, got ${status}`);
   });
 
   await runner.test("Delete interface", async () => {
-    const { status } = await api("DELETE", `/api/v2/ontology/${ctx.ontologyId}/interfaces/StandaloneLocation`);
+    const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/interfaces/StandaloneLocation`);
     runner.assert(status === 204, `Expected 204, got ${status}`);
   });
 
   await runner.test("Delete ontology", async () => {
-    const { status } = await api("DELETE", `/api/v2/ontologies/${ctx.ontologyId}`);
+    const { status } = await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
     runner.assert(status === 204, `Expected 204, got ${status}`);
   });
 

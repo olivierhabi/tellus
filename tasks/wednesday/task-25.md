@@ -4,7 +4,7 @@
 
 **Dependencies:** Tasks 1, 2, 6, 7, 9, 15, 17, 18, 21.
 
-**Purpose:** Write the route handler function for `POST /api/v2/objects/:objectType/searchFullText` that orchestrates the full-text search pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
+**Purpose:** Write the route handler function for `POST /api/v1/objects/:objectType/searchFullText` that orchestrates the full-text search pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
 
 **The handler must perform these steps in order:**
 

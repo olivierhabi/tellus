@@ -18,7 +18,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   });
 
   await t.test("Create ontology (Task 2)", async () => {
-    const { status, body } = await api("POST", "/api/v2/ontologies", {
+    const { status, body } = await api("POST", "/api/v1/ontologies", {
       displayName: "Test Ontology",
       description: "Integration test ontology",
     });
@@ -34,7 +34,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   });
 
   await t.test("Duplicate ontology fails (Task 2)", async () => {
-    const { status, body } = await api("POST", "/api/v2/ontologies", {
+    const { status, body } = await api("POST", "/api/v1/ontologies", {
       displayName: "Test Ontology",
     });
     t.assert(status === 409, `Expected 409, got ${status}`);
@@ -42,7 +42,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   });
 
   await t.test("List ontologies with pagination (Task 11/12)", async () => {
-    const { status, body } = await api("GET", "/api/v2/ontologies?pageSize=10");
+    const { status, body } = await api("GET", "/api/v1/ontologies?pageSize=10");
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(Array.isArray(body.data), "data is array");
     t.assert(body.data.length >= 1, "at least 1 ontology");
@@ -51,7 +51,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   });
 
   await t.test("Get ontology by ID (Task 11/12)", async () => {
-    const { status, body } = await api("GET", `/api/v2/ontologies/${ctx.ontologyId}`);
+    const { status, body } = await api("GET", `/api/v1/ontologies/${ctx.ontologyId}`);
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.displayName === "Test Ontology", "displayName matches");
   });
@@ -59,14 +59,14 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   t.section("Validation Middleware (Task 19)");
 
   await t.test("validateBody rejects missing required fields (Task 19)", async () => {
-    const { status, body } = await api("POST", "/api/v2/ontologies", {});
+    const { status, body } = await api("POST", "/api/v1/ontologies", {});
     t.assert(status === 400, `Expected 400, got ${status}`);
     t.assert(body.error.code === "VALIDATION_FAILED", `code = ${body.error.code}`);
     t.assert(body.error.message.includes("displayName"), "mentions displayName");
   });
 
   await t.test("Invalid UUID rejected (Task 9)", async () => {
-    const { status, body } = await api("GET", "/api/v2/ontologies/not-a-uuid");
+    const { status, body } = await api("GET", "/api/v1/ontologies/not-a-uuid");
     t.assert(status === 400, `Expected 400, got ${status}`);
     t.assert(body.error.code === "INVALID_PARAMETER", `code = ${body.error.code}`);
   });

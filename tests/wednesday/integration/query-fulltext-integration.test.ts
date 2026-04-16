@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { api } from "../../helpers/api";
 
-const BASE = "/api/v2/objects";
+const BASE = "/api/v1/objects";
 let ONTOLOGY_ID: string;
 let READY = false;
 
@@ -22,14 +22,14 @@ describe("Query Full-Text Search (Task 29)", () => {
       return;
     }
 
-    const { body } = await api("POST", "/api/v2/ontologies", {
+    const { body } = await api("POST", "/api/v1/ontologies", {
       displayName: "T29 Fulltext Test",
       description: "Task 29",
     });
     ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
     if (!ONTOLOGY_ID) return;
 
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T29Employee",
       displayName: "T29 Employee",
       description: "Test",
@@ -43,14 +43,14 @@ describe("Query Full-Text Search (Task 29)", () => {
       { apiName: "isActive", displayName: "Is Active", baseType: "boolean" },
     ];
     for (const p of props) {
-      await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/T29Employee/properties`, p);
+      await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/T29Employee/properties`, p);
     }
 
     READY = true;
   }, 30_000);
 
   afterAll(async () => {
-    if (ONTOLOGY_ID) await api("DELETE", `/api/v2/ontologies/${ONTOLOGY_ID}`);
+    if (ONTOLOGY_ID) await api("DELETE", `/api/v1/ontologies/${ONTOLOGY_ID}`);
   }, 10_000);
 
   // 1. Search by name

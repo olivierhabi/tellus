@@ -119,18 +119,11 @@ run_layer "docker-integrations" \
   bash "$REPO_BACKEND/scripts/verify-docker-integrations.sh"
 cooldown
 
-# Layer 1b: Palantir reference-architecture services (Keycloak, Nessie, Flink)
+# Layer 1b: Palantir reference-architecture services (Keycloak)
 run_layer "keycloak-sso" \
   "Layer 1b — Keycloak SSO end-to-end" \
   bash "$REPO_BACKEND/scripts/verify-keycloak.sh"
 
-run_layer "iceberg-nessie" \
-  "Layer 1c — Iceberg + Nessie REST catalog" \
-  bash "$REPO_BACKEND/scripts/verify-iceberg.sh"
-
-run_layer "flink" \
-  "Layer 1d — Flink JobManager proxy" \
-  bash "$REPO_BACKEND/scripts/verify-flink.sh"
 cooldown
 
 # Layer 2: backend feature matrix
@@ -148,7 +141,7 @@ run_layer "production-readiness" \
 if [[ "${SKIP_CYPRESS:-0}" != "1" ]]; then
   cooldown
   run_layer "cypress-frontend" \
-    "Layer 4 — Cypress frontend E2E (ontology + Keycloak + Nessie + Flink)" \
+    "Layer 4 — Cypress frontend E2E (ontology + Keycloak)" \
     bash -c "cd $REPO_FRONTEND && npx cypress run --spec cypress/e2e/ontology-manager.cy.ts,cypress/e2e/keycloak-sso.cy.ts --headless --browser electron"
 else
   echo

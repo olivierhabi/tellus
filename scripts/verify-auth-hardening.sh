@@ -235,7 +235,7 @@ BODY=$(docker exec tellus-db psql -U tellus -d tellus_db -tAc \
 [[ "$BODY" != *"{{"* ]] || err "password-changed template has unrendered {{...}} placeholders"
 ok "password-changed email template rendered with {{variables}} substituted"
 
-# --- 11. App-wide PAT scope guard on /api/v2/ontologies/* ----------------
+# --- 11. App-wide PAT scope guard on /api/v1/ontologies/* ----------------
 # A PAT carrying only audit:read must NOT be able to reach an ontology
 # GET endpoint — the scope guard in requireTellusAuth consults
 # services/patScopeMap.ts and rejects with PAT_SCOPE_INSUFFICIENT.
@@ -256,11 +256,11 @@ NARROW=$(curl -sf -b "$JAR" -H 'Content-Type: application/json' -X POST \
 
 HTTP=$(curl -s -o /tmp/hd_narrow.json -w '%{http_code}' \
   -H "Authorization: Bearer $NARROW" \
-  "$API/api/v2/ontologies/default/objectTypes")
-[[ "$HTTP" == "403" ]] || err "narrow PAT on /api/v2/ontologies expected 403, got $HTTP"
+  "$API/api/v1/ontologies/default/objectTypes")
+[[ "$HTTP" == "403" ]] || err "narrow PAT on /api/v1/ontologies expected 403, got $HTTP"
 jq -e '.errorCode == "PAT_SCOPE_INSUFFICIENT" and (.message | contains("ontology:read"))' /tmp/hd_narrow.json >/dev/null \
   || err "narrow PAT response missing PAT_SCOPE_INSUFFICIENT for ontology:read: $(cat /tmp/hd_narrow.json)"
-ok "/api/v2/ontologies rejects PAT without ontology:read"
+ok "/api/v1/ontologies rejects PAT without ontology:read"
 
 # Wide-scope PAT — ontology:read. Passes the scope gate; the handler
 # may still 404 if the ontology doesn't exist, but the important thing
@@ -270,20 +270,20 @@ WIDE=$(curl -sf -b "$JAR" -H 'Content-Type: application/json' -X POST \
   "$API/api/v1/auth/tokens" | jq -r '.data.token')
 HTTP=$(curl -s -o /tmp/hd_wide.json -w '%{http_code}' \
   -H "Authorization: Bearer $WIDE" \
-  "$API/api/v2/ontologies/default/objectTypes")
+  "$API/api/v1/ontologies/default/objectTypes")
 if jq -e '.errorCode == "PAT_SCOPE_INSUFFICIENT"' /tmp/hd_wide.json >/dev/null 2>&1; then
   err "wide PAT was still rejected for scope: $(cat /tmp/hd_wide.json)"
 fi
-ok "/api/v2/ontologies accepts PAT with ontology:read (HTTP $HTTP, no scope error)"
+ok "/api/v1/ontologies accepts PAT with ontology:read (HTTP $HTTP, no scope error)"
 
-# --- 12. Guard also covers /api/projects --------------------------------
+# --- 12. Guard also covers /api/v1/projects --------------------------------
 HTTP=$(curl -s -o /tmp/hd_proj.json -w '%{http_code}' \
   -H "Authorization: Bearer $NARROW" \
-  "$API/api/projects")
-[[ "$HTTP" == "403" ]] || err "narrow PAT on /api/projects expected 403, got $HTTP"
+  "$API/api/v1/projects")
+[[ "$HTTP" == "403" ]] || err "narrow PAT on /api/v1/projects expected 403, got $HTTP"
 jq -e '.errorCode == "PAT_SCOPE_INSUFFICIENT"' /tmp/hd_proj.json >/dev/null \
-  || err "narrow PAT on /api/projects missing PAT_SCOPE_INSUFFICIENT"
-ok "/api/projects rejects PAT without datasets:read"
+  || err "narrow PAT on /api/v1/projects missing PAT_SCOPE_INSUFFICIENT"
+ok "/api/v1/projects rejects PAT without datasets:read"
 
 # --- 13. Guard default: unknown /api/* routes require api:read/write ----
 HTTP=$(curl -s -o /tmp/hd_unknown.json -w '%{http_code}' \
@@ -329,8 +329,8 @@ echo "$MANIFEST" | jq -e '.data.scopes | index("ontology:read")' >/dev/null \
   || err "manifest.data.scopes missing ontology:read"
 echo "$MANIFEST" | jq -e '.data.scopes | index("audit:read")' >/dev/null \
   || err "manifest.data.scopes missing audit:read"
-echo "$MANIFEST" | jq -e '.data.rules | map(select(.prefix == "/api/v2/ontologies")) | length >= 1' >/dev/null \
-  || err "manifest.data.rules missing /api/v2/ontologies entry"
+echo "$MANIFEST" | jq -e '.data.rules | map(select(.prefix == "/api/v1/ontologies")) | length >= 1' >/dev/null \
+  || err "manifest.data.rules missing /api/v1/ontologies entry"
 echo "$MANIFEST" | jq -e '.data.fallback.GET == "api:read" and .data.fallback.MUTATION == "api:write"' >/dev/null \
   || err "manifest.data.fallback has wrong GET/MUTATION values"
 echo "$MANIFEST" | jq -e '.data.unauthenticatedRoutes | index("/api/v1/auth/pat-scopes")' >/dev/null \
@@ -352,9 +352,9 @@ NARROW_RAW=$(curl -sf -b "$JAR" -H 'Content-Type: application/json' \
   "$API/api/v1/auth/tokens" | jq -r '.data.token')
 [[ -n "$NARROW_RAW" && "$NARROW_RAW" != "null" ]] \
   || err "could not mint narrow PAT for post-removal gate check"
-RESP=$(curl -s -H "Authorization: Bearer $NARROW_RAW" "$API/api/v2/ontologies")
+RESP=$(curl -s -H "Authorization: Bearer $NARROW_RAW" "$API/api/v1/ontologies")
 echo "$RESP" | jq -e '.errorCode == "PAT_SCOPE_INSUFFICIENT"' >/dev/null \
-  || err "app-wide gate failed to reject narrow PAT on /api/v2/ontologies: $RESP"
+  || err "app-wide gate failed to reject narrow PAT on /api/v1/ontologies: $RESP"
 ok "app-wide patSecurityGate still rejects narrow PAT after inline gate removal"
 
 # Belt-and-braces: make sure the inline gate is actually gone from
@@ -378,7 +378,7 @@ ok "middleware/tellusAuth.ts contains no inline PAT scope gate"
 #   e) asserting the enrollmentToken has the tellus_enroll_ prefix
 #   f) re-seeding a passkey and verifying the SAME login now sets cookies
 #
-# Between (e) and (f) we also confirm that /api/v2/ontologies rejects
+# Between (e) and (f) we also confirm that /api/v1/ontologies rejects
 # the enrollment bearer — it must NOT double as a session token.
 
 # Wipe, then hit /login with no passkey present.
@@ -400,12 +400,12 @@ grep -q 'TELLUS_TOKEN' "$TMP_JAR" \
 ok "/login with no passkey returns enrollment token and refuses cookies"
 
 # Enrollment bearer must NOT be accepted as a session token by the
-# normal auth path — /api/v2/ontologies requires a real JWT/PAT and
+# normal auth path — /api/v1/ontologies requires a real JWT/PAT and
 # the PAT gate doesn't know about tellus_enroll_ tokens.
 HTTP=$(curl -s -o /dev/null -w '%{http_code}' \
-  -H "Authorization: Bearer $ENROLL_TOK" "$API/api/v2/ontologies")
+  -H "Authorization: Bearer $ENROLL_TOK" "$API/api/v1/ontologies")
 [[ "$HTTP" == "401" || "$HTTP" == "403" ]] \
-  || err "enrollment bearer was accepted as session token on /api/v2/ontologies (HTTP $HTTP)"
+  || err "enrollment bearer was accepted as session token on /api/v1/ontologies (HTTP $HTTP)"
 ok "enrollment bearer cannot be used as a session token on protected routes"
 
 # A second /enroll/passkey/options call with a bogus bearer must 401.

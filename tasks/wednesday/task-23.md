@@ -6,7 +6,7 @@
 
 **Relationship to Task 12:** Task 12 defines the endpoint specification (behavior, edge cases, test cases). This task (Task 23) implements the actual route handler by wiring together the services. Do not implement the endpoint directly from Task 12's inline implementation steps — those are superseded by the service call pipeline below.
 
-**Purpose:** Write the route handler function for `POST /api/v2/objects/:objectType/search` that orchestrates the filtered-search pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
+**Purpose:** Write the route handler function for `POST /api/v1/objects/:objectType/search` that orchestrates the filtered-search pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
 
 **The handler must perform these steps in order:**
 

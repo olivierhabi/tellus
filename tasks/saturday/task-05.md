@@ -7,7 +7,7 @@ For week 1, our APPEND implementation is simple: the new file's rows are added t
 
 ### Exact Specification
 
-**Endpoint: `POST /api/v2/datasets/:datasetId/transactions`**
+**Endpoint: `POST /api/v1/datasets/:datasetId/transactions`**
 
 This endpoint uploads a new file of data to append to an existing dataset.
 

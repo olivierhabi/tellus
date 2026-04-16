@@ -1,7 +1,7 @@
 # Pipeline Nodes API Reference
 
 > API endpoints for managing nodes within a pipeline graph.
-> Base URL: `/api/projects/{projectId}/pipelines/{pipelineId}/nodes`
+> Base URL: `/api/v1/projects/{projectId}/pipelines/{pipelineId}/nodes`
 
 ## Overview
 
@@ -65,7 +65,7 @@ Indexes: `pipeline_id`, `dataset_id`. Cascade-deletes when the parent pipeline i
 ### 1. List Pipeline Nodes
 
 ```
-GET /api/projects/{projectId}/pipelines/{pipelineId}/nodes
+GET /api/v1/projects/{projectId}/pipelines/{pipelineId}/nodes
 ```
 
 Returns all nodes for a pipeline with joined dataset metadata. Ordered by `created_at` ascending.
@@ -106,7 +106,7 @@ Returns all nodes for a pipeline with joined dataset metadata. Ordered by `creat
 ### 2. Add a Single Node
 
 ```
-POST /api/projects/{projectId}/pipelines/{pipelineId}/nodes
+POST /api/v1/projects/{projectId}/pipelines/{pipelineId}/nodes
 ```
 
 **Request Body:**
@@ -158,7 +158,7 @@ POST /api/projects/{projectId}/pipelines/{pipelineId}/nodes
 ### 3. Bulk-Add Nodes
 
 ```
-POST /api/projects/{projectId}/pipelines/{pipelineId}/nodes/bulk
+POST /api/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/bulk
 ```
 
 Creates 1–50 nodes in a single request. All dataset references are validated before any inserts. If any dataset is invalid, **no nodes are created** (atomic failure).
@@ -205,7 +205,7 @@ Creates 1–50 nodes in a single request. All dataset references are validated b
 ### 4. Update a Node
 
 ```
-PUT /api/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}
+PUT /api/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}
 ```
 
 Partially updates a node. At least one field must be provided.
@@ -244,7 +244,7 @@ Partially updates a node. At least one field must be provided.
 ### 5. Delete a Single Node
 
 ```
-DELETE /api/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}
+DELETE /api/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}
 ```
 
 **Response:** `204 No Content`
@@ -257,7 +257,7 @@ DELETE /api/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}
 ### 6. Delete All Nodes
 
 ```
-DELETE /api/projects/{projectId}/pipelines/{pipelineId}/nodes
+DELETE /api/v1/projects/{projectId}/pipelines/{pipelineId}/nodes
 ```
 
 Removes all nodes from the pipeline graph. Returns the count of deleted nodes.
@@ -281,12 +281,12 @@ Removes all nodes from the pipeline graph. Returns the count of deleted nodes.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/projects/:projectId/pipelines/:pipelineId/nodes` | List all nodes (with joined dataset metadata) |
-| `POST` | `/api/projects/:projectId/pipelines/:pipelineId/nodes` | Add a single node |
-| `POST` | `/api/projects/:projectId/pipelines/:pipelineId/nodes/bulk` | Bulk-add 1–50 nodes |
-| `PUT` | `/api/projects/:projectId/pipelines/:pipelineId/nodes/:nodeId` | Update a node |
-| `DELETE` | `/api/projects/:projectId/pipelines/:pipelineId/nodes/:nodeId` | Delete a single node |
-| `DELETE` | `/api/projects/:projectId/pipelines/:pipelineId/nodes` | Delete all nodes |
+| `GET` | `/api/v1/projects/:projectId/pipelines/:pipelineId/nodes` | List all nodes (with joined dataset metadata) |
+| `POST` | `/api/v1/projects/:projectId/pipelines/:pipelineId/nodes` | Add a single node |
+| `POST` | `/api/v1/projects/:projectId/pipelines/:pipelineId/nodes/bulk` | Bulk-add 1–50 nodes |
+| `PUT` | `/api/v1/projects/:projectId/pipelines/:pipelineId/nodes/:nodeId` | Update a node |
+| `DELETE` | `/api/v1/projects/:projectId/pipelines/:pipelineId/nodes/:nodeId` | Delete a single node |
+| `DELETE` | `/api/v1/projects/:projectId/pipelines/:pipelineId/nodes` | Delete all nodes |
 
 ## Interactive Documentation
 

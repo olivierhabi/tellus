@@ -173,7 +173,7 @@ async function main() {
   const ontologyName = `benchmark_links_${Date.now()}`;
 
   // Create ontology
-  let { body: ontBody } = await request("POST", "/api/v2/ontologies", {
+  let { body: ontBody } = await request("POST", "/api/v1/ontologies", {
     displayName: ontologyName,
     description: "Performance benchmark ontology",
   });
@@ -185,7 +185,7 @@ async function main() {
   console.log(`  Ontology: ${ONTOLOGY_ID}`);
 
   // Create BenchEmployee object type
-  await request("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch`, {
+  await request("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/batch`, {
     apiName: "BenchEmployee",
     displayName: "Bench Employee",
     description: "Benchmark employee",
@@ -200,7 +200,7 @@ async function main() {
   console.log("  Created BenchEmployee object type");
 
   // Create BenchTicket object type
-  await request("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch`, {
+  await request("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/batch`, {
     apiName: "BenchTicket",
     displayName: "Bench Ticket",
     description: "Benchmark ticket",
@@ -219,7 +219,7 @@ async function main() {
   console.log("  Created BenchTicket object type");
 
   // Create BenchCourse object type
-  await request("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch`, {
+  await request("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/batch`, {
     apiName: "BenchCourse",
     displayName: "Bench Course",
     description: "Benchmark course",
@@ -268,17 +268,17 @@ async function main() {
   // Register datasources
   await request(
     "POST",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchEmployee/datasource`,
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchEmployee/datasource`,
     { filePath: empPath }
   );
   await request(
     "POST",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchTicket/datasource`,
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchTicket/datasource`,
     { filePath: tktPath }
   );
   await request(
     "POST",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchCourse/datasource`,
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchCourse/datasource`,
     { filePath: crsPath }
   );
   console.log("  Registered all datasources");
@@ -287,7 +287,7 @@ async function main() {
   console.log("  Indexing BenchEmployee...");
   await request(
     "POST",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchEmployee/index`,
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchEmployee/index`,
     {}
   );
   // Wait for indexing to complete
@@ -296,7 +296,7 @@ async function main() {
   console.log("  Indexing BenchTicket...");
   await request(
     "POST",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchTicket/index`,
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchTicket/index`,
     {}
   );
   await waitForIndexing(ONTOLOGY_ID, "BenchTicket");
@@ -304,7 +304,7 @@ async function main() {
   console.log("  Indexing BenchCourse...");
   await request(
     "POST",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchCourse/index`,
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchCourse/index`,
     {}
   );
   await waitForIndexing(ONTOLOGY_ID, "BenchCourse");
@@ -316,7 +316,7 @@ async function main() {
   console.log("\nStep 1c: Creating link types...");
 
   // FK link: BenchEmployee -> BenchTicket (ONE_TO_MANY, FK on target)
-  await request("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes`, {
+  await request("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes`, {
     apiName: "benchEmployeeTickets",
     displayName: "Employee Tickets",
     cardinality: "ONE_TO_MANY",
@@ -327,7 +327,7 @@ async function main() {
   console.log("  Created benchEmployeeTickets (ONE_TO_MANY)");
 
   // M2M link: BenchEmployee -> BenchCourse
-  await request("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes`, {
+  await request("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes`, {
     apiName: "benchEmployeeCourses",
     displayName: "Employee Courses",
     cardinality: "MANY_TO_MANY",
@@ -339,7 +339,7 @@ async function main() {
 
   // Upload join table
   const uploadResult = await uploadCSV(
-    `/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeCourses/upload`,
+    `/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeCourses/upload`,
     joinCSV
   );
   if (uploadResult.status === 200 || uploadResult.status === 201) {
@@ -360,7 +360,7 @@ async function main() {
     const empId = `BEMP-${String(empNum).padStart(5, "0")}`;
     await request(
       "GET",
-      `/api/v2/objects/BenchEmployee/${empId}/links/benchEmployeeTickets`
+      `/api/v1/objects/BenchEmployee/${empId}/links/benchEmployeeTickets`
     );
   }
   console.log("  Warm-up complete");
@@ -383,7 +383,7 @@ async function main() {
         const start = performance.now();
         await request(
           "GET",
-          `/api/v2/objects/BenchEmployee/${empId}/links/benchEmployeeTickets`
+          `/api/v1/objects/BenchEmployee/${empId}/links/benchEmployeeTickets`
         );
         return performance.now() - start;
       },
@@ -397,7 +397,7 @@ async function main() {
         const start = performance.now();
         await request(
           "POST",
-          `/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeTickets/searchAround`,
+          `/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeTickets/searchAround`,
           {
             direction: "forward",
             sourceFilter: { department: "Engineering" },
@@ -418,7 +418,7 @@ async function main() {
         const start = performance.now();
         await request(
           "GET",
-          `/api/v2/objects/BenchEmployee/${empId}/links/benchEmployeeCourses`
+          `/api/v1/objects/BenchEmployee/${empId}/links/benchEmployeeCourses`
         );
         return performance.now() - start;
       },
@@ -434,7 +434,7 @@ async function main() {
         const start = performance.now();
         await request(
           "GET",
-          `/api/v2/objects/BenchEmployee/${empId}/links/benchEmployeeTickets/count`
+          `/api/v1/objects/BenchEmployee/${empId}/links/benchEmployeeTickets/count`
         );
         return performance.now() - start;
       },
@@ -450,7 +450,7 @@ async function main() {
         const start = performance.now();
         await request(
           "POST",
-          `/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/bulkCount`,
+          `/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes/bulkCount`,
           {
             objectTypeApiName: "BenchEmployee",
             objectPK: empId,
@@ -541,29 +541,29 @@ async function main() {
   // Delete link types
   await request(
     "DELETE",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeTickets`
+    `/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeTickets`
   );
   await request(
     "DELETE",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeCourses`
+    `/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes/benchEmployeeCourses`
   );
 
   // Delete object types
   await request(
     "DELETE",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchTicket`
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchTicket`
   );
   await request(
     "DELETE",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchEmployee`
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchEmployee`
   );
   await request(
     "DELETE",
-    `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/BenchCourse`
+    `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/BenchCourse`
   );
 
   // Delete ontology
-  await request("DELETE", `/api/v2/ontologies/${ONTOLOGY_ID}`);
+  await request("DELETE", `/api/v1/ontologies/${ONTOLOGY_ID}`);
 
   // Delete OpenSearch indices
   try {
@@ -615,7 +615,7 @@ async function waitForIndexing(ontologyId, objectType, maxWaitMs = 600000) {
   while (Date.now() - start < maxWaitMs) {
     const { body } = await request(
       "GET",
-      `/api/v2/ontologies/${ontologyId}/objectTypes/${objectType}`
+      `/api/v1/ontologies/${ontologyId}/objectTypes/${objectType}`
     );
     const state = body?.objectType?.indexingState?.status;
     if (state === "indexed" || state === "stale") {

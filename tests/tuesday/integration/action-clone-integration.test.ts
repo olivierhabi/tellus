@@ -60,7 +60,7 @@ async function request(
 // ---------------------------------------------------------------------------
 
 function actionTypesPath(suffix = "") {
-  return `/api/v2/ontologies/${ontologyId}/actionTypes${suffix}`;
+  return `/api/v1/ontologies/${ontologyId}/actionTypes${suffix}`;
 }
 
 async function ensureActionType(def: Record<string, unknown>): Promise<void> {
@@ -104,7 +104,7 @@ beforeAll(async () => {
     return;
   }
 
-  const ont = await request("GET", "/api/v2/ontologies");
+  const ont = await request("GET", "/api/v1/ontologies");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
     const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;
@@ -394,7 +394,7 @@ describe("Action Type Cloning (Task 23)", () => {
     const tin = `CLONE-EXEC-${RUN_ID}`;
     const execRes = await request(
       "POST",
-      `/api/v2/ontologies/${ontologyId}/actions/${newName}/apply`,
+      `/api/v1/ontologies/${ontologyId}/actions/${newName}/apply`,
       {
         parameters: { tin, fullName: "Clone Execution Test" },
       }

@@ -41,7 +41,7 @@
     }
   ],
   "paths": {
-    "/api/v2/ontologies/{ontologyId}/actionTypes": {
+    "/api/v1/ontologies/{ontologyId}/actionTypes": {
       "post": {
         "operationId": "createActionType",
         "summary": "Create a new action type",
@@ -130,7 +130,7 @@
         }
       }
     },
-    "/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}": {
+    "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}": {
       "get": {
         "operationId": "getActionType",
         "summary": "Get a single action type",
@@ -241,7 +241,7 @@
         }
       }
     },
-    "/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone": {
+    "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone": {
       "post": {
         "operationId": "cloneActionType",
         "summary": "Clone an action type",
@@ -295,7 +295,7 @@
         }
       }
     },
-    "/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact": {
+    "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact": {
       "get": {
         "operationId": "getActionTypeImpact",
         "summary": "Analyze action type impact",
@@ -325,7 +325,7 @@
         }
       }
     },
-    "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply": {
+    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply": {
       "post": {
         "operationId": "applyAction",
         "summary": "Execute an action",
@@ -397,7 +397,7 @@
         }
       }
     },
-    "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate": {
+    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate": {
       "post": {
         "operationId": "validateAction",
         "summary": "Validate an action (dry run)",
@@ -443,7 +443,7 @@
         }
       }
     },
-    "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch": {
+    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch": {
       "post": {
         "operationId": "applyBatchAction",
         "summary": "Execute a batch of actions",
@@ -489,7 +489,7 @@
         }
       }
     },
-    "/api/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit": {
+    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit": {
       "get": {
         "operationId": "getActionAuditLog",
         "summary": "Get audit log for an action type",
@@ -525,7 +525,7 @@
         }
       }
     },
-    "/api/v2/audit/log": {
+    "/api/v1/audit/log": {
       "get": {
         "operationId": "getGlobalAuditLog",
         "summary": "Get global audit log",
@@ -568,7 +568,7 @@
         }
       }
     },
-    "/api/v2/audit/log/{executionId}": {
+    "/api/v1/audit/log/{executionId}": {
       "get": {
         "operationId": "getAuditLogEntry",
         "summary": "Get a single audit log entry",
@@ -614,7 +614,7 @@
         }
       }
     },
-    "/api/v2/audit/stats": {
+    "/api/v1/audit/stats": {
       "get": {
         "operationId": "getAuditStats",
         "summary": "Get audit statistics",
@@ -653,7 +653,7 @@
         }
       }
     },
-    "/api/v2/objects/{objectType}/{primaryKey}/editHistory": {
+    "/api/v1/objects/{objectType}/{primaryKey}/editHistory": {
       "get": {
         "operationId": "getEditHistory",
         "summary": "Get edit history for an object",
@@ -730,11 +730,11 @@
         }
       }
     },
-    "/api/v2/spec": {
+    "/api/docs/spec.json": {
       "get": {
         "operationId": "getOpenApiSpec",
         "summary": "Get OpenAPI specification",
-        "description": "Returns the raw OpenAPI 3.0 JSON specification for the Actions API.",
+        "description": "Returns the combined OpenAPI 3.0 JSON specification for the entire Tellus API.",
         "tags": ["API Specification"],
         "responses": {
           "200": {

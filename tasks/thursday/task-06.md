@@ -1,4 +1,4 @@
-# TASK 6: Create the DELETE `/api/v2/ontology/:ontologyId/linkTypes/:apiName` Endpoint
+# TASK 6: Create the DELETE `/api/v1/ontology/:ontologyId/linkTypes/:apiName` Endpoint
 
 **Objective:** Build the REST API endpoint that deletes a link type definition from the Ontology. Deleting a link type removes the relationship definition but does NOT modify any objects on either side — the foreign key property values remain on the objects, they just no longer have a link type interpreting them as a relationship. In Palantir, deleting a link type is a destructive action that breaks any applications (Workshop modules, saved explorations, functions) that reference the link type.
 
@@ -6,7 +6,7 @@
 
 **Prerequisites:** Tasks 1 and 2 must be complete.
 
-**HTTP method and path:** `DELETE /api/v2/ontology/:ontologyId/linkTypes/:apiName`
+**HTTP method and path:** `DELETE /api/v1/ontology/:ontologyId/linkTypes/:apiName`
 
 **Implementation:**
 

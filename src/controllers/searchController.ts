@@ -103,7 +103,7 @@ export class SearchController {
   };
 
   /**
-   * GET /api/search/picker
+   * GET /api/v1/search/picker
    *
    * Returns pickable resources (projects, folders, datasets, pipelines)
    * for the ontology "Select dataset" dialog. Supports search, scope

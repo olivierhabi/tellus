@@ -27,7 +27,7 @@
      "type": "slow_request",
      "requestId": "...",
      "method": "POST",
-     "path": "/api/v2/objects/Employee/search",
+     "path": "/api/v1/objects/Employee/search",
      "durationMs": 3245.67,
      "body": "{\"where\":{\"type\":\"and\",\"value\":[...truncated...]}",
      "timestamp": "..."

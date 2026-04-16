@@ -1,6 +1,6 @@
 # TASK 8: Build the Action Execution Orchestrator
 
-**Objective:** Create the master orchestrator that ties together parameter validation, rule compilation, edit application, and audit logging into a single, coherent action execution pipeline. This is the main entry point — when someone calls `POST /api/v2/actions/:actionTypeApiName/apply`, this orchestrator runs all stages in sequence.
+**Objective:** Create the master orchestrator that ties together parameter validation, rule compilation, edit application, and audit logging into a single, coherent action execution pipeline. This is the main entry point — when someone calls `POST /api/v1/actions/:actionTypeApiName/apply`, this orchestrator runs all stages in sequence.
 
 Palantir's action execution has 8 documented stages. In week 1, we implement 6 of them (skipping submission criteria and side effects). The orchestrator must track timing for each stage, handle errors at every stage, and always write to the audit log — even for failed executions.
 
@@ -141,7 +141,7 @@ The key behavior to get right: the `finally` block ALWAYS runs. Even if the acti
 **Create the corresponding REST endpoint** at `src/routes/actions.js`:
 
 ```
-POST /api/v2/actions/:actionTypeApiName/apply
+POST /api/v1/actions/:actionTypeApiName/apply
   Body: { "parameters": { ... } }
   Response (success): 200 { "executionId": "...", "result": "success", "affectedObjects": [...], "durationMs": 42 }
   Response (failure): see failureType-to-HTTP mapping below

@@ -6,7 +6,7 @@
 
 Create src/routes/ontology.js. Import Express Router, ontologyService (Task 11), and response formatter utilities (Task 9).
 
-**Route 1: POST /api/v2/ontologies**
+**Route 1: POST /api/v1/ontologies**
 
 Create a new ontology. Input validation is handled by `validateBody` middleware (Task 19) using `CREATE_ONTOLOGY_SCHEMA`. The handler:
 1. Extract `displayName` and `description` from `req.body`.
@@ -15,7 +15,7 @@ Create a new ontology. Input validation is handled by `validateBody` middleware 
 4. Return with `sendCreated(res, formatted)`.
 5. Catch: if `err.code === 'ONTOLOGY_ALREADY_EXISTS'`, call `sendError(res, 'ONTOLOGY_ALREADY_EXISTS', err.message)`. Otherwise, `next(err)`.
 
-**Route 2: GET /api/v2/ontologies**
+**Route 2: GET /api/v1/ontologies**
 
 List all ontologies with pagination.
 1. Extract `pageSize` from `req.query` — parse as integer, default 100, clamp to 1–1000.
@@ -24,7 +24,7 @@ List all ontologies with pagination.
 4. Format each ontology: `formatOntology(row, row.object_type_count)`.
 5. Return with `sendSuccess(res, {data: formatted, totalCount: result.totalCount, pageSize: result.pageSize, nextPageToken: result.nextPageToken})`.
 
-**Route 3: GET /api/v2/ontologies/:ontologyId**
+**Route 3: GET /api/v1/ontologies/:ontologyId**
 
 Get a single ontology.
 1. Extract `ontologyId` from `req.params`.
@@ -34,7 +34,7 @@ Get a single ontology.
 5. Return with `sendSuccess(res, formatted)`.
 6. Catch: if `err.code === 'ONTOLOGY_NOT_FOUND'`, call `sendError(res, 'ONTOLOGY_NOT_FOUND', err.message)`. Otherwise, `next(err)`.
 
-**Route 4: PUT /api/v2/ontologies/:ontologyId**
+**Route 4: PUT /api/v1/ontologies/:ontologyId**
 
 Update an ontology.
 1. Extract `ontologyId` from `req.params`.
@@ -44,7 +44,7 @@ Update an ontology.
 5. Return with `sendSuccess(res, formatted)`.
 6. Catch: handle `ONTOLOGY_NOT_FOUND` and `ONTOLOGY_ALREADY_EXISTS` with `sendError`. Otherwise, `next(err)`.
 
-**Route 5: DELETE /api/v2/ontologies/:ontologyId**
+**Route 5: DELETE /api/v1/ontologies/:ontologyId**
 
 Delete an ontology (cascades all child resources).
 1. Extract `ontologyId` from `req.params`.
@@ -66,10 +66,10 @@ app.use(ontologyRouter);
 **Modify:** src/server.js to mount the router
 
 **Verification:**
-- `curl -X POST http://localhost:3000/api/v2/ontologies -H 'Content-Type: application/json' -d '{"displayName":"Test"}'` → 201 with ontologyId
-- `curl http://localhost:3000/api/v2/ontologies` → 200 with data array
-- `curl http://localhost:3000/api/v2/ontologies/{id}` → 200 with single ontology
-- `curl -X PUT http://localhost:3000/api/v2/ontologies/{id} -H 'Content-Type: application/json' -d '{"displayName":"Updated"}'` → 200
+- `curl -X POST http://localhost:3000/api/v1/ontologies -H 'Content-Type: application/json' -d '{"displayName":"Test"}'` → 201 with ontologyId
+- `curl http://localhost:3000/api/v1/ontologies` → 200 with data array
+- `curl http://localhost:3000/api/v1/ontologies/{id}` → 200 with single ontology
+- `curl -X PUT http://localhost:3000/api/v1/ontologies/{id} -H 'Content-Type: application/json' -d '{"displayName":"Updated"}'` → 200
 - `curl -X PUT` with empty body → 400 with VALIDATION_FAILED
-- `curl -X DELETE http://localhost:3000/api/v2/ontologies/{id}` → 204
-- `curl http://localhost:3000/api/v2/ontologies/{id}` after delete → 404
+- `curl -X DELETE http://localhost:3000/api/v1/ontologies/{id}` → 204
+- `curl http://localhost:3000/api/v1/ontologies/{id}` after delete → 404

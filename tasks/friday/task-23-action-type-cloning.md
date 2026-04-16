@@ -5,7 +5,7 @@
 **Add endpoint** to `src/routes/actionTypes.js`:
 
 ```
-POST /api/v2/ontology/:ontologyId/actionTypes/:apiName/clone
+POST /api/v1/ontology/:ontologyId/actionTypes/:apiName/clone
 Body: { "newApiName": "createContractor", "newDisplayName": "Create Contractor" }
 ```
 
@@ -26,7 +26,7 @@ The cloned action type is completely independent of the original — subsequent 
 **Test cases:**
 ```javascript
 // Clone createEmployee → createContractor
-const res = await fetch('/api/v2/ontology/ont-1/actionTypes/createEmployee/clone', {
+const res = await fetch('/api/v1/ontology/ont-1/actionTypes/createEmployee/clone', {
     method: 'POST',
     body: JSON.stringify({ newApiName: 'createContractor', newDisplayName: 'Create Contractor' })
 });

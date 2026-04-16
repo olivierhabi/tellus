@@ -4,17 +4,18 @@ import { ontologyPaths, ontologySchemas } from './ontology-openapi';
 /**
  * OpenAPI 3.0 specification for the Tellus Backend.
  *
- * Combines two surface areas:
+ * Combines three surface areas:
  *   1. The original Foundry data ingestion API (defined inline below).
  *   2. The Ontology Manager / Object Explorer API, defined separately in
  *      `ontology-openapi.ts` and merged in below so the file stays
  *      navigable.
+ *   3. The Actions API, loaded from `src/api-spec/actions.openapi.json`.
  */
 const baseSpec = {
   openapi: '3.0.3',
   info: {
-    title: 'Foundry Backend API',
-    description: 'Data ingestion and management API for the Foundry platform',
+    title: 'Tellus Backend API',
+    description: 'Complete API reference — Ontology Engine, Foundry data ingestion, and platform services.',
     version: '1.0.0',
     contact: {
       name: 'Foundry Team',
@@ -299,19 +300,6 @@ const baseSpec = {
   },
   security: [{ bearerAuth: [] }, { cookieAuth: [] }, { patAuth: [] }],
   paths: {
-    '/health': {
-      get: {
-        tags: ['Health'],
-        summary: 'Health check',
-        security: [],
-        responses: {
-          '200': {
-            description: 'Service is healthy',
-            content: { 'application/json': { schema: { type: 'object' as const } } },
-          },
-        },
-      },
-    },
     // ---------------------------------------------------------------
     // Authentication — Keycloak-backed (ontology/tellus-auth.md Tasks
     // 3, 4, 9; Phase 3 in-app credential UX).
@@ -324,128 +312,6 @@ const baseSpec = {
     // were all removed. Callers that still hit it get a 404 from the
     // notFoundHandler.
     // ---------------------------------------------------------------
-    '/v1/auth/login': {
-      post: {
-        tags: ['Authentication'],
-        summary: 'Direct-grant login against Keycloak',
-        description:
-          'Proxies the email/password pair to Keycloak via the OAuth2 ' +
-          'Resource Owner Password Credentials grant against the ' +
-          'tellus-frontend client. On success the backend sets an ' +
-          'httpOnly TELLUS_TOKEN cookie (Max-Age 16h) and also returns the ' +
-          'access token in the response body so programmatic clients can ' +
-          'use the Authorization: Bearer path.',
-        security: [],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object' as const,
-                properties: {
-                  username: { type: 'string' as const, description: 'Email or Keycloak username' },
-                  email: { type: 'string' as const, format: 'email' },
-                  password: { type: 'string' as const },
-                },
-                required: ['password'],
-              },
-            },
-          },
-        },
-        responses: {
-          '200': {
-            description: 'Login successful — TELLUS_TOKEN cookie set; body contains accessToken + tokenInfo.',
-          },
-          '401': { description: 'Invalid credentials (Keycloak rejected the direct grant)' },
-          '429': { description: 'AUTH_RATE_LIMIT — too many failed attempts (per IP+username)' },
-          '502': { description: 'KEYCLOAK_UNREACHABLE' },
-        },
-      },
-    },
-    '/v1/auth/logout': {
-      post: {
-        tags: ['Authentication'],
-        summary: 'Logout + revoke current session',
-        description:
-          'Adds the current jti to the server-side revocation set, calls ' +
-          'Keycloak\'s logout endpoint with the refresh token, and clears ' +
-          'the TELLUS_TOKEN + TELLUS_REFRESH cookies. Idempotent.',
-        responses: { '204': { description: 'Logged out' } },
-      },
-    },
-    '/v1/auth/token-info': {
-      get: {
-        tags: ['Authentication'],
-        summary: 'Decoded session claims for the current caller',
-        description:
-          'Returns sub, jti, org, markings, orgs, realmRoles, session scope ' +
-          'and timing data. Works for both JWT and PAT auth; PATs return ' +
-          '`tokenKind: "pat"` and the `scopes` array.',
-        responses: {
-          '200': { description: 'Session info' },
-          '401': { description: 'TOKEN_INVALID / TOKEN_EXPIRED / TOKEN_REVOKED' },
-        },
-      },
-    },
-    '/v1/auth/check-access': {
-      post: {
-        tags: ['Authentication'],
-        summary: 'Centralized hasOperation() authorization check',
-        description:
-          'The Palantir Multipass-equivalent permission probe. Returns ' +
-          '{ allowed, reason } for the (operation, resourceType, resourceRid) ' +
-          'triple evaluated against the caller\'s realm roles.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object' as const,
-                properties: {
-                  operation: { type: 'string' as const },
-                  resourceRid: { type: 'string' as const },
-                  resourceType: { type: 'string' as const },
-                },
-                required: ['operation'],
-              },
-            },
-          },
-        },
-        responses: {
-          '200': { description: '{ allowed: boolean, reason: string }' },
-          '401': { description: 'Unauthenticated' },
-        },
-      },
-    },
-    // /v1/auth/oidc/authorize and /v1/auth/oidc/callback were retired in
-    // Phase 3 (ontology/tellus-auth.md) because they browser-redirected
-    // to the Keycloak hostname. Authentication is now fully in-app via
-    // /v1/auth/login (password, possibly two-step) and /v1/auth/login/mfa
-    // (TOTP or WebAuthn). Only the pure-JSON /oidc/config is still here.
-    '/v1/auth/login/mfa': {
-      post: {
-        tags: ['Authentication'],
-        summary: 'Complete a two-step login (TOTP code or WebAuthn assertion)',
-        description:
-          'Second step of /api/v1/auth/login when the user has enrolled ' +
-          'TOTP or a WebAuthn passkey. Pass the mfaChallenge from step 1 ' +
-          'plus either a TOTP `code` or a WebAuthn `assertionResponse`. ' +
-          'On success the TELLUS_TOKEN cookie is set and the session goes live.',
-        security: [],
-        responses: {
-          '200': { description: 'MFA satisfied — session cookie now set' },
-          '401': { description: 'MFA_CHALLENGE_INVALID / MFA_INVALID' },
-        },
-      },
-    },
-    '/v1/auth/login/mfa/webauthn-options': {
-      post: {
-        tags: ['Authentication'],
-        summary: 'Build a WebAuthn authentication request for an in-flight MFA challenge',
-        security: [],
-        responses: { '200': { description: '@simplewebauthn authenticationOptions JSON' } },
-      },
-    },
     '/v1/auth/me/password': {
       post: {
         tags: ['Authentication'],
@@ -521,27 +387,6 @@ const baseSpec = {
         responses: { '204': { description: 'Deleted' } },
       },
     },
-    '/v1/auth/oidc/config': {
-      get: {
-        tags: ['Authentication'],
-        summary: 'Proxied Keycloak OIDC discovery document',
-        security: [],
-        responses: { '200': { description: 'Essential OIDC endpoints for this realm.' } },
-      },
-    },
-    '/v1/auth/saml/metadata': {
-      get: {
-        tags: ['Authentication'],
-        summary: 'SP EntityDescriptor for partner IdP brokering',
-        security: [],
-        responses: {
-          '200': {
-            description: 'application/xml — Keycloak SAML SP descriptor',
-            content: { 'application/xml': { schema: { type: 'string' as const } } },
-          },
-        },
-      },
-    },
     '/v1/auth/tokens': {
       get: {
         tags: ['Authentication'],
@@ -579,64 +424,6 @@ const baseSpec = {
         },
       },
     },
-    '/v1/auth/pat-scopes': {
-      get: {
-        tags: ['Authentication'],
-        summary: 'Public PAT scope manifest',
-        description:
-          'Returns the closed enum of PAT scopes plus the route-pattern → ' +
-          'required-scope table enforced by the app-wide patSecurityGate. ' +
-          'Tooling that mints PATs for third-party apps reads this instead ' +
-          'of scraping services/patScopeMap.ts. Public (no auth required).',
-        responses: {
-          '200': {
-            description: 'PatScopeManifest JSON',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object' as const,
-                  properties: {
-                    success: { type: 'boolean' as const },
-                    data: {
-                      type: 'object' as const,
-                      properties: {
-                        scopes: { type: 'array' as const, items: { type: 'string' as const } },
-                        unauthenticatedRoutes: {
-                          type: 'array' as const,
-                          items: { type: 'string' as const },
-                        },
-                        rules: {
-                          type: 'array' as const,
-                          items: {
-                            type: 'object' as const,
-                            properties: {
-                              method: { type: 'string' as const, enum: ['ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
-                              prefix: { type: 'string' as const },
-                              scope: { type: 'string' as const },
-                              extraCondition: { type: 'string' as const },
-                            },
-                            required: ['method', 'prefix', 'scope'],
-                          },
-                        },
-                        fallback: {
-                          type: 'object' as const,
-                          properties: {
-                            GET: { type: 'string' as const },
-                            MUTATION: { type: 'string' as const },
-                          },
-                          required: ['GET', 'MUTATION'],
-                        },
-                      },
-                      required: ['scopes', 'unauthenticatedRoutes', 'rules', 'fallback'],
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
     '/v1/auth/tokens/{id}': {
       delete: {
         tags: ['Authentication'],
@@ -650,7 +437,57 @@ const baseSpec = {
         },
       },
     },
-    '/projects': {
+    '/v1/auth/me': {
+      get: { tags: ['Authentication'], summary: 'Current user profile and account console URL', responses: { '200': { description: 'User profile' } } },
+    },
+    '/v1/auth/me/sessions': {
+      get: { tags: ['Authentication'], summary: 'List active Keycloak sessions', responses: { '200': { description: 'Session list' } } },
+    },
+    '/v1/auth/me/sessions/{sessionId}': {
+      delete: { tags: ['Authentication'], summary: 'Revoke a specific session', parameters: [{ name: 'sessionId', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '204': { description: 'Session revoked' } } },
+    },
+    '/v1/auth/me/logout-all': {
+      post: { tags: ['Authentication'], summary: 'Revoke all sessions (logout everywhere)', responses: { '204': { description: 'All sessions revoked' } } },
+    },
+    '/v1/auth/me/credentials': {
+      get: { tags: ['Authentication'], summary: 'List credentials (password, totp, passkey)', responses: { '200': { description: 'Credential list' } } },
+    },
+    '/v1/auth/me/reauth': {
+      post: { tags: ['Authentication'], summary: 'Mint a reauth token by verifying current password', responses: { '200': { description: 'Reauth token' }, '401': { description: 'Password incorrect' } } },
+    },
+    '/v1/auth/me/audit': {
+      get: { tags: ['Authentication'], summary: 'Auth audit events for the current user', responses: { '200': { description: 'Paginated audit events' } } },
+    },
+    '/v1/auth/me/audit/export': {
+      get: { tags: ['Authentication'], summary: 'Export audit events (PAT audit:read scope)', responses: { '200': { description: 'Audit events' } } },
+    },
+    '/v1/auth/me/session-scope': {
+      get: { tags: ['Authentication'], summary: 'Read current session marking scope', responses: { '200': { description: 'Current scope' } } },
+    },
+    '/v1/auth/admin/users': {
+      get: { tags: ['Authentication'], summary: 'List users (superadmin)', responses: { '200': { description: 'Paginated user list' } } },
+      post: { tags: ['Authentication'], summary: 'Create user in Keycloak (superadmin)', responses: { '201': { description: 'User created' } } },
+    },
+    '/v1/auth/admin/users/{id}': {
+      delete: { tags: ['Authentication'], summary: 'Delete user and wipe MFA/PAT data (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '204': { description: 'Deleted' } } },
+    },
+    '/v1/auth/admin/users/{id}/enabled': {
+      patch: { tags: ['Authentication'], summary: 'Enable or disable a user (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '200': { description: 'Updated' } } },
+    },
+    '/v1/auth/admin/settings': {
+      get: { tags: ['Authentication'], summary: 'List system settings (superadmin)', responses: { '200': { description: 'Settings list' } } },
+    },
+    '/v1/auth/admin/settings/{key}': {
+      put: { tags: ['Authentication'], summary: 'Update a system setting (superadmin)', parameters: [{ name: 'key', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '200': { description: 'Updated' } } },
+    },
+    '/v1/auth/admin/applications': {
+      get: { tags: ['Authentication'], summary: 'List OAuth/OIDC applications (superadmin)', responses: { '200': { description: 'Application list' } } },
+      post: { tags: ['Authentication'], summary: 'Register OAuth/OIDC application (superadmin)', responses: { '201': { description: 'Created' } } },
+    },
+    '/v1/auth/admin/applications/{id}': {
+      delete: { tags: ['Authentication'], summary: 'Delete an OAuth/OIDC application (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '204': { description: 'Deleted' } } },
+    },
+    '/v1/projects': {
       get: {
         tags: ['Projects'],
         summary: 'List all projects for the authenticated user',
@@ -681,7 +518,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}': {
+    '/v1/projects/{projectId}': {
       get: {
         tags: ['Projects'],
         summary: 'Get a project by ID',
@@ -728,7 +565,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/stats': {
+    '/v1/projects/{projectId}/stats': {
       get: {
         tags: ['Projects'],
         summary: 'Get project statistics',
@@ -744,7 +581,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/folders': {
+    '/v1/projects/{projectId}/folders': {
       get: {
         tags: ['Folders'],
         summary: 'List folders in a project',
@@ -767,7 +604,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/folders/{folderId}': {
+    '/v1/projects/{projectId}/folders/{folderId}': {
       get: {
         tags: ['Folders'],
         summary: 'Get a folder by ID with children',
@@ -851,7 +688,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/folders/tree': {
+    '/v1/projects/{projectId}/folders/tree': {
       get: {
         tags: ['Folders'],
         summary: 'Get the full project folder tree',
@@ -873,7 +710,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/folders/{folderId}/tree': {
+    '/v1/projects/{projectId}/folders/{folderId}/tree': {
       get: {
         tags: ['Folders'],
         summary: 'Get folder subtree',
@@ -887,7 +724,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/folders/{folderId}/breadcrumb': {
+    '/v1/projects/{projectId}/folders/{folderId}/breadcrumb': {
       get: {
         tags: ['Folders'],
         summary: 'Get breadcrumb trail for a folder',
@@ -911,7 +748,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/folders/{folderId}/upload': {
+    '/v1/projects/{projectId}/folders/{folderId}/upload': {
       post: {
         tags: ['Uploads'],
         summary: 'Upload files to a folder',
@@ -941,7 +778,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/upload': {
+    '/v1/projects/{projectId}/upload': {
       post: {
         tags: ['Uploads'],
         summary: 'Upload files to a project',
@@ -991,7 +828,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/datasets/all': {
+    '/v1/projects/{projectId}/datasets/all': {
       get: {
         tags: ['Datasets'],
         summary: 'List all datasets in a project',
@@ -1021,7 +858,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/datasets': {
+    '/v1/projects/{projectId}/datasets': {
       get: {
         tags: ['Datasets'],
         summary: 'List datasets at the project root level',
@@ -1045,7 +882,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/folders/{folderId}/datasets': {
+    '/v1/projects/{projectId}/folders/{folderId}/datasets': {
       get: {
         tags: ['Datasets'],
         summary: 'List datasets in a folder',
@@ -1061,7 +898,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/status-batch': {
+    '/v1/datasets/status-batch': {
       get: {
         tags: ['Datasets'],
         summary: 'Get processing status for multiple datasets',
@@ -1074,7 +911,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}': {
+    '/v1/datasets/{datasetId}': {
       get: {
         tags: ['Datasets'],
         summary: 'Get a dataset by ID with columns',
@@ -1098,7 +935,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/preview': {
+    '/v1/datasets/{datasetId}/preview': {
       get: {
         tags: ['Datasets'],
         summary: 'Preview dataset rows',
@@ -1111,7 +948,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/status': {
+    '/v1/datasets/{datasetId}/status': {
       get: {
         tags: ['Datasets'],
         summary: 'Get dataset processing status',
@@ -1123,7 +960,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/summary': {
+    '/v1/datasets/{datasetId}/summary': {
       get: {
         tags: ['Datasets'],
         summary: 'Get dataset summary',
@@ -1139,7 +976,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/columns/{columnName}/stats': {
+    '/v1/datasets/{datasetId}/columns/{columnName}/stats': {
       get: {
         tags: ['Column Stats'],
         summary: 'Get statistics for a specific column',
@@ -1153,7 +990,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/profile': {
+    '/v1/datasets/{datasetId}/profile': {
       get: {
         tags: ['Column Stats'],
         summary: 'Get full dataset profile with all column statistics',
@@ -1166,7 +1003,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/versions': {
+    '/v1/datasets/{datasetId}/versions': {
       get: {
         tags: ['Versions'],
         summary: 'List all versions for a dataset',
@@ -1200,7 +1037,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/versions/{versionNumber}': {
+    '/v1/datasets/{datasetId}/versions/{versionNumber}': {
       get: {
         tags: ['Versions'],
         summary: 'Get a specific version',
@@ -1214,7 +1051,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/versions/restore': {
+    '/v1/datasets/{datasetId}/versions/restore': {
       post: {
         tags: ['Versions'],
         summary: 'Restore a dataset to a previous version',
@@ -1240,7 +1077,7 @@ const baseSpec = {
         },
       },
     },
-    '/datasets/{datasetId}/deduplicate': {
+    '/v1/datasets/{datasetId}/deduplicate': {
       post: {
         tags: ['Duplicates'],
         summary: 'Check if a dataset is a duplicate',
@@ -1252,7 +1089,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/duplicates': {
+    '/v1/projects/{projectId}/duplicates': {
       get: {
         tags: ['Duplicates'],
         summary: 'Find all duplicate files in a project',
@@ -1264,7 +1101,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/members': {
+    '/v1/projects/{projectId}/members': {
       get: {
         tags: ['Members'],
         summary: 'List project members',
@@ -1286,7 +1123,7 @@ const baseSpec = {
         },
       },
     },
-    '/search': {
+    '/v1/search': {
       get: {
         tags: ['Search'],
         summary: 'Search datasets, folders, and projects',
@@ -1299,7 +1136,7 @@ const baseSpec = {
         },
       },
     },
-    '/search/suggest': {
+    '/v1/search/suggest': {
       get: {
         tags: ['Search'],
         summary: 'Get search suggestions and autocomplete',
@@ -1311,7 +1148,7 @@ const baseSpec = {
         },
       },
     },
-    '/breadcrumb/{type}/{id}': {
+    '/v1/breadcrumb/{type}/{id}': {
       get: {
         tags: ['Navigation'],
         summary: 'Get breadcrumb trail for a project, folder, or dataset',
@@ -1336,7 +1173,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines': {
+    '/v1/projects/{projectId}/pipelines': {
       get: {
         tags: ['Pipelines'],
         summary: 'List pipelines for a project',
@@ -1402,7 +1239,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}': {
       get: {
         tags: ['Pipelines'],
         summary: 'Get a pipeline by ID',
@@ -1479,7 +1316,7 @@ const baseSpec = {
 
     /* ── Pipeline Nodes ─────────────────────────────────────────────── */
 
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes': {
       get: {
         tags: ['Pipeline Nodes'],
         summary: 'List all nodes for a pipeline',
@@ -1568,7 +1405,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/bulk': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/bulk': {
       post: {
         tags: ['Pipeline Nodes'],
         summary: 'Bulk-add nodes to a pipeline',
@@ -1601,7 +1438,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}': {
       put: {
         tags: ['Pipeline Nodes'],
         summary: 'Update a pipeline node',
@@ -1649,27 +1486,8 @@ const baseSpec = {
       },
     },
 
-    '/users/me/preferences': {
-      get: {
-        tags: ['User Preferences'],
-        summary: 'Get all user preferences',
-        responses: {
-          '200': {
-            description: 'List of user preferences',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'array' as const,
-                  items: { $ref: '#/components/schemas/UserPreference' },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
     /* ── Transform — Cast ──────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/cast/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/cast/preview': {
       post: {
         tags: ['Transforms'],
         summary: 'Preview a Cast transform',
@@ -1756,7 +1574,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/cast/apply': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/cast/apply': {
       post: {
         tags: ['Transforms'],
         summary: 'Apply (persist) a Cast transform',
@@ -1819,7 +1637,7 @@ const baseSpec = {
       },
     },
     /* ── Transform — Filter ─────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/filter/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/filter/preview': {
       post: {
         tags: ['Transforms'],
         summary: 'Preview a Filter transform',
@@ -1905,7 +1723,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/filter/apply': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/filter/apply': {
       post: {
         tags: ['Transforms'],
         summary: 'Apply (persist) a Filter transform',
@@ -1955,7 +1773,7 @@ const baseSpec = {
       },
     },
     /* ── Transform — Drop Columns ──────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/drop/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/drop/preview': {
       post: {
         tags: ['Transforms'],
         summary: 'Preview a Drop Columns transform',
@@ -2010,7 +1828,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/drop/apply': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/drop/apply': {
       post: {
         tags: ['Transforms'],
         summary: 'Apply (persist) a Drop Columns transform',
@@ -2042,7 +1860,7 @@ const baseSpec = {
       },
     },
     /* ── Join ──────────────────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/join/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/join/preview': {
       post: {
         tags: ['Join'],
         summary: 'Preview a Join transform',
@@ -2074,7 +1892,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/join/apply': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/join/apply': {
       post: {
         tags: ['Join'],
         summary: 'Apply (persist) a Join transform',
@@ -2096,7 +1914,7 @@ const baseSpec = {
       },
     },
     /* ── Union by name ─────────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/union/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/union/preview': {
       post: {
         tags: ['Union'],
         summary: 'Preview a Union by name transform',
@@ -2128,7 +1946,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/union/apply': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/union/apply': {
       post: {
         tags: ['Union'],
         summary: 'Apply (persist) a Union by name transform',
@@ -2148,7 +1966,7 @@ const baseSpec = {
       },
     },
     /* ── Transform — Rename Columns ─────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/rename/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/rename/preview': {
       post: {
         tags: ['Transforms'],
         summary: 'Preview a Rename Columns transform',
@@ -2202,7 +2020,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/rename/apply': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/rename/apply': {
       post: {
         tags: ['Transforms'],
         summary: 'Apply (persist) a Rename Columns transform',
@@ -2226,7 +2044,7 @@ const baseSpec = {
       },
     },
     /* ── Transform — Normalize Column Names ────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/normalize/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/normalize/preview': {
       post: {
         tags: ['Transforms'],
         summary: 'Preview a Normalize Column Names transform',
@@ -2255,7 +2073,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/normalize/apply': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/normalize/apply': {
       post: {
         tags: ['Transforms'],
         summary: 'Apply (persist) a Normalize Column Names transform',
@@ -2275,7 +2093,7 @@ const baseSpec = {
       },
     },
     /* ── Execute Full Transform Chain ─────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/execute': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/execute': {
       post: {
         tags: ['Transforms'],
         summary: 'Execute the full transform chain',
@@ -2300,7 +2118,7 @@ const baseSpec = {
       },
     },
     /* ── Deploy Pipeline ─────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/deploy': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/deploy': {
       post: {
         tags: ['Deployment'],
         summary: 'Deploy pipeline (async)',
@@ -2349,7 +2167,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/deployments': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/deployments': {
       get: {
         tags: ['Deployment'],
         summary: 'List pipeline deployments',
@@ -2363,7 +2181,7 @@ const baseSpec = {
         },
       },
     },
-    '/projects/{projectId}/pipelines/{pipelineId}/deployments/{deploymentId}': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/deployments/{deploymentId}': {
       get: {
         tags: ['Deployment'],
         summary: 'Get deployment status (poll endpoint)',
@@ -2441,7 +2259,7 @@ const baseSpec = {
       },
     },
     /* ── Save Pipeline Progress ──────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/save': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/save': {
       post: {
         tags: ['Pipeline'],
         summary: 'Save pipeline progress',
@@ -2515,7 +2333,7 @@ const baseSpec = {
       },
     },
     /* ── Output Preview ────────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/output/preview': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/output/preview': {
       post: {
         tags: ['Output'],
         summary: 'Preview output node data',
@@ -2563,7 +2381,7 @@ const baseSpec = {
       },
     },
     /* ── Preview Snapshot ──────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/preview-snapshot': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/preview-snapshot': {
       post: {
         tags: ['Transforms'],
         summary: 'Save a transform preview snapshot',
@@ -2608,7 +2426,7 @@ const baseSpec = {
       },
     },
     /* ── Canvas Viewport ─────────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/viewport': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/viewport': {
       put: {
         tags: ['Pipelines'],
         summary: 'Save canvas viewport',
@@ -2636,7 +2454,7 @@ const baseSpec = {
       },
     },
     /* ── Batch Position Update ────────────────────────────────────── */
-    '/projects/{projectId}/pipelines/{pipelineId}/nodes/positions': {
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/positions': {
       patch: {
         tags: ['Pipeline Nodes'],
         summary: 'Batch update node positions',
@@ -2659,68 +2477,244 @@ const baseSpec = {
         },
       },
     },
-    '/users/me/preferences/{key}': {
+    // ---------------------------------------------------------------
+    // Favorites & Recent
+    // ---------------------------------------------------------------
+    '/v1/users/me/favorites': {
       get: {
-        tags: ['User Preferences'],
-        summary: 'Get a single user preference by key',
-        parameters: [
-          { name: 'key', in: 'path' as const, required: true, schema: { type: 'string' as const, pattern: '^[a-z][a-z0-9_]*$' } },
-        ],
+        tags: ['Favorites'],
+        summary: 'List all favorites for the current user',
         responses: {
-          '200': {
-            description: 'User preference',
-            content: { 'application/json': { schema: { $ref: '#/components/schemas/UserPreference' } } },
-          },
-          '404': { description: 'Preference not found' },
+          '200': { description: 'Favorites list', content: { 'application/json': { schema: { type: 'object' as const, properties: { data: { type: 'array' as const, items: { type: 'object' as const, properties: { resource_type: { type: 'string' as const }, resource_id: { type: 'string' as const }, created_at: { type: 'string' as const } } } }, totalCount: { type: 'integer' as const } } } } } },
         },
       },
-      put: {
-        tags: ['User Preferences'],
-        summary: 'Update a user preference',
-        parameters: [
-          { name: 'key', in: 'path' as const, required: true, schema: { type: 'string' as const, pattern: '^[a-z][a-z0-9_]*$' } },
-        ],
+      post: {
+        tags: ['Favorites'],
+        summary: 'Mark a resource as favorite (idempotent)',
         requestBody: {
           required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object' as const,
-                properties: {
-                  value: {},
-                },
-                required: ['value'],
-              },
-            },
-          },
+          content: { 'application/json': { schema: { type: 'object' as const, properties: { resourceType: { type: 'string' as const }, resourceId: { type: 'string' as const } }, required: ['resourceType', 'resourceId'] } } },
         },
         responses: {
-          '200': { description: 'Preference updated' },
+          '201': { description: 'Favorited', content: { 'application/json': { schema: { type: 'object' as const, properties: { ok: { type: 'boolean' as const } } } } } },
         },
       },
+    },
+    '/v1/users/me/favorites/{resourceType}/{resourceId}': {
       delete: {
-        tags: ['User Preferences'],
-        summary: 'Delete (reset) a user preference',
+        tags: ['Favorites'],
+        summary: 'Remove a favorite',
         parameters: [
-          { name: 'key', in: 'path' as const, required: true, schema: { type: 'string' as const, pattern: '^[a-z][a-z0-9_]*$' } },
+          { name: 'resourceType', in: 'path' as const, required: true, schema: { type: 'string' as const } },
+          { name: 'resourceId', in: 'path' as const, required: true, schema: { type: 'string' as const } },
+        ],
+        responses: { '204': { description: 'Removed' } },
+      },
+    },
+    '/v1/users/me/favorites/recent': {
+      get: {
+        tags: ['Favorites'],
+        summary: 'List 50 most recent resource visits',
+        responses: {
+          '200': { description: 'Recent visits', content: { 'application/json': { schema: { type: 'object' as const, properties: { data: { type: 'array' as const, items: { type: 'object' as const } }, totalCount: { type: 'integer' as const } } } } } },
+        },
+      },
+      post: {
+        tags: ['Favorites'],
+        summary: 'Record a resource visit (keeps last 50)',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object' as const, properties: { resourceType: { type: 'string' as const }, resourceId: { type: 'string' as const } }, required: ['resourceType', 'resourceId'] } } },
+        },
+        responses: {
+          '201': { description: 'Recorded', content: { 'application/json': { schema: { type: 'object' as const, properties: { ok: { type: 'boolean' as const } } } } } },
+        },
+      },
+    },
+    // ---------------------------------------------------------------
+    // SQL (DuckDB / Furnace)
+    // ---------------------------------------------------------------
+    '/v1/sql': {
+      post: {
+        tags: ['SQL'],
+        summary: 'Execute a read-only SQL query via DuckDB (max 1,000 rows)',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object' as const, properties: { ontologyId: { type: 'string' as const }, sql: { type: 'string' as const } }, required: ['ontologyId', 'sql'] } } },
+        },
+        responses: {
+          '200': { description: 'Query result', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const } } } } } },
+          '400': { description: 'VALIDATION_ERROR or SQL_ERROR' },
+        },
+      },
+    },
+    '/v1/sql/invalidate': {
+      post: {
+        tags: ['SQL'],
+        summary: 'Invalidate the Furnace SQL cache',
+        requestBody: {
+          content: { 'application/json': { schema: { type: 'object' as const, properties: { ontologyId: { type: 'string' as const, description: 'Omit to invalidate all' } } } } },
+        },
+        responses: {
+          '200': { description: 'Cache invalidated', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const, properties: { invalidated: { type: 'string' as const } } } } } } } },
+        },
+      },
+    },
+    // ---------------------------------------------------------------
+    // Charts
+    // ---------------------------------------------------------------
+    '/v1/charts/auto': {
+      post: {
+        tags: ['Charts'],
+        summary: 'Auto-select one chart per field in a given field list',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object' as const, properties: { ontologyId: { type: 'string' as const }, objectType: { type: 'string' as const }, fields: { type: 'array' as const, items: { type: 'object' as const, properties: { field: { type: 'string' as const }, baseType: { type: 'string' as const } } } } }, required: ['ontologyId', 'objectType', 'fields'] } } },
+        },
+        responses: {
+          '200': { description: 'Auto charts', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const } } } } } },
+        },
+      },
+    },
+    // ---------------------------------------------------------------
+    // Pipelines Status (Funnel / Streaming)
+    // ---------------------------------------------------------------
+    '/v1/pipelines/funnel/{ontologyId}/{apiName}': {
+      get: {
+        tags: ['Pipeline Status'],
+        summary: 'Batch funnel status (changelog → merge → indexing → hydration)',
+        parameters: [
+          { name: 'ontologyId', in: 'path' as const, required: true, schema: { type: 'string' as const } },
+          { name: 'apiName', in: 'path' as const, required: true, schema: { type: 'string' as const } },
         ],
         responses: {
-          '204': { description: 'Preference deleted' },
+          '200': { description: 'Funnel status', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const, properties: { ontologyId: { type: 'string' as const }, objectType: { type: 'string' as const }, mode: { type: 'string' as const }, stages: { type: 'array' as const, items: { type: 'object' as const } }, objectsIndexed: { type: 'integer' as const }, objectsFailed: { type: 'integer' as const } } } } } } } },
+        },
+      },
+    },
+    '/v1/pipelines/streaming/{ontologyId}/{apiName}': {
+      get: {
+        tags: ['Pipeline Status'],
+        summary: 'Streaming pipeline status (Flink)',
+        parameters: [
+          { name: 'ontologyId', in: 'path' as const, required: true, schema: { type: 'string' as const } },
+          { name: 'apiName', in: 'path' as const, required: true, schema: { type: 'string' as const } },
+        ],
+        responses: {
+          '200': { description: 'Streaming status', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const } } } } } },
+        },
+      },
+    },
+    // ---------------------------------------------------------------
+    // Dev Tools (non-production only)
+    // ---------------------------------------------------------------
+    '/v1/dev/seed': {
+      post: {
+        tags: ['Dev Tools'],
+        summary: 'Seed sample project data (non-production only)',
+        responses: {
+          '200': { description: 'Seeded', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const, properties: { message: { type: 'string' as const }, project: { type: 'object' as const } } } } } } } },
+        },
+      },
+    },
+    '/v1/dev/reset': {
+      post: {
+        tags: ['Dev Tools'],
+        summary: 'Truncate all data tables (non-production only)',
+        responses: {
+          '200': { description: 'Reset', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const, properties: { message: { type: 'string' as const } } } } } } } },
+        },
+      },
+    },
+    '/v1/dev/status': {
+      get: {
+        tags: ['Dev Tools'],
+        summary: 'Row counts and seeded status (non-production only)',
+        responses: {
+          '200': { description: 'Status', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const, properties: { seeded: { type: 'boolean' as const }, counts: { type: 'object' as const, properties: { projects: { type: 'integer' as const }, folders: { type: 'integer' as const }, datasets: { type: 'integer' as const } } } } } } } } } },
         },
       },
     },
   },
 };
 
-// Merge Ontology paths/schemas into the spec exported to consumers.
+// ---------------------------------------------------------------------------
+// Tag ordering — groups endpoints logically in Swagger UI the way a senior
+// engineer would expect: auth & health first, then core domain, then
+// ontology, actions, observability, and docs last.
+// ---------------------------------------------------------------------------
+const orderedTags: Array<{ name: string; description?: string }> = [
+  // 1. Auth
+  { name: 'Authentication', description: 'Keycloak login, MFA, PATs, passkeys, and session management' },
+
+  // 2. Core data domain
+  { name: 'Projects', description: 'Create, list, update, and delete projects' },
+  { name: 'Members', description: 'Project membership and roles' },
+  { name: 'Folders', description: 'Folder tree, nesting, and breadcrumb navigation' },
+  { name: 'Uploads', description: 'File upload (folder-level and project-level)' },
+  { name: 'Datasets', description: 'Dataset CRUD, preview, status, and summary' },
+  { name: 'Column Stats', description: 'Per-column statistics and dataset profiling' },
+  { name: 'Versions', description: 'Dataset version history and restore' },
+  { name: 'Duplicates', description: 'Hash-based duplicate detection and deduplication' },
+  { name: 'Search', description: 'Full-text search, suggest, and typeahead' },
+  { name: 'Navigation', description: 'Breadcrumb trails for projects, folders, and datasets' },
+
+  // 3. Favorites
+  { name: 'Favorites', description: 'Starred items for quick access' },
+
+  // 4. Ontology & Object Explorer
+  { name: 'Ontology Manager', description: 'Ontology CRUD, aliases, and metadata' },
+  { name: 'Object Types', description: 'Object type definitions, schema, and configuration' },
+  { name: 'Properties', description: 'Property definitions on object types' },
+  { name: 'Link Types', description: 'Relationship definitions between object types' },
+  { name: 'Interfaces', description: 'Interface definitions and object type implementations' },
+  { name: 'Objects', description: 'Object instance search, CRUD, and aggregation' },
+  { name: 'Object Views', description: 'Saved object views and filters' },
+  { name: 'Groups', description: 'Object type grouping and categorisation' },
+  { name: 'Branches', description: 'Ontology branching and merge' },
+  { name: 'Governance', description: 'Ontology governance rules and approval workflows' },
+  { name: 'Summary', description: 'Ontology-level summary statistics' },
+  { name: 'Comparisons', description: 'Ontology diff and comparison' },
+  { name: 'Explorations', description: 'Saved exploration queries' },
+  { name: 'Exports', description: 'Ontology export in various formats' },
+  { name: 'Functions', description: 'Ontology-defined computed functions' },
+  { name: 'Geo', description: 'Geospatial queries on object instances' },
+  { name: 'Backing Datasource', description: 'Datasource mapping and sync configuration' },
+  { name: 'Indexing', description: 'Object indexing and reindex operations' },
+  { name: 'Edits', description: 'Edit overlay and pending change management' },
+  { name: 'Migrations', description: 'Ontology schema migrations' },
+
+  // 5. Actions & Audit
+  { name: 'Action Types', description: 'Action type CRUD and impact analysis' },
+  { name: 'Audit', description: 'Ontology audit trail' },
+
+  // 6. Analytics & Pipelines
+  { name: 'SQL', description: 'DuckDB SQL query interface' },
+  { name: 'Charts', description: 'Polars-backed chart generation' },
+  { name: 'Pipeline', description: 'Pipeline builder canvas and node graph' },
+  { name: 'Pipeline Nodes', description: 'Pipeline node CRUD' },
+  { name: 'Pipelines', description: 'Pipeline execution and management' },
+  { name: 'Pipeline Status', description: 'Pipeline run status and history' },
+  { name: 'Transforms', description: 'Data transformation operations' },
+  { name: 'Join', description: 'Dataset join operations' },
+  { name: 'Union', description: 'Dataset union operations' },
+  { name: 'Output', description: 'Pipeline output sinks' },
+
+  // 7. Infrastructure
+  { name: 'Deployment', description: 'Deployment status and environment info' },
+  { name: 'Dev Tools', description: 'Development seed/reset utilities' },
+];
+
+// Merge Ontology + Actions paths/schemas into the spec exported to consumers.
 export const openApiSpec = {
   ...baseSpec,
   info: {
     ...baseSpec.info,
     title: 'Tellus Backend API',
     description:
-      'Combined Foundry data ingestion + Ontology Manager / Object Explorer API.',
+      'Combined Foundry data ingestion, Ontology Manager / Object Explorer, and Actions API.',
   },
+  tags: orderedTags,
   components: {
     ...baseSpec.components,
     schemas: {
@@ -2738,7 +2732,7 @@ export const openApiSpec = {
  * Set up Swagger UI and serve the OpenAPI spec.
  *
  * Serves the raw spec at GET /api/docs/spec.json
- * and a minimal HTML Swagger UI at GET /api/docs.
+ * and a dark-mode Swagger UI at GET /api/docs.
  */
 export function setupSwagger(app: Express): void {
   // Serve the raw OpenAPI spec
@@ -2746,9 +2740,7 @@ export function setupSwagger(app: Express): void {
     res.json(openApiSpec);
   });
 
-  // Serve a minimal Swagger UI HTML page.
-  // Override Content-Security-Policy so the browser allows the unpkg CDN
-  // assets and the small inline bootstrap script.
+  // Serve a dark-mode Swagger UI HTML page.
   app.get('/api/docs', (_req, res) => {
     res.setHeader(
       'Content-Security-Policy',
@@ -2759,8 +2751,241 @@ export function setupSwagger(app: Express): void {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Foundry API Docs</title>
+  <title>Tellus API Docs</title>
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    /* ── Dark mode theme for Swagger UI ── */
+    :root {
+      --bg-primary: #1a1a2e;
+      --bg-secondary: #16213e;
+      --bg-tertiary: #0f3460;
+      --bg-input: #1e2a4a;
+      --text-primary: #e0e0e0;
+      --text-secondary: #a0a0b8;
+      --text-muted: #6c6c80;
+      --border-color: #2a2a4a;
+      --accent: #4fc3f7;
+      --accent-hover: #81d4fa;
+      --link: #4fc3f7;
+      --get: #61affe;
+      --post: #49cc90;
+      --put: #fca130;
+      --delete: #f93e3e;
+      --patch: #50e3c2;
+      --get-bg: rgba(97, 175, 254, 0.1);
+      --post-bg: rgba(73, 204, 144, 0.1);
+      --put-bg: rgba(252, 161, 48, 0.1);
+      --delete-bg: rgba(249, 62, 62, 0.1);
+      --patch-bg: rgba(80, 227, 194, 0.1);
+    }
+
+    html, body {
+      background: var(--bg-primary) !important;
+      color: var(--text-primary) !important;
+    }
+
+    /* Top bar */
+    .swagger-ui .topbar { display: none !important; }
+
+    /* Info section */
+    .swagger-ui .info .title,
+    .swagger-ui .info h1,
+    .swagger-ui .info h2,
+    .swagger-ui .info h3 {
+      color: #fff !important;
+    }
+    .swagger-ui .info p,
+    .swagger-ui .info .markdown p,
+    .swagger-ui .info li,
+    .swagger-ui .info table {
+      color: var(--text-secondary) !important;
+    }
+    .swagger-ui .info a { color: var(--link) !important; }
+
+    /* Scheme container */
+    .swagger-ui .scheme-container {
+      background: var(--bg-secondary) !important;
+      box-shadow: none !important;
+      border-bottom: 1px solid var(--border-color) !important;
+    }
+    .swagger-ui .scheme-container label,
+    .swagger-ui .scheme-container select {
+      color: var(--text-primary) !important;
+    }
+
+    /* Tag groups */
+    .swagger-ui .opblock-tag {
+      color: var(--text-primary) !important;
+      border-bottom: 1px solid var(--border-color) !important;
+    }
+    .swagger-ui .opblock-tag:hover { background: var(--bg-secondary) !important; }
+    .swagger-ui .opblock-tag small { color: var(--text-muted) !important; }
+
+    /* Operation blocks */
+    .swagger-ui .opblock {
+      border: 1px solid var(--border-color) !important;
+      border-radius: 6px !important;
+      box-shadow: none !important;
+      margin-bottom: 8px !important;
+    }
+    .swagger-ui .opblock.opblock-get { background: var(--get-bg) !important; border-color: var(--get) !important; }
+    .swagger-ui .opblock.opblock-post { background: var(--post-bg) !important; border-color: var(--post) !important; }
+    .swagger-ui .opblock.opblock-put { background: var(--put-bg) !important; border-color: var(--put) !important; }
+    .swagger-ui .opblock.opblock-delete { background: var(--delete-bg) !important; border-color: var(--delete) !important; }
+    .swagger-ui .opblock.opblock-patch { background: var(--patch-bg) !important; border-color: var(--patch) !important; }
+
+    .swagger-ui .opblock .opblock-summary {
+      border: none !important;
+    }
+    .swagger-ui .opblock .opblock-summary-method {
+      border-radius: 4px !important;
+      font-weight: 700 !important;
+    }
+    .swagger-ui .opblock .opblock-summary-path,
+    .swagger-ui .opblock .opblock-summary-path__deprecated,
+    .swagger-ui .opblock .opblock-summary-description {
+      color: var(--text-primary) !important;
+    }
+
+    /* Expanded operation body */
+    .swagger-ui .opblock-body { background: var(--bg-secondary) !important; }
+    .swagger-ui .opblock-body pre,
+    .swagger-ui .opblock-body pre.microlight {
+      background: var(--bg-primary) !important;
+      color: var(--text-primary) !important;
+      border: 1px solid var(--border-color) !important;
+      border-radius: 4px !important;
+    }
+    .swagger-ui .opblock-section-header {
+      background: var(--bg-tertiary) !important;
+      box-shadow: none !important;
+      border-bottom: 1px solid var(--border-color) !important;
+    }
+    .swagger-ui .opblock-section-header h4,
+    .swagger-ui .opblock-section-header label {
+      color: var(--text-primary) !important;
+    }
+
+    /* Parameter table */
+    .swagger-ui table thead tr th,
+    .swagger-ui table thead tr td,
+    .swagger-ui .parameters-col_name,
+    .swagger-ui .parameters-col_description {
+      color: var(--text-primary) !important;
+    }
+    .swagger-ui table tbody tr td {
+      color: var(--text-secondary) !important;
+      border-bottom-color: var(--border-color) !important;
+    }
+    .swagger-ui .parameter__name { color: var(--text-primary) !important; }
+    .swagger-ui .parameter__type { color: var(--text-muted) !important; }
+    .swagger-ui .parameter__name.required::after { color: var(--delete) !important; }
+
+    /* Inputs */
+    .swagger-ui input[type=text],
+    .swagger-ui textarea,
+    .swagger-ui select {
+      background: var(--bg-input) !important;
+      color: var(--text-primary) !important;
+      border: 1px solid var(--border-color) !important;
+      border-radius: 4px !important;
+    }
+
+    /* Response section */
+    .swagger-ui .responses-inner h4,
+    .swagger-ui .responses-inner h5,
+    .swagger-ui .response-col_status,
+    .swagger-ui .response-col_description {
+      color: var(--text-primary) !important;
+    }
+    .swagger-ui .response-col_links { color: var(--text-secondary) !important; }
+
+    /* Models / Schemas section */
+    .swagger-ui section.models {
+      border: 1px solid var(--border-color) !important;
+      border-radius: 6px !important;
+    }
+    .swagger-ui section.models h4 { color: var(--text-primary) !important; }
+    .swagger-ui section.models .model-container {
+      background: var(--bg-secondary) !important;
+      border-bottom-color: var(--border-color) !important;
+    }
+    .swagger-ui .model-title { color: var(--text-primary) !important; }
+    .swagger-ui .model { color: var(--text-secondary) !important; }
+    .swagger-ui .model .property.primitive { color: var(--text-secondary) !important; }
+    .swagger-ui .prop-type { color: var(--accent) !important; }
+
+    /* Buttons */
+    .swagger-ui .btn {
+      border-radius: 4px !important;
+      box-shadow: none !important;
+    }
+    .swagger-ui .btn.execute {
+      background-color: var(--accent) !important;
+      border-color: var(--accent) !important;
+      color: #000 !important;
+    }
+    .swagger-ui .btn.execute:hover {
+      background-color: var(--accent-hover) !important;
+    }
+    .swagger-ui .btn.cancel {
+      border-color: var(--delete) !important;
+      color: var(--delete) !important;
+    }
+
+    /* Authorize button */
+    .swagger-ui .btn.authorize {
+      color: var(--post) !important;
+      border-color: var(--post) !important;
+    }
+    .swagger-ui .btn.authorize svg { fill: var(--post) !important; }
+
+    /* Code/response blocks */
+    .swagger-ui .highlight-code .microlight {
+      background: var(--bg-primary) !important;
+      color: var(--text-primary) !important;
+    }
+    .swagger-ui .renderedMarkdown p,
+    .swagger-ui .renderedMarkdown code {
+      color: var(--text-secondary) !important;
+    }
+    .swagger-ui .renderedMarkdown code {
+      background: var(--bg-primary) !important;
+      padding: 2px 6px !important;
+      border-radius: 3px !important;
+    }
+
+    /* Tab headers */
+    .swagger-ui .tab li { color: var(--text-muted) !important; }
+    .swagger-ui .tab li.active { color: var(--text-primary) !important; }
+
+    /* Misc overrides */
+    .swagger-ui .wrapper { background: transparent !important; }
+    .swagger-ui .loading-container .loading::after { color: var(--text-muted) !important; }
+    .swagger-ui svg:not(:root) { fill: var(--text-secondary); }
+    .swagger-ui .expand-operation svg { fill: var(--text-muted) !important; }
+    .swagger-ui .arrow { fill: var(--text-secondary) !important; }
+
+    /* Dialog / modal */
+    .swagger-ui .dialog-ux .modal-ux {
+      background: var(--bg-secondary) !important;
+      border: 1px solid var(--border-color) !important;
+    }
+    .swagger-ui .dialog-ux .modal-ux-header h3 { color: var(--text-primary) !important; }
+    .swagger-ui .dialog-ux .modal-ux-content p { color: var(--text-secondary) !important; }
+
+    /* Copy-to-clipboard */
+    .swagger-ui .copy-to-clipboard { filter: invert(0.8); }
+
+    /* JSON / example values */
+    .swagger-ui .example .microlight { background: var(--bg-primary) !important; }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: var(--bg-primary); }
+    ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+  </style>
 </head>
 <body>
   <div id="swagger-ui"></div>
@@ -2771,6 +2996,13 @@ export function setupSwagger(app: Express): void {
       dom_id: '#swagger-ui',
       presets: [SwaggerUIBundle.presets.apis],
       layout: 'BaseLayout',
+      deepLinking: true,
+      defaultModelsExpandDepth: 1,
+      defaultModelExpandDepth: 2,
+      docExpansion: 'list',
+      filter: true,
+      showExtensions: true,
+      tryItOutEnabled: false,
     });
   </script>
 </body>

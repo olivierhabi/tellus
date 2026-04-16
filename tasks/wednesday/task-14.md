@@ -7,7 +7,7 @@
 **Endpoint specification:**
 
 ```
-POST /api/v2/objects/:objectType/searchFullText
+POST /api/v1/objects/:objectType/searchFullText
 Content-Type: application/json
 ```
 

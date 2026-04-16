@@ -1,4 +1,4 @@
-# TASK 12: Create the GET `/api/v2/objects/:objectType/:primaryKey/links/:linkType` Endpoint
+# TASK 12: Create the GET `/api/v1/objects/:objectType/:primaryKey/links/:linkType` Endpoint
 
 **Objective:** Build the REST API endpoint that resolves a link from a specific object. This is the primary endpoint for link traversal in the API. Given an object (identified by type + PK) and a link type, return the linked objects.
 
@@ -6,7 +6,7 @@
 
 **Prerequisites:** Tasks 1-11 must be complete (link_type table, CRUD endpoints, all resolvers, dispatcher).
 
-**HTTP method and path:** `GET /api/v2/objects/:objectType/:primaryKey/links/:linkType`
+**HTTP method and path:** `GET /api/v1/objects/:objectType/:primaryKey/links/:linkType`
 
 **Path parameters:**
 - `objectType` (string): api_name of the starting object's type
@@ -91,9 +91,9 @@ router.get('/:objectType/:primaryKey/links/:linkType', handler);
 
 **Testing:**
 1. Create Employee with companyId=COMP-001. Create Company COMP-001. Create MANY_TO_ONE link (Employee → Company).
-2. `GET /api/v2/objects/Employee/EMP-001/links/employeeCompany` — expect `{ "data": { "__primaryKey": "COMP-001", ... } }`.
-3. `GET /api/v2/objects/Company/COMP-001/links/employeeCompany` — reverse traversal, expect `{ "data": [...employees...], "totalCount": N }`.
-4. `GET /api/v2/objects/Employee/EMP-001/links/nonExistent` — expect HTTP 404.
-5. `GET /api/v2/objects/Ticket/TKT-001/links/employeeCompany` — expect HTTP 400 (Ticket not part of link).
-6. `GET /api/v2/objects/Employee/NONEXISTENT/links/employeeCompany` — expect HTTP 404 (starting object not found).
-7. `GET /api/v2/objects/Employee/EMP-001/links/manages?$direction=reverse` — self-referential reverse, expect manager returned.
+2. `GET /api/v1/objects/Employee/EMP-001/links/employeeCompany` — expect `{ "data": { "__primaryKey": "COMP-001", ... } }`.
+3. `GET /api/v1/objects/Company/COMP-001/links/employeeCompany` — reverse traversal, expect `{ "data": [...employees...], "totalCount": N }`.
+4. `GET /api/v1/objects/Employee/EMP-001/links/nonExistent` — expect HTTP 404.
+5. `GET /api/v1/objects/Ticket/TKT-001/links/employeeCompany` — expect HTTP 400 (Ticket not part of link).
+6. `GET /api/v1/objects/Employee/NONEXISTENT/links/employeeCompany` — expect HTTP 404 (starting object not found).
+7. `GET /api/v1/objects/Employee/EMP-001/links/manages?$direction=reverse` — self-referential reverse, expect manager returned.

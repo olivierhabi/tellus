@@ -10,23 +10,23 @@ Create `/tests/integration/test04_link_traversal.js`:
 **Setup:** This test must be self-contained. Create its own ontology, object types, datasets, and backing datasources — do not depend on any prior test having run. Use a unique ontology name (e.g., "Link Traversal Test").
 
 Setup steps (each step must assert status code for early failure detection):
-- `POST /api/v2/ontology` — create ontology. Assert: status 201.
-- `POST /api/v2/ontology/{id}/objectTypes` — create Employee object type with all 10 properties from Task 17 (including companyId). Assert: status 201.
-- `POST /api/v2/ontology/{id}/objectTypes` — create Company object type with: companyId (PK, string), companyName (string), sector (string). Assert: status 201.
-- `POST /api/v2/datasets/upload` — upload employees_1000.csv (generate or reuse from Task 17). Assert: status 201.
-- `POST /api/v2/datasets/upload` — upload companies_5.csv (generate or reuse from Task 17). Assert: status 201.
+- `POST /api/v1/ontology` — create ontology. Assert: status 201.
+- `POST /api/v1/ontology/{id}/objectTypes` — create Employee object type with all 10 properties from Task 17 (including companyId). Assert: status 201.
+- `POST /api/v1/ontology/{id}/objectTypes` — create Company object type with: companyId (PK, string), companyName (string), sector (string). Assert: status 201.
+- `POST /api/v1/datasets/upload` — upload employees_1000.csv (generate or reuse from Task 17). Assert: status 201.
+- `POST /api/v1/datasets/upload` — upload companies_5.csv (generate or reuse from Task 17). Assert: status 201.
 - `POST .../Employee/datasource` — register Employee backing datasource with column mapping. Assert: status 200.
 - `POST .../Company/datasource` — register Company backing datasource. Assert: status 200.
 - `POST .../Employee/reindex` — reindex Employee. Assert: status 200, totalObjectsIndexed === 1000.
 - `POST .../Company/reindex` — reindex Company. Assert: status 200, totalObjectsIndexed === 5.
 
-Note: The `searchAround` endpoint (`POST /api/v2/objects/:objectType/searchAround`) and the object view endpoint (`GET /api/v2/objects/:objectType/:pk/view`) are listed in the OBJECTS and LINKS sections of the API endpoint list and were built in Days 1-5. If they do not exist, they must be built as prerequisites before this test can pass.
+Note: The `searchAround` endpoint (`POST /api/v1/objects/:objectType/searchAround`) and the object view endpoint (`GET /api/v1/objects/:objectType/:pk/view`) are listed in the OBJECTS and LINKS sections of the API endpoint list and were built in Days 1-5. If they do not exist, they must be built as prerequisites before this test can pass.
 
 **Test sequence:**
 
 Test 4.1: Create a MANY_TO_ONE link type from Employee to Company
 ```
-POST /api/v2/ontology/{ontologyId}/linkTypes
+POST /api/v1/ontology/{ontologyId}/linkTypes
 Body: {
   "apiName": "employeeCompany",
   "displayName": "Employee → Company",
@@ -39,14 +39,14 @@ Body: {
 
 Test 4.2: Traverse from Employee to Company
 ```
-GET /api/v2/objects/Employee/EMP-0001/links/employeeCompany
+GET /api/v1/objects/Employee/EMP-0001/links/employeeCompany
 Assert: Returns exactly 1 company object
 Assert: The returned company's companyId matches EMP-0001's companyId
 ```
 
 Test 4.3: Reverse traverse — from Company to all Employees
 ```
-GET /api/v2/objects/Company/COMP-001/links/employeeCompany
+GET /api/v1/objects/Company/COMP-001/links/employeeCompany
 Assert: Returns multiple employees
 Assert: ALL returned employees have companyId === "COMP-001"
 Note: The API automatically infers traversal direction based on whether the source object is the link's source or target type. Same endpoint pattern, direction is resolved by the system.
@@ -54,7 +54,7 @@ Note: The API automatically infers traversal direction based on whether the sour
 
 Test 4.4: Search Around with filter
 ```
-POST /api/v2/objects/Company/searchAround
+POST /api/v1/objects/Company/searchAround
 Body: {
   "sourceFilter": { "type": "eq", "field": "sector", "value": "Banking" },
   "linkType": "employeeCompany",
@@ -65,13 +65,13 @@ Assert: Returns employees who work at Banking companies AND have salary > 100K
 
 Test 4.5: Verify link count in object view
 ```
-GET /api/v2/objects/Employee/EMP-0001/view
+GET /api/v1/objects/Employee/EMP-0001/view
 Assert: links.employeeCompany.count === 1
 ```
 
 Test 4.5b: Record current COMP-003 employee count
 ```
-GET /api/v2/objects/Company/COMP-003/links/employeeCompany
+GET /api/v1/objects/Company/COMP-003/links/employeeCompany
 Store: originalComp003Count = response.totalCount
 ```
 
@@ -80,16 +80,16 @@ Test 4.6: Upload new employees (append) and reindex
 Generate a 10-row CSV with employee IDs EMP-LINK-001 through EMP-LINK-010,
 all with companyId = "COMP-003". Other fields: full_name, email, department, annual_salary, etc.
 
-POST /api/v2/datasets/{employeeDatasetId}/transactions (multipart form, type: "APPEND")
+POST /api/v1/datasets/{employeeDatasetId}/transactions (multipart form, type: "APPEND")
 Assert: status 201, transaction.type === "APPEND"
 
-POST /api/v2/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
+POST /api/v1/ontology/{ontologyId}/objectTypes/Employee/reindex?force=true
 Assert: status 200, result.totalObjectsIndexed === 1010
 ```
 
 Test 4.7: Verify new employees are linked correctly
 ```
-GET /api/v2/objects/Company/COMP-003/links/employeeCompany
+GET /api/v1/objects/Company/COMP-003/links/employeeCompany
 Assert: response.totalCount === originalComp003Count + 10
 ```
 

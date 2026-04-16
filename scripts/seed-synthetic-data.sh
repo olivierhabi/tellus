@@ -14,7 +14,7 @@ set -uo pipefail
 API="${API:-http://localhost:3000}"
 ES="${ES:-http://localhost:9200}"
 DATA_DIR="${DATA_DIR:-/tmp/tellus-synthetic}"
-ONTOLOGY_ID="${ONTOLOGY_ID:-$(curl -s "$API/api/v2/ontologies" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["ontologyId"])')}"
+ONTOLOGY_ID="${ONTOLOGY_ID:-$(curl -s "$API/api/v1/ontologies" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["ontologyId"])')}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -92,7 +92,7 @@ echo -e "${YELLOW}[2/6]${NC} Registering object types"
 create_type() {
   local api_name="$1" display_name="$2"
   local existing
-  existing=$(curl -s -o /dev/null -w "%{http_code}" "$API/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/$api_name")
+  existing=$(curl -s -o /dev/null -w "%{http_code}" "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$api_name")
   if [[ "$existing" == "200" ]]; then
     echo -e "  ${GREEN}✓${NC} $api_name already exists"
     return 0
@@ -101,7 +101,7 @@ create_type() {
   status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
     -H "Content-Type: application/json" \
     -d "{\"apiName\":\"$api_name\",\"displayName\":\"$display_name\",\"status\":\"active\"}" \
-    "$API/api/v2/ontologies/$ONTOLOGY_ID/objectTypes")
+    "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes")
   if [[ "$status" == "201" ]]; then
     echo -e "  ${GREEN}✓${NC} $api_name created"
   else
@@ -117,7 +117,7 @@ add_property() {
   curl -s -o /dev/null -X POST \
     -H "Content-Type: application/json" \
     -d "{\"apiName\":\"$api\",\"displayName\":\"$display\",\"baseType\":\"$base\"}" \
-    "$API/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/$type/properties"
+    "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$type/properties"
 }
 
 add_property SynthFlight flightNumber  "Flight Number"   string
@@ -272,41 +272,41 @@ echo -e "${YELLOW}[4/6]${NC} Seeding branches, groups, favorites, explorations"
 BRANCH="seed-$(date +%s)"
 curl -s -X POST -H 'Content-Type: application/json' \
   -d "{\"name\":\"$BRANCH\"}" \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/branches" > /dev/null
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/branches" > /dev/null
 curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"title":"Add Flight primary key"}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/branches/$BRANCH/proposals" > /dev/null
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/branches/$BRANCH/proposals" > /dev/null
 echo -e "  ${GREEN}✓${NC} branch $BRANCH + proposal"
 
 GROUP="transport"
 curl -s -X POST -H 'Content-Type: application/json' \
   -d "{\"apiName\":\"$GROUP\",\"displayName\":\"Transport\"}" \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/groups" > /dev/null
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/groups" > /dev/null
 curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"objectTypeApiName":"SynthFlight"}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/groups/$GROUP/members" > /dev/null
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/groups/$GROUP/members" > /dev/null
 echo -e "  ${GREEN}✓${NC} group $GROUP + SynthFlight membership"
 
 curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"resourceType":"objectType","resourceId":"SynthFlight"}' \
-  "$API/api/v2/users/me/favorites" > /dev/null
+  "$API/api/v1/users/me/favorites" > /dev/null
 curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"resourceType":"objectType","resourceId":"SynthFlight"}' \
-  "$API/api/v2/users/me/favorites/recent" > /dev/null
+  "$API/api/v1/users/me/favorites/recent" > /dev/null
 echo -e "  ${GREEN}✓${NC} favorite + recent visit"
 
 curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"title":"Delayed SFO flights","description":"seed","config":{"filter":[{"property":"status","operator":"eq","value":"DELAYED"}]}}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/explorations" > /dev/null
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/explorations" > /dev/null
 echo -e "  ${GREEN}✓${NC} saved exploration"
 
 FN_NAME="seedFn$(date +%s)"
 curl -s -X POST -H 'Content-Type: application/json' \
   -d "{\"apiName\":\"$FN_NAME\",\"displayName\":\"Seed Fn\",\"runtime\":\"typescript\",\"sourceCode\":\"module.exports = (input) => ({ doubled: (input && input.n) ? input.n * 2 : 0 });\"}" \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/functions" > /dev/null
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/functions" > /dev/null
 INVOKE_RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"input":{"n":21}}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/functions/$FN_NAME/invoke")
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$FN_NAME/invoke")
 if echo "$INVOKE_RES" | grep -q '"doubled":42'; then
   echo -e "  ${GREEN}✓${NC} function $FN_NAME invoked (21 → 42)"
 else

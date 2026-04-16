@@ -10,7 +10,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   t.section("Response Format + Error Handler (Tasks 9, 10)");
 
   await t.test("Error response shape (Task 9)", async () => {
-    const { body } = await api("GET", "/api/v2/ontologies/00000000-0000-0000-0000-000000000000");
+    const { body } = await api("GET", "/api/v1/ontologies/00000000-0000-0000-0000-000000000000");
     t.assert(body.error !== undefined, "error key present");
     t.assert(typeof body.error.code === "string", "error.code is string");
     t.assert(typeof body.error.message === "string", "error.message is string");
@@ -23,7 +23,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Error handler catches service errors (Task 10)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/NonExistent`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/NonExistent`
     );
     t.assert(status === 404, `Expected 404, got ${status}`);
     t.assert(body.error.code === "OBJECT_TYPE_NOT_FOUND", `code = ${body.error.code}`);
@@ -34,7 +34,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Delete non-PK property (Task 15)", async () => {
     const { status } = await api(
       "DELETE",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/phone`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/phone`
     );
     t.assert(status === 204, `Expected 204, got ${status}`);
   });
@@ -42,7 +42,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Delete PK property fails (Task 15)", async () => {
     const { status, body } = await api(
       "DELETE",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/employeeId`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/employeeId`
     );
     t.assert(status === 400, `Expected 400, got ${status}`);
     t.assert(body.error.code === "VALIDATION_FAILED", `code = ${body.error.code}`);
@@ -54,7 +54,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Update object type (Task 14)", async () => {
     const { status, body } = await api(
       "PUT",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee`,
       { displayName: "Updated Employee", icon: "user", iconColor: "#FF0000" }
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
@@ -66,7 +66,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Update ontology (Task 11/12)", async () => {
     const { status, body } = await api(
       "PUT",
-      `/api/v2/ontologies/${ctx.ontologyId}`,
+      `/api/v1/ontologies/${ctx.ontologyId}`,
       { displayName: "Test Ontology Updated", description: "Updated description" }
     );
     t.assert(status === 200, `Expected 200, got ${status}`);

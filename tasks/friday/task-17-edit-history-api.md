@@ -5,7 +5,7 @@
 **Add endpoint** to `src/routes/objects.js` (the existing objects router):
 
 ```
-GET /api/v2/objects/:objectType/:primaryKey/editHistory
+GET /api/v1/objects/:objectType/:primaryKey/editHistory
 ```
 
 Query parameters:
@@ -80,7 +80,7 @@ await executeAction('ont-1', 'updateSalary', { employeeRef: 'EMP-HIST', newSalar
 await executeAction('ont-1', 'updateSalary', { employeeRef: 'EMP-HIST', newSalary: 150000 }, { executedBy: 'user-a' });
 
 // Fetch edit history
-const response = await fetch('/api/v2/objects/Employee/EMP-HIST/editHistory');
+const response = await fetch('/api/v1/objects/Employee/EMP-HIST/editHistory');
 const history = await response.json();
 assert(history.totalCount === 3);
 assert(history.data[0].operation === 'update'); // most recent first

@@ -13,7 +13,7 @@ Create `/tests/integration/test05_bulk_actions_audit.js`:
 
 Test 5.1: Create action type for bulk department reassignment
 ```
-POST /api/v2/ontology/{ontologyId}/actionTypes
+POST /api/v1/ontology/{ontologyId}/actionTypes
 Body: {
   "apiName": "reassignDepartment",
   "displayName": "Reassign Employee Department",
@@ -34,7 +34,7 @@ Body: {
 
 Test 5.2: Execute bulk action with 50 valid + 5 invalid requests
 ```
-POST /api/v2/actions/reassignDepartment/applyBulk
+POST /api/v1/actions/reassignDepartment/applyBulk
 Body: {
   "requests": [
     // 50 valid: EMP-0001 through EMP-0050, all reassigned to "Audit Division"
@@ -57,14 +57,14 @@ Assert: failed results have error.code === "OBJECT_NOT_FOUND"
 
 Test 5.3: Verify all 50 employees now have department "Audit Division"
 ```
-POST /api/v2/objects/Employee/search
+POST /api/v1/objects/Employee/search
 Body: { "where": { "type": "eq", "field": "department", "value": "Audit Division" } }
 Assert: totalCount >= 50
 ```
 
 Test 5.4: Verify audit log has 55 entries (50 success + 5 failure)
 ```
-GET /api/v2/actions/reassignDepartment/audit?pageSize=100
+GET /api/v1/actions/reassignDepartment/audit?pageSize=100
 Assert: data.length === 55
 Assert: 50 entries have result === "success"
 Assert: 5 entries have result === "failed"
@@ -83,7 +83,7 @@ Assert: duration_ms is a positive integer
 
 Test 5.6: Test stopOnError=true behavior
 ```
-POST /api/v2/actions/reassignDepartment/applyBulk
+POST /api/v1/actions/reassignDepartment/applyBulk
 Body: {
   "requests": [
     { "parameters": { "employeeRef": "EMP-0051", "newDepartment": "Legal" } },
@@ -101,13 +101,13 @@ Assert: results[1].status === "failed" (INVALID-99)
 
 Test 5.7: Verify EMP-0053 was NOT changed (stopOnError prevented it)
 ```
-GET /api/v2/objects/Employee/EMP-0053
+GET /api/v1/objects/Employee/EMP-0053
 Assert: department !== "Legal" (should still be its original department)
 ```
 
 Test 5.8: Test scale limit
 ```
-POST /api/v2/actions/reassignDepartment/applyBulk
+POST /api/v1/actions/reassignDepartment/applyBulk
 Body: { "requests": Array of 1001 items }
 Assert: status 400, error mentions "limited to 1000 items"
 ```
@@ -115,7 +115,7 @@ Assert: status 400, error mentions "limited to 1000 items"
 **Cleanup:**
 After tests complete (pass or fail), delete all test data in the same order as Task 17's cleanup.
 
-**Note:** The audit query endpoint (`GET /api/v2/actions/:actionType/audit`) is listed in the ACTIONS section of the API endpoint summary. Its response format must include a `data` array where each entry has: `action_type_api_name` (string), `parameters` (object), `affected_objects` (array), `result` (string: "success" or "failed"), `executed_at` (ISO timestamp), and `duration_ms` (integer). Pagination uses `pageSize` and `pageToken` query parameters.
+**Note:** The audit query endpoint (`GET /api/v1/actions/:actionType/audit`) is listed in the ACTIONS section of the API endpoint summary. Its response format must include a `data` array where each entry has: `action_type_api_name` (string), `parameters` (object), `affected_objects` (array), `result` (string: "success" or "failed"), `executed_at` (ISO timestamp), and `duration_ms` (integer). Pagination uses `pageSize` and `pageToken` query parameters.
 
 ### Validation Criteria
 - Bulk operation with mixed success/failure returns correct summary

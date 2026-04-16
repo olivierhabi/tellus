@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Comparison Views — Ontology Platform spec Task 26
 // ---------------------------------------------------------------------------
-// Mounted at /api/v2/ontologies/:ontologyId/comparisons
+// Mounted at /api/v1/ontologies/:ontologyId/comparisons
 //
 // POST /aggregate — dual aggregation in a single round trip
 //

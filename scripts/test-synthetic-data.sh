@@ -10,7 +10,7 @@
 set -uo pipefail
 
 API="${API:-http://localhost:3000}"
-ONTOLOGY_ID="${ONTOLOGY_ID:-$(curl -s "$API/api/v2/ontologies" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["ontologyId"])')}"
+ONTOLOGY_ID="${ONTOLOGY_ID:-$(curl -s "$API/api/v1/ontologies" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["ontologyId"])')}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -53,12 +53,12 @@ echo "============================================================"
 # ---------------------------------------------------------------------------
 echo ""
 echo "Task 5 — pagination envelope"
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/objectTypes?pageSize=5")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes?pageSize=5")
 assert_json "Task 5: list returns data[] with totalCount" \
   "$RES" 'len(d.get("data", [])) > 0 and d.get("totalCount", 0) > 0'
 
 # Test ETag header on GET
-ETAG=$(curl -s -i "$API/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/SynthFlight" | grep -i '^etag:' | tr -d '\r')
+ETAG=$(curl -s -i "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/SynthFlight" | grep -i '^etag:' | tr -d '\r')
 if [[ -n "$ETAG" ]]; then
   printf "${GREEN}✓${NC} Task 5: GET SynthFlight returns ETag header (%s)\n" "$ETAG"
   PASS=$((PASS + 1))
@@ -75,7 +75,7 @@ echo ""
 echo "Task 6 — vector KNN"
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"query":[0.1,0.2,0.3,0.4,0.5],"topK":3}' \
-  "$API/api/v2/vector/SynthFlight/embedding/search")
+  "$API/api/v1/vector/SynthFlight/embedding/search")
 assert_json "Task 6: KNN returns a results array and engine name" \
   "$RES" 'isinstance(d.get("data"), dict) and "results" in d["data"] and "engine" in d["data"]'
 
@@ -84,12 +84,12 @@ assert_json "Task 6: KNN returns a results array and engine name" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "Task 9 — branches"
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/branches")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/branches")
 assert_json "Task 9: at least one OPEN branch present" \
   "$RES" 'any(b.get("status") == "OPEN" for b in d.get("data", []))'
 
 FIRST_BRANCH=$(echo "$RES" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["data"][0]["name"])')
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/branches/$FIRST_BRANCH")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/branches/$FIRST_BRANCH")
 assert_json "Task 9: branch detail includes proposals array" \
   "$RES" '"proposals" in d and len(d["proposals"]) > 0'
 
@@ -100,7 +100,7 @@ echo ""
 echo "Task 13 — migration plan"
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"operations":["property_type_change","add_property","primary_key_change","change_description"]}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/migrations/plan")
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/migrations/plan")
 assert_json "Task 13: breaking includes property_type_change + primary_key_change" \
   "$RES" 'set(["property_type_change","primary_key_change"]).issubset(set(d.get("breaking", [])))'
 assert_json "Task 13: nonBreaking includes add_property + change_description" \
@@ -111,10 +111,10 @@ assert_json "Task 13: nonBreaking includes add_property + change_description" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "Task 14 — favorites"
-RES=$(curl -s "$API/api/v2/users/me/favorites")
+RES=$(curl -s "$API/api/v1/users/me/favorites")
 assert_json "Task 14: seeded favorite SynthFlight is listed" \
   "$RES" 'any(f.get("resource_id") == "SynthFlight" for f in d.get("data", []))'
-RES=$(curl -s "$API/api/v2/users/me/favorites/recent")
+RES=$(curl -s "$API/api/v1/users/me/favorites/recent")
 assert_json "Task 14: recent visit is recorded" \
   "$RES" 'len(d.get("data", [])) > 0'
 
@@ -123,13 +123,13 @@ assert_json "Task 14: recent visit is recorded" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "Task 15 — groups"
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/groups")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/groups")
 assert_json "Task 15: transport group is listed" \
   "$RES" 'any(g.get("api_name") == "transport" for g in d.get("data", []))'
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/groups/graph")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/groups/graph")
 assert_json "Task 15: graph returns nodes array" \
   "$RES" 'isinstance(d.get("nodes"), list) and "truncated" in d'
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/groups/transport/counts")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/groups/transport/counts")
 assert_json "Task 15: count cache returns live SynthFlight count" \
   "$RES" 'isinstance(d.get("counts", {}).get("SynthFlight"), int) and d["counts"]["SynthFlight"] >= 200'
 
@@ -138,7 +138,7 @@ assert_json "Task 15: count cache returns live SynthFlight count" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "Task 18 — function registry"
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/functions")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/functions")
 assert_json "Task 18: at least one function registered" \
   "$RES" 'len(d.get("data", [])) > 0'
 
@@ -146,20 +146,20 @@ assert_json "Task 18: at least one function registered" \
 FN="testSynth$(date +%s)"
 curl -s -X POST -H 'Content-Type: application/json' \
   -d "{\"apiName\":\"$FN\",\"displayName\":\"Synth Test\",\"runtime\":\"typescript\",\"sourceCode\":\"module.exports = (i) => ({ sum: (i.a||0) + (i.b||0) });\"}" \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/functions" > /dev/null
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/functions" > /dev/null
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"input":{"a":40,"b":2}}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/functions/$FN/invoke")
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$FN/invoke")
 assert_json "Task 18: function output reflects input" \
   "$RES" 'd.get("output", {}).get("sum") == 42'
-curl -s -X DELETE "$API/api/v2/ontologies/$ONTOLOGY_ID/functions/$FN" > /dev/null
+curl -s -X DELETE "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$FN" > /dev/null
 
 # ---------------------------------------------------------------------------
 # Task 19: summary bundle should pull the seeded Phase 2 data
 # ---------------------------------------------------------------------------
 echo ""
 echo "Task 19 — home bundle"
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/summary")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/summary")
 assert_json "Task 19: summary contains objectTypes, groups, favorites, recent" \
   "$RES" 'all(k in d for k in ["objectTypes","groups","favorites","recent"]) and len(d["favorites"]) > 0 and any(g.get("api_name") == "transport" for g in d["groups"])'
 
@@ -170,7 +170,7 @@ echo ""
 echo "Task 21 — chart batch"
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"objectType":"SynthFlight","specs":[{"type":"terms","field":"status"},{"type":"histogram","field":"ticketPrice"}]}' \
-  "$API/api/v2/charts/batch")
+  "$API/api/v1/charts/batch")
 assert_json "Task 21: batch returns 2 charts with non-empty terms buckets" \
   "$RES" 'len(d.get("data", {}).get("charts", [])) == 2 and len(d["data"]["charts"][0].get("buckets", [])) > 0'
 assert_json "Task 21: autoBuckets computed from live docCount" \
@@ -183,13 +183,13 @@ echo ""
 echo "Task 22 — geohash"
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"geopointProperty":"originLocation","zoom":3}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/geo/SynthFlight/geohash")
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/geo/SynthFlight/geohash")
 assert_json "Task 22: geohash returns buckets for seeded origins" \
   "$RES" 'len(d.get("buckets", [])) > 0 and d.get("precision", 0) >= 3'
 
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"regionProperty":"originCountry","level":"country"}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/geo/SynthFlight/choropleth")
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/geo/SynthFlight/choropleth")
 assert_json "Task 22: choropleth returns region buckets" \
   "$RES" 'len(d.get("regions", [])) > 0'
 
@@ -200,7 +200,7 @@ echo ""
 echo "Task 23 — filter model"
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"filter":[{"property":"status","operator":"eq","value":"DELAYED"}],"pageSize":5}' \
-  "$API/api/v2/objects/SynthFlight/search")
+  "$API/api/v1/objects/SynthFlight/search")
 assert_json "Task 23: search returns SynthFlight hits" \
   "$RES" '"data" in d or "hits" in d or "results" in d'
 
@@ -211,7 +211,7 @@ echo ""
 echo "Task 26 — comparison"
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"objectTypeApiName":"SynthFlight","setA":{"label":"All","filter":[]},"setB":{"label":"Expensive","filter":[{"property":"ticketPrice","operator":"gt","value":1000}]},"aggregation":{"type":"terms","field":"status"}}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/comparisons/aggregate")
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/comparisons/aggregate")
 assert_json "Task 26: setA contains non-empty status buckets" \
   "$RES" 'len(d.get("setA", {}).get("buckets", [])) > 0'
 assert_json "Task 26: palette has both A and B colors" \
@@ -224,14 +224,14 @@ echo ""
 echo "Task 27 — async export"
 JOB=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"objectTypeApiName":"SynthFlight","format":"csv","query":{}}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/exports" | \
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/exports" | \
   python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])' 2>/dev/null)
 if [[ -z "$JOB" ]]; then
   printf "${RED}✗${NC} Task 27: failed to enqueue job\n"
   FAIL=$((FAIL + 1)); FAILED+=("Task 27 enqueue")
 else
   for i in 1 2 3 4 5; do
-    STATUS=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/exports/$JOB" | \
+    STATUS=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/exports/$JOB" | \
       python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' 2>/dev/null)
     [[ "$STATUS" == "COMPLETED" ]] && break
     sleep 1
@@ -275,7 +275,7 @@ fi
 echo ""
 echo "Task 28 — IDOR protection"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-  "$API/api/v2/objects/SynthFlight/DOES-NOT-EXIST")
+  "$API/api/v1/objects/SynthFlight/DOES-NOT-EXIST")
 if [[ "$STATUS" == "404" ]]; then
   printf "${GREEN}✓${NC} Task 28: unknown object → 404\n"
   PASS=$((PASS + 1))
@@ -291,7 +291,7 @@ echo ""
 echo "Task 29 — SQL read-only"
 RES=$(curl -s -X POST -H 'Content-Type: application/json' \
   -d "{\"ontologyId\":\"$ONTOLOGY_ID\",\"sql\":\"DROP TABLE object_type\"}" \
-  "$API/api/v2/sql")
+  "$API/api/v1/sql")
 assert_json "Task 29: DDL rejected with errorCode" \
   "$RES" '"errorCode" in d or ("error" in d and "code" in d.get("error", {}))'
 
@@ -300,16 +300,16 @@ assert_json "Task 29: DDL rejected with errorCode" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "Task 30 — governance over real data"
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/governance/lineage/SynthFlight?depth=3")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/governance/lineage/SynthFlight?depth=3")
 assert_json "Task 30: lineage returns a node for SynthFlight" \
   "$RES" 'any(n.get("id") == "ot:SynthFlight" for n in d.get("nodes", []))'
 
 RES=$(curl -s -X POST -H 'Content-Type: application/json' -d '{}' \
-  "$API/api/v2/ontologies/$ONTOLOGY_ID/governance/pii-scans/SynthFlight")
+  "$API/api/v1/ontologies/$ONTOLOGY_ID/governance/pii-scans/SynthFlight")
 assert_json "Task 30: PII scan reports email hits against live index" \
   "$RES" 'any(m.get("detectedType") == "email" for m in d.get("matches", [])) and d.get("sampleSize", 0) > 0'
 
-RES=$(curl -s "$API/api/v2/ontologies/$ONTOLOGY_ID/governance/usage/SynthFlight")
+RES=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/governance/usage/SynthFlight")
 assert_json "Task 30: usage sparkline shows non-zero reads or writes" \
   "$RES" 'isinstance(d.get("series"), list) and len(d["series"]) == 30 and sum(s.get("reads", 0) + s.get("writes", 0) for s in d["series"]) > 0'
 

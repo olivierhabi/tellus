@@ -2,7 +2,7 @@
 
 **File to modify:** `/src/routes/indexing.js` (add route to the file created in Task 14)
 
-**Endpoint:** `DELETE /api/v2/ontology/:ontologyId/objectTypes/:apiName/index`
+**Endpoint:** `DELETE /api/v1/ontology/:ontologyId/objectTypes/:apiName/index`
 
 **Purpose:** Deletes the OpenSearch index for an object type. All indexed objects are permanently deleted. The object type definition in PostgreSQL is NOT affected — only the indexed data in OpenSearch is removed. After calling this, the object type will have no queryable objects until it is re-indexed.
 

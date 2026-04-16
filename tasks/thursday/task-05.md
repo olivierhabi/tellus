@@ -1,4 +1,4 @@
-# TASK 5: Create the PUT `/api/v2/ontology/:ontologyId/linkTypes/:apiName` Endpoint
+# TASK 5: Create the PUT `/api/v1/ontology/:ontologyId/linkTypes/:apiName` Endpoint
 
 **Objective:** Build the REST API endpoint that updates an existing link type definition. In Palantir Foundry, link type definitions can be modified — for example, changing the display name, description, or even the cardinality (though changing cardinality is a breaking change that requires careful handling). This endpoint allows partial updates — the caller only needs to provide the fields they want to change, and all other fields remain unchanged.
 
@@ -6,7 +6,7 @@
 
 **Prerequisites:** Tasks 1 and 2 must be complete (link_type table and POST endpoint).
 
-**HTTP method and path:** `PUT /api/v2/ontology/:ontologyId/linkTypes/:apiName`
+**HTTP method and path:** `PUT /api/v1/ontology/:ontologyId/linkTypes/:apiName`
 
 **Request body (all fields optional — partial update):**
 

@@ -9,7 +9,7 @@ export class HashController {
   constructor(private hashService: HashService) {}
 
   /**
-   * GET /api/projects/:projectId/duplicates
+   * GET /api/v1/projects/:projectId/duplicates
    * Find all duplicate files within a project.
    */
   findDuplicates = async (req: Request, res: Response, next: NextFunction) => {
@@ -33,7 +33,7 @@ export class HashController {
   };
 
   /**
-   * POST /api/datasets/:datasetId/deduplicate
+   * POST /api/v1/datasets/:datasetId/deduplicate
    * Check if a dataset is a duplicate and compute its hash.
    */
   deduplicateDataset = async (req: Request, res: Response, next: NextFunction) => {

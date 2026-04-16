@@ -13,7 +13,7 @@
  *   • Enforces a hard `LIMIT 1000` and a 10 s statement timeout so users
  *     can't lock the request thread.
  *
- * The endpoint surface is `/api/v2/sql` (see `routes/sql.ts`).
+ * The endpoint surface is `/api/v1/sql` (see `routes/sql.ts`).
  */
 
 import pool from '../db';
@@ -25,7 +25,7 @@ let Database: typeof import('duckdb').Database | null = null;
 try {
   Database = require('duckdb').Database;
 } catch {
-  console.warn('duckdb native module not available — /api/v2/sql endpoint will be disabled');
+  console.warn('duckdb native module not available — /api/v1/sql endpoint will be disabled');
 }
 
 type Database = import('duckdb').Database;

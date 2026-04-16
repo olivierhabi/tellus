@@ -125,7 +125,7 @@ On any error, log the error and call `process.exit(1)`. On success, call `proces
 **Verification:**
 - `npm run seed` completes without errors
 - `npm run seed` run a second time also completes without errors (idempotency)
-- `GET /api/v2/ontologies` returns 1 ontology with objectTypeCount: 5
-- `GET /api/v2/ontologies/:id/objectTypes` returns 5 types
-- `GET /api/v2/ontologies/:id/objectTypes/Taxpayer` returns 10 properties, a backing datasource with rowCount 100, and funnelState with status 'not_indexed'
+- `GET /api/v1/ontologies` returns 1 ontology with objectTypeCount: 5
+- `GET /api/v1/ontologies/:id/objectTypes` returns 5 types
+- `GET /api/v1/ontologies/:id/objectTypes/Taxpayer` returns 10 properties, a backing datasource with rowCount 100, and funnelState with status 'not_indexed'
 - CSV files in `/tmp/ontology-testdata/` each have exactly 101 lines (1 header + 100 data rows)

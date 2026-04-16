@@ -7,7 +7,7 @@
 **Endpoint specification:**
 
 ```
-POST /api/v2/objects/:objectType/search
+POST /api/v1/objects/:objectType/search
 Content-Type: application/json
 ```
 
@@ -89,7 +89,7 @@ Content-Type: application/json
 - **Query matches zero objects:** Return `{ "data": [], "nextPageToken": null, "totalCount": 0 }`. This is NOT an error — HTTP 200 with empty data.
 - **Very complex nested query with 100+ conditions:** The query should execute normally. OpenSearch handles complex bool queries efficiently. But set a timeout of 30 seconds on the OpenSearch request to prevent indefinite hangs.
 
-**Logging:** Log every search request with: the object type, a compact representation of the `where` clause (JSON stringify, truncated to 200 chars), the number of results, the total count, and the response time. Example: `[2025-03-12T14:30:00Z] POST /api/v2/objects/Employee/search where={"type":"and","value":[{"type":"eq"...]} → 200 (50/1523 objects, 89ms)`
+**Logging:** Log every search request with: the object type, a compact representation of the `where` clause (JSON stringify, truncated to 200 chars), the number of results, the total count, and the response time. Example: `[2025-03-12T14:30:00Z] POST /api/v1/objects/Employee/search where={"type":"and","value":[{"type":"eq"...]} → 200 (50/1523 objects, 89ms)`
 
 **Test cases:**
 1. Search with no filter → returns all objects paginated

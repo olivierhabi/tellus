@@ -12,7 +12,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("changeStatus to experimental (Task 21)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/changeStatus`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/changeStatus`,
       { status: "experimental" }
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
@@ -22,7 +22,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("changeStatus back to active (Task 21)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/changeStatus`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/changeStatus`,
       { status: "active" }
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
@@ -32,7 +32,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("changeStatus invalid status (Task 21)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/changeStatus`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/changeStatus`,
       { status: "invalid_status" }
     );
     t.assert(status === 400, `Expected 400, got ${status}`);
@@ -42,7 +42,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Clone object type (Task 21)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/clone`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/clone`,
       { newApiName: "EmployeeClone", newDisplayName: "Employee Clone" }
     );
     t.assert(status === 201, `Expected 201, got ${status}`);
@@ -60,7 +60,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Export single object type (Task 21)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/export`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/export`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.exportVersion === "1.0", "exportVersion = 1.0");
@@ -74,14 +74,14 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Import single object type (Task 21)", async () => {
     const { body: exportBody } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/export`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee/export`
     );
     exportBody.objectType.apiName = "EmployeeImported";
     exportBody.objectType.displayName = "Employee Imported";
 
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/import`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/import`,
       exportBody
     );
     t.assert(status === 201, `Expected 201, got ${status}`);
@@ -93,13 +93,13 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Cleanup lifecycle OTs", async () => {
     const { status: del1 } = await api(
       "DELETE",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/EmployeeClone`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/EmployeeClone`
     );
     t.assert(del1 === 204, `Delete clone: expected 204, got ${del1}`);
 
     const { status: del2 } = await api(
       "DELETE",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/EmployeeImported`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/EmployeeImported`
     );
     t.assert(del2 === 204, `Delete imported: expected 204, got ${del2}`);
   });

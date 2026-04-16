@@ -9,7 +9,7 @@
 Export a single Express middleware function. On every incoming request:
 
 1. Attach `req.requestId = crypto.randomUUID()` and `req._startTime = Date.now()`.
-2. Log request start as single-line JSON: `{"level":"info","type":"request_start","requestId":"...","method":"POST","path":"/api/v2/...","timestamp":"..."}`. Include the request body truncated to 2000 characters. Exception: do NOT log bodies for paths containing `/auth/` or `/password/`.
+2. Log request start as single-line JSON: `{"level":"info","type":"request_start","requestId":"...","method":"POST","path":"/api/v1/...","timestamp":"..."}`. Include the request body truncated to 2000 characters. Exception: do NOT log bodies for paths containing `/auth/` or `/password/`.
 3. On `res.on('finish')`, log completion: `{"level":"info","type":"request_complete","requestId":"...","statusCode":201,"durationMs":45,"timestamp":"..."}`. If `statusCode >= 400`, use `"level":"error"` instead of `"level":"info"`.
 4. Attach `req.log = function(message, data)` helper that emits structured JSON with the same requestId, for use by service-layer code. Format: `{"level":"info","type":"app_log","requestId":"...","message":"...","data":{...},"timestamp":"..."}`.
 5. Call `next()`.
@@ -43,7 +43,7 @@ Route handlers should propagate errors to the error handler by calling `next(err
 **Modify:** src/server.js to register both middleware
 
 **Verification:**
-- `POST /api/v2/ontologies` with valid body → two log lines appear in stdout (request_start and request_complete with `durationMs`)
+- `POST /api/v1/ontologies` with valid body → two log lines appear in stdout (request_start and request_complete with `durationMs`)
 - Insert a duplicate ontology name → response is `409` with `{"error":{"code":"ALREADY_EXISTS",...}}`
 - Throw an unrecognized error in a route handler → response is `500` with `{"error":{"code":"INTERNAL_ERROR",...}}`, stack trace appears in server logs but NOT in the response body
 - PostgreSQL not-null violation (e.g., missing display_name) → response is `400` with `{"error":{"code":"REQUIRED_FIELD_MISSING",...}}`

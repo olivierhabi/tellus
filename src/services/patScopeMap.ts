@@ -64,22 +64,22 @@ const RULES: ScopeRule[] = [
   { method: 'GET', prefix: '/api/v1/auth/me', scope: 'api:read' },
 
   // --- Ontology engine --------------------------------------------
-  { method: 'GET', prefix: '/api/v2/ontologies', scope: 'ontology:read' },
-  { prefix: '/api/v2/ontologies', scope: 'ontology:write' },
+  { method: 'GET', prefix: '/api/v1/ontologies', scope: 'ontology:read' },
+  { prefix: '/api/v1/ontologies', scope: 'ontology:write' },
 
   // --- Dataset lifecycle (upload is its own narrower scope) -------
   {
-    prefix: '/api/projects',
+    prefix: '/api/v1/projects',
     scope: 'datasets:upload',
     when: (p) => /\/datasets(\/|$)/.test(p) && /\/upload|\/datasets$/.test(p),
     whenDescription: 'project sub-path matches /datasets(/|$) AND /upload|/datasets$',
   },
-  { method: 'GET', prefix: '/api/datasets', scope: 'datasets:read' },
-  { prefix: '/api/datasets', scope: 'datasets:upload' },
-  { method: 'GET', prefix: '/api/projects', scope: 'datasets:read' },
-  { prefix: '/api/projects', scope: 'api:write' },
-  { method: 'GET', prefix: '/api/search', scope: 'datasets:read' },
-  { method: 'GET', prefix: '/api/breadcrumb', scope: 'datasets:read' },
+  { method: 'GET', prefix: '/api/v1/datasets', scope: 'datasets:read' },
+  { prefix: '/api/v1/datasets', scope: 'datasets:upload' },
+  { method: 'GET', prefix: '/api/v1/projects', scope: 'datasets:read' },
+  { prefix: '/api/v1/projects', scope: 'api:write' },
+  { method: 'GET', prefix: '/api/v1/search', scope: 'datasets:read' },
+  { method: 'GET', prefix: '/api/v1/breadcrumb', scope: 'datasets:read' },
 
   // --- Administrative --------------------------------------------
   { prefix: '/api/v1/auth/admin/applications', scope: 'api:write' },

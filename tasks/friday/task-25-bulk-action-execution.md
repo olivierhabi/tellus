@@ -7,7 +7,7 @@ Palantir's documentation on inline edits states: "Inline edits differ in that th
 **Add endpoint:**
 
 ```
-POST /api/v2/actions/:actionTypeApiName/applyBatch
+POST /api/v1/actions/:actionTypeApiName/applyBatch
 Body: {
     "requests": [
         { "parameters": { "employeeRef": "EMP-001", "newSalary": 120000 } },
@@ -49,7 +49,7 @@ Body: {
 **Test cases:**
 ```javascript
 // Batch update 3 salaries
-const res = await fetch('/api/v2/actions/updateSalary/applyBatch', {
+const res = await fetch('/api/v1/actions/updateSalary/applyBatch', {
     method: 'POST',
     body: JSON.stringify({ requests: [
         { parameters: { employeeRef: 'EMP-001', newSalary: 120000 } },
@@ -69,6 +69,6 @@ assert((await fetchObject('Employee', 'EMP-002')).salary === 130000);
 
 // Over limit
 const bigBatch = { requests: Array(101).fill({ parameters: { employeeRef: 'EMP-001', newSalary: 1 } }) };
-const overLimit = await fetch('/api/v2/actions/updateSalary/applyBatch', { method: 'POST', body: JSON.stringify(bigBatch) });
+const overLimit = await fetch('/api/v1/actions/updateSalary/applyBatch', { method: 'POST', body: JSON.stringify(bigBatch) });
 assert(overLimit.status === 400);
 ```

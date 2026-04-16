@@ -3,7 +3,7 @@
 //
 // CRUD for Interfaces (shared property contracts for Object Types).
 //
-// Mounted at: /api/v2/ontology/:ontologyId/interfaces
+// Mounted at: /api/v1/ontology/:ontologyId/interfaces
 //
 // Interfaces define a set of typed properties that Object Types can
 // implement. This enables polymorphic queries across heterogeneous

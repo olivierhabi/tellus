@@ -27,7 +27,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Batch create OT with 6 properties (Tasks 3, 6, 26)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`,
       batchBody
     );
     t.assert(status === 201, `Expected 201, got ${status}`);
@@ -45,7 +45,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Duplicate object type fails (Task 14)", async () => {
     const { status } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`,
       batchBody
     );
     t.assert(status === 409, `Expected 409, got ${status}`);
@@ -54,7 +54,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Invalid apiName rejected (Task 8)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes`,
       { apiName: "bad_name", displayName: "Bad" }
     );
     t.assert(status === 400, `Expected 400, got ${status}`);
@@ -64,7 +64,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Reserved name rejected (Task 8)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes`,
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes`,
       { apiName: "Object", displayName: "Object" }
     );
     t.assert(status === 400, `Expected 400, got ${status}`);
@@ -75,7 +75,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("List object types (Task 14)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.data.length === 1, `Expected 1, got ${body.data.length}`);
@@ -86,7 +86,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Get object type with full details (Task 14)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee`
+      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/Employee`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.objectType.primaryKey === "employeeId", "PK = employeeId");

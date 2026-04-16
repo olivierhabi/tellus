@@ -38,7 +38,7 @@ let secondObjectTypeApiName: string | null = null;
 
 before(async () => {
   // Try to list existing ontologies
-  const { status, data } = await api('GET', '/api/v2/ontology');
+  const { status, data } = await api('GET', '/api/v1/ontology');
 
   if (status === 200 && data && Array.isArray(data.data) && data.data.length > 0) {
     ontologyId = data.data[0].ontologyId ?? data.data[0].id;
@@ -52,7 +52,7 @@ before(async () => {
 
   if (!ontologyId) {
     // Attempt to create one
-    const create = await api('POST', '/api/v2/ontology', {
+    const create = await api('POST', '/api/v1/ontology', {
       apiName: 'TestOntology',
       displayName: 'Test Ontology',
       description: 'Ontology created by integration tests',
@@ -63,14 +63,14 @@ before(async () => {
   }
 
   assert.ok(ontologyId, 'Could not resolve an ontology to run tests against');
-  baseUrl = `/api/v2/ontology/${ontologyId}/interfaces`;
+  baseUrl = `/api/v1/ontology/${ontologyId}/interfaces`;
 
   // ── Check whether we can test implementations ──────────────────────────
   // Try to find or create two object types so Block 2 & 3 can run.
   try {
     const otRes = await api(
       'GET',
-      `/api/v2/ontology/${ontologyId}/objectTypes`,
+      `/api/v1/ontology/${ontologyId}/objectTypes`,
     );
     if (
       otRes.status === 200 &&
@@ -99,7 +99,7 @@ before(async () => {
     try {
       const airportRes = await api(
         'POST',
-        `/api/v2/ontology/${ontologyId}/objectTypes`,
+        `/api/v1/ontology/${ontologyId}/objectTypes`,
         {
           apiName: 'Airport',
           displayName: 'Airport',
@@ -116,7 +116,7 @@ before(async () => {
 
       const warehouseRes = await api(
         'POST',
-        `/api/v2/ontology/${ontologyId}/objectTypes`,
+        `/api/v1/ontology/${ontologyId}/objectTypes`,
         {
           apiName: 'Warehouse',
           displayName: 'Warehouse',
@@ -157,7 +157,7 @@ after(async () => {
     try {
       await api(
         'DELETE',
-        `/api/v2/ontology/${ontologyId}/objectTypes/${objectTypeApiName}/implements/HasLocation`,
+        `/api/v1/ontology/${ontologyId}/objectTypes/${objectTypeApiName}/implements/HasLocation`,
       );
     } catch {}
   }
@@ -175,7 +175,7 @@ after(async () => {
     try {
       await api(
         'DELETE',
-        `/api/v2/ontology/${ontologyId}/objectTypes/${ot}`,
+        `/api/v1/ontology/${ontologyId}/objectTypes/${ot}`,
       );
     } catch {}
   }
@@ -489,7 +489,7 @@ describe('Interface CRUD', () => {
 describe('Interface Implementation', () => {
   // Helper to build the implements URL for an object type
   function implementsUrl(objectType: string) {
-    return `/api/v2/ontology/${ontologyId}/objectTypes/${objectType}/implements`;
+    return `/api/v1/ontology/${ontologyId}/objectTypes/${objectType}/implements`;
   }
 
   // 2.1
@@ -712,7 +712,7 @@ describe('Polymorphic Queries', () => {
     try {
       await api(
         'POST',
-        `/api/v2/ontology/${ontologyId}/objectTypes/${objectTypeApiName}/implements/HasLocation`,
+        `/api/v1/ontology/${ontologyId}/objectTypes/${objectTypeApiName}/implements/HasLocation`,
         {
           propertyMapping: {
             latitude: 'lat',
@@ -724,7 +724,7 @@ describe('Polymorphic Queries', () => {
 
       await api(
         'POST',
-        `/api/v2/ontology/${ontologyId}/objectTypes/${secondObjectTypeApiName}/implements/HasLocation`,
+        `/api/v1/ontology/${ontologyId}/objectTypes/${secondObjectTypeApiName}/implements/HasLocation`,
         {
           propertyMapping: {
             latitude: 'latitude',

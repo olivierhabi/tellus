@@ -5,7 +5,7 @@
 // Ontology. Action types define parameterized, auditable sets of changes
 // that can be applied to objects, properties, and links.
 //
-// Mounted at: /api/v2/ontologies/:ontologyId/actionTypes
+// Mounted at: /api/v1/ontologies/:ontologyId/actionTypes
 //
 // Endpoints:
 //   POST   /                       — Create a new action type

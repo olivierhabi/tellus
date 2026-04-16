@@ -9,7 +9,7 @@ In Palantir Foundry, datasets are created through Data Connection syncs or by wr
 
 Create or update the file `/src/routes/datasets.js` with the following endpoint:
 
-**Endpoint: `POST /api/v2/datasets/upload`**
+**Endpoint: `POST /api/v1/datasets/upload`**
 
 This endpoint accepts a multipart form-data request with the following fields:
 

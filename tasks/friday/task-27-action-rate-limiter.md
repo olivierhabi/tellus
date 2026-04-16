@@ -157,7 +157,7 @@ function batchRateLimiter(req, res, next) {
 // Rapid-fire 101 requests to exceed per-action-type limit (100/min)
 const promises = [];
 for (let i = 0; i < 101; i++) {
-    promises.push(fetch('/api/v2/actions/updateSalary/apply', {
+    promises.push(fetch('/api/v1/actions/updateSalary/apply', {
         method: 'POST', body: JSON.stringify({ parameters: { employeeRef: 'EMP-001', newSalary: 100000 + i } })
     }));
 }

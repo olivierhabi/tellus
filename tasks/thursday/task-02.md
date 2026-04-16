@@ -1,10 +1,10 @@
-# TASK 2: Create the POST `/api/v2/ontology/:ontologyId/linkTypes` Endpoint
+# TASK 2: Create the POST `/api/v1/ontology/:ontologyId/linkTypes` Endpoint
 
 **Objective:** Build the REST API endpoint that allows users to create a new link type definition in the Ontology. This endpoint receives a JSON body describing the relationship between two object types, validates all inputs, inserts a row into the `link_type` table, and returns the created link type definition.
 
 **Why this exists in Palantir:** In Palantir Foundry, link types are created through the Ontology Manager UI or programmatically via the API. The creation process validates that the referenced object types exist, that the foreign key property exists on the correct side, and that the cardinality is valid. The API response includes the full link type definition so the caller can confirm what was created.
 
-**HTTP method and path:** `POST /api/v2/ontology/:ontologyId/linkTypes`
+**HTTP method and path:** `POST /api/v1/ontology/:ontologyId/linkTypes`
 
 **Request headers:**
 - `Content-Type: application/json`
@@ -85,7 +85,7 @@
 
 **Error response format:** All error responses must follow this shape: `{ "error": "message string" }`. The `error` field is always a string. Additional context fields are optional (e.g., `apiName`, `ontologyId`).
 
-**File to create or modify:** Create a new route file `src/routes/linkTypes.js` and register it in the main Express app at `/api/v2/ontology/:ontologyId/linkTypes`. The route handler should import the database pool (`db` from `src/db/pool.js`) and perform all queries within a single database transaction (using `BEGIN`/`COMMIT`/`ROLLBACK`) to ensure atomicity — if any validation query fails or the insert fails, no partial state is left.
+**File to create or modify:** Create a new route file `src/routes/linkTypes.js` and register it in the main Express app at `/api/v1/ontology/:ontologyId/linkTypes`. The route handler should import the database pool (`db` from `src/db/pool.js`) and perform all queries within a single database transaction (using `BEGIN`/`COMMIT`/`ROLLBACK`) to ensure atomicity — if any validation query fails or the insert fails, no partial state is left.
 
 **Logging:** Log every successful link type creation with: `console.log(\`[LINK_TYPE_CREATED] ontology=${ontologyId} apiName=${apiName} source=${sourceObjectType} target=${targetObjectType} cardinality=${cardinality}\`)`.
 
@@ -93,7 +93,7 @@
 
 ```bash
 # Create a MANY_TO_ONE link (Employee → Company via Employee.companyId)
-curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/linkTypes \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/linkTypes \
   -H "Content-Type: application/json" \
   -d '{
     "apiName": "employeeCompany",
@@ -107,7 +107,7 @@ curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/linkTypes \
 # Should return 201 with full link type definition
 
 # Test validation: invalid source object type
-curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/linkTypes \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/linkTypes \
   -H "Content-Type: application/json" \
   -d '{
     "apiName": "badLink",

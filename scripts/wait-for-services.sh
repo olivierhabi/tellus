@@ -81,7 +81,7 @@ if need flink; then
 fi
 
 if need api; then
-  wait_for "API Server" "curl -sf '$API_URL/api/health'" 60 2 || failed=1
+  wait_for "API Server" "curl -sf '$API_URL/api/v1/health'" 60 2 || failed=1
 fi
 
 exit "$failed"

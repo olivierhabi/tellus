@@ -64,7 +64,7 @@ Each handler must have all three annotation tags. This is tedious but essential 
 The generated Markdown should look like:
 
 ```markdown
-## POST /api/v2/ontology/:ontologyId/objectTypes
+## POST /api/v1/ontology/:ontologyId/objectTypes
 
 **Description:** Create a new Object Type in the Ontology
 
@@ -86,7 +86,7 @@ The generated Markdown should look like:
 
 **Example Request:**
 \```bash
-curl -X POST http://localhost:3000/api/v2/ontology/abc-123/objectTypes \
+curl -X POST http://localhost:3000/api/v1/ontology/abc-123/objectTypes \
   -H "Content-Type: application/json" \
   -d '{"apiName":"Employee","displayName":"Employee","properties":[...]}'
 \```

@@ -27,90 +27,90 @@
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Basic health check |
-| `GET` | `/api/v2/health` | Enhanced health check |
-| `GET` | `/api/v2/status` | Comprehensive system status |
-| `POST` | `/api/v2/ontologies` | Create a new ontology |
-| `GET` | `/api/v2/ontologies` | List all ontologies with pagination |
-| `GET` | `/api/v2/ontologies/:ontologyId` | Get a single ontology by ID |
-| `PUT` | `/api/v2/ontologies/:ontologyId` | Update an ontology (displayName and/or description) |
-| `DELETE` | `/api/v2/ontologies/:ontologyId` | Delete an ontology and all its children (cascades) |
-| `GET` | `/api/v2/ontologies/:ontologyId/export` | Export full ontology as JSON (with object types, properties, link types, action types) |
-| `POST` | `/api/v2/ontologies/import` | Import an ontology from a previously exported JSON payload |
-| `POST` | `/api/v2/ontologies/:ontologyId/objectTypes` | Create a new object type within an ontology |
-| `GET` | `/api/v2/ontologies/:ontologyId/objectTypes` | List all object types for an ontology |
-| `GET` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName` | Get a single object type with properties, datasource, and funnel state |
-| `PUT` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName` | Update an object type (displayName, description, icon, etc) |
-| `DELETE` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName` | Delete an object type and its properties, datasource, and index |
-| `POST` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties` | Create a new property on an object type |
-| `GET` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties` | List all properties for an object type |
-| `PUT` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName` | Update a property (displayName, description) |
-| `DELETE` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName` | Delete a property from an object type |
-| `PUT` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/primaryKey` | Set the primary key property for an object type |
-| `PUT` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/titleProperty` | Set the title property for an object type |
-| `POST` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource` | Register a backing datasource for an object type |
-| `GET` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource` | Get the registered datasource for an object type |
-| `DELETE` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource` | Unregister the backing datasource |
-| `POST` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource/scan` | Re-scan the backing file and update metadata (row count, column names, schema hash) |
-| `POST` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index` | Trigger a full reindex of an object type into OpenSearch |
-| `GET` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index/status` | Get the indexing status for an object type |
-| `DELETE` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index` | Delete the OpenSearch index for an object type |
-| `GET` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/status` | Get the current reindex status and health assessment |
-| `GET` | `/api/v2/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/history` | Get paginated reindex history |
-| `GET` | `/api/v2/objects/:objectType` | List objects of a type with pagination and optional sorting |
-| `GET` | `/api/v2/objects/:objectType/:primaryKey` | Get a single object by primary key |
-| `POST` | `/api/v2/objects/:objectType/search` | Search objects with filter expressions, ordering, and pagination |
-| `POST` | `/api/v2/objects/:objectType/searchFullText` | Full-text search across all indexed text fields |
-| `POST` | `/api/v2/objects/:objectType/aggregate` | Run aggregations (count, avg, sum, min, max, terms, date_histogram, range, cardinality) |
-| `POST` | `/api/v2/objects/:objectType/searchAround` | Search around linked objects (Search Around) |
-| `GET` | `/api/v2/objects/:objectType/:primaryKey/links/:linkType` | Resolve links for a specific object |
-| `GET` | `/api/v2/objects/:objectType/:primaryKey/links/:linkType/count` | Count linked objects for a specific link type |
-| `GET` | `/api/v2/objects/:objectType/:primaryKey/editHistory` | Get the complete edit history for a single object in reverse chronological order |
-| `POST` | `/api/v2/objects/:objectType/validateForeignKeys` | Validate foreign key references for an object type |
-| `POST` | `/api/v2/ontologies/:ontologyId/linkTypes` | Create a new link type between two object types |
-| `GET` | `/api/v2/ontologies/:ontologyId/linkTypes` | List all link types for an ontology |
-| `GET` | `/api/v2/ontologies/:ontologyId/linkTypes/:linkApiName` | Get a single link type by API name |
-| `DELETE` | `/api/v2/ontologies/:ontologyId/linkTypes/:linkApiName` | Delete a link type |
-| `POST` | `/api/v2/ontologies/:ontologyId/actionTypes` | Create a new action type with rules and parameters |
-| `GET` | `/api/v2/ontologies/:ontologyId/actionTypes` | List all action types for an ontology |
-| `GET` | `/api/v2/ontologies/:ontologyId/actionTypes/:actionApiName` | Get a single action type by API name |
-| `PUT` | `/api/v2/ontologies/:ontologyId/actionTypes/:actionApiName` | Update an action type (displayName, description, parameters, rules) |
-| `DELETE` | `/api/v2/ontologies/:ontologyId/actionTypes/:actionApiName` | Delete an action type |
-| `POST` | `/api/v2/ontologies/:ontologyId/actionTypes/:actionApiName/clone` | Clone an action type with a new API name |
-| `GET` | `/api/v2/ontologies/:ontologyId/actionTypes/:actionApiName/impact` | Analyze the impact of an action type (which object types and properties it touches) |
-| `POST` | `/api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/apply` | Execute an action |
-| `POST` | `/api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/validate` | Dry-run validation of an action without applying edits |
-| `POST` | `/api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/applyBatch` | Execute the same action type multiple times with different parameter sets (max 100 per batch) |
-| `POST` | `/api/v2/actions/:actionTypeApiName/validate` | Validate an action using the default ontology (no ontologyId required) |
-| `POST` | `/api/v2/actions/:actionTypeApiName/applyBatch` | Batch-execute actions using the default ontology |
-| `POST` | `/api/v2/actions/:actionTypeApiName/applyBulk` | Bulk-execute an action (max 1000 per call, with stopOnError and autoIndex options) |
-| `GET` | `/api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/audit` | Get audit log entries for a specific action type |
-| `GET` | `/api/v2/audit/log` | Global audit log across all action types |
-| `GET` | `/api/v2/audit/log/:executionId` | Get a single audit entry by execution ID |
-| `GET` | `/api/v2/audit/stats` | Get aggregate statistics across all action executions |
-| `GET` | `/api/v2/ontology/:ontologyId/objectTypes/:apiName/edits` | List all edits for an object type with filtering and pagination |
-| `GET` | `/api/v2/ontology/:ontologyId/objectTypes/:apiName/edits/diff/:primaryKey` | Diff view: compare datasource state vs ontology state for one object |
-| `POST` | `/api/v2/datasets/upload` | Upload a new dataset file (multipart form) |
-| `GET` | `/api/v2/datasets` | List datasets with pagination and search |
-| `GET` | `/api/v2/datasets/:datasetId` | Get full dataset details with transactions |
-| `DELETE` | `/api/v2/datasets/:datasetId` | Delete a dataset (with safety check for backing usage) |
-| `POST` | `/api/v2/datasets/:datasetId/transactions` | Add a new transaction (append or snapshot) to a dataset |
-| `GET` | `/api/v2/datasets/:datasetId/transactions` | List transactions for a dataset |
-| `GET` | `/api/v2/datasets/:datasetId/preview` | Preview dataset rows with column statistics |
-| `POST` | `/api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex` | Trigger a full reindex with smart skip logic and atomic locking |
-| `GET` | `/api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex/status` | Get current reindex status |
-| `GET` | `/api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex/history` | Get paginated reindex history |
-| `POST` | `/api/v2/ontology/:ontologyId/interfaces` | Create a new Interface with typed properties |
-| `GET` | `/api/v2/ontology/:ontologyId/interfaces` | List all Interfaces in an ontology with their properties and implementing object types |
-| `GET` | `/api/v2/ontology/:ontologyId/interfaces/:interfaceApiName` | Get a single Interface with full details (properties, implementing OTs) |
-| `PUT` | `/api/v2/ontology/:ontologyId/interfaces/:interfaceApiName` | Update an Interface (displayName, description, properties) |
-| `DELETE` | `/api/v2/ontology/:ontologyId/interfaces/:interfaceApiName` | Delete an Interface |
-| `POST` | `/api/v2/ontology/:ontologyId/interfaces/:interfaceApiName/search` | Polymorphic search across all Object Types implementing the Interface |
-| `POST` | `/api/v2/ontology/:ontologyId/interfaces/:interfaceApiName/aggregate` | Polymorphic aggregation across implementing types |
-| `POST` | `/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements` | Declare that an Object Type implements an Interface with a property mapping |
-| `DELETE` | `/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName` | Remove an Interface implementation from an Object Type |
-| `GET` | `/api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements` | List all Interfaces an Object Type implements with property mappings |
-| `GET` | `/api/v2/spec` | Returns raw OpenAPI JSON specification |
-| `GET` | `/api/v2/docs` | Swagger UI interactive API documentation |
+| `GET` | `/api/v1/health` | Enhanced health check |
+| `GET` | `/api/v1/status` | Comprehensive system status |
+| `POST` | `/api/v1/ontologies` | Create a new ontology |
+| `GET` | `/api/v1/ontologies` | List all ontologies with pagination |
+| `GET` | `/api/v1/ontologies/:ontologyId` | Get a single ontology by ID |
+| `PUT` | `/api/v1/ontologies/:ontologyId` | Update an ontology (displayName and/or description) |
+| `DELETE` | `/api/v1/ontologies/:ontologyId` | Delete an ontology and all its children (cascades) |
+| `GET` | `/api/v1/ontologies/:ontologyId/export` | Export full ontology as JSON (with object types, properties, link types, action types) |
+| `POST` | `/api/v1/ontologies/import` | Import an ontology from a previously exported JSON payload |
+| `POST` | `/api/v1/ontologies/:ontologyId/objectTypes` | Create a new object type within an ontology |
+| `GET` | `/api/v1/ontologies/:ontologyId/objectTypes` | List all object types for an ontology |
+| `GET` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName` | Get a single object type with properties, datasource, and funnel state |
+| `PUT` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName` | Update an object type (displayName, description, icon, etc) |
+| `DELETE` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName` | Delete an object type and its properties, datasource, and index |
+| `POST` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties` | Create a new property on an object type |
+| `GET` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties` | List all properties for an object type |
+| `PUT` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName` | Update a property (displayName, description) |
+| `DELETE` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName` | Delete a property from an object type |
+| `PUT` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/primaryKey` | Set the primary key property for an object type |
+| `PUT` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/titleProperty` | Set the title property for an object type |
+| `POST` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource` | Register a backing datasource for an object type |
+| `GET` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource` | Get the registered datasource for an object type |
+| `DELETE` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource` | Unregister the backing datasource |
+| `POST` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource/scan` | Re-scan the backing file and update metadata (row count, column names, schema hash) |
+| `POST` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index` | Trigger a full reindex of an object type into OpenSearch |
+| `GET` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index/status` | Get the indexing status for an object type |
+| `DELETE` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index` | Delete the OpenSearch index for an object type |
+| `GET` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/status` | Get the current reindex status and health assessment |
+| `GET` | `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/history` | Get paginated reindex history |
+| `GET` | `/api/v1/objects/:objectType` | List objects of a type with pagination and optional sorting |
+| `GET` | `/api/v1/objects/:objectType/:primaryKey` | Get a single object by primary key |
+| `POST` | `/api/v1/objects/:objectType/search` | Search objects with filter expressions, ordering, and pagination |
+| `POST` | `/api/v1/objects/:objectType/searchFullText` | Full-text search across all indexed text fields |
+| `POST` | `/api/v1/objects/:objectType/aggregate` | Run aggregations (count, avg, sum, min, max, terms, date_histogram, range, cardinality) |
+| `POST` | `/api/v1/objects/:objectType/searchAround` | Search around linked objects (Search Around) |
+| `GET` | `/api/v1/objects/:objectType/:primaryKey/links/:linkType` | Resolve links for a specific object |
+| `GET` | `/api/v1/objects/:objectType/:primaryKey/links/:linkType/count` | Count linked objects for a specific link type |
+| `GET` | `/api/v1/objects/:objectType/:primaryKey/editHistory` | Get the complete edit history for a single object in reverse chronological order |
+| `POST` | `/api/v1/objects/:objectType/validateForeignKeys` | Validate foreign key references for an object type |
+| `POST` | `/api/v1/ontologies/:ontologyId/linkTypes` | Create a new link type between two object types |
+| `GET` | `/api/v1/ontologies/:ontologyId/linkTypes` | List all link types for an ontology |
+| `GET` | `/api/v1/ontologies/:ontologyId/linkTypes/:linkApiName` | Get a single link type by API name |
+| `DELETE` | `/api/v1/ontologies/:ontologyId/linkTypes/:linkApiName` | Delete a link type |
+| `POST` | `/api/v1/ontologies/:ontologyId/actionTypes` | Create a new action type with rules and parameters |
+| `GET` | `/api/v1/ontologies/:ontologyId/actionTypes` | List all action types for an ontology |
+| `GET` | `/api/v1/ontologies/:ontologyId/actionTypes/:actionApiName` | Get a single action type by API name |
+| `PUT` | `/api/v1/ontologies/:ontologyId/actionTypes/:actionApiName` | Update an action type (displayName, description, parameters, rules) |
+| `DELETE` | `/api/v1/ontologies/:ontologyId/actionTypes/:actionApiName` | Delete an action type |
+| `POST` | `/api/v1/ontologies/:ontologyId/actionTypes/:actionApiName/clone` | Clone an action type with a new API name |
+| `GET` | `/api/v1/ontologies/:ontologyId/actionTypes/:actionApiName/impact` | Analyze the impact of an action type (which object types and properties it touches) |
+| `POST` | `/api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/apply` | Execute an action |
+| `POST` | `/api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/validate` | Dry-run validation of an action without applying edits |
+| `POST` | `/api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/applyBatch` | Execute the same action type multiple times with different parameter sets (max 100 per batch) |
+| `POST` | `/api/v1/actions/:actionTypeApiName/validate` | Validate an action using the default ontology (no ontologyId required) |
+| `POST` | `/api/v1/actions/:actionTypeApiName/applyBatch` | Batch-execute actions using the default ontology |
+| `POST` | `/api/v1/actions/:actionTypeApiName/applyBulk` | Bulk-execute an action (max 1000 per call, with stopOnError and autoIndex options) |
+| `GET` | `/api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/audit` | Get audit log entries for a specific action type |
+| `GET` | `/api/v1/audit/log` | Global audit log across all action types |
+| `GET` | `/api/v1/audit/log/:executionId` | Get a single audit entry by execution ID |
+| `GET` | `/api/v1/audit/stats` | Get aggregate statistics across all action executions |
+| `GET` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/edits` | List all edits for an object type with filtering and pagination |
+| `GET` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/edits/diff/:primaryKey` | Diff view: compare datasource state vs ontology state for one object |
+| `POST` | `/api/v1/datasets/upload` | Upload a new dataset file (multipart form) |
+| `GET` | `/api/v1/datasets` | List datasets with pagination and search |
+| `GET` | `/api/v1/datasets/:datasetId` | Get full dataset details with transactions |
+| `DELETE` | `/api/v1/datasets/:datasetId` | Delete a dataset (with safety check for backing usage) |
+| `POST` | `/api/v1/datasets/:datasetId/transactions` | Add a new transaction (append or snapshot) to a dataset |
+| `GET` | `/api/v1/datasets/:datasetId/transactions` | List transactions for a dataset |
+| `GET` | `/api/v1/datasets/:datasetId/preview` | Preview dataset rows with column statistics |
+| `POST` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex` | Trigger a full reindex with smart skip logic and atomic locking |
+| `GET` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/status` | Get current reindex status |
+| `GET` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/history` | Get paginated reindex history |
+| `POST` | `/api/v1/ontology/:ontologyId/interfaces` | Create a new Interface with typed properties |
+| `GET` | `/api/v1/ontology/:ontologyId/interfaces` | List all Interfaces in an ontology with their properties and implementing object types |
+| `GET` | `/api/v1/ontology/:ontologyId/interfaces/:interfaceApiName` | Get a single Interface with full details (properties, implementing OTs) |
+| `PUT` | `/api/v1/ontology/:ontologyId/interfaces/:interfaceApiName` | Update an Interface (displayName, description, properties) |
+| `DELETE` | `/api/v1/ontology/:ontologyId/interfaces/:interfaceApiName` | Delete an Interface |
+| `POST` | `/api/v1/ontology/:ontologyId/interfaces/:interfaceApiName/search` | Polymorphic search across all Object Types implementing the Interface |
+| `POST` | `/api/v1/ontology/:ontologyId/interfaces/:interfaceApiName/aggregate` | Polymorphic aggregation across implementing types |
+| `POST` | `/api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements` | Declare that an Object Type implements an Interface with a property mapping |
+| `DELETE` | `/api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName` | Remove an Interface implementation from an Object Type |
+| `GET` | `/api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements` | List all Interfaces an Object Type implements with property mappings |
+| `GET` | `/api/docs/spec.json` | Returns raw OpenAPI JSON specification |
+| `GET` | `/api/docs` | Swagger UI interactive API documentation |
 
 ## Health & Status
 
@@ -137,7 +137,7 @@ curl http://localhost:3000/health
 
 ---
 
-### `GET /api/v2/health`
+### `GET /api/v1/health`
 
 Enhanced health check. Checks PostgreSQL and OpenSearch with 2s timeout each. Returns overall healthy/unhealthy status.
 
@@ -164,12 +164,12 @@ Enhanced health check. Checks PostgreSQL and OpenSearch with 2s timeout each. Re
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/health
+curl http://localhost:3000/api/v1/health
 ```
 
 ---
 
-### `GET /api/v2/status`
+### `GET /api/v1/status`
 
 Comprehensive system status. Includes system memory, uptime, PG table counts, OpenSearch cluster info, ontology counts, dataset stats, and edit stats.
 
@@ -200,14 +200,14 @@ Comprehensive system status. Includes system memory, uptime, PG table counts, Op
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/status
+curl http://localhost:3000/api/v1/status
 ```
 
 ---
 
 ## Ontology
 
-### `POST /api/v2/ontologies`
+### `POST /api/v1/ontologies`
 
 Create a new ontology.
 
@@ -233,12 +233,12 @@ Create a new ontology.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies -H "Content-Type: application/json" -d '{"displayName":"Test Ontology"}'
+curl -X POST http://localhost:3000/api/v1/ontologies -H "Content-Type: application/json" -d '{"displayName":"Test Ontology"}'
 ```
 
 ---
 
-### `GET /api/v2/ontologies`
+### `GET /api/v1/ontologies`
 
 List all ontologies with pagination.
 
@@ -258,12 +258,12 @@ List all ontologies with pagination.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies
+curl http://localhost:3000/api/v1/ontologies
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId`
+### `GET /api/v1/ontologies/:ontologyId`
 
 Get a single ontology by ID.
 
@@ -281,12 +281,12 @@ Get a single ontology by ID.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}
 ```
 
 ---
 
-### `PUT /api/v2/ontologies/:ontologyId`
+### `PUT /api/v1/ontologies/:ontologyId`
 
 Update an ontology (displayName and/or description).
 
@@ -304,12 +304,12 @@ Update an ontology (displayName and/or description).
 
 **Example:**
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontologies/{ontologyId} -H "Content-Type: application/json" -d '{"displayName":"New Name"}'
+curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId} -H "Content-Type: application/json" -d '{"displayName":"New Name"}'
 ```
 
 ---
 
-### `DELETE /api/v2/ontologies/:ontologyId`
+### `DELETE /api/v1/ontologies/:ontologyId`
 
 Delete an ontology and all its children (cascades).
 
@@ -318,12 +318,12 @@ Delete an ontology and all its children (cascades).
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/export`
+### `GET /api/v1/ontologies/:ontologyId/export`
 
 Export full ontology as JSON (with object types, properties, link types, action types).
 
@@ -332,12 +332,12 @@ Export full ontology as JSON (with object types, properties, link types, action 
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/export
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/export
 ```
 
 ---
 
-### `POST /api/v2/ontologies/import`
+### `POST /api/v1/ontologies/import`
 
 Import an ontology from a previously exported JSON payload.
 
@@ -347,14 +347,14 @@ Import an ontology from a previously exported JSON payload.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/import -H "Content-Type: application/json" -d @export.json
+curl -X POST http://localhost:3000/api/v1/ontologies/import -H "Content-Type: application/json" -d @export.json
 ```
 
 ---
 
 ## Object Types
 
-### `POST /api/v2/ontologies/:ontologyId/objectTypes`
+### `POST /api/v1/ontologies/:ontologyId/objectTypes`
 
 Create a new object type within an ontology.
 
@@ -385,23 +385,23 @@ Create a new object type within an ontology.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes -H "Content-Type: application/json" -d '{"apiName":"Employee","displayName":"Employee"}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes -H "Content-Type: application/json" -d '{"apiName":"Employee","displayName":"Employee"}'
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/objectTypes`
+### `GET /api/v1/ontologies/:ontologyId/objectTypes`
 
 List all object types for an ontology.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/objectTypes/:apiName`
+### `GET /api/v1/ontologies/:ontologyId/objectTypes/:apiName`
 
 Get a single object type with properties, datasource, and funnel state.
 
@@ -410,12 +410,12 @@ Get a single object type with properties, datasource, and funnel state.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}
 ```
 
 ---
 
-### `PUT /api/v2/ontologies/:ontologyId/objectTypes/:apiName`
+### `PUT /api/v1/ontologies/:ontologyId/objectTypes/:apiName`
 
 Update an object type (displayName, description, icon, etc).
 
@@ -424,12 +424,12 @@ Update an object type (displayName, description, icon, etc).
 
 **Example:**
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName} -H "Content-Type: application/json" -d '{"displayName":"Updated"}'
+curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName} -H "Content-Type: application/json" -d '{"displayName":"Updated"}'
 ```
 
 ---
 
-### `DELETE /api/v2/ontologies/:ontologyId/objectTypes/:apiName`
+### `DELETE /api/v1/ontologies/:ontologyId/objectTypes/:apiName`
 
 Delete an object type and its properties, datasource, and index.
 
@@ -438,14 +438,14 @@ Delete an object type and its properties, datasource, and index.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}
 ```
 
 ---
 
 ## Properties
 
-### `POST /api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties`
+### `POST /api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties`
 
 Create a new property on an object type.
 
@@ -466,23 +466,23 @@ Create a new property on an object type.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties -H "Content-Type: application/json" -d '{"apiName":"salary","displayName":"Salary","baseType":"double"}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties -H "Content-Type: application/json" -d '{"apiName":"salary","displayName":"Salary","baseType":"double"}'
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties`
+### `GET /api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties`
 
 List all properties for an object type.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties
 ```
 
 ---
 
-### `PUT /api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName`
+### `PUT /api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName`
 
 Update a property (displayName, description).
 
@@ -491,12 +491,12 @@ Update a property (displayName, description).
 
 **Example:**
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propName} -H "Content-Type: application/json" -d '{"displayName":"Updated"}'
+curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propName} -H "Content-Type: application/json" -d '{"displayName":"Updated"}'
 ```
 
 ---
 
-### `DELETE /api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName`
+### `DELETE /api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties/:propertyApiName`
 
 Delete a property from an object type.
 
@@ -505,12 +505,12 @@ Delete a property from an object type.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propName}
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propName}
 ```
 
 ---
 
-### `PUT /api/v2/ontologies/:ontologyId/objectTypes/:apiName/primaryKey`
+### `PUT /api/v1/ontologies/:ontologyId/objectTypes/:apiName/primaryKey`
 
 Set the primary key property for an object type.
 
@@ -526,12 +526,12 @@ Set the primary key property for an object type.
 
 **Example:**
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/primaryKey -H "Content-Type: application/json" -d '{"propertyApiName":"employeeId"}'
+curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/primaryKey -H "Content-Type: application/json" -d '{"propertyApiName":"employeeId"}'
 ```
 
 ---
 
-### `PUT /api/v2/ontologies/:ontologyId/objectTypes/:apiName/titleProperty`
+### `PUT /api/v1/ontologies/:ontologyId/objectTypes/:apiName/titleProperty`
 
 Set the title property for an object type.
 
@@ -547,14 +547,14 @@ Set the title property for an object type.
 
 **Example:**
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/titleProperty -H "Content-Type: application/json" -d '{"propertyApiName":"fullName"}'
+curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/titleProperty -H "Content-Type: application/json" -d '{"propertyApiName":"fullName"}'
 ```
 
 ---
 
 ## Datasources
 
-### `POST /api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource`
+### `POST /api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource`
 
 Register a backing datasource for an object type.
 
@@ -574,12 +574,12 @@ Register a backing datasource for an object type.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource -H "Content-Type: application/json" -d '{...}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource -H "Content-Type: application/json" -d '{...}'
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource`
+### `GET /api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource`
 
 Get the registered datasource for an object type.
 
@@ -588,12 +588,12 @@ Get the registered datasource for an object type.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource
 ```
 
 ---
 
-### `DELETE /api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource`
+### `DELETE /api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource`
 
 Unregister the backing datasource.
 
@@ -602,12 +602,12 @@ Unregister the backing datasource.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource
 ```
 
 ---
 
-### `POST /api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource/scan`
+### `POST /api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource/scan`
 
 Re-scan the backing file and update metadata (row count, column names, schema hash).
 
@@ -616,14 +616,14 @@ Re-scan the backing file and update metadata (row count, column names, schema ha
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource/scan
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource/scan
 ```
 
 ---
 
 ## Indexing
 
-### `POST /api/v2/ontologies/:ontologyId/objectTypes/:apiName/index`
+### `POST /api/v1/ontologies/:ontologyId/objectTypes/:apiName/index`
 
 Trigger a full reindex of an object type into OpenSearch.
 
@@ -633,58 +633,58 @@ Trigger a full reindex of an object type into OpenSearch.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/index
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/objectTypes/:apiName/index/status`
+### `GET /api/v1/ontologies/:ontologyId/objectTypes/:apiName/index/status`
 
 Get the indexing status for an object type.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index/status
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/index/status
 ```
 
 ---
 
-### `DELETE /api/v2/ontologies/:ontologyId/objectTypes/:apiName/index`
+### `DELETE /api/v1/ontologies/:ontologyId/objectTypes/:apiName/index`
 
 Delete the OpenSearch index for an object type.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/index
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/status`
+### `GET /api/v1/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/status`
 
 Get the current reindex status and health assessment.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index/reindex/status
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/index/reindex/status
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/history`
+### `GET /api/v1/ontologies/:ontologyId/objectTypes/:apiName/index/reindex/history`
 
 Get paginated reindex history.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index/reindex/history
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/{apiName}/index/reindex/history
 ```
 
 ---
 
 ## Objects
 
-### `GET /api/v2/objects/:objectType`
+### `GET /api/v1/objects/:objectType`
 
 List objects of a type with pagination and optional sorting.
 
@@ -699,12 +699,12 @@ List objects of a type with pagination and optional sorting.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/objects/Employee?\$pageSize=10"
+curl "http://localhost:3000/api/v1/objects/Employee?\$pageSize=10"
 ```
 
 ---
 
-### `GET /api/v2/objects/:objectType/:primaryKey`
+### `GET /api/v1/objects/:objectType/:primaryKey`
 
 Get a single object by primary key.
 
@@ -714,12 +714,12 @@ Get a single object by primary key.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/objects/Employee/EMP-001
+curl http://localhost:3000/api/v1/objects/Employee/EMP-001
 ```
 
 ---
 
-### `POST /api/v2/objects/:objectType/search`
+### `POST /api/v1/objects/:objectType/search`
 
 Search objects with filter expressions, ordering, and pagination.
 
@@ -741,12 +741,12 @@ Search objects with filter expressions, ordering, and pagination.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/objects/Employee/search -H "Content-Type: application/json" -d '{"where":{"type":"eq","field":"department","value":"Engineering"}}'
+curl -X POST http://localhost:3000/api/v1/objects/Employee/search -H "Content-Type: application/json" -d '{"where":{"type":"eq","field":"department","value":"Engineering"}}'
 ```
 
 ---
 
-### `POST /api/v2/objects/:objectType/searchFullText`
+### `POST /api/v1/objects/:objectType/searchFullText`
 
 Full-text search across all indexed text fields.
 
@@ -763,12 +763,12 @@ Full-text search across all indexed text fields.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/objects/Employee/searchFullText -H "Content-Type: application/json" -d '{"query":"Habimana"}'
+curl -X POST http://localhost:3000/api/v1/objects/Employee/searchFullText -H "Content-Type: application/json" -d '{"query":"Habimana"}'
 ```
 
 ---
 
-### `POST /api/v2/objects/:objectType/aggregate`
+### `POST /api/v1/objects/:objectType/aggregate`
 
 Run aggregations (count, avg, sum, min, max, terms, date_histogram, range, cardinality).
 
@@ -790,12 +790,12 @@ Run aggregations (count, avg, sum, min, max, terms, date_histogram, range, cardi
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/objects/Employee/aggregate -H "Content-Type: application/json" -d '{"aggregations":[{"type":"avg","field":"salary","name":"avgSalary"}]}'
+curl -X POST http://localhost:3000/api/v1/objects/Employee/aggregate -H "Content-Type: application/json" -d '{"aggregations":[{"type":"avg","field":"salary","name":"avgSalary"}]}'
 ```
 
 ---
 
-### `POST /api/v2/objects/:objectType/searchAround`
+### `POST /api/v1/objects/:objectType/searchAround`
 
 Search around linked objects (Search Around). Returns linked objects matching filters.
 
@@ -812,12 +812,12 @@ Search around linked objects (Search Around). Returns linked objects matching fi
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/objects/Employee/searchAround -H "Content-Type: application/json" -d '{"linkType":"employedBy","direction":"forward"}'
+curl -X POST http://localhost:3000/api/v1/objects/Employee/searchAround -H "Content-Type: application/json" -d '{"linkType":"employedBy","direction":"forward"}'
 ```
 
 ---
 
-### `GET /api/v2/objects/:objectType/:primaryKey/links/:linkType`
+### `GET /api/v1/objects/:objectType/:primaryKey/links/:linkType`
 
 Resolve links for a specific object.
 
@@ -832,12 +832,12 @@ Resolve links for a specific object.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/objects/Employee/EMP-001/links/employedBy"
+curl "http://localhost:3000/api/v1/objects/Employee/EMP-001/links/employedBy"
 ```
 
 ---
 
-### `GET /api/v2/objects/:objectType/:primaryKey/links/:linkType/count`
+### `GET /api/v1/objects/:objectType/:primaryKey/links/:linkType/count`
 
 Count linked objects for a specific link type.
 
@@ -846,12 +846,12 @@ Count linked objects for a specific link type.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/objects/Employee/EMP-001/links/employedBy/count"
+curl "http://localhost:3000/api/v1/objects/Employee/EMP-001/links/employedBy/count"
 ```
 
 ---
 
-### `GET /api/v2/objects/:objectType/:primaryKey/editHistory`
+### `GET /api/v1/objects/:objectType/:primaryKey/editHistory`
 
 Get the complete edit history for a single object in reverse chronological order.
 
@@ -867,25 +867,25 @@ Get the complete edit history for a single object in reverse chronological order
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/objects/Employee/EMP-001/editHistory"
+curl "http://localhost:3000/api/v1/objects/Employee/EMP-001/editHistory"
 ```
 
 ---
 
-### `POST /api/v2/objects/:objectType/validateForeignKeys`
+### `POST /api/v1/objects/:objectType/validateForeignKeys`
 
 Validate foreign key references for an object type.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/objects/Employee/validateForeignKeys -H "Content-Type: application/json" -d '{}'
+curl -X POST http://localhost:3000/api/v1/objects/Employee/validateForeignKeys -H "Content-Type: application/json" -d '{}'
 ```
 
 ---
 
 ## Link Types
 
-### `POST /api/v2/ontologies/:ontologyId/linkTypes`
+### `POST /api/v1/ontologies/:ontologyId/linkTypes`
 
 Create a new link type between two object types.
 
@@ -905,23 +905,23 @@ Create a new link type between two object types.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes -H "Content-Type: application/json" -d '{...}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes -H "Content-Type: application/json" -d '{...}'
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/linkTypes`
+### `GET /api/v1/ontologies/:ontologyId/linkTypes`
 
 List all link types for an ontology.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/linkTypes/:linkApiName`
+### `GET /api/v1/ontologies/:ontologyId/linkTypes/:linkApiName`
 
 Get a single link type by API name.
 
@@ -930,12 +930,12 @@ Get a single link type by API name.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/{linkApiName}
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/{linkApiName}
 ```
 
 ---
 
-### `DELETE /api/v2/ontologies/:ontologyId/linkTypes/:linkApiName`
+### `DELETE /api/v1/ontologies/:ontologyId/linkTypes/:linkApiName`
 
 Delete a link type.
 
@@ -944,14 +944,14 @@ Delete a link type.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/{linkApiName}
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/{linkApiName}
 ```
 
 ---
 
 ## Action Types
 
-### `POST /api/v2/ontologies/:ontologyId/actionTypes`
+### `POST /api/v1/ontologies/:ontologyId/actionTypes`
 
 Create a new action type with rules and parameters.
 
@@ -970,23 +970,23 @@ Create a new action type with rules and parameters.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/actionTypes -H "Content-Type: application/json" -d '{...}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/actionTypes -H "Content-Type: application/json" -d '{...}'
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/actionTypes`
+### `GET /api/v1/ontologies/:ontologyId/actionTypes`
 
 List all action types for an ontology.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/actionTypes
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/actionTypes
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/actionTypes/:actionApiName`
+### `GET /api/v1/ontologies/:ontologyId/actionTypes/:actionApiName`
 
 Get a single action type by API name.
 
@@ -995,12 +995,12 @@ Get a single action type by API name.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}
 ```
 
 ---
 
-### `PUT /api/v2/ontologies/:ontologyId/actionTypes/:actionApiName`
+### `PUT /api/v1/ontologies/:ontologyId/actionTypes/:actionApiName`
 
 Update an action type (displayName, description, parameters, rules).
 
@@ -1009,12 +1009,12 @@ Update an action type (displayName, description, parameters, rules).
 
 **Example:**
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName} -H "Content-Type: application/json" -d '{...}'
+curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName} -H "Content-Type: application/json" -d '{...}'
 ```
 
 ---
 
-### `DELETE /api/v2/ontologies/:ontologyId/actionTypes/:actionApiName`
+### `DELETE /api/v1/ontologies/:ontologyId/actionTypes/:actionApiName`
 
 Delete an action type.
 
@@ -1023,12 +1023,12 @@ Delete an action type.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}
 ```
 
 ---
 
-### `POST /api/v2/ontologies/:ontologyId/actionTypes/:actionApiName/clone`
+### `POST /api/v1/ontologies/:ontologyId/actionTypes/:actionApiName/clone`
 
 Clone an action type with a new API name.
 
@@ -1046,12 +1046,12 @@ Clone an action type with a new API name.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone -H "Content-Type: application/json" -d '{"newApiName":"hireContractor"}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone -H "Content-Type: application/json" -d '{"newApiName":"hireContractor"}'
 ```
 
 ---
 
-### `GET /api/v2/ontologies/:ontologyId/actionTypes/:actionApiName/impact`
+### `GET /api/v1/ontologies/:ontologyId/actionTypes/:actionApiName/impact`
 
 Analyze the impact of an action type (which object types and properties it touches).
 
@@ -1060,14 +1060,14 @@ Analyze the impact of an action type (which object types and properties it touch
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact
 ```
 
 ---
 
 ## Actions
 
-### `POST /api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/apply`
+### `POST /api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/apply`
 
 Execute an action. Supports idempotency via Idempotency-Key header and optimistic concurrency via $expectedVersion.
 
@@ -1091,12 +1091,12 @@ Execute an action. Supports idempotency via Idempotency-Key header and optimisti
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/actions/updateSalary/apply -H "Content-Type: application/json" -d '{"parameters":{"employeeId":"EMP-001","salary":75000}}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/actions/updateSalary/apply -H "Content-Type: application/json" -d '{"parameters":{"employeeId":"EMP-001","salary":75000}}'
 ```
 
 ---
 
-### `POST /api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/validate`
+### `POST /api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/validate`
 
 Dry-run validation of an action without applying edits.
 
@@ -1112,12 +1112,12 @@ Dry-run validation of an action without applying edits.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/actions/updateSalary/validate -H "Content-Type: application/json" -d '{"parameters":{}}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/actions/updateSalary/validate -H "Content-Type: application/json" -d '{"parameters":{}}'
 ```
 
 ---
 
-### `POST /api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/applyBatch`
+### `POST /api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/applyBatch`
 
 Execute the same action type multiple times with different parameter sets (max 100 per batch).
 
@@ -1137,34 +1137,34 @@ Execute the same action type multiple times with different parameter sets (max 1
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/actions/updateSalary/applyBatch -H "Content-Type: application/json" -d '{"requests":[{"parameters":{}}]}'
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/actions/updateSalary/applyBatch -H "Content-Type: application/json" -d '{"requests":[{"parameters":{}}]}'
 ```
 
 ---
 
-### `POST /api/v2/actions/:actionTypeApiName/validate`
+### `POST /api/v1/actions/:actionTypeApiName/validate`
 
 Validate an action using the default ontology (no ontologyId required).
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/actions/updateSalary/validate -H "Content-Type: application/json" -d '{"parameters":{}}'
+curl -X POST http://localhost:3000/api/v1/actions/updateSalary/validate -H "Content-Type: application/json" -d '{"parameters":{}}'
 ```
 
 ---
 
-### `POST /api/v2/actions/:actionTypeApiName/applyBatch`
+### `POST /api/v1/actions/:actionTypeApiName/applyBatch`
 
 Batch-execute actions using the default ontology.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/actions/updateSalary/applyBatch -H "Content-Type: application/json" -d '{"requests":[...]}'
+curl -X POST http://localhost:3000/api/v1/actions/updateSalary/applyBatch -H "Content-Type: application/json" -d '{"requests":[...]}'
 ```
 
 ---
 
-### `POST /api/v2/actions/:actionTypeApiName/applyBulk`
+### `POST /api/v1/actions/:actionTypeApiName/applyBulk`
 
 Bulk-execute an action (max 1000 per call, with stopOnError and autoIndex options).
 
@@ -1182,14 +1182,14 @@ Bulk-execute an action (max 1000 per call, with stopOnError and autoIndex option
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/actions/updateSalary/applyBulk -H "Content-Type: application/json" -d '{"requests":[...],"autoIndex":true}'
+curl -X POST http://localhost:3000/api/v1/actions/updateSalary/applyBulk -H "Content-Type: application/json" -d '{"requests":[...],"autoIndex":true}'
 ```
 
 ---
 
 ## Audit Log
 
-### `GET /api/v2/ontologies/:ontologyId/actions/:actionTypeApiName/audit`
+### `GET /api/v1/ontologies/:ontologyId/actions/:actionTypeApiName/audit`
 
 Get audit log entries for a specific action type.
 
@@ -1202,12 +1202,12 @@ Get audit log entries for a specific action type.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/ontologies/{ontologyId}/actions/updateSalary/audit"
+curl "http://localhost:3000/api/v1/ontologies/{ontologyId}/actions/updateSalary/audit"
 ```
 
 ---
 
-### `GET /api/v2/audit/log`
+### `GET /api/v1/audit/log`
 
 Global audit log across all action types.
 
@@ -1220,12 +1220,12 @@ Global audit log across all action types.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/audit/log"
+curl "http://localhost:3000/api/v1/audit/log"
 ```
 
 ---
 
-### `GET /api/v2/audit/log/:executionId`
+### `GET /api/v1/audit/log/:executionId`
 
 Get a single audit entry by execution ID.
 
@@ -1234,25 +1234,25 @@ Get a single audit entry by execution ID.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/audit/log/{executionId}
+curl http://localhost:3000/api/v1/audit/log/{executionId}
 ```
 
 ---
 
-### `GET /api/v2/audit/stats`
+### `GET /api/v1/audit/stats`
 
 Get aggregate statistics across all action executions.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/audit/stats
+curl http://localhost:3000/api/v1/audit/stats
 ```
 
 ---
 
 ## Edits
 
-### `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/edits`
+### `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/edits`
 
 List all edits for an object type with filtering and pagination.
 
@@ -1265,36 +1265,36 @@ List all edits for an object type with filtering and pagination.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/edits"
+curl "http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/edits"
 ```
 
 ---
 
-### `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/edits/diff/:primaryKey`
+### `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/edits/diff/:primaryKey`
 
 Diff view: compare datasource state vs ontology state for one object.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/edits/diff/EMP-001"
+curl "http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/edits/diff/EMP-001"
 ```
 
 ---
 
 ## Datasets
 
-### `POST /api/v2/datasets/upload`
+### `POST /api/v1/datasets/upload`
 
 Upload a new dataset file (multipart form).
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/datasets/upload -F "file=@data.csv" -F "name=employees"
+curl -X POST http://localhost:3000/api/v1/datasets/upload -F "file=@data.csv" -F "name=employees"
 ```
 
 ---
 
-### `GET /api/v2/datasets`
+### `GET /api/v1/datasets`
 
 List datasets with pagination and search.
 
@@ -1305,12 +1305,12 @@ List datasets with pagination and search.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/datasets"
+curl "http://localhost:3000/api/v1/datasets"
 ```
 
 ---
 
-### `GET /api/v2/datasets/:datasetId`
+### `GET /api/v1/datasets/:datasetId`
 
 Get full dataset details with transactions.
 
@@ -1319,12 +1319,12 @@ Get full dataset details with transactions.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/datasets/{datasetId}
+curl http://localhost:3000/api/v1/datasets/{datasetId}
 ```
 
 ---
 
-### `DELETE /api/v2/datasets/:datasetId`
+### `DELETE /api/v1/datasets/:datasetId`
 
 Delete a dataset (with safety check for backing usage).
 
@@ -1334,12 +1334,12 @@ Delete a dataset (with safety check for backing usage).
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/datasets/{datasetId}
+curl -X DELETE http://localhost:3000/api/v1/datasets/{datasetId}
 ```
 
 ---
 
-### `POST /api/v2/datasets/:datasetId/transactions`
+### `POST /api/v1/datasets/:datasetId/transactions`
 
 Add a new transaction (append or snapshot) to a dataset.
 
@@ -1349,12 +1349,12 @@ Add a new transaction (append or snapshot) to a dataset.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/datasets/{datasetId}/transactions -F "file=@new_data.csv" -F "type=APPEND"
+curl -X POST http://localhost:3000/api/v1/datasets/{datasetId}/transactions -F "file=@new_data.csv" -F "type=APPEND"
 ```
 
 ---
 
-### `GET /api/v2/datasets/:datasetId/transactions`
+### `GET /api/v1/datasets/:datasetId/transactions`
 
 List transactions for a dataset.
 
@@ -1363,12 +1363,12 @@ List transactions for a dataset.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/datasets/{datasetId}/transactions"
+curl "http://localhost:3000/api/v1/datasets/{datasetId}/transactions"
 ```
 
 ---
 
-### `GET /api/v2/datasets/:datasetId/preview`
+### `GET /api/v1/datasets/:datasetId/preview`
 
 Preview dataset rows with column statistics.
 
@@ -1381,14 +1381,14 @@ Preview dataset rows with column statistics.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/datasets/{datasetId}/preview?rows=10"
+curl "http://localhost:3000/api/v1/datasets/{datasetId}/preview?rows=10"
 ```
 
 ---
 
 ## Reindex
 
-### `POST /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex`
+### `POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex`
 
 Trigger a full reindex with smart skip logic and atomic locking.
 
@@ -1397,36 +1397,36 @@ Trigger a full reindex with smart skip logic and atomic locking.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/reindex
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/reindex
 ```
 
 ---
 
-### `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex/status`
+### `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/status`
 
 Get current reindex status.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/reindex/status
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/reindex/status
 ```
 
 ---
 
-### `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex/history`
+### `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/history`
 
 Get paginated reindex history.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/reindex/history"
+curl "http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/reindex/history"
 ```
 
 ---
 
 ## Interfaces
 
-### `POST /api/v2/ontology/:ontologyId/interfaces`
+### `POST /api/v1/ontology/:ontologyId/interfaces`
 
 Create a new Interface with typed properties. Enables polymorphic queries across implementing Object Types.
 
@@ -1459,23 +1459,23 @@ Create a new Interface with typed properties. Enables polymorphic queries across
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/interfaces -H "Content-Type: application/json" -d '{...}'
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/interfaces -H "Content-Type: application/json" -d '{...}'
 ```
 
 ---
 
-### `GET /api/v2/ontology/:ontologyId/interfaces`
+### `GET /api/v1/ontology/:ontologyId/interfaces`
 
 List all Interfaces in an ontology with their properties and implementing object types.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontology/{ontologyId}/interfaces
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/interfaces
 ```
 
 ---
 
-### `GET /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName`
+### `GET /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName`
 
 Get a single Interface with full details (properties, implementing OTs).
 
@@ -1484,12 +1484,12 @@ Get a single Interface with full details (properties, implementing OTs).
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontology/{ontologyId}/interfaces/{interfaceApiName}
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/interfaces/{interfaceApiName}
 ```
 
 ---
 
-### `PUT /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName`
+### `PUT /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName`
 
 Update an Interface (displayName, description, properties). Property changes validated against implementing types.
 
@@ -1500,12 +1500,12 @@ Update an Interface (displayName, description, properties). Property changes val
 
 **Example:**
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontology/{ontologyId}/interfaces/{interfaceApiName} -H "Content-Type: application/json" -d '{...}'
+curl -X PUT http://localhost:3000/api/v1/ontology/{ontologyId}/interfaces/{interfaceApiName} -H "Content-Type: application/json" -d '{...}'
 ```
 
 ---
 
-### `DELETE /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName`
+### `DELETE /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName`
 
 Delete an Interface. Fails if any Object Types still implement it.
 
@@ -1515,12 +1515,12 @@ Delete an Interface. Fails if any Object Types still implement it.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontology/{ontologyId}/interfaces/{interfaceApiName}
+curl -X DELETE http://localhost:3000/api/v1/ontology/{ontologyId}/interfaces/{interfaceApiName}
 ```
 
 ---
 
-### `POST /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName/search`
+### `POST /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName/search`
 
 Polymorphic search across all Object Types implementing the Interface. Translates field names via property mappings.
 
@@ -1542,12 +1542,12 @@ Polymorphic search across all Object Types implementing the Interface. Translate
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/interfaces/HasLocation/search -H "Content-Type: application/json" -d '{"where":{"type":"gt","field":"latitude","value":-2.0}}'
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/interfaces/HasLocation/search -H "Content-Type: application/json" -d '{"where":{"type":"gt","field":"latitude","value":-2.0}}'
 ```
 
 ---
 
-### `POST /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName/aggregate`
+### `POST /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName/aggregate`
 
 Polymorphic aggregation across implementing types. Correctly merges results (weighted avg, sum counts, merge buckets).
 
@@ -1569,12 +1569,12 @@ Polymorphic aggregation across implementing types. Correctly merges results (wei
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/interfaces/HasLocation/aggregate -H "Content-Type: application/json" -d '{"aggregations":[{"type":"count","name":"total"}]}'
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/interfaces/HasLocation/aggregate -H "Content-Type: application/json" -d '{"aggregations":[{"type":"count","name":"total"}]}'
 ```
 
 ---
 
-### `POST /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
+### `POST /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
 
 Declare that an Object Type implements an Interface with a property mapping.
 
@@ -1596,12 +1596,12 @@ Declare that an Object Type implements an Interface with a property mapping.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/implements -H "Content-Type: application/json" -d '{...}'
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/implements -H "Content-Type: application/json" -d '{...}'
 ```
 
 ---
 
-### `DELETE /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName`
+### `DELETE /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName`
 
 Remove an Interface implementation from an Object Type.
 
@@ -1610,42 +1610,42 @@ Remove an Interface implementation from an Object Type.
 
 **Example:**
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/implements/{interfaceApiName}
+curl -X DELETE http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/implements/{interfaceApiName}
 ```
 
 ---
 
-### `GET /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
+### `GET /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements`
 
 List all Interfaces an Object Type implements with property mappings.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/ontology/{ontologyId}/objectTypes/{apiName}/implements
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/implements
 ```
 
 ---
 
 ## Documentation
 
-### `GET /api/v2/spec`
+### `GET /api/docs/spec.json`
 
 Returns raw OpenAPI JSON specification.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/v2/spec
+curl http://localhost:3000/api/docs/spec.json
 ```
 
 ---
 
-### `GET /api/v2/docs`
+### `GET /api/docs`
 
 Swagger UI interactive API documentation.
 
 **Example:**
 ```bash
-open http://localhost:3000/api/v2/docs
+open http://localhost:3000/api/docs
 ```
 
 ---

@@ -1,10 +1,10 @@
-# TASK 13: Create the POST `/api/v2/objects/:objectType/searchAround` Endpoint
+# TASK 13: Create the POST `/api/v1/objects/:objectType/searchAround` Endpoint
 
 **Objective:** Build the Search Around endpoint — the most powerful link traversal feature. Given a FILTER on source objects (not a single PK), traverse a link type and return all target objects linked to any of the matching source objects. This is how Palantir enables queries like: "Find all open Tickets assigned to Employees in the Engineering department."
 
 **Palantir doc reference:** The Object Set Service's Search Around feature. Default limit: 100,000 objects.
 
-**HTTP method and path:** `POST /api/v2/objects/:objectType/searchAround`
+**HTTP method and path:** `POST /api/v1/objects/:objectType/searchAround`
 
 **Request body:**
 
@@ -168,7 +168,7 @@ const targetResult = await opensearch.search({ index: targetIndex, body: searchB
 
 **Testing:**
 1. Create 10 Employees across 3 departments (Engineering: 4, Sales: 3, Marketing: 3). Create 20 Tickets linked to Employees via `assigneeEmployeeId` with mixed statuses (open/closed).
-2. Search Around: `POST /api/v2/objects/Employee/searchAround` with `sourceFilter: { type: "eq", field: "department", value: "Engineering" }`, `linkType: "assignedTickets"` — verify only tickets assigned to Engineering employees are returned.
+2. Search Around: `POST /api/v1/objects/Employee/searchAround` with `sourceFilter: { type: "eq", field: "department", value: "Engineering" }`, `linkType: "assignedTickets"` — verify only tickets assigned to Engineering employees are returned.
 3. Add `targetFilter: { type: "eq", field: "status", value: "open" }` — verify only open tickets for Engineering employees are returned.
 4. Test with a sourceFilter that matches 0 employees — verify empty result `{ "data": [], "totalCount": 0 }`.
 5. Test with missing `linkType` in body — verify HTTP 400.

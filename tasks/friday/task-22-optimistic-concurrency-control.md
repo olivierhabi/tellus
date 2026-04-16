@@ -8,7 +8,7 @@ Palantir uses optimistic concurrency via object versioning. Each object has a `_
 
 Add a `$expectedVersion` field to the action execution request:
 ```json
-POST /api/v2/actions/updateSalary/apply
+POST /api/v1/actions/updateSalary/apply
 {
     "parameters": { "employeeRef": "EMP-001", "newSalary": 150000 },
     "$expectedVersion": 3

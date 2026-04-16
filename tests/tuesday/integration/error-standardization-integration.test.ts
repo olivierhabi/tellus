@@ -47,7 +47,7 @@ async function request(method: string, path: string, body?: unknown) {
 async function ensureActionType(def: Record<string, unknown>): Promise<void> {
   const res = await request(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actionTypes`,
+    `/api/v1/ontologies/${ontologyId}/actionTypes`,
     def
   );
   if (res.status !== 201 && res.status !== 409) {
@@ -67,7 +67,7 @@ async function executeAction(
 ) {
   return request(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actions/${actionTypeApiName}/apply`,
+    `/api/v1/ontologies/${ontologyId}/actions/${actionTypeApiName}/apply`,
     { parameters }
   );
 }
@@ -90,7 +90,7 @@ beforeAll(async () => {
   }
 
   // Discover the first ontology (seed ontology)
-  const ont = await request("GET", "/api/v2/ontologies");
+  const ont = await request("GET", "/api/v1/ontologies");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
     const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;
@@ -276,7 +276,7 @@ describe("Error Response Standardization (Task 20)", () => {
 
       const res = await request(
         "POST",
-        `/api/v2/actions/nonExistentActionType/validate`,
+        `/api/v1/actions/nonExistentActionType/validate`,
         { parameters: {} }
       );
 
@@ -297,7 +297,7 @@ describe("Error Response Standardization (Task 20)", () => {
 
       const res = await request(
         "GET",
-        `/api/v2/ontologies/${ontologyId}/actionTypes/nonExistentAction`
+        `/api/v1/ontologies/${ontologyId}/actionTypes/nonExistentAction`
       );
 
       expect(res.status).toBe(404);
@@ -318,7 +318,7 @@ describe("Error Response Standardization (Task 20)", () => {
 
       const res = await request(
         "DELETE",
-        `/api/v2/ontologies/${ontologyId}/actionTypes/nonExistentAction`
+        `/api/v1/ontologies/${ontologyId}/actionTypes/nonExistentAction`
       );
 
       expect(res.status).toBe(404);
@@ -505,7 +505,7 @@ describe("Error Response Standardization (Task 20)", () => {
       // for estUpdateRiskScore
       const auditRes = await request(
         "GET",
-        `/api/v2/ontologies/${ontologyId}/actions/estUpdateRiskScore/auditLog?$pageSize=1`
+        `/api/v1/ontologies/${ontologyId}/actions/estUpdateRiskScore/auditLog?$pageSize=1`
       );
       // Audit endpoint may or may not exist in all configurations
       // If it returns 200, verify the latest entry is a failure
@@ -528,7 +528,7 @@ describe("Error Response Standardization (Task 20)", () => {
 
       const res = await request(
         "POST",
-        `/api/v2/ontologies/${ontologyId}/actions/nonExistent/apply`,
+        `/api/v1/ontologies/${ontologyId}/actions/nonExistent/apply`,
         { parameters: {} }
       );
 

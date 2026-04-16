@@ -7,7 +7,7 @@ In Palantir Foundry, "backing datasources" are always datasets (or restricted vi
 
 ### Exact Specification
 
-**Update endpoint: `POST /api/v2/ontology/:ontologyId/objectTypes/:apiName/datasource`**
+**Update endpoint: `POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/datasource`**
 
 The request body must now accept EITHER a `datasetId` (new preferred method) or a `filePath` (legacy fallback for backward compatibility):
 
@@ -106,7 +106,7 @@ When all validations pass:
     "primaryKeyColumn": "emp_id",
     "registeredAt": "2025-03-15T12:00:00.000Z"
   },
-  "message": "Backing datasource registered. Call POST /api/v2/ontology/:id/objectTypes/Employee/reindex to index the data into the Ontology."
+  "message": "Backing datasource registered. Call POST /api/v1/ontology/:id/objectTypes/Employee/reindex to index the data into the Ontology."
 }
 ```
 

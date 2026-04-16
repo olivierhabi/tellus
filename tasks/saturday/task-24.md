@@ -66,7 +66,7 @@ Assert: status 404, error.code === "OBJECT_NOT_FOUND"
 
 Test 8.9: Delete dataset that is backing an object type
 ```
-DELETE /api/v2/datasets/{datasetId} where dataset backs Employee
+DELETE /api/v1/datasets/{datasetId} where dataset backs Employee
 Assert: status 409, error.code === "DATASET_IN_USE"
 Assert: error.message mentions which object type is using it
 ```
@@ -92,20 +92,20 @@ Assert: status 400, error.code === "FORMAT_MISMATCH"
 
 Test 8.13: Query non-existent object type
 ```
-GET /api/v2/objects/NonExistentType
+GET /api/v1/objects/NonExistentType
 Assert: status 404, error.code === "OBJECT_TYPE_NOT_FOUND"
 ```
 
 Test 8.14: Search with invalid filter operator
 ```
-POST /api/v2/objects/Employee/search
+POST /api/v1/objects/Employee/search
 Body: { "where": { "type": "INVALID_OPERATOR", "field": "salary", "value": 100 } }
 Assert: status 400, error.code === "INVALID_FILTER_OPERATOR"
 ```
 
 Test 8.15: Aggregate with non-numeric field for avg
 ```
-POST /api/v2/objects/Employee/aggregate
+POST /api/v1/objects/Employee/aggregate
 Body: { "aggregations": [{ "type": "avg", "field": "fullName", "name": "test" }] }
 Assert: status 400, error.code === "INVALID_AGGREGATION_TYPE"
 Assert: error.message indicates that 'avg' requires a numeric field

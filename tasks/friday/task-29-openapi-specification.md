@@ -6,21 +6,21 @@
 
 **The spec must include ALL of these endpoints with complete request/response schemas:**
 
-1. `POST /api/v2/ontology/{ontologyId}/actionTypes` — Create action type
-2. `GET /api/v2/ontology/{ontologyId}/actionTypes` — List action types
-3. `GET /api/v2/ontology/{ontologyId}/actionTypes/{apiName}` — Get action type
-4. `PUT /api/v2/ontology/{ontologyId}/actionTypes/{apiName}` — Update action type
-5. `DELETE /api/v2/ontology/{ontologyId}/actionTypes/{apiName}` — Delete action type
-6. `POST /api/v2/ontology/{ontologyId}/actionTypes/{apiName}/clone` — Clone action type
-7. `GET /api/v2/ontology/{ontologyId}/actionTypes/{apiName}/impact` — Impact analysis
-8. `POST /api/v2/actions/{actionTypeApiName}/apply` — Execute action
-9. `POST /api/v2/actions/{actionTypeApiName}/validate` — Validate action (dry run)
-10. `POST /api/v2/actions/{actionTypeApiName}/applyBatch` — Batch execute
-11. `GET /api/v2/actions/{actionTypeApiName}/audit` — Action audit log
-12. `GET /api/v2/audit/log` — Global audit log
-13. `GET /api/v2/audit/log/{executionId}` — Single audit entry
-14. `GET /api/v2/audit/stats` — Audit statistics
-15. `GET /api/v2/objects/{objectType}/{primaryKey}/editHistory` — Object edit history
+1. `POST /api/v1/ontology/{ontologyId}/actionTypes` — Create action type
+2. `GET /api/v1/ontology/{ontologyId}/actionTypes` — List action types
+3. `GET /api/v1/ontology/{ontologyId}/actionTypes/{apiName}` — Get action type
+4. `PUT /api/v1/ontology/{ontologyId}/actionTypes/{apiName}` — Update action type
+5. `DELETE /api/v1/ontology/{ontologyId}/actionTypes/{apiName}` — Delete action type
+6. `POST /api/v1/ontology/{ontologyId}/actionTypes/{apiName}/clone` — Clone action type
+7. `GET /api/v1/ontology/{ontologyId}/actionTypes/{apiName}/impact` — Impact analysis
+8. `POST /api/v1/actions/{actionTypeApiName}/apply` — Execute action
+9. `POST /api/v1/actions/{actionTypeApiName}/validate` — Validate action (dry run)
+10. `POST /api/v1/actions/{actionTypeApiName}/applyBatch` — Batch execute
+11. `GET /api/v1/actions/{actionTypeApiName}/audit` — Action audit log
+12. `GET /api/v1/audit/log` — Global audit log
+13. `GET /api/v1/audit/log/{executionId}` — Single audit entry
+14. `GET /api/v1/audit/stats` — Audit statistics
+15. `GET /api/v1/objects/{objectType}/{primaryKey}/editHistory` — Object edit history
 
 **For each endpoint, include:**
 - Path and method
@@ -54,14 +54,14 @@
 - `ImpactAnalysis` (the impact analysis response from Task 24)
 
 **Also create a middleware** that serves the spec and a Swagger UI at these paths:
-- `GET /api/v2/spec` — Returns the raw OpenAPI JSON
-- `GET /api/v2/docs` — Renders Swagger UI (use swagger-ui-express npm package)
+- `GET /api/v1/spec` — Returns the raw OpenAPI JSON
+- `GET /api/v1/docs` — Renders Swagger UI (use swagger-ui-express npm package)
 
 ```javascript
 const swaggerUi = require('swagger-ui-express');
 const spec = require('./api-spec/actions.openapi.json');
-app.use('/api/v2/docs', swaggerUi.serve, swaggerUi.setup(spec));
-app.get('/api/v2/spec', (req, res) => res.json(spec));
+app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(spec));
+app.get('/api/v1/spec', (req, res) => res.json(spec));
 ```
 
 Install swagger-ui-express: `npm install swagger-ui-express`
@@ -72,4 +72,4 @@ npx swagger-cli validate src/api-spec/actions.openapi.json
 ```
 This ensures the spec is valid OpenAPI 3.0 and all `$ref` references resolve correctly.
 
-**Manual test:** Open `http://localhost:3000/api/v2/docs` in a browser and verify all 15 endpoints are listed with their full schemas, examples, and "Try it out" functionality works.
+**Manual test:** Open `http://localhost:3000/api/v1/docs` in a browser and verify all 15 endpoints are listed with their full schemas, examples, and "Try it out" functionality works.

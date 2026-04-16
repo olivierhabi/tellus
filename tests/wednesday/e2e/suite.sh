@@ -48,25 +48,25 @@ done
 section "1. Setup: Ontology, Object Type, Properties"
 
 # Clean up any pre-existing test ontology first
-do_request GET /api/v2/ontologies
+do_request GET /api/v1/ontologies
 OLD_ID=$(echo "$HTTP_BODY" | grep -o '"ontologyId":"[^"]*"' | while read -r line; do
   OID=$(echo "$line" | sed 's/"ontologyId":"//;s/"//')
-  do_request GET "/api/v2/ontologies/${OID}"
+  do_request GET "/api/v1/ontologies/${OID}"
   if echo "$HTTP_BODY" | grep -q "E2E Wednesday Ontology"; then
     echo "$OID"
     break
   fi
 done)
 if [[ -n "${OLD_ID:-}" ]]; then
-  do_request DELETE "/api/v2/ontologies/${OLD_ID}"
+  do_request DELETE "/api/v1/ontologies/${OLD_ID}"
 fi
 
-do_request POST /api/v2/ontologies '{"displayName":"E2E Wednesday Ontology","description":"Wednesday E2E testing"}'
+do_request POST /api/v1/ontologies '{"displayName":"E2E Wednesday Ontology","description":"Wednesday E2E testing"}'
 assert_status "$HTTP_STATUS" "201" "Create E2E Wednesday ontology"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "Ontology ID returned"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes" '{"apiName":"WedTestEmployee","displayName":"Wed Test Employee","description":"Wednesday test"}'
+do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes" '{"apiName":"WedTestEmployee","displayName":"Wed Test Employee","description":"Wednesday test"}'
 assert_status "$HTTP_STATUS" "201" "Create WedTestEmployee object type"
 
 # Create properties
@@ -77,7 +77,7 @@ for PROP_JSON in \
   '{"apiName":"department","displayName":"Department","baseType":"string"}' \
   '{"apiName":"isActive","displayName":"Is Active","baseType":"boolean"}' \
   '{"apiName":"startDate","displayName":"Start Date","baseType":"date"}'; do
-  do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/WedTestEmployee/properties" "$PROP_JSON"
+  do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedTestEmployee/properties" "$PROP_JSON"
   PROP_NAME=$(echo "$PROP_JSON" | grep -o '"apiName":"[^"]*"' | head -1 | sed 's/"apiName":"//;s/"//')
   assert_status "$HTTP_STATUS" "201" "Create property: $PROP_NAME"
 done
@@ -87,20 +87,20 @@ done
 # ===========================================================================
 section "2. Object Type Not Found"
 
-do_request GET /api/v2/objects/NonExistentType123
+do_request GET /api/v1/objects/NonExistentType123
 assert_status "$HTTP_STATUS" "404" "GET list - non-existent type returns 404"
 assert_contains "$HTTP_BODY" "OBJECT_TYPE_NOT_FOUND" "Error code is OBJECT_TYPE_NOT_FOUND"
 
-do_request POST /api/v2/objects/FakeType/search '{}'
+do_request POST /api/v1/objects/FakeType/search '{}'
 assert_status "$HTTP_STATUS" "404" "POST search - non-existent type returns 404"
 
-do_request GET /api/v2/objects/FakeType/SOME-PK
+do_request GET /api/v1/objects/FakeType/SOME-PK
 assert_status "$HTTP_STATUS" "404" "GET single - non-existent type returns 404"
 
-do_request POST /api/v2/objects/FakeType/aggregate '{"aggregations":[{"type":"count","name":"total"}]}'
+do_request POST /api/v1/objects/FakeType/aggregate '{"aggregations":[{"type":"count","name":"total"}]}'
 assert_status "$HTTP_STATUS" "404" "POST aggregate - non-existent type returns 404"
 
-do_request POST /api/v2/objects/FakeType/searchFullText '{"query":"test"}'
+do_request POST /api/v1/objects/FakeType/searchFullText '{"query":"test"}'
 assert_status "$HTTP_STATUS" "404" "POST searchFullText - non-existent type returns 404"
 
 # ===========================================================================
@@ -108,7 +108,7 @@ assert_status "$HTTP_STATUS" "404" "POST searchFullText - non-existent type retu
 # ===========================================================================
 section "3. List Objects (empty)"
 
-do_request GET /api/v2/objects/WedTestEmployee
+do_request GET /api/v1/objects/WedTestEmployee
 assert_status "$HTTP_STATUS" "200" "GET list returns 200 for existing type"
 assert_contains "$HTTP_BODY" '"data"' "Response has data field"
 
@@ -117,16 +117,16 @@ assert_contains "$HTTP_BODY" '"data"' "Response has data field"
 # ===========================================================================
 section "4. PageSize Validation"
 
-do_request GET "/api/v2/objects/WedTestEmployee?\$pageSize=0"
+do_request GET "/api/v1/objects/WedTestEmployee?\$pageSize=0"
 assert_status "$HTTP_STATUS" "400" "pageSize=0 rejected"
 
-do_request GET "/api/v2/objects/WedTestEmployee?\$pageSize=-1"
+do_request GET "/api/v1/objects/WedTestEmployee?\$pageSize=-1"
 assert_status "$HTTP_STATUS" "400" "pageSize=-1 rejected"
 
-do_request GET "/api/v2/objects/WedTestEmployee?\$pageSize=10001"
+do_request GET "/api/v1/objects/WedTestEmployee?\$pageSize=10001"
 assert_status "$HTTP_STATUS" "400" "pageSize=10001 rejected"
 
-do_request GET "/api/v2/objects/WedTestEmployee?\$pageSize=50"
+do_request GET "/api/v1/objects/WedTestEmployee?\$pageSize=50"
 assert_status "$HTTP_STATUS" "200" "pageSize=50 accepted"
 
 # ===========================================================================
@@ -134,20 +134,20 @@ assert_status "$HTTP_STATUS" "200" "pageSize=50 accepted"
 # ===========================================================================
 section "5. Search Validation"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"$pgeSize": 10}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"$pgeSize": 10}'
 assert_status "$HTTP_STATUS" "400" "Unexpected field rejected"
 assert_contains "$HTTP_BODY" "Unexpected field" "Error mentions unexpected field"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"unknownFilter"}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"unknownFilter"}}'
 assert_status "$HTTP_STATUS" "400" "Unknown filter type rejected"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{}'
 assert_status "$HTTP_STATUS" "200" "Empty body accepted (match_all)"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"$select":[]}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"$select":[]}'
 assert_status "$HTTP_STATUS" "400" "Empty \$select rejected"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"$pageSize": 5}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"$pageSize": 5}'
 assert_status "$HTTP_STATUS" "200" "Valid pageSize in search accepted"
 
 # ===========================================================================
@@ -155,13 +155,13 @@ assert_status "$HTTP_STATUS" "200" "Valid pageSize in search accepted"
 # ===========================================================================
 section "6. Full-Text Search Validation"
 
-do_request POST /api/v2/objects/WedTestEmployee/searchFullText '{"query":""}'
+do_request POST /api/v1/objects/WedTestEmployee/searchFullText '{"query":""}'
 assert_status "$HTTP_STATUS" "400" "Empty search query rejected"
 
-do_request POST /api/v2/objects/WedTestEmployee/searchFullText '{}'
+do_request POST /api/v1/objects/WedTestEmployee/searchFullText '{}'
 assert_status "$HTTP_STATUS" "400" "Missing search query rejected"
 
-do_request POST /api/v2/objects/WedTestEmployee/searchFullText '{"query":"test search"}'
+do_request POST /api/v1/objects/WedTestEmployee/searchFullText '{"query":"test search"}'
 assert_status "$HTTP_STATUS" "200" "Valid search query accepted"
 
 # ===========================================================================
@@ -169,13 +169,13 @@ assert_status "$HTTP_STATUS" "200" "Valid search query accepted"
 # ===========================================================================
 section "7. Aggregate Validation"
 
-do_request POST /api/v2/objects/WedTestEmployee/aggregate '{"aggregations":[]}'
+do_request POST /api/v1/objects/WedTestEmployee/aggregate '{"aggregations":[]}'
 assert_status "$HTTP_STATUS" "400" "Empty aggregations rejected"
 
-do_request POST /api/v2/objects/WedTestEmployee/aggregate '{}'
+do_request POST /api/v1/objects/WedTestEmployee/aggregate '{}'
 assert_status "$HTTP_STATUS" "400" "Missing aggregations rejected"
 
-do_request POST /api/v2/objects/WedTestEmployee/aggregate '{"aggregations":[{"type":"count","name":"total"}]}'
+do_request POST /api/v1/objects/WedTestEmployee/aggregate '{"aggregations":[{"type":"count","name":"total"}]}'
 assert_status "$HTTP_STATUS" "200" "Valid count aggregation accepted"
 
 # ===========================================================================
@@ -183,7 +183,7 @@ assert_status "$HTTP_STATUS" "200" "Valid count aggregation accepted"
 # ===========================================================================
 section "8. Single Object Not Found"
 
-do_request GET /api/v2/objects/WedTestEmployee/NONEXISTENT
+do_request GET /api/v1/objects/WedTestEmployee/NONEXISTENT
 assert_status "$HTTP_STATUS" "404" "Non-existent PK returns 404"
 assert_contains "$HTTP_BODY" "OBJECT_NOT_FOUND" "Error code is OBJECT_NOT_FOUND"
 
@@ -192,29 +192,29 @@ assert_contains "$HTTP_BODY" "OBJECT_NOT_FOUND" "Error code is OBJECT_NOT_FOUND"
 # ===========================================================================
 section "9. Search With Filters (empty index)"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"eq","field":"department","value":"Engineering"}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"eq","field":"department","value":"Engineering"}}'
 assert_status "$HTTP_STATUS" "200" "eq filter on empty index returns 200"
 assert_contains "$HTTP_BODY" '"data"' "Response has data field"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"and","value":[{"type":"eq","field":"department","value":"Engineering"},{"type":"gt","field":"salary","value":100000}]}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"and","value":[{"type":"eq","field":"department","value":"Engineering"},{"type":"gt","field":"salary","value":100000}]}}'
 assert_status "$HTTP_STATUS" "200" "Compound and filter returns 200"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"or","value":[{"type":"eq","field":"department","value":"Engineering"},{"type":"eq","field":"department","value":"Sales"}]}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"or","value":[{"type":"eq","field":"department","value":"Engineering"},{"type":"eq","field":"department","value":"Sales"}]}}'
 assert_status "$HTTP_STATUS" "200" "Compound or filter returns 200"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"not","value":[{"type":"eq","field":"isActive","value":false}]}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"not","value":[{"type":"eq","field":"isActive","value":false}]}}'
 assert_status "$HTTP_STATUS" "200" "Not filter returns 200"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"isNull","field":"salary"}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"isNull","field":"salary"}}'
 assert_status "$HTTP_STATUS" "200" "isNull filter returns 200"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"in","field":"department","value":["Engineering","Sales"]}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"in","field":"department","value":["Engineering","Sales"]}}'
 assert_status "$HTTP_STATUS" "200" "in filter returns 200"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"contains","field":"fullName","value":"melissa"}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"contains","field":"fullName","value":"melissa"}}'
 assert_status "$HTTP_STATUS" "200" "contains filter returns 200"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"where":{"type":"startsWith","field":"fullName","value":"M"}}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"where":{"type":"startsWith","field":"fullName","value":"M"}}'
 assert_status "$HTTP_STATUS" "200" "startsWith filter returns 200"
 
 # ===========================================================================
@@ -222,10 +222,10 @@ assert_status "$HTTP_STATUS" "200" "startsWith filter returns 200"
 # ===========================================================================
 section "10. OrderBy + Select"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"$orderBy":[{"field":"salary","direction":"desc"}]}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"$orderBy":[{"field":"salary","direction":"desc"}]}'
 assert_status "$HTTP_STATUS" "200" "orderBy on salary:desc accepted"
 
-do_request POST /api/v2/objects/WedTestEmployee/search '{"$select":["fullName","salary"]}'
+do_request POST /api/v1/objects/WedTestEmployee/search '{"$select":["fullName","salary"]}'
 assert_status "$HTTP_STATUS" "200" "\$select with valid fields accepted"
 
 # ===========================================================================
@@ -233,7 +233,7 @@ assert_status "$HTTP_STATUS" "200" "\$select with valid fields accepted"
 # ===========================================================================
 section "Cleanup"
 
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}"
+do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}"
 if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
   pass "Deleted test ontology"
 else

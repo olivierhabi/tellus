@@ -2,11 +2,11 @@
 // Object Query Routes — Express Router
 //
 // Implements the Object Set Service query API:
-//   GET    /api/v2/objects/:objectType               — List objects
-//   GET    /api/v2/objects/:objectType/:primaryKey    — Get single object
-//   POST   /api/v2/objects/:objectType/search         — Search with filters
-//   POST   /api/v2/objects/:objectType/searchFullText — Full-text search
-//   POST   /api/v2/objects/:objectType/aggregate      — Aggregations
+//   GET    /api/v1/objects/:objectType               — List objects
+//   GET    /api/v1/objects/:objectType/:primaryKey    — Get single object
+//   POST   /api/v1/objects/:objectType/search         — Search with filters
+//   POST   /api/v1/objects/:objectType/searchFullText — Full-text search
+//   POST   /api/v1/objects/:objectType/aggregate      — Aggregations
 //
 // Tasks 9-15, 16-20 combined.
 // ---------------------------------------------------------------------------
@@ -76,11 +76,11 @@ function handleError(err: any, res: Response, next: NextFunction) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/search (MUST come before /:primaryKey)
+// POST /api/v1/objects/:objectType/search (MUST come before /:primaryKey)
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/search",
+  "/api/v1/objects/:objectType/search",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -140,7 +140,7 @@ router.post(
 
       const elapsed = Date.now() - start;
       console.log(
-        `[SEARCH] POST /api/v2/objects/${objectType}/search → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
+        `[SEARCH] POST /api/v1/objects/${objectType}/search → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -151,11 +151,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/searchFullText
+// POST /api/v1/objects/:objectType/searchFullText
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/searchFullText",
+  "/api/v1/objects/:objectType/searchFullText",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -189,7 +189,7 @@ router.post(
 
       const elapsed = Date.now() - start;
       console.log(
-        `[FULLTEXT] POST /api/v2/objects/${objectType}/searchFullText → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
+        `[FULLTEXT] POST /api/v1/objects/${objectType}/searchFullText → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -200,11 +200,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/aggregate
+// POST /api/v1/objects/:objectType/aggregate
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/aggregate",
+  "/api/v1/objects/:objectType/aggregate",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -219,7 +219,7 @@ router.post(
 
       const elapsed = Date.now() - start;
       console.log(
-        `[AGGREGATE] POST /api/v2/objects/${objectType}/aggregate → 200 (${elapsed}ms)`
+        `[AGGREGATE] POST /api/v1/objects/${objectType}/aggregate → 200 (${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -230,11 +230,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType (List Objects)
+// GET /api/v1/objects/:objectType (List Objects)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType",
+  "/api/v1/objects/:objectType",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -255,7 +255,7 @@ router.get(
 
       const elapsed = Date.now() - start;
       console.log(
-        `[LIST] GET /api/v2/objects/${objectType} → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
+        `[LIST] GET /api/v1/objects/${objectType} → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -266,11 +266,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/searchAround (Task 13-14)
+// POST /api/v1/objects/:objectType/searchAround (Task 13-14)
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/searchAround",
+  "/api/v1/objects/:objectType/searchAround",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType } = req.params;
@@ -313,11 +313,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/validateForeignKeys (Task 20)
+// POST /api/v1/objects/:objectType/validateForeignKeys (Task 20)
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/validateForeignKeys",
+  "/api/v1/objects/:objectType/validateForeignKeys",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType } = req.params;
@@ -338,11 +338,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey/links/:linkType (Task 12)
+// GET /api/v1/objects/:objectType/:primaryKey/links/:linkType (Task 12)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey/links/:linkType",
+  "/api/v1/objects/:objectType/:primaryKey/links/:linkType",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType, primaryKey, linkType: linkTypeApiName } = req.params;
@@ -399,11 +399,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey/links/:linkType/count (Task 15)
+// GET /api/v1/objects/:objectType/:primaryKey/links/:linkType/count (Task 15)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey/links/:linkType/count",
+  "/api/v1/objects/:objectType/:primaryKey/links/:linkType/count",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType, primaryKey, linkType: linkTypeApiName } = req.params;
@@ -438,7 +438,7 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey/editHistory (Task 17)
+// GET /api/v1/objects/:objectType/:primaryKey/editHistory (Task 17)
 //
 // Returns the complete edit history for a single object in reverse
 // chronological order (most recent first). Each entry shows what operation
@@ -454,7 +454,7 @@ router.get(
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey/editHistory",
+  "/api/v1/objects/:objectType/:primaryKey/editHistory",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -636,7 +636,7 @@ router.get(
 
       const elapsed = Date.now() - start;
       console.log(
-        `[EDIT_HISTORY] GET /api/v2/objects/${objectType}/${primaryKey}/editHistory → 200 (${data.length}/${totalCount} edits, ${elapsed}ms)`
+        `[EDIT_HISTORY] GET /api/v1/objects/${objectType}/${primaryKey}/editHistory → 200 (${data.length}/${totalCount} edits, ${elapsed}ms)`
       );
 
       return sendSuccess(res, {
@@ -653,11 +653,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey (Single Object)
+// GET /api/v1/objects/:objectType/:primaryKey (Single Object)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey",
+  "/api/v1/objects/:objectType/:primaryKey",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -705,7 +705,7 @@ router.get(
 
       const elapsed = Date.now() - start;
       console.log(
-        `[GET] GET /api/v2/objects/${objectType}/${primaryKey} → 200 (${elapsed}ms)`
+        `[GET] GET /api/v1/objects/${objectType}/${primaryKey} → 200 (${elapsed}ms)`
       );
 
       return sendSuccess(res, obj);

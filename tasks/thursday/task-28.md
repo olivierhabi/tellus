@@ -33,7 +33,7 @@ const benchmarks = [
         description: 'Resolves ONE_TO_MANY from a single employee to their ~5 tickets',
         run: async () => {
             // Pick 100 random employee PKs
-            // For each: GET /api/v2/objects/BenchEmployee/{pk}/links/benchEmployeeTickets
+            // For each: GET /api/v1/objects/BenchEmployee/{pk}/links/benchEmployeeTickets
             // Measure response time for each request
         },
         iterations: 100,
@@ -43,7 +43,7 @@ const benchmarks = [
         name: 'Search Around (Engineering employee tickets)',
         description: 'Finds all tickets for employees in Engineering department (~2000 employees → ~10000 tickets)',
         run: async () => {
-            // POST /api/v2/objects/BenchEmployee/searchAround
+            // POST /api/v1/objects/BenchEmployee/searchAround
             // Body: { sourceFilter: { type: "eq", field: "department", value: "Engineering" },
             //         linkType: "benchEmployeeTickets", $pageSize: 100 }
         },
@@ -55,7 +55,7 @@ const benchmarks = [
         description: 'Resolves MANY_TO_MANY from a single employee to their ~10 courses via 100K-row join table',
         run: async () => {
             // Pick 100 random employee PKs
-            // For each: GET /api/v2/objects/BenchEmployee/{pk}/links/benchEmployeeCourses
+            // For each: GET /api/v1/objects/BenchEmployee/{pk}/links/benchEmployeeCourses
         },
         iterations: 100,
         target: { p50: 50, p95: 500, p99: 1000 }
@@ -65,7 +65,7 @@ const benchmarks = [
         description: 'Counts linked tickets for a single employee',
         run: async () => {
             // Pick 100 random employee PKs
-            // For each: GET /api/v2/objects/BenchEmployee/{pk}/links/benchEmployeeTickets/count
+            // For each: GET /api/v1/objects/BenchEmployee/{pk}/links/benchEmployeeTickets/count
         },
         iterations: 100,
         target: { p50: 5, p95: 15, p99: 30 }
@@ -75,7 +75,7 @@ const benchmarks = [
         description: 'Gets counts for all link types on a single employee',
         run: async () => {
             // Pick 50 random employee PKs
-            // For each: GET /api/v2/objects/BenchEmployee/{pk}/links
+            // For each: GET /api/v1/objects/BenchEmployee/{pk}/links
         },
         iterations: 50,
         target: { p50: 20, p95: 50, p99: 100 }

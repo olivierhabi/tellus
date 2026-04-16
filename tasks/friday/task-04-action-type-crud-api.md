@@ -2,9 +2,9 @@
 
 **Objective:** Build the complete set of REST API endpoints for creating, reading, updating, and deleting action type definitions. These endpoints are what the Ontology Manager UI (in week 2) will call, and what developers use directly via API to configure actions in the Ontology. The endpoints must validate all input thoroughly — an invalid action type definition should never be saved to the database because it would cause failures at execution time that are much harder to debug.
 
-**Create a new Express router file** at `src/routes/actionTypes.js` and register it in the main `src/server.js` file under the path prefix `/api/v2/ontology/:ontologyId/actionTypes`.
+**Create a new Express router file** at `src/routes/actionTypes.js` and register it in the main `src/server.js` file under the path prefix `/api/v1/ontology/:ontologyId/actionTypes`.
 
-**Endpoint 1: POST /api/v2/ontology/:ontologyId/actionTypes (Create Action Type)**
+**Endpoint 1: POST /api/v1/ontology/:ontologyId/actionTypes (Create Action Type)**
 
 This endpoint creates a new action type definition in the Ontology. It must perform comprehensive validation before persisting to the database. The request body must be a JSON object with the following structure:
 
@@ -90,7 +90,7 @@ This endpoint creates a new action type definition in the Ontology. It must perf
 
 **On conflict:** Return 409 with: `{ "error": "CONFLICT", "message": "Action type with apiName 'X' already exists" }`
 
-**Endpoint 2: GET /api/v2/ontology/:ontologyId/actionTypes (List Action Types)**
+**Endpoint 2: GET /api/v1/ontology/:ontologyId/actionTypes (List Action Types)**
 
 Returns all action types for the given ontology. No pagination needed for week 1 (action type counts are small — typically dozens, not thousands). Return as an array sorted by `created_at` ascending.
 
@@ -114,13 +114,13 @@ Response format:
 }
 ```
 
-**Endpoint 3: GET /api/v2/ontology/:ontologyId/actionTypes/:apiName (Get Single Action Type)**
+**Endpoint 3: GET /api/v1/ontology/:ontologyId/actionTypes/:apiName (Get Single Action Type)**
 
 Returns a single action type by its `apiName`. If not found, return 404 with: `{ "error": "NOT_FOUND", "message": "Action type 'X' not found in this ontology" }`.
 
 Response format: The raw action type object (e.g., `{ "actionTypeId": "uuid", "apiName": "createEmployee", ... }`), NOT wrapped in a `data` array or any other wrapper object.
 
-**Endpoint 4: PUT /api/v2/ontology/:ontologyId/actionTypes/:apiName (Update Action Type)**
+**Endpoint 4: PUT /api/v1/ontology/:ontologyId/actionTypes/:apiName (Update Action Type)**
 
 Updates an existing action type. The request body can contain any subset of: `displayName`, `description`, `parameters`, `rules`, `submissionCriteria`, `sideEffects`, `maxAffectedObjects`, `isEnabled`. Fields not included in the request body are not modified. The `apiName` cannot be changed (it's the identifier).
 
@@ -130,7 +130,7 @@ Apply the same validation rules as the create endpoint for any fields that are b
 
 Return 200 with the updated action type object. Return 404 if the action type doesn't exist. Return 400 if validation fails.
 
-**Endpoint 5: DELETE /api/v2/ontology/:ontologyId/actionTypes/:apiName (Delete Action Type)**
+**Endpoint 5: DELETE /api/v1/ontology/:ontologyId/actionTypes/:apiName (Delete Action Type)**
 
 Deletes an action type definition. This does NOT undo any edits previously made by this action type — those edits are permanent in the `ontology_edit` table and the audit log.
 
@@ -139,7 +139,7 @@ Return 204 (No Content) on success. Return 404 if not found.
 **Register the router** in `src/server.js`:
 ```javascript
 const actionTypeRoutes = require('./routes/actionTypes');
-app.use('/api/v2/ontology/:ontologyId/actionTypes', actionTypeRoutes);
+app.use('/api/v1/ontology/:ontologyId/actionTypes', actionTypeRoutes);
 ```
 
 Make sure the `:ontologyId` parameter is accessible in the route handlers. In Express, you may need to use `{ mergeParams: true }` when creating the Router.

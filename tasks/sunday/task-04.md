@@ -9,7 +9,7 @@ Build the endpoints for updating an existing Interface definition and deleting a
 
 ## Sub-task 4A: PUT Endpoint for Updating an Interface
 
-**Endpoint 1:** `PUT /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName`
+**Endpoint 1:** `PUT /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName`
 
 This endpoint replaces the entire Interface definition (except the apiName, which is immutable). The request body has the same shape as the POST body but without `apiName`. The implementation must handle three cases for properties: new properties that don't exist yet (insert), existing properties whose definition changed (update), and properties that existed before but are not in the new request (delete).
 
@@ -58,7 +58,7 @@ COMMIT
 
 ## Sub-task 4B: DELETE Endpoint for Removing an Interface
 
-**Endpoint 2:** `DELETE /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName`
+**Endpoint 2:** `DELETE /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName`
 
 Deletes an Interface and all its properties. However, if any Object Types currently implement this Interface, the deletion must be REJECTED. Return HTTP 409 with error code "INTERFACE_IN_USE" and message "Cannot delete Interface '{apiName}' because it is implemented by Object Types: {list of names}".
 

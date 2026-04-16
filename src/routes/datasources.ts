@@ -3,7 +3,7 @@
 //
 // Routes for backing datasource management, nested under object types.
 // Mounted at:
-//   /api/v2/ontologies/:ontologyId/objectTypes/:apiName/datasource
+//   /api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource
 //
 // Provides 4 endpoints:
 //   POST   /          — Register a backing datasource
@@ -126,7 +126,7 @@ router.post(
 
         return sendCreated(res, {
           backingDatasource: result,
-          message: `Backing datasource registered. Call POST /api/v2/ontology/:id/objectTypes/${result.objectType}/reindex to index the data into the Ontology.`,
+          message: `Backing datasource registered. Call POST /api/v1/ontology/:id/objectTypes/${result.objectType}/reindex to index the data into the Ontology.`,
         });
       }
 
@@ -246,7 +246,7 @@ router.post(
 // confidence levels and a readyToRegister flag.
 //
 // This route is exported separately and mounted at:
-//   /api/v2/ontology/:ontologyId/objectTypes/:apiName/suggestMapping
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/suggestMapping
 // ---------------------------------------------------------------------------
 
 import { suggestMapping } from "../services/mappingSuggestionService";

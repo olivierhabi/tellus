@@ -13,12 +13,12 @@ Add a catch-all route in `server.js` AFTER all defined routes but BEFORE the err
 
 ```javascript
 // All defined routes
-app.use('/api/v2', ontologyRoutes);
-app.use('/api/v2', objectTypeRoutes);
+app.use('/api/v1', ontologyRoutes);
+app.use('/api/v1', objectTypeRoutes);
 // ... etc
 
 // Catch-all for undefined routes (AFTER all routes, BEFORE error handler)
-app.use('/api/v2/*', (req, res) => {
+app.use('/api/v1/*', (req, res) => {
   res.status(404).json({
     error: {
       code: 'ROUTE_NOT_FOUND',
@@ -26,21 +26,21 @@ app.use('/api/v2/*', (req, res) => {
       details: {
         method: req.method,
         path: req.originalUrl,
-        suggestion: 'Check the API documentation at GET /api/v2/docs for available endpoints'
+        suggestion: 'Check the API documentation at GET /api/v1/docs for available endpoints'
       }
     }
   });
 });
 
-// Also catch requests outside /api/v2 prefix
+// Also catch requests outside /api/v1 prefix
 app.use('*', (req, res) => {
   res.status(404).json({
     error: {
       code: 'ROUTE_NOT_FOUND',
-      message: `This server only handles requests under /api/v2/. You requested: ${req.originalUrl}`,
+      message: `This server only handles requests under /api/v1/. You requested: ${req.originalUrl}`,
       details: {
         requestedPath: req.originalUrl,
-        apiPrefix: '/api/v2'
+        apiPrefix: '/api/v1'
       }
     }
   });
@@ -56,7 +56,7 @@ app.use(errorHandler);
 
 Additionally, create a basic API documentation endpoint:
 
-**Endpoint:** `GET /api/v2/docs`
+**Endpoint:** `GET /api/v1/docs`
 
 This returns a machine-readable list of all available API endpoints with their methods, paths, and brief descriptions. This helps API consumers discover endpoints and is referenced in the 404 error message.
 
@@ -66,7 +66,7 @@ This returns a machine-readable list of all available API endpoints with their m
   "data": {
     "name": "Ontology System Engine API",
     "version": "1.0.0",
-    "baseUrl": "/api/v2",
+    "baseUrl": "/api/v1",
     "endpoints": [
       {
         "method": "POST",
@@ -147,9 +147,9 @@ Note: This approach has caveats — Express's internal stack structure is not a 
 **Note:** `app._router.stack` is an Express internal API, not a public contract. Add a code comment in the implementation acknowledging this caveat.
 
 ## Verification
-1. GET /api/v2/nonexistent → verify 404 with ROUTE_NOT_FOUND and helpful suggestion
-2. POST /api/v2/nonexistent → verify same 404 (method doesn't matter for undefined routes)
-3. GET /random/path → verify 404 with message about /api/v2 prefix
-4. GET /api/v2/docs → verify endpoint list is populated and matches actual routes
+1. GET /api/v1/nonexistent → verify 404 with ROUTE_NOT_FOUND and helpful suggestion
+2. POST /api/v1/nonexistent → verify same 404 (method doesn't matter for undefined routes)
+3. GET /random/path → verify 404 with message about /api/v1 prefix
+4. GET /api/v1/docs → verify endpoint list is populated and matches actual routes
 5. Verify no HTML is returned for any 404 (all responses are JSON)
-6. Add a new route to a route file → GET /api/v2/docs → verify the new route appears in the list
+6. Add a new route to a route file → GET /api/v1/docs → verify the new route appears in the list

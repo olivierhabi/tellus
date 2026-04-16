@@ -1,28 +1,15 @@
 -- ---------------------------------------------------------------------------
--- 009 — pgvector + TimescaleDB extensions for ontology vector & time-series
--- properties.
+-- 009 — TimescaleDB extension for ontology time-series properties.
 --
--- Spec equivalents:
---   • Vector properties (#12): up to 2048-d float arrays for KNN search.
+-- Spec equivalent:
 --   • Time series properties (#13): (timestamp, value) pairs with history.
 --
--- Both extensions are no-ops if not installed in the running Postgres image
--- (e.g. the plain `postgres:16-alpine`). Use the `pgvector/pgvector:pg16`
--- or `timescale/timescaledb-ha:pg16` image to get them. The migration
+-- The extension is a no-op if not installed in the running Postgres image
+-- (e.g. the plain `postgres:16-alpine`). Use the
+-- `timescale/timescaledb-ha:pg16` image to get it. The migration
 -- swallows extension-not-available errors so it remains idempotent across
 -- environments.
 -- ---------------------------------------------------------------------------
-
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'vector') THEN
-    CREATE EXTENSION IF NOT EXISTS vector;
-  ELSE
-    RAISE NOTICE 'pgvector extension not available — vector property storage will fall back to JSONB';
-  END IF;
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'pgvector install skipped: %', SQLERRM;
-END $$;
 
 DO $$
 BEGIN
@@ -33,36 +20,6 @@ BEGIN
   END IF;
 EXCEPTION WHEN OTHERS THEN
   RAISE NOTICE 'timescaledb install skipped: %', SQLERRM;
-END $$;
-
--- ---------------------------------------------------------------------------
--- vector_property_value
--- One row per (object_type, primary_key, property_api_name) — value is a
--- 1536-d vector by default. The dimension can be lifted to 2048 (the spec
--- max) by altering the column when an extension supports it; we ship 1536
--- as a safe default that matches OpenAI ada-002 and Anthropic Voyage 3.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS vector_property_value (
-  object_type_api_name   text NOT NULL,
-  property_api_name      text NOT NULL,
-  primary_key_value      text NOT NULL,
-  embedding              jsonb NOT NULL,  -- pgvector type swap-in below
-  created_at             timestamptz NOT NULL DEFAULT now(),
-  updated_at             timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (object_type_api_name, property_api_name, primary_key_value)
-);
-
--- Hot-swap the column type when pgvector is loaded.
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
-    BEGIN
-      ALTER TABLE vector_property_value
-        ALTER COLUMN embedding TYPE vector(1536) USING NULL;
-    EXCEPTION WHEN OTHERS THEN
-      RAISE NOTICE 'vector column promote skipped: %', SQLERRM;
-    END;
-  END IF;
 END $$;
 
 -- ---------------------------------------------------------------------------

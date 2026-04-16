@@ -7,7 +7,7 @@ This test verifies that the column mapping suggestion engine (Task 10) produces 
 
 Create `/tests/integration/test07_mapping_suggestions.js`:
 
-**Setup:** For each test, create a temporary object type with the specified properties (using `POST /api/v2/ontology/{id}/objectTypes` and `POST /api/v2/ontology/{id}/objectTypes/{apiName}/properties`) and upload a temporary dataset with the specified columns (using `POST /api/v2/datasets/upload`). After all tests complete, clean up all temporary resources.
+**Setup:** For each test, create a temporary object type with the specified properties (using `POST /api/v1/ontology/{id}/objectTypes` and `POST /api/v1/ontology/{id}/objectTypes/{apiName}/properties`) and upload a temporary dataset with the specified columns (using `POST /api/v1/datasets/upload`). After all tests complete, clean up all temporary resources.
 
 **Test sequence:**
 

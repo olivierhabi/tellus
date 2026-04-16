@@ -7,7 +7,7 @@ In week 1, we don't have Workshop or Automate yet. But we can still analyze: whi
 **Add endpoint:**
 
 ```
-GET /api/v2/ontology/:ontologyId/actionTypes/:apiName/impact
+GET /api/v1/ontology/:ontologyId/actionTypes/:apiName/impact
 ```
 
 **Implementation:**
@@ -78,7 +78,7 @@ If there are warnings (e.g., a referenced object type has been deleted):
 
 **Test cases:**
 ```javascript
-const impact = await fetch('/api/v2/ontology/ont-1/actionTypes/createEmployee/impact');
+const impact = await fetch('/api/v1/ontology/ont-1/actionTypes/createEmployee/impact');
 const data = await impact.json();
 assert(data.affectedObjectTypes.length >= 1);
 assert(data.affectedObjectTypes[0].apiName === 'Employee');

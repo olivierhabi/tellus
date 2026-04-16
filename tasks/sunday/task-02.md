@@ -5,9 +5,9 @@ Build the REST API endpoint that allows creating a new Interface definition in t
 
 ## Exact Specification
 
-Create a new route file at `/src/routes/interfaces.js` and register it in `server.js` under the path prefix `/api/v2/ontology/:ontologyId/interfaces`.
+Create a new route file at `/src/routes/interfaces.js` and register it in `server.js` under the path prefix `/api/v1/ontology/:ontologyId/interfaces`.
 
-**Endpoint:** `POST /api/v2/ontology/:ontologyId/interfaces`
+**Endpoint:** `POST /api/v1/ontology/:ontologyId/interfaces`
 
 **Request Body (JSON):**
 ```json

@@ -4,7 +4,7 @@
 
 **Prerequisites:** Tasks 1, 7-11 must be complete.
 
-**HTTP method and path:** `GET /api/v2/objects/:objectType/:primaryKey/links/:linkType/count`
+**HTTP method and path:** `GET /api/v1/objects/:objectType/:primaryKey/links/:linkType/count`
 
 **Implementation:**
 

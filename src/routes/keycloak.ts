@@ -1,13 +1,13 @@
 /**
- * /api/v2/sso — routes that exercise the Keycloak integration end-to-end.
+ * /api/v1/sso — routes that exercise the Keycloak integration end-to-end.
  *
  * Adds three endpoints used by the Cypress + bash test layers:
  *
- *   GET  /api/v2/sso/config   — public, returns the Keycloak realm metadata
+ *   GET  /api/v1/sso/config   — public, returns the Keycloak realm metadata
  *                              the frontend needs to bootstrap its login form
- *   GET  /api/v2/sso/whoami   — protected, requires a valid Keycloak token,
+ *   GET  /api/v1/sso/whoami   — protected, requires a valid Keycloak token,
  *                              returns the verified claims
- *   GET  /api/v2/sso/admin    — protected + role-gated, requires the
+ *   GET  /api/v1/sso/admin    — protected + role-gated, requires the
  *                              `ontology-admin` realm role
  */
 

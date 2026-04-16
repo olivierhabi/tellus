@@ -2,7 +2,7 @@
 
 **File to modify:** `/src/routes/indexing.js` (add route to the file created in Task 14)
 
-**Endpoint:** `GET /api/v2/ontology/:ontologyId/objectTypes/:apiName/indexing/status`
+**Endpoint:** `GET /api/v1/ontology/:ontologyId/objectTypes/:apiName/indexing/status`
 
 **Purpose:** Returns the current indexing pipeline status for an object type. This includes when it was last indexed, how many objects were indexed, whether the last run succeeded or failed, and current index statistics from OpenSearch. In Palantir's Ontology Manager, the Datasources tab shows the Funnel pipeline status — we replicate that information via this API.
 

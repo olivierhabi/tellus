@@ -5,8 +5,8 @@
 # Hits the live backend at $BASE (default http://localhost:3000) and
 # walks through the full lifecycle the wired UI exercises:
 #
-#   1.  /api/v2/ontologies                        — pick the active ontology
-#   2.  POST /api/v2/auth/register|login          — get a bearer token
+#   1.  /api/v1/ontologies                        — pick the active ontology
+#   2.  POST /api/v1/auth/register|login          — get a bearer token
 #   3.  POST /v2/ontologies/:id/objectTypes       — create a fresh OT
 #   4.  POST .../properties                       — add three properties
 #   5.  POST .../primaryKey                       — set the PK
@@ -117,8 +117,8 @@ fi
 # ----------------------------------------------------------------------
 # Step 1 — pick the active ontology
 # ----------------------------------------------------------------------
-status=$(req GET /api/v2/ontologies)
-assert "GET  /api/v2/ontologies" "200" "$status" "$(cat /tmp/verify-body.json)"
+status=$(req GET /api/v1/ontologies)
+assert "GET  /api/v1/ontologies" "200" "$status" "$(cat /tmp/verify-body.json)"
 ONTOLOGY_ID=$(jq -r '.data[0].ontologyId // .data.data[0].ontologyId // empty' /tmp/verify-body.json)
 [[ -n "$ONTOLOGY_ID" ]] || { echo "no ontology to test against"; exit 1; }
 echo "  active ontology: $ONTOLOGY_ID"
@@ -139,8 +139,8 @@ OT_BODY=$(cat <<EOF
 }
 EOF
 )
-status=$(req POST "/api/v2/ontologies/$ONTOLOGY_ID/objectTypes" "$OT_BODY")
-assert "POST /api/v2/ontologies/:id/objectTypes (create)" "201" "$status" "$(cat /tmp/verify-body.json)"
+status=$(req POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes" "$OT_BODY")
+assert "POST /api/v1/ontologies/:id/objectTypes (create)" "201" "$status" "$(cat /tmp/verify-body.json)"
 
 # Some envs return 200 instead of 201; both are acceptable.
 if [[ "$status" == "200" ]]; then
@@ -157,7 +157,7 @@ add_prop() {
   local displayName="$2"
   local baseType="$3"
   local body="{\"apiName\":\"$apiName\",\"displayName\":\"$displayName\",\"baseType\":\"$baseType\"}"
-  status=$(req POST "/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties" "$body")
+  status=$(req POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties" "$body")
   assert "POST .../properties ($apiName)" "201" "$status" "$(cat /tmp/verify-body.json)"
 }
 add_prop "orderId" "Order ID" "string"
@@ -167,18 +167,18 @@ add_prop "createdAt" "Created at" "timestamp"
 # ----------------------------------------------------------------------
 # Step 4 — set primary key + title
 # ----------------------------------------------------------------------
-status=$(req POST "/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/primaryKey" \
+status=$(req POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/primaryKey" \
   '{"propertyApiName":"orderId"}')
 assert "POST .../primaryKey" "200" "$status" "$(cat /tmp/verify-body.json)"
 
-status=$(req POST "/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/titleProperty" \
+status=$(req POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/titleProperty" \
   '{"propertyApiName":"orderId"}')
 assert "POST .../titleProperty" "200" "$status" "$(cat /tmp/verify-body.json)"
 
 # ----------------------------------------------------------------------
 # Step 5 — fetch object type detail
 # ----------------------------------------------------------------------
-status=$(req GET "/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API")
+status=$(req GET "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API")
 assert "GET  .../objectTypes/:apiName" "200" "$status" "$(cat /tmp/verify-body.json)"
 property_count=$(jq -r '.objectType.properties | length' /tmp/verify-body.json 2>/dev/null || echo 0)
 echo "  detail returned $property_count properties"
@@ -186,7 +186,7 @@ echo "  detail returned $property_count properties"
 # ----------------------------------------------------------------------
 # Step 6 — link to an existing object type
 # ----------------------------------------------------------------------
-status=$(req GET "/api/v2/ontologies/$ONTOLOGY_ID/objectTypes")
+status=$(req GET "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes")
 TARGET_OT=$(jq -r ".data[] | select(.apiName != \"$OT_API\") | .apiName" /tmp/verify-body.json | head -1)
 if [[ -n "$TARGET_OT" ]]; then
   LINK_API="verifyLink${SUFFIX}"
@@ -200,41 +200,41 @@ if [[ -n "$TARGET_OT" ]]; then
 }
 EOF
 )
-  status=$(req POST "/api/v2/ontologies/$ONTOLOGY_ID/linkTypes" "$LINK_BODY")
+  status=$(req POST "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes" "$LINK_BODY")
   assert "POST .../linkTypes (create)" "201" "$status" "$(cat /tmp/verify-body.json)"
 fi
 
-status=$(req GET "/api/v2/ontologies/$ONTOLOGY_ID/linkTypes")
+status=$(req GET "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes")
 assert "GET  .../linkTypes" "200" "$status" "$(cat /tmp/verify-body.json)"
 
 # ----------------------------------------------------------------------
 # Step 7 — search objects (empty result is fine)
 # ----------------------------------------------------------------------
-status=$(req POST "/api/v2/objects/$OT_API/search" '{"$pageSize":10}')
-assert "POST /api/v2/objects/:apiName/search" "200" "$status" "$(cat /tmp/verify-body.json)"
+status=$(req POST "/api/v1/objects/$OT_API/search" '{"$pageSize":10}')
+assert "POST /api/v1/objects/:apiName/search" "200" "$status" "$(cat /tmp/verify-body.json)"
 
 # ----------------------------------------------------------------------
 # Step 8 — audit log
 # ----------------------------------------------------------------------
-status=$(req GET "/api/v2/audit?ontologyId=$ONTOLOGY_ID")
+status=$(req GET "/api/v1/audit?ontologyId=$ONTOLOGY_ID")
 if [[ "$status" == "200" || "$status" == "404" ]]; then
-  printf "${GREEN}✓${NC} %-60s %s\n" "GET  /api/v2/audit" "$status"
+  printf "${GREEN}✓${NC} %-60s %s\n" "GET  /api/v1/audit" "$status"
   PASS=$((PASS + 1))
 else
-  assert "GET  /api/v2/audit" "200" "$status" "$(cat /tmp/verify-body.json)"
+  assert "GET  /api/v1/audit" "200" "$status" "$(cat /tmp/verify-body.json)"
 fi
 
 # ----------------------------------------------------------------------
 # Step 9 — list action types
 # ----------------------------------------------------------------------
-status=$(req GET "/api/v2/ontologies/$ONTOLOGY_ID/actionTypes")
+status=$(req GET "/api/v1/ontologies/$ONTOLOGY_ID/actionTypes")
 assert "GET  .../actionTypes" "200" "$status" "$(cat /tmp/verify-body.json)"
 
 # ----------------------------------------------------------------------
 # Step 10 — cleanup (delete link, delete object type)
 # ----------------------------------------------------------------------
 if [[ -n "$TARGET_OT" ]]; then
-  status=$(req DELETE "/api/v2/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API")
+  status=$(req DELETE "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API")
   if [[ "$status" =~ ^(200|204)$ ]]; then
     printf "${GREEN}✓${NC} %-60s %s\n" "DELETE .../linkTypes/$LINK_API" "$status"
     PASS=$((PASS + 1))
@@ -243,7 +243,7 @@ if [[ -n "$TARGET_OT" ]]; then
   fi
 fi
 
-status=$(req DELETE "/api/v2/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API")
+status=$(req DELETE "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API")
 if [[ "$status" =~ ^(200|204)$ ]]; then
   printf "${GREEN}✓${NC} %-60s %s\n" "DELETE .../objectTypes/$OT_API" "$status"
   PASS=$((PASS + 1))

@@ -69,7 +69,7 @@ Authorization: Bearer <token>
 ### 4.1 List Objects
 
 ```
-GET /api/v2/objects/:objectType
+GET /api/v1/objects/:objectType
 ```
 
 Returns all objects of a given type with optional pagination and sorting.
@@ -85,7 +85,7 @@ Returns all objects of a given type with optional pagination and sorting.
 
 **Example:**
 ```
-GET /api/v2/objects/Employee?$pageSize=10&$orderBy=salary:desc&$select=fullName,salary
+GET /api/v1/objects/Employee?$pageSize=10&$orderBy=salary:desc&$select=fullName,salary
 ```
 
 **Response:** `200 OK`
@@ -109,7 +109,7 @@ GET /api/v2/objects/Employee?$pageSize=10&$orderBy=salary:desc&$select=fullName,
 ### 4.2 Get Single Object
 
 ```
-GET /api/v2/objects/:objectType/:primaryKey
+GET /api/v1/objects/:objectType/:primaryKey
 ```
 
 Retrieves a single object by its primary key using a direct O(1) lookup.
@@ -122,7 +122,7 @@ Retrieves a single object by its primary key using a direct O(1) lookup.
 
 **Example:**
 ```
-GET /api/v2/objects/Employee/EMP-001
+GET /api/v1/objects/Employee/EMP-001
 ```
 
 **Response:** `200 OK`
@@ -148,7 +148,7 @@ GET /api/v2/objects/Employee/EMP-001
 ### 4.3 Search Objects
 
 ```
-POST /api/v2/objects/:objectType/search
+POST /api/v1/objects/:objectType/search
 Content-Type: application/json
 ```
 
@@ -196,7 +196,7 @@ All fields are optional. An empty body `{}` returns all objects (match_all).
 ### 4.4 Aggregate Objects
 
 ```
-POST /api/v2/objects/:objectType/aggregate
+POST /api/v1/objects/:objectType/aggregate
 Content-Type: application/json
 ```
 
@@ -241,7 +241,7 @@ The `aggregations` array is **required** and must be non-empty (max 25).
 ### 4.5 Full-Text Search
 
 ```
-POST /api/v2/objects/:objectType/searchFullText
+POST /api/v1/objects/:objectType/searchFullText
 Content-Type: application/json
 ```
 

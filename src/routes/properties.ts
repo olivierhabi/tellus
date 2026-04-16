@@ -2,7 +2,7 @@
 // Property Routes — Express Router
 //
 // Routes for Property CRUD, nested under object types:
-//   /api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties
+//   /api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties
 //
 // Also includes primaryKey and titleProperty routes at the object type level.
 // Uses mergeParams: true to access :ontologyId and :apiName from parent.

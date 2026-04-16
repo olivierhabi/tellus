@@ -7,7 +7,7 @@ Production systems need health monitoring. This task builds comprehensive health
 
 Create the endpoints in a new file `/src/routes/health.js` and register them in `server.js`.
 
-**Endpoint 1: `GET /api/v2/health`**
+**Endpoint 1: `GET /api/v1/health`**
 
 Simple health check for load balancers and monitoring. Must respond within 500ms.
 
@@ -27,7 +27,7 @@ Check PostgreSQL with a simple `SELECT 1` query (timeout: 2 seconds).
 Check OpenSearch with a `GET /` call (timeout: 2 seconds).
 If either fails, return status "unhealthy" with HTTP 503.
 
-**Endpoint 2: `GET /api/v2/status`**
+**Endpoint 2: `GET /api/v1/status`**
 
 Comprehensive system status with statistics. May take longer (up to 10 seconds).
 

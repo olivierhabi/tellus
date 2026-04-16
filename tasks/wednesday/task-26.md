@@ -47,13 +47,13 @@ The teardown must delete the test ontology, object types, and OpenSearch indices
 
 **Test cases (each as a separate test function):**
 
-All list/get tests use `GET` requests. All search tests use `POST /api/v2/objects/Employee/search` with the filter in the request body.
+All list/get tests use `GET` requests. All search tests use `POST /api/v1/objects/Employee/search` with the filter in the request body.
 
-1. `test_list_all_objects` — `GET /api/v2/objects/Employee` → returns exactly 100 objects (default pageSize is 100, matching the test data size)
-2. `test_list_with_page_size` — `GET /api/v2/objects/Employee?$pageSize=10` → returns exactly 10 objects, `nextPageToken` is not null
-3. `test_list_with_select` — `GET /api/v2/objects/Employee?$select=fullName,salary` → each object has only `__primaryKey`, `__objectType`, `fullName`, `salary`
-4. `test_get_single_object` — `GET /api/v2/objects/Employee/EMP-001` → returns object with `fullName: "Melissa Chang"`, `salary: 145000`
-5. `test_get_nonexistent_object` — `GET /api/v2/objects/Employee/FAKE-999` → 404 with `OBJECT_NOT_FOUND`
+1. `test_list_all_objects` — `GET /api/v1/objects/Employee` → returns exactly 100 objects (default pageSize is 100, matching the test data size)
+2. `test_list_with_page_size` — `GET /api/v1/objects/Employee?$pageSize=10` → returns exactly 10 objects, `nextPageToken` is not null
+3. `test_list_with_select` — `GET /api/v1/objects/Employee?$select=fullName,salary` → each object has only `__primaryKey`, `__objectType`, `fullName`, `salary`
+4. `test_get_single_object` — `GET /api/v1/objects/Employee/EMP-001` → returns object with `fullName: "Melissa Chang"`, `salary: 145000`
+5. `test_get_nonexistent_object` — `GET /api/v1/objects/Employee/FAKE-999` → 404 with `OBJECT_NOT_FOUND`
 6. `test_search_eq_string` — search where `{ "type": "eq", "field": "department", "value": "Engineering" }` → returns only employees where `department === "Engineering"`, assert count matches test data
 7. `test_search_eq_boolean` — search where `{ "type": "eq", "field": "isActive", "value": true }` → returns only employees where `isActive === true`
 8. `test_search_gt_number` — search where `{ "type": "gt", "field": "salary", "value": 100000 }` → returns only employees where `salary > 100000`

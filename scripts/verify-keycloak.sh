@@ -108,9 +108,9 @@ echo -e "  ${DIM}token alg=$ALG kid=$KID${NC}"
 
 # 3. Backend /sso/config publishes the realm metadata.
 echo
-echo -e "${BOLD}── backend ${BACKEND}/api/v2/sso/* ──${NC}"
-status=$(curl -s -o /tmp/sso-config.json -w '%{http_code}' "$BACKEND/api/v2/sso/config")
-check "GET /api/v2/sso/config (public)" "200" "$status"
+echo -e "${BOLD}── backend ${BACKEND}/api/v1/sso/* ──${NC}"
+status=$(curl -s -o /tmp/sso-config.json -w '%{http_code}' "$BACKEND/api/v1/sso/config")
+check "GET /api/v1/sso/config (public)" "200" "$status"
 realm_in_config=$(jq -r '.data.realm // empty' /tmp/sso-config.json)
 if [[ "$realm_in_config" == "$REALM" ]]; then
   printf "${GREEN}✓${NC} %s\n" "config.realm == '$REALM'"
@@ -121,20 +121,20 @@ else
 fi
 
 # 4. /sso/whoami without a token → 401
-status=$(curl -s -o /tmp/sso-na.json -w '%{http_code}' "$BACKEND/api/v2/sso/whoami")
-check "GET /api/v2/sso/whoami without token" "401" "$status" "$(cat /tmp/sso-na.json)"
+status=$(curl -s -o /tmp/sso-na.json -w '%{http_code}' "$BACKEND/api/v1/sso/whoami")
+check "GET /api/v1/sso/whoami without token" "401" "$status" "$(cat /tmp/sso-na.json)"
 
 # 5. /sso/whoami with garbage token → 401
 status=$(curl -s -o /tmp/sso-bad.json -w '%{http_code}' \
   -H "Authorization: Bearer not.a.real.token" \
-  "$BACKEND/api/v2/sso/whoami")
-check "GET /api/v2/sso/whoami with garbage token" "401" "$status" "$(cat /tmp/sso-bad.json)"
+  "$BACKEND/api/v1/sso/whoami")
+check "GET /api/v1/sso/whoami with garbage token" "401" "$status" "$(cat /tmp/sso-bad.json)"
 
 # 6. /sso/whoami with REAL token → 200 + claims
 status=$(curl -s -o /tmp/sso-ok.json -w '%{http_code}' \
   -H "Authorization: Bearer $TOKEN" \
-  "$BACKEND/api/v2/sso/whoami")
-check "GET /api/v2/sso/whoami with valid Keycloak token" "200" "$status" "$(cat /tmp/sso-ok.json)"
+  "$BACKEND/api/v1/sso/whoami")
+check "GET /api/v1/sso/whoami with valid Keycloak token" "200" "$status" "$(cat /tmp/sso-ok.json)"
 
 # 7. The whoami response actually contains the test user's email.
 got_email=$(jq -r '.data.email // empty' /tmp/sso-ok.json)
@@ -159,8 +159,8 @@ fi
 # 9. /sso/admin requires ontology-admin → editor user gets 403.
 status=$(curl -s -o /tmp/sso-admin.json -w '%{http_code}' \
   -H "Authorization: Bearer $TOKEN" \
-  "$BACKEND/api/v2/sso/admin")
-check "GET /api/v2/sso/admin without ontology-admin role" "403" "$status" "$(cat /tmp/sso-admin.json)"
+  "$BACKEND/api/v1/sso/admin")
+check "GET /api/v1/sso/admin without ontology-admin role" "403" "$status" "$(cat /tmp/sso-admin.json)"
 
 # 10. Promote the user to ontology-admin and verify access.
 echo
@@ -188,8 +188,8 @@ TOKEN=$(curl -sf -X POST \
 
 status=$(curl -s -o /tmp/sso-admin2.json -w '%{http_code}' \
   -H "Authorization: Bearer $TOKEN" \
-  "$BACKEND/api/v2/sso/admin")
-check "GET /api/v2/sso/admin with elevated role" "200" "$status" "$(cat /tmp/sso-admin2.json)"
+  "$BACKEND/api/v1/sso/admin")
+check "GET /api/v1/sso/admin with elevated role" "200" "$status" "$(cat /tmp/sso-admin2.json)"
 
 # Cleanup: revoke the admin role so re-runs start clean.
 curl -sf -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \

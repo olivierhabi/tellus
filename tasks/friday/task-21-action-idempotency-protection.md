@@ -73,7 +73,7 @@ async function cleanupExpiredKeys() {
 **Integrate with the action execution flow** in the action routes (Task 8):
 
 ```javascript
-// In POST /api/v2/actions/:actionTypeApiName/apply
+// In POST /api/v1/actions/:actionTypeApiName/apply
 router.post('/:actionTypeApiName/apply', async (req, res, next) => {
     try {
         // Use ONLY the Idempotency-Key header for idempotency. Do NOT use req.body.executionId
@@ -133,7 +133,7 @@ setInterval(async () => {
 const key = 'test-idempotency-key-' + Date.now();
 
 // First execution: should run normally
-const res1 = await fetch('/api/v2/actions/createEmployee/apply', {
+const res1 = await fetch('/api/v1/actions/createEmployee/apply', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
     body: JSON.stringify({ parameters: { employeeId: 'EMP-IDEM', fullName: 'Idempotent' } })
@@ -144,7 +144,7 @@ const body1 = await res1.json();
 assert(body1.success === true);
 
 // Second execution with same key: should return cached result
-const res2 = await fetch('/api/v2/actions/createEmployee/apply', {
+const res2 = await fetch('/api/v1/actions/createEmployee/apply', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
     body: JSON.stringify({ parameters: { employeeId: 'EMP-IDEM', fullName: 'Idempotent' } })

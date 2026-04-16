@@ -9,7 +9,7 @@
 #   • B  — backend probe in verify-features.sh hits a real route
 #   • C  — Cypress walks a UI page that exercises this feature
 #   • D  — backend route or page transits a non-trivial docker container
-#          (Postgres / OpenSearch / Redpanda / Prometheus / pgvector / Debezium)
+#          (Postgres / OpenSearch / Redpanda / Debezium)
 #
 # Output format:
 #   #NN  [BCD]  Feature title
@@ -80,7 +80,7 @@ row 8  B C D "Add backing datasource"
 row 9  B C D "Property configuration"
 row 10 B C .  "Derived properties (function-backed)"
 row 11 B C .  "Struct properties"
-row 12 B C D "Vector properties (pgvector)"
+row 12 . . . "Vector properties (removed)"
 row 13 B C D "Time series properties (TimescaleDB hypertable + plain fallback)"
 row 14 B C D "Primary key configuration"
 row 15 B C D "Multi-datasource objects"
@@ -107,7 +107,7 @@ row 31 B C D "Action audit log"
 row 32 B C .  "Undo / revert (edits)"
 row 33 B C .  "Inline edit actions"
 row 34 B . .  "Bulk actions"
-row 35 B C D "Near-real-time action metrics (Prometheus)"
+row 35 B C . "Near-real-time action metrics"
 row 36 B C D "Action run history"
 
 section "1.5 Function Type Management"
@@ -115,7 +115,7 @@ row 37 B C .  "Function overview"
 row 38 . C .  "Version selector"
 row 39 . C .  "Open in code repo (deep link)"
 row 40 B C .  "Usage history"
-row 41 B C D "Function observability (Prometheus)"
+row 41 B C . "Function observability"
 row 42 . C .  "Branched functions"
 
 section "1.6 Interface Management"
@@ -132,7 +132,7 @@ row 50 B C .  "Schema migration manager"
 row 51 B C D "Reindexing trigger (Debezium CDC into Kafka)"
 
 section "1.8 Usage & Governance"
-row 52 B C D "Usage graph (Prometheus counters)"
+row 52 B C . "Usage graph"
 row 53 B C D "Detailed usage tab (audit log)"
 row 54 B C .  "Ontology branching — proposals"
 row 55 B C .  "Workflow lineage"
@@ -220,7 +220,7 @@ row 118 B . .  "Global default layout (admin)"
 
 section "2.9 SQL Analysis (Furnace = DuckDB)"
 row 119 B C D "Analyze using SQL (Furnace SQL editor + Monaco)"
-row 120 B C D "Ontology SQL via Furnace + Iceberg/Nessie catalog ready"
+row 120 B C D "Ontology SQL via Furnace"
 
 # ----------------------------------------------------------------------
 # Summary

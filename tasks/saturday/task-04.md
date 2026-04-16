@@ -7,7 +7,7 @@ After datasets can be uploaded (Task 3), users need to be able to list all datas
 
 Add the following endpoints to `/src/routes/datasets.js`:
 
-**Endpoint 1: `GET /api/v2/datasets`**
+**Endpoint 1: `GET /api/v1/datasets`**
 
 Lists all datasets in the system, ordered by creation date descending (newest first). Supports pagination.
 
@@ -50,7 +50,7 @@ Response format:
 
 The `nextPageToken` must be a base64 encoding of the `created_at` timestamp of the last item in the current page. If there are no more results, `nextPageToken` must be `null`. To decode: `Buffer.from(token, 'base64').toString('utf8')` gives the ISO timestamp which is used as the `$2` parameter in the SQL query.
 
-**Endpoint 2: `GET /api/v2/datasets/:datasetId`**
+**Endpoint 2: `GET /api/v1/datasets/:datasetId`**
 
 Returns full details of a single dataset, including its schema and all committed transactions.
 
@@ -109,7 +109,7 @@ The `backingObjectTypes` array must be populated by querying the `backing_dataso
 
 The `transactions` array must be ordered by `committed_at` descending (newest first), and must only include transactions with status = 'committed' (not 'open' or 'aborted').
 
-**Endpoint 3: `DELETE /api/v2/datasets/:datasetId`**
+**Endpoint 3: `DELETE /api/v1/datasets/:datasetId`**
 
 Deletes a dataset and all its transactions and files. However, if the dataset is currently referenced as a backing datasource for any object type, the deletion must be REJECTED. This matches Palantir's behavior — you cannot delete a dataset that is actively backing an object type.
 

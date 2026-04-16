@@ -63,7 +63,7 @@ if (requestedDirection === 'forward' || requestedDirection === 'reverse') {
 
 **Change 3: Add `$direction` query parameter to the linked objects endpoint in `src/routes/linkTraversal.js`**
 
-In the GET `/api/v2/objects/:objectType/:primaryKey/links/:linkType` handler (Task 12), parse the `$direction` query parameter:
+In the GET `/api/v1/objects/:objectType/:primaryKey/links/:linkType` handler (Task 12), parse the `$direction` query parameter:
 
 ```javascript
 const direction = req.query.$direction; // 'forward', 'reverse', or undefined
@@ -90,8 +90,8 @@ const result = await resolveLink({
 **Testing:**
 1. Create an Employee → Employee "manages" link type (ONE_TO_MANY, FK: `managerId` on target side, bidirectional: true).
 2. Create employees: EMP-001 (manager, managerId=null), EMP-002 (managerId=EMP-001), EMP-003 (managerId=EMP-001), EMP-004 (managerId=EMP-001).
-3. **Forward traversal (default):** `GET /api/v2/objects/Employee/EMP-001/links/manages` — returns EMP-002, EMP-003, EMP-004. Does NOT return EMP-001 itself. `totalCount: 3`.
-4. **Forward traversal (explicit):** `GET /api/v2/objects/Employee/EMP-001/links/manages?$direction=forward` — same result as above.
-5. **Reverse traversal:** `GET /api/v2/objects/Employee/EMP-002/links/manages?$direction=reverse` — returns EMP-001 (the manager). `totalCount: 1`.
-6. **No direction on self-referential:** `GET /api/v2/objects/Employee/EMP-002/links/manages` (no `$direction`) — defaults to forward. Returns employees where managerId=EMP-002 (should be empty if EMP-002 manages nobody). `totalCount: 0`.
-7. **Invalid direction:** `GET /api/v2/objects/Employee/EMP-001/links/manages?$direction=sideways` — returns HTTP 400 with `{ "error": "Invalid $direction. Must be 'forward' or 'reverse'." }`.
+3. **Forward traversal (default):** `GET /api/v1/objects/Employee/EMP-001/links/manages` — returns EMP-002, EMP-003, EMP-004. Does NOT return EMP-001 itself. `totalCount: 3`.
+4. **Forward traversal (explicit):** `GET /api/v1/objects/Employee/EMP-001/links/manages?$direction=forward` — same result as above.
+5. **Reverse traversal:** `GET /api/v1/objects/Employee/EMP-002/links/manages?$direction=reverse` — returns EMP-001 (the manager). `totalCount: 1`.
+6. **No direction on self-referential:** `GET /api/v1/objects/Employee/EMP-002/links/manages` (no `$direction`) — defaults to forward. Returns employees where managerId=EMP-002 (should be empty if EMP-002 manages nobody). `totalCount: 0`.
+7. **Invalid direction:** `GET /api/v1/objects/Employee/EMP-001/links/manages?$direction=sideways` — returns HTTP 400 with `{ "error": "Invalid $direction. Must be 'forward' or 'reverse'." }`.

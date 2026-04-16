@@ -276,7 +276,7 @@ describe('Friday Integration: Complete Action System', () => {
         // This test should be run last because it hammers the API
         let rateLimited = false;
         for (let i = 0; i < 150; i++) {
-            const res = await fetch(`http://localhost:3000/api/v2/actions/updateTaxpayerRiskScore/apply`, {
+            const res = await fetch(`http://localhost:3000/api/v1/actions/updateTaxpayerRiskScore/apply`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ parameters: { taxpayerRef: 'TIN-001-TEST', riskScore: i } })
@@ -373,7 +373,7 @@ After all 30 tasks are complete, verify these acceptance criteria:
 - [ ] Error responses follow standardized format across all endpoints
 - [ ] All error codes match Palantir's documented failure types
 - [ ] OpenAPI spec covers all 15 endpoints with full schemas
-- [ ] Swagger UI is accessible at /api/v2/docs
+- [ ] Swagger UI is accessible at /api/v1/docs
 - [ ] RRA seed action types are created and verified
 - [ ] Integration test suite passes completely
 - [ ] Request logging middleware captures all requests with timing

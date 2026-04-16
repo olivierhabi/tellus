@@ -31,21 +31,21 @@ Tellus is a Palantir Foundry-inspired ontology engine built on TypeScript, Expre
 │  │                     ROUTE LAYER                           │   │
 │  │                                                           │   │
 │  │  /health          - Basic health check                    │   │
-│  │  /api/v2/health   - Enhanced health (PG + OS)             │   │
-│  │  /api/v2/status   - Comprehensive system status           │   │
-│  │  /api/v2/ontologies       - Ontology CRUD                 │   │
-│  │  /api/v2/ontologies/:id/objectTypes  - Object Type CRUD   │   │
-│  │  /api/v2/ontologies/:id/objectTypes/:name/properties      │   │
-│  │  /api/v2/ontologies/:id/objectTypes/:name/datasource      │   │
-│  │  /api/v2/ontologies/:id/objectTypes/:name/index           │   │
-│  │  /api/v2/ontologies/:id/linkTypes    - Link Type CRUD     │   │
-│  │  /api/v2/ontologies/:id/actionTypes  - Action Type CRUD   │   │
-│  │  /api/v2/ontologies/:id/actions      - Action Execution   │   │
-│  │  /api/v2/objects/:type               - Object Queries     │   │
-│  │  /api/v2/datasets                    - Dataset Management │   │
-│  │  /api/v2/audit                       - Audit Log          │   │
-│  │  /api/v2/docs                        - Swagger UI         │   │
-│  │  /api/v2/spec                        - OpenAPI JSON       │   │
+│  │  /api/v1/health   - Enhanced health (PG + OS)             │   │
+│  │  /api/v1/status   - Comprehensive system status           │   │
+│  │  /api/v1/ontologies       - Ontology CRUD                 │   │
+│  │  /api/v1/ontologies/:id/objectTypes  - Object Type CRUD   │   │
+│  │  /api/v1/ontologies/:id/objectTypes/:name/properties      │   │
+│  │  /api/v1/ontologies/:id/objectTypes/:name/datasource      │   │
+│  │  /api/v1/ontologies/:id/objectTypes/:name/index           │   │
+│  │  /api/v1/ontologies/:id/linkTypes    - Link Type CRUD     │   │
+│  │  /api/v1/ontologies/:id/actionTypes  - Action Type CRUD   │   │
+│  │  /api/v1/ontologies/:id/actions      - Action Execution   │   │
+│  │  /api/v1/objects/:type               - Object Queries     │   │
+│  │  /api/v1/datasets                    - Dataset Management │   │
+│  │  /api/v1/audit                       - Audit Log          │   │
+│  │  /api/docs                            - Swagger UI         │   │
+│  │  /api/docs/spec.json                 - OpenAPI JSON       │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
@@ -195,7 +195,7 @@ Tellus is a Palantir Foundry-inspired ontology engine built on TypeScript, Expre
 | `actionExecutor` | Action Execution Service | 5-stage pipeline: validate → check → compile → apply → audit |
 | `indexingOrchestrator` | Funnel Pipeline | CSV → transform → validate → bulk index |
 | `reindexService` | Reindex Pipeline | Full re-index with edit overlay |
-| Swagger UI at `/api/v2/docs` | API Documentation | Interactive API explorer |
+| Swagger UI at `/api/docs` | API Documentation | Interactive API explorer |
 | `responseFormatter` | API Gateway Formatter | Snake→camel, pagination, error codes |
 
 ## Database Schema Reference
@@ -423,75 +423,75 @@ CREATE TABLE reindex_history (
 | # | Method | Path | Description |
 |---|--------|------|-------------|
 | 1 | GET | `/health` | Basic health check |
-| 2 | GET | `/api/v2/health` | Enhanced health check (PG + OS) |
-| 3 | GET | `/api/v2/status` | Comprehensive system status |
-| 4 | POST | `/api/v2/ontologies` | Create ontology |
-| 5 | GET | `/api/v2/ontologies` | List ontologies |
-| 6 | GET | `/api/v2/ontologies/:id` | Get ontology |
-| 7 | PUT | `/api/v2/ontologies/:id` | Update ontology |
-| 8 | DELETE | `/api/v2/ontologies/:id` | Delete ontology |
-| 9 | GET | `/api/v2/ontologies/:id/export` | Export ontology |
-| 10 | POST | `/api/v2/ontologies/import` | Import ontology |
-| 11 | POST | `/api/v2/ontologies/:id/objectTypes` | Create object type |
-| 12 | GET | `/api/v2/ontologies/:id/objectTypes` | List object types |
-| 13 | GET | `/api/v2/ontologies/:id/objectTypes/:name` | Get object type |
-| 14 | PUT | `/api/v2/ontologies/:id/objectTypes/:name` | Update object type |
-| 15 | DELETE | `/api/v2/ontologies/:id/objectTypes/:name` | Delete object type |
-| 16 | POST | `/api/v2/.../properties` | Create property |
-| 17 | GET | `/api/v2/.../properties` | List properties |
-| 18 | PUT | `/api/v2/.../properties/:prop` | Update property |
-| 19 | DELETE | `/api/v2/.../properties/:prop` | Delete property |
-| 20 | PUT | `/api/v2/.../primaryKey` | Set primary key |
-| 21 | PUT | `/api/v2/.../titleProperty` | Set title property |
-| 22 | POST | `/api/v2/.../datasource` | Register datasource |
-| 23 | GET | `/api/v2/.../datasource` | Get datasource |
-| 24 | DELETE | `/api/v2/.../datasource` | Unregister datasource |
-| 25 | POST | `/api/v2/.../datasource/scan` | Re-scan datasource |
-| 26 | POST | `/api/v2/.../index` | Trigger indexing |
-| 27 | GET | `/api/v2/.../index/status` | Get indexing status |
-| 28 | DELETE | `/api/v2/.../index` | Delete index |
-| 29 | GET | `/api/v2/objects/:type` | List objects |
-| 30 | GET | `/api/v2/objects/:type/:pk` | Get object |
-| 31 | POST | `/api/v2/objects/:type/search` | Search objects |
-| 32 | POST | `/api/v2/objects/:type/searchFullText` | Full-text search |
-| 33 | POST | `/api/v2/objects/:type/aggregate` | Aggregations |
-| 34 | POST | `/api/v2/objects/:type/searchAround` | Search Around |
-| 35 | GET | `/api/v2/objects/:type/:pk/links/:lt` | Resolve links |
-| 36 | GET | `/api/v2/objects/:type/:pk/links/:lt/count` | Count links |
-| 37 | GET | `/api/v2/objects/:type/:pk/editHistory` | Edit history |
-| 38 | POST | `/api/v2/.../linkTypes` | Create link type |
-| 39 | GET | `/api/v2/.../linkTypes` | List link types |
-| 40 | GET | `/api/v2/.../linkTypes/:name` | Get link type |
-| 41 | DELETE | `/api/v2/.../linkTypes/:name` | Delete link type |
-| 42 | POST | `/api/v2/.../actionTypes` | Create action type |
-| 43 | GET | `/api/v2/.../actionTypes` | List action types |
-| 44 | GET | `/api/v2/.../actionTypes/:name` | Get action type |
-| 45 | PUT | `/api/v2/.../actionTypes/:name` | Update action type |
-| 46 | DELETE | `/api/v2/.../actionTypes/:name` | Delete action type |
-| 47 | POST | `/api/v2/.../actionTypes/:name/clone` | Clone action type |
-| 48 | GET | `/api/v2/.../actionTypes/:name/impact` | Impact analysis |
-| 49 | POST | `/api/v2/.../actions/:name/apply` | Execute action |
-| 50 | POST | `/api/v2/.../actions/:name/validate` | Validate action |
-| 51 | POST | `/api/v2/.../actions/:name/applyBatch` | Batch actions |
-| 52 | POST | `/api/v2/actions/:name/applyBulk` | Bulk actions |
-| 53 | GET | `/api/v2/.../actions/:name/audit` | Action audit |
-| 54 | GET | `/api/v2/audit/log` | Global audit log |
-| 55 | GET | `/api/v2/audit/log/:id` | Audit entry |
-| 56 | GET | `/api/v2/audit/stats` | Audit stats |
-| 57 | GET | `/api/v2/.../edits` | List edits |
-| 58 | GET | `/api/v2/.../edits/diff/:pk` | Edit diff |
-| 59 | POST | `/api/v2/datasets/upload` | Upload dataset |
-| 60 | GET | `/api/v2/datasets` | List datasets |
-| 61 | GET | `/api/v2/datasets/:id` | Get dataset |
-| 62 | DELETE | `/api/v2/datasets/:id` | Delete dataset |
-| 63 | POST | `/api/v2/datasets/:id/transactions` | Add transaction |
-| 64 | GET | `/api/v2/datasets/:id/transactions` | List transactions |
-| 65 | GET | `/api/v2/datasets/:id/preview` | Preview dataset |
-| 66 | POST | `/api/v2/.../reindex` | Trigger reindex |
-| 67 | GET | `/api/v2/.../reindex/status` | Reindex status |
-| 68 | GET | `/api/v2/.../reindex/history` | Reindex history |
-| 69 | GET | `/api/v2/spec` | OpenAPI spec |
-| 70 | GET | `/api/v2/docs` | Swagger UI |
+| 2 | GET | `/api/v1/health` | Enhanced health check (PG + OS) |
+| 3 | GET | `/api/v1/status` | Comprehensive system status |
+| 4 | POST | `/api/v1/ontologies` | Create ontology |
+| 5 | GET | `/api/v1/ontologies` | List ontologies |
+| 6 | GET | `/api/v1/ontologies/:id` | Get ontology |
+| 7 | PUT | `/api/v1/ontologies/:id` | Update ontology |
+| 8 | DELETE | `/api/v1/ontologies/:id` | Delete ontology |
+| 9 | GET | `/api/v1/ontologies/:id/export` | Export ontology |
+| 10 | POST | `/api/v1/ontologies/import` | Import ontology |
+| 11 | POST | `/api/v1/ontologies/:id/objectTypes` | Create object type |
+| 12 | GET | `/api/v1/ontologies/:id/objectTypes` | List object types |
+| 13 | GET | `/api/v1/ontologies/:id/objectTypes/:name` | Get object type |
+| 14 | PUT | `/api/v1/ontologies/:id/objectTypes/:name` | Update object type |
+| 15 | DELETE | `/api/v1/ontologies/:id/objectTypes/:name` | Delete object type |
+| 16 | POST | `/api/v1/.../properties` | Create property |
+| 17 | GET | `/api/v1/.../properties` | List properties |
+| 18 | PUT | `/api/v1/.../properties/:prop` | Update property |
+| 19 | DELETE | `/api/v1/.../properties/:prop` | Delete property |
+| 20 | PUT | `/api/v1/.../primaryKey` | Set primary key |
+| 21 | PUT | `/api/v1/.../titleProperty` | Set title property |
+| 22 | POST | `/api/v1/.../datasource` | Register datasource |
+| 23 | GET | `/api/v1/.../datasource` | Get datasource |
+| 24 | DELETE | `/api/v1/.../datasource` | Unregister datasource |
+| 25 | POST | `/api/v1/.../datasource/scan` | Re-scan datasource |
+| 26 | POST | `/api/v1/.../index` | Trigger indexing |
+| 27 | GET | `/api/v1/.../index/status` | Get indexing status |
+| 28 | DELETE | `/api/v1/.../index` | Delete index |
+| 29 | GET | `/api/v1/objects/:type` | List objects |
+| 30 | GET | `/api/v1/objects/:type/:pk` | Get object |
+| 31 | POST | `/api/v1/objects/:type/search` | Search objects |
+| 32 | POST | `/api/v1/objects/:type/searchFullText` | Full-text search |
+| 33 | POST | `/api/v1/objects/:type/aggregate` | Aggregations |
+| 34 | POST | `/api/v1/objects/:type/searchAround` | Search Around |
+| 35 | GET | `/api/v1/objects/:type/:pk/links/:lt` | Resolve links |
+| 36 | GET | `/api/v1/objects/:type/:pk/links/:lt/count` | Count links |
+| 37 | GET | `/api/v1/objects/:type/:pk/editHistory` | Edit history |
+| 38 | POST | `/api/v1/.../linkTypes` | Create link type |
+| 39 | GET | `/api/v1/.../linkTypes` | List link types |
+| 40 | GET | `/api/v1/.../linkTypes/:name` | Get link type |
+| 41 | DELETE | `/api/v1/.../linkTypes/:name` | Delete link type |
+| 42 | POST | `/api/v1/.../actionTypes` | Create action type |
+| 43 | GET | `/api/v1/.../actionTypes` | List action types |
+| 44 | GET | `/api/v1/.../actionTypes/:name` | Get action type |
+| 45 | PUT | `/api/v1/.../actionTypes/:name` | Update action type |
+| 46 | DELETE | `/api/v1/.../actionTypes/:name` | Delete action type |
+| 47 | POST | `/api/v1/.../actionTypes/:name/clone` | Clone action type |
+| 48 | GET | `/api/v1/.../actionTypes/:name/impact` | Impact analysis |
+| 49 | POST | `/api/v1/.../actions/:name/apply` | Execute action |
+| 50 | POST | `/api/v1/.../actions/:name/validate` | Validate action |
+| 51 | POST | `/api/v1/.../actions/:name/applyBatch` | Batch actions |
+| 52 | POST | `/api/v1/actions/:name/applyBulk` | Bulk actions |
+| 53 | GET | `/api/v1/.../actions/:name/audit` | Action audit |
+| 54 | GET | `/api/v1/audit/log` | Global audit log |
+| 55 | GET | `/api/v1/audit/log/:id` | Audit entry |
+| 56 | GET | `/api/v1/audit/stats` | Audit stats |
+| 57 | GET | `/api/v1/.../edits` | List edits |
+| 58 | GET | `/api/v1/.../edits/diff/:pk` | Edit diff |
+| 59 | POST | `/api/v1/datasets/upload` | Upload dataset |
+| 60 | GET | `/api/v1/datasets` | List datasets |
+| 61 | GET | `/api/v1/datasets/:id` | Get dataset |
+| 62 | DELETE | `/api/v1/datasets/:id` | Delete dataset |
+| 63 | POST | `/api/v1/datasets/:id/transactions` | Add transaction |
+| 64 | GET | `/api/v1/datasets/:id/transactions` | List transactions |
+| 65 | GET | `/api/v1/datasets/:id/preview` | Preview dataset |
+| 66 | POST | `/api/v1/.../reindex` | Trigger reindex |
+| 67 | GET | `/api/v1/.../reindex/status` | Reindex status |
+| 68 | GET | `/api/v1/.../reindex/history` | Reindex history |
+| 69 | GET | `/api/docs/spec.json` | OpenAPI spec |
+| 70 | GET | `/api/docs` | Swagger UI |
 
 ## Data Flow
 

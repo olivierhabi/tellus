@@ -4,7 +4,7 @@
 // Master orchestrator that ties together parameter validation, rule
 // compilation, edit application, and audit logging into a single coherent
 // action execution pipeline. This is the main entry point — when someone
-// calls POST /api/v2/actions/:actionTypeApiName/apply, this runs.
+// calls POST /api/v1/actions/:actionTypeApiName/apply, this runs.
 //
 // Palantir's action execution has 8 documented stages. In week 1, we
 // implement 6 of them (skipping submission criteria and side effects):
@@ -431,9 +431,6 @@ export async function executeAction(
     // ---------------------------------------------------------------------
     try {
       const { publishEvent } = await import("../services/kafkaProducer");
-      const { incrementCounter, observeHistogram } = await import("../routes/metrics");
-      incrementCounter("ontology_actions_applied_total");
-      observeHistogram("ontology_action_duration_ms", result.durationMs);
       void publishEvent("ontology.actions", {
         ontologyId,
         actionTypeApiName,

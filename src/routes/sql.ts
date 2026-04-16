@@ -1,5 +1,5 @@
 /**
- * /api/v2/sql — Furnace SQL Analyzer endpoint.
+ * /api/v1/sql — Furnace SQL Analyzer endpoint.
  *
  * Mirrors the "Analyze Using SQL" feature in the Object Explorer spec
  * (#119, #120). Read-only ANSI SQL against a DuckDB-backed snapshot of

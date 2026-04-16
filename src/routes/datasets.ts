@@ -2,7 +2,7 @@
 // Dataset Routes — Express Router
 //
 // Routes for dataset management: uploading, listing, details, and deletion.
-// Mounted at /api/v2/datasets
+// Mounted at /api/v1/datasets
 //
 // Provides endpoints:
 //   POST   /upload                   — Upload a new dataset (multipart form)
@@ -535,17 +535,15 @@ router.get(
         );
       }
 
-      // Fetch dataset
+      // Fetch dataset from the ontology `dataset` table first.
       const dsResult = await query(
         "SELECT * FROM dataset WHERE dataset_id = $1",
         [datasetId]
       );
       if (dsResult.rows.length === 0) {
-        return sendError(
-          res,
-          "DATASET_NOT_FOUND",
-          `Dataset '${datasetId}' not found.`
-        );
+        // Not in the ontology dataset table — fall through to the
+        // foundry dataset router which checks `foundry_datasets`.
+        return next();
       }
 
       const ds = dsResult.rows[0];
@@ -626,17 +624,15 @@ router.delete(
         );
       }
 
-      // Check dataset exists
+      // Check dataset exists in the ontology `dataset` table
       const dsResult = await query(
         "SELECT * FROM dataset WHERE dataset_id = $1",
         [datasetId]
       );
       if (dsResult.rows.length === 0) {
-        return sendError(
-          res,
-          "DATASET_NOT_FOUND",
-          `Dataset '${datasetId}' not found.`
-        );
+        // Not in the ontology dataset table — fall through to the
+        // foundry dataset router which checks `foundry_datasets`.
+        return next();
       }
 
       const dataset = dsResult.rows[0];
@@ -1024,17 +1020,14 @@ router.get(
         );
       }
 
-      // Verify dataset exists
+      // Verify dataset exists in the ontology `dataset` table
       const dsResult = await query(
         "SELECT dataset_id FROM dataset WHERE dataset_id = $1",
         [datasetId]
       );
       if (dsResult.rows.length === 0) {
-        return sendError(
-          res,
-          "DATASET_NOT_FOUND",
-          `Dataset with ID '${datasetId}' was not found.`
-        );
+        // Not in the ontology dataset table — fall through
+        return next();
       }
 
       const txnResult = await query(

@@ -1,11 +1,11 @@
 # Dataset Ownership API Reference
 
 > Tracks who created and last modified each dataset in the `foundry_datasets` table.
-> Base URL: `/api/datasets`
+> Base URL: `/api/v1/datasets`
 
 ## Overview
 
-Every `foundry_datasets` row now stores `created_by` and `updated_by` as foreign keys to the `users` table. When the API returns a dataset via `GET /api/datasets/:datasetId`, it resolves these UUIDs into human-readable display names via LEFT JOINs on the `users` table.
+Every `foundry_datasets` row now stores `created_by` and `updated_by` as foreign keys to the `users` table. When the API returns a dataset via `GET /api/v1/datasets/:datasetId`, it resolves these UUIDs into human-readable display names via LEFT JOINs on the `users` table.
 
 This enables the Pipeline Builder's bottom-panel sidebar to show:
 
@@ -58,7 +58,7 @@ The same evolution is also applied by `foundryMigrate.ts` for environments that 
 
 ## API Response Changes
 
-### `GET /api/datasets/:datasetId`
+### `GET /api/v1/datasets/:datasetId`
 
 Two new fields are included in the response, resolved via LEFT JOIN:
 
@@ -111,11 +111,11 @@ When `created_by` or `updated_by` is `NULL` (e.g., datasets created before this 
 
 Sets `created_by` and `updated_by` to the authenticated user's ID.
 
-### Dataset Update (`PUT /api/datasets/:datasetId`)
+### Dataset Update (`PUT /api/v1/datasets/:datasetId`)
 
 Sets `updated_by` to the authenticated user's ID. `created_by` is never modified.
 
-### Dataset Duplicate (`POST /api/datasets/:datasetId/duplicate`)
+### Dataset Duplicate (`POST /api/v1/datasets/:datasetId/duplicate`)
 
 Sets both `created_by` and `updated_by` on the new copy to the authenticated user's ID.
 

@@ -100,10 +100,10 @@ describe("Saturday Integration Tests", async () => {
     // Cleanup test data
     try {
       if (ctx.ontologyId) {
-        await api("DELETE", `/api/v2/ontologies/${ctx.ontologyId}`);
+        await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
       }
       if (ctx.datasetId) {
-        await api("DELETE", `/api/v2/datasets/${ctx.datasetId}?force=true`);
+        await api("DELETE", `/api/v1/datasets/${ctx.datasetId}?force=true`);
       }
     } catch { /* ignore cleanup errors */ }
 
@@ -121,7 +121,7 @@ describe("Saturday Integration Tests", async () => {
     const beforeFailed = runner.failed;
 
     await runner.test("Create ontology", async () => {
-      const { status, body } = await api("POST", "/api/v2/ontologies", {
+      const { status, body } = await api("POST", "/api/v1/ontologies", {
         displayName: "Saturday Integration Test",
         description: "Testing dataset integration",
       });
@@ -131,7 +131,7 @@ describe("Saturday Integration Tests", async () => {
     });
 
     await runner.test("Create Employee object type", async () => {
-      const { status } = await api("POST", `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+      const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
         apiName: "SatEmployee",
         displayName: "Saturday Employee",
         description: "Employee type for Saturday tests",
@@ -156,15 +156,15 @@ describe("Saturday Integration Tests", async () => {
   it("Dataset: Upload and list", async () => {
     const beforeFailed = runner.failed;
 
-    await runner.test("GET /api/v2/datasets returns empty list", async () => {
-      const { status, body } = await api("GET", "/api/v2/datasets");
+    await runner.test("GET /api/v1/datasets returns empty list", async () => {
+      const { status, body } = await api("GET", "/api/v1/datasets");
       runner.assert(status === 200, `Expected 200, got ${status}`);
     });
 
     // Dataset upload uses multipart - test via datasource registration instead
     await runner.test("Register backing datasource (legacy path)", async () => {
       const { status, body } = await api("POST",
-        `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/datasource`, {
+        `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/datasource`, {
           datasetName: "Saturday Employee Dataset",
           filePath: ctx.employeeCsvPath,
           fileFormat: "csv",
@@ -190,7 +190,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("Trigger indexing", async () => {
         const { status, body } = await api("POST",
-          `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index`,
+          `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index`,
           { forceRecreateIndex: true }
         );
         runner.assert(status === 200, `Expected 200, got ${status}`);
@@ -200,7 +200,7 @@ describe("Saturday Integration Tests", async () => {
       await new Promise(r => setTimeout(r, 2000));
 
       await runner.test("Query indexed employees", async () => {
-        const { status, body } = await api("POST", "/api/v2/objects/SatEmployee/search", {
+        const { status, body } = await api("POST", "/api/v1/objects/SatEmployee/search", {
           $pageSize: 10,
         });
         runner.assert(status === 200, `Expected 200, got ${status}`);
@@ -209,12 +209,12 @@ describe("Saturday Integration Tests", async () => {
       });
 
       await runner.test("Get single employee by PK", async () => {
-        const { status, body } = await api("GET", "/api/v2/objects/SatEmployee/E001");
+        const { status, body } = await api("GET", "/api/v1/objects/SatEmployee/E001");
         runner.assert(status === 200, `Expected 200, got ${status}`);
       });
 
       await runner.test("Search with filter", async () => {
-        const { status, body } = await api("POST", "/api/v2/objects/SatEmployee/search", {
+        const { status, body } = await api("POST", "/api/v1/objects/SatEmployee/search", {
           where: { type: "eq", field: "department", value: "Engineering" },
           $pageSize: 10,
         });
@@ -222,7 +222,7 @@ describe("Saturday Integration Tests", async () => {
       });
 
       await runner.test("Aggregate", async () => {
-        const { status, body } = await api("POST", "/api/v2/objects/SatEmployee/aggregate", {
+        const { status, body } = await api("POST", "/api/v1/objects/SatEmployee/aggregate", {
           aggregations: [
             { type: "count", name: "total" },
             { type: "avg", field: "salary", name: "avgSalary" },
@@ -240,7 +240,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("Get reindex status", async () => {
         const { status } = await api("GET",
-          `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index/reindex/status`
+          `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index/reindex/status`
         );
         // May be 200 or 404 depending on route registration
         runner.assert(status === 200 || status === 404, `Expected 200 or 404, got ${status}`);
@@ -255,7 +255,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("List edits (should be empty initially)", async () => {
         const { status } = await api("GET",
-          `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/edits`
+          `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/edits`
         );
         runner.assert(status === 200 || status === 404, `Expected 200/404, got ${status}`);
       });
@@ -271,7 +271,7 @@ describe("Saturday Integration Tests", async () => {
     const beforeFailed = runner.failed;
 
     await runner.test("List datasets", async () => {
-      const { status } = await api("GET", "/api/v2/datasets");
+      const { status } = await api("GET", "/api/v1/datasets");
       runner.assert(status === 200, `Expected 200, got ${status}`);
     });
 
@@ -282,13 +282,13 @@ describe("Saturday Integration Tests", async () => {
   it("Health: Enhanced health and status endpoints", async () => {
     const beforeFailed = runner.failed;
 
-    await runner.test("GET /api/v2/health returns healthy", async () => {
-      const { status, body } = await api("GET", "/api/v2/health");
+    await runner.test("GET /api/v1/health returns healthy", async () => {
+      const { status, body } = await api("GET", "/api/v1/health");
       runner.assert(status === 200 || status === 503, `Expected 200/503, got ${status}`);
     });
 
-    await runner.test("GET /api/v2/status returns system info", async () => {
-      const { status, body } = await api("GET", "/api/v2/status");
+    await runner.test("GET /api/v1/status returns system info", async () => {
+      const { status, body } = await api("GET", "/api/v1/status");
       runner.assert(status === 200, `Expected 200, got ${status}`);
     });
 

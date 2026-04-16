@@ -86,13 +86,13 @@ async function cleanup() {
   console.log("\n--- Cleanup ---");
   try {
     if (ontologyId) {
-      await api("DELETE", `/api/v2/ontologies/${ontologyId}`);
+      await api("DELETE", `/api/v1/ontologies/${ontologyId}`);
       console.log("  Deleted ontology");
     }
   } catch { /* best effort */ }
   for (const dsId of datasetIds) {
     try {
-      await api("DELETE", `/api/v2/datasets/${dsId}?force=true`);
+      await api("DELETE", `/api/v1/datasets/${dsId}?force=true`);
       console.log(`  Deleted dataset ${dsId.slice(0, 8)}...`);
     } catch { /* best effort */ }
   }
@@ -127,7 +127,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("7.1  Setup ontology + Employee type");
 
-  const ontRes = await api("POST", "/api/v2/ontologies", {
+  const ontRes = await api("POST", "/api/v1/ontologies", {
     displayName: "Test07 Mapping Suggestions",
   });
   assert(ontRes.status === 201, "Ontology created");
@@ -135,7 +135,7 @@ async function main() {
 
   const otRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontologies/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee",
@@ -162,7 +162,7 @@ async function main() {
     "E003,Carol Lee,91000,2021-11-20\n";
   const snakePath = writeTmpCsv("test07_snake", snakeCsv);
 
-  const upload1Res = await uploadFile(`${API}/api/v2/datasets/upload`, snakePath, {
+  const upload1Res = await uploadFile(`${API}/api/v1/datasets/upload`, snakePath, {
     name: "test07_snake_case",
   });
   assert(upload1Res.status === 201, "Snake-case CSV uploaded");
@@ -176,7 +176,7 @@ async function main() {
 
   const suggestRes = await api(
     "POST",
-    `/api/v2/ontology/${ontologyId}/objectTypes/Employee/suggestMapping`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/suggestMapping`,
     { datasetId: dataset1Id }
   );
   assert(suggestRes.status === 200, `suggestMapping returned 200 (got ${suggestRes.status})`);
@@ -223,7 +223,7 @@ async function main() {
     "E002,Bob Jones,82000,Sales\n";
   const altPath = writeTmpCsv("test07_alt_names", altCsv);
 
-  const upload2Res = await uploadFile(`${API}/api/v2/datasets/upload`, altPath, {
+  const upload2Res = await uploadFile(`${API}/api/v1/datasets/upload`, altPath, {
     name: "test07_alt_names",
   });
   assert(upload2Res.status === 201, "Alt-names CSV uploaded");
@@ -232,7 +232,7 @@ async function main() {
 
   const suggestAltRes = await api(
     "POST",
-    `/api/v2/ontology/${ontologyId}/objectTypes/Employee/suggestMapping`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/suggestMapping`,
     { datasetId: dataset2Id }
   );
   assert(suggestAltRes.status === 200, "suggestMapping returned 200");
@@ -274,7 +274,7 @@ async function main() {
     "E002,Bob Jones,82000,2022-06-01,James,Red,10\n";
   const extraPath = writeTmpCsv("test07_extra_cols", extraCsv);
 
-  const upload3Res = await uploadFile(`${API}/api/v2/datasets/upload`, extraPath, {
+  const upload3Res = await uploadFile(`${API}/api/v1/datasets/upload`, extraPath, {
     name: "test07_extra_columns",
   });
   assert(upload3Res.status === 201, "Extra-columns CSV uploaded");
@@ -283,7 +283,7 @@ async function main() {
 
   const suggestExtraRes = await api(
     "POST",
-    `/api/v2/ontology/${ontologyId}/objectTypes/Employee/suggestMapping`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/suggestMapping`,
     { datasetId: dataset3Id }
   );
   assert(suggestExtraRes.status === 200, "suggestMapping returned 200");

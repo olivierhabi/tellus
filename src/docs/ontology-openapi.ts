@@ -189,7 +189,7 @@ export const ontologySchemas = {
   },
 
   /**
-   * Request body for `POST /v2/ontologies/:id/objectTypes/batch`.
+   * Request body for `POST /v1/ontologies/:id/objectTypes/batch`.
    * Atomically creates the object type, every property, and sets
    * the primary key + title property in a single transaction.
    */
@@ -240,7 +240,7 @@ export const ontologySchemas = {
   },
 
   /**
-   * Request body for `PUT /v2/ontologies/:id/objectTypes/:apiName`.
+   * Request body for `PUT /v1/ontologies/:id/objectTypes/:apiName`.
    * Every field is optional — send only what you want to change.
    * When `apiName` is present, the backend ALSO clears any lingering
    * `requestedApiName` conflict marker in the same UPDATE.
@@ -264,7 +264,7 @@ export const ontologySchemas = {
   },
 
   /**
-   * Request body for `POST /v2/ontologies/:id/objectTypes/:apiName/datasource`.
+   * Request body for `POST /v1/ontologies/:id/objectTypes/:apiName/datasource`.
    * Three mutually-exclusive binding modes, in priority order: foundry
    * bridge, legacy ontology-dataset, and raw filesystem.
    */
@@ -413,7 +413,7 @@ const apiNameParam = {
 export const ontologyPaths = {
   /* ----------------------------- Ontologies ---------------------------- */
 
-  '/v2/ontologies': {
+  '/v1/ontologies': {
     get: {
       tags: ['Ontology Manager'],
       summary: 'List all ontologies',
@@ -435,7 +435,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}': {
+  '/v1/ontologies/{ontologyId}': {
     get: {
       tags: ['Ontology Manager'],
       summary: 'Get a single ontology',
@@ -462,7 +462,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Object types -------------------------- */
 
-  '/v2/ontologies/{ontologyId}/objectTypes': {
+  '/v1/ontologies/{ontologyId}/objectTypes': {
     get: {
       tags: ['Object Types'],
       summary: 'List object types in an ontology',
@@ -517,7 +517,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Batch create + foundry dataset bridge -- */
 
-  '/v2/ontologies/{ontologyId}/objectTypes/batch': {
+  '/v1/ontologies/{ontologyId}/objectTypes/batch': {
     post: {
       tags: ['Object Types'],
       summary:
@@ -559,7 +559,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/by-id/{objectTypeId}': {
+  '/v1/ontologies/{ontologyId}/objectTypes/by-id/{objectTypeId}': {
     get: {
       tags: ['Object Types'],
       summary: 'Get an object type by UUID (stable across renames)',
@@ -589,7 +589,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}': {
     get: {
       tags: ['Object Types'],
       summary: 'Get an object type with its properties, datasource, indexing state, and link types',
@@ -640,7 +640,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/changeStatus': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/changeStatus': {
     post: {
       tags: ['Object Types'],
       summary: 'Change the lifecycle status of an object type',
@@ -653,7 +653,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/clone': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/clone': {
     post: {
       tags: ['Object Types'],
       summary: 'Clone an object type with a new apiName',
@@ -665,7 +665,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Properties ---------------------------- */
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties': {
     get: {
       tags: ['Properties'],
       summary: 'List properties on an object type',
@@ -684,7 +684,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}': {
     put: {
       tags: ['Properties'],
       summary: 'Update a property',
@@ -706,7 +706,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/primaryKey': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/primaryKey': {
     post: {
       tags: ['Properties'],
       summary: 'Set a property as the primary key',
@@ -719,7 +719,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/titleProperty': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/titleProperty': {
     post: {
       tags: ['Properties'],
       summary: 'Set a property as the object title',
@@ -734,7 +734,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Link types ---------------------------- */
 
-  '/v2/ontologies/{ontologyId}/linkTypes': {
+  '/v1/ontologies/{ontologyId}/linkTypes': {
     get: {
       tags: ['Link Types'],
       summary: 'List link types',
@@ -771,7 +771,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/linkTypes/{apiName}': {
+  '/v1/ontologies/{ontologyId}/linkTypes/{apiName}': {
     get: {
       tags: ['Link Types'],
       summary: 'Get a link type',
@@ -793,7 +793,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/linkTypes/{apiName}/resolve': {
+  '/v1/ontologies/{ontologyId}/linkTypes/{apiName}/resolve': {
     post: {
       tags: ['Link Types'],
       summary: 'Resolve link instances around a source object',
@@ -806,7 +806,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/linkTypes/{apiName}/searchAround': {
+  '/v1/ontologies/{ontologyId}/linkTypes/{apiName}/searchAround': {
     post: {
       tags: ['Link Types'],
       summary: 'Search around an object — return all related objects via this link type',
@@ -818,7 +818,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Action types -------------------------- */
 
-  '/v2/ontologies/{ontologyId}/actionTypes': {
+  '/v1/ontologies/{ontologyId}/actionTypes': {
     get: {
       tags: ['Action Types'],
       summary: 'List action types',
@@ -834,7 +834,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply': {
+  '/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply': {
     post: {
       tags: ['Action Types'],
       summary: 'Execute an action with parameters (transactional)',
@@ -850,7 +850,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch': {
+  '/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch': {
     post: {
       tags: ['Action Types'],
       summary: 'Apply an action to up to 100 parameter sets in one transaction',
@@ -865,7 +865,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Objects (data plane) ------------------ */
 
-  '/v2/objects/{objectType}/search': {
+  '/v1/objects/{objectType}/search': {
     post: {
       tags: ['Objects'],
       summary: 'Search instances of an object type',
@@ -893,7 +893,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/objects/{objectType}/{primaryKey}': {
+  '/v1/objects/{objectType}/{primaryKey}': {
     get: {
       tags: ['Objects'],
       summary: 'Get a single object instance by primary key',
@@ -905,7 +905,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/objects/{objectType}/aggregate': {
+  '/v1/objects/{objectType}/aggregate': {
     post: {
       tags: ['Objects'],
       summary: 'Run aggregations (count/sum/avg/min/max group by) over object instances',
@@ -920,7 +920,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Interfaces ---------------------------- */
 
-  '/v2/ontology/{ontologyId}/interfaces': {
+  '/v1/ontology/{ontologyId}/interfaces': {
     get: {
       tags: ['Interfaces'],
       summary: 'List interface types',
@@ -938,7 +938,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Edits / audit ------------------------- */
 
-  '/v2/ontology/{ontologyId}/objectTypes/{apiName}/edits': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/edits': {
     get: {
       tags: ['Edits'],
       summary: 'List unsaved/pending edits for an object type',
@@ -947,7 +947,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/audit': {
+  '/v1/audit': {
     get: {
       tags: ['Audit'],
       summary: 'Global audit log',
@@ -961,7 +961,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Indexing & reindex -------------------- */
 
-  '/v2/ontology/{ontologyId}/objectTypes/{apiName}/reindex': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/reindex': {
     post: {
       tags: ['Indexing'],
       summary: 'Trigger a reindex for an object type',
@@ -970,7 +970,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/index': {
     get: {
       tags: ['Indexing'],
       summary: 'Get current indexing status for an object type',
@@ -981,7 +981,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Backing datasources ------------------- */
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource': {
     post: {
       tags: ['Backing Datasource'],
       summary: 'Register a backing datasource for an object type',
@@ -1043,7 +1043,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource/scan': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource/scan': {
     post: {
       tags: ['Backing Datasource'],
       summary: 'Re-scan the datasource and refresh column metadata',
@@ -1057,7 +1057,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Bulk properties ---------------------- */
 
-  '/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/batch': {
+  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties/batch': {
     post: {
       tags: ['Properties'],
       summary: 'Create multiple properties on an object type in one call',
@@ -1100,7 +1100,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Search -------------------------------- */
 
-  '/search': {
+  '/v1/search': {
     get: {
       tags: ['Search'],
       summary: 'Cross-ontology global search across resources and instances',
@@ -1111,7 +1111,574 @@ export const ontologyPaths = {
     },
   },
 
-  '/search/picker': {
+  /* ----------------------------- Branches ----------------------------- */
+
+  '/v1/ontologies/{ontologyId}/branches': {
+    get: {
+      tags: ['Branches'],
+      summary: 'List branches for an ontology',
+      parameters: [
+        ontologyIdParam,
+        { name: 'status', in: 'query' as const, schema: { type: 'string' as const, enum: ['OPEN', 'MERGED', 'CLOSED'] }, description: 'Filter by branch status' },
+      ],
+      responses: { '200': ok('Branch list', { type: 'object' as const, properties: { data: { type: 'array' as const, items: OBJ }, totalCount: INT } }), ...errorResponses },
+    },
+    post: {
+      tags: ['Branches'],
+      summary: 'Create a new branch (max 50 open per ontology)',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { name: STR, parentBranchName: STR, description: STR }, required: ['name'] } } },
+      },
+      responses: { '201': ok('Created', { type: 'object' as const, properties: { branch: OBJ, description: { type: 'string' as const, nullable: true } } }), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/branches/{branchName}': {
+    get: {
+      tags: ['Branches'],
+      summary: 'Get branch detail with proposals',
+      parameters: [
+        ontologyIdParam,
+        { name: 'branchName', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Branch detail', { type: 'object' as const, properties: { branch: OBJ, proposals: { type: 'array' as const, items: OBJ } } }), ...errorResponses },
+    },
+    delete: {
+      tags: ['Branches'],
+      summary: 'Close a branch (soft-delete)',
+      parameters: [
+        ontologyIdParam,
+        { name: 'branchName', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '204': { description: 'Branch closed' }, ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/branches/{branchName}/merge': {
+    post: {
+      tags: ['Branches'],
+      summary: 'Merge branch into parent (requires at least one approved proposal)',
+      parameters: [
+        ontologyIdParam,
+        { name: 'branchName', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Merged', { type: 'object' as const, properties: { branchId: STR, status: STR } }), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/branches/{branchName}/proposals': {
+    post: {
+      tags: ['Branches'],
+      summary: 'Open a new proposal on a branch',
+      parameters: [
+        ontologyIdParam,
+        { name: 'branchName', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { title: STR, description: STR }, required: ['title'] } } },
+      },
+      responses: { '201': ok('Proposal created', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/branches/{branchName}/proposals/{proposalId}/approve': {
+    post: {
+      tags: ['Branches'],
+      summary: 'Approve an open proposal',
+      parameters: [
+        ontologyIdParam,
+        { name: 'branchName', in: 'path' as const, required: true, schema: STR },
+        { name: 'proposalId', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Approved', OBJ), ...errorResponses },
+    },
+  },
+
+  /* ----------------------------- Groups ------------------------------ */
+
+  '/v1/ontologies/{ontologyId}/groups': {
+    get: {
+      tags: ['Groups'],
+      summary: 'List object type groups with member counts',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Group list', { type: 'object' as const, properties: { data: { type: 'array' as const, items: OBJ }, totalCount: INT } }) },
+    },
+    post: {
+      tags: ['Groups'],
+      summary: 'Create an object type group',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { apiName: STR, displayName: STR, description: STR, icon: { ...STR, default: 'folder' } }, required: ['apiName', 'displayName'] } } },
+      },
+      responses: { '201': ok('Created', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/groups/graph': {
+    get: {
+      tags: ['Groups'],
+      summary: 'Cytoscape-style group→objectType graph (max 200 nodes)',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Graph', { type: 'object' as const, properties: { nodes: { type: 'array' as const, items: OBJ }, edges: { type: 'array' as const, items: OBJ }, truncated: BOOL } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/groups/{groupApiName}/counts': {
+    get: {
+      tags: ['Groups'],
+      summary: 'Cached OpenSearch doc counts per object type in a group (60 s TTL)',
+      parameters: [
+        ontologyIdParam,
+        { name: 'groupApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Counts', { type: 'object' as const, properties: { counts: OBJ, cachedTtlMs: INT } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/groups/{groupApiName}/members': {
+    post: {
+      tags: ['Groups'],
+      summary: 'Add an object type to a group (idempotent)',
+      parameters: [
+        ontologyIdParam,
+        { name: 'groupApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { objectTypeApiName: STR }, required: ['objectTypeApiName'] } } },
+      },
+      responses: { '204': { description: 'Member added' }, ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/groups/{groupApiName}': {
+    delete: {
+      tags: ['Groups'],
+      summary: 'Delete a group',
+      parameters: [
+        ontologyIdParam,
+        { name: 'groupApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '204': { description: 'Deleted' }, ...errorResponses },
+    },
+  },
+
+  /* ----------------------------- Functions --------------------------- */
+
+  '/v1/ontologies/{ontologyId}/functions': {
+    get: {
+      tags: ['Functions'],
+      summary: 'List functions with version counts and invocation stats',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Function list', { type: 'object' as const, properties: { data: { type: 'array' as const, items: OBJ }, totalCount: INT } }) },
+    },
+    post: {
+      tags: ['Functions'],
+      summary: 'Register a new function and publish its first version',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { apiName: STR, displayName: STR, description: STR, runtime: { ...STR, default: 'typescript' }, sourceCode: STR, inputSchema: OBJ, outputSchema: OBJ }, required: ['apiName', 'displayName', 'sourceCode'] } } },
+      },
+      responses: { '201': ok('Created', { type: 'object' as const, properties: { function: OBJ, versions: { type: 'array' as const, items: OBJ } } }), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/functions/{apiName}': {
+    get: {
+      tags: ['Functions'],
+      summary: 'Get function detail with version history',
+      parameters: [ontologyIdParam, apiNameParam],
+      responses: { '200': ok('Function detail', { type: 'object' as const, properties: { function: OBJ, versions: { type: 'array' as const, items: OBJ } } }), ...errorResponses },
+    },
+    delete: {
+      tags: ['Functions'],
+      summary: 'Delete a function',
+      parameters: [ontologyIdParam, apiNameParam],
+      responses: { '204': { description: 'Deleted' }, ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/functions/{apiName}/versions': {
+    post: {
+      tags: ['Functions'],
+      summary: 'Publish a new version of a function',
+      parameters: [ontologyIdParam, apiNameParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { sourceCode: STR, inputSchema: OBJ, outputSchema: OBJ }, required: ['sourceCode'] } } },
+      },
+      responses: { '201': ok('Version published', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/functions/{apiName}/invoke': {
+    post: {
+      tags: ['Functions'],
+      summary: 'Execute the latest version in a sandboxed runtime (5 s timeout)',
+      parameters: [ontologyIdParam, apiNameParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { input: {} } } } },
+      },
+      responses: {
+        '200': ok('Invocation result', { type: 'object' as const, properties: { output: {}, durationMs: INT, logs: { type: 'array' as const, items: STR } } }),
+        '408': { description: 'FUNCTION_TIMEOUT', content: { 'application/json': { schema: REF_ERR } } },
+        ...errorResponses,
+      },
+    },
+  },
+
+  /* ----------------------------- Explorations ------------------------ */
+
+  '/v1/ontologies/{ontologyId}/explorations': {
+    get: {
+      tags: ['Explorations'],
+      summary: 'List saved explorations (own + shared/public)',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Exploration list', { type: 'object' as const, properties: { data: { type: 'array' as const, items: OBJ }, totalCount: INT } }) },
+    },
+    post: {
+      tags: ['Explorations'],
+      summary: 'Create a saved exploration',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { title: STR, description: STR, config: OBJ, visibility: { ...STR, default: 'private' } }, required: ['title'] } } },
+      },
+      responses: { '201': ok('Created', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/explorations/{id}': {
+    get: {
+      tags: ['Explorations'],
+      summary: 'Get a single exploration',
+      parameters: [
+        ontologyIdParam,
+        { name: 'id', in: 'path' as const, required: true, schema: STR, description: 'Exploration UUID' },
+      ],
+      responses: { '200': ok('Exploration', OBJ), ...errorResponses },
+    },
+    put: {
+      tags: ['Explorations'],
+      summary: 'Update an exploration (owner only)',
+      parameters: [
+        ontologyIdParam,
+        { name: 'id', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { title: STR, description: STR, config: OBJ, visibility: STR } } } },
+      },
+      responses: { '200': ok('Updated', OBJ), ...errorResponses },
+    },
+    delete: {
+      tags: ['Explorations'],
+      summary: 'Delete an exploration (owner only)',
+      parameters: [
+        ontologyIdParam,
+        { name: 'id', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '204': { description: 'Deleted' }, ...errorResponses },
+    },
+  },
+
+  /* ----------------------------- Exports ----------------------------- */
+
+  '/v1/ontologies/{ontologyId}/exports': {
+    get: {
+      tags: ['Exports'],
+      summary: 'List export jobs for the current user (last 100)',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Export jobs', { type: 'object' as const, properties: { data: { type: 'array' as const, items: OBJ }, totalCount: INT } }) },
+    },
+    post: {
+      tags: ['Exports'],
+      summary: 'Enqueue a new async export job',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { objectTypeApiName: STR, format: { type: 'string' as const, enum: ['csv', 'xlsx', 'jsonl'], default: 'csv' }, query: OBJ } } } },
+      },
+      responses: { '202': ok('Export job enqueued', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/exports/{jobId}': {
+    get: {
+      tags: ['Exports'],
+      summary: 'Poll export job status',
+      parameters: [
+        ontologyIdParam,
+        { name: 'jobId', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Export job', { type: 'object' as const, properties: { status: STR, row_count: INT, download_url: { type: 'string' as const, nullable: true }, expires_at: { type: 'string' as const, nullable: true } } }), ...errorResponses },
+    },
+  },
+
+  /* ----------------------------- Summary ----------------------------- */
+
+  '/v1/ontologies/{ontologyId}/summary': {
+    get: {
+      tags: ['Summary'],
+      summary: 'Home page bundle — object types, groups, favorites, recent activity',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Summary', { type: 'object' as const, properties: { objectTypes: { type: 'array' as const, items: OBJ }, groups: { type: 'array' as const, items: OBJ }, favorites: { type: 'array' as const, items: OBJ }, recent: { type: 'array' as const, items: OBJ } } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/summary/{apiName}': {
+    get: {
+      tags: ['Summary'],
+      summary: 'Lightweight single-type summary for preview popovers',
+      parameters: [ontologyIdParam, apiNameParam],
+      responses: { '200': ok('Type summary', { type: 'object' as const, properties: { api_name: STR, display_name: STR, description: { type: 'string' as const, nullable: true }, icon: STR, icon_color: STR, status: STR, property_count: INT } }), ...errorResponses },
+    },
+  },
+
+  /* ----------------------------- Geo --------------------------------- */
+
+  '/v1/ontologies/{ontologyId}/geo/{objectTypeApiName}/geohash': {
+    post: {
+      tags: ['Geo'],
+      summary: 'Geohash bucket aggregation for map rendering',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { geopointProperty: STR, zoom: { ...INT, default: 4 }, filter: { type: 'array' as const, items: OBJ } }, required: ['geopointProperty'] } } },
+      },
+      responses: { '200': ok('Geohash buckets', { type: 'object' as const, properties: { precision: INT, buckets: { type: 'array' as const, items: OBJ }, geopointProperty: STR } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/geo/{objectTypeApiName}/choropleth': {
+    post: {
+      tags: ['Geo'],
+      summary: 'Country/state term aggregation for choropleth maps',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { regionProperty: STR, level: { type: 'string' as const, enum: ['country', 'state'], default: 'country' }, filter: { type: 'array' as const, items: OBJ } }, required: ['regionProperty'] } } },
+      },
+      responses: { '200': ok('Choropleth regions', { type: 'object' as const, properties: { level: STR, regions: { type: 'array' as const, items: OBJ }, regionProperty: STR } }) },
+    },
+  },
+
+  /* ----------------------------- Comparisons ------------------------- */
+
+  '/v1/ontologies/{ontologyId}/comparisons/aggregate': {
+    post: {
+      tags: ['Comparisons'],
+      summary: 'Dual-set aggregation comparison via OpenSearch msearch',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { objectTypeApiName: STR, sharedFilter: { type: 'array' as const, items: OBJ }, setA: { type: 'object' as const, properties: { filter: { type: 'array' as const, items: OBJ }, label: STR, color: STR } }, setB: { type: 'object' as const, properties: { filter: { type: 'array' as const, items: OBJ }, label: STR, color: STR } }, aggregation: { type: 'object' as const, properties: { type: { type: 'string' as const, enum: ['terms', 'histogram', 'date_histogram'] }, field: STR }, required: ['type', 'field'] } }, required: ['objectTypeApiName', 'aggregation'] } } },
+      },
+      responses: { '200': ok('Comparison result', { type: 'object' as const, properties: { palette: OBJ, setA: { type: 'object' as const, properties: { label: STR, buckets: { type: 'array' as const, items: OBJ } } }, setB: { type: 'object' as const, properties: { label: STR, buckets: { type: 'array' as const, items: OBJ } } }, aggregation: OBJ } }) },
+    },
+  },
+
+  /* ----------------------------- Migrations -------------------------- */
+
+  '/v1/ontologies/{ontologyId}/migrations': {
+    get: {
+      tags: ['Migrations'],
+      summary: 'List recent migration jobs (last 100)',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Migration list', { type: 'object' as const, properties: { data: { type: 'array' as const, items: OBJ }, totalCount: INT } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/migrations/plan': {
+    post: {
+      tags: ['Migrations'],
+      summary: 'Classify proposed schema operations as breaking/non-breaking',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { operations: { type: 'array' as const, items: STR } }, required: ['operations'] } } },
+      },
+      responses: { '200': ok('Migration plan', { type: 'object' as const, properties: { breaking: { type: 'array' as const, items: STR }, nonBreaking: { type: 'array' as const, items: STR }, unknown: { type: 'array' as const, items: STR }, requiresMigration: BOOL } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/migrations/execute': {
+    post: {
+      tags: ['Migrations'],
+      summary: 'Execute a migration — reindex into a new versioned index and swap alias',
+      parameters: [ontologyIdParam],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { objectTypeApiName: STR, operations: { type: 'array' as const, items: STR } }, required: ['objectTypeApiName', 'operations'] } } },
+      },
+      responses: { '200': ok('Migration result', { type: 'object' as const, properties: { jobId: STR, status: STR, newIndex: STR, previousIndex: { type: 'string' as const, nullable: true } } }), ...errorResponses },
+    },
+  },
+
+  /* ----------------------------- Governance -------------------------- */
+
+  '/v1/ontologies/{ontologyId}/governance/lineage/{objectTypeApiName}': {
+    get: {
+      tags: ['Governance'],
+      summary: 'Lineage DAG for an object type (max 5 hops)',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+        { name: 'depth', in: 'query' as const, schema: INT, description: 'Number of hops (max 5)' },
+      ],
+      responses: { '200': ok('Lineage graph', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/governance/pii-scans/{objectTypeApiName}': {
+    get: {
+      tags: ['Governance'],
+      summary: 'List historical PII scan results',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('PII scan history', { type: 'object' as const, properties: { data: { type: 'array' as const, items: OBJ }, totalCount: INT } }) },
+    },
+    post: {
+      tags: ['Governance'],
+      summary: 'Trigger a PII scan on object type data',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { samples: { type: 'array' as const, items: OBJ } } } } },
+      },
+      responses: { '200': ok('Scan results', { type: 'object' as const, properties: { matches: { type: 'array' as const, items: OBJ }, suggestionCount: INT, sampleSize: INT, scannedFromIndex: BOOL } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/governance/usage/{objectTypeApiName}': {
+    get: {
+      tags: ['Governance'],
+      summary: '30-day read/write usage sparkline',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Usage series', { type: 'object' as const, properties: { series: { type: 'array' as const, items: { type: 'object' as const, properties: { day: STR, reads: INT, writes: INT } } } } }) },
+    },
+  },
+
+  '/v1/ontologies/{ontologyId}/governance/usage/refresh': {
+    post: {
+      tags: ['Governance'],
+      summary: 'Refresh the usage_event_daily materialized view',
+      parameters: [ontologyIdParam],
+      responses: { '200': ok('Refreshed', { type: 'object' as const, properties: { refreshedAt: STR } }) },
+    },
+  },
+
+  /* ----------------------------- Object Views ------------------------ */
+
+  '/v1/ontology/{ontologyId}/objectTypes/{objectTypeApiName}/objects/{primaryKey}/view': {
+    get: {
+      tags: ['Object Views'],
+      summary: 'Enriched single-object view with properties, interfaces, and link summary',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+        { name: 'primaryKey', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Object view', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontology/{ontologyId}/objectTypes/{objectTypeApiName}/objects/{primaryKey}/linked': {
+    get: {
+      tags: ['Object Views'],
+      summary: 'Grouped linked objects for every link type involving this object',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+        { name: 'primaryKey', in: 'path' as const, required: true, schema: STR },
+        { name: 'linkType', in: 'query' as const, schema: STR, description: 'Filter to specific link type' },
+        { name: 'pageSize', in: 'query' as const, schema: { ...INT, default: 100 }, description: '1–1000' },
+        { name: 'pageToken', in: 'query' as const, schema: STR },
+      ],
+      responses: { '200': ok('Linked objects', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/ontology/{ontologyId}/objectTypes/{objectTypeApiName}/objects/batchView': {
+    post: {
+      tags: ['Object Views'],
+      summary: 'Batch-fetch enriched views for up to 100 objects',
+      parameters: [
+        ontologyIdParam,
+        { name: 'objectTypeApiName', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { primaryKeys: { type: 'array' as const, items: STR, minItems: 1, maxItems: 100 }, include: { type: 'array' as const, items: { type: 'string' as const, enum: ['properties', 'links', 'interfaces'] } } }, required: ['primaryKeys'] } } },
+      },
+      responses: { '200': ok('Batch views', { type: 'object' as const, properties: { objectType: STR, views: { type: 'array' as const, items: OBJ }, totalRequested: INT, totalResolved: INT } }), ...errorResponses },
+    },
+  },
+
+  '/v1/objects/{objectType}/{primaryKey}/view': {
+    get: {
+      tags: ['Object Views'],
+      summary: 'Enriched object view (auto-resolves ontologyId from object type)',
+      parameters: [
+        { name: 'objectType', in: 'path' as const, required: true, schema: STR },
+        { name: 'primaryKey', in: 'path' as const, required: true, schema: STR },
+      ],
+      responses: { '200': ok('Object view', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/objects/{objectType}/{primaryKey}/linked': {
+    get: {
+      tags: ['Object Views'],
+      summary: 'Linked objects (auto-resolves ontologyId from object type)',
+      parameters: [
+        { name: 'objectType', in: 'path' as const, required: true, schema: STR },
+        { name: 'primaryKey', in: 'path' as const, required: true, schema: STR },
+        { name: 'linkType', in: 'query' as const, schema: STR },
+        { name: 'pageSize', in: 'query' as const, schema: INT },
+        { name: 'pageToken', in: 'query' as const, schema: STR },
+      ],
+      responses: { '200': ok('Linked objects', OBJ), ...errorResponses },
+    },
+  },
+
+  '/v1/objects/{objectType}/batchView': {
+    post: {
+      tags: ['Object Views'],
+      summary: 'Batch object views (auto-resolves ontologyId from object type)',
+      parameters: [
+        { name: 'objectType', in: 'path' as const, required: true, schema: STR },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: { type: 'object' as const, properties: { primaryKeys: { type: 'array' as const, items: STR, minItems: 1, maxItems: 100 }, include: { type: 'array' as const, items: STR } }, required: ['primaryKeys'] } } },
+      },
+      responses: { '200': ok('Batch views', OBJ), ...errorResponses },
+    },
+  },
+
+  /* ----------------------------- Bulk Actions ------------------------ */
+
+  '/v1/search/picker': {
     get: {
       tags: ['Search'],
       summary: 'Resource picker for the "Create object type" wizard',

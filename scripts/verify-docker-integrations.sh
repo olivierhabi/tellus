@@ -10,20 +10,14 @@
 #
 #   TIER A  — wired in code today
 #       redpanda    : kafkajs producer publishes ontology.actions
-#       prometheus  : scrapes /api/metrics on host
-#       pgvector    : conditional migration loads vector(1536)
 #       postgres    : tellus-db (live primary)
 #       opensearch  : object index nodes
 #       minio       : object storage
 #
 #   TIER B  — scaffolded for future iterations, asserted reachable only
-#       flink       : JobManager web UI
 #       spark       : master web UI
-#       nessie      : Iceberg REST catalog v2
 #       keycloak    : OIDC provider /health/ready
 #       debezium    : Kafka Connect REST
-#       otel        : OTLP collector ports
-#       grafana     : dashboard server
 #
 # Each check prints PASS / FAIL with the URL or shell command being probed.
 # Exits non-zero if any TIER A check fails (TIER B failures are reported
@@ -148,7 +142,7 @@ if require tellus-redpanda; then
   done
 
   # Round-trip: pick the seeded action, fire 3 applies, check the topic.
-  ACTION=$(curl -s "$BASE/api/v2/ontologies/$ONTOLOGY_ID/actionTypes" \
+  ACTION=$(curl -s "$BASE/api/v1/ontologies/$ONTOLOGY_ID/actionTypes" \
     | jq -r '.data[0].apiName // empty')
   if [[ -z "$ACTION" ]]; then
     warn "no action type seeded" "Kafka publish round-trip"
@@ -159,7 +153,7 @@ if require tellus-redpanda; then
     for _ in 1 2 3; do
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"parameters":{"customerId":"c","quantity":1}}' \
-        "$BASE/api/v2/ontologies/$ONTOLOGY_ID/actions/$ACTION/apply" >/dev/null
+        "$BASE/api/v1/ontologies/$ONTOLOGY_ID/actions/$ACTION/apply" >/dev/null
     done
     sleep 3
     msgs=$(docker exec tellus-redpanda sh -c 'grep -c "actionTypeApiName" /tmp/k.json 2>/dev/null || echo 0')
@@ -173,76 +167,9 @@ else
   fail "container missing" "Redpanda"
 fi
 
-# --------------------------------------------------------------------
-# Prometheus — scraping the backend
-# --------------------------------------------------------------------
-section "TIER A — Prometheus (scrape /api/metrics)"
-if require tellus-prometheus; then
-  if curl -sf http://localhost:9090/-/ready >/dev/null; then
-    pass "" "Prometheus /-/ready"
-  else
-    fail "unready" "Prometheus /-/ready"
-  fi
-  # Backend target is up? (use --data-urlencode so curl handles { and ")
-  up=$(curl -sG --data-urlencode 'query=up{job="tellus-backend"}' \
-    'http://localhost:9090/api/v1/query' \
-    | jq -r '.data.result[0].value[1] // "missing"')
-  if [[ "$up" == "1" ]]; then
-    pass "" "Prometheus target tellus-backend = up"
-  else
-    fail "got $up" "Prometheus target tellus-backend = up"
-  fi
-  series=$(curl -sG --data-urlencode 'query=process_uptime_seconds{job="tellus-backend"}' \
-    'http://localhost:9090/api/v1/query' \
-    | jq -r '.data.result | length')
-  if [[ "$series" -ge 1 ]]; then
-    pass "" "Prometheus has process_uptime_seconds for tellus-backend"
-  else
-    fail "missing" "Prometheus has process_uptime_seconds for tellus-backend"
-  fi
-else
-  fail "container missing" "Prometheus"
-fi
-
-# --------------------------------------------------------------------
-# pgvector — extension actually loaded + column type promoted
-# --------------------------------------------------------------------
-section "TIER A — pgvector (vector extension)"
-if require tellus-pgvector; then
-  ext=$(docker exec tellus-pgvector psql -U tellus -d tellus_db -tAc \
-    "SELECT extname FROM pg_extension WHERE extname='vector';" 2>/dev/null)
-  if [[ "$ext" == "vector" ]]; then
-    pass "" "pgvector extension loaded"
-  else
-    fail "extension not present" "pgvector extension loaded"
-  fi
-  coltype=$(docker exec tellus-pgvector psql -U tellus -d tellus_db -tAc \
-    "SELECT format_type(atttypid, atttypmod) FROM pg_attribute
-       WHERE attrelid='vector_property_value'::regclass AND attname='embedding';" 2>/dev/null)
-  if [[ "$coltype" == vector* ]]; then
-    pass "($coltype)" "embedding column promoted to vector type"
-  else
-    fail "got $coltype" "embedding column promoted to vector type"
-  fi
-else
-  warn "tellus-pgvector not running — fallback path active" "pgvector extension"
-fi
-
 # ====================================================================
 # TIER B — services that are scaffolded but not yet wired in code
 # ====================================================================
-
-section "TIER B — Flink (Apache Flink JobManager)"
-if require tellus-flink-jobmanager; then
-  if curl -sf http://localhost:8083/overview >/dev/null; then
-    parallelism=$(curl -s http://localhost:8083/overview | jq -r '.["taskmanagers"]')
-    pass "(${parallelism} task manager(s))" "Flink JobManager /overview"
-  else
-    warn "not yet ready" "Flink JobManager /overview"
-  fi
-else
-  warn "not running" "Flink JobManager"
-fi
 
 section "TIER B — Spark (Apache Spark master)"
 if require tellus-spark-master; then
@@ -253,18 +180,6 @@ if require tellus-spark-master; then
   fi
 else
   warn "not running" "Spark master"
-fi
-
-section "TIER B — Nessie (Iceberg REST catalog)"
-if require tellus-nessie; then
-  if curl -sf http://localhost:19120/api/v2/config >/dev/null; then
-    branch=$(curl -s http://localhost:19120/api/v2/config | jq -r '.defaultBranch')
-    pass "(defaultBranch=$branch)" "Nessie /api/v2/config"
-  else
-    fail "unreachable" "Nessie /api/v2/config"
-  fi
-else
-  warn "not running" "Nessie"
 fi
 
 section "TIER B — Debezium (Kafka Connect)"
@@ -287,29 +202,6 @@ if require tellus-keycloak; then
   fi
 else
   warn "not running" "Keycloak"
-fi
-
-section "TIER B — Grafana (dashboards)"
-if require tellus-grafana; then
-  if curl -sf http://localhost:3100/api/health >/dev/null; then
-    pass "" "Grafana /api/health"
-  else
-    warn "not ready" "Grafana /api/health"
-  fi
-else
-  warn "not running" "Grafana"
-fi
-
-section "TIER B — OTel Collector"
-if require tellus-otel; then
-  status=$(docker inspect -f '{{.State.Status}}' tellus-otel)
-  if [[ "$status" == "running" ]]; then
-    pass "" "OTel collector container running"
-  else
-    warn "$status" "OTel collector container"
-  fi
-else
-  warn "not running" "OTel collector"
 fi
 
 # ====================================================================

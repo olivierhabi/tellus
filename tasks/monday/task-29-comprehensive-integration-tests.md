@@ -16,11 +16,11 @@ const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
 Each test is a separate async function. Tests are numbered and depend on state from previous tests (e.g., Test 2 creates an ontology, Test 3 uses its ID).
 
 1. **Health check:** `GET /health` → assert status 200, assert body has `status: "healthy"`.
-2. **Create ontology:** `POST /api/v2/ontologies` with `{"displayName": "Test Ontology", "description": "Integration test ontology"}` → assert status 201, assert body has `ontologyId` (UUID), store `ontologyId` for later tests.
-3. **Duplicate ontology fails:** `POST /api/v2/ontologies` with same displayName → assert status 409, assert body.error.code === "ONTOLOGY_ALREADY_EXISTS".
-4. **List ontologies:** `GET /api/v2/ontologies` → assert status 200, assert body.data is array with length >= 1.
-5. **Get ontology by ID:** `GET /api/v2/ontologies/{ontologyId}` → assert status 200, assert body.displayName === "Test Ontology".
-6. **Batch create object type:** `POST /api/v2/ontologies/{ontologyId}/objectTypes/batch` with body:
+2. **Create ontology:** `POST /api/v1/ontologies` with `{"displayName": "Test Ontology", "description": "Integration test ontology"}` → assert status 201, assert body has `ontologyId` (UUID), store `ontologyId` for later tests.
+3. **Duplicate ontology fails:** `POST /api/v1/ontologies` with same displayName → assert status 409, assert body.error.code === "ONTOLOGY_ALREADY_EXISTS".
+4. **List ontologies:** `GET /api/v1/ontologies` → assert status 200, assert body.data is array with length >= 1.
+5. **Get ontology by ID:** `GET /api/v1/ontologies/{ontologyId}` → assert status 200, assert body.displayName === "Test Ontology".
+6. **Batch create object type:** `POST /api/v1/ontologies/{ontologyId}/objectTypes/batch` with body:
    ```json
    {
      "apiName": "Employee",
@@ -67,12 +67,12 @@ Each test is a separate async function. Tests are numbered and depend on state f
 16. **Duplicate datasource fails:** `POST` same body → assert status 409.
 17. **Scan datasource:** `POST .../objectTypes/Employee/datasource/scan` → assert status 200.
 18. **Get statistics:** `GET .../objectTypes/Employee/statistics` → assert status 200, assert body.statistics.propertyCount === 7.
-19. **Export ontology:** `GET /api/v2/ontologies/{ontologyId}/export` → assert status 200, assert body.ontology.objectTypes is array with length 1.
+19. **Export ontology:** `GET /api/v1/ontologies/{ontologyId}/export` → assert status 200, assert body.ontology.objectTypes is array with length 1.
 20. **Delete non-PK property:** `DELETE .../objectTypes/Employee/properties/email` → assert status 204.
 21. **Delete PK property fails:** `DELETE .../objectTypes/Employee/properties/employeeId` → assert status 400.
 22. **Update object type:** `PUT .../objectTypes/Employee` with `{"displayName": "Updated Employee"}` → assert status 200, assert body.displayName === "Updated Employee".
 23. **Delete object type:** `DELETE .../objectTypes/Employee` → assert status 204. Verify cascade: `GET .../objectTypes/Employee` → assert status 404.
-24. **Import from export:** `POST /api/v2/ontologies/import` with the JSON from test 19 → assert status 201.
+24. **Import from export:** `POST /api/v1/ontologies/import` with the JSON from test 19 → assert status 201.
 
 **Output format:**
 

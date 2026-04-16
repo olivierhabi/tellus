@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // System Health Check Endpoint
 //
-// GET /api/v2/status
+// GET /api/v1/status
 //
 // Returns comprehensive system health information including the status of
 // PostgreSQL and OpenSearch, table row counts, index stats, and ontology
@@ -345,7 +345,7 @@ export async function buildHealthResponse(deps: HealthDeps): Promise<{
 
 const router = Router();
 
-router.get("/api/v2/status", async (_req: Request, res: Response) => {
+router.get("/api/v1/status", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildHealthResponse(deps);
@@ -361,7 +361,7 @@ router.get("/api/v2/status", async (_req: Request, res: Response) => {
 });
 
 /**
- * GET /api/health — Ontology Platform spec §2.6 canonical health endpoint.
+ * GET /api/v1/health — Ontology Platform spec §2.6 canonical health endpoint.
  *
  * Shape per spec:
  *   { status, postgres, elasticsearch, kafka, uptime_seconds }
@@ -369,7 +369,7 @@ router.get("/api/v2/status", async (_req: Request, res: Response) => {
  * Kafka/opensearch statuses are best-effort — they return "unknown" if a
  * probe fails rather than bringing the whole endpoint down.
  */
-router.get("/api/health", async (_req: Request, res: Response) => {
+router.get("/api/v1/health", async (_req: Request, res: Response) => {
   const deps = resolveDefaultDeps();
   let pg = "connected";
   try {
@@ -408,9 +408,9 @@ router.get("/api/health", async (_req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 /**
- * GET /api/v2/system/health — Full health check (same as /api/v2/status)
+ * GET /api/v1/system/health — Full health check (same as /api/v1/status)
  */
-router.get("/api/v2/system/health", async (_req: Request, res: Response) => {
+router.get("/api/v1/system/health", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildHealthResponse(deps);
@@ -426,12 +426,12 @@ router.get("/api/v2/system/health", async (_req: Request, res: Response) => {
 });
 
 /**
- * GET /api/v2/system/readiness — Readiness probe
+ * GET /api/v1/system/readiness — Readiness probe
  *
  * Returns 200 if the system can handle requests (DB is reachable).
  * Returns 503 if the database is unreachable.
  */
-router.get("/api/v2/system/readiness", async (_req: Request, res: Response) => {
+router.get("/api/v1/system/readiness", async (_req: Request, res: Response) => {
   try {
     await pool.query("SELECT 1");
     res.status(200).json({
@@ -449,12 +449,12 @@ router.get("/api/v2/system/readiness", async (_req: Request, res: Response) => {
 });
 
 /**
- * GET /api/v2/system/liveness — Liveness probe
+ * GET /api/v1/system/liveness — Liveness probe
  *
  * Always returns 200 if the process is running. This is a simple
  * liveness check that does not depend on external services.
  */
-router.get("/api/v2/system/liveness", (_req: Request, res: Response) => {
+router.get("/api/v1/system/liveness", (_req: Request, res: Response) => {
   res.status(200).json({
     status: "alive",
     uptime: process.uptime(),

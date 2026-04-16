@@ -4,7 +4,7 @@
 
 **Prerequisites:** Tasks 1, 2, and 25 must be complete (link_type table, POST endpoint, and export endpoint).
 
-**HTTP method and path:** `POST /api/v2/ontology/:ontologyId/linkTypes/import`
+**HTTP method and path:** `POST /api/v1/ontology/:ontologyId/linkTypes/import`
 
 **Request body:** Same format as the export from Task 25 (the `linkTypes` array portion):
 

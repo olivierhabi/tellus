@@ -94,7 +94,7 @@ node src/migrations/runner.js
 npm start
 
 # 7. Verify it works
-curl http://localhost:3000/api/v2/health
+curl http://localhost:3000/api/v1/health
 ```
 
 **Section 5: API Reference**
@@ -178,7 +178,7 @@ Table showing the week-by-week plan for building the remaining 41 components on 
 
 ## Verification
 1. A new developer follows the Quick Start section → the system runs on their machine with no errors
-2. Every API endpoint listed in Section 5 matches the actual running system — verify by comparing against `GET /api/v2/docs` output (Task 20). Section 5 lists at least 25 endpoints.
+2. Every API endpoint listed in Section 5 matches the actual running system — verify by comparing against `GET /api/v1/docs` output (Task 20). Section 5 lists at least 25 endpoints.
 3. Every Palantir documentation URL in Section 6 is valid (not 404). Section 6 contains at least 15 rows.
 4. The architecture diagram accurately represents the current system
 5. Section 8 lists every environment variable referenced in `db.js`, `opensearch.js`, and `server.js`

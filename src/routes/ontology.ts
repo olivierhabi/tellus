@@ -28,11 +28,11 @@ const router = Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ---------------------------------------------------------------------------
-// Route 1: POST /api/v2/ontologies — Create a new ontology
+// Route 1: POST /api/v1/ontologies — Create a new ontology
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/ontologies",
+  "/api/v1/ontologies",
   validateBody(CREATE_ONTOLOGY_SCHEMA),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -56,11 +56,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// Route 2: GET /api/v2/ontologies — List all ontologies with pagination
+// Route 2: GET /api/v1/ontologies — List all ontologies with pagination
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/ontologies",
+  "/api/v1/ontologies",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const rawPageSize = req.query.pageSize;
@@ -88,11 +88,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// Route 3: POST /api/v2/ontologies/import — Import an ontology from JSON
+// Route 3: POST /api/v1/ontologies/import — Import an ontology from JSON
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/ontologies/import",
+  "/api/v1/ontologies/import",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const result = await ontologyService.importOntology(req.body);
@@ -114,11 +114,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// Route 4: GET /api/v2/ontologies/:ontologyId/export — Export full ontology
+// Route 4: GET /api/v1/ontologies/:ontologyId/export — Export full ontology
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/ontologies/:ontologyId/export",
+  "/api/v1/ontologies/:ontologyId/export",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;
@@ -160,11 +160,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// Route 5: GET /api/v2/ontologies/:ontologyId — Get a single ontology
+// Route 5: GET /api/v1/ontologies/:ontologyId — Get a single ontology
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/ontologies/:ontologyId",
+  "/api/v1/ontologies/:ontologyId",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;
@@ -190,11 +190,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// Route 4: PUT /api/v2/ontologies/:ontologyId — Update an ontology
+// Route 4: PUT /api/v1/ontologies/:ontologyId — Update an ontology
 // ---------------------------------------------------------------------------
 
 router.put(
-  "/api/v2/ontologies/:ontologyId",
+  "/api/v1/ontologies/:ontologyId",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;
@@ -237,11 +237,11 @@ router.put(
 );
 
 // ---------------------------------------------------------------------------
-// Route 5: DELETE /api/v2/ontologies/:ontologyId — Delete an ontology
+// Route 5: DELETE /api/v1/ontologies/:ontologyId — Delete an ontology
 // ---------------------------------------------------------------------------
 
 router.delete(
-  "/api/v2/ontologies/:ontologyId",
+  "/api/v1/ontologies/:ontologyId",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;

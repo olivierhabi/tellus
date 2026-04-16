@@ -1,5 +1,5 @@
 /**
- * /api/v2/pipelines — Funnel pipeline status feed for the OMA UI.
+ * /api/v1/pipelines — Funnel pipeline status feed for the OMA UI.
  *
  * Returns a synthesized view of the four-stage Object Data Funnel
  * (changelog → merge → indexing → hydration) for an object type, plus

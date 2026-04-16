@@ -3,12 +3,11 @@
 # ---------------------------------------------------------------------------
 # Spec equivalent: "TimescaleDB or InfluxDB" (techstack §Time Series Store).
 # This image is a drop-in replacement for the regular postgres container —
-# it's PostgreSQL 16 with TimescaleDB and pgvector pre-installed, so the
-# same connection URL serves three workloads in one DB:
+# it's PostgreSQL 16 with TimescaleDB pre-installed, so the same connection
+# URL serves two workloads in one DB:
 #
 #   1. The Ontology metadata (object_types, link_types, etc.)
 #   2. Time-series property values stored in TimescaleDB hypertables
-#   3. Vector property embeddings stored in pgvector columns
 #
 # When this compose file is included, comment out the plain postgres image
 # from postgres.docker-compose.yml — the two would clash on port 5432.

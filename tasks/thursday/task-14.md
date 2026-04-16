@@ -52,7 +52,7 @@ Then use `effectiveSourceType` and `effectiveTargetType` throughout both phases:
 
 **Testing:**
 1. Using the Employee → Ticket link (ONE_TO_MANY, FK: `assigneeEmployeeId` on Ticket):
-   - Forward: `POST /api/v2/objects/Employee/searchAround` with `sourceFilter: { type: "eq", field: "department", value: "Engineering" }`, `linkType: "assignedTickets"` → returns Tickets assigned to Engineering employees.
-   - Reverse: `POST /api/v2/objects/Ticket/searchAround` with `sourceFilter: { type: "eq", field: "status", value: "open" }`, `linkType: "assignedTickets"` → returns Employees who have open tickets assigned to them.
+   - Forward: `POST /api/v1/objects/Employee/searchAround` with `sourceFilter: { type: "eq", field: "department", value: "Engineering" }`, `linkType: "assignedTickets"` → returns Tickets assigned to Engineering employees.
+   - Reverse: `POST /api/v1/objects/Ticket/searchAround` with `sourceFilter: { type: "eq", field: "status", value: "open" }`, `linkType: "assignedTickets"` → returns Employees who have open tickets assigned to them.
 2. Test with a non-bidirectional link type in reverse — verify HTTP 400.
 3. Test with an object type not part of the link — verify HTTP 400.

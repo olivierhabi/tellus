@@ -37,7 +37,7 @@ CREATE INDEX idx_pipelines_folder ON pipelines(folder_id);
 ### 1. List Pipelines (Updated)
 
 ```
-GET /api/projects/{projectId}/pipelines[?folderId=<filter>]
+GET /api/v1/projects/{projectId}/pipelines[?folderId=<filter>]
 ```
 
 **Query Parameters:**
@@ -50,13 +50,13 @@ GET /api/projects/{projectId}/pipelines[?folderId=<filter>]
 
 ```bash
 # All pipelines in the project
-GET /api/projects/:projectId/pipelines
+GET /api/v1/projects/:projectId/pipelines
 
 # Only root-level pipelines (no folder)
-GET /api/projects/:projectId/pipelines?folderId=null
+GET /api/v1/projects/:projectId/pipelines?folderId=null
 
 # Only pipelines in a specific folder
-GET /api/projects/:projectId/pipelines?folderId=92e1b122-2b04-4df9-96b7-733499f3e092
+GET /api/v1/projects/:projectId/pipelines?folderId=92e1b122-2b04-4df9-96b7-733499f3e092
 ```
 
 **Response:** `200 OK`
@@ -89,7 +89,7 @@ GET /api/projects/:projectId/pipelines?folderId=92e1b122-2b04-4df9-96b7-733499f3
 ### 2. Create Pipeline (Updated)
 
 ```
-POST /api/projects/{projectId}/pipelines
+POST /api/v1/projects/{projectId}/pipelines
 ```
 
 **Request Body (updated):**
@@ -135,7 +135,7 @@ POST /api/projects/{projectId}/pipelines
 ### 3. Get Folder Contents (Updated)
 
 ```
-GET /api/projects/{projectId}/folders/{folderId}
+GET /api/v1/projects/{projectId}/folders/{folderId}
 ```
 
 The `children` object in the response now includes a `pipelines` array.

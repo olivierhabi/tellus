@@ -30,14 +30,14 @@ Create a file at `/tests/integration/test01_upload_to_query.js` that:
 
 Test 1.1: Create ontology
 ```
-POST /api/v2/ontology
+POST /api/v1/ontology
 Body: { "displayName": "RRA Tax System", "description": "Test ontology for integration tests" }
 Assert: status 201, ontologyId is returned
 ```
 
 Test 1.2: Create Employee object type with 10 properties
 ```
-POST /api/v2/ontology/{ontologyId}/objectTypes
+POST /api/v1/ontology/{ontologyId}/objectTypes
 Body: {
   "apiName": "Employee",
   "displayName": "Employee",
@@ -61,7 +61,7 @@ Assert: status 201
 
 Test 1.3: Upload employee CSV
 ```
-POST /api/v2/datasets/upload (multipart form)
+POST /api/v1/datasets/upload (multipart form)
 File: employees_1000.csv
 Name: "Employee Directory Test"
 Assert: status 201, dataset.rowCount === 1000
@@ -69,7 +69,7 @@ Assert: status 201, dataset.rowCount === 1000
 
 Test 1.4: Register backing datasource
 ```
-POST /api/v2/ontology/{ontologyId}/objectTypes/Employee/datasource
+POST /api/v1/ontology/{ontologyId}/objectTypes/Employee/datasource
 Body: {
   "datasetId": "{datasetId from 1.3}",
   "columnMapping": {
@@ -91,25 +91,25 @@ Assert: status 200
 
 Test 1.5: Trigger reindex
 ```
-POST /api/v2/ontology/{ontologyId}/objectTypes/Employee/reindex
+POST /api/v1/ontology/{ontologyId}/objectTypes/Employee/reindex
 Assert: status 200, result.totalObjectsIndexed === 1000
 ```
 
 Test 1.6: Query all employees — verify count
 ```
-GET /api/v2/objects/Employee?$pageSize=1
+GET /api/v1/objects/Employee?$pageSize=1
 Assert: totalCount === 1000
 ```
 
 Test 1.7: Get single employee by PK
 ```
-GET /api/v2/objects/Employee/EMP-0001
+GET /api/v1/objects/Employee/EMP-0001
 Assert: status 200, __primaryKey === "EMP-0001", all properties present
 ```
 
 Test 1.8: Search with filter
 ```
-POST /api/v2/objects/Employee/search
+POST /api/v1/objects/Employee/search
 Body: { "where": { "type": "eq", "field": "department", "value": "Engineering" } }
 Assert: status 200, all returned objects have department === "Engineering"
 Assert: totalCount > 0 and totalCount < 1000
@@ -117,7 +117,7 @@ Assert: totalCount > 0 and totalCount < 1000
 
 Test 1.9: Search with compound filter
 ```
-POST /api/v2/objects/Employee/search
+POST /api/v1/objects/Employee/search
 Body: {
   "where": {
     "type": "and",
@@ -133,7 +133,7 @@ Assert: all returned objects match ALL three conditions
 
 Test 1.10: Aggregate
 ```
-POST /api/v2/objects/Employee/aggregate
+POST /api/v1/objects/Employee/aggregate
 Body: {
   "aggregations": [
     { "type": "count", "name": "total" },
@@ -148,7 +148,7 @@ Assert: byDept is an array with department names and counts that sum to 1000
 
 Test 1.11: Full-text search
 ```
-POST /api/v2/objects/Employee/searchFullText
+POST /api/v1/objects/Employee/searchFullText
 Body: { "query": "Engineering python", "$pageSize": 10 }
 Assert: status 200, response.data is an array with length <= 10, response.data is an array (may be empty if no objects match — full-text relevance depends on OpenSearch analyzer configuration)
 ```

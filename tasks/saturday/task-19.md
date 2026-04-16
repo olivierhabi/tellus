@@ -13,11 +13,11 @@ Create `/tests/integration/test03_multi_transaction.js`:
 
 Test 3.1: Create ontology and Product object type
 ```
-POST /api/v2/ontology
+POST /api/v1/ontology
 Body: { "displayName": "Multi-Transaction Test", "description": "Test ontology for multi-transaction merge" }
 Assert: status 201
 
-POST /api/v2/ontology/{ontologyId}/objectTypes
+POST /api/v1/ontology/{ontologyId}/objectTypes
 Body: {
   "apiName": "Product",
   "displayName": "Product",
@@ -43,7 +43,7 @@ Generate CSV programmatically with columns: product_id, product_name, price, cat
 - category: Cycle through ["Electronics", "Clothing", "Food", "Tools", "Books"]
 - in_stock: Alternate "true"/"false" (80% true)
 
-POST /api/v2/datasets/upload (multipart form)
+POST /api/v1/datasets/upload (multipart form)
 File: products_100.csv
 Name: "Product Catalog Test"
 Assert: status 201, dataset.rowCount === 100
@@ -57,9 +57,9 @@ Assert: 100 objects indexed
 
 Test 3.4: Record original prices of PROD-001 and PROD-050
 ```
-GET /api/v2/objects/Product/PROD-050
+GET /api/v1/objects/Product/PROD-050
 Store: originalPrice050 = response.price
-GET /api/v2/objects/Product/PROD-001
+GET /api/v1/objects/Product/PROD-001
 Store: originalPrice001 = response.price
 ```
 
@@ -69,7 +69,7 @@ Generate CSV with 20 rows:
 - 10 NEW products: PROD-101 through PROD-110 (prices: 999.99 each — outside original range to make assertions deterministic)
 - 10 UPDATED products: PROD-041 through PROD-050 with price = 888.88 (a sentinel value that cannot appear in the original data)
 
-POST /api/v2/datasets/{datasetId}/transactions (multipart form)
+POST /api/v1/datasets/{datasetId}/transactions (multipart form)
 File: products_append.csv
 type: "APPEND"
 Assert: status 201, transaction.type === "APPEND", transaction.rowCount === 20
@@ -83,20 +83,20 @@ NOT 120 — because 10 of the appended rows have the same PKs as existing rows
 
 Test 3.7: Verify new products exist
 ```
-GET /api/v2/objects/Product/PROD-101
+GET /api/v1/objects/Product/PROD-101
 Assert: status 200
 ```
 
 Test 3.8: Verify updated products have NEW values (most recent transaction wins)
 ```
-GET /api/v2/objects/Product/PROD-050
+GET /api/v1/objects/Product/PROD-050
 Assert: price === 888.88 (the sentinel value from the APPEND, NOT originalPrice050)
 Assert: price !== originalPrice050
 ```
 
 Test 3.9: Verify original-only products are unchanged
 ```
-GET /api/v2/objects/Product/PROD-001
+GET /api/v1/objects/Product/PROD-001
 Assert: price === originalPrice001 (stored in Test 3.4, untouched by append)
 ```
 
@@ -106,7 +106,7 @@ Generate CSV with 1 row: PROD-001 with an is_deleted column set to "true"
 Columns: product_id, product_name, price, category, in_stock, is_deleted
 Row: "PROD-001", "Widget A", 14.99, "Electronics", "true", "true"
 
-POST /api/v2/datasets/{datasetId}/transactions (multipart form)
+POST /api/v1/datasets/{datasetId}/transactions (multipart form)
 File: products_delete.csv
 type: "APPEND"
 Assert: status 201
@@ -120,7 +120,7 @@ This is_deleted handling MUST be added to the reindex engine as part of this tas
 
 Test 3.11: Reindex and verify PROD-001 is removed
 ```
-GET /api/v2/objects/Product/PROD-001
+GET /api/v1/objects/Product/PROD-001
 Assert: status 404 (deleted via is_deleted marker in dataset)
 Assert: totalObjectsIndexed === 109
 ```
@@ -130,7 +130,7 @@ Test 3.12: Upload a SNAPSHOT transaction (full replacement)
 Generate CSV with 50 rows: PROD-201 through PROD-250 with new product data
 Columns: product_id, product_name, price, category, in_stock
 
-POST /api/v2/datasets/{datasetId}/transactions (multipart form)
+POST /api/v1/datasets/{datasetId}/transactions (multipart form)
 File: products_snapshot.csv
 type: "SNAPSHOT"
 Assert: status 201, transaction.type === "SNAPSHOT"
@@ -139,9 +139,9 @@ Assert: status 201, transaction.type === "SNAPSHOT"
 Test 3.13: Reindex and verify complete replacement
 ```
 Assert: totalObjectsIndexed === 50 (SNAPSHOT replaces everything)
-GET /api/v2/objects/Product/PROD-050
+GET /api/v1/objects/Product/PROD-050
 Assert: status 404 (no longer exists — replaced by SNAPSHOT)
-GET /api/v2/objects/Product/PROD-201
+GET /api/v1/objects/Product/PROD-201
 Assert: status 200 (new product from SNAPSHOT)
 ```
 

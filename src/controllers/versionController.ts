@@ -25,7 +25,7 @@ export class VersionController {
   }
 
   /**
-   * GET /api/datasets/:datasetId/versions
+   * GET /api/v1/datasets/:datasetId/versions
    * List all versions for a dataset.
    */
   listVersions = async (req: Request, res: Response, next: NextFunction) => {
@@ -43,7 +43,7 @@ export class VersionController {
   };
 
   /**
-   * GET /api/datasets/:datasetId/versions/:versionNumber
+   * GET /api/v1/datasets/:datasetId/versions/:versionNumber
    * Get a specific version.
    */
   getVersion = async (req: Request, res: Response, next: NextFunction) => {
@@ -66,7 +66,7 @@ export class VersionController {
   };
 
   /**
-   * POST /api/datasets/:datasetId/versions
+   * POST /api/v1/datasets/:datasetId/versions
    * Create a new version snapshot.
    */
   createVersion = async (req: Request, res: Response, next: NextFunction) => {
@@ -94,7 +94,7 @@ export class VersionController {
   };
 
   /**
-   * POST /api/datasets/:datasetId/versions/restore
+   * POST /api/v1/datasets/:datasetId/versions/restore
    * Restore a dataset to a previous version.
    */
   restoreVersion = async (req: Request, res: Response, next: NextFunction) => {

@@ -52,7 +52,7 @@ in the Ontology. It mirrors Palantir's "Link Types" and "Search Around" concepts
 
 #### Create Link Type
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes \
   -H "Content-Type: application/json" \
   -d '{
     "apiName": "companyEmployees",
@@ -66,62 +66,62 @@ curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes \
 
 #### List Link Types
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes?pageSize=100
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes?pageSize=100
 ```
 
 #### Get Link Type
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/companyEmployees
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/companyEmployees
 ```
 
 #### Update Link Type
 ```bash
-curl -X PUT http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/companyEmployees \
+curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/companyEmployees \
   -H "Content-Type: application/json" \
   -d '{"displayName": "Company -> Employees", "isBidirectional": true}'
 ```
 
 #### Delete Link Type
 ```bash
-curl -X DELETE http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/companyEmployees
+curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/companyEmployees
 ```
 
 ### Link Resolution
 
 #### Resolve Linked Objects
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/companyEmployees/resolve \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/companyEmployees/resolve \
   -H "Content-Type: application/json" \
   -d '{"objectPK": "c1", "direction": "forward", "pageSize": 50}'
 ```
 
 #### Object-Level Link Resolution
 ```bash
-curl http://localhost:3000/api/v2/objects/Company/c1/links/companyEmployees
+curl http://localhost:3000/api/v1/objects/Company/c1/links/companyEmployees
 ```
 
 #### Link Count
 ```bash
-curl http://localhost:3000/api/v2/objects/Company/c1/links/companyEmployees/count
+curl http://localhost:3000/api/v1/objects/Company/c1/links/companyEmployees/count
 ```
 
 #### Bulk Count
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/bulkCount \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/bulkCount \
   -H "Content-Type: application/json" \
   -d '{"objectTypeApiName": "Company", "objectPK": "c1"}'
 ```
 
 #### Search Around
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/companyEmployees/searchAround \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/companyEmployees/searchAround \
   -H "Content-Type: application/json" \
   -d '{"direction": "forward", "sourceFilter": {"industry": "tech"}}'
 ```
 
 #### Multi-Hop Traversal
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/multiHop \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/multiHop \
   -H "Content-Type: application/json" \
   -d '{
     "startingPKs": ["c1"],
@@ -136,25 +136,25 @@ curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/mult
 
 #### Upload Join Table CSV
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/employeeDepartments/upload \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/employeeDepartments/upload \
   -F "file=@employee_departments.csv"
 ```
 
 #### Validate Join Table
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/employeeDepartments/validate
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/employeeDepartments/validate
 ```
 
 ### Analysis & Migration
 
 #### Link Type Analysis
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/companyEmployees/analysis
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/companyEmployees/analysis
 ```
 
 #### Validate Cardinality Migration
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/companyEmployees/validateMigration \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/companyEmployees/validateMigration \
   -H "Content-Type: application/json" \
   -d '{"targetCardinality": "MANY_TO_MANY"}'
 ```
@@ -163,12 +163,12 @@ curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/comp
 
 #### Export
 ```bash
-curl http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/export -o link-types.json
+curl http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/export -o link-types.json
 ```
 
 #### Import
 ```bash
-curl -X POST http://localhost:3000/api/v2/ontologies/{ontologyId}/linkTypes/import \
+curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/linkTypes/import \
   -H "Content-Type: application/json" \
   -d @link-types.json
 ```

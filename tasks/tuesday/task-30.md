@@ -2,7 +2,7 @@
 
 **File to create:** `/src/routes/health.js`
 
-**Endpoint:** `GET /api/v2/status`
+**Endpoint:** `GET /api/v1/status`
 
 **Purpose:** Returns comprehensive system health information including the status of all backend services and a summary of indexed data. This is the endpoint the human operator uses at the end of each day to verify everything is working.
 
@@ -75,11 +75,11 @@ This aggregates information from Tasks 4, 13, and 20.
 npm test -- --grep "fullPipelineTest"
 
 # 2. Check the health endpoint
-curl http://localhost:3000/api/v2/status | jq .
+curl http://localhost:3000/api/v1/status | jq .
 
 # 3. Manually verify: create an object type, upload CSV, index, query
-curl -X POST http://localhost:3000/api/v2/ontology/{id}/objectTypes/Employee/index
-curl http://localhost:3000/api/v2/ontology/{id}/objectTypes/Employee/indexing/status
+curl -X POST http://localhost:3000/api/v1/ontology/{id}/objectTypes/Employee/index
+curl http://localhost:3000/api/v1/ontology/{id}/objectTypes/Employee/indexing/status
 ```
 
 **If all 30 tasks pass, Day 2 is complete. Move to Day 3: Query API.**

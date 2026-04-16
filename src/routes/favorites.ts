@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Favorites / Recent activity — Ontology Platform spec Task 14 (OMA)
 // ---------------------------------------------------------------------------
-// Mounted at /api/v2/users/me/favorites
+// Mounted at /api/v1/users/me/favorites
 //   POST   /                    — mark a resource as favorite
 //   DELETE /:type/:id           — unfavorite
 //   GET    /                    — list favorites for the current user

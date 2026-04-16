@@ -12,7 +12,7 @@ Create a single file `/docs/ARCHITECTURE.md` containing all 7 sections below. Th
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                        REST API LAYER                           │
-│  /api/v2/ontology  /api/v2/objects  /api/v2/actions  /api/v2/datasets  │
+│  /api/v1/ontology  /api/v1/objects  /api/v1/actions  /api/v1/datasets  │
 └──────┬──────────────────┬───────────────────┬──────────────┬───┘
        │                  │                   │              │
 ┌──────▼──────┐   ┌───────▼───────┐   ┌──────▼──────┐  ┌───▼────────┐

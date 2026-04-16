@@ -9,7 +9,7 @@ Build the REST API endpoints for listing all Interfaces in an Ontology and retri
 
 Add two GET endpoints to `/src/routes/interfaces.js`:
 
-**Endpoint 1:** `GET /api/v2/ontology/:ontologyId/interfaces`
+**Endpoint 1:** `GET /api/v1/ontology/:ontologyId/interfaces`
 
 This returns all Interfaces defined in the specified Ontology. The response must include the complete property list for each Interface and the list of implementing Object Types.
 
@@ -83,7 +83,7 @@ The grouping algorithm must:
 }
 ```
 
-**Endpoint 2:** `GET /api/v2/ontology/:ontologyId/interfaces/:interfaceApiName`
+**Endpoint 2:** `GET /api/v1/ontology/:ontologyId/interfaces/:interfaceApiName`
 
 Returns a single Interface by its API name. The query is the same as above but with an additional WHERE clause: `AND i.api_name = $2`. If no Interface is found with this API name, return HTTP 404 with error code "NOT_FOUND" and message "Interface with apiName '{interfaceApiName}' not found in this Ontology".
 

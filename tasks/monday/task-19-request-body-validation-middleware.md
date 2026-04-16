@@ -80,8 +80,8 @@ const REGISTER_DATASOURCE_SCHEMA = {
 **Files to create:** src/middleware/validateBody.js
 
 **Verification:**
-- `POST /api/v2/ontologies` with empty body → 400 with `"Field 'displayName' is required."`
-- `POST /api/v2/ontologies` with `{"displayName": 123}` → 400 with `"Field 'displayName' must be of type string."`
-- `POST /api/v2/ontologies` with `{"displayName": ""}` → 400 with `"Field 'displayName' must be at least 1 characters."`
+- `POST /api/v1/ontologies` with empty body → 400 with `"Field 'displayName' is required."`
+- `POST /api/v1/ontologies` with `{"displayName": 123}` → 400 with `"Field 'displayName' must be of type string."`
+- `POST /api/v1/ontologies` with `{"displayName": ""}` → 400 with `"Field 'displayName' must be at least 1 characters."`
 - `POST .../properties` with `{"apiName": "foo", "displayName": "Foo", "baseType": "string"}` → passes validation, `isRequired` defaults to `false`, `ordinal` defaults to `0`
 - `POST` with multiple invalid fields → error message contains ALL field errors (not just the first)

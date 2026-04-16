@@ -4,7 +4,7 @@
 
 **Dependencies:** Tasks 1, 2, 7, 8, 15, 16, 17, 18, 21.
 
-**Purpose:** Write the route handler function for `POST /api/v2/objects/:objectType/aggregate` that orchestrates the aggregation pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
+**Purpose:** Write the route handler function for `POST /api/v1/objects/:objectType/aggregate` that orchestrates the aggregation pipeline by calling existing services. This handler must be wrapped in `asyncHandler` (from Task 15).
 
 **The handler must perform these steps in order:**
 

@@ -69,28 +69,28 @@ Create the following test data via API calls to `http://localhost:3000`:
 describe('ONE_TO_MANY', () => {
   // Test 1: Forward - Company → Employees
   it('resolves Company COMP-001 → Employees', async () => {
-    // GET /api/v2/objects/TestCompany/COMP-001/links/companyEmployees
+    // GET /api/v1/objects/TestCompany/COMP-001/links/companyEmployees
     // Expect: data contains EMP-001, EMP-002, EMP-004, EMP-007 (4 employees with companyId=COMP-001)
     // Expect: totalCount = 4
   });
 
   // Test 2: Forward - Company with many employees (pagination)
   it('paginates through COMP-003 tickets via EMP-010', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-010/links/employeeTickets?$pageSize=100
+    // GET /api/v1/objects/TestEmployee/EMP-010/links/employeeTickets?$pageSize=100
     // Expect: data.length = 100, nextPageToken is not null, totalCount = 505
     // Follow nextPageToken for 5 more pages, verify all 505 tickets received
   });
 
   // Test 3: Forward with targetFilter
   it('filters Employees by department', async () => {
-    // GET /api/v2/objects/TestCompany/COMP-001/links/companyEmployees
+    // GET /api/v1/objects/TestCompany/COMP-001/links/companyEmployees
     //   with targetFilter: { type: "eq", field: "department", value: "Engineering" }
     // Expect: only Engineering employees returned (EMP-001, EMP-002, EMP-004, EMP-007)
   });
 
   // Test 4: Reverse - Employee → Company (reverse of ONE_TO_MANY = MANY_TO_ONE)
   it('resolves reverse: Employee → Company via companyEmployees', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-001/links/companyEmployees
+    // GET /api/v1/objects/TestEmployee/EMP-001/links/companyEmployees
     // Expect: data is single object COMP-001
   });
 });
@@ -98,25 +98,25 @@ describe('ONE_TO_MANY', () => {
 describe('MANY_TO_ONE', () => {
   // Test 5: Forward - Employee → Company
   it('resolves Employee EMP-002 → Company', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-002/links/employeeCompany
+    // GET /api/v1/objects/TestEmployee/EMP-002/links/employeeCompany
     // Expect: data = { __primaryKey: "COMP-001", ... }
   });
 
   // Test 6: Reverse - Company → Employees (reverse of MANY_TO_ONE = ONE_TO_MANY)
   it('resolves reverse: Company → Employees via employeeCompany', async () => {
-    // GET /api/v2/objects/TestCompany/COMP-001/links/employeeCompany
+    // GET /api/v1/objects/TestCompany/COMP-001/links/employeeCompany
     // Expect: data is array of employees with companyId=COMP-001
   });
 
   // Test 7: Null FK value
   it('returns null for Employee with no company (null FK)', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-005/links/employeeCompany
+    // GET /api/v1/objects/TestEmployee/EMP-005/links/employeeCompany
     // Expect: data = null, linked = false
   });
 
   // Test 8: Orphaned FK value
   it('returns null for Employee with orphaned FK', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-006/links/employeeCompany
+    // GET /api/v1/objects/TestEmployee/EMP-006/links/employeeCompany
     // Expect: data = null, linked = false (COMP-999 doesn't exist)
   });
 });
@@ -124,25 +124,25 @@ describe('MANY_TO_ONE', () => {
 describe('MANY_TO_MANY', () => {
   // Test 9: Forward - Employee → Courses
   it('resolves Employee EMP-001 → Courses', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-001/links/employeeCourses
+    // GET /api/v1/objects/TestEmployee/EMP-001/links/employeeCourses
     // Expect: data contains CRS-001 and CRS-002, totalCount = 2
   });
 
   // Test 10: Forward - Employee with 3 courses
   it('resolves Employee EMP-004 → Courses (3 courses)', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-004/links/employeeCourses
+    // GET /api/v1/objects/TestEmployee/EMP-004/links/employeeCourses
     // Expect: data contains CRS-001, CRS-002, CRS-003, totalCount = 3
   });
 
   // Test 11: Reverse - Course → Employees
   it('resolves reverse: Course CRS-001 → Employees', async () => {
-    // GET /api/v2/objects/TestCourse/CRS-001/links/employeeCourses
+    // GET /api/v1/objects/TestCourse/CRS-001/links/employeeCourses
     // Expect: data contains EMP-001, EMP-002, EMP-004, totalCount = 3
   });
 
   // Test 12: Employee with no courses
   it('returns empty for Employee with no courses', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-005/links/employeeCourses
+    // GET /api/v1/objects/TestEmployee/EMP-005/links/employeeCourses
     // Expect: data = [], totalCount = 0
   });
 });
@@ -150,20 +150,20 @@ describe('MANY_TO_MANY', () => {
 describe('Self-referential links', () => {
   // Test 13: Forward - Manager → Reports
   it('resolves EMP-001 → managed employees (forward)', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-001/links/manages
+    // GET /api/v1/objects/TestEmployee/EMP-001/links/manages
     // Expect: data contains EMP-002, EMP-003, EMP-004 (3 reports)
     // Expect: EMP-001 is NOT in results (self-exclusion)
   });
 
   // Test 14: Reverse - Employee → Manager
   it('resolves EMP-002 → manager (reverse)', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-002/links/manages?$direction=reverse
+    // GET /api/v1/objects/TestEmployee/EMP-002/links/manages?$direction=reverse
     // Expect: data = { __primaryKey: "EMP-001", ... }
   });
 
   // Test 15: Forward default for self-referential
   it('defaults to forward when no direction specified', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-002/links/manages (no $direction)
+    // GET /api/v1/objects/TestEmployee/EMP-002/links/manages (no $direction)
     // Expect: forward traversal — returns employees where managerId=EMP-002 (empty)
     // Expect: totalCount = 0
   });
@@ -172,7 +172,7 @@ describe('Self-referential links', () => {
 describe('Search Around', () => {
   // Test 16: Basic Search Around
   it('finds all Tickets for Engineering Employees', async () => {
-    // POST /api/v2/objects/TestEmployee/searchAround
+    // POST /api/v1/objects/TestEmployee/searchAround
     // Body: { sourceFilter: { type: "eq", field: "department", value: "Engineering" },
     //         linkType: "employeeTickets" }
     // Expect: tickets assigned to Engineering employees (EMP-001: TKT-001,TKT-002; EMP-002: TKT-003; EMP-004: TKT-005)
@@ -180,7 +180,7 @@ describe('Search Around', () => {
 
   // Test 17: Search Around with targetFilter
   it('finds open Tickets for Engineering Employees', async () => {
-    // POST /api/v2/objects/TestEmployee/searchAround
+    // POST /api/v1/objects/TestEmployee/searchAround
     // Body: { sourceFilter: { type: "eq", field: "department", value: "Engineering" },
     //         linkType: "employeeTickets",
     //         targetFilter: { type: "eq", field: "status", value: "open" } }
@@ -191,19 +191,19 @@ describe('Search Around', () => {
 describe('Link Count', () => {
   // Test 18: Single link count
   it('counts COMP-001 employees', async () => {
-    // GET /api/v2/objects/TestCompany/COMP-001/links/companyEmployees/count
+    // GET /api/v1/objects/TestCompany/COMP-001/links/companyEmployees/count
     // Expect: count = 4
   });
 
   // Test 19: Zero link count
   it('returns 0 for object with no links', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-005/links/employeeTickets/count
+    // GET /api/v1/objects/TestEmployee/EMP-005/links/employeeTickets/count
     // Expect: count = 0
   });
 
   // Test 20: Bulk link count
   it('returns counts for all link types on Employee', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-001/links
+    // GET /api/v1/objects/TestEmployee/EMP-001/links
     // Expect: links array contains entries for employeeCompany (count=1),
     //         employeeTickets (count=2), employeeCourses (count=2), manages (count=3)
   });
@@ -212,25 +212,25 @@ describe('Link Count', () => {
 describe('Error cases', () => {
   // Test 21: Non-existent link type
   it('returns 404 for non-existent link type', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-001/links/nonExistentLink
+    // GET /api/v1/objects/TestEmployee/EMP-001/links/nonExistentLink
     // Expect: HTTP 404
   });
 
   // Test 22: Object type not part of link
   it('returns 400 when object type is not part of link', async () => {
-    // GET /api/v2/objects/TestTicket/TKT-001/links/companyEmployees
+    // GET /api/v1/objects/TestTicket/TKT-001/links/companyEmployees
     // Expect: HTTP 400
   });
 
   // Test 23: Non-existent starting object
   it('returns 404 for non-existent starting object', async () => {
-    // GET /api/v2/objects/TestEmployee/NONEXISTENT/links/employeeCompany
+    // GET /api/v1/objects/TestEmployee/NONEXISTENT/links/employeeCompany
     // Expect: HTTP 404
   });
 
   // Test 24: Invalid direction parameter
   it('returns 400 for invalid direction', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-001/links/manages?$direction=sideways
+    // GET /api/v1/objects/TestEmployee/EMP-001/links/manages?$direction=sideways
     // Expect: HTTP 400
   });
 
@@ -245,7 +245,7 @@ describe('Error cases', () => {
 describe('Pagination edge cases', () => {
   // Test 26: pageSize=1 returns correct nextPageToken
   it('paginates with pageSize=1', async () => {
-    // GET /api/v2/objects/TestCompany/COMP-001/links/companyEmployees?$pageSize=1
+    // GET /api/v1/objects/TestCompany/COMP-001/links/companyEmployees?$pageSize=1
     // Expect: data.length = 1, nextPageToken is not null
   });
 
@@ -259,7 +259,7 @@ describe('Pagination edge cases', () => {
 
   // Test 28: Large page size (>10000) is capped silently
   it('caps pageSize at 10000', async () => {
-    // GET /api/v2/objects/TestEmployee/EMP-010/links/employeeTickets?$pageSize=99999
+    // GET /api/v1/objects/TestEmployee/EMP-010/links/employeeTickets?$pageSize=99999
     // Should not error — pageSize is silently capped at 10000
     // Expect: HTTP 200
   });
@@ -271,7 +271,7 @@ describe('Pagination edge cases', () => {
 Wrap teardown in `try/finally` to ensure it runs even if tests fail:
 
 1. Delete all OpenSearch indices matching the test object types: `DELETE /ontology-testcompany`, `DELETE /ontology-testemployee`, `DELETE /ontology-testticket`, `DELETE /ontology-testcourse`.
-2. Delete the test ontology via `DELETE /api/v2/ontology/${ontologyId}` (which should CASCADE delete object_type, property, and link_type rows via PostgreSQL CASCADE constraints).
+2. Delete the test ontology via `DELETE /api/v1/ontology/${ontologyId}` (which should CASCADE delete object_type, property, and link_type rows via PostgreSQL CASCADE constraints).
 3. Delete the join table CSV file: `data/join_tables/test_employee_courses.csv`.
 
 **File to create:** `tests/linkResolvers.test.js`

@@ -4,7 +4,7 @@
 
 **Prerequisites:** Tasks 1-3 must be complete (link_type table and list endpoint).
 
-**HTTP method and path:** `GET /api/v2/ontology/:ontologyId/linkTypes/export`
+**HTTP method and path:** `GET /api/v1/ontology/:ontologyId/linkTypes/export`
 
 **Implementation:**
 
@@ -67,7 +67,7 @@
 
 **Testing:**
 1. Create 5 link types in an ontology (mix of FK-based and M2M cardinalities).
-2. Call `GET /api/v2/ontology/{ontologyId}/linkTypes/export`.
+2. Call `GET /api/v1/ontology/{ontologyId}/linkTypes/export`.
 3. Verify the response has `Content-Disposition: attachment` header.
 4. Verify `exportMetadata.totalLinkTypes` is 5.
 5. Verify the JSON file contains all 5 link types with correct definitions matching what was created.

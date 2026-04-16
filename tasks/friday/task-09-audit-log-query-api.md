@@ -4,7 +4,7 @@
 
 **Create endpoints** in `src/routes/auditLog.js`:
 
-**Endpoint 1: GET /api/v2/actions/:actionTypeApiName/audit**
+**Endpoint 1: GET /api/v1/actions/:actionTypeApiName/audit**
 
 Returns the audit log entries for a specific action type. This is the endpoint Palantir documents directly on their action types page.
 
@@ -55,7 +55,7 @@ Response format:
 }
 ```
 
-**Endpoint 2: GET /api/v2/audit/log**
+**Endpoint 2: GET /api/v1/audit/log**
 
 Returns the global audit log across ALL action types. Same query parameters as Endpoint 1 except no `:actionTypeApiName` filter (or it's optional as a query param instead of a URL param). This endpoint is used by the platform admin to see all activity across the entire Ontology.
 
@@ -64,13 +64,13 @@ Additional query parameter:
 
 Same response format and pagination logic as Endpoint 1.
 
-**Endpoint 3: GET /api/v2/audit/log/:executionId**
+**Endpoint 3: GET /api/v1/audit/log/:executionId**
 
 Returns a single audit log entry by execution ID. Returns 404 if not found.
 
 Response: The single audit log entry object (not wrapped in a `data` array).
 
-**Endpoint 4: GET /api/v2/audit/stats**
+**Endpoint 4: GET /api/v1/audit/stats**
 
 Returns aggregate statistics about action executions. This maps to Palantir's Action Metrics feature.
 
@@ -130,15 +130,15 @@ Response format:
 
 ```javascript
 const actionAuditRouter = express.Router({ mergeParams: true });
-// Endpoint 1: GET /:actionTypeApiName/audit — mounted under /api/v2/actions
+// Endpoint 1: GET /:actionTypeApiName/audit — mounted under /api/v1/actions
 actionAuditRouter.get('/:actionTypeApiName/audit', async (req, res) => { /* ... */ });
 
 const globalAuditRouter = express.Router();
-// Endpoint 2: GET /log — mounted under /api/v2/audit
+// Endpoint 2: GET /log — mounted under /api/v1/audit
 globalAuditRouter.get('/log', async (req, res) => { /* ... */ });
-// Endpoint 3: GET /log/:executionId — mounted under /api/v2/audit
+// Endpoint 3: GET /log/:executionId — mounted under /api/v1/audit
 globalAuditRouter.get('/log/:executionId', async (req, res) => { /* ... */ });
-// Endpoint 4: GET /stats — mounted under /api/v2/audit
+// Endpoint 4: GET /stats — mounted under /api/v1/audit
 globalAuditRouter.get('/stats', async (req, res) => { /* ... */ });
 
 module.exports = { actionAuditRouter, globalAuditRouter };
@@ -147,8 +147,8 @@ module.exports = { actionAuditRouter, globalAuditRouter };
 **Register both routers** in `src/server.js`:
 ```javascript
 const { actionAuditRouter, globalAuditRouter } = require('./routes/auditLog');
-app.use('/api/v2/actions', actionAuditRouter);
-app.use('/api/v2/audit', globalAuditRouter);
+app.use('/api/v1/actions', actionAuditRouter);
+app.use('/api/v1/audit', globalAuditRouter);
 ```
 
 **Test the complete flow:**

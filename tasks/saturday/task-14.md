@@ -7,7 +7,7 @@ For our week-1 implementation, we build a bulk action endpoint that accepts an a
 
 ### Exact Specification
 
-**Endpoint: `POST /api/v2/actions/:actionTypeApiName/applyBulk`**
+**Endpoint: `POST /api/v1/actions/:actionTypeApiName/applyBulk`**
 
 Request body:
 ```json

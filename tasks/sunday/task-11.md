@@ -5,7 +5,7 @@ Build the Object View endpoint that returns a comprehensive, fully-resolved view
 
 ## Exact Specification
 
-**Endpoint:** `GET /api/v2/objects/:objectType/:primaryKey/view`
+**Endpoint:** `GET /api/v1/objects/:objectType/:primaryKey/view`
 
 **OntologyId resolution:** This endpoint does not include `ontologyId` in its path. Resolve the `ontologyId` by looking up the Object Type in PostgreSQL: `SELECT ontology_id FROM object_type WHERE api_name = $1`. If no Object Type is found, return 404. If multiple ontologies contain an Object Type with this api_name (unlikely but possible), use the first result (Object Type apiNames are expected to be unique within a deployment).
 

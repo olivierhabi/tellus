@@ -5,7 +5,6 @@
 # Used by:
 #   • The actions/edits event producer (kafkajs publishes to topic
 #     `ontology.events`)
-#   • Apache Flink consumers running streaming pipelines
 #   • Debezium CDC sink (postgres → ontology.cdc.*)
 #
 # Single-node mode is sufficient for local dev. The web console (Redpanda
