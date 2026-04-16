@@ -136,10 +136,7 @@ jobs:
           version: 10
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Rebuild native addons
-        run: pnpm rebuild duckdb bcrypt
+        run: pnpm install --frozen-lockfile
 
       - name: Run database migrations
         run: pnpm run migrate
@@ -204,10 +201,7 @@ jobs:
           version: 10
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Rebuild native addons
-        run: pnpm rebuild duckdb bcrypt
+        run: pnpm install --frozen-lockfile
 
       - name: Start MinIO and create bucket
         run: |
@@ -289,10 +283,7 @@ jobs:
           version: 10
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Rebuild native addons
-        run: pnpm rebuild duckdb bcrypt
+        run: pnpm install --frozen-lockfile
 
       - name: Start MinIO and create bucket
         run: |
@@ -410,10 +401,7 @@ jobs:
           version: 10
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Rebuild native addons
-        run: pnpm rebuild duckdb bcrypt
+        run: pnpm install --frozen-lockfile
 
       - name: Start MinIO and create bucket
         run: |

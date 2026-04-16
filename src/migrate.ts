@@ -1261,7 +1261,16 @@ async function migrate(): Promise<void> {
     // Back-fill additively so both old and new code paths work.
     await client.query(`ALTER TABLE object_type_group ADD COLUMN IF NOT EXISTS api_name TEXT`);
     await client.query(`ALTER TABLE object_type_group ADD COLUMN IF NOT EXISTS display_name TEXT`);
-    await client.query(`UPDATE object_type_group SET api_name = COALESCE(api_name, name), display_name = COALESCE(display_name, name) WHERE api_name IS NULL OR display_name IS NULL`);
+    // Backfill api_name/display_name from legacy `name` column if it exists
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'object_type_group' AND column_name = 'name') THEN
+          UPDATE object_type_group SET api_name = COALESCE(api_name, name), display_name = COALESCE(display_name, name) WHERE api_name IS NULL OR display_name IS NULL;
+        END IF;
+      END
+      $$;
+    `);
     await client.query(`ALTER TABLE object_type_group ALTER COLUMN api_name SET NOT NULL`);
     await client.query(`ALTER TABLE object_type_group ALTER COLUMN display_name SET NOT NULL`);
     await client.query(`DO $$ BEGIN
