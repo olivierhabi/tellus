@@ -326,10 +326,10 @@ app.get("/health", async (_req: Request, res: Response) => {
   }
 });
 
-// API routers — spec cypress tests hit `.../ontologies/default/...`; rewrite
+// API routers — spec cypress tests hit `.../ontology/default/...`; rewrite
 // the URL path so every downstream router sees the real UUID. This is a
 // string substitution on `req.url` so Express re-parses params for us.
-const ALIAS_RE = /^(\/api\/v1\/ontolog(?:y|ies))\/(default|main|primary)(\/|$)/;
+const ALIAS_RE = /^(\/api\/v1\/ontology)\/(default|main|primary)(\/|$)/;
 app.use(async (req, _res, next) => {
   const m = req.url.match(ALIAS_RE);
   if (!m) return next();
@@ -349,10 +349,10 @@ app.use(async (req, _res, next) => {
 });
 
 app.use(ontologyRouter);
-app.use("/api/v1/ontologies/:ontologyId/objectTypes", objectTypeRouter);
-app.use("/api/v1/ontologies/:ontologyId/objectTypes/:apiName", propertyRouter);
+app.use("/api/v1/ontology/:ontologyId/objectTypes", objectTypeRouter);
+app.use("/api/v1/ontology/:ontologyId/objectTypes/:apiName", propertyRouter);
 app.use(
-  "/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource",
+  "/api/v1/ontology/:ontologyId/objectTypes/:apiName/datasource",
   datasourceRouter
 );
 app.use(
@@ -360,23 +360,23 @@ app.use(
   suggestMappingRouter
 );
 app.use(
-  "/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index",
+  "/api/v1/ontology/:ontologyId/objectTypes/:apiName/index",
   indexingRouter
 );
 app.use(
-  "/api/v1/ontologies/:ontologyId/linkTypes",
+  "/api/v1/ontology/:ontologyId/linkTypes",
   linkRouter
 );
 app.use(
-  "/api/v1/ontologies/:ontologyId/actionTypes",
+  "/api/v1/ontology/:ontologyId/actionTypes",
   actionTypeRouter
 );
 app.use(
-  "/api/v1/ontologies/:ontologyId/actions",
+  "/api/v1/ontology/:ontologyId/actions",
   actionsRouter
 );
 app.use(
-  "/api/v1/ontologies/:ontologyId/actions",
+  "/api/v1/ontology/:ontologyId/actions",
   actionAuditRouter
 );
 app.use("/api/v1/actions", validateRouter);
@@ -387,7 +387,7 @@ app.use(
   editsRouter
 );
 app.use(
-  "/api/v1/ontologies/:ontologyId/objectTypes/:apiName/index",
+  "/api/v1/ontology/:ontologyId/objectTypes/:apiName/index",
   reindexStatusRouter
 );
 app.use("/api/v1/datasets", datasetRouter);
@@ -416,16 +416,16 @@ app.use(healthRouter);
 // Ontology Platform spec Phase 2 — branching, groups, functions, favorites,
 // saved explorations, exports, summary, geo, comparisons, schema migrations.
 // ---------------------------------------------------------------------------
-app.use("/api/v1/ontologies/:ontologyId/branches", branchesRouter);
-app.use("/api/v1/ontologies/:ontologyId/groups", groupsRouter);
-app.use("/api/v1/ontologies/:ontologyId/functions", functionsRouter);
-app.use("/api/v1/ontologies/:ontologyId/explorations", explorationsRouter);
-app.use("/api/v1/ontologies/:ontologyId/exports", exportsRouter);
-app.use("/api/v1/ontologies/:ontologyId/summary", summaryRouter);
-app.use("/api/v1/ontologies/:ontologyId/geo", geoRouter);
-app.use("/api/v1/ontologies/:ontologyId/comparisons", comparisonsRouter);
-app.use("/api/v1/ontologies/:ontologyId/migrations", migrationManagerRouter);
-app.use("/api/v1/ontologies/:ontologyId/governance", governanceRouter);
+app.use("/api/v1/ontology/:ontologyId/branches", branchesRouter);
+app.use("/api/v1/ontology/:ontologyId/groups", groupsRouter);
+app.use("/api/v1/ontology/:ontologyId/functions", functionsRouter);
+app.use("/api/v1/ontology/:ontologyId/explorations", explorationsRouter);
+app.use("/api/v1/ontology/:ontologyId/exports", exportsRouter);
+app.use("/api/v1/ontology/:ontologyId/summary", summaryRouter);
+app.use("/api/v1/ontology/:ontologyId/geo", geoRouter);
+app.use("/api/v1/ontology/:ontologyId/comparisons", comparisonsRouter);
+app.use("/api/v1/ontology/:ontologyId/migrations", migrationManagerRouter);
+app.use("/api/v1/ontology/:ontologyId/governance", governanceRouter);
 app.use("/api/v1/users/me/favorites", favoritesRouter);
 
 // New Palantir-stack endpoints (Furnace SQL, Polars charts, Funnel pipeline status).

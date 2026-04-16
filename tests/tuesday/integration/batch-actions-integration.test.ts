@@ -61,11 +61,11 @@ async function request(
 // ---------------------------------------------------------------------------
 
 function actionTypesPath(suffix = "") {
-  return `/api/v1/ontologies/${ontologyId}/actionTypes${suffix}`;
+  return `/api/v1/ontology/${ontologyId}/actionTypes${suffix}`;
 }
 
 function actionsPath(actionApiName: string, suffix = "") {
-  return `/api/v1/ontologies/${ontologyId}/actions/${actionApiName}${suffix}`;
+  return `/api/v1/ontology/${ontologyId}/actions/${actionApiName}${suffix}`;
 }
 
 async function ensureActionType(def: Record<string, unknown>): Promise<void> {
@@ -105,7 +105,7 @@ beforeAll(async () => {
     return;
   }
 
-  const ont = await request("GET", "/api/v1/ontologies");
+  const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
     const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;

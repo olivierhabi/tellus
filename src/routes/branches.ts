@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Branches / proposals / merge routes — Ontology Platform spec Task 9
 // ---------------------------------------------------------------------------
-// Mounted at: /api/v1/ontologies/:ontologyId/branches
+// Mounted at: /api/v1/ontology/:ontologyId/branches
 //   POST   /                          — open a new branch
 //   GET    /                          — list branches
 //   GET    /:branchName               — get branch details

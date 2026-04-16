@@ -141,7 +141,7 @@ export function createDocsRouter(app: Express): Router {
     // Group by path prefix
     const grouped: Record<string, RouteInfo[]> = {};
     for (const route of routes) {
-      // Extract group from path (e.g., "/api/v1/ontologies" -> "ontologies")
+      // Extract group from path (e.g., "/api/v1/ontology" -> "ontologies")
       const parts = route.path.split("/").filter(Boolean);
       const group = parts[2] || parts[1] || "root";
       if (!grouped[group]) grouped[group] = [];
@@ -277,7 +277,7 @@ export function runSelfTests(): void {
 
     // With params
     const withParams = extractPathFromRegexp(
-      /^\/api\/v1\/ontologies\/(?:([^\/]+?))\/?(?=\/|$)/i,
+      /^\/api\/v1\/ontology\/(?:([^\/]+?))\/?(?=\/|$)/i,
       [{ name: "ontologyId" } as any]
     );
     assert(withParams.includes("ontologies"), "extracts parameterized path");

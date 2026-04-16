@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // resolveOntologyAlias.ts — map `default` / `main` to a real ontology UUID
 // ---------------------------------------------------------------------------
-// The Ontology Platform spec cypress specs all hit `.../ontologies/default/…`
+// The Ontology Platform spec cypress specs all hit `.../ontology/default/…`
 // rather than a UUID. Production Palantir does the same thing: a symbolic
 // ontology name is resolved at the edge. This middleware intercepts the
 // `ontologyId` path parameter and substitutes the real UUID if it matches

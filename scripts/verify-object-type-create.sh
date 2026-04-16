@@ -8,7 +8,7 @@
 #
 # This script exists to pin the contract between tellus-fe's
 # `handleCreateObjectType` dialog submit handler and the tellus backend's
-# `POST /v2/ontologies/:id/objectTypes/batch` + `POST .../datasource`
+# `POST /v2/ontology/:id/objectTypes/batch` + `POST .../datasource`
 # endpoints. Running it should surface any regression in either direction
 # (missing fields, wrong baseType enum, camelCase mismatches, dataset-id
 # binding mix-ups).
@@ -18,7 +18,7 @@
 #   2. Create a fresh project so we can upload a dataset under it.
 #   3. Upload a CSV → new foundry_datasets row with columns materialised.
 #   4. GET /datasets/:id → verify column schema is populated.
-#   5. POST /v2/ontologies/default/objectTypes/batch with:
+#   5. POST /v2/ontology/default/objectTypes/batch with:
 #        - apiName: PascalCase derived from a timestamp
 #        - properties: one per CSV column, camelCase apiName, baseType
 #          mapped from Postgres column_type
@@ -80,7 +80,7 @@ ok "Created project $PROJECT_ID"
 cleanup() {
   if [ -n "${OBJECT_TYPE_API_NAME:-}" ]; then
     curl -s -o /dev/null -X DELETE -H "$AUTH" \
-      "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME" || true
+      "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME" || true
   fi
   curl -s -o /dev/null -X DELETE -H "$AUTH" "$API/projects/$PROJECT_ID" || true
   rm -f "$TMP_CSV" "$SCHEMA_JSON"
@@ -185,7 +185,7 @@ BATCH_RESPONSE_FILE="/tmp/verify-ot-create-batch-$STAMP.json"
 BATCH_HTTP=$(curl -s -o "$BATCH_RESPONSE_FILE" -w "%{http_code}" \
   -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$BATCH_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/batch")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/batch")
 if [ "$BATCH_HTTP" != "201" ] && [ "$BATCH_HTTP" != "200" ]; then
   die "Batch create failed ($BATCH_HTTP): $(cat "$BATCH_RESPONSE_FILE")"
 fi
@@ -203,7 +203,7 @@ DS_RESPONSE_FILE="/tmp/verify-ot-create-ds-$STAMP.json"
 DS_HTTP=$(curl -s -o "$DS_RESPONSE_FILE" -w "%{http_code}" \
   -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$DS_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME/datasource")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME/datasource")
 if [ "$DS_HTTP" != "201" ] && [ "$DS_HTTP" != "200" ]; then
   die "Datasource binding failed ($DS_HTTP): $(cat "$DS_RESPONSE_FILE")"
 fi
@@ -212,7 +212,7 @@ ok "Bound backing datasource (HTTP $DS_HTTP)"
 # ---- 7. Fetch the object type and assert shape ------------------------
 OT_FILE="/tmp/verify-ot-create-get-$STAMP.json"
 OT_HTTP=$(curl -s -o "$OT_FILE" -w "%{http_code}" -H "$AUTH" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
 [ "$OT_HTTP" = "200" ] || die "GET object type failed ($OT_HTTP): $(cat "$OT_FILE")"
 
 # Response might be flat or wrapped under { objectType: ... }
@@ -325,14 +325,14 @@ METADATA_BODY=$(jq -n \
 MD_HTTP=$(curl -s -o /tmp/verify-ot-md-put-$STAMP.json -w "%{http_code}" \
   -X PUT -H "$AUTH" -H "Content-Type: application/json" \
   -d "$METADATA_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
 [ "$MD_HTTP" = "200" ] \
   || die "PUT metadata failed ($MD_HTTP): $(cat /tmp/verify-ot-md-put-$STAMP.json)"
 ok "PUT metadata returned 200"
 
 # Re-GET and check each field was persisted.
 OT_HTTP2=$(curl -s -o "$OT_FILE" -w "%{http_code}" -H "$AUTH" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
 [ "$OT_HTTP2" = "200" ] || die "GET after PUT failed ($OT_HTTP2)"
 OT=$(jq '(.data.objectType // .objectType // .data // .)' "$OT_FILE")
 
@@ -387,13 +387,13 @@ SIBLING_BODY=$(jq -n \
 SIBLING_HTTP=$(curl -s -o /tmp/verify-ot-sibling-$STAMP.json -w "%{http_code}" \
   -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$SIBLING_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/batch")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/batch")
 [ "$SIBLING_HTTP" = "201" ] || die "Sibling create failed ($SIBLING_HTTP)"
 ok "Created sibling $SIBLING_API_NAME"
 
 cleanup_sibling() {
   curl -s -o /dev/null -X DELETE -H "$AUTH" \
-    "$API/v2/ontologies/$ONTOLOGY/objectTypes/$SIBLING_API_NAME" || true
+    "$API/v2/ontology/$ONTOLOGY/objectTypes/$SIBLING_API_NAME" || true
 }
 trap 'cleanup; cleanup_sibling' EXIT
 
@@ -402,7 +402,7 @@ DUP_BODY=$(jq -n --arg apiName "$SIBLING_API_NAME" '{apiName: $apiName}')
 DUP_HTTP=$(curl -s -o /tmp/verify-ot-dup-$STAMP.json -w "%{http_code}" \
   -X PUT -H "$AUTH" -H "Content-Type: application/json" \
   -d "$DUP_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
 if [ "$DUP_HTTP" != "409" ]; then
   die "Expected duplicate rename to return 409, got $DUP_HTTP: $(cat /tmp/verify-ot-dup-$STAMP.json)"
 fi
@@ -417,21 +417,21 @@ NEW_API_NAME="VerifyOrderRenamed$STAMP"
 RENAME_HTTP=$(curl -s -o /tmp/verify-ot-rename-$STAMP.json -w "%{http_code}" \
   -X PUT -H "$AUTH" -H "Content-Type: application/json" \
   -d "$(jq -n --arg apiName "$NEW_API_NAME" '{apiName: $apiName}')" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
 [ "$RENAME_HTTP" = "200" ] \
   || die "Unique rename failed ($RENAME_HTTP): $(cat /tmp/verify-ot-rename-$STAMP.json)"
 ok "Unique rename returned 200"
 
 # Old apiName must now 404.
 OLD_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME")
 [ "$OLD_HTTP" = "404" ] \
   || die "Old apiName still resolves after rename (HTTP $OLD_HTTP)"
 ok "Old apiName 404s after rename"
 
 # New apiName must resolve and carry the preserved metadata.
 OT_HTTP3=$(curl -s -o "$OT_FILE" -w "%{http_code}" -H "$AUTH" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$NEW_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$NEW_API_NAME")
 [ "$OT_HTTP3" = "200" ] || die "GET new apiName failed ($OT_HTTP3)"
 ok "New apiName resolves"
 
@@ -455,7 +455,7 @@ CONFLICT_BODY=$(jq -n \
 CONFLICT_HTTP=$(curl -s -o /tmp/verify-ot-conflict-$STAMP.json -w "%{http_code}" \
   -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$CONFLICT_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/batch")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/batch")
 [ "$CONFLICT_HTTP" = "201" ] \
   || die "onConflict=rename failed ($CONFLICT_HTTP): $(cat /tmp/verify-ot-conflict-$STAMP.json)"
 
@@ -472,7 +472,7 @@ ok "onConflict=rename surfaced $CONFLICT_RESOLVED_API_NAME with requestedApiName
 
 cleanup_conflict() {
   curl -s -o /dev/null -X DELETE -H "$AUTH" \
-    "$API/v2/ontologies/$ONTOLOGY/objectTypes/$CONFLICT_RESOLVED_API_NAME" || true
+    "$API/v2/ontology/$ONTOLOGY/objectTypes/$CONFLICT_RESOLVED_API_NAME" || true
 }
 trap 'cleanup; cleanup_sibling; cleanup_second; cleanup_conflict' EXIT
 
@@ -482,12 +482,12 @@ CONFLICT_RENAME_TO="VerifyConflictResolved$STAMP"
 RESOLVE_HTTP=$(curl -s -o /tmp/verify-ot-resolve-$STAMP.json -w "%{http_code}" \
   -X PUT -H "$AUTH" -H "Content-Type: application/json" \
   -d "$(jq -n --arg apiName "$CONFLICT_RENAME_TO" '{apiName: $apiName}')" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$CONFLICT_RESOLVED_API_NAME")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$CONFLICT_RESOLVED_API_NAME")
 [ "$RESOLVE_HTTP" = "200" ] \
   || die "Resolving apiName conflict failed ($RESOLVE_HTTP): $(cat /tmp/verify-ot-resolve-$STAMP.json)"
 
 RESOLVED_REQUESTED=$(curl -s -H "$AUTH" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$CONFLICT_RENAME_TO" \
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$CONFLICT_RENAME_TO" \
   | jq -r '.objectType.requestedApiName')
 if [ "$RESOLVED_REQUESTED" != "null" ] && [ -n "$RESOLVED_REQUESTED" ]; then
   die "requestedApiName should be cleared after rename, got '$RESOLVED_REQUESTED'"
@@ -515,21 +515,21 @@ SECOND_BATCH_BODY=$(jq -n \
 SECOND_BATCH_HTTP=$(curl -s -o /tmp/verify-ot-second-batch-$STAMP.json -w "%{http_code}" \
   -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$SECOND_BATCH_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/batch")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/batch")
 [ "$SECOND_BATCH_HTTP" = "201" ] \
   || die "Second batch create failed ($SECOND_BATCH_HTTP): $(cat /tmp/verify-ot-second-batch-$STAMP.json)"
 ok "Created second object type $SECOND_OT_API_NAME"
 
 cleanup_second() {
   curl -s -o /dev/null -X DELETE -H "$AUTH" \
-    "$API/v2/ontologies/$ONTOLOGY/objectTypes/$SECOND_OT_API_NAME" || true
+    "$API/v2/ontology/$ONTOLOGY/objectTypes/$SECOND_OT_API_NAME" || true
 }
 trap 'cleanup; cleanup_sibling; cleanup_second' EXIT
 
 SECOND_DS_HTTP=$(curl -s -o /tmp/verify-ot-second-ds-$STAMP.json -w "%{http_code}" \
   -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$DS_BODY" \
-  "$API/v2/ontologies/$ONTOLOGY/objectTypes/$SECOND_OT_API_NAME/datasource")
+  "$API/v2/ontology/$ONTOLOGY/objectTypes/$SECOND_OT_API_NAME/datasource")
 if [ "$SECOND_DS_HTTP" != "201" ] && [ "$SECOND_DS_HTTP" != "200" ]; then
   die "Second datasource bind failed ($SECOND_DS_HTTP): $(cat /tmp/verify-ot-second-ds-$STAMP.json)"
 fi

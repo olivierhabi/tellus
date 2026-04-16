@@ -1,6 +1,6 @@
 # TASK 16 OF 30: Property Routes
 
-**Objective:** Create Express routes for Property CRUD, nested under object types at `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties`.
+**Objective:** Create Express routes for Property CRUD, nested under object types at `/api/v1/ontology/:ontologyId/objectTypes/:apiName/properties`.
 
 **Step-by-step instructions:**
 
@@ -74,9 +74,9 @@ Same as Task 14: try/catch in every handler. Known error codes → `sendError`. 
 **Registration in src/server.js:**
 ```javascript
 const propertyRouter = require('./routes/properties');
-app.use('/api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties', propertyRouter);
+app.use('/api/v1/ontology/:ontologyId/objectTypes/:apiName/properties', propertyRouter);
 // Also mount setPrimaryKey and setTitleProperty routes:
-app.use('/api/v1/ontologies/:ontologyId/objectTypes/:apiName', propertyRouter);
+app.use('/api/v1/ontology/:ontologyId/objectTypes/:apiName', propertyRouter);
 ```
 
 Note: Routes 6 and 7 (primaryKey/titleProperty) are at the object type level, not the property level. Mount them accordingly or define them in the objectTypes router (Task 14). The implementation choice is left to the developer — either approach works as long as the full paths are correct.

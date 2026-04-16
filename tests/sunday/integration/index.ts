@@ -22,7 +22,7 @@ async function main() {
   runner.section("Setup");
 
   await runner.test("Create ontology", async () => {
-    const { status, body } = await api("POST", "/api/v1/ontologies", {
+    const { status, body } = await api("POST", "/api/v1/ontology", {
       displayName: "Sunday Standalone Test",
     });
     runner.assert(status === 201, `Expected 201, got ${status}`);
@@ -30,7 +30,7 @@ async function main() {
   });
 
   await runner.test("Create Airport OT", async () => {
-    const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+    const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/batch`, {
       apiName: "StandaloneAirport",
       displayName: "Airport",
       properties: [
@@ -113,7 +113,7 @@ async function main() {
   });
 
   await runner.test("Delete ontology", async () => {
-    const { status } = await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
+    const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
     runner.assert(status === 204, `Expected 204, got ${status}`);
   });
 

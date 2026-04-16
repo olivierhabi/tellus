@@ -4,7 +4,7 @@
 
 **Step-by-step instructions:**
 
-**Endpoint 1: GET /api/v1/ontologies/:ontologyId/export**
+**Endpoint 1: GET /api/v1/ontology/:ontologyId/export**
 
 Add this route to src/routes/ontology.js. Add corresponding `exportOntology` method to src/services/ontologyService.js.
 
@@ -49,7 +49,7 @@ The `linkTypes`, `actionTypes`, and `interfaces` arrays are always empty in the 
 5. Set response header: `Content-Disposition: attachment; filename="{ontology-display-name-kebab-case}-export-{YYYY-MM-DD}.json"` (e.g., `rra-tax-ontology-export-2025-03-11.json`). Convert display name to kebab-case (lowercase, spaces to hyphens, remove special characters).
 6. Return HTTP 200 with the JSON body.
 
-**Endpoint 2: POST /api/v1/ontologies/import**
+**Endpoint 2: POST /api/v1/ontology/import**
 
 Add this route to src/routes/ontology.js. Add corresponding `importOntology` method to src/services/ontologyService.js.
 
@@ -67,9 +67,9 @@ Implementation:
 **Files to modify:** src/routes/ontology.js, src/services/ontologyService.js
 
 **Verification:**
-- `GET /api/v1/ontologies/:id/export` → 200 with JSON containing all 5 object types and 41 total properties (after seeding)
+- `GET /api/v1/ontology/:id/export` → 200 with JSON containing all 5 object types and 41 total properties (after seeding)
 - Response has `Content-Disposition` header with `.json` filename
-- `POST /api/v1/ontologies/import` with the exported JSON → 201, new ontology created with display name "RRA Tax Ontology (imported)", all 5 object types and 41 properties restored
+- `POST /api/v1/ontology/import` with the exported JSON → 201, new ontology created with display name "RRA Tax Ontology (imported)", all 5 object types and 41 properties restored
 - Import with duplicate display name → auto-appends " (imported)" suffix
 - Import with invalid exportVersion → 400 VALIDATION_FAILED
 - Import with one invalid object type → 400, nothing created (transaction rolled back)

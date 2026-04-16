@@ -130,7 +130,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.1 Create ontology
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontology", {
       displayName: "RRA Tax System",
       description: "Integration test ontology for RRA",
     });
@@ -140,7 +140,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.2 Create Employee object type (batch) with 10 properties
     // -----------------------------------------------------------------------
-    const otRes = await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
+    const otRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Employee",
       displayName: "Employee",
       description: "RRA employee record",
@@ -180,7 +180,7 @@ async function run() {
     // -----------------------------------------------------------------------
     const dsRes = await api(
       "POST",
-      `/api/v1/ontologies/${ontologyId}/objectTypes/Employee/datasource`,
+      `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`,
       {
         datasetId,
         columnMapping: {
@@ -280,7 +280,7 @@ async function run() {
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
     if (ontologyId) {
-      await api("DELETE", `/api/v1/ontologies/${ontologyId}`).catch(() => {});
+      await api("DELETE", `/api/v1/ontology/${ontologyId}`).catch(() => {});
     }
     if (datasetId) {
       await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`).catch(() => {});

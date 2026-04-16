@@ -124,7 +124,7 @@ async function triggerIndex(
 ): Promise<any> {
   const { status, body } = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/${apiName}/index`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/${apiName}/index`,
     { forceRecreateIndex: true, strict: false, ...opts }
   );
 
@@ -151,7 +151,7 @@ async function setup(t: Runner): Promise<void> {
 
   // 1. Create ontology
   await t.test("Create test ontology", async () => {
-    const { status, body } = await api("POST", "/api/v1/ontologies", {
+    const { status, body } = await api("POST", "/api/v1/ontology", {
       displayName: "Link Test Ontology",
       description: "Ontology for link resolver tests",
     });
@@ -166,7 +166,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create Company object type", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/batch`,
+      `/api/v1/ontology/${oid()}/objectTypes/batch`,
       {
         apiName: "Company",
         displayName: "Company",
@@ -186,7 +186,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create LREmployee object type", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/batch`,
+      `/api/v1/ontology/${oid()}/objectTypes/batch`,
       {
         apiName: "LREmployee",
         displayName: "LREmployee",
@@ -209,7 +209,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create Ticket object type", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/batch`,
+      `/api/v1/ontology/${oid()}/objectTypes/batch`,
       {
         apiName: "Ticket",
         displayName: "Ticket",
@@ -230,7 +230,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create Course object type", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/batch`,
+      `/api/v1/ontology/${oid()}/objectTypes/batch`,
       {
         apiName: "Course",
         displayName: "Course",
@@ -256,7 +256,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Register Company datasource", async () => {
     const { status } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/Company/datasource`,
+      `/api/v1/ontology/${oid()}/objectTypes/Company/datasource`,
       {
         datasetName: "Company DS",
         filePath: companyCsvPath,
@@ -270,7 +270,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Register Employee datasource", async () => {
     const { status } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/LREmployee/datasource`,
+      `/api/v1/ontology/${oid()}/objectTypes/LREmployee/datasource`,
       {
         datasetName: "Employee DS",
         filePath: employeeCsvPath,
@@ -291,7 +291,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Register Ticket datasource", async () => {
     const { status } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/Ticket/datasource`,
+      `/api/v1/ontology/${oid()}/objectTypes/Ticket/datasource`,
       {
         datasetName: "Ticket DS",
         filePath: ticketCsvPath,
@@ -305,7 +305,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Register Course datasource", async () => {
     const { status } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/objectTypes/Course/datasource`,
+      `/api/v1/ontology/${oid()}/objectTypes/Course/datasource`,
       {
         datasetName: "Course DS",
         filePath: courseCsvPath,
@@ -348,7 +348,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create ONE_TO_MANY link: companyEmployees", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/linkTypes`,
+      `/api/v1/ontology/${oid()}/linkTypes`,
       {
         apiName: "companyEmployees",
         displayName: "Company Employees",
@@ -364,7 +364,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create MANY_TO_ONE link: employeeCompany", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/linkTypes`,
+      `/api/v1/ontology/${oid()}/linkTypes`,
       {
         apiName: "employeeCompany",
         displayName: "Employee Company",
@@ -380,7 +380,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create ONE_TO_ONE link: employeeTicket", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/linkTypes`,
+      `/api/v1/ontology/${oid()}/linkTypes`,
       {
         apiName: "employeeTicket",
         displayName: "Employee Ticket",
@@ -396,7 +396,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create MANY_TO_MANY link: employeeCourses", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/linkTypes`,
+      `/api/v1/ontology/${oid()}/linkTypes`,
       {
         apiName: "employeeCourses",
         displayName: "Employee Courses",
@@ -412,7 +412,7 @@ async function setup(t: Runner): Promise<void> {
   await t.test("Create self-referential link: employeeManager", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${oid()}/linkTypes`,
+      `/api/v1/ontology/${oid()}/linkTypes`,
       {
         apiName: "employeeManager",
         displayName: "Employee Manager",
@@ -431,7 +431,7 @@ async function setup(t: Runner): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function linkUrl(apiName: string): string {
-  return `/api/v1/ontologies/${state.ontologyId}/linkTypes/${apiName}`;
+  return `/api/v1/ontology/${state.ontologyId}/linkTypes/${apiName}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +445,7 @@ async function runLinkTests(t: Runner): Promise<void> {
   t.section("Link Type CRUD");
 
   await t.test("1. List link types returns 5", async () => {
-    const { status, body } = await api("GET", `/api/v1/ontologies/${state.ontologyId}/linkTypes`);
+    const { status, body } = await api("GET", `/api/v1/ontology/${state.ontologyId}/linkTypes`);
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.data.length === 5, `Expected 5 link types, got ${body.data.length}`);
   });
@@ -753,7 +753,7 @@ async function runLinkTests(t: Runner): Promise<void> {
   await t.test("23. Bulk count across multiple link types", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${state.ontologyId}/linkTypes/bulkCount`,
+      `/api/v1/ontology/${state.ontologyId}/linkTypes/bulkCount`,
       {
         requests: [
           { linkTypeApiName: "companyEmployees", objectPK: "C001", direction: "forward" },
@@ -813,7 +813,7 @@ async function runLinkTests(t: Runner): Promise<void> {
   await t.test("27. Resolve non-existent link type returns 404", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v1/ontologies/${state.ontologyId}/linkTypes/nonexistentLink/resolve`,
+      `/api/v1/ontology/${state.ontologyId}/linkTypes/nonexistentLink/resolve`,
       { objectPK: "X", direction: "forward" }
     );
     t.assert(status === 404, `Expected 404, got ${status}`);
@@ -822,7 +822,7 @@ async function runLinkTests(t: Runner): Promise<void> {
   await t.test("28. Duplicate link type creation returns 409", async () => {
     const { status } = await api(
       "POST",
-      `/api/v1/ontologies/${state.ontologyId}/linkTypes`,
+      `/api/v1/ontology/${state.ontologyId}/linkTypes`,
       {
         apiName: "companyEmployees",
         displayName: "Duplicate",
@@ -837,7 +837,7 @@ async function runLinkTests(t: Runner): Promise<void> {
   await t.test("29. Invalid cardinality returns 400", async () => {
     const { status } = await api(
       "POST",
-      `/api/v1/ontologies/${state.ontologyId}/linkTypes`,
+      `/api/v1/ontology/${state.ontologyId}/linkTypes`,
       {
         apiName: "badLink",
         displayName: "Bad",
@@ -858,7 +858,7 @@ async function runLinkTests(t: Runner): Promise<void> {
     // Create a temporary link, then delete it
     const { status: createStatus } = await api(
       "POST",
-      `/api/v1/ontologies/${state.ontologyId}/linkTypes`,
+      `/api/v1/ontology/${state.ontologyId}/linkTypes`,
       {
         apiName: "tempLink",
         displayName: "Temporary",
@@ -871,14 +871,14 @@ async function runLinkTests(t: Runner): Promise<void> {
 
     const { status: deleteStatus } = await api(
       "DELETE",
-      `/api/v1/ontologies/${state.ontologyId}/linkTypes/tempLink`
+      `/api/v1/ontology/${state.ontologyId}/linkTypes/tempLink`
     );
     t.assert(deleteStatus === 200, `Delete temp link: ${deleteStatus}`);
 
     // Verify it's gone
     const { status: getStatus } = await api(
       "GET",
-      `/api/v1/ontologies/${state.ontologyId}/linkTypes/tempLink`
+      `/api/v1/ontology/${state.ontologyId}/linkTypes/tempLink`
     );
     t.assert(getStatus === 404, `After delete, GET returns 404: ${getStatus}`);
   });
@@ -896,7 +896,7 @@ async function teardown(t: Runner): Promise<void> {
     try {
       await api(
         "DELETE",
-        `/api/v1/ontologies/${state.ontologyId}/objectTypes/${apiName}/index`
+        `/api/v1/ontology/${state.ontologyId}/objectTypes/${apiName}/index`
       );
     } catch {
       // Ignore — index may not exist
@@ -905,7 +905,7 @@ async function teardown(t: Runner): Promise<void> {
 
   // Delete the ontology (cascades to object types, properties, link types, datasources)
   await t.test("Delete test ontology", async () => {
-    const { status } = await api("DELETE", `/api/v1/ontologies/${state.ontologyId}`);
+    const { status } = await api("DELETE", `/api/v1/ontology/${state.ontologyId}`);
     t.assert(status === 204 || status === 200, `Expected 204/200, got ${status}`);
   });
 

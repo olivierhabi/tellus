@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Geo endpoints — Ontology Platform spec Task 22
 // ---------------------------------------------------------------------------
-// Mounted at /api/v1/ontologies/:ontologyId/geo
+// Mounted at /api/v1/ontology/:ontologyId/geo
 //   POST /:objectTypeApiName/geohash    — geohash bucket aggregation
 //   POST /:objectTypeApiName/choropleth — country/state aggregation
 //

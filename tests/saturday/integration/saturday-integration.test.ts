@@ -100,7 +100,7 @@ describe("Saturday Integration Tests", async () => {
     // Cleanup test data
     try {
       if (ctx.ontologyId) {
-        await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
+        await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
       }
       if (ctx.datasetId) {
         await api("DELETE", `/api/v1/datasets/${ctx.datasetId}?force=true`);
@@ -121,7 +121,7 @@ describe("Saturday Integration Tests", async () => {
     const beforeFailed = runner.failed;
 
     await runner.test("Create ontology", async () => {
-      const { status, body } = await api("POST", "/api/v1/ontologies", {
+      const { status, body } = await api("POST", "/api/v1/ontology", {
         displayName: "Saturday Integration Test",
         description: "Testing dataset integration",
       });
@@ -131,7 +131,7 @@ describe("Saturday Integration Tests", async () => {
     });
 
     await runner.test("Create Employee object type", async () => {
-      const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/batch`, {
         apiName: "SatEmployee",
         displayName: "Saturday Employee",
         description: "Employee type for Saturday tests",
@@ -164,7 +164,7 @@ describe("Saturday Integration Tests", async () => {
     // Dataset upload uses multipart - test via datasource registration instead
     await runner.test("Register backing datasource (legacy path)", async () => {
       const { status, body } = await api("POST",
-        `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/datasource`, {
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/datasource`, {
           datasetName: "Saturday Employee Dataset",
           filePath: ctx.employeeCsvPath,
           fileFormat: "csv",
@@ -190,7 +190,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("Trigger indexing", async () => {
         const { status, body } = await api("POST",
-          `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index`,
+          `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/index`,
           { forceRecreateIndex: true }
         );
         runner.assert(status === 200, `Expected 200, got ${status}`);
@@ -240,7 +240,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("Get reindex status", async () => {
         const { status } = await api("GET",
-          `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index/reindex/status`
+          `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/index/reindex/status`
         );
         // May be 200 or 404 depending on route registration
         runner.assert(status === 200 || status === 404, `Expected 200 or 404, got ${status}`);

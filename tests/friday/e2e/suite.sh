@@ -80,7 +80,7 @@ done
 # ===========================================================================
 section "0. Discover Seed Ontology"
 
-do_request GET /api/v1/ontologies
+do_request GET /api/v1/ontology
 assert_status "$HTTP_STATUS" "200" "List ontologies"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "Seed ontology ID discovered"
@@ -92,7 +92,7 @@ echo "  Using ontologyId: $ONTOLOGY_ID"
 section "1. Action Type CRUD"
 
 # --- 1.1 Create custom action type ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes" '{
   "apiName":"'"${CUSTOM_ACTION}"'",
   "displayName":"E2E Friday Custom Action",
   "description":"Custom action type for Friday E2E testing",
@@ -121,25 +121,25 @@ assert_contains "$HTTP_BODY" '"isEnabled"' "isEnabled present"
 assert_contains "$HTTP_BODY" '"createdAt"' "createdAt present"
 
 # --- 1.2 List action types ---
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes"
 assert_status "$HTTP_STATUS" "200" "List action types"
 assert_contains "$HTTP_BODY" '"data"' "data array present"
 assert_contains "$HTTP_BODY" '"registerTaxpayer"' "Seed action type in list"
 assert_contains "$HTTP_BODY" "\"${CUSTOM_ACTION}\"" "Custom action type in list"
 
 # --- 1.3 Get single action type ---
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/registerTaxpayer"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/registerTaxpayer"
 assert_status "$HTTP_STATUS" "200" "Get registerTaxpayer"
 assert_contains "$HTTP_BODY" '"registerTaxpayer"' "apiName matches"
 assert_contains "$HTTP_BODY" '"parameters"' "Parameters present"
 assert_contains "$HTTP_BODY" '"rules"' "Rules present"
 
 # --- 1.4 Get non-existent action type ---
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/nonExistentAction"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/nonExistentAction"
 assert_status "$HTTP_STATUS" "404" "Non-existent action type returns 404"
 
 # --- 1.5 Update action type (remove notes param — breaking change) ---
-do_request PUT "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}" '{
+do_request PUT "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}" '{
   "displayName":"E2E Friday Custom Action Updated",
   "parameters":[
     {"apiName":"targetTin","displayName":"Target TIN","type":"string","required":true},
@@ -151,9 +151,9 @@ assert_contains "$HTTP_BODY" '"E2E Friday Custom Action Updated"' "Updated displ
 
 # --- 1.6 Clone action type ---
 # Delete clone target if it exists from prior run
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/${CLONE_ACTION}"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/${CLONE_ACTION}"
 
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/registerTaxpayer/clone" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/registerTaxpayer/clone" \
   '{"newApiName":"'"${CLONE_ACTION}"'","newDisplayName":"Cloned Register TP"}'
 assert_status "$HTTP_STATUS" "201" "Clone action type"
 assert_contains "$HTTP_BODY" "\"${CLONE_ACTION}\"" "Clone apiName matches"
@@ -162,7 +162,7 @@ assert_contains "$HTTP_BODY" '"parameters"' "Clone has parameters"
 assert_contains "$HTTP_BODY" '"rules"' "Clone has rules"
 
 # --- 1.7 Impact analysis ---
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/flagForAudit/impact"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/flagForAudit/impact"
 assert_status "$HTTP_STATUS" "200" "Impact analysis"
 assert_contains "$HTTP_BODY" '"actionTypeApiName"' "actionTypeApiName in impact"
 assert_contains "$HTTP_BODY" '"affectedObjectTypes"' "affectedObjectTypes present"
@@ -176,11 +176,11 @@ assert_contains "$HTTP_BODY" '"executionStats"' "executionStats present"
 section "2. Action Type Validation"
 
 # --- Missing required fields ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes" '{}'
 assert_status "$HTTP_STATUS" "400" "Empty body returns 400"
 
 # --- Missing rules ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes" '{
   "apiName":"noRulesAction",
   "displayName":"No Rules",
   "rules":[]
@@ -188,7 +188,7 @@ do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes" '{
 assert_status "$HTTP_STATUS" "400" "Empty rules rejected"
 
 # --- Duplicate apiName ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes" '{
   "apiName":"registerTaxpayer",
   "displayName":"Duplicate",
   "rules":[{"type":"createObject","objectType":"Taxpayer","properties":{}}]
@@ -196,7 +196,7 @@ do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes" '{
 assert_status "$HTTP_STATUS" "409" "Duplicate apiName returns 409"
 
 # --- Clone non-existent source ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/nonExistent/clone" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/nonExistent/clone" \
   '{"newApiName":"cloneFail"}'
 assert_status "$HTTP_STATUS" "404" "Clone non-existent returns 404"
 
@@ -205,7 +205,7 @@ assert_status "$HTTP_STATUS" "404" "Clone non-existent returns 404"
 # ===========================================================================
 section "3. Setup: Ensure taxpayerBusiness Link Type"
 
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"taxpayerBusiness",
   "displayName":"Taxpayer Business",
   "cardinality":"MANY_TO_MANY",
@@ -226,7 +226,7 @@ fi
 section "4. Action Execution — Happy Paths"
 
 # --- 4.1 Create taxpayer ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
   "parameters":{
     "tin":"'"${TEST_TIN}"'",
     "fullName":"E2E Friday Taxpayer",
@@ -253,7 +253,7 @@ assert_contains "$HTTP_BODY" '"Individual"' "taxpayerType matches"
 assert_contains "$HTTP_BODY" '"active"' "complianceStatus = active"
 
 # --- 4.2 Create second taxpayer ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
   "parameters":{
     "tin":"'"${TEST_TIN_2}"'",
     "fullName":"E2E Friday Secondary",
@@ -268,7 +268,7 @@ EXEC_IDS+=("$EXEC_ID")
 sleep 1
 
 # --- 4.3 File tax return ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/fileTaxReturn/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/fileTaxReturn/apply" '{
   "parameters":{
     "returnId":"'"${TEST_RETURN_ID}"'",
     "taxType":"VAT",
@@ -291,7 +291,7 @@ assert_contains "$HTTP_BODY" '"VAT"' "taxType = VAT"
 assert_contains "$HTTP_BODY" '"filed"' "status = filed"
 
 # --- 4.4 Flag for audit (multi-object modification) ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/flagForAudit/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/flagForAudit/apply" '{
   "parameters":{
     "returnRef":"'"${TEST_RETURN_ID}"'",
     "taxpayerRef":"'"${TEST_TIN}"'",
@@ -314,7 +314,7 @@ do_request GET "/api/v1/objects/Taxpayer/${TEST_TIN}"
 assert_contains "$HTTP_BODY" '"under_review"' "Compliance status changed to under_review"
 
 # --- 4.5 Register business (create + link) ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerBusiness/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerBusiness/apply" '{
   "parameters":{
     "businessId":"'"${TEST_BUSINESS_ID}"'",
     "tradeName":"E2E Friday Corp",
@@ -340,7 +340,7 @@ assert_contains "$HTTP_BODY" '"Technology"' "sector matches"
 section "5. Action Execution — Error Cases"
 
 # --- 5.1 Duplicate primary key ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
   "parameters":{
     "tin":"'"${TEST_TIN}"'",
     "fullName":"Duplicate",
@@ -352,14 +352,14 @@ assert_status "$HTTP_STATUS" "409" "Duplicate PK returns 409"
 assert_contains "$HTTP_BODY" '"DUPLICATE_PRIMARY_KEY"' "Error code is DUPLICATE_PRIMARY_KEY"
 
 # --- 5.2 Missing required parameters ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" '{
   "parameters":{}
 }'
 assert_status "$HTTP_STATUS" "400" "Missing required params returns 400"
 assert_contains "$HTTP_BODY" '"INVALID_PARAMETER"' "Error code is INVALID_PARAMETER"
 
 # --- 5.3 Constraint violation (riskScore > 100) ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" '{
   "parameters":{
     "taxpayerRef":"'"${TEST_TIN}"'",
     "riskScore":150
@@ -369,7 +369,7 @@ assert_status "$HTTP_STATUS" "400" "Constraint violation returns 400"
 assert_contains "$HTTP_BODY" '"INVALID_PARAMETER"' "Error code for constraint violation"
 
 # --- 5.4 Non-existent object reference ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" '{
   "parameters":{
     "taxpayerRef":"NONEXISTENT999",
     "riskScore":50
@@ -383,7 +383,7 @@ else
 fi
 
 # --- 5.5 Negative revenue (min constraint) ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/fileTaxReturn/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/fileTaxReturn/apply" '{
   "parameters":{
     "returnId":"'"E2EFRI${SUFFIX}NEG"'",
     "taxType":"VAT",
@@ -395,7 +395,7 @@ do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/fileTaxReturn/apply" 
 assert_status "$HTTP_STATUS" "400" "Negative revenue rejected"
 
 # --- 5.6 Non-existent action type ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/nonExistentAction/apply" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/nonExistentAction/apply" '{
   "parameters":{}
 }'
 assert_status "$HTTP_STATUS" "404" "Non-existent action type returns 404"
@@ -408,7 +408,7 @@ section "6. Validate (Dry Run)"
 VALIDATE_TIN="88099${SUFFIX}"
 
 # --- 6.1 Valid action preview ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/validate" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/validate" '{
   "parameters":{
     "tin":"'"${VALIDATE_TIN}"'",
     "fullName":"Preview Only",
@@ -428,14 +428,14 @@ do_request GET "/api/v1/objects/Taxpayer/${VALIDATE_TIN}"
 assert_status "$HTTP_STATUS" "404" "Validated object NOT created (dry run)"
 
 # --- 6.2 Invalid params validation ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/validate" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/validate" '{
   "parameters":{}
 }'
 assert_status "$HTTP_STATUS" "400" "Validate invalid params returns 400"
 assert_contains "$HTTP_BODY" '"errors"' "errors array in validation response"
 
 # --- 6.3 Constraint violation validation ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/validate" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/validate" '{
   "parameters":{
     "taxpayerRef":"'"${TEST_TIN}"'",
     "riskScore":200
@@ -449,7 +449,7 @@ assert_status "$HTTP_STATUS" "400" "Validate constraint violation returns 400"
 section "7. Batch Execution"
 
 # --- 7.1 Mixed success/failure batch ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/applyBatch" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/applyBatch" '{
   "requests":[
     {"parameters":{"taxpayerRef":"'"${TEST_TIN}"'","riskScore":50}},
     {"parameters":{"taxpayerRef":"000000000","riskScore":60}},
@@ -475,11 +475,11 @@ for i in $(seq 1 101); do
 done
 LARGE_BATCH="${LARGE_BATCH}]}"
 
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/applyBatch" "$LARGE_BATCH"
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/applyBatch" "$LARGE_BATCH"
 assert_status "$HTTP_STATUS" "400" "Oversized batch rejected"
 
 # --- 7.3 Missing requests field ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/applyBatch" '{"notRequests":[]}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/applyBatch" '{"notRequests":[]}'
 assert_status "$HTTP_STATUS" "400" "Missing requests field returns 400"
 
 # ===========================================================================
@@ -491,7 +491,7 @@ IDEM_KEY="friday-e2e-idem-${SUFFIX}"
 
 # --- 8.1 First execution ---
 do_request_with_header POST \
-  "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" \
+  "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" \
   "Idempotency-Key: ${IDEM_KEY}" \
   '{"parameters":{"tin":"'"${IDEM_TIN}"'","fullName":"Idempotent Test","taxpayerType":"Individual","province":"Kigali"}}'
 assert_status "$HTTP_STATUS" "200" "First idempotent execution"
@@ -501,7 +501,7 @@ assert_not_empty "$FIRST_EXEC_ID" "First executionId present"
 
 # --- 8.2 Retry with same key ---
 do_request_with_header POST \
-  "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" \
+  "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/apply" \
   "Idempotency-Key: ${IDEM_KEY}" \
   '{"parameters":{"tin":"'"${IDEM_TIN}"'","fullName":"Idempotent Test","taxpayerType":"Individual","province":"Kigali"}}'
 assert_status "$HTTP_STATUS" "200" "Idempotent retry returns 200"
@@ -525,7 +525,7 @@ CURRENT_VERSION=$(json_field_raw "$HTTP_BODY" "__version")
 assert_not_empty "$CURRENT_VERSION" "Current version found"
 
 # --- 9.2 Update with correct version ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" \
   '{"parameters":{"taxpayerRef":"'"${TEST_TIN}"'","riskScore":42},"$expectedVersion":'"${CURRENT_VERSION}"'}'
 assert_status "$HTTP_STATUS" "200" "OCC update with correct version"
 assert_contains "$HTTP_BODY" '"success"' "OCC update succeeded"
@@ -535,7 +535,7 @@ EXEC_IDS+=("$EXEC_ID")
 sleep 1
 
 # --- 9.3 Concurrent conflict (stale version) ---
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actions/updateTaxpayerRiskScore/apply" \
   '{"parameters":{"taxpayerRef":"'"${TEST_TIN}"'","riskScore":60},"$expectedVersion":'"${CURRENT_VERSION}"'}'
 assert_status "$HTTP_STATUS" "409" "Stale version returns 409"
 assert_contains "$HTTP_BODY" '"CONCURRENCY_CONFLICT"' "Error code is CONCURRENCY_CONFLICT"
@@ -570,7 +570,7 @@ do_request GET "/api/v1/audit/log?result=success&\$pageSize=10"
 assert_status "$HTTP_STATUS" "200" "Filter audit log by result"
 
 # --- 10.5 Per-action-type audit log ---
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}/actions/registerTaxpayer/audit?\$pageSize=10"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/actions/registerTaxpayer/audit?\$pageSize=10"
 assert_status "$HTTP_STATUS" "200" "Per-action-type audit log"
 assert_contains "$HTTP_BODY" '"data"' "data in per-action audit"
 assert_contains "$HTTP_BODY" '"totalCount"' "totalCount in per-action audit"
@@ -645,7 +645,7 @@ else
     STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
       -H "Content-Type: application/json" \
       -d '{"parameters":{"returnRef":"'"${TEST_RETURN_ID}"'"}}' \
-      "${BASE_URL}/api/v1/ontologies/${ONTOLOGY_ID}/actions/closeTaxReturn/apply" 2>/dev/null)
+      "${BASE_URL}/api/v1/ontology/${ONTOLOGY_ID}/actions/closeTaxReturn/apply" 2>/dev/null)
     if [[ "$STATUS" == "429" ]]; then
       RATE_LIMITED="true"
       break
@@ -661,15 +661,15 @@ fi
 section "14. Delete Action Type"
 
 # --- 14.1 Delete custom action type ---
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}"
 assert_status "$HTTP_STATUS" "204" "Delete custom action type"
 
 # --- 14.2 Verify deletion ---
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}"
 assert_status "$HTTP_STATUS" "404" "Deleted action type returns 404"
 
 # --- 14.3 Delete non-existent returns 404 ---
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/${CUSTOM_ACTION}"
 assert_status "$HTTP_STATUS" "404" "Delete non-existent action type returns 404"
 
 # ===========================================================================
@@ -678,7 +678,7 @@ assert_status "$HTTP_STATUS" "404" "Delete non-existent action type returns 404"
 section "15. Cleanup"
 
 # Delete clone action type
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}/actionTypes/${CLONE_ACTION}"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes/${CLONE_ACTION}"
 if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "404" ]]; then
   pass "Delete clone action type [HTTP ${HTTP_STATUS}]"
 else

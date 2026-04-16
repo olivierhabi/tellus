@@ -64,8 +64,8 @@ const RULES: ScopeRule[] = [
   { method: 'GET', prefix: '/api/v1/auth/me', scope: 'api:read' },
 
   // --- Ontology engine --------------------------------------------
-  { method: 'GET', prefix: '/api/v1/ontologies', scope: 'ontology:read' },
-  { prefix: '/api/v1/ontologies', scope: 'ontology:write' },
+  { method: 'GET', prefix: '/api/v1/ontology', scope: 'ontology:read' },
+  { prefix: '/api/v1/ontology', scope: 'ontology:write' },
 
   // --- Dataset lifecycle (upload is its own narrower scope) -------
   {

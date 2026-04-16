@@ -84,7 +84,7 @@ SUFFIX=$(date +%s)
 OT_API="VerifyFeat${SUFFIX}"
 LINK_API="verifyFeatLink${SUFFIX}"
 
-probe 0 "Bootstrap: list ontologies"          GET   "/api/v1/ontologies"
+probe 0 "Bootstrap: list ontologies"          GET   "/api/v1/ontology"
 ONTOLOGY_ID=$(jq -r '.data[0].ontologyId' /tmp/feature-body.json 2>/dev/null)
 [[ -z "$ONTOLOGY_ID" || "$ONTOLOGY_ID" == "null" ]] && { echo "no ontology"; exit 1; }
 echo "  ontology: $ONTOLOGY_ID"
@@ -95,11 +95,11 @@ echo "  ontology: $ONTOLOGY_ID"
 echo
 echo -e "${BLUE}-- 1.1 Navigation & Discovery --${NC}"
 probe 1  "Top-bar global search across resources"         GET  "/api/v1/search?q=order"
-probe 2  "Create-new dropdown (object type create)"       POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes" \
+probe 2  "Create-new dropdown (object type create)"       POST "/api/v1/ontology/$ONTOLOGY_ID/objectTypes" \
   "{\"apiName\":\"$OT_API\",\"displayName\":\"Verify Feat $SUFFIX\",\"icon\":\"cube\",\"status\":\"experimental\"}" "^201"
-probe 3  "Branch selector (list ontologies = branches)"   GET  "/api/v1/ontologies"
-probe 4  "Sidebar resource navigation (list object types)" GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes"
-probe 5  "Discover landing (object types page)"           GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes?pageSize=12"
+probe 3  "Branch selector (list ontologies = branches)"   GET  "/api/v1/ontology"
+probe 4  "Sidebar resource navigation (list object types)" GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes"
+probe 5  "Discover landing (object types page)"           GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes?pageSize=12"
 probe 6  "Favorites — preferences storage"                GET  "/api/users/me/preferences/ontology_favorites" "" "^(200|404)"
 
 # ========================================================================
@@ -107,53 +107,53 @@ probe 6  "Favorites — preferences storage"                GET  "/api/users/me/
 # ========================================================================
 echo
 echo -e "${BLUE}-- 1.2 Object Type Management --${NC}"
-probe 7  "Create object type"                              GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
-probe 8  "Add backing datasource (datasource route exists)" GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/datasource" "" "^(200|400|404)"
-probe 9  "Property configuration (create string prop)"     POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties" \
+probe 7  "Create object type"                              GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 8  "Add backing datasource (datasource route exists)" GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/datasource" "" "^(200|400|404)"
+probe 9  "Property configuration (create string prop)"     POST "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/properties" \
   '{"apiName":"orderId","displayName":"Order ID","baseType":"string"}' "^201"
-probe 10 "Derived property — function runtime route"       GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
-probe 11 "Struct property (json column type)"              POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties" \
+probe 10 "Derived property — function runtime route"       GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
+probe 11 "Struct property (json column type)"              POST "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/properties" \
   '{"apiName":"address","displayName":"Address","baseType":"string"}' "^201"
 probe 13 "Time series property — TimescaleDB ingest"       POST "/api/v1/timeseries/$OT_API/temperature/pk1" \
   "{\"samples\":[{\"timestamp\":\"2026-04-14T00:00:00Z\",\"value\":21.5}]}"
-probe 14 "Primary key configuration"                       POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/primaryKey" \
+probe 14 "Primary key configuration"                       POST "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/primaryKey" \
   '{"propertyApiName":"orderId"}'
-probe 15 "Multi-datasource objects (datasource list)"      GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/datasource" "" "^(200|404)"
-probe 16 "Object type status — changeStatus"               POST "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/changeStatus" \
+probe 15 "Multi-datasource objects (datasource list)"      GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/datasource" "" "^(200|404)"
+probe 16 "Object type status — changeStatus"               POST "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/changeStatus" \
   '{"status":"experimental"}'
-probe 17 "Point of contact (members route)"                GET  "/api/v1/ontologies/$ONTOLOGY_ID" "" "^(200|404)"
-probe 18 "Object type groups (list object types grouped)"  GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes"
-probe 19 "Metadata widget — full object type detail"       GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 17 "Point of contact (members route)"                GET  "/api/v1/ontology/$ONTOLOGY_ID" "" "^(200|404)"
+probe 18 "Object type groups (list object types grouped)"  GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes"
+probe 19 "Metadata widget — full object type detail"       GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 
 # ========================================================================
 # OMA Section 1.3 — Link Type Management (20-24)
 # ========================================================================
 echo
 echo -e "${BLUE}-- 1.3 Link Type Management --${NC}"
-TARGET_OT=$(curl -s "$BASE/api/v1/ontologies/$ONTOLOGY_ID/objectTypes" | jq -r ".data[] | select(.apiName != \"$OT_API\") | .apiName" | head -1)
-probe 20 "Create link type"                                POST "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes" \
+TARGET_OT=$(curl -s "$BASE/api/v1/ontology/$ONTOLOGY_ID/objectTypes" | jq -r ".data[] | select(.apiName != \"$OT_API\") | .apiName" | head -1)
+probe 20 "Create link type"                                POST "/api/v1/ontology/$ONTOLOGY_ID/linkTypes" \
   "{\"apiName\":\"$LINK_API\",\"displayName\":\"Verify Link\",\"cardinality\":\"MANY_TO_ONE\",\"sourceObjectTypeApiName\":\"$OT_API\",\"targetObjectTypeApiName\":\"$TARGET_OT\"}" "^201"
-probe 21 "Foreign key links (link list)"                   GET  "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes"
-probe 22 "Many-to-many join table validation"              POST "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API/validate" \
+probe 21 "Foreign key links (link list)"                   GET  "/api/v1/ontology/$ONTOLOGY_ID/linkTypes"
+probe 22 "Many-to-many join table validation"              POST "/api/v1/ontology/$ONTOLOGY_ID/linkTypes/$LINK_API/validate" \
   '{}' "^(200|400|404)"
-probe 23 "Object-backed links (resolve)"                   POST "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API/resolve" \
+probe 23 "Object-backed links (resolve)"                   POST "/api/v1/ontology/$ONTOLOGY_ID/linkTypes/$LINK_API/resolve" \
   '{"sourcePrimaryKey":"x"}' "^(200|400|404)"
-probe 24 "Link direction (analysis)"                       GET  "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API/analysis" "" "^(200|404)"
+probe 24 "Link direction (analysis)"                       GET  "/api/v1/ontology/$ONTOLOGY_ID/linkTypes/$LINK_API/analysis" "" "^(200|404)"
 
 # ========================================================================
 # OMA Section 1.4 — Action Type Management (25-36)
 # ========================================================================
 echo
 echo -e "${BLUE}-- 1.4 Action Type Management --${NC}"
-probe 25 "Create action type (list-based check)"           GET  "/api/v1/ontologies/$ONTOLOGY_ID/actionTypes"
-ACTION_API=$(curl -s "$BASE/api/v1/ontologies/$ONTOLOGY_ID/actionTypes" | jq -r '.data[0].apiName // empty')
-probe 26 "Action parameters (action detail)"               GET  "/api/v1/ontologies/$ONTOLOGY_ID/actionTypes/${ACTION_API:-noop}" "" "^(200|404)"
+probe 25 "Create action type (list-based check)"           GET  "/api/v1/ontology/$ONTOLOGY_ID/actionTypes"
+ACTION_API=$(curl -s "$BASE/api/v1/ontology/$ONTOLOGY_ID/actionTypes" | jq -r '.data[0].apiName // empty')
+probe 26 "Action parameters (action detail)"               GET  "/api/v1/ontology/$ONTOLOGY_ID/actionTypes/${ACTION_API:-noop}" "" "^(200|404)"
 probe 27 "Submission criteria (validate endpoint)"         POST "/api/v1/actions/${ACTION_API:-noop}/validate" \
   '{"parameters":{}}' "^(200|400|404)"
-probe 28 "Action rules (impact analysis)"                  GET  "/api/v1/ontologies/$ONTOLOGY_ID/actionTypes/${ACTION_API:-noop}/impact" "" "^(200|404)"
+probe 28 "Action rules (impact analysis)"                  GET  "/api/v1/ontology/$ONTOLOGY_ID/actionTypes/${ACTION_API:-noop}/impact" "" "^(200|404)"
 probe 29 "Side effects (action validate)"                  POST "/api/v1/actions/${ACTION_API:-noop}/validate" \
   '{"parameters":{}}' "^(200|400|404)"
-probe 30 "Function-backed actions (apply)"                 POST "/api/v1/ontologies/$ONTOLOGY_ID/actions/${ACTION_API:-noop}/apply" \
+probe 30 "Function-backed actions (apply)"                 POST "/api/v1/ontology/$ONTOLOGY_ID/actions/${ACTION_API:-noop}/apply" \
   '{"parameters":{}}' "^(200|400|404)"
 probe 31 "Action audit log"                                GET  "/api/v1/audit?ontologyId=$ONTOLOGY_ID" "" "^(200|404)"
 probe 32 "Undo / revert actions (edits route)"             GET  "/api/v1/edits" "" "^(200|404)"
@@ -168,12 +168,12 @@ probe 36 "Action run history (audit log)"                  GET  "/api/v1/audit?o
 # ========================================================================
 echo
 echo -e "${BLUE}-- 1.5 Function Type Management --${NC}"
-probe 37 "Function overview (list ontologies)"             GET  "/api/v1/ontologies"
+probe 37 "Function overview (list ontologies)"             GET  "/api/v1/ontology"
 probe 38 "Version selector (versions API)"                 GET  "/api/v1/datasets" "" "^(200|404)"
-probe 39 "Open in code repo (deep link surface)"           GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes"
+probe 39 "Open in code repo (deep link surface)"           GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes"
 probe 40 "Usage history (audit endpoint)"                  GET  "/api/v1/audit?ontologyId=$ONTOLOGY_ID" "" "^(200|404)"
 probe 41 "Function observability (audit log)"              GET  "/api/v1/audit?ontologyId=$ONTOLOGY_ID" "" "^(200|404)"
-probe 42 "Branched functions (ontology list)"              GET  "/api/v1/ontologies"
+probe 42 "Branched functions (ontology list)"              GET  "/api/v1/ontology"
 
 # ========================================================================
 # OMA Section 1.6 — Interface Management (43-46)
@@ -192,8 +192,8 @@ echo
 echo -e "${BLUE}-- 1.7 Indexing & Observability --${NC}"
 probe 47 "Funnel batch pipeline view"                      GET  "/api/v1/pipelines/funnel/$ONTOLOGY_ID/$OT_API"
 probe 48 "Funnel streaming pipeline view (Flink)"          GET  "/api/v1/pipelines/streaming/$ONTOLOGY_ID/$OT_API"
-probe 49 "Indexing health dashboard (object type detail)"  GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
-probe 50 "Schema migration manager (impact endpoint)"      GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 49 "Indexing health dashboard (object type detail)"  GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 50 "Schema migration manager (impact endpoint)"      GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 probe 51 "Reindexing trigger"                              POST "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/reindex" \
   '{}' "^(200|202|400|404)"
 
@@ -205,28 +205,28 @@ echo -e "${BLUE}-- 1.8 Usage & Governance --${NC}"
 probe 52 "Usage graph (audit log)"                         GET  "/api/v1/audit?ontologyId=$ONTOLOGY_ID" "" "^(200|404)"
 probe 53 "Detailed usage tab (audit log)"                  GET  "/api/v1/audit?ontologyId=$ONTOLOGY_ID" "" "^(200|404)"
 probe 54 "Ontology branching — proposals (edits)"          GET  "/api/v1/edits" "" "^(200|404)"
-probe 55 "Workflow lineage (object type detail)"           GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
-probe 56 "Ontology settings (configuration)"               GET  "/api/v1/ontologies/$ONTOLOGY_ID"
+probe 55 "Workflow lineage (object type detail)"           GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 56 "Ontology settings (configuration)"               GET  "/api/v1/ontology/$ONTOLOGY_ID"
 
 # ========================================================================
 # OMA Section 1.9 — Security Configuration (57-60)
 # ========================================================================
 echo
 echo -e "${BLUE}-- 1.9 Security Configuration --${NC}"
-probe 57 "Object security policies (object type detail)"   GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
-probe 58 "Property security policies (property list)"      GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
-probe 59 "Mandatory control properties (property list)"    GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
-probe 60 "Ontology roles (members route)"                  GET  "/api/v1/ontologies/$ONTOLOGY_ID"
+probe 57 "Object security policies (object type detail)"   GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 58 "Property security policies (property list)"      GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
+probe 59 "Mandatory control properties (property list)"    GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
+probe 60 "Ontology roles (members route)"                  GET  "/api/v1/ontology/$ONTOLOGY_ID"
 
 # ========================================================================
 # OE Section 2.1 — Home Page & Discovery (61-64)
 # ========================================================================
 echo
 echo -e "${BLUE}-- 2.1 Object Explorer Home --${NC}"
-probe 61 "Home page hub (object types list)"               GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes"
-probe 62 "Object type groups visual grid"                  GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes"
-probe 63 "Group graph visualization (link types)"          GET  "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes"
-probe 64 "Object type preview (object type detail)"        GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 61 "Home page hub (object types list)"               GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes"
+probe 62 "Object type groups visual grid"                  GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes"
+probe 63 "Group graph visualization (link types)"          GET  "/api/v1/ontology/$ONTOLOGY_ID/linkTypes"
+probe 64 "Object type preview (object type detail)"        GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 
 # ========================================================================
 # OE Section 2.2 — Global Search (65-72)
@@ -240,7 +240,7 @@ probe 68 "Boolean operators (search)"                      GET  "/api/v1/search?
 probe 69 "Wildcards (search)"                              GET  "/api/v1/search?q=ver*"
 probe 70 "Fuzzy match (search)"                            GET  "/api/v1/search?q=verify~"
 probe 71 "Exact phrase (search)"                           GET  "/api/v1/search?q=%22Verify%20Feat%22"
-probe 72 "Object-hover link exploration (links list)"      GET  "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes"
+probe 72 "Object-hover link exploration (links list)"      GET  "/api/v1/ontology/$ONTOLOGY_ID/linkTypes"
 
 # ========================================================================
 # OE Section 2.3 — Charts/Filters (73-84)
@@ -258,10 +258,10 @@ probe 76 "Date histogram"                                  POST "/api/v1/charts/
 probe 77 "GeoHash map (objects search)"                    POST "/api/v1/objects/$OT_API/search" '{"$pageSize":10}'
 probe 78 "Choropleth map (aggregate route)"                POST "/api/v1/objects/$OT_API/aggregate" \
   '{"aggregations":[{"type":"count"}]}' "^(200|400|404)"
-probe 79 "Linked object filtering (link search-around)"    POST "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API/searchAround" \
+probe 79 "Linked object filtering (link search-around)"    POST "/api/v1/ontology/$ONTOLOGY_ID/linkTypes/$LINK_API/searchAround" \
   '{"sourcePrimaryKey":"x"}' "^(200|400|404)"
-probe 80 "Chart drag-and-drop (UI — backend list)"         GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
-probe 81 "Chart resize (UI — backend list)"                GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 80 "Chart drag-and-drop (UI — backend list)"         GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 81 "Chart resize (UI — backend list)"                GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 probe 82 "Undo/redo state (edits)"                         GET  "/api/v1/edits" "" "^(200|404)"
 probe 83 "Search bar filters (objects search w/ where)"    POST "/api/v1/objects/$OT_API/search" \
   "{\"where\":{\"orderId\":\"x\"},\"\$pageSize\":5}" "^(200|400)"
@@ -277,30 +277,30 @@ probe 86 "Column sorting (orderBy)"                        POST "/api/v1/objects
   "{\"\$orderBy\":[{\"field\":\"orderId\",\"direction\":\"asc\"}]}"
 probe 87 "Column reorder (UI — backend select)"            POST "/api/v1/objects/$OT_API/search" \
   "{\"\$select\":[\"orderId\"]}" "^(200|400)"
-probe 88 "Freeze columns (UI — backend list)"              GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
-probe 89 "Column visibility (UI — properties list)"        GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
+probe 88 "Freeze columns (UI — backend list)"              GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
+probe 89 "Column visibility (UI — properties list)"        GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/properties"
 probe 90 "Selection preview panel (object detail)"         GET  "/api/v1/objects/$OT_API/x" "" "^(200|404)"
 probe 91 "Compare two objects (object detail)"             GET  "/api/v1/objects/$OT_API/y" "" "^(200|404)"
 probe 92 "Inline property editing (action apply)"          POST "/api/v1/actions/${ACTION_API:-noop}/apply" \
   '{"parameters":{}}' "^(200|400|404)"
 probe 93 "Time series in table (timeseries GET)"           GET  "/api/v1/timeseries/$OT_API/temperature/pk1?limit=5"
-probe 94 "Value formatting (object type metadata)"         GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
-probe 95 "Conditional formatting (object detail)"          GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 94 "Value formatting (object type metadata)"         GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 95 "Conditional formatting (object detail)"          GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 
 # ========================================================================
 # OE Section 2.5 — Object View (96-104)
 # ========================================================================
 echo
 echo -e "${BLUE}-- 2.5 Object View --${NC}"
-probe 96  "Default object view (object type detail)"        GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 96  "Default object view (object type detail)"        GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 probe 97  "Custom object view (object views CRUD)"          GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/objectViews" "" "^(200|404)"
 probe 98  "Full vs panel object view"                       GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/objectViews" "" "^(200|404)"
-probe 99  "Linked objects table widget"                     POST "/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API/resolve" \
+probe 99  "Linked objects table widget"                     POST "/api/v1/ontology/$ONTOLOGY_ID/linkTypes/$LINK_API/resolve" \
   '{"sourcePrimaryKey":"x"}' "^(200|400|404)"
 probe 100 "Event timeline widget (timeseries)"              GET  "/api/v1/timeseries/$OT_API/temperature/pk1"
 probe 101 "Map widget (objects search)"                     POST "/api/v1/objects/$OT_API/search" '{"$pageSize":10}'
 probe 102 "Time series chart in object view"                GET  "/api/v1/timeseries/$OT_API/temperature/pk1?limit=100"
-probe 103 "Embedded applications (UI — list)"               GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 103 "Embedded applications (UI — list)"               GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 probe 104 "Edit object view (CRUD)"                         GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API/objectViews" "" "^(200|404)"
 
 # ========================================================================
@@ -319,12 +319,12 @@ probe 108 "Save/share comparison (preferences)"             GET  "/api/users/me/
 # ========================================================================
 echo
 echo -e "${BLUE}-- 2.7 Actions & Export --${NC}"
-probe 109 "Actions dropdown (action types list)"            GET  "/api/v1/ontologies/$ONTOLOGY_ID/actionTypes"
-probe 110 "Open in… menu (object detail)"                   GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 109 "Actions dropdown (action types list)"            GET  "/api/v1/ontology/$ONTOLOGY_ID/actionTypes"
+probe 110 "Open in… menu (object detail)"                   GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 probe 111 "Export to CSV/XLSX (search w/ select)"           POST "/api/v1/objects/$OT_API/search" \
   "{\"\$pageSize\":1000}" "^(200|400)"
 probe 112 "Dynamic object sets (preferences)"               GET  "/api/users/me/preferences" "" "^(200|404)"
-probe 113 "Success toast deep link (object detail)"         GET  "/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+probe 113 "Success toast deep link (object detail)"         GET  "/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 
 # ========================================================================
 # OE Section 2.8 — Saved Explorations & Layouts (114-118)
@@ -355,8 +355,8 @@ probe 120 "Ontology SQL via Furnace"                        POST "/api/v1/sql" \
 # ========================================================================
 echo
 echo -e "${BLUE}-- cleanup --${NC}"
-curl -s -o /dev/null -X DELETE "$BASE/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/$LINK_API"
-curl -s -o /dev/null -X DELETE "$BASE/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$OT_API"
+curl -s -o /dev/null -X DELETE "$BASE/api/v1/ontology/$ONTOLOGY_ID/linkTypes/$LINK_API"
+curl -s -o /dev/null -X DELETE "$BASE/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$OT_API"
 echo "  removed scratch object type & link type"
 
 (( FAIL == 0 )) || exit 1

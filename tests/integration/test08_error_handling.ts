@@ -98,7 +98,7 @@ async function cleanup() {
   console.log("\n--- Cleanup ---");
   try {
     if (ontologyId) {
-      await api("DELETE", `/api/v1/ontologies/${ontologyId}`);
+      await api("DELETE", `/api/v1/ontology/${ontologyId}`);
       console.log("  Deleted ontology");
     }
   } catch { /* best effort */ }
@@ -139,14 +139,14 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("Setup: ontology + Employee type + dataset\n");
 
-  const ontRes = await api("POST", "/api/v1/ontologies", {
+  const ontRes = await api("POST", "/api/v1/ontology", {
     displayName: "Test08 Error Handling",
   });
   ontologyId = ontRes.body?.data?.ontologyId;
 
   const otRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee",
@@ -176,7 +176,7 @@ async function main() {
   // Register datasource
   await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/Employee/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`,
     {
       datasetId,
       columnMapping: {
@@ -192,7 +192,7 @@ async function main() {
   await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
 
   // Create an action type for later tests
-  await api("POST", `/api/v1/ontologies/${ontologyId}/actionTypes`, {
+  await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
     apiName: "updateDepartment",
     displayName: "Update Department",
     parameters: [
@@ -228,7 +228,7 @@ async function main() {
 
   const dupRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee Duplicate",
@@ -254,7 +254,7 @@ async function main() {
   console.log("\n8.2  Register datasource with non-existent datasetId");
 
   // Create a second object type to register against
-  await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
+  await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
     apiName: "TempType",
     displayName: "Temp Type",
     primaryKeyProperty: "id",
@@ -266,7 +266,7 @@ async function main() {
   const fakeDatasetId = "00000000-0000-0000-0000-000000000000";
   const noDatasetRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/TempType/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/TempType/datasource`,
     {
       datasetId: fakeDatasetId,
       columnMapping: { id: "id" },
@@ -288,7 +288,7 @@ async function main() {
   console.log("\n8.3  Register datasource with misspelled column");
 
   // Create another object type
-  await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
+  await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
     apiName: "BadMapping",
     displayName: "Bad Mapping",
     primaryKeyProperty: "myId",
@@ -300,7 +300,7 @@ async function main() {
 
   const badColRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/BadMapping/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/BadMapping/datasource`,
     {
       datasetId,
       columnMapping: {
@@ -397,7 +397,7 @@ async function main() {
 
   const missingParamRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actions/updateDepartment/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/updateDepartment/apply`,
     {
       parameters: {
         // missing employeeRef and newDepartment
@@ -416,7 +416,7 @@ async function main() {
 
   const noObjRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actions/updateDepartment/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/updateDepartment/apply`,
     {
       parameters: {
         employeeRef: "NONEXISTENT_XYZ",

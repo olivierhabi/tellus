@@ -67,7 +67,7 @@ async function request(
 async function ensureActionType(def: Record<string, unknown>): Promise<void> {
   const res = await request(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actionTypes`,
+    `/api/v1/ontology/${ontologyId}/actionTypes`,
     def
   );
   if (res.status !== 201 && res.status !== 409) {
@@ -92,7 +92,7 @@ async function executeAction(
   }
   return request(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actions/${actionTypeApiName}/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/${actionTypeApiName}/apply`,
     body
   );
 }
@@ -125,7 +125,7 @@ beforeAll(async () => {
     return;
   }
 
-  const ont = await request("GET", "/api/v1/ontologies");
+  const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
     const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;
@@ -538,7 +538,7 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
     // Negative number
     const res1 = await request(
       "POST",
-      `/api/v1/ontologies/${ontologyId}/actions/${MODIFY_ACTION}/apply`,
+      `/api/v1/ontology/${ontologyId}/actions/${MODIFY_ACTION}/apply`,
       { parameters: { tin }, $expectedVersion: -1 }
     );
     expect(res1.status).toBe(400);
@@ -547,7 +547,7 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
     // Non-integer
     const res2 = await request(
       "POST",
-      `/api/v1/ontologies/${ontologyId}/actions/${MODIFY_ACTION}/apply`,
+      `/api/v1/ontology/${ontologyId}/actions/${MODIFY_ACTION}/apply`,
       { parameters: { tin }, $expectedVersion: 1.5 }
     );
     expect(res2.status).toBe(400);
@@ -556,7 +556,7 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
     // String
     const res3 = await request(
       "POST",
-      `/api/v1/ontologies/${ontologyId}/actions/${MODIFY_ACTION}/apply`,
+      `/api/v1/ontology/${ontologyId}/actions/${MODIFY_ACTION}/apply`,
       { parameters: { tin }, $expectedVersion: "abc" }
     );
     expect(res3.status).toBe(400);

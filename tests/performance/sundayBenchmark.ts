@@ -129,7 +129,7 @@ async function benchmarkPolymorphicQuery(ontologyId: string): Promise<BenchmarkR
 // ---------------------------------------------------------------------------
 async function benchmarkObjectView(ontologyId: string): Promise<BenchmarkResult | null> {
   // Find an object type with indexed data
-  const { body: otList } = await api("GET", `/api/v1/ontologies/${ontologyId}/objectTypes`);
+  const { body: otList } = await api("GET", `/api/v1/ontology/${ontologyId}/objectTypes`);
   if (!otList?.data || otList.data.length === 0) {
     console.log("  [SKIP] No object types found for view benchmark");
     return null;
@@ -163,7 +163,7 @@ async function benchmarkObjectView(ontologyId: string): Promise<BenchmarkResult 
 // Benchmark 4: Batch Object View Throughput
 // ---------------------------------------------------------------------------
 async function benchmarkBatchView(ontologyId: string): Promise<BenchmarkResult | null> {
-  const { body: otList } = await api("GET", `/api/v1/ontologies/${ontologyId}/objectTypes`);
+  const { body: otList } = await api("GET", `/api/v1/ontology/${ontologyId}/objectTypes`);
   if (!otList?.data || otList.data.length === 0) return null;
 
   const otApiName = otList.data[0].apiName;
@@ -212,11 +212,11 @@ async function main() {
 
   // Get or create an ontology
   let ontologyId: string;
-  const { body: ontList } = await api("GET", "/api/v1/ontologies?pageSize=1");
+  const { body: ontList } = await api("GET", "/api/v1/ontology?pageSize=1");
   if (ontList?.data?.length > 0) {
     ontologyId = ontList.data[0].ontologyId;
   } else {
-    const { body: created } = await api("POST", "/api/v1/ontologies", {
+    const { body: created } = await api("POST", "/api/v1/ontology", {
       displayName: "Sunday Benchmark Ontology",
     });
     ontologyId = created.data?.ontologyId || created.ontologyId;

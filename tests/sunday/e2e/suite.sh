@@ -59,13 +59,13 @@ assert_status "$HTTP_STATUS" "200" "Health endpoint returns 200"
 # ===========================================================================
 section "2. Setup: Ontology and Object Types"
 
-do_request POST /api/v1/ontologies '{"displayName":"E2E Sunday Ontology","description":"Sunday E2E testing"}'
+do_request POST /api/v1/ontology '{"displayName":"E2E Sunday Ontology","description":"Sunday E2E testing"}'
 assert_status "$HTTP_STATUS" "201" "Create ontology"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "ontologyId returned"
 
 # Airport
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/batch" '{
   "apiName":"E2eAirport",
   "displayName":"E2E Airport",
   "properties":[
@@ -81,7 +81,7 @@ do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
 assert_status "$HTTP_STATUS" "201" "Create E2eAirport"
 
 # Warehouse
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/batch" '{
   "apiName":"E2eWarehouse",
   "displayName":"E2E Warehouse",
   "properties":[
@@ -328,21 +328,21 @@ do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/interfaces/E2eHasLocation"
 assert_status "$HTTP_STATUS" "204" "Delete E2eHasLocation interface"
 
 # Delete object types
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/E2eAirport"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2eAirport"
 assert_status "$HTTP_STATUS" "204" "Delete E2eAirport"
 
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/E2eWarehouse"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2eWarehouse"
 assert_status "$HTTP_STATUS" "204" "Delete E2eWarehouse"
 
 # Verify gone
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/E2eAirport"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2eAirport"
 assert_status "$HTTP_STATUS" "404" "E2eAirport gone"
 
 # Delete ontology
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
 assert_status "$HTTP_STATUS" "204" "Delete ontology"
 
-do_request GET "/api/v1/ontologies/${ONTOLOGY_ID}"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}"
 assert_status "$HTTP_STATUS" "404" "Ontology gone"
 
 # ===========================================================================

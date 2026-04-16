@@ -91,13 +91,13 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.1 Setup: ontology + Employee type + upload + register + reindex
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontology", {
       displayName: "Edit Preservation Test",
       description: "Test 02 — edit preservation",
     });
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
-    await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Employee",
       displayName: "Employee",
       primaryKeyProperty: "employeeId",
@@ -125,7 +125,7 @@ async function run() {
     });
     datasetId = upRes.body?.data?.dataset?.datasetId ?? null;
 
-    await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/Employee/datasource`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`, {
       datasetId,
       columnMapping: {
         employeeId: "emp_id", fullName: "full_name", email: "email",
@@ -142,7 +142,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.2 Create updateEmployeeSalary action type
     // -----------------------------------------------------------------------
-    const actRes = await api("POST", `/api/v1/ontologies/${ontologyId}/actionTypes`, {
+    const actRes = await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
       apiName: "updateEmployeeSalary",
       displayName: "Update Employee Salary",
       parameters: [
@@ -168,7 +168,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.4 Update EMP-0001 salary to 999999
     // -----------------------------------------------------------------------
-    const applyRes = await api("POST", `/api/v1/ontologies/${ontologyId}/actions/updateEmployeeSalary/apply`, {
+    const applyRes = await api("POST", `/api/v1/ontology/${ontologyId}/actions/updateEmployeeSalary/apply`, {
       parameters: { employeeId: "EMP-0001", newSalary: 999999 },
     });
     assert(applyRes.status === 200, "2.4 Update EMP-0001 salary to 999999", `status=${applyRes.status}`);
@@ -204,7 +204,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.9 Create createEmployee action type
     // -----------------------------------------------------------------------
-    const createActRes = await api("POST", `/api/v1/ontologies/${ontologyId}/actionTypes`, {
+    const createActRes = await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
       apiName: "createEmployee",
       displayName: "Create Employee",
       parameters: [
@@ -231,7 +231,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.10 Create new employee EMP-NEW-TEST via action
     // -----------------------------------------------------------------------
-    const createEmpRes = await api("POST", `/api/v1/ontologies/${ontologyId}/actions/createEmployee/apply`, {
+    const createEmpRes = await api("POST", `/api/v1/ontology/${ontologyId}/actions/createEmployee/apply`, {
       parameters: {
         employeeId: "EMP-NEW-TEST",
         fullName: "New Test Employee",
@@ -258,7 +258,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.13 Create deleteEmployee action type
     // -----------------------------------------------------------------------
-    const delActRes = await api("POST", `/api/v1/ontologies/${ontologyId}/actionTypes`, {
+    const delActRes = await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
       apiName: "deleteEmployee",
       displayName: "Delete Employee",
       parameters: [
@@ -275,7 +275,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.14 Delete EMP-0002 via action
     // -----------------------------------------------------------------------
-    const deleteRes = await api("POST", `/api/v1/ontologies/${ontologyId}/actions/deleteEmployee/apply`, {
+    const deleteRes = await api("POST", `/api/v1/ontology/${ontologyId}/actions/deleteEmployee/apply`, {
       parameters: { employeeId: "EMP-0002" },
     });
     assert(deleteRes.status === 200, "2.14 Delete EMP-0002 via action", `status=${deleteRes.status}`);
@@ -298,7 +298,7 @@ async function run() {
     // Cleanup
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
-    if (ontologyId) await api("DELETE", `/api/v1/ontologies/${ontologyId}`).catch(() => {});
+    if (ontologyId) await api("DELETE", `/api/v1/ontology/${ontologyId}`).catch(() => {});
     if (datasetId) await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`).catch(() => {});
     if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }

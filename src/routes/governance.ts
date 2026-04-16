@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Governance routes — Ontology Platform spec Task 30
 // ---------------------------------------------------------------------------
-// Mounted at /api/v1/ontologies/:ontologyId/governance
+// Mounted at /api/v1/ontology/:ontologyId/governance
 //   GET  /lineage/:objectTypeApiName     — lineage DAG up to depth 5
 //   POST /pii-scans/:objectTypeApiName   — trigger a PII scan
 //   GET  /pii-scans/:objectTypeApiName   — list scan results

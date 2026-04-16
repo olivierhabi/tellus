@@ -10,9 +10,9 @@ set -uo pipefail
 
 API="${API:-http://localhost:3000}"
 # Resolve the real ontology UUID from the backend rather than using a literal.
-ONTOLOGY_ID="${ONTOLOGY_ID:-$(curl -s "$API/api/v1/ontologies" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["data"][0]["ontologyId"])' 2>/dev/null)}"
+ONTOLOGY_ID="${ONTOLOGY_ID:-$(curl -s "$API/api/v1/ontology" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["data"][0]["ontologyId"])' 2>/dev/null)}"
 if [[ -z "$ONTOLOGY_ID" ]]; then
-  echo "Could not resolve ontology id from $API/api/v1/ontologies"
+  echo "Could not resolve ontology id from $API/api/v1/ontology"
   exit 1
 fi
 
@@ -89,15 +89,15 @@ check "§2.6 Prometheus metrics exposed with spec names" \
   "ontology_kafka_consumer_lag\\|ontology_es_cluster_health"
 
 check "§2.1 error envelope on 404 (object type not found)" \
-  "curl -s $API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/__nope__" \
+  "curl -s $API/api/v1/ontology/$ONTOLOGY_ID/objectTypes/__nope__" \
   '"errorCode"'
 
 check "§2.1 error envelope carries requestId" \
-  "curl -s $API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/__nope__" \
+  "curl -s $API/api/v1/ontology/$ONTOLOGY_ID/objectTypes/__nope__" \
   '"requestId"'
 
 check "§2.1 error envelope carries statusCode" \
-  "curl -s $API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/__nope__" \
+  "curl -s $API/api/v1/ontology/$ONTOLOGY_ID/objectTypes/__nope__" \
   '"statusCode":404'
 
 # ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ TEST_API_NAME="verifyType$(date +%s)"
 CREATE_RES=$(curl -s -w "\n%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d "{\"apiName\":\"$TEST_API_NAME\",\"displayName\":\"Verify $TEST_API_NAME\",\"status\":\"active\"}" \
-  "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes")
+  "$API/api/v1/ontology/$ONTOLOGY_ID/objectTypes")
 CREATE_STATUS=$(echo "$CREATE_RES" | tail -n1)
 
 if [[ "$CREATE_STATUS" == "201" ]]; then
@@ -143,15 +143,15 @@ else
 fi
 
 check "Task 5: GET list returns pagination envelope" \
-  "curl -sf '$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes?pageSize=5'" \
+  "curl -sf '$API/api/v1/ontology/$ONTOLOGY_ID/objectTypes?pageSize=5'" \
   '"data"'
 
 check "Task 5: INVALID_API_NAME on bad apiName" \
-  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"apiName\":\"123bad\",\"displayName\":\"X\",\"status\":\"active\"}' $API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes" \
+  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"apiName\":\"123bad\",\"displayName\":\"X\",\"status\":\"active\"}' $API/api/v1/ontology/$ONTOLOGY_ID/objectTypes" \
   "INVALID_API_NAME"
 
 # Cleanup
-curl -s -X DELETE "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$TEST_API_NAME" > /dev/null
+curl -s -X DELETE "$API/api/v1/ontology/$ONTOLOGY_ID/objectTypes/$TEST_API_NAME" > /dev/null
 
 # ---------------------------------------------------------------------------
 # Task 6: Vector dims limit
@@ -159,7 +159,7 @@ curl -s -X DELETE "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/$TEST_API_NAM
 echo ""
 echo "Task 6 — Advanced property limits"
 check "Task 6: VECTOR_DIMS_EXCEEDED rejected" \
-  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"apiName\":\"x\",\"displayName\":\"X\",\"baseType\":\"Vector\",\"config\":{\"dimensions\":2049}}' $API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes/__any__/properties" \
+  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"apiName\":\"x\",\"displayName\":\"X\",\"baseType\":\"Vector\",\"config\":{\"dimensions\":2049}}' $API/api/v1/ontology/$ONTOLOGY_ID/objectTypes/__any__/properties" \
   "errorCode"
 
 # ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ check "Task 6: VECTOR_DIMS_EXCEEDED rejected" \
 echo ""
 echo "Task 7 — Link traversal depth"
 check "Task 7: MAX_LINK_DEPTH_EXCEEDED rejected" \
-  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"direction\":\"forward\",\"maxDepth\":4}' $API/api/v1/ontologies/$ONTOLOGY_ID/linkTypes/__any__/searchAround" \
+  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"direction\":\"forward\",\"maxDepth\":4}' $API/api/v1/ontology/$ONTOLOGY_ID/linkTypes/__any__/searchAround" \
   "errorCode"
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ BRANCH_NAME="verify-$(date +%s)"
 CREATE_BR=$(curl -s -w "\n%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d "{\"name\":\"$BRANCH_NAME\"}" \
-  "$API/api/v1/ontologies/$ONTOLOGY_ID/branches")
+  "$API/api/v1/ontology/$ONTOLOGY_ID/branches")
 BR_STATUS=$(echo "$CREATE_BR" | tail -n1)
 if [[ "$BR_STATUS" == "201" ]]; then
   printf "${GREEN}✓${NC} Task 9: POST /branches → 201\n"
@@ -197,7 +197,7 @@ if [[ "$BR_STATUS" == "201" ]]; then
   # Open a proposal
   PROP_RES=$(curl -s -X POST -H "Content-Type: application/json" \
     -d '{"title":"verify"}' \
-    "$API/api/v1/ontologies/$ONTOLOGY_ID/branches/$BRANCH_NAME/proposals")
+    "$API/api/v1/ontology/$ONTOLOGY_ID/branches/$BRANCH_NAME/proposals")
   if echo "$PROP_RES" | grep -q '"proposal_id"'; then
     printf "${GREEN}✓${NC} Task 9: proposal created\n"
     PASS=$((PASS + 1))
@@ -233,7 +233,7 @@ check_status "Task 12: Flink overview via backend" \
 echo ""
 echo "Task 13 — Migration manager"
 check "Task 13: POST /migrations/plan classifies breaking ops" \
-  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"operations\":[\"property_type_change\",\"add_property\"]}' $API/api/v1/ontologies/$ONTOLOGY_ID/migrations/plan" \
+  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"operations\":[\"property_type_change\",\"add_property\"]}' $API/api/v1/ontology/$ONTOLOGY_ID/migrations/plan" \
   '"breaking"'
 
 # ---------------------------------------------------------------------------
@@ -252,12 +252,12 @@ echo ""
 echo "Task 15 — Groups"
 GROUP_NAME="verifyGroup$(date +%s)"
 check_status "Task 15: POST group" \
-  "/api/v1/ontologies/$ONTOLOGY_ID/groups" 201 POST \
+  "/api/v1/ontology/$ONTOLOGY_ID/groups" 201 POST \
   "{\"apiName\":\"$GROUP_NAME\",\"displayName\":\"Verify Group\"}"
 check "Task 15: graph returns nodes+edges" \
-  "curl -sf $API/api/v1/ontologies/$ONTOLOGY_ID/groups/graph" \
+  "curl -sf $API/api/v1/ontology/$ONTOLOGY_ID/groups/graph" \
   '"nodes"'
-curl -s -X DELETE "$API/api/v1/ontologies/$ONTOLOGY_ID/groups/$GROUP_NAME" > /dev/null
+curl -s -X DELETE "$API/api/v1/ontology/$ONTOLOGY_ID/groups/$GROUP_NAME" > /dev/null
 
 # ---------------------------------------------------------------------------
 # Task 16: Idempotency-Key header recognized
@@ -285,12 +285,12 @@ echo "Task 18 — Function registry"
 
 FN_NAME="verifyFn$(date +%s)"
 check_status "Task 18: POST /functions" \
-  "/api/v1/ontologies/$ONTOLOGY_ID/functions" 201 POST \
+  "/api/v1/ontology/$ONTOLOGY_ID/functions" 201 POST \
   "{\"apiName\":\"$FN_NAME\",\"displayName\":\"Verify Fn\",\"runtime\":\"typescript\",\"sourceCode\":\"module.exports = (i) => ({ echoed: i });\"}"
 
 INVOKE_RES=$(curl -s -X POST -H "Content-Type: application/json" \
   -d '{"input":{"hello":"world"}}' \
-  "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$FN_NAME/invoke")
+  "$API/api/v1/ontology/$ONTOLOGY_ID/functions/$FN_NAME/invoke")
 if echo "$INVOKE_RES" | grep -q '"echoed"'; then
   printf "${GREEN}✓${NC} Task 18: sandboxed function returns echoed output\n"
   PASS=$((PASS + 1))
@@ -304,12 +304,12 @@ fi
 TIMEOUT_FN="verifyTimeout$(date +%s)"
 curl -s -X POST -H "Content-Type: application/json" \
   -d "{\"apiName\":\"$TIMEOUT_FN\",\"displayName\":\"Timeout\",\"runtime\":\"typescript\",\"sourceCode\":\"module.exports = () => { while(true) {} };\"}" \
-  "$API/api/v1/ontologies/$ONTOLOGY_ID/functions" > /dev/null
+  "$API/api/v1/ontology/$ONTOLOGY_ID/functions" > /dev/null
 
 TIMEOUT_START=$(date +%s)
 TIMEOUT_RES=$(curl -s --max-time 10 -X POST -H "Content-Type: application/json" \
   -d '{"input":null}' \
-  "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$TIMEOUT_FN/invoke")
+  "$API/api/v1/ontology/$ONTOLOGY_ID/functions/$TIMEOUT_FN/invoke")
 TIMEOUT_ELAPSED=$(($(date +%s) - TIMEOUT_START))
 
 if echo "$TIMEOUT_RES" | grep -q "FUNCTION_TIMEOUT" && [[ "$TIMEOUT_ELAPSED" -lt 8 ]]; then
@@ -321,8 +321,8 @@ else
   FAILED_TASKS+=("Task 18 timeout")
 fi
 
-curl -s -X DELETE "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$FN_NAME" > /dev/null
-curl -s -X DELETE "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$TIMEOUT_FN" > /dev/null
+curl -s -X DELETE "$API/api/v1/ontology/$ONTOLOGY_ID/functions/$FN_NAME" > /dev/null
+curl -s -X DELETE "$API/api/v1/ontology/$ONTOLOGY_ID/functions/$TIMEOUT_FN" > /dev/null
 
 # ---------------------------------------------------------------------------
 # Task 19: Summary endpoint
@@ -330,7 +330,7 @@ curl -s -X DELETE "$API/api/v1/ontologies/$ONTOLOGY_ID/functions/$TIMEOUT_FN" > 
 echo ""
 echo "Task 19 — Summary endpoint"
 check_status "Task 19: GET /summary (home bundle)" \
-  "/api/v1/ontologies/$ONTOLOGY_ID/summary" 200
+  "/api/v1/ontology/$ONTOLOGY_ID/summary" 200
 
 # ---------------------------------------------------------------------------
 # Task 20: Search sanitization
@@ -356,7 +356,7 @@ check "Task 21: charts/histogram endpoint reachable" \
 echo ""
 echo "Task 22 — Geo"
 check "Task 22: geohash endpoint returns precision" \
-  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"geopointProperty\":\"loc\",\"zoom\":5}' $API/api/v1/ontologies/$ONTOLOGY_ID/geo/flight/geohash" \
+  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"geopointProperty\":\"loc\",\"zoom\":5}' $API/api/v1/ontology/$ONTOLOGY_ID/geo/flight/geohash" \
   '"precision"'
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ check "Task 22: geohash endpoint returns precision" \
 echo ""
 echo "Task 26 — Comparisons"
 check "Task 26: comparison returns palette" \
-  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"objectTypeApiName\":\"flight\",\"setA\":{\"label\":\"A\",\"filter\":[]},\"setB\":{\"label\":\"B\",\"filter\":[]},\"aggregation\":{\"type\":\"terms\",\"field\":\"status\"}}' $API/api/v1/ontologies/$ONTOLOGY_ID/comparisons/aggregate" \
+  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"objectTypeApiName\":\"flight\",\"setA\":{\"label\":\"A\",\"filter\":[]},\"setB\":{\"label\":\"B\",\"filter\":[]},\"aggregation\":{\"type\":\"terms\",\"field\":\"status\"}}' $API/api/v1/ontology/$ONTOLOGY_ID/comparisons/aggregate" \
   '"palette"'
 
 # ---------------------------------------------------------------------------
@@ -375,7 +375,7 @@ echo ""
 echo "Task 27 — Exports"
 EXPORT_RES=$(curl -s -X POST -H "Content-Type: application/json" \
   -d '{"format":"csv","query":{}}' \
-  "$API/api/v1/ontologies/$ONTOLOGY_ID/exports")
+  "$API/api/v1/ontology/$ONTOLOGY_ID/exports")
 if echo "$EXPORT_RES" | grep -q '"job_id"'; then
   JOB_ID=$(echo "$EXPORT_RES" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])' 2>/dev/null)
   printf "${GREEN}✓${NC} Task 27: export job enqueued (%s)\n" "${JOB_ID:0:8}"
@@ -383,7 +383,7 @@ if echo "$EXPORT_RES" | grep -q '"job_id"'; then
 
   # Poll to completion
   for i in 1 2 3 4 5; do
-    POLL=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/exports/$JOB_ID")
+    POLL=$(curl -s "$API/api/v1/ontology/$ONTOLOGY_ID/exports/$JOB_ID")
     STATUS=$(echo "$POLL" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' 2>/dev/null)
     if [[ "$STATUS" == "COMPLETED" ]]; then
       printf "${GREEN}✓${NC} Task 27: export polled to COMPLETED after %ss\n" "$i"
@@ -421,14 +421,14 @@ check "Task 29: DDL rejected via SQL route" \
 echo ""
 echo "Task 30 — Governance"
 # Pick a real object type for the scanner to target
-FIRST_OT=$(curl -s "$API/api/v1/ontologies/$ONTOLOGY_ID/objectTypes?pageSize=1" | \
+FIRST_OT=$(curl -s "$API/api/v1/ontology/$ONTOLOGY_ID/objectTypes?pageSize=1" | \
   python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["apiName"])' 2>/dev/null)
 check "Task 30: PII scanner detects email+ssn" \
-  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"samples\":[{\"email\":\"user@example.com\",\"ssn\":\"123-45-6789\"}]}' $API/api/v1/ontologies/$ONTOLOGY_ID/governance/pii-scans/$FIRST_OT" \
+  "curl -s -X POST -H 'Content-Type: application/json' -d '{\"samples\":[{\"email\":\"user@example.com\",\"ssn\":\"123-45-6789\"}]}' $API/api/v1/ontology/$ONTOLOGY_ID/governance/pii-scans/$FIRST_OT" \
   "email"
 
 check_status "Task 30: usage sparkline returns 30 days" \
-  "/api/v1/ontologies/$ONTOLOGY_ID/governance/usage/$FIRST_OT" 200
+  "/api/v1/ontology/$ONTOLOGY_ID/governance/usage/$FIRST_OT" 200
 
 # ---------------------------------------------------------------------------
 # Summary

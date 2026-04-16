@@ -36,7 +36,7 @@ async function main() {
   runner.section("Ontology Setup");
 
   await runner.test("Create ontology", async () => {
-    const { status, body } = await api("POST", "/api/v1/ontologies", {
+    const { status, body } = await api("POST", "/api/v1/ontology", {
       displayName: "Saturday Standalone Test",
     });
     runner.assert(status === 201, `Expected 201, got ${status}`);
@@ -44,7 +44,7 @@ async function main() {
   });
 
   await runner.test("Create Employee object type", async () => {
-    const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+    const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/batch`, {
       apiName: "StandaloneEmployee",
       displayName: "Standalone Employee",
       properties: [
@@ -69,7 +69,7 @@ async function main() {
 
   await runner.test("Register datasource", async () => {
     const { status } = await api("POST",
-      `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/StandaloneEmployee/datasource`, {
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/StandaloneEmployee/datasource`, {
         datasetName: "Standalone Dataset",
         filePath: ctx.employeeCsvPath,
         fileFormat: "csv",
@@ -95,7 +95,7 @@ async function main() {
   runner.section("Cleanup");
 
   await runner.test("Delete ontology (cascade)", async () => {
-    const { status } = await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
+    const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
     runner.assert(status === 204, `Expected 204, got ${status}`);
   });
 

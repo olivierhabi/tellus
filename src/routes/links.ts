@@ -4,7 +4,7 @@
 // CRUD for link types plus resolution, counting, Search Around, multi-hop,
 // analysis, export/import, and join table upload endpoints.
 //
-// Mounted at: /api/v1/ontologies/:ontologyId/linkTypes
+// Mounted at: /api/v1/ontology/:ontologyId/linkTypes
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";

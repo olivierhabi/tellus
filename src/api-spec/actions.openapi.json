@@ -41,7 +41,7 @@
     }
   ],
   "paths": {
-    "/api/v1/ontologies/{ontologyId}/actionTypes": {
+    "/api/v1/ontology/{ontologyId}/actionTypes": {
       "post": {
         "operationId": "createActionType",
         "summary": "Create a new action type",
@@ -130,7 +130,7 @@
         }
       }
     },
-    "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}": {
+    "/api/v1/ontology/{ontologyId}/actionTypes/{actionApiName}": {
       "get": {
         "operationId": "getActionType",
         "summary": "Get a single action type",
@@ -241,7 +241,7 @@
         }
       }
     },
-    "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone": {
+    "/api/v1/ontology/{ontologyId}/actionTypes/{actionApiName}/clone": {
       "post": {
         "operationId": "cloneActionType",
         "summary": "Clone an action type",
@@ -295,7 +295,7 @@
         }
       }
     },
-    "/api/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact": {
+    "/api/v1/ontology/{ontologyId}/actionTypes/{actionApiName}/impact": {
       "get": {
         "operationId": "getActionTypeImpact",
         "summary": "Analyze action type impact",
@@ -325,7 +325,7 @@
         }
       }
     },
-    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply": {
+    "/api/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/apply": {
       "post": {
         "operationId": "applyAction",
         "summary": "Execute an action",
@@ -397,7 +397,7 @@
         }
       }
     },
-    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate": {
+    "/api/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/validate": {
       "post": {
         "operationId": "validateAction",
         "summary": "Validate an action (dry run)",
@@ -443,7 +443,7 @@
         }
       }
     },
-    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch": {
+    "/api/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/applyBatch": {
       "post": {
         "operationId": "applyBatchAction",
         "summary": "Execute a batch of actions",
@@ -489,7 +489,7 @@
         }
       }
     },
-    "/api/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit": {
+    "/api/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/audit": {
       "get": {
         "operationId": "getActionAuditLog",
         "summary": "Get audit log for an action type",

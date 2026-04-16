@@ -1,6 +1,6 @@
 # TASK 18 OF 30: Backing Datasource Routes
 
-**Objective:** Create Express routes for datasource registration and management, nested under object types at `/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource`.
+**Objective:** Create Express routes for datasource registration and management, nested under object types at `/api/v1/ontology/:ontologyId/objectTypes/:apiName/datasource`.
 
 **Step-by-step instructions:**
 
@@ -55,7 +55,7 @@ Re-scan the file without reindexing. Useful when the file has been updated exter
 **Registration in src/server.js:**
 ```javascript
 const datasourceRouter = require('./routes/datasources');
-app.use('/api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource', datasourceRouter);
+app.use('/api/v1/ontology/:ontologyId/objectTypes/:apiName/datasource', datasourceRouter);
 ```
 
 **Files to create:** src/routes/datasources.js

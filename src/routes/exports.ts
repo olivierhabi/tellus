@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Async Export Jobs — Ontology Platform spec Task 27
 // ---------------------------------------------------------------------------
-// Mounted at /api/v1/ontologies/:ontologyId/exports
+// Mounted at /api/v1/ontology/:ontologyId/exports
 //   POST   /                       — enqueue a new export job (returns 202)
 //   GET    /                       — list the current user's jobs
 //   GET    /:jobId                 — poll a job

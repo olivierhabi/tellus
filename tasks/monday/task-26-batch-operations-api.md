@@ -4,7 +4,7 @@
 
 **Step-by-step instructions:**
 
-**Endpoint 1: POST /api/v1/ontologies/:ontologyId/objectTypes/batch**
+**Endpoint 1: POST /api/v1/ontology/:ontologyId/objectTypes/batch**
 
 Create a single object type WITH all its properties, primary key, and title in one atomic request. Add this route to src/routes/objectTypes.js.
 
@@ -42,7 +42,7 @@ Implementation: Add a `batchCreate` method to src/services/objectTypeService.js.
 
 Return HTTP 201 with the full object type (formatted via `formatObjectType` with all created properties, null datasource, and the created funnelState). This ensures atomicity — if any property creation fails (e.g., invalid baseType), the entire object type creation is rolled back.
 
-**Endpoint 2: POST /api/v1/ontologies/:ontologyId/objectTypes/:apiName/properties/batch**
+**Endpoint 2: POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/properties/batch**
 
 Add multiple properties to an existing object type in a single atomic request. Add this route to src/routes/properties.js.
 

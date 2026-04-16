@@ -21,14 +21,14 @@ describe("Query Aggregations (Task 28)", () => {
       return;
     }
 
-    const { body } = await api("POST", "/api/v1/ontologies", {
+    const { body } = await api("POST", "/api/v1/ontology", {
       displayName: "T28 Agg Test",
       description: "Task 28",
     });
     ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
     if (!ONTOLOGY_ID) return;
 
-    await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T28Employee",
       displayName: "T28 Employee",
       description: "Test",
@@ -43,14 +43,14 @@ describe("Query Aggregations (Task 28)", () => {
       { apiName: "isActive", displayName: "Is Active", baseType: "boolean" },
     ];
     for (const p of props) {
-      await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/T28Employee/properties`, p);
+      await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/T28Employee/properties`, p);
     }
 
     READY = true;
   }, 30_000);
 
   afterAll(async () => {
-    if (ONTOLOGY_ID) await api("DELETE", `/api/v1/ontologies/${ONTOLOGY_ID}`);
+    if (ONTOLOGY_ID) await api("DELETE", `/api/v1/ontology/${ONTOLOGY_ID}`);
   }, 10_000);
 
   // 1. Count aggregation

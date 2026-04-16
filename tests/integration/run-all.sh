@@ -50,7 +50,7 @@ start_server() {
   for i in $(seq 1 30); do
     if curl -sf "http://localhost:3000/health" >/dev/null 2>&1; then
       # Also verify DB connectivity by checking ontologies endpoint
-      if curl -sf "http://localhost:3000/api/v1/ontologies" | grep -q "ontologyId" 2>/dev/null; then
+      if curl -sf "http://localhost:3000/api/v1/ontology" | grep -q "ontologyId" 2>/dev/null; then
         echo " ready (PID ${SERVER_PID})."
         return 0
       fi

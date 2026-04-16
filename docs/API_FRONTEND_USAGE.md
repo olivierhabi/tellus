@@ -148,49 +148,49 @@
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies` | List all ontologies | Y |
-| `POST` | `/v2/ontologies` | Create an ontology | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}` | Delete an ontology | Y |
-| `GET` | `/v2/ontologies/{ontologyId}` | Get a single ontology | Y |
-| `PUT` | `/v2/ontologies/{ontologyId}` | Update ontology metadata | Y |
+| `GET` | `/v2/ontology` | List all ontologies | Y |
+| `POST` | `/v2/ontology` | Create an ontology | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}` | Delete an ontology | Y |
+| `GET` | `/v2/ontology/{ontologyId}` | Get a single ontology | Y |
+| `PUT` | `/v2/ontology/{ontologyId}` | Update ontology metadata | Y |
 
 ## Object Types (9/9 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/objectTypes` | List object types in an ontology | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes` | Create an object type (metadata only — no properties) | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/batch` | Atomically create an object type + properties + primary key + tit... | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/objectTypes/by-id/{objectTypeId}` | Get an object type by UUID (stable across renames) | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}` | Delete an object type and all its properties | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}` | Get an object type with its properties, datasource, indexing stat... | Y |
-| `PUT` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}` | Update object type metadata (also supports apiName rename) | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/changeStatus` | Change the lifecycle status of an object type | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/clone` | Clone an object type with a new apiName | Y |
+| `GET` | `/v2/ontology/{ontologyId}/objectTypes` | List object types in an ontology | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes` | Create an object type (metadata only — no properties) | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/batch` | Atomically create an object type + properties + primary key + tit... | Y |
+| `GET` | `/v2/ontology/{ontologyId}/objectTypes/by-id/{objectTypeId}` | Get an object type by UUID (stable across renames) | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}` | Delete an object type and all its properties | Y |
+| `GET` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}` | Get an object type with its properties, datasource, indexing stat... | Y |
+| `PUT` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}` | Update object type metadata (also supports apiName rename) | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/changeStatus` | Change the lifecycle status of an object type | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/clone` | Clone an object type with a new apiName | Y |
 
 ## Properties (7/7 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/primaryKey` | Set a property as the primary key | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties` | List properties on an object type | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties` | Create a property on an object type | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/batch` | Create multiple properties on an object type in one call | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}` | Delete a property | Y |
-| `PUT` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}` | Update a property | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/titleProperty` | Set a property as the object title | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/primaryKey` | Set a property as the primary key | Y |
+| `GET` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/properties` | List properties on an object type | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/properties` | Create a property on an object type | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/properties/batch` | Create multiple properties on an object type in one call | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}` | Delete a property | Y |
+| `PUT` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}` | Update a property | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/titleProperty` | Set a property as the object title | Y |
 
 ## Link Types (7/7 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/linkTypes` | List link types | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/linkTypes` | Create a link type | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}/linkTypes/{apiName}` | Delete a link type | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/linkTypes/{apiName}` | Get a link type | Y |
-| `PUT` | `/v2/ontologies/{ontologyId}/linkTypes/{apiName}` | Update a link type | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/linkTypes/{apiName}/resolve` | Resolve link instances around a source object | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/linkTypes/{apiName}/searchAround` | Search around an object — return all related objects via this lin... | Y |
+| `GET` | `/v2/ontology/{ontologyId}/linkTypes` | List link types | Y |
+| `POST` | `/v2/ontology/{ontologyId}/linkTypes` | Create a link type | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/linkTypes/{apiName}` | Delete a link type | Y |
+| `GET` | `/v2/ontology/{ontologyId}/linkTypes/{apiName}` | Get a link type | Y |
+| `PUT` | `/v2/ontology/{ontologyId}/linkTypes/{apiName}` | Update a link type | Y |
+| `POST` | `/v2/ontology/{ontologyId}/linkTypes/{apiName}/resolve` | Resolve link instances around a source object | Y |
+| `POST` | `/v2/ontology/{ontologyId}/linkTypes/{apiName}/searchAround` | Search around an object — return all related objects via this lin... | Y |
 
 ## Interfaces (2/2 — 100%)
 
@@ -222,98 +222,98 @@
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/groups` | List object type groups with member counts | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/groups` | Create an object type group | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/groups/graph` | Cytoscape-style group→objectType graph (max 200 nodes) | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}/groups/{groupApiName}` | Delete a group | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/groups/{groupApiName}/counts` | Cached OpenSearch doc counts per object type in a group (60 s TTL... | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/groups/{groupApiName}/members` | Add an object type to a group (idempotent) | Y |
+| `GET` | `/v2/ontology/{ontologyId}/groups` | List object type groups with member counts | Y |
+| `POST` | `/v2/ontology/{ontologyId}/groups` | Create an object type group | Y |
+| `GET` | `/v2/ontology/{ontologyId}/groups/graph` | Cytoscape-style group→objectType graph (max 200 nodes) | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/groups/{groupApiName}` | Delete a group | Y |
+| `GET` | `/v2/ontology/{ontologyId}/groups/{groupApiName}/counts` | Cached OpenSearch doc counts per object type in a group (60 s TTL... | Y |
+| `POST` | `/v2/ontology/{ontologyId}/groups/{groupApiName}/members` | Add an object type to a group (idempotent) | Y |
 
 ## Branches (7/7 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/branches` | List branches for an ontology | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/branches` | Create a new branch (max 50 open per ontology) | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}/branches/{branchName}` | Close a branch (soft-delete) | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/branches/{branchName}` | Get branch detail with proposals | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/branches/{branchName}/merge` | Merge branch into parent (requires at least one approved proposal... | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/branches/{branchName}/proposals` | Open a new proposal on a branch | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/branches/{branchName}/proposals/{proposalId}/approve` | Approve an open proposal | Y |
+| `GET` | `/v2/ontology/{ontologyId}/branches` | List branches for an ontology | Y |
+| `POST` | `/v2/ontology/{ontologyId}/branches` | Create a new branch (max 50 open per ontology) | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/branches/{branchName}` | Close a branch (soft-delete) | Y |
+| `GET` | `/v2/ontology/{ontologyId}/branches/{branchName}` | Get branch detail with proposals | Y |
+| `POST` | `/v2/ontology/{ontologyId}/branches/{branchName}/merge` | Merge branch into parent (requires at least one approved proposal... | Y |
+| `POST` | `/v2/ontology/{ontologyId}/branches/{branchName}/proposals` | Open a new proposal on a branch | Y |
+| `POST` | `/v2/ontology/{ontologyId}/branches/{branchName}/proposals/{proposalId}/approve` | Approve an open proposal | Y |
 
 ## Governance (5/5 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/governance/lineage/{objectTypeApiName}` | Lineage DAG for an object type (max 5 hops) | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/governance/pii-scans/{objectTypeApiName}` | List historical PII scan results | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/governance/pii-scans/{objectTypeApiName}` | Trigger a PII scan on object type data | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/governance/usage/refresh` | Refresh the usage_event_daily materialized view | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/governance/usage/{objectTypeApiName}` | 30-day read/write usage sparkline | Y |
+| `GET` | `/v2/ontology/{ontologyId}/governance/lineage/{objectTypeApiName}` | Lineage DAG for an object type (max 5 hops) | Y |
+| `GET` | `/v2/ontology/{ontologyId}/governance/pii-scans/{objectTypeApiName}` | List historical PII scan results | Y |
+| `POST` | `/v2/ontology/{ontologyId}/governance/pii-scans/{objectTypeApiName}` | Trigger a PII scan on object type data | Y |
+| `POST` | `/v2/ontology/{ontologyId}/governance/usage/refresh` | Refresh the usage_event_daily materialized view | Y |
+| `GET` | `/v2/ontology/{ontologyId}/governance/usage/{objectTypeApiName}` | 30-day read/write usage sparkline | Y |
 
 ## Summary (2/2 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/summary` | Home page bundle — object types, groups, favorites, recent activi... | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/summary/{apiName}` | Lightweight single-type summary for preview popovers | Y |
+| `GET` | `/v2/ontology/{ontologyId}/summary` | Home page bundle — object types, groups, favorites, recent activi... | Y |
+| `GET` | `/v2/ontology/{ontologyId}/summary/{apiName}` | Lightweight single-type summary for preview popovers | Y |
 
 ## Comparisons (1/1 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `POST` | `/v2/ontologies/{ontologyId}/comparisons/aggregate` | Dual-set aggregation comparison via OpenSearch msearch | Y |
+| `POST` | `/v2/ontology/{ontologyId}/comparisons/aggregate` | Dual-set aggregation comparison via OpenSearch msearch | Y |
 
 ## Explorations (5/5 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/explorations` | List saved explorations (own + shared/public) | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/explorations` | Create a saved exploration | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}/explorations/{id}` | Delete an exploration (owner only) | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/explorations/{id}` | Get a single exploration | Y |
-| `PUT` | `/v2/ontologies/{ontologyId}/explorations/{id}` | Update an exploration (owner only) | Y |
+| `GET` | `/v2/ontology/{ontologyId}/explorations` | List saved explorations (own + shared/public) | Y |
+| `POST` | `/v2/ontology/{ontologyId}/explorations` | Create a saved exploration | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/explorations/{id}` | Delete an exploration (owner only) | Y |
+| `GET` | `/v2/ontology/{ontologyId}/explorations/{id}` | Get a single exploration | Y |
+| `PUT` | `/v2/ontology/{ontologyId}/explorations/{id}` | Update an exploration (owner only) | Y |
 
 ## Exports (3/3 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/exports` | List export jobs for the current user (last 100) | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/exports` | Enqueue a new async export job | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/exports/{jobId}` | Poll export job status | Y |
+| `GET` | `/v2/ontology/{ontologyId}/exports` | List export jobs for the current user (last 100) | Y |
+| `POST` | `/v2/ontology/{ontologyId}/exports` | Enqueue a new async export job | Y |
+| `GET` | `/v2/ontology/{ontologyId}/exports/{jobId}` | Poll export job status | Y |
 
 ## Functions (6/6 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/functions` | List functions with version counts and invocation stats | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/functions` | Register a new function and publish its first version | Y |
-| `DELETE` | `/v2/ontologies/{ontologyId}/functions/{apiName}` | Delete a function | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/functions/{apiName}` | Get function detail with version history | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/functions/{apiName}/invoke` | Execute the latest version in a sandboxed runtime (5 s timeout) | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/functions/{apiName}/versions` | Publish a new version of a function | Y |
+| `GET` | `/v2/ontology/{ontologyId}/functions` | List functions with version counts and invocation stats | Y |
+| `POST` | `/v2/ontology/{ontologyId}/functions` | Register a new function and publish its first version | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/functions/{apiName}` | Delete a function | Y |
+| `GET` | `/v2/ontology/{ontologyId}/functions/{apiName}` | Get function detail with version history | Y |
+| `POST` | `/v2/ontology/{ontologyId}/functions/{apiName}/invoke` | Execute the latest version in a sandboxed runtime (5 s timeout) | Y |
+| `POST` | `/v2/ontology/{ontologyId}/functions/{apiName}/versions` | Publish a new version of a function | Y |
 
 ## Geo (2/2 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `POST` | `/v2/ontologies/{ontologyId}/geo/{objectTypeApiName}/choropleth` | Country/state term aggregation for choropleth maps | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/geo/{objectTypeApiName}/geohash` | Geohash bucket aggregation for map rendering | Y |
+| `POST` | `/v2/ontology/{ontologyId}/geo/{objectTypeApiName}/choropleth` | Country/state term aggregation for choropleth maps | Y |
+| `POST` | `/v2/ontology/{ontologyId}/geo/{objectTypeApiName}/geohash` | Geohash bucket aggregation for map rendering | Y |
 
 ## Backing Datasource (4/4 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `DELETE` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource` | Unregister the backing datasource | Y |
-| `GET` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource` | Get the registered backing datasource for an object type | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource` | Register a backing datasource for an object type | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/datasource/scan` | Re-scan the datasource and refresh column metadata | Y |
+| `DELETE` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/datasource` | Unregister the backing datasource | Y |
+| `GET` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/datasource` | Get the registered backing datasource for an object type | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/datasource` | Register a backing datasource for an object type | Y |
+| `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/datasource/scan` | Re-scan the datasource and refresh column metadata | Y |
 
 ## Indexing (2/2 — 100%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/objectTypes/{apiName}/index` | Get current indexing status for an object type | Y |
+| `GET` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/index` | Get current indexing status for an object type | Y |
 | `POST` | `/v2/ontology/{ontologyId}/objectTypes/{apiName}/reindex` | Trigger a reindex for an object type | Y |
 
 ## Edits (1/1 — 100%)
@@ -326,19 +326,19 @@
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
-| `GET` | `/v2/ontologies/{ontologyId}/migrations` | List recent migration jobs (last 100) | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/migrations/execute` | Execute a migration — reindex into a new versioned index and swap... | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/migrations/plan` | Classify proposed schema operations as breaking/non-breaking | Y |
+| `GET` | `/v2/ontology/{ontologyId}/migrations` | List recent migration jobs (last 100) | Y |
+| `POST` | `/v2/ontology/{ontologyId}/migrations/execute` | Execute a migration — reindex into a new versioned index and swap... | Y |
+| `POST` | `/v2/ontology/{ontologyId}/migrations/plan` | Classify proposed schema operations as breaking/non-breaking | Y |
 
 ## Action Types (4/5 — 80%)
 
 | Method | Endpoint | Description | FE? |
 |--------|----------|-------------|:---:|
 | `POST` | `/v2/actions/{actionTypeApiName}/applyBulk` | Bulk-apply an action type (up to 1,000 requests) | - |
-| `GET` | `/v2/ontologies/{ontologyId}/actionTypes` | List action types | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/actionTypes` | Create an action type | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply` | Execute an action with parameters (transactional) | Y |
-| `POST` | `/v2/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch` | Apply an action to up to 100 parameter sets in one transaction | Y |
+| `GET` | `/v2/ontology/{ontologyId}/actionTypes` | List action types | Y |
+| `POST` | `/v2/ontology/{ontologyId}/actionTypes` | Create an action type | Y |
+| `POST` | `/v2/ontology/{ontologyId}/actions/{actionTypeApiName}/apply` | Execute an action with parameters (transactional) | Y |
+| `POST` | `/v2/ontology/{ontologyId}/actions/{actionTypeApiName}/applyBatch` | Apply an action to up to 100 parameter sets in one transaction | Y |
 
 ## Audit (1/1 — 100%)
 

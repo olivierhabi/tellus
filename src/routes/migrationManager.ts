@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Schema Migration Manager — Ontology Platform spec Task 13
 // ---------------------------------------------------------------------------
-// Mounted at /api/v1/ontologies/:ontologyId/migrations
+// Mounted at /api/v1/ontology/:ontologyId/migrations
 //   POST /plan  — classify a proposed change as breaking vs non-breaking
 //   POST /execute — run a migration (reindex alias swap)
 //   GET  /      — list recent migrations

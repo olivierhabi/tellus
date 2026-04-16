@@ -86,7 +86,7 @@ async function cleanup() {
   console.log("\n--- Cleanup ---");
   try {
     if (ontologyId) {
-      await api("DELETE", `/api/v1/ontologies/${ontologyId}`);
+      await api("DELETE", `/api/v1/ontology/${ontologyId}`);
       console.log("  Deleted ontology");
     }
   } catch { /* best effort */ }
@@ -127,7 +127,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("7.1  Setup ontology + Employee type");
 
-  const ontRes = await api("POST", "/api/v1/ontologies", {
+  const ontRes = await api("POST", "/api/v1/ontology", {
     displayName: "Test07 Mapping Suggestions",
   });
   assert(ontRes.status === 201, "Ontology created");
@@ -135,7 +135,7 @@ async function main() {
 
   const otRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee",

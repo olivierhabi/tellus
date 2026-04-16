@@ -3,7 +3,7 @@
 //
 // Routes for backing datasource management, nested under object types.
 // Mounted at:
-//   /api/v1/ontologies/:ontologyId/objectTypes/:apiName/datasource
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/datasource
 //
 // Provides 4 endpoints:
 //   POST   /          — Register a backing datasource

@@ -131,14 +131,14 @@ async function run() {
     // -----------------------------------------------------------------------
     // 4.1 Setup: ontology + Employee type + Company type
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontology", {
       displayName: "Link Traversal Test",
       description: "Test 04 — link traversal after reindex",
     });
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
     // Create Employee type
-    const empOtRes = await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
+    const empOtRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Employee",
       displayName: "Employee",
       primaryKeyProperty: "employeeId",
@@ -153,7 +153,7 @@ async function run() {
     });
 
     // Create Company type
-    const compOtRes = await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
+    const compOtRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Company",
       displayName: "Company",
       primaryKeyProperty: "companyId",
@@ -203,7 +203,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 4.3 Register datasources + reindex both
     // -----------------------------------------------------------------------
-    await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/Employee/datasource`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`, {
       datasetId: empDatasetId,
       columnMapping: {
         employeeId: "emp_id",
@@ -214,7 +214,7 @@ async function run() {
       },
     });
 
-    await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/Company/datasource`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Company/datasource`, {
       datasetId: compDatasetId,
       columnMapping: {
         companyId: "company_id",
@@ -240,7 +240,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 4.4 Create MANY_TO_ONE link type: Employee→Company
     // -----------------------------------------------------------------------
-    const linkRes = await api("POST", `/api/v1/ontologies/${ontologyId}/linkTypes`, {
+    const linkRes = await api("POST", `/api/v1/ontology/${ontologyId}/linkTypes`, {
       apiName: "employeeCompany",
       displayName: "Employee Company",
       description: "Links employees to their company",
@@ -319,7 +319,7 @@ async function run() {
     // Cleanup
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
-    if (ontologyId) await api("DELETE", `/api/v1/ontologies/${ontologyId}`).catch(() => {});
+    if (ontologyId) await api("DELETE", `/api/v1/ontology/${ontologyId}`).catch(() => {});
     if (empDatasetId) await api("DELETE", `/api/v1/datasets/${empDatasetId}?force=true`).catch(() => {});
     if (compDatasetId) await api("DELETE", `/api/v1/datasets/${compDatasetId}?force=true`).catch(() => {});
     for (const f of tmpFiles) {

@@ -48,25 +48,25 @@ done
 section "1. Setup: Ontology, Object Type, Properties"
 
 # Clean up any pre-existing test ontology first
-do_request GET /api/v1/ontologies
+do_request GET /api/v1/ontology
 OLD_ID=$(echo "$HTTP_BODY" | grep -o '"ontologyId":"[^"]*"' | while read -r line; do
   OID=$(echo "$line" | sed 's/"ontologyId":"//;s/"//')
-  do_request GET "/api/v1/ontologies/${OID}"
+  do_request GET "/api/v1/ontology/${OID}"
   if echo "$HTTP_BODY" | grep -q "E2E Wednesday Ontology"; then
     echo "$OID"
     break
   fi
 done)
 if [[ -n "${OLD_ID:-}" ]]; then
-  do_request DELETE "/api/v1/ontologies/${OLD_ID}"
+  do_request DELETE "/api/v1/ontology/${OLD_ID}"
 fi
 
-do_request POST /api/v1/ontologies '{"displayName":"E2E Wednesday Ontology","description":"Wednesday E2E testing"}'
+do_request POST /api/v1/ontology '{"displayName":"E2E Wednesday Ontology","description":"Wednesday E2E testing"}'
 assert_status "$HTTP_STATUS" "201" "Create E2E Wednesday ontology"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "Ontology ID returned"
 
-do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes" '{"apiName":"WedTestEmployee","displayName":"Wed Test Employee","description":"Wednesday test"}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes" '{"apiName":"WedTestEmployee","displayName":"Wed Test Employee","description":"Wednesday test"}'
 assert_status "$HTTP_STATUS" "201" "Create WedTestEmployee object type"
 
 # Create properties
@@ -77,7 +77,7 @@ for PROP_JSON in \
   '{"apiName":"department","displayName":"Department","baseType":"string"}' \
   '{"apiName":"isActive","displayName":"Is Active","baseType":"boolean"}' \
   '{"apiName":"startDate","displayName":"Start Date","baseType":"date"}'; do
-  do_request POST "/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedTestEmployee/properties" "$PROP_JSON"
+  do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/WedTestEmployee/properties" "$PROP_JSON"
   PROP_NAME=$(echo "$PROP_JSON" | grep -o '"apiName":"[^"]*"' | head -1 | sed 's/"apiName":"//;s/"//')
   assert_status "$HTTP_STATUS" "201" "Create property: $PROP_NAME"
 done
@@ -233,7 +233,7 @@ assert_status "$HTTP_STATUS" "200" "\$select with valid fields accepted"
 # ===========================================================================
 section "Cleanup"
 
-do_request DELETE "/api/v1/ontologies/${ONTOLOGY_ID}"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
 if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
   pass "Deleted test ontology"
 else

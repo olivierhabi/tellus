@@ -102,13 +102,13 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.1 Setup: ontology + Product type
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontology", {
       displayName: "Multi-Transaction Test",
       description: "Test 03 — append and snapshot",
     });
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
-    const otRes = await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/batch`, {
+    const otRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Product",
       displayName: "Product",
       primaryKeyProperty: "productId",
@@ -140,7 +140,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.3 Register datasource + reindex (50 objects)
     // -----------------------------------------------------------------------
-    await api("POST", `/api/v1/ontologies/${ontologyId}/objectTypes/Product/datasource`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Product/datasource`, {
       datasetId,
       columnMapping: {
         productId: "product_id",
@@ -280,7 +280,7 @@ async function run() {
     // Cleanup
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
-    if (ontologyId) await api("DELETE", `/api/v1/ontologies/${ontologyId}`).catch(() => {});
+    if (ontologyId) await api("DELETE", `/api/v1/ontology/${ontologyId}`).catch(() => {});
     if (datasetId) await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`).catch(() => {});
     for (const f of tmpFiles) {
       if (fs.existsSync(f)) fs.unlinkSync(f);

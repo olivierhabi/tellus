@@ -83,7 +83,7 @@ curl http://localhost:3000/health
 **2. Create an ontology:**
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies \
+curl -X POST http://localhost:3000/api/v1/ontology \
   -H "Content-Type: application/json" \
   -d '{"displayName":"My Ontology","description":"A test ontology"}'
 ```
@@ -100,7 +100,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies \
 **3. Create an object type with properties (batch):**
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/batch \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/batch \
   -H "Content-Type: application/json" \
   -d '{
     "apiName": "Employee",
@@ -118,7 +118,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/ba
 **4. List object types:**
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes
 ```
 
 ```json
@@ -142,7 +142,7 @@ curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes
 **5. Get object type with full details:**
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee
 ```
 
 ```json
@@ -205,12 +205,12 @@ All endpoints return JSON. Error responses follow this shape:
 
 ### Ontology
 
-#### POST /api/v1/ontologies
+#### POST /api/v1/ontology
 
 Create a new ontology.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies \
+curl -X POST http://localhost:3000/api/v1/ontology \
   -H "Content-Type: application/json" \
   -d '{"displayName":"My Ontology","description":"Optional description"}'
 ```
@@ -231,12 +231,12 @@ curl -X POST http://localhost:3000/api/v1/ontologies \
 
 **Errors:** `409 ONTOLOGY_ALREADY_EXISTS`, `400 REQUIRED_FIELD_MISSING`
 
-#### GET /api/v1/ontologies
+#### GET /api/v1/ontology
 
 List all ontologies with pagination.
 
 ```bash
-curl "http://localhost:3000/api/v1/ontologies?pageSize=10"
+curl "http://localhost:3000/api/v1/ontology?pageSize=10"
 ```
 
 **Response:** `200 OK`
@@ -250,24 +250,24 @@ curl "http://localhost:3000/api/v1/ontologies?pageSize=10"
 }
 ```
 
-#### GET /api/v1/ontologies/:ontologyId
+#### GET /api/v1/ontology/:ontologyId
 
 Get a single ontology by ID.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}
+curl http://localhost:3000/api/v1/ontology/{ontologyId}
 ```
 
 **Response:** `200 OK`
 
 **Errors:** `404 ONTOLOGY_NOT_FOUND`, `400 INVALID_PARAMETER` (invalid UUID)
 
-#### PUT /api/v1/ontologies/:ontologyId
+#### PUT /api/v1/ontology/:ontologyId
 
 Update an ontology's displayName and/or description.
 
 ```bash
-curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId} \
+curl -X PUT http://localhost:3000/api/v1/ontology/{ontologyId} \
   -H "Content-Type: application/json" \
   -d '{"displayName":"Updated Name"}'
 ```
@@ -276,12 +276,12 @@ curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId} \
 
 **Errors:** `404 ONTOLOGY_NOT_FOUND`, `409 ONTOLOGY_ALREADY_EXISTS`, `400 VALIDATION_FAILED`
 
-#### DELETE /api/v1/ontologies/:ontologyId
+#### DELETE /api/v1/ontology/:ontologyId
 
 Delete an ontology and all cascaded resources (object types, properties, datasources, funnel states).
 
 ```bash
-curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}
+curl -X DELETE http://localhost:3000/api/v1/ontology/{ontologyId}
 ```
 
 **Response:** `204 No Content`
@@ -292,14 +292,14 @@ curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}
 
 ### Object Types
 
-All object type routes are nested under `/api/v1/ontologies/:ontologyId/objectTypes`.
+All object type routes are nested under `/api/v1/ontology/:ontologyId/objectTypes`.
 
 #### POST .../objectTypes/batch
 
 Atomically create an object type with all its properties, primary key, and title property.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/batch \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/batch \
   -H "Content-Type: application/json" \
   -d '{
     "apiName": "Employee",
@@ -323,7 +323,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/ba
 Create an object type (without properties — add them separately).
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes \
   -H "Content-Type: application/json" \
   -d '{"apiName":"Employee","displayName":"Employee"}'
 ```
@@ -337,7 +337,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes \
 List object types with pagination and summary data.
 
 ```bash
-curl "http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes?pageSize=10"
+curl "http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes?pageSize=10"
 ```
 
 **Response:** `200 OK`
@@ -365,7 +365,7 @@ curl "http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes?pageSize=
 Get a single object type with full properties, datasource, and indexing state.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Taxpayer
 ```
 
 **Response:** `200 OK`
@@ -377,7 +377,7 @@ curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer
 Update displayName, description, icon, iconColor, or status.
 
 ```bash
-curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer \
+curl -X PUT http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Taxpayer \
   -H "Content-Type: application/json" \
   -d '{"displayName":"Updated Taxpayer"}'
 ```
@@ -391,7 +391,7 @@ curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Tax
 Delete an object type and all cascaded resources.
 
 ```bash
-curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee
+curl -X DELETE http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee
 ```
 
 **Response:** `204 No Content`
@@ -409,7 +409,7 @@ All property routes are nested under `.../objectTypes/:apiName`.
 Create a single property.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/properties \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/properties \
   -H "Content-Type: application/json" \
   -d '{"apiName":"email","displayName":"Email","baseType":"string","isRequired":false}'
 ```
@@ -436,7 +436,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Em
 Atomically create multiple properties. Validates all before inserting any.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/properties/batch \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/properties/batch \
   -H "Content-Type: application/json" \
   -d '{
     "properties": [
@@ -459,7 +459,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Em
 List all properties on an object type.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/properties
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/properties
 ```
 
 **Response:** `200 OK` — `{"data": [...]}`
@@ -469,7 +469,7 @@ curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/p
 Get a single property.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/properties/email
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/properties/email
 ```
 
 **Response:** `200 OK`
@@ -481,7 +481,7 @@ curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/p
 Update displayName, description, isRequired, or ordinal. `apiName` and `baseType` are immutable.
 
 ```bash
-curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/properties/email \
+curl -X PUT http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/properties/email \
   -H "Content-Type: application/json" \
   -d '{"displayName":"Work Email","isRequired":true}'
 ```
@@ -495,7 +495,7 @@ curl -X PUT http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Emp
 Delete a property. Cannot delete the primary key property.
 
 ```bash
-curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/properties/email
+curl -X DELETE http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/properties/email
 ```
 
 **Response:** `204 No Content`
@@ -507,7 +507,7 @@ curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/
 Set the primary key property for the object type.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/primaryKey \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/primaryKey \
   -H "Content-Type: application/json" \
   -d '{"propertyApiName":"employeeId"}'
 ```
@@ -521,7 +521,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Em
 Set the title (display) property for the object type.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/titleProperty \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/titleProperty \
   -H "Content-Type: application/json" \
   -d '{"propertyApiName":"fullName"}'
 ```
@@ -541,7 +541,7 @@ All datasource routes are nested under `.../objectTypes/:apiName/datasource`.
 Register a backing datasource (CSV or JSON file). One datasource per object type.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer/datasource \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Taxpayer/datasource \
   -H "Content-Type: application/json" \
   -d '{
     "datasetName": "Taxpayer Dataset",
@@ -575,7 +575,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Ta
 Get the registered datasource for an object type.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer/datasource
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Taxpayer/datasource
 ```
 
 **Response:** `200 OK`
@@ -587,7 +587,7 @@ curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer/d
 Unregister the datasource. Resets funnel state to `not_indexed`.
 
 ```bash
-curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer/datasource
+curl -X DELETE http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Taxpayer/datasource
 ```
 
 **Response:** `204 No Content`
@@ -599,7 +599,7 @@ curl -X DELETE http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/
 Re-scan the file and update metadata (row count, column names, schema hash).
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer/datasource/scan
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Taxpayer/datasource/scan
 ```
 
 **Response:** `200 OK`
@@ -622,7 +622,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Ta
 Get aggregated metrics: property counts by type, datasource status, indexing metrics, health.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Taxpayer/statistics
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Taxpayer/statistics
 ```
 
 **Response:** `200 OK`
@@ -668,7 +668,7 @@ Health values: `not_indexed`, `indexing`, `healthy`, `warning`, `error`.
 Change an object type's status. Valid statuses: `active`, `experimental`, `deprecated`.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/changeStatus \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/changeStatus \
   -H "Content-Type: application/json" \
   -d '{"status":"experimental"}'
 ```
@@ -682,7 +682,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Em
 Clone an object type's schema (properties, PK, title) into a new object type. Clone starts with status `experimental`. Does NOT copy backing datasource.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/clone \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/clone \
   -H "Content-Type: application/json" \
   -d '{"newApiName":"EmployeeClone","newDisplayName":"Employee Clone"}'
 ```
@@ -696,7 +696,7 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Em
 Export a single object type definition as JSON.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/export
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/Employee/export
 ```
 
 **Response:** `200 OK`
@@ -720,7 +720,7 @@ curl http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/Employee/e
 Import a single object type from a JSON definition (the inverse of export).
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/import \
+curl -X POST http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/import \
   -H "Content-Type: application/json" \
   -d @exported-object-type.json
 ```
@@ -733,12 +733,12 @@ curl -X POST http://localhost:3000/api/v1/ontologies/{ontologyId}/objectTypes/im
 
 ### Export / Import
 
-#### GET /api/v1/ontologies/:ontologyId/export
+#### GET /api/v1/ontology/:ontologyId/export
 
 Export the entire ontology definition as JSON. Sets `Content-Disposition` header for file download.
 
 ```bash
-curl http://localhost:3000/api/v1/ontologies/{ontologyId}/export
+curl http://localhost:3000/api/v1/ontology/{ontologyId}/export
 ```
 
 **Response:** `200 OK`
@@ -769,12 +769,12 @@ curl http://localhost:3000/api/v1/ontologies/{ontologyId}/export
 
 **Errors:** `404 ONTOLOGY_NOT_FOUND`
 
-#### POST /api/v1/ontologies/import
+#### POST /api/v1/ontology/import
 
 Import an ontology from a previously exported JSON body. If `displayName` conflicts, appends `(imported)`.
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/ontologies/import \
+curl -X POST http://localhost:3000/api/v1/ontology/import \
   -H "Content-Type: application/json" \
   -d @exported-ontology.json
 ```

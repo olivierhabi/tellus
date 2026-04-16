@@ -75,7 +75,7 @@ describe("Sunday Integration Tests", async () => {
           await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/interfaces/${ctx.interfaceApiName}`);
         }
         // Delete ontology (cascades OTs)
-        await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
+        await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
       }
     } catch { /* ignore */ }
     stopServer();
@@ -86,7 +86,7 @@ describe("Sunday Integration Tests", async () => {
     const bf = runner.failed;
 
     await runner.test("Create ontology", async () => {
-      const { status, body } = await api("POST", "/api/v1/ontologies", {
+      const { status, body } = await api("POST", "/api/v1/ontology", {
         displayName: "Sunday Integration Test",
         description: "Testing interface system",
       });
@@ -96,7 +96,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Create Airport object type", async () => {
-      const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/batch`, {
         apiName: "SunAirport",
         displayName: "Sunday Airport",
         properties: [
@@ -114,7 +114,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Create Warehouse object type", async () => {
-      const { status } = await api("POST", `/api/v1/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/batch`, {
         apiName: "SunWarehouse",
         displayName: "Sunday Warehouse",
         properties: [
@@ -372,7 +372,7 @@ describe("Sunday Integration Tests", async () => {
     });
 
     await runner.test("Delete ontology (cascade)", async () => {
-      const { status } = await api("DELETE", `/api/v1/ontologies/${ctx.ontologyId}`);
+      const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
       runner.assert(status === 204, `Expected 204, got ${status}`);
       ctx.ontologyId = ""; // Prevent afterAll cleanup
     });

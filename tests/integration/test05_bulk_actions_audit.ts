@@ -94,7 +94,7 @@ async function cleanup() {
   console.log("\n--- Cleanup ---");
   try {
     if (ontologyId) {
-      await api("DELETE", `/api/v1/ontologies/${ontologyId}`);
+      await api("DELETE", `/api/v1/ontology/${ontologyId}`);
       console.log("  Deleted ontology");
     }
   } catch { /* best effort */ }
@@ -124,7 +124,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("5.1  Setup ontology + Employee type + upload 50 employees");
 
-  const ontRes = await api("POST", "/api/v1/ontologies", {
+  const ontRes = await api("POST", "/api/v1/ontology", {
     displayName: "Test05 Bulk Actions Ontology",
   });
   assert(ontRes.status === 201, "Ontology created");
@@ -133,7 +133,7 @@ async function main() {
   // Create Employee object type with properties via batch
   const otRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee",
@@ -164,7 +164,7 @@ async function main() {
   // Register datasource
   const dsRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/objectTypes/Employee/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`,
     {
       datasetId,
       columnMapping: {
@@ -191,7 +191,7 @@ async function main() {
 
   const atRes = await api(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actionTypes`,
+    `/api/v1/ontology/${ontologyId}/actionTypes`,
     {
       apiName: "reassignDepartment",
       displayName: "Reassign Department",

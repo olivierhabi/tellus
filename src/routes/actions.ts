@@ -5,7 +5,7 @@
 // primary interface for action execution — all action executions go through
 // this route.
 //
-// Mounted at: /api/v1/ontologies/:ontologyId/actions
+// Mounted at: /api/v1/ontology/:ontologyId/actions
 //
 // Endpoints:
 //   POST /:actionTypeApiName/apply      — Execute an action
@@ -425,7 +425,7 @@ router.post(
   "/:actionTypeApiName/validate",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // ontologyId may come from the URL (/api/v1/ontologies/:ontologyId/actions)
+      // ontologyId may come from the URL (/api/v1/ontology/:ontologyId/actions)
       // or be resolved from the default ontology (/api/v1/actions)
       let ontologyId = req.params.ontologyId;
       const { actionTypeApiName } = req.params;

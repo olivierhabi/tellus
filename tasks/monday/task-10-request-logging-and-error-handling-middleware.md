@@ -43,7 +43,7 @@ Route handlers should propagate errors to the error handler by calling `next(err
 **Modify:** src/server.js to register both middleware
 
 **Verification:**
-- `POST /api/v1/ontologies` with valid body → two log lines appear in stdout (request_start and request_complete with `durationMs`)
+- `POST /api/v1/ontology` with valid body → two log lines appear in stdout (request_start and request_complete with `durationMs`)
 - Insert a duplicate ontology name → response is `409` with `{"error":{"code":"ALREADY_EXISTS",...}}`
 - Throw an unrecognized error in a route handler → response is `500` with `{"error":{"code":"INTERNAL_ERROR",...}}`, stack trace appears in server logs but NOT in the response body
 - PostgreSQL not-null violation (e.g., missing display_name) → response is `400` with `{"error":{"code":"REQUIRED_FIELD_MISSING",...}}`

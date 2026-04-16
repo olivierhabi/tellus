@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Lightweight Type Summary — Ontology Platform spec Task 19
 // ---------------------------------------------------------------------------
-// Mounted at /api/v1/ontologies/:ontologyId/summary
+// Mounted at /api/v1/ontology/:ontologyId/summary
 //   GET /:apiName   — return an under-1KB summary of an object type
 //
 // The explorer home page uses this to render preview popovers without

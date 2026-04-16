@@ -35,7 +35,7 @@ describe("Wednesday Integration Tests", () => {
     }
 
     // Create test ontology
-    const { body: ontBody } = await api("POST", "/api/v1/ontologies", {
+    const { body: ontBody } = await api("POST", "/api/v1/ontology", {
       displayName: "WedIntTest",
       description: "Wednesday integration tests",
     });
@@ -43,7 +43,7 @@ describe("Wednesday Integration Tests", () => {
     if (!ONTOLOGY_ID) return;
 
     // Create Employee object type
-    await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "WedEmployee",
       displayName: "Wed Employee",
       description: "Test employee",
@@ -59,14 +59,14 @@ describe("Wednesday Integration Tests", () => {
     ];
 
     for (const p of props) {
-      await api("POST", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`, p);
+      await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`, p);
     }
 
     // Set PK property
-    const propsRes = await api("GET", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`);
+    const propsRes = await api("GET", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`);
     const employeeIdProp = (propsRes.body?.data || []).find((p: any) => p.apiName === "employeeId" || p.api_name === "employeeId");
     if (employeeIdProp) {
-      await api("PUT", `/api/v1/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee`, {
+      await api("PUT", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/WedEmployee`, {
         primaryKeyPropertyId: employeeIdProp.propertyId || employeeIdProp.property_id,
       });
     }
@@ -76,7 +76,7 @@ describe("Wednesday Integration Tests", () => {
 
   afterAll(async () => {
     if (ONTOLOGY_ID) {
-      await api("DELETE", `/api/v1/ontologies/${ONTOLOGY_ID}`);
+      await api("DELETE", `/api/v1/ontology/${ONTOLOGY_ID}`);
     }
   }, 10000);
 

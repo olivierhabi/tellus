@@ -142,7 +142,7 @@ if require tellus-redpanda; then
   done
 
   # Round-trip: pick the seeded action, fire 3 applies, check the topic.
-  ACTION=$(curl -s "$BASE/api/v1/ontologies/$ONTOLOGY_ID/actionTypes" \
+  ACTION=$(curl -s "$BASE/api/v1/ontology/$ONTOLOGY_ID/actionTypes" \
     | jq -r '.data[0].apiName // empty')
   if [[ -z "$ACTION" ]]; then
     warn "no action type seeded" "Kafka publish round-trip"
@@ -153,7 +153,7 @@ if require tellus-redpanda; then
     for _ in 1 2 3; do
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"parameters":{"customerId":"c","quantity":1}}' \
-        "$BASE/api/v1/ontologies/$ONTOLOGY_ID/actions/$ACTION/apply" >/dev/null
+        "$BASE/api/v1/ontology/$ONTOLOGY_ID/actions/$ACTION/apply" >/dev/null
     done
     sleep 3
     msgs=$(docker exec tellus-redpanda sh -c 'grep -c "actionTypeApiName" /tmp/k.json 2>/dev/null || echo 0')

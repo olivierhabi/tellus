@@ -33,14 +33,14 @@ Tellus is a Palantir Foundry-inspired ontology engine built on TypeScript, Expre
 │  │  /health          - Basic health check                    │   │
 │  │  /api/v1/health   - Enhanced health (PG + OS)             │   │
 │  │  /api/v1/status   - Comprehensive system status           │   │
-│  │  /api/v1/ontologies       - Ontology CRUD                 │   │
-│  │  /api/v1/ontologies/:id/objectTypes  - Object Type CRUD   │   │
-│  │  /api/v1/ontologies/:id/objectTypes/:name/properties      │   │
-│  │  /api/v1/ontologies/:id/objectTypes/:name/datasource      │   │
-│  │  /api/v1/ontologies/:id/objectTypes/:name/index           │   │
-│  │  /api/v1/ontologies/:id/linkTypes    - Link Type CRUD     │   │
-│  │  /api/v1/ontologies/:id/actionTypes  - Action Type CRUD   │   │
-│  │  /api/v1/ontologies/:id/actions      - Action Execution   │   │
+│  │  /api/v1/ontology       - Ontology CRUD                 │   │
+│  │  /api/v1/ontology/:id/objectTypes  - Object Type CRUD   │   │
+│  │  /api/v1/ontology/:id/objectTypes/:name/properties      │   │
+│  │  /api/v1/ontology/:id/objectTypes/:name/datasource      │   │
+│  │  /api/v1/ontology/:id/objectTypes/:name/index           │   │
+│  │  /api/v1/ontology/:id/linkTypes    - Link Type CRUD     │   │
+│  │  /api/v1/ontology/:id/actionTypes  - Action Type CRUD   │   │
+│  │  /api/v1/ontology/:id/actions      - Action Execution   │   │
 │  │  /api/v1/objects/:type               - Object Queries     │   │
 │  │  /api/v1/datasets                    - Dataset Management │   │
 │  │  /api/v1/audit                       - Audit Log          │   │
@@ -425,18 +425,18 @@ CREATE TABLE reindex_history (
 | 1 | GET | `/health` | Basic health check |
 | 2 | GET | `/api/v1/health` | Enhanced health check (PG + OS) |
 | 3 | GET | `/api/v1/status` | Comprehensive system status |
-| 4 | POST | `/api/v1/ontologies` | Create ontology |
-| 5 | GET | `/api/v1/ontologies` | List ontologies |
-| 6 | GET | `/api/v1/ontologies/:id` | Get ontology |
-| 7 | PUT | `/api/v1/ontologies/:id` | Update ontology |
-| 8 | DELETE | `/api/v1/ontologies/:id` | Delete ontology |
-| 9 | GET | `/api/v1/ontologies/:id/export` | Export ontology |
-| 10 | POST | `/api/v1/ontologies/import` | Import ontology |
-| 11 | POST | `/api/v1/ontologies/:id/objectTypes` | Create object type |
-| 12 | GET | `/api/v1/ontologies/:id/objectTypes` | List object types |
-| 13 | GET | `/api/v1/ontologies/:id/objectTypes/:name` | Get object type |
-| 14 | PUT | `/api/v1/ontologies/:id/objectTypes/:name` | Update object type |
-| 15 | DELETE | `/api/v1/ontologies/:id/objectTypes/:name` | Delete object type |
+| 4 | POST | `/api/v1/ontology` | Create ontology |
+| 5 | GET | `/api/v1/ontology` | List ontologies |
+| 6 | GET | `/api/v1/ontology/:id` | Get ontology |
+| 7 | PUT | `/api/v1/ontology/:id` | Update ontology |
+| 8 | DELETE | `/api/v1/ontology/:id` | Delete ontology |
+| 9 | GET | `/api/v1/ontology/:id/export` | Export ontology |
+| 10 | POST | `/api/v1/ontology/import` | Import ontology |
+| 11 | POST | `/api/v1/ontology/:id/objectTypes` | Create object type |
+| 12 | GET | `/api/v1/ontology/:id/objectTypes` | List object types |
+| 13 | GET | `/api/v1/ontology/:id/objectTypes/:name` | Get object type |
+| 14 | PUT | `/api/v1/ontology/:id/objectTypes/:name` | Update object type |
+| 15 | DELETE | `/api/v1/ontology/:id/objectTypes/:name` | Delete object type |
 | 16 | POST | `/api/v1/.../properties` | Create property |
 | 17 | GET | `/api/v1/.../properties` | List properties |
 | 18 | PUT | `/api/v1/.../properties/:prop` | Update property |

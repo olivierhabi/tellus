@@ -103,7 +103,7 @@ function waitForIndex(ms = 1000): Promise<void> {
 async function ensureActionType(def: Record<string, unknown>): Promise<void> {
   const res = await request(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actionTypes`,
+    `/api/v1/ontology/${ontologyId}/actionTypes`,
     def
   );
   if (res.status !== 201 && res.status !== 409) {
@@ -119,7 +119,7 @@ async function ensureActionType(def: Record<string, unknown>): Promise<void> {
 async function ensureLinkType(def: Record<string, unknown>): Promise<void> {
   const res = await request(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/linkTypes`,
+    `/api/v1/ontology/${ontologyId}/linkTypes`,
     def
   );
   if (res.status !== 201 && res.status !== 409) {
@@ -141,7 +141,7 @@ async function executeAction(
   const body: Record<string, unknown> = { parameters, ...bodyExtras };
   return request(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actions/${actionTypeApiName}/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/${actionTypeApiName}/apply`,
     body,
     extraHeaders
   );
@@ -171,7 +171,7 @@ async function validateAction(
 ): Promise<HttpResult> {
   return request(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actions/${actionTypeApiName}/validate`,
+    `/api/v1/ontology/${ontologyId}/actions/${actionTypeApiName}/validate`,
     { parameters }
   );
 }
@@ -185,7 +185,7 @@ async function executeBatchAction(
 ): Promise<HttpResult> {
   return request(
     "POST",
-    `/api/v1/ontologies/${ontologyId}/actions/${actionTypeApiName}/applyBatch`,
+    `/api/v1/ontology/${ontologyId}/actions/${actionTypeApiName}/applyBatch`,
     { requests }
   );
 }
@@ -264,7 +264,7 @@ describe("Friday Integration: Complete Action System", () => {
     }
 
     // 2. Discover the seed ontology
-    const ont = await request("GET", "/api/v1/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status === 200 && ont.body?.data?.length > 0) {
       const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
       ontologyId = seedOnt.ontologyId;
@@ -450,7 +450,7 @@ describe("Friday Integration: Complete Action System", () => {
 
       const res = await request(
         "POST",
-        `/api/v1/ontologies/${ontologyId}/actionTypes`,
+        `/api/v1/ontology/${ontologyId}/actionTypes`,
         {
           apiName: CUSTOM_ACTION,
           displayName: "Friday Custom Action",
@@ -494,7 +494,7 @@ describe("Friday Integration: Complete Action System", () => {
       // Missing required fields (no apiName)
       const r1 = await request(
         "POST",
-        `/api/v1/ontologies/${ontologyId}/actionTypes`,
+        `/api/v1/ontology/${ontologyId}/actionTypes`,
         { displayName: "No API Name", rules: [{ type: "createObject", objectType: "Taxpayer", properties: {} }] }
       );
       expect(r1.status).toBe(400);
@@ -502,7 +502,7 @@ describe("Friday Integration: Complete Action System", () => {
       // Missing rules (empty array)
       const r2 = await request(
         "POST",
-        `/api/v1/ontologies/${ontologyId}/actionTypes`,
+        `/api/v1/ontology/${ontologyId}/actionTypes`,
         { apiName: "invalidNoRules", displayName: "No Rules", rules: [] }
       );
       expect(r2.status).toBe(400);
@@ -510,7 +510,7 @@ describe("Friday Integration: Complete Action System", () => {
       // Duplicate apiName
       const r3 = await request(
         "POST",
-        `/api/v1/ontologies/${ontologyId}/actionTypes`,
+        `/api/v1/ontology/${ontologyId}/actionTypes`,
         {
           apiName: "registerTaxpayer",
           displayName: "Duplicate",
@@ -548,7 +548,7 @@ describe("Friday Integration: Complete Action System", () => {
       // Update: remove the "notes" parameter (breaking change) and change score type
       const res = await request(
         "PUT",
-        `/api/v1/ontologies/${ontologyId}/actionTypes/${CUSTOM_ACTION}`,
+        `/api/v1/ontology/${ontologyId}/actionTypes/${CUSTOM_ACTION}`,
         {
           displayName: "Friday Custom Action Updated",
           parameters: [
@@ -573,12 +573,12 @@ describe("Friday Integration: Complete Action System", () => {
       // Delete the clone target if it exists from a prior run
       await request(
         "DELETE",
-        `/api/v1/ontologies/${ontologyId}/actionTypes/${CLONE_ACTION}`
+        `/api/v1/ontology/${ontologyId}/actionTypes/${CLONE_ACTION}`
       );
 
       const res = await request(
         "POST",
-        `/api/v1/ontologies/${ontologyId}/actionTypes/registerTaxpayer/clone`,
+        `/api/v1/ontology/${ontologyId}/actionTypes/registerTaxpayer/clone`,
         { newApiName: CLONE_ACTION, newDisplayName: "Cloned Register Taxpayer" }
       );
 
@@ -592,7 +592,7 @@ describe("Friday Integration: Complete Action System", () => {
       // Verify independence — original still has original display name
       const original = await request(
         "GET",
-        `/api/v1/ontologies/${ontologyId}/actionTypes/registerTaxpayer`
+        `/api/v1/ontology/${ontologyId}/actionTypes/registerTaxpayer`
       );
       expect(original.body.displayName).not.toBe("Cloned Register Taxpayer");
     });
@@ -602,7 +602,7 @@ describe("Friday Integration: Complete Action System", () => {
 
       const res = await request(
         "GET",
-        `/api/v1/ontologies/${ontologyId}/actionTypes/flagForAudit/impact`
+        `/api/v1/ontology/${ontologyId}/actionTypes/flagForAudit/impact`
       );
 
       expect(res.status).toBe(200);
@@ -625,7 +625,7 @@ describe("Friday Integration: Complete Action System", () => {
 
       const res = await request(
         "GET",
-        `/api/v1/ontologies/${ontologyId}/actionTypes`
+        `/api/v1/ontology/${ontologyId}/actionTypes`
       );
 
       expect(res.status).toBe(200);
@@ -1147,7 +1147,7 @@ describe("Friday Integration: Complete Action System", () => {
 
       const res = await request(
         "POST",
-        `/api/v1/ontologies/${ontologyId}/actions/updateTaxpayerRiskScore/applyBatch`,
+        `/api/v1/ontology/${ontologyId}/actions/updateTaxpayerRiskScore/applyBatch`,
         { notRequests: [] }
       );
 
@@ -1236,7 +1236,7 @@ describe("Friday Integration: Complete Action System", () => {
       // Query audit log scoped to registerTaxpayer via the actionAuditRouter
       const res = await request(
         "GET",
-        `/api/v1/ontologies/${ontologyId}/actions/registerTaxpayer/audit?$pageSize=10`
+        `/api/v1/ontology/${ontologyId}/actions/registerTaxpayer/audit?$pageSize=10`
       );
 
       expect(res.status).toBe(200);
@@ -1373,7 +1373,7 @@ describe("Friday Integration: Complete Action System", () => {
       for (let i = 0; i < maxAttempts; i++) {
         attempts++;
         const res = await fetch(
-          `${BASE}/api/v1/ontologies/${ontologyId}/actions/closeTaxReturn/apply`,
+          `${BASE}/api/v1/ontology/${ontologyId}/actions/closeTaxReturn/apply`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1541,7 +1541,7 @@ describe("Friday Integration: Complete Action System", () => {
       ]) {
         const res = await request(
           "DELETE",
-          `/api/v1/ontologies/${ontologyId}/actionTypes/${apiName}`
+          `/api/v1/ontology/${ontologyId}/actionTypes/${apiName}`
         );
         expect([204, 404]).toContain(res.status);
       }

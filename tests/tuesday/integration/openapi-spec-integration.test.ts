@@ -70,14 +70,14 @@ describe("Task 29 — OpenAPI Specification", () => {
     // Paths in the spec are relative to the server base URL (`/api`),
     // so they start with `/v1/...` not `/api/v1/...`.
     const expectedPaths = [
-      "/v1/ontologies/{ontologyId}/actionTypes",
-      "/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}",
-      "/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/clone",
-      "/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}/impact",
-      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply",
-      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/validate",
-      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch",
-      "/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/audit",
+      "/v1/ontology/{ontologyId}/actionTypes",
+      "/v1/ontology/{ontologyId}/actionTypes/{actionApiName}",
+      "/v1/ontology/{ontologyId}/actionTypes/{actionApiName}/clone",
+      "/v1/ontology/{ontologyId}/actionTypes/{actionApiName}/impact",
+      "/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/apply",
+      "/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/validate",
+      "/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/applyBatch",
+      "/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/audit",
       "/v1/audit/log",
       "/v1/audit/log/{executionId}",
       "/v1/audit/stats",
@@ -126,7 +126,7 @@ describe("Task 29 — OpenAPI Specification", () => {
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/v1/ontologies/{ontologyId}/actionTypes"] ?? {}
+      spec.paths["/v1/ontology/{ontologyId}/actionTypes"] ?? {}
     );
     expect(methods).toContain("post");
     expect(methods).toContain("get");
@@ -140,7 +140,7 @@ describe("Task 29 — OpenAPI Specification", () => {
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/v1/ontologies/{ontologyId}/actionTypes/{actionApiName}"] ?? {}
+      spec.paths["/v1/ontology/{ontologyId}/actionTypes/{actionApiName}"] ?? {}
     );
     expect(methods).toContain("get");
     expect(methods).toContain("put");

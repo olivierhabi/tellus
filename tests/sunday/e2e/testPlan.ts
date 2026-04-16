@@ -91,9 +91,9 @@ export const SUNDAY_E2E_TESTS: TestSection[] = [
     name: "Middleware",
     tests: [
       { id: "6.1", description: "Structured error response with requestId", method: "GET", path: "/api/v1/nonexistent", expectedStatus: 404 },
-      { id: "6.2", description: "Input sanitization strips null bytes", method: "POST", path: "/api/v1/ontologies", expectedStatus: 400 },
-      { id: "6.3", description: "Validation middleware rejects invalid body", method: "POST", path: "/api/v1/ontologies", expectedStatus: 400 },
-      { id: "6.4", description: "XSS prevention strips script tags", method: "POST", path: "/api/v1/ontologies", expectedStatus: 201 },
+      { id: "6.2", description: "Input sanitization strips null bytes", method: "POST", path: "/api/v1/ontology", expectedStatus: 400 },
+      { id: "6.3", description: "Validation middleware rejects invalid body", method: "POST", path: "/api/v1/ontology", expectedStatus: 400 },
+      { id: "6.4", description: "XSS prevention strips script tags", method: "POST", path: "/api/v1/ontology", expectedStatus: 201 },
     ],
   },
   {
@@ -112,7 +112,7 @@ export const SUNDAY_E2E_TESTS: TestSection[] = [
       { id: "8.1", description: "Remove all test implementations", method: "DELETE", path: "various", expectedStatus: 204 },
       { id: "8.2", description: "Remove all test interfaces", method: "DELETE", path: "various", expectedStatus: 204 },
       { id: "8.3", description: "Remove all test object types", method: "DELETE", path: "various", expectedStatus: 204 },
-      { id: "8.4", description: "Remove test ontology", method: "DELETE", path: "/api/v1/ontologies/:id", expectedStatus: 204 },
+      { id: "8.4", description: "Remove test ontology", method: "DELETE", path: "/api/v1/ontology/:id", expectedStatus: 204 },
     ],
   },
 ];

@@ -189,7 +189,7 @@ export const ontologySchemas = {
   },
 
   /**
-   * Request body for `POST /v1/ontologies/:id/objectTypes/batch`.
+   * Request body for `POST /v1/ontology/:id/objectTypes/batch`.
    * Atomically creates the object type, every property, and sets
    * the primary key + title property in a single transaction.
    */
@@ -240,7 +240,7 @@ export const ontologySchemas = {
   },
 
   /**
-   * Request body for `PUT /v1/ontologies/:id/objectTypes/:apiName`.
+   * Request body for `PUT /v1/ontology/:id/objectTypes/:apiName`.
    * Every field is optional — send only what you want to change.
    * When `apiName` is present, the backend ALSO clears any lingering
    * `requestedApiName` conflict marker in the same UPDATE.
@@ -264,7 +264,7 @@ export const ontologySchemas = {
   },
 
   /**
-   * Request body for `POST /v1/ontologies/:id/objectTypes/:apiName/datasource`.
+   * Request body for `POST /v1/ontology/:id/objectTypes/:apiName/datasource`.
    * Three mutually-exclusive binding modes, in priority order: foundry
    * bridge, legacy ontology-dataset, and raw filesystem.
    */
@@ -413,7 +413,7 @@ const apiNameParam = {
 export const ontologyPaths = {
   /* ----------------------------- Ontologies ---------------------------- */
 
-  '/v1/ontologies': {
+  '/v1/ontology': {
     get: {
       tags: ['Ontology Manager'],
       summary: 'List all ontologies',
@@ -435,7 +435,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}': {
+  '/v1/ontology/{ontologyId}': {
     get: {
       tags: ['Ontology Manager'],
       summary: 'Get a single ontology',
@@ -462,7 +462,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Object types -------------------------- */
 
-  '/v1/ontologies/{ontologyId}/objectTypes': {
+  '/v1/ontology/{ontologyId}/objectTypes': {
     get: {
       tags: ['Object Types'],
       summary: 'List object types in an ontology',
@@ -517,7 +517,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Batch create + foundry dataset bridge -- */
 
-  '/v1/ontologies/{ontologyId}/objectTypes/batch': {
+  '/v1/ontology/{ontologyId}/objectTypes/batch': {
     post: {
       tags: ['Object Types'],
       summary:
@@ -559,7 +559,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/by-id/{objectTypeId}': {
+  '/v1/ontology/{ontologyId}/objectTypes/by-id/{objectTypeId}': {
     get: {
       tags: ['Object Types'],
       summary: 'Get an object type by UUID (stable across renames)',
@@ -589,7 +589,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}': {
     get: {
       tags: ['Object Types'],
       summary: 'Get an object type with its properties, datasource, indexing state, and link types',
@@ -640,7 +640,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/changeStatus': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/changeStatus': {
     post: {
       tags: ['Object Types'],
       summary: 'Change the lifecycle status of an object type',
@@ -653,7 +653,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/clone': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/clone': {
     post: {
       tags: ['Object Types'],
       summary: 'Clone an object type with a new apiName',
@@ -665,7 +665,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Properties ---------------------------- */
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/properties': {
     get: {
       tags: ['Properties'],
       summary: 'List properties on an object type',
@@ -684,7 +684,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/properties/{propApiName}': {
     put: {
       tags: ['Properties'],
       summary: 'Update a property',
@@ -706,7 +706,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/primaryKey': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/primaryKey': {
     post: {
       tags: ['Properties'],
       summary: 'Set a property as the primary key',
@@ -719,7 +719,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/titleProperty': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/titleProperty': {
     post: {
       tags: ['Properties'],
       summary: 'Set a property as the object title',
@@ -734,7 +734,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Link types ---------------------------- */
 
-  '/v1/ontologies/{ontologyId}/linkTypes': {
+  '/v1/ontology/{ontologyId}/linkTypes': {
     get: {
       tags: ['Link Types'],
       summary: 'List link types',
@@ -771,7 +771,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/linkTypes/{apiName}': {
+  '/v1/ontology/{ontologyId}/linkTypes/{apiName}': {
     get: {
       tags: ['Link Types'],
       summary: 'Get a link type',
@@ -793,7 +793,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/linkTypes/{apiName}/resolve': {
+  '/v1/ontology/{ontologyId}/linkTypes/{apiName}/resolve': {
     post: {
       tags: ['Link Types'],
       summary: 'Resolve link instances around a source object',
@@ -806,7 +806,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/linkTypes/{apiName}/searchAround': {
+  '/v1/ontology/{ontologyId}/linkTypes/{apiName}/searchAround': {
     post: {
       tags: ['Link Types'],
       summary: 'Search around an object — return all related objects via this link type',
@@ -818,7 +818,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Action types -------------------------- */
 
-  '/v1/ontologies/{ontologyId}/actionTypes': {
+  '/v1/ontology/{ontologyId}/actionTypes': {
     get: {
       tags: ['Action Types'],
       summary: 'List action types',
@@ -834,7 +834,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/apply': {
+  '/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/apply': {
     post: {
       tags: ['Action Types'],
       summary: 'Execute an action with parameters (transactional)',
@@ -850,7 +850,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/actions/{actionTypeApiName}/applyBatch': {
+  '/v1/ontology/{ontologyId}/actions/{actionTypeApiName}/applyBatch': {
     post: {
       tags: ['Action Types'],
       summary: 'Apply an action to up to 100 parameter sets in one transaction',
@@ -970,7 +970,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/index': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/index': {
     get: {
       tags: ['Indexing'],
       summary: 'Get current indexing status for an object type',
@@ -981,7 +981,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Backing datasources ------------------- */
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/datasource': {
     post: {
       tags: ['Backing Datasource'],
       summary: 'Register a backing datasource for an object type',
@@ -1043,7 +1043,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/datasource/scan': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/datasource/scan': {
     post: {
       tags: ['Backing Datasource'],
       summary: 'Re-scan the datasource and refresh column metadata',
@@ -1057,7 +1057,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Bulk properties ---------------------- */
 
-  '/v1/ontologies/{ontologyId}/objectTypes/{apiName}/properties/batch': {
+  '/v1/ontology/{ontologyId}/objectTypes/{apiName}/properties/batch': {
     post: {
       tags: ['Properties'],
       summary: 'Create multiple properties on an object type in one call',
@@ -1113,7 +1113,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Branches ----------------------------- */
 
-  '/v1/ontologies/{ontologyId}/branches': {
+  '/v1/ontology/{ontologyId}/branches': {
     get: {
       tags: ['Branches'],
       summary: 'List branches for an ontology',
@@ -1135,7 +1135,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/branches/{branchName}': {
+  '/v1/ontology/{ontologyId}/branches/{branchName}': {
     get: {
       tags: ['Branches'],
       summary: 'Get branch detail with proposals',
@@ -1156,7 +1156,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/branches/{branchName}/merge': {
+  '/v1/ontology/{ontologyId}/branches/{branchName}/merge': {
     post: {
       tags: ['Branches'],
       summary: 'Merge branch into parent (requires at least one approved proposal)',
@@ -1168,7 +1168,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/branches/{branchName}/proposals': {
+  '/v1/ontology/{ontologyId}/branches/{branchName}/proposals': {
     post: {
       tags: ['Branches'],
       summary: 'Open a new proposal on a branch',
@@ -1184,7 +1184,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/branches/{branchName}/proposals/{proposalId}/approve': {
+  '/v1/ontology/{ontologyId}/branches/{branchName}/proposals/{proposalId}/approve': {
     post: {
       tags: ['Branches'],
       summary: 'Approve an open proposal',
@@ -1199,7 +1199,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Groups ------------------------------ */
 
-  '/v1/ontologies/{ontologyId}/groups': {
+  '/v1/ontology/{ontologyId}/groups': {
     get: {
       tags: ['Groups'],
       summary: 'List object type groups with member counts',
@@ -1218,7 +1218,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/groups/graph': {
+  '/v1/ontology/{ontologyId}/groups/graph': {
     get: {
       tags: ['Groups'],
       summary: 'Cytoscape-style group→objectType graph (max 200 nodes)',
@@ -1227,7 +1227,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/groups/{groupApiName}/counts': {
+  '/v1/ontology/{ontologyId}/groups/{groupApiName}/counts': {
     get: {
       tags: ['Groups'],
       summary: 'Cached OpenSearch doc counts per object type in a group (60 s TTL)',
@@ -1239,7 +1239,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/groups/{groupApiName}/members': {
+  '/v1/ontology/{ontologyId}/groups/{groupApiName}/members': {
     post: {
       tags: ['Groups'],
       summary: 'Add an object type to a group (idempotent)',
@@ -1255,7 +1255,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/groups/{groupApiName}': {
+  '/v1/ontology/{ontologyId}/groups/{groupApiName}': {
     delete: {
       tags: ['Groups'],
       summary: 'Delete a group',
@@ -1269,7 +1269,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Functions --------------------------- */
 
-  '/v1/ontologies/{ontologyId}/functions': {
+  '/v1/ontology/{ontologyId}/functions': {
     get: {
       tags: ['Functions'],
       summary: 'List functions with version counts and invocation stats',
@@ -1288,7 +1288,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/functions/{apiName}': {
+  '/v1/ontology/{ontologyId}/functions/{apiName}': {
     get: {
       tags: ['Functions'],
       summary: 'Get function detail with version history',
@@ -1303,7 +1303,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/functions/{apiName}/versions': {
+  '/v1/ontology/{ontologyId}/functions/{apiName}/versions': {
     post: {
       tags: ['Functions'],
       summary: 'Publish a new version of a function',
@@ -1316,7 +1316,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/functions/{apiName}/invoke': {
+  '/v1/ontology/{ontologyId}/functions/{apiName}/invoke': {
     post: {
       tags: ['Functions'],
       summary: 'Execute the latest version in a sandboxed runtime (5 s timeout)',
@@ -1335,7 +1335,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Explorations ------------------------ */
 
-  '/v1/ontologies/{ontologyId}/explorations': {
+  '/v1/ontology/{ontologyId}/explorations': {
     get: {
       tags: ['Explorations'],
       summary: 'List saved explorations (own + shared/public)',
@@ -1354,7 +1354,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/explorations/{id}': {
+  '/v1/ontology/{ontologyId}/explorations/{id}': {
     get: {
       tags: ['Explorations'],
       summary: 'Get a single exploration',
@@ -1390,7 +1390,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Exports ----------------------------- */
 
-  '/v1/ontologies/{ontologyId}/exports': {
+  '/v1/ontology/{ontologyId}/exports': {
     get: {
       tags: ['Exports'],
       summary: 'List export jobs for the current user (last 100)',
@@ -1409,7 +1409,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/exports/{jobId}': {
+  '/v1/ontology/{ontologyId}/exports/{jobId}': {
     get: {
       tags: ['Exports'],
       summary: 'Poll export job status',
@@ -1423,7 +1423,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Summary ----------------------------- */
 
-  '/v1/ontologies/{ontologyId}/summary': {
+  '/v1/ontology/{ontologyId}/summary': {
     get: {
       tags: ['Summary'],
       summary: 'Home page bundle — object types, groups, favorites, recent activity',
@@ -1432,7 +1432,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/summary/{apiName}': {
+  '/v1/ontology/{ontologyId}/summary/{apiName}': {
     get: {
       tags: ['Summary'],
       summary: 'Lightweight single-type summary for preview popovers',
@@ -1443,7 +1443,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Geo --------------------------------- */
 
-  '/v1/ontologies/{ontologyId}/geo/{objectTypeApiName}/geohash': {
+  '/v1/ontology/{ontologyId}/geo/{objectTypeApiName}/geohash': {
     post: {
       tags: ['Geo'],
       summary: 'Geohash bucket aggregation for map rendering',
@@ -1459,7 +1459,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/geo/{objectTypeApiName}/choropleth': {
+  '/v1/ontology/{ontologyId}/geo/{objectTypeApiName}/choropleth': {
     post: {
       tags: ['Geo'],
       summary: 'Country/state term aggregation for choropleth maps',
@@ -1477,7 +1477,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Comparisons ------------------------- */
 
-  '/v1/ontologies/{ontologyId}/comparisons/aggregate': {
+  '/v1/ontology/{ontologyId}/comparisons/aggregate': {
     post: {
       tags: ['Comparisons'],
       summary: 'Dual-set aggregation comparison via OpenSearch msearch',
@@ -1492,7 +1492,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Migrations -------------------------- */
 
-  '/v1/ontologies/{ontologyId}/migrations': {
+  '/v1/ontology/{ontologyId}/migrations': {
     get: {
       tags: ['Migrations'],
       summary: 'List recent migration jobs (last 100)',
@@ -1501,7 +1501,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/migrations/plan': {
+  '/v1/ontology/{ontologyId}/migrations/plan': {
     post: {
       tags: ['Migrations'],
       summary: 'Classify proposed schema operations as breaking/non-breaking',
@@ -1514,7 +1514,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/migrations/execute': {
+  '/v1/ontology/{ontologyId}/migrations/execute': {
     post: {
       tags: ['Migrations'],
       summary: 'Execute a migration — reindex into a new versioned index and swap alias',
@@ -1529,7 +1529,7 @@ export const ontologyPaths = {
 
   /* ----------------------------- Governance -------------------------- */
 
-  '/v1/ontologies/{ontologyId}/governance/lineage/{objectTypeApiName}': {
+  '/v1/ontology/{ontologyId}/governance/lineage/{objectTypeApiName}': {
     get: {
       tags: ['Governance'],
       summary: 'Lineage DAG for an object type (max 5 hops)',
@@ -1542,7 +1542,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/governance/pii-scans/{objectTypeApiName}': {
+  '/v1/ontology/{ontologyId}/governance/pii-scans/{objectTypeApiName}': {
     get: {
       tags: ['Governance'],
       summary: 'List historical PII scan results',
@@ -1566,7 +1566,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/governance/usage/{objectTypeApiName}': {
+  '/v1/ontology/{ontologyId}/governance/usage/{objectTypeApiName}': {
     get: {
       tags: ['Governance'],
       summary: '30-day read/write usage sparkline',
@@ -1578,7 +1578,7 @@ export const ontologyPaths = {
     },
   },
 
-  '/v1/ontologies/{ontologyId}/governance/usage/refresh': {
+  '/v1/ontology/{ontologyId}/governance/usage/refresh': {
     post: {
       tags: ['Governance'],
       summary: 'Refresh the usage_event_daily materialized view',
