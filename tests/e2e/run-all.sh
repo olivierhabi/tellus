@@ -33,7 +33,7 @@ lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 sleep 1
 
 export DATA_DIR="${DATA_DIR:-${ROOT}/data}"
-RATE_LIMIT_MAX=10000 DATA_DIR="$DATA_DIR" nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>&1 &
+RATE_LIMIT_MAX=10000 DATA_DIR="$DATA_DIR" nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>/tmp/tellus-e2e-server-err.log &
 SERVER_PID=$!
 
 # Ensure server is killed on script exit
@@ -129,8 +129,14 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
   echo -e "${RED}${BOLD}SOME E2E SUITES FAILED${NC}"
   echo ""
-  echo -e "${BOLD}Server log (last 50 lines):${NC}"
-  tail -50 /tmp/tellus-e2e-server.log 2>/dev/null || true
+  echo -e "${BOLD}Server 500 errors:${NC}"
+  grep -i '"statusCode":500\|"status":500\|Error\|error.*500\|INTERNAL\|stack.*at ' /tmp/tellus-e2e-server.log 2>/dev/null | head -30 || true
+  echo ""
+  echo -e "${BOLD}Server log (first batch create attempt):${NC}"
+  grep -A2 'batch\|500' /tmp/tellus-e2e-server.log 2>/dev/null | head -40 || true
+  echo ""
+  echo -e "${BOLD}Server stderr:${NC}"
+  cat /tmp/tellus-e2e-server-err.log 2>/dev/null | head -50 || true
 fi
 echo -e "${BOLD}========================================${NC}"
 
