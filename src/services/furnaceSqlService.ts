@@ -16,8 +16,19 @@
  * The endpoint surface is `/api/v2/sql` (see `routes/sql.ts`).
  */
 
-import { Database } from 'duckdb';
 import pool from '../db';
+
+// Lazy-load DuckDB so the server can start even when the native binary
+// is missing (e.g. CI environments without prebuilt binaries). The SQL
+// endpoint will return an error at call time instead of crashing on boot.
+let Database: typeof import('duckdb').Database | null = null;
+try {
+  Database = require('duckdb').Database;
+} catch {
+  console.warn('duckdb native module not available — /api/v2/sql endpoint will be disabled');
+}
+
+type Database = import('duckdb').Database;
 
 interface CachedDb {
   db: Database;
@@ -33,6 +44,13 @@ const ROW_LIMIT = 1_000;
  * (re)hydrated from postgres on every cache miss.
  */
 async function getDb(ontologyId: string): Promise<Database> {
+  if (!Database) {
+    throw Object.assign(
+      new Error('DuckDB native module is not available. The SQL endpoint is disabled in this environment.'),
+      { code: 'DUCKDB_UNAVAILABLE' },
+    );
+  }
+
   const cached = CACHE[ontologyId];
   if (cached && Date.now() - cached.loadedAt < CACHE_TTL_MS) {
     return cached.db;
