@@ -28,3 +28,6 @@ coverage/
 
 # Data files (user-specific)
 data/
+
+# Legacy local uploads (now stored in MinIO/S3)
+uploads/

@@ -31,11 +31,34 @@ import interfaceRouter from "./routes/interfaces";
 import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
 import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
+
+// Foundry data ingestion layer routes (BE-003 through BE-030)
+import foundryProjectsRouter from "./routes/projects";
+import foundryFoldersRouter from "./routes/folders";
+import foundryUploadsRouter from "./routes/uploads";
+import foundryProjectUploadsRouter from "./routes/projectUploads";
+import { folderDatasetsRouter as foundryFolderDatasetsRouter, datasetRouter as foundryDatasetRouter } from "./routes/foundryDatasets";
+import foundrySearchRouter from "./routes/search";
+import foundryBreadcrumbRouter from "./routes/breadcrumb";
+import foundryAuthRouter from "./routes/auth";
+import foundryMembersRouter from "./routes/members";
+import foundryColumnStatsRouter from "./routes/columnStats";
+import foundryVersionsRouter from "./routes/versions";
+import { projectDuplicatesRouter, datasetDeduplicateRouter } from "./routes/duplicates";
+import foundryPreferencesRouter from "./routes/preferences";
+import { devRouter } from "./routes/devTools";
+import { healthDetailedRouter } from "./routes/healthDetailed";
+import { initWebSocketServer, getWss } from "./websocket/server";
+import { setupSwagger as setupFoundrySwagger } from "./docs/openapi";
 import { cleanupExpiredKeys } from "./actions/idempotency";
 import { limiter } from "./middleware/rateLimiter";
+import { serverTiming } from './middleware/serverTiming';
+import { contentLanguage } from './middleware/contentLanguage';
+import foundryDb from "./config/foundryDb";
 import swaggerUi from "swagger-ui-express";
 import * as fs from "fs";
 import * as path from "path";
+import { ensureBucket, destroyStorageClient, storageHealthCheck } from "./services/storageService";
 
 // Load OpenAPI spec JSON at startup
 const openApiSpec = JSON.parse(
@@ -65,6 +88,8 @@ const app = express();
 
 // Security headers (helmet defaults are sensible for APIs)
 app.use(helmet());
+app.use(serverTiming);
+app.use(contentLanguage);
 
 // Compress responses (gzip/brotli)
 app.use(compression());
@@ -96,8 +121,8 @@ app.use(
   cors({
     origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
-    exposedHeaders: ["X-Idempotency-Cached"],
+    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "X-Request-ID"],
+    exposedHeaders: ["X-Idempotency-Cached", "X-Total-Count", "Server-Timing", "Retry-After", "Content-Language", "X-Request-ID"],
   })
 );
 
@@ -128,6 +153,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
+
+// Detailed health check (must be before the foundry /health route)
+app.use("/health", healthDetailedRouter);
 
 /**
  * GET /health
@@ -229,6 +257,26 @@ app.use(objectsRouter);
 app.use(healthRouter);
 
 // ---------------------------------------------------------------------------
+// Foundry Data Ingestion Layer routes (BE-003 through BE-030)
+// These run alongside the ontology engine routes on the same Express app.
+// ---------------------------------------------------------------------------
+app.use("/api/projects", foundryProjectsRouter);
+app.use("/api/projects/:projectId/folders", foundryFoldersRouter);
+app.use("/api/projects/:projectId/folders/:folderId", foundryUploadsRouter);
+app.use("/api/projects/:projectId", foundryProjectUploadsRouter);
+app.use("/api/projects/:projectId/folders/:folderId/datasets", foundryFolderDatasetsRouter);
+app.use("/api/datasets", foundryDatasetRouter);
+app.use("/api/datasets", foundryColumnStatsRouter);
+app.use("/api/datasets", foundryVersionsRouter);
+app.use("/api/datasets", datasetDeduplicateRouter);
+app.use("/api/projects", projectDuplicatesRouter);
+app.use("/api/search", foundrySearchRouter);
+app.use("/api/breadcrumb", foundryBreadcrumbRouter);
+app.use("/api/auth", foundryAuthRouter);
+app.use("/api/projects/:projectId/members", foundryMembersRouter);
+app.use("/api/users/me/preferences", foundryPreferencesRouter);
+
+// ---------------------------------------------------------------------------
 // API Specification & Documentation
 // ---------------------------------------------------------------------------
 
@@ -242,6 +290,12 @@ app.use("/api/v2/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, {
   customCss: ".swagger-ui .topbar { display: none }",
   customSiteTitle: "Tellus Ontology Engine — API Docs",
 }));
+
+// Dev tools (seed/reset/status) — only active in non-production
+app.use("/api/dev", devRouter);
+
+// Foundry API docs (BE-029) — must be before notFoundHandler
+setupFoundrySwagger(app);
 
 // API endpoint listing (docs/endpoints)
 app.use(createDocsRouter(app));
@@ -301,11 +355,27 @@ async function start(): Promise<void> {
       );
     }
 
+    // Ensure the S3/MinIO bucket exists (creates if missing).
+    // Best-effort — server still starts if MinIO is unreachable.
+    try {
+      await ensureBucket();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `WARNING: Could not ensure S3/MinIO bucket: ${msg}`
+      );
+    }
+
     server = app.listen(PORT, () => {
       console.log(
         `Ontology Engine started on port ${PORT} | PostgreSQL connected`
       );
     });
+
+    // Attach WebSocket server for foundry real-time events (BE-012)
+    initWebSocketServer(server);
+
+    // Foundry Swagger docs are registered before server start (before notFoundHandler)
 
     // Clean up expired idempotency keys every 6 hours (Task 21)
     const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
@@ -366,6 +436,45 @@ async function shutdown(signal: string): Promise<void> {
 
   // Destroy the action rate limiter to prevent dangling setInterval
   limiter.destroy();
+
+  // Close foundry WebSocket connections
+  const wss = getWss();
+  if (wss) {
+    console.log(JSON.stringify({ type: "foundry_ws_closing" }));
+    for (const client of wss.clients) {
+      if (client.readyState === 1 /* WebSocket.OPEN */) {
+        client.close(1001, 'Server shutting down');
+      }
+    }
+  }
+
+  // Reset foundry datasets stuck in "processing" to "pending"
+  try {
+    const resetCount = await foundryDb('foundry_datasets')
+      .where({ status: 'processing' })
+      .update({ status: 'pending' });
+    if (resetCount > 0) {
+      console.log(JSON.stringify({ type: "foundry_datasets_reset", count: resetCount }));
+    }
+  } catch (err) {
+    console.error(JSON.stringify({ type: "foundry_datasets_reset_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // Destroy S3/MinIO client
+  try {
+    destroyStorageClient();
+    console.log(JSON.stringify({ type: "s3_client_destroyed" }));
+  } catch (err) {
+    console.error(JSON.stringify({ type: "s3_client_destroy_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // Drain foundry database connection pool
+  try {
+    await foundryDb.destroy();
+    console.log(JSON.stringify({ type: "foundry_db_disconnected" }));
+  } catch (err) {
+    console.error(JSON.stringify({ type: "foundry_db_disconnect_error", error: err instanceof Error ? err.message : String(err) }));
+  }
 
   try {
     await pool.end();

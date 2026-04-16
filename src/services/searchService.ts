@@ -1,0 +1,102 @@
+import { Knex } from 'knex';
+
+export class SearchService {
+  constructor(private knex: Knex) {}
+
+  async search(params: { q: string; type?: string; projectId?: string; page: number; limit: number; ownerId: string }) {
+    const { q, type, projectId, page, limit, ownerId } = params;
+    const offset = (page - 1) * limit;
+
+    if (!q || q.trim() === '') {
+      const countResult = await this.knex('projects').where({ owner_id: ownerId }).count('* as cnt').first();
+      const total = Number(countResult?.cnt ?? 0);
+      const projects = await this.knex('projects').where({ owner_id: ownerId }).orderBy('updated_at', 'desc').limit(limit).offset(offset);
+      return { results: projects.map((p: Record<string, unknown>) => ({ ...p, resourceType: 'project' })), meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+    }
+
+    const searchTerm = q.trim();
+    // Escape LIKE special characters to prevent wildcard injection
+    const escapedTerm = searchTerm.replace(/[\\%_]/g, '\\$&');
+    const ilikeTerm = `%${escapedTerm}%`;
+
+    // Build a UNION ALL with proper parameterized bindings.
+    // Collect SQL fragments (with ? placeholders) and their bindings separately,
+    // then pass everything to a single knex.raw() call.
+    const sqlParts: string[] = [];
+    const allBindings: unknown[] = [];
+
+    if (!type || type === 'project') {
+      sqlParts.push(`(SELECT id, name, 'project' AS "resourceType", updated_at FROM projects WHERE owner_id = ? AND name ILIKE ? ESCAPE '\\')`);
+      allBindings.push(ownerId, ilikeTerm);
+    }
+
+    if (!type || type === 'folder') {
+      let folderSql = `(SELECT folders.id, folders.name, 'folder' AS "resourceType", folders.updated_at FROM folders JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND folders.name ILIKE ? ESCAPE '\\'`;
+      allBindings.push(ownerId, ilikeTerm);
+      if (projectId) {
+        folderSql += ' AND folders.project_id = ?';
+        allBindings.push(projectId);
+      }
+      folderSql += ')';
+      sqlParts.push(folderSql);
+    }
+
+    if (!type || type === 'dataset') {
+      let dsSql = `(SELECT foundry_datasets.id, foundry_datasets.name, 'dataset' AS "resourceType", foundry_datasets.updated_at FROM foundry_datasets JOIN folders ON foundry_datasets.folder_id = folders.id JOIN projects ON folders.project_id = projects.id WHERE projects.owner_id = ? AND foundry_datasets.name ILIKE ? ESCAPE '\\'`;
+      allBindings.push(ownerId, ilikeTerm);
+      if (projectId) {
+        dsSql += ' AND folders.project_id = ?';
+        allBindings.push(projectId);
+      }
+      dsSql += ')';
+      sqlParts.push(dsSql);
+    }
+
+    if (sqlParts.length === 0) {
+      return { results: [], meta: { page, limit, total: 0, totalPages: 0 } };
+    }
+
+    const unionSql = sqlParts.join(' UNION ALL ');
+
+    // Get total count with proper parameterization
+    const countBindings = [...allBindings];
+    const countResult = await this.knex.raw(
+      `SELECT COUNT(*) AS cnt FROM (${unionSql}) AS search_results`,
+      countBindings
+    );
+    const total = Number(countResult.rows[0]?.cnt ?? 0);
+
+    // Get paginated results with proper parameterization
+    const dataBindings = [...allBindings, limit, offset];
+    const dataResult = await this.knex.raw(
+      `SELECT * FROM (${unionSql}) AS search_results ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+      dataBindings
+    );
+
+    const results = dataResult.rows as Record<string, unknown>[];
+    return { results, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  }
+
+  async suggest(q: string, ownerId: string): Promise<{ name: string; type: string }[]> {
+    if (!q || q.trim().length === 0) return [];
+    // Escape LIKE special characters to prevent wildcard injection
+    const escapedPrefix = q.trim().replace(/[\\%_]/g, '\\$&');
+    const prefix = `${escapedPrefix}%`;
+    const suggestions: { name: string; type: string }[] = [];
+
+    const projects = await this.knex('projects').where({ owner_id: ownerId }).whereRaw("name ILIKE ? ESCAPE '\\'", [prefix]).select('name').limit(10);
+    suggestions.push(...projects.map((p: Record<string, unknown>) => ({ name: p.name as string, type: 'project' })));
+
+    if (suggestions.length < 10) {
+      const folders = await this.knex('folders').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).whereRaw("folders.name ILIKE ? ESCAPE '\\'", [prefix]).select('folders.name').limit(10 - suggestions.length);
+      suggestions.push(...folders.map((f: Record<string, unknown>) => ({ name: f.name as string, type: 'folder' })));
+    }
+
+    if (suggestions.length < 10) {
+      const datasets = await this.knex('foundry_datasets').join('folders', 'foundry_datasets.folder_id', 'folders.id').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).whereRaw("foundry_datasets.name ILIKE ? ESCAPE '\\'", [prefix]).select('foundry_datasets.name').limit(10 - suggestions.length);
+      suggestions.push(...datasets.map((d: Record<string, unknown>) => ({ name: d.name as string, type: 'dataset' })));
+    }
+
+    return suggestions.slice(0, 10);
+  }
+}

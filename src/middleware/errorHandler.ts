@@ -292,6 +292,51 @@ export default function errorHandler(
   }
 
   // -----------------------------------------------------------------
+  // 2b. Foundry data ingestion layer AppError (duck-type detection)
+  //     These have statusCode (number), code (string), isOperational (boolean)
+  //     Check error name to avoid catching third-party errors
+  // -----------------------------------------------------------------
+  if (
+    typeof err === "object" && err !== null &&
+    ((err as any).name === "AppError" || (err as any).constructor?.name === "AppError") &&
+    typeof (err as any).statusCode === "number" &&
+    typeof (err as any).code === "string" &&
+    typeof (err as any).isOperational === "boolean"
+  ) {
+    const fErr = err as { statusCode: number; code: string; message: string; isOperational: boolean };
+    const instanceId = crypto.randomUUID();
+    console.error(`[${fErr.code}] ${fErr.message} (${instanceId}) [requestId=${requestId}]`);
+
+    // Foundry endpoints return { success: false, error: { code, message } } format
+    return void res.status(fErr.statusCode).json({
+      success: false,
+      error: {
+        code: fErr.code,
+        message: fErr.message,
+        details: null,
+      },
+    });
+  }
+
+  // -----------------------------------------------------------------
+  // 2c. JSON parse error (malformed request body from express.json())
+  // -----------------------------------------------------------------
+  if (
+    err instanceof SyntaxError &&
+    "type" in err &&
+    (err as any).type === "entity.parse.failed"
+  ) {
+    return void res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Malformed JSON in request body.",
+        details: null,
+      },
+    });
+  }
+
+  // -----------------------------------------------------------------
   // 3. Application error with a code matching ERROR_CODES
   //    Convert to standardized format (Task 20)
   // -----------------------------------------------------------------
