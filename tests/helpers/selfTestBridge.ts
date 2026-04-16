@@ -36,7 +36,20 @@ export interface SelfTestResult {
  * @param forceChildProcess - Skip in-process attempt (for modules with
  *   async side effects like signal handlers and timers that outlive the call)
  */
-export async function executeSelfTest(
+export function executeSelfTest(
+  modulePath: string,
+  timeout: number = 60_000,
+): SelfTestResult {
+  // Synchronous child-process execution — used by integration tests
+  const absolutePath = path.join(ROOT, modulePath);
+  return runInChildProcess(absolutePath, timeout);
+}
+
+/**
+ * Async version that tries in-process first (for V8 coverage),
+ * falling back to child process.
+ */
+async function executeSelfTestAsync(
   modulePath: string,
   timeout: number = 60_000,
   forceChildProcess: boolean = false
@@ -44,15 +57,13 @@ export async function executeSelfTest(
   const absolutePath = path.join(ROOT, modulePath);
 
   if (!forceChildProcess) {
-    // --- Attempt 1: In-process (enables V8 coverage) ---
     try {
       return await runInProcess(absolutePath);
     } catch {
-      // Import failed (DB dependency, etc.) — fall back to child process
+      // Import failed — fall back to child process
     }
   }
 
-  // --- Attempt 2: Child process (no coverage, but always works) ---
   return runInChildProcess(absolutePath, timeout);
 }
 
@@ -166,7 +177,7 @@ export function runModuleSelfTest(
 ): void {
   describe(`${name} (${task})`, () => {
     it("passes all inline self-tests", async () => {
-      const result = await executeSelfTest(modulePath, 60_000, forceChildProcess);
+      const result = await executeSelfTestAsync(modulePath, 60_000, forceChildProcess);
 
       expect(
         result.failed,
