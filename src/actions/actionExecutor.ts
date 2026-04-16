@@ -423,6 +423,30 @@ export async function executeAction(
       branch_id: context.branchId || null,
     });
 
+    // ---------------------------------------------------------------------
+    // STAGE 9: Publish to Kafka so the streaming pipeline (Apache Flink)
+    // and the Object Explorer "Action Run History" panel see the event in
+    // near-real-time. Best-effort — we don't block the action result on
+    // broker availability.
+    // ---------------------------------------------------------------------
+    try {
+      const { publishEvent } = await import("../services/kafkaProducer");
+      const { incrementCounter, observeHistogram } = await import("../routes/metrics");
+      incrementCounter("ontology_actions_applied_total");
+      observeHistogram("ontology_action_duration_ms", result.durationMs);
+      void publishEvent("ontology.actions", {
+        ontologyId,
+        actionTypeApiName,
+        executionId,
+        result: result.result,
+        affectedCount: result.affectedObjects.length,
+        durationMs: result.durationMs,
+        executedBy: context.executedBy ?? "system",
+      });
+    } catch {
+      /* ignore — observability must never break the action path */
+    }
+
     // After audit logging, throw the deferred OntologyError. This causes
     // the Promise<ExecutionResult> to reject — the caller never receives
     // the result object on failure paths. This is intentional: the global

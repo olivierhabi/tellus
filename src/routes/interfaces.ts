@@ -43,6 +43,8 @@ const KNOWN_CODES = new Set([
   "QUERY_VALIDATION_ERROR",
   "INVALID_PAGE_TOKEN",
   "INVALID_PARAMETER",
+  "INTERFACE_CYCLE_DETECTED",
+  "INCOMPATIBLE_PROPERTY_TYPE",
   "INVALID_AGGREGATION",
 ]);
 
@@ -533,7 +535,8 @@ router.put(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId, interfaceApiName } = req.params;
-      const { displayName, description, properties } = req.body;
+      const { displayName, description, properties, parentInterfaceApiName } =
+        req.body;
 
       await verifyOntology(ontologyId);
 
@@ -550,6 +553,33 @@ router.put(
       }
       const interfaceRow = existing.rows[0];
       const interfaceId = interfaceRow.interface_id;
+
+      // Spec §Task 8 — inheritance DAG cycle detection. If the caller wants
+      // to change the parent, verify no cycle would be introduced.
+      if (parentInterfaceApiName !== undefined) {
+        let parentId: string | null = null;
+        if (parentInterfaceApiName !== null) {
+          const parentRow = await query(
+            "SELECT interface_id FROM interface WHERE ontology_id = $1 AND api_name = $2",
+            [ontologyId, parentInterfaceApiName]
+          );
+          if (parentRow.rowCount === 0) {
+            throw appError(
+              "INTERFACE_NOT_FOUND",
+              `Parent interface "${parentInterfaceApiName}" not found.`
+            );
+          }
+          parentId = parentRow.rows[0].interface_id;
+        }
+        const { assertNoInheritanceCycle } = await import(
+          "../services/interfaceInheritance"
+        );
+        await assertNoInheritanceCycle(interfaceId, parentId);
+        await query(
+          "UPDATE interface SET parent_interface_id = $1 WHERE interface_id = $2",
+          [parentId, interfaceId]
+        );
+      }
 
       // Validate displayName if provided
       if (displayName !== undefined) {

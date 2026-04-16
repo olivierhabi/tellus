@@ -37,7 +37,140 @@ import {
   deleteIndex,
   createIndex,
 } from "./opensearch/indexLifecycleManager";
+import { getObjectBuffer } from "./storageService";
 import type { PropertyInput } from "./mapping/typeMapper";
+
+// ---------------------------------------------------------------------------
+// Pipeline stage tracking — matches the 4-stage Funnel spec
+// (ontology-object explorer.md §1.7, item 47).
+// ---------------------------------------------------------------------------
+
+type PipelineStage = "changelog" | "merge_changes" | "indexing" | "hydration";
+
+/**
+ * Write the live pipeline stage into `funnel_pipeline_state`. Called
+ * at the start of each major step in `reindexObjectType` so the
+ * frontend's status poller can surface which stage is running.
+ * Errors are swallowed — stage tracking is best-effort and must
+ * never break the core reindex path.
+ */
+async function setPipelineStage(
+  objectTypeApiName: string,
+  stage: PipelineStage | null,
+  status: "running" | "success" | "failed" = "running",
+): Promise<void> {
+  try {
+    await query(
+      `INSERT INTO funnel_pipeline_state
+         (object_type_api_name, status, current_stage, stage_started_at, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (object_type_api_name) DO UPDATE SET
+         status = EXCLUDED.status,
+         current_stage = EXCLUDED.current_stage,
+         stage_started_at = EXCLUDED.stage_started_at,
+         updated_at = now()`,
+      [objectTypeApiName, status, stage, stage ? new Date() : null],
+    );
+  } catch (err) {
+    console.warn(
+      `[Reindex] setPipelineStage failed (best-effort)`,
+      (err as Error).message,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Foundry-dataset bridge helpers
+//
+// When an object type is backed via `registerWithFoundryDataset`, the
+// `backing_datasource.file_path` is a SYNTHETIC string of the form
+// `<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>`. The pre-tag
+// prefix is the real S3 key stored in `foundry_datasets.file_path`,
+// which is uploaded via `storageService.uploadObject` (MinIO-backed).
+//
+// These helpers let the reindex pipeline transparently read from
+// MinIO when the synthetic tag is present, so foundry-bridged object
+// types reindex without needing a parallel "Ontology dataset" row.
+// ---------------------------------------------------------------------------
+
+function isFoundryBridgedPath(filePath: string | null | undefined): boolean {
+  return typeof filePath === "string" && filePath.includes("#foundry-dataset:");
+}
+
+function stripFoundryTags(filePath: string): string {
+  // Everything before the first `#foundry-dataset:` segment is the
+  // real S3 object key.
+  const idx = filePath.indexOf("#foundry-dataset:");
+  return idx >= 0 ? filePath.slice(0, idx) : filePath;
+}
+
+async function readFoundryBridgedFile(
+  rawFilePath: string,
+  format: string,
+): Promise<{ rows: Record<string, unknown>[]; headers: string[] }> {
+  const s3Key = stripFoundryTags(rawFilePath);
+  if (!s3Key) {
+    throw new Error(
+      `Foundry-bridged datasource has no resolvable S3 key in '${rawFilePath}'`,
+    );
+  }
+  const buffer = await getObjectBuffer(s3Key);
+  let content = buffer.toString("utf-8");
+  // Strip BOM
+  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
+
+  if (format === "csv" || format === "tsv") {
+    const { parse } = await import("csv-parse/sync");
+    const records: Record<string, string>[] = parse(content, {
+      columns: true,
+      skip_empty_lines: true,
+      relax_column_count: true,
+      trim: true,
+      delimiter: format === "tsv" ? "\t" : ",",
+    });
+    // Normalise null-likes so downstream type conversion treats
+    // empty cells as SQL NULL rather than the literal string "".
+    for (const record of records) {
+      for (const key of Object.keys(record)) {
+        const v = (record as Record<string, unknown>)[key];
+        if (typeof v === "string") {
+          const n = v.trim().toLowerCase();
+          if (n === "" || n === "null" || n === "na" || n === "n/a") {
+            (record as Record<string, unknown>)[key] = null;
+          }
+        }
+      }
+    }
+    const headers = records.length > 0 ? Object.keys(records[0]) : [];
+    return { rows: records, headers };
+  }
+  if (format === "json" || format === "jsonl") {
+    const trimmed = content.trim();
+    let records: Record<string, unknown>[];
+    if (trimmed.startsWith("[")) {
+      records = JSON.parse(trimmed);
+    } else {
+      records = trimmed
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l));
+    }
+    const headers: string[] = [];
+    const seen = new Set<string>();
+    for (const row of records) {
+      if (row && typeof row === "object" && !Array.isArray(row)) {
+        for (const k of Object.keys(row)) {
+          if (!seen.has(k)) {
+            seen.add(k);
+            headers.push(k);
+          }
+        }
+      }
+    }
+    return { rows: records, headers };
+  }
+  throw new Error(`Unsupported foundry-bridge file format: '${format}'`);
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -229,8 +362,12 @@ export async function reindexObjectType(
 
   try {
     // =================================================================
-    // Step 1: Load metadata from PostgreSQL
+    // Stage 1: CHANGELOG — load metadata + read every committed
+    // transaction / file into memory. Spec §1.7 item 47 calls this
+    // the "changelog" stage: assemble the ordered sequence of
+    // changes that need to be merged.
     // =================================================================
+    await setPipelineStage(objectTypeApiName, "changelog");
 
     // Get object type
     const otResult = await query(
@@ -328,25 +465,38 @@ export async function reindexObjectType(
       );
       transactions = txnResult.rows;
     } else {
-      // Case B: legacy file-backed
+      // Case B: legacy file-backed  OR  Case C: foundry-dataset bridged
+      //
+      // Both land here because they share a single synthetic
+      // "transaction" (no committed `dataset_transaction` rows).
+      // The distinction is made further down in Step 3 when the
+      // file is actually read: `isFoundryBridgedPath` decides
+      // whether to pull from MinIO or from local disk.
       transactions = [
         {
-          transaction_id: "legacy",
+          transaction_id: isFoundryBridgedPath(datasource.file_path)
+            ? "foundry-bridge"
+            : "legacy",
           file_path: datasource.file_path,
           transaction_type: "SNAPSHOT",
           committed_at: new Date().toISOString(),
         },
       ];
-      // Detect format from file extension
-      const ext = path.extname(datasource.file_path).toLowerCase();
-      if (ext === ".json" || ext === ".jsonl") {
-        datasetFormat = "json";
-      } else {
-        datasetFormat = "csv";
-      }
-      // Also check if the datasource has a file_format column
+      // Format detection: prefer the explicit `file_format` column
+      // (foundry uploads always set this), then fall back to the
+      // file extension of the pre-tag S3 key for safety.
       if (datasource.file_format) {
         datasetFormat = datasource.file_format;
+      } else {
+        const cleanPath = isFoundryBridgedPath(datasource.file_path)
+          ? stripFoundryTags(datasource.file_path)
+          : datasource.file_path;
+        const ext = path.extname(cleanPath).toLowerCase();
+        if (ext === ".json" || ext === ".jsonl") {
+          datasetFormat = "json";
+        } else {
+          datasetFormat = "csv";
+        }
       }
     }
 
@@ -363,20 +513,31 @@ export async function reindexObjectType(
     );
 
     // =================================================================
-    // Step 3: Read & merge all transaction files
-    //
-    // In-memory Map keyed by primary key value. Process each transaction
-    // file in chronological order (oldest first). For SNAPSHOT transactions,
-    // clear the map first (it replaces all previous data). For APPEND
-    // transactions, add to the existing map.
+    // Stage 2: MERGE CHANGES — read every transaction file in
+    // chronological order into a single `Map<pk, row>`. SNAPSHOTs
+    // clear the map; APPENDs overlay. This is the "merge changes"
+    // stage from the Funnel spec — we collapse the changelog into
+    // the final state we'll hand to the indexer.
     // =================================================================
+    await setPipelineStage(objectTypeApiName, "merge_changes");
 
     const objectMap = new Map<string, Record<string, unknown>>();
 
     for (const txn of transactions) {
       let rows: Record<string, unknown>[];
       try {
-        const fileResult = await readFile(txn.file_path, datasetFormat);
+        // Case C (foundry-dataset bridge): the synthetic file_path
+        // contains `#foundry-dataset:<uuid>` — we strip the tag to
+        // get the real MinIO object key and read via the storage
+        // client, bypassing the local-filesystem `readFile` path
+        // entirely. This is what makes wizard-created object types
+        // (which upload to MinIO via the foundry pipeline) actually
+        // indexable without requiring an Ontology `dataset_transaction`.
+        //
+        // Case A and Case B continue through the legacy disk reader.
+        const fileResult = isFoundryBridgedPath(txn.file_path)
+          ? await readFoundryBridgedFile(txn.file_path, datasetFormat)
+          : await readFile(txn.file_path, datasetFormat);
         rows = fileResult.rows;
       } catch (err: any) {
         throw appError(
@@ -538,8 +699,12 @@ export async function reindexObjectType(
     );
 
     // =================================================================
-    // Step 7: Build OpenSearch bulk request
+    // Stage 3: INDEXING — build the OpenSearch bulk body, recreate
+    // the per-object-type index, and push every merged document.
+    // This is the "indexing" stage from the Funnel spec: the
+    // merged state lands in the search store.
     // =================================================================
+    await setPipelineStage(objectTypeApiName, "indexing");
 
     const indexName = getIndexName(objectTypeApiName);
     const bulkBody: Record<string, unknown>[] = [];
@@ -633,8 +798,14 @@ export async function reindexObjectType(
     );
 
     // =================================================================
-    // Step 10: Mark edits as indexed
+    // Stage 4: HYDRATION — mark the `ontology_edit` rows as indexed
+    // so the next pass through `checkReindexNeeded` treats them as
+    // caught-up, bump `funnel_state` to `indexed`, and record the
+    // run in `reindex_history`. Spec §1.7 names this stage "hydration":
+    // everything downstream of the search index gets caught up to
+    // the new state of the world.
     // =================================================================
+    await setPipelineStage(objectTypeApiName, "hydration");
 
     if (editIds.length > 0) {
       await query(
@@ -645,7 +816,7 @@ export async function reindexObjectType(
     }
 
     console.log(
-      `[Reindex] Step 10: Marked ${editIds.length} edits as indexed`
+      `[Reindex] Hydration: marked ${editIds.length} edits as indexed`
     );
 
     // =================================================================
@@ -669,15 +840,19 @@ export async function reindexObjectType(
       [objectTypeId, indexedCount, durationMs, indexName]
     );
 
-    // Also update funnel_pipeline_state if it exists
+    // Also update funnel_pipeline_state if it exists. Clears
+    // `current_stage` so the frontend status poller sees the
+    // pipeline has settled and can drop the spinner.
     try {
       await query(
         `INSERT INTO funnel_pipeline_state
-           (object_type_api_name, status, last_indexed_at, objects_indexed,
-            duration_ms, error_message, updated_at)
-         VALUES ($1, 'success', now(), $2, $3, NULL, now())
+           (object_type_api_name, status, current_stage, stage_started_at,
+            last_indexed_at, objects_indexed, duration_ms, error_message, updated_at)
+         VALUES ($1, 'success', NULL, NULL, now(), $2, $3, NULL, now())
          ON CONFLICT (object_type_api_name) DO UPDATE SET
            status = 'success',
+           current_stage = NULL,
+           stage_started_at = NULL,
            last_indexed_at = now(),
            objects_indexed = $2,
            duration_ms = $3,
@@ -770,14 +945,17 @@ export async function reindexObjectType(
       // Best-effort state update
     }
 
-    // Try to update funnel_pipeline_state
+    // Try to update funnel_pipeline_state — clear `current_stage`
+    // so the frontend spinner drops back to idle on failure.
     try {
       await query(
         `INSERT INTO funnel_pipeline_state
-           (object_type_api_name, status, error_message, updated_at)
-         VALUES ($1, 'failed', $2, now())
+           (object_type_api_name, status, current_stage, stage_started_at, error_message, updated_at)
+         VALUES ($1, 'failed', NULL, NULL, $2, now())
          ON CONFLICT (object_type_api_name) DO UPDATE SET
            status = 'failed',
+           current_stage = NULL,
+           stage_started_at = NULL,
            error_message = $2,
            updated_at = now()`,
         [objectTypeApiName, err.message]

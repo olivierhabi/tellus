@@ -133,21 +133,28 @@ export class OntologyError extends Error {
   }
 
   /**
-   * Produce the Palantir-compatible standardized error response body.
+   * Produce the Ontology Platform spec §2.1 error envelope. The legacy
+   * `errorInstanceId` field is retained for backward compatibility with
+   * older clients, but the canonical contract is:
+   *   {errorCode, errorName, message, statusCode, requestId, parameters}
    */
   toResponse(): {
     errorCode: string;
     errorName: string;
-    errorInstanceId: string;
-    parameters: Record<string, unknown>;
     message: string;
+    statusCode: number;
+    requestId: string;
+    parameters: Record<string, unknown>;
+    errorInstanceId: string;
   } {
     return {
       errorCode: this.code,
       errorName: this.errorName,
-      errorInstanceId: this.errorInstanceId,
-      parameters: this.parameters,
       message: this.message,
+      statusCode: this.statusCode,
+      requestId: this.errorInstanceId,
+      parameters: this.parameters,
+      errorInstanceId: this.errorInstanceId,
     };
   }
 }

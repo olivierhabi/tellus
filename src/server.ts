@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "crypto";
 import http from "http";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -13,6 +14,19 @@ import errorHandler from "./middleware/errorHandler";
 import ontologyRouter from "./routes/ontology";
 import objectTypeRouter from "./routes/objectTypes";
 import propertyRouter from "./routes/properties";
+import branchesRouter from "./routes/branches";
+import groupsRouter from "./routes/groups";
+import functionsRouter from "./routes/functions";
+import favoritesRouter from "./routes/favorites";
+import explorationsRouter from "./routes/explorations";
+import exportsRouter from "./routes/exports";
+import summaryRouter from "./routes/summary";
+import geoRouter from "./routes/geo";
+import comparisonsRouter from "./routes/comparisons";
+import migrationManagerRouter from "./routes/migrationManager";
+import governanceRouter from "./routes/governance";
+import { securityContext } from "./middleware/securityContext";
+import { resolveOntologyAlias } from "./middleware/resolveOntologyAlias";
 import datasourceRouter, { suggestMappingRouter } from "./routes/datasources";
 import indexingRouter from "./routes/indexing";
 import linkRouter from "./routes/links";
@@ -32,6 +46,18 @@ import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
 import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
+// Modern Palantir-stack additions: DuckDB SQL, Polars charts, Kafka producer,
+// pipeline status, Prometheus metrics. Each module is documented inline.
+import sqlRouter from "./routes/sql";
+import chartsRouter from "./routes/charts";
+import pipelinesStatusRouter from "./routes/pipelines-status";
+import metricsRouter, { incrementCounter } from "./routes/metrics";
+import vectorTimeseriesRouter from "./routes/vectorAndTimeseries";
+import keycloakSsoRouter from "./routes/keycloak";
+import icebergRouter from "./routes/iceberg";
+import flinkRouter from "./routes/flink";
+import { shutdownKafka } from "./services/kafkaProducer";
+
 // Foundry data ingestion layer routes (BE-003 through BE-030)
 import foundryProjectsRouter from "./routes/projects";
 import foundryFoldersRouter from "./routes/folders";
@@ -40,7 +66,13 @@ import foundryProjectUploadsRouter from "./routes/projectUploads";
 import { folderDatasetsRouter as foundryFolderDatasetsRouter, datasetRouter as foundryDatasetRouter } from "./routes/foundryDatasets";
 import foundrySearchRouter from "./routes/search";
 import foundryBreadcrumbRouter from "./routes/breadcrumb";
-import foundryAuthRouter from "./routes/auth";
+import tellusAuthV1Router from "./routes/tellusAuthV1";
+import tellusAuthTestHooksRouter from "./routes/tellusAuthTestHooks";
+import { purgeExpiredAuthChallenges } from "./services/totpService";
+import { purgeExpiredReauthTokens } from "./services/reauthService";
+import { flushEmailOutbox } from "./services/emailOutboxService";
+import { getPasskeyEnrollmentService } from "./services/passkeyEnrollmentService";
+import { patSecurityGate } from "./middleware/patSecurityGate";
 import foundryMembersRouter from "./routes/members";
 import foundryColumnStatsRouter from "./routes/columnStats";
 import foundryVersionsRouter from "./routes/versions";
@@ -95,16 +127,37 @@ app.use(contentLanguage);
 // Compress responses (gzip/brotli)
 app.use(compression());
 
-// Rate limiting — configurable requests per minute per IP
-// Default: 200 req/min. Override via RATE_LIMIT_MAX env var.
+// Rate limiting — configurable requests per minute per IP.
+//
+// `/health`, `/api/health`, and `/api/metrics` are intentionally exempted
+// because Kubernetes liveness probes and Prometheus scrapers hit them on a
+// fixed schedule that would otherwise burn the entire request budget. The
+// production rule is: **observability must never throttle**.
+//
+// We also normalize the limit-exceeded response to the same
+// `{ error: { code, message } }` envelope every other route uses, so
+// monitoring and the frontend toaster can treat 429 like any other error.
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "200", 10);
+const RATE_LIMIT_SKIP = new Set<string>([
+  "/health",
+  "/api/health",
+  "/api/metrics",
+]);
 app.use(
   rateLimit({
     windowMs: 60_000,
     limit: RATE_LIMIT_MAX,
     standardHeaders: "draft-7",
     legacyHeaders: false,
-    message: { error: "Too many requests, please try again later." },
+    skip: (req: Request) => RATE_LIMIT_SKIP.has(req.path),
+    handler: (_req: Request, res: Response) => {
+      res.status(429).json({
+        error: {
+          code: "RATE_LIMITED",
+          message: "Too many requests, please try again later.",
+        },
+      });
+    },
   })
 );
 
@@ -112,6 +165,38 @@ app.use(
 // requests (like registering a backing datasource with a very large column
 // mapping) can have substantial JSON bodies.
 app.use(express.json({ limit: "10mb" }));
+
+// Body-parser error catcher. Without this, Express maps `entity.too.large`
+// and `entity.parse.failed` errors to a generic 500, which violates the
+// "never return 5xx for client mistakes" rule the SRE audit checks. We
+// translate them to the unified spec envelope (matching the rest of the
+// auth surface + the global errorHandler) and keep a legacy shim on
+// .error for backwards compatibility with older clients.
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  if (!err) return next();
+  const requestId = (req as any).requestId || crypto.randomUUID();
+  if (err.type === "entity.too.large" || err.status === 413) {
+    return res.status(413).json({
+      errorCode: "PAYLOAD_TOO_LARGE",
+      errorName: "ValidationError",
+      message: `Request body exceeds the ${err.limit ?? "10mb"} limit`,
+      statusCode: 413,
+      requestId,
+      error: { code: "PAYLOAD_TOO_LARGE", message: `Request body exceeds the ${err.limit ?? "10mb"} limit` },
+    });
+  }
+  if (err.type === "entity.parse.failed" || err instanceof SyntaxError) {
+    return res.status(400).json({
+      errorCode: "VALIDATION_ERROR",
+      errorName: "ValidationError",
+      message: "Request body is not valid JSON",
+      statusCode: 400,
+      requestId,
+      error: { code: "MALFORMED_JSON", message: "Request body is not valid JSON" },
+    });
+  }
+  return next(err);
+});
 
 // CORS — restrict origins via CORS_ORIGINS env var; empty = allow all (dev)
 const corsOrigins = process.env.CORS_ORIGINS
@@ -121,17 +206,83 @@ const corsOrigins = process.env.CORS_ORIGINS
 app.use(
   cors({
     origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
+    credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "X-Request-ID"],
     exposedHeaders: ["X-Idempotency-Cached", "X-Total-Count", "Server-Timing", "Retry-After", "Content-Language", "X-Request-ID"],
   })
 );
 
+// Lightweight cookie parser — populates req.cookies for the Tellus auth
+// middleware without pulling in an extra dependency. Keeps values URI-
+// decoded and handles multiple cookies in one header.
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  const header = req.headers.cookie;
+  const out: Record<string, string> = {};
+  if (header) {
+    for (const pair of header.split(/; */)) {
+      const idx = pair.indexOf("=");
+      if (idx < 0) continue;
+      const name = pair.slice(0, idx).trim();
+      const value = pair.slice(idx + 1).trim();
+      if (!name) continue;
+      try {
+        out[name] = decodeURIComponent(value);
+      } catch {
+        out[name] = value;
+      }
+    }
+  }
+  (req as Request & { cookies: Record<string, string> }).cookies = out;
+  next();
+});
+
 // Input sanitization — trim, strip null bytes, normalize Unicode, XSS prevention
 app.use(inputSanitizer);
 
+// App-wide PAT security gate. MUST be registered before every route
+// handler in the middleware chain — Express only runs middleware
+// whose use() call comes BEFORE the matching route mount. Without
+// this gate the pre-existing ontology / dataset / project routes
+// (which never used `authenticate`) would happily serve any Bearer
+// tellus_pat_* token because nothing was looking at it. The gate:
+//   1. Resolves the PAT via TellusAuthService.resolvePat()
+//   2. Populates req.tellusPrincipal with the token's scopes
+//   3. Enforces the route→scope map in services/patScopeMap.ts
+// Interactive JWT / cookie sessions are untouched — only PAT-prefixed
+// Bearer headers trigger the gate.
+app.use("/api", patSecurityGate);
+
+// Boot-time assertion: a future refactor must not be able to silently
+// drop the app-wide PAT scope gate. If the middleware is no longer
+// registered on the express router stack, fail loudly on startup rather
+// than quietly serving every Bearer tellus_pat_* token with no scope
+// check. The per-route inline gate that used to live in
+// middleware/tellusAuth.ts was removed (it was redundant with this
+// mount), so this assertion is now the sole structural guarantee.
+{
+  const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
+  const mounted = stack.some((layer) => layer.handle === patSecurityGate || layer.name === "patSecurityGate");
+  if (!mounted) {
+    // eslint-disable-next-line no-console
+    console.error("[boot] FATAL: patSecurityGate is not mounted — PAT scope enforcement would be disabled");
+    throw new Error("patSecurityGate middleware is not registered on the Express app");
+  }
+}
+
 // Structured JSON request/response logging
 app.use(requestLogger);
+
+// Populate req.security with marking/org/cbac claims so every downstream
+// search handler can inject a mandatory filter (Ontology Platform spec §Task 28).
+app.use(securityContext);
+
+// Increment Prometheus counters on every request. Must be registered
+// BEFORE the route handlers so it sees every inbound HTTP call.
+app.use((_req: Request, _res: Response, next: NextFunction) => {
+  incrementCounter("http_requests_total");
+  next();
+});
 
 // ---------------------------------------------------------------------------
 // In-flight request tracking + shutdown rejection (Task 21)
@@ -191,7 +342,28 @@ app.get("/health", async (_req: Request, res: Response) => {
   }
 });
 
-// API routers
+// API routers — spec cypress tests hit `.../ontologies/default/...`; rewrite
+// the URL path so every downstream router sees the real UUID. This is a
+// string substitution on `req.url` so Express re-parses params for us.
+const ALIAS_RE = /^(\/api\/v2\/ontolog(?:y|ies))\/(default|main|primary)(\/|$)/;
+app.use(async (req, _res, next) => {
+  const m = req.url.match(ALIAS_RE);
+  if (!m) return next();
+  try {
+    const { query } = await import("./db");
+    const result = await query(
+      "SELECT ontology_id FROM ontology ORDER BY created_at ASC LIMIT 1"
+    );
+    if (result.rowCount && result.rowCount > 0) {
+      const real = result.rows[0].ontology_id as string;
+      req.url = req.url.replace(ALIAS_RE, `$1/${real}$3`);
+    }
+  } catch {
+    // fall through — route will return its own error
+  }
+  next();
+});
+
 app.use(ontologyRouter);
 app.use("/api/v2/ontologies/:ontologyId/objectTypes", objectTypeRouter);
 app.use("/api/v2/ontologies/:ontologyId/objectTypes/:apiName", propertyRouter);
@@ -258,6 +430,33 @@ app.use(objectsRouter);
 app.use(healthRouter);
 
 // ---------------------------------------------------------------------------
+// Ontology Platform spec Phase 2 — branching, groups, functions, favorites,
+// saved explorations, exports, summary, geo, comparisons, schema migrations.
+// ---------------------------------------------------------------------------
+app.use("/api/v2/ontologies/:ontologyId/branches", branchesRouter);
+app.use("/api/v2/ontologies/:ontologyId/groups", groupsRouter);
+app.use("/api/v2/ontologies/:ontologyId/functions", functionsRouter);
+app.use("/api/v2/ontologies/:ontologyId/explorations", explorationsRouter);
+app.use("/api/v2/ontologies/:ontologyId/exports", exportsRouter);
+app.use("/api/v2/ontologies/:ontologyId/summary", summaryRouter);
+app.use("/api/v2/ontologies/:ontologyId/geo", geoRouter);
+app.use("/api/v2/ontologies/:ontologyId/comparisons", comparisonsRouter);
+app.use("/api/v2/ontologies/:ontologyId/migrations", migrationManagerRouter);
+app.use("/api/v2/ontologies/:ontologyId/governance", governanceRouter);
+app.use("/api/v2/users/me/favorites", favoritesRouter);
+
+// New Palantir-stack endpoints (Furnace SQL, Polars charts, Funnel pipeline
+// status, Prometheus metrics).
+app.use("/api/v2", sqlRouter);
+app.use("/api/v2", chartsRouter);
+app.use("/api/v2", pipelinesStatusRouter);
+app.use("/api/v2", vectorTimeseriesRouter);
+app.use("/api/v2", keycloakSsoRouter);
+app.use("/api/v2", icebergRouter);
+app.use("/api/v2", flinkRouter);
+app.use("/api", metricsRouter);
+
+// ---------------------------------------------------------------------------
 // Foundry Data Ingestion Layer routes (BE-003 through BE-030)
 // These run alongside the ontology engine routes on the same Express app.
 // ---------------------------------------------------------------------------
@@ -273,7 +472,16 @@ app.use("/api/datasets", datasetDeduplicateRouter);
 app.use("/api/projects", projectDuplicatesRouter);
 app.use("/api/search", foundrySearchRouter);
 app.use("/api/breadcrumb", foundryBreadcrumbRouter);
-app.use("/api/auth", foundryAuthRouter);
+// Palantir Multipass-equivalent auth surface (see ontology/tellus-auth.md).
+// The legacy /api/auth/{register,login,refresh,logout} router was retired
+// in Phase 3; /api/v1/auth is the only supported authentication entry point.
+app.use("/api/v1/auth", tellusAuthV1Router);
+
+// Dev-only: Cypress's MFA cleanup hooks live under /api/v1/auth/_test.
+// Mount conditionally so production bundles never expose the router at all.
+if (process.env.NODE_ENV !== "production") {
+  app.use("/api/v1/auth/_test", tellusAuthTestHooksRouter);
+}
 app.use("/api/projects/:projectId/members", foundryMembersRouter);
 app.use("/api/users/me/preferences", foundryPreferencesRouter);
 app.use("/api/projects/:projectId/pipelines", foundryPipelinesRouter);
@@ -307,6 +515,59 @@ app.use(notFoundHandler);
 
 // Global error handler — MUST be last in the middleware chain
 app.use(errorHandler);
+
+// ---------------------------------------------------------------------------
+// Background maintenance — runs every 60 seconds:
+//   • purge expired MFA / WebAuthn challenge rows
+//   • purge expired reauth tokens
+//   • flush pending rows from email_outbox (dev stub writer)
+// Each task is isolated in its own try/catch so a failure in one
+// doesn't block the others, and the interval is .unref()'d so it
+// never keeps the event loop alive during a graceful shutdown.
+// ---------------------------------------------------------------------------
+const authMaintenanceSweeper = setInterval(async () => {
+  try {
+    await purgeExpiredAuthChallenges(foundryDb as never);
+  } catch (err) {
+    console.error(JSON.stringify({
+      type: "auth_challenge_sweep_error",
+      timestamp: new Date().toISOString(),
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+  try {
+    await purgeExpiredReauthTokens();
+  } catch (err) {
+    console.error(JSON.stringify({
+      type: "reauth_sweep_error",
+      timestamp: new Date().toISOString(),
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+  try {
+    await flushEmailOutbox();
+  } catch (err) {
+    console.error(JSON.stringify({
+      type: "email_flush_error",
+      timestamp: new Date().toISOString(),
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+  try {
+    // Drop expired + consumed passkey enrollment rows so a leaked
+    // stashed refresh token has a bounded lifetime even if the
+    // happy-path consume() didn't fire.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await getPasskeyEnrollmentService(foundryDb as any).purgeExpired();
+  } catch (err) {
+    console.error(JSON.stringify({
+      type: "passkey_enrollment_sweep_error",
+      timestamp: new Date().toISOString(),
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+}, 60_000);
+if (typeof authMaintenanceSweeper.unref === "function") authMaintenanceSweeper.unref();
 
 // ---------------------------------------------------------------------------
 // Process-level error handlers — prevent silent crashes
@@ -373,6 +634,52 @@ async function start(): Promise<void> {
         `Ontology Engine started on port ${PORT} | PostgreSQL connected`
       );
     });
+
+    // ----------------------------------------------------------------
+    // Bootstrap the tellus-superadmin realm role and seed it onto the
+    // designated bootstrap account. This is idempotent and runs on
+    // every boot: if the role already exists and the user already
+    // holds it, both calls are no-ops. Failures are logged but do
+    // NOT crash the server — Keycloak may be slow to come up, and
+    // we want the API to keep serving the rest of the surface even
+    // if the role bootstrap is briefly unavailable.
+    //
+    // The bootstrap account is configurable via TELLUS_SUPERADMIN_EMAIL
+    // so a fresh deployment can hand the keys to whichever address
+    // the operator owns. Default keeps the project-owner email pinned
+    // for the dev environment.
+    // ----------------------------------------------------------------
+    void (async () => {
+      const email =
+        process.env.TELLUS_SUPERADMIN_EMAIL || "habimanaolivier6@gmail.com";
+      try {
+        const { getKeycloakAdminService } = await import(
+          "./services/keycloakAdminService"
+        );
+        const { TELLUS_SUPERADMIN_ROLE } = await import(
+          "./middleware/requireSuperAdmin"
+        );
+        const kc = getKeycloakAdminService();
+        await kc.ensureRealmRole(
+          TELLUS_SUPERADMIN_ROLE,
+          "Tellus superadmin — full access to /admin/users and system settings",
+        );
+        const user = await kc.findUserByEmail(email);
+        if (!user) {
+          console.warn(
+            `[bootstrap] superadmin email ${email} not found in Keycloak; skipping role grant`
+          );
+          return;
+        }
+        await kc.assignRealmRoleToUser(user.id, TELLUS_SUPERADMIN_ROLE);
+        console.log(
+          `[bootstrap] tellus-superadmin role ensured + granted to ${email}`
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[bootstrap] superadmin role bootstrap failed: ${msg}`);
+      }
+    })();
 
     // Attach WebSocket server for foundry real-time events (BE-012)
     initWebSocketServer(server);

@@ -17,7 +17,10 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import datasourceService from "../services/datasourceService";
-import { registerWithDataset } from "../services/datasetDatasourceService";
+import {
+  registerWithDataset,
+  registerWithFoundryDataset,
+} from "../services/datasetDatasourceService";
 import {
   formatDatasource,
   sendSuccess,
@@ -87,9 +90,32 @@ router.post(
       const objectTypeId = await resolveObjectTypeId(req, res);
       if (!objectTypeId) return;
 
-      const { datasetId, datasetName, filePath, fileFormat, columnMapping, primaryKeyColumn } = req.body;
+      const { datasetId, foundryDatasetId, datasetName, filePath, fileFormat, columnMapping, primaryKeyColumn } = req.body;
 
-      // If datasetId is provided, use the dataset-aware registration path
+      // Foundry-dataset bridge: registers a `foundry_datasets` row (the
+      // table tellus-fe's upload pipeline writes to) as a backing
+      // datasource, reading columns from `dataset_columns` without any
+      // filesystem round-trip. Used by the "Create a new object type"
+      // wizard whose Step 1 picker is backed by foundry_datasets.
+      if (foundryDatasetId) {
+        if (!columnMapping) {
+          return sendError(res, "VALIDATION_FAILED", "columnMapping is required.");
+        }
+        if (!primaryKeyColumn) {
+          return sendError(res, "VALIDATION_FAILED", "primaryKeyColumn is required.");
+        }
+        const result = await registerWithFoundryDataset(objectTypeId, {
+          foundryDatasetId,
+          columnMapping,
+          primaryKeyColumn,
+        });
+        return sendCreated(res, {
+          backingDatasource: result,
+          message: `Backing datasource registered from foundry dataset ${foundryDatasetId}.`,
+        });
+      }
+
+      // If datasetId is provided, use the Ontology-dataset-aware path
       if (datasetId) {
         const result = await registerWithDataset(objectTypeId, {
           datasetId,

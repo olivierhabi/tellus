@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Apache Iceberg via Project Nessie (REST Catalog)
+# ---------------------------------------------------------------------------
+# Spec equivalent: "Iceberg with REST Catalog (Nessie or Polaris)"
+# (techstack §Data Layer). Provides:
+#   • Iceberg REST catalog endpoint at http://nessie:19120/iceberg/v1
+#   • Branch + tagging semantics for ontology snapshots (matches the
+#     "Ontology branching" feature in the OMA spec)
+#
+# Tables live in MinIO under s3://iceberg-warehouse/. The Spark / DuckDB
+# clients pick them up via the REST catalog URL.
+# ---------------------------------------------------------------------------
+services:
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.99.0
+    container_name: tellus-nessie
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:19120:19120"
+    environment:
+      NESSIE_VERSION_STORE_TYPE: IN_MEMORY
+      QUARKUS_HTTP_PORT: 19120
+      # Wire the catalog at the /iceberg/v1 sub-path so SDK clients can
+      # talk to it without extra config.
+      NESSIE_CATALOG_DEFAULT_WAREHOUSE: warehouse
+      NESSIE_CATALOG_WAREHOUSES_warehouse_LOCATION: s3://iceberg-warehouse/
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_REGION: us-east-1
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ENDPOINT: http://minio:9000
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_PATH_STYLE_ACCESS: "true"
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ACCESS_KEY: urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
+      NESSIE_CATALOG_SECRETS_ACCESS_KEY_NAME: minioadmin
+      NESSIE_CATALOG_SECRETS_ACCESS_KEY_SECRET: minioadmin
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:19120/api/v2/config || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s

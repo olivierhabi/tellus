@@ -360,6 +360,49 @@ router.get("/api/v2/status", async (_req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/health — Ontology Platform spec §2.6 canonical health endpoint.
+ *
+ * Shape per spec:
+ *   { status, postgres, elasticsearch, kafka, uptime_seconds }
+ *
+ * Kafka/opensearch statuses are best-effort — they return "unknown" if a
+ * probe fails rather than bringing the whole endpoint down.
+ */
+router.get("/api/health", async (_req: Request, res: Response) => {
+  const deps = resolveDefaultDeps();
+  let pg = "connected";
+  try {
+    await deps.queryFn("SELECT 1");
+  } catch {
+    pg = "disconnected";
+  }
+
+  let es = "green";
+  try {
+    const ping = await deps.pingOpenSearch();
+    es = ping.connected ? (ping.status || "green") : "red";
+  } catch {
+    es = "unknown";
+  }
+
+  const overall =
+    pg === "connected" && (es === "green" || es === "yellow")
+      ? "healthy"
+      : pg === "connected"
+        ? "degraded"
+        : "unhealthy";
+
+  res.status(overall === "unhealthy" ? 503 : 200).json({
+    status: overall,
+    postgres: pg,
+    elasticsearch: es,
+    kafka: process.env.KAFKA_BROKERS ? "configured" : "not_configured",
+    uptime_seconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Kubernetes-style health endpoints (Sunday Task)
 // ---------------------------------------------------------------------------

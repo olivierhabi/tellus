@@ -72,6 +72,9 @@ const KNOWN_CODES = new Set([
   "ALREADY_EXISTS",
   "LINK_TYPE_NOT_FOUND",
   "VALIDATION_FAILED",
+  "INVALID_PARAMETER",
+  "MAX_LINK_DEPTH_EXCEEDED",
+  "JOIN_TABLE_REQUIRED",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -509,10 +512,25 @@ router.post("/:apiName/count", async (req: Request, res: Response, next: NextFun
 router.post("/:apiName/searchAround", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { ontologyId, apiName } = req.params;
-    const { direction, sourceFilter, targetFilter, pageSize, pageToken } = req.body;
+    const { direction, sourceFilter, targetFilter, pageSize, pageToken, maxDepth } = req.body;
 
     if (!direction) {
       return sendError(res, "VALIDATION_FAILED", "direction is required.");
+    }
+
+    // Spec §Task 7 — maxDepth defaults to 1, caps at 3 (Palantir Search Around).
+    if (maxDepth !== undefined) {
+      if (typeof maxDepth !== "number" || !Number.isInteger(maxDepth) || maxDepth < 1) {
+        return sendError(res, "INVALID_PARAMETER", "maxDepth must be a positive integer.");
+      }
+      if (maxDepth > 3) {
+        return sendError(
+          res,
+          "MAX_LINK_DEPTH_EXCEEDED",
+          `maxDepth ${maxDepth} exceeds the Palantir Search Around limit of 3.`,
+          { maxDepth, limit: 3 }
+        );
+      }
     }
 
     const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);

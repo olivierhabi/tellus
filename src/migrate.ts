@@ -107,11 +107,33 @@ async function migrate(): Promise<void> {
         status                   TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'experimental', 'deprecated')),
         edits_via_actions_only   BOOLEAN     DEFAULT true,
         max_properties           INTEGER     DEFAULT 2000,
+        version                  INTEGER     NOT NULL DEFAULT 1,
         created_at               TIMESTAMPTZ DEFAULT now(),
         updated_at               TIMESTAMPTZ DEFAULT now(),
         created_by               TEXT        DEFAULT 'system',
         UNIQUE(ontology_id, api_name)
       );
+    `);
+    // Back-fill version column on pre-existing object_type rows (idempotent).
+    await client.query(
+      `ALTER TABLE object_type ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1`
+    );
+    // Auto-increment trigger so UPDATEs always bump the ETag version.
+    await client.query(`
+      CREATE OR REPLACE FUNCTION bump_version_column() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.version IS NOT DISTINCT FROM OLD.version THEN
+          NEW.version := OLD.version + 1;
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await client.query(`DROP TRIGGER IF EXISTS trg_object_type_version ON object_type`);
+    await client.query(`
+      CREATE TRIGGER trg_object_type_version
+        BEFORE UPDATE ON object_type
+        FOR EACH ROW EXECUTE FUNCTION bump_version_column()
     `);
 
     // Fast lookup of all object types belonging to a given ontology.
@@ -930,6 +952,79 @@ async function migrate(): Promise<void> {
     console.log("Ensured backing_datasource has dataset_id column");
 
     // ------------------------------------------------------------------
+    // object_type: add Palantir-parity metadata columns if missing.
+    //
+    // The overview tab surfaces a pile of curatorial metadata — plural
+    // name, aliases, point of contact, contributors, visibility — that
+    // wasn't part of the v1 schema. Added here as idempotent ALTERs so
+    // existing deployments upgrade cleanly without a bespoke migration.
+    // ------------------------------------------------------------------
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'object_type' AND column_name = 'plural_name') THEN
+          ALTER TABLE object_type ADD COLUMN plural_name TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'object_type' AND column_name = 'aliases') THEN
+          ALTER TABLE object_type ADD COLUMN aliases TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'object_type' AND column_name = 'point_of_contact') THEN
+          ALTER TABLE object_type ADD COLUMN point_of_contact TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'object_type' AND column_name = 'contributors') THEN
+          ALTER TABLE object_type ADD COLUMN contributors TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'object_type' AND column_name = 'visibility') THEN
+          ALTER TABLE object_type ADD COLUMN visibility TEXT NOT NULL DEFAULT 'normal'
+            CHECK (visibility IN ('prominent','normal','hidden'));
+        END IF;
+        -- When a caller creates an object type with an apiName that
+        -- already exists in this ontology AND opts into the rename-
+        -- on-conflict strategy, we keep a record of the ORIGINAL
+        -- apiName the caller asked for. The overview page reads this
+        -- and surfaces a red "Invalid" badge so the user can fix it.
+        -- Cleared by the update service whenever a rename lands.
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'object_type' AND column_name = 'requested_api_name') THEN
+          ALTER TABLE object_type ADD COLUMN requested_api_name TEXT;
+        END IF;
+      END
+      $$;
+    `);
+    console.log("Ensured object_type has curatorial metadata columns");
+
+    // ------------------------------------------------------------------
+    // funnel_pipeline_state: add per-stage progress tracking.
+    //
+    // Spec (ontology-object explorer.md §1.7, item 47) calls for a
+    // 4-stage Funnel pipeline — `changelog → merge_changes → indexing
+    // → hydration`. The original schema only tracked the top-level
+    // `status` (idle/running/success/failed). To surface which stage
+    // is live in the overview card's spinner, we add:
+    //
+    //   current_stage    — null when idle/success/failed, else one
+    //                      of the 4 stage names
+    //   stage_started_at — UTC timestamp at which the live stage
+    //                      entered 'running', so the frontend can
+    //                      compute "X s elapsed" without pulling a
+    //                      full history row.
+    // ------------------------------------------------------------------
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'funnel_pipeline_state' AND column_name = 'current_stage') THEN
+          ALTER TABLE funnel_pipeline_state
+            ADD COLUMN current_stage TEXT
+              CHECK (current_stage IS NULL OR current_stage IN ('changelog','merge_changes','indexing','hydration'));
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'funnel_pipeline_state' AND column_name = 'stage_started_at') THEN
+          ALTER TABLE funnel_pipeline_state ADD COLUMN stage_started_at TIMESTAMPTZ;
+        END IF;
+      END
+      $$;
+    `);
+    console.log("Ensured funnel_pipeline_state has stage tracking columns");
+
+    // ------------------------------------------------------------------
     // reindex_history
     //
     // Audit log for re-indexing operations. Each row records a single
@@ -987,10 +1082,15 @@ async function migrate(): Promise<void> {
         api_name TEXT NOT NULL UNIQUE CHECK (api_name ~ '^[A-Z][a-zA-Z0-9]*$'),
         display_name TEXT NOT NULL,
         description TEXT,
+        parent_interface_id UUID REFERENCES interface(interface_id) ON DELETE SET NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
+    // Back-fill parent_interface_id column on pre-existing interface rows.
+    await client.query(
+      `ALTER TABLE interface ADD COLUMN IF NOT EXISTS parent_interface_id UUID REFERENCES interface(interface_id) ON DELETE SET NULL`
+    );
 
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_interface_ontology_id ON interface(ontology_id);
@@ -1099,6 +1199,262 @@ async function migrate(): Promise<void> {
       const msg = revokeErr instanceof Error ? revokeErr.message : String(revokeErr);
       console.warn("Warning: Could not REVOKE UPDATE/DELETE on action_audit_log:", msg);
     }
+
+    // ------------------------------------------------------------------
+    // Ontology Platform spec Phase 2 — branching, proposals, groups,
+    // functions, markings, explorations, exports.
+    // ------------------------------------------------------------------
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ontology_branch (
+        branch_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id     UUID NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        name            TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'OPEN'
+                         CHECK (status IN ('OPEN','MERGED','CLOSED')),
+        parent_branch_id UUID REFERENCES ontology_branch(branch_id) ON DELETE SET NULL,
+        created_by      TEXT NOT NULL DEFAULT 'system',
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        merged_at       TIMESTAMPTZ,
+        UNIQUE (ontology_id, name)
+      );
+    `);
+    // Pre-existing ontology_branch schemas may lack these columns — back-fill
+    // defensively. If the CHECK constraint is missing, re-add it.
+    await client.query(`ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OPEN'`);
+    await client.query(`ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS parent_branch_id UUID`);
+    await client.query(`ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS created_by TEXT NOT NULL DEFAULT 'system'`);
+    await client.query(`ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS merged_at TIMESTAMPTZ`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ontology_branch_ontology ON ontology_branch(ontology_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ontology_branch_status ON ontology_branch(status)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ontology_proposal (
+        proposal_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        branch_id       UUID NOT NULL REFERENCES ontology_branch(branch_id) ON DELETE CASCADE,
+        title           TEXT NOT NULL,
+        description     TEXT,
+        status          TEXT NOT NULL DEFAULT 'OPEN'
+                         CHECK (status IN ('OPEN','APPROVED','MERGED','CLOSED')),
+        created_by      TEXT NOT NULL DEFAULT 'system',
+        approved_by     TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        approved_at     TIMESTAMPTZ,
+        merged_at       TIMESTAMPTZ
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_proposal_branch ON ontology_proposal(branch_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_proposal_status ON ontology_proposal(status)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS object_type_group (
+        group_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id  UUID NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        api_name     TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        description  TEXT,
+        icon         TEXT DEFAULT 'folder',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (ontology_id, api_name)
+      );
+    `);
+    // Pre-existing schemas may have `name` instead of api_name/display_name.
+    // Back-fill additively so both old and new code paths work.
+    await client.query(`ALTER TABLE object_type_group ADD COLUMN IF NOT EXISTS api_name TEXT`);
+    await client.query(`ALTER TABLE object_type_group ADD COLUMN IF NOT EXISTS display_name TEXT`);
+    await client.query(`UPDATE object_type_group SET api_name = COALESCE(api_name, name), display_name = COALESCE(display_name, name) WHERE api_name IS NULL OR display_name IS NULL`);
+    await client.query(`ALTER TABLE object_type_group ALTER COLUMN api_name SET NOT NULL`);
+    await client.query(`ALTER TABLE object_type_group ALTER COLUMN display_name SET NOT NULL`);
+    await client.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'object_type_group_ontology_api_name_key') THEN
+        BEGIN
+          ALTER TABLE object_type_group ADD CONSTRAINT object_type_group_ontology_api_name_key UNIQUE (ontology_id, api_name);
+        EXCEPTION WHEN duplicate_table THEN NULL; WHEN unique_violation THEN NULL; END;
+      END IF;
+    END $$;`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS object_type_group_member (
+        group_id         UUID NOT NULL REFERENCES object_type_group(group_id) ON DELETE CASCADE,
+        object_type_id   UUID NOT NULL REFERENCES object_type(object_type_id) ON DELETE CASCADE,
+        PRIMARY KEY (group_id, object_type_id)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ontology_function (
+        function_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id    UUID NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        api_name       TEXT NOT NULL,
+        display_name   TEXT NOT NULL,
+        description    TEXT,
+        runtime        TEXT NOT NULL DEFAULT 'typescript'
+                        CHECK (runtime IN ('typescript','python','sql')),
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (ontology_id, api_name)
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ontology_function_version (
+        version_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        function_id    UUID NOT NULL REFERENCES ontology_function(function_id) ON DELETE CASCADE,
+        version_number INTEGER NOT NULL,
+        source_code    TEXT NOT NULL,
+        input_schema   JSONB DEFAULT '{}'::jsonb,
+        output_schema  JSONB DEFAULT '{}'::jsonb,
+        is_latest      BOOLEAN NOT NULL DEFAULT true,
+        published_by   TEXT NOT NULL DEFAULT 'system',
+        published_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (function_id, version_number)
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ontology_function_invocation (
+        invocation_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        function_id    UUID NOT NULL REFERENCES ontology_function(function_id) ON DELETE CASCADE,
+        version_id     UUID NOT NULL REFERENCES ontology_function_version(version_id) ON DELETE CASCADE,
+        duration_ms    INTEGER,
+        status         TEXT NOT NULL CHECK (status IN ('ok','error','timeout')),
+        error_message  TEXT,
+        invoked_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_fn_invocation_function ON ontology_function_invocation(function_id, invoked_at DESC)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_favorite (
+        user_id      TEXT NOT NULL,
+        resource_type TEXT NOT NULL CHECK (resource_type IN ('objectType','linkType','actionType','interface','function','group')),
+        resource_id  TEXT NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (user_id, resource_type, resource_id)
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_recent_activity (
+        id           BIGSERIAL PRIMARY KEY,
+        user_id      TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id  TEXT NOT NULL,
+        visited_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_recent_user_time ON user_recent_activity(user_id, visited_at DESC)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS saved_exploration (
+        exploration_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id    UUID NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        owner_id       TEXT NOT NULL,
+        title          TEXT NOT NULL,
+        description    TEXT,
+        config         JSONB NOT NULL DEFAULT '{}'::jsonb,
+        visibility     TEXT NOT NULL DEFAULT 'private'
+                        CHECK (visibility IN ('private','shared','public')),
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    // Back-fill columns on pre-existing saved_exploration schemas.
+    await client.query(`ALTER TABLE saved_exploration ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'system'`);
+    await client.query(`ALTER TABLE saved_exploration ADD COLUMN IF NOT EXISTS description TEXT`);
+    await client.query(`ALTER TABLE saved_exploration ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await client.query(`ALTER TABLE saved_exploration ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'`);
+    await client.query(`ALTER TABLE saved_exploration ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS export_job (
+        job_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id    UUID NOT NULL REFERENCES ontology(ontology_id) ON DELETE CASCADE,
+        requested_by   TEXT NOT NULL,
+        object_type_api_name TEXT,
+        format         TEXT NOT NULL CHECK (format IN ('csv','xlsx','jsonl')),
+        query_json     JSONB NOT NULL DEFAULT '{}'::jsonb,
+        status         TEXT NOT NULL DEFAULT 'PENDING'
+                        CHECK (status IN ('PENDING','RUNNING','COMPLETED','FAILED','EXPIRED')),
+        row_count      BIGINT,
+        file_path      TEXT,
+        download_url   TEXT,
+        expires_at     TIMESTAMPTZ,
+        error_message  TEXT,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_export_job_status ON export_job(status)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS marking (
+        marking_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        code         TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        description  TEXT,
+        color        TEXT DEFAULT '#999999',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS marking_assignment (
+        marking_id   UUID NOT NULL REFERENCES marking(marking_id) ON DELETE CASCADE,
+        subject_type TEXT NOT NULL CHECK (subject_type IN ('user','group')),
+        subject_id   TEXT NOT NULL,
+        PRIMARY KEY (marking_id, subject_type, subject_id)
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS organization (
+        organization_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        code            TEXT NOT NULL UNIQUE,
+        display_name    TEXT NOT NULL,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pii_scan_result (
+        scan_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        object_type_id UUID NOT NULL REFERENCES object_type(object_type_id) ON DELETE CASCADE,
+        property_api_name TEXT NOT NULL,
+        detected_type TEXT NOT NULL,
+        sample_count  INTEGER NOT NULL DEFAULT 0,
+        scanned_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+
+    // Spec §Task 30: usage materialized view refreshed every 60s.
+    //   "SELECT object_type_id, date_trunc('day', timestamp) AS day,
+    //    operation, COUNT(*) FROM usage_events WHERE timestamp > now() -
+    //    interval '30 days' GROUP BY 1, 2, 3"
+    await client.query(`
+      DROP MATERIALIZED VIEW IF EXISTS usage_event_daily;
+    `);
+    try {
+      await client.query(`
+        CREATE MATERIALIZED VIEW usage_event_daily AS
+        SELECT
+          resource_type,
+          resource_id,
+          date_trunc('day', created_at) AS day,
+          operation,
+          COUNT(*)::int AS n
+        FROM usage_event
+        WHERE created_at > now() - interval '30 days'
+        GROUP BY 1, 2, 3, 4
+      `);
+      await client.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_event_daily
+           ON usage_event_daily(resource_type, resource_id, day, operation)`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn("Could not create usage_event_daily matview:", msg);
+    }
+
+    // Property.marking_required column — spec §Task 28 column-level
+    // stripping uses this to decide which properties to redact.
+    await client.query(
+      `ALTER TABLE property ADD COLUMN IF NOT EXISTS marking_required TEXT`
+    );
+
+    console.log("Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)");
 
   } catch (err) {
     await client.query("ROLLBACK");

@@ -358,6 +358,11 @@ router.get(
         pipelineState: pipelineState
           ? {
               status: pipelineState.status,
+              // Live 4-stage funnel pipeline tracking (spec §1.7 item 47):
+              //   changelog → merge_changes → indexing → hydration
+              // Null means no stage is currently running.
+              currentStage: pipelineState.current_stage || null,
+              stageStartedAt: pipelineState.stage_started_at || null,
               objectsIndexed: pipelineState.objects_indexed || 0,
               lastIndexedAt: pipelineState.last_indexed_at || null,
               durationMs: pipelineState.duration_ms || null,

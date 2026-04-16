@@ -24,7 +24,6 @@ import uploadsRouter from './routes/uploads';
 import { folderDatasetsRouter, datasetRouter } from './routes/foundryDatasets';
 import searchRouter from './routes/search';
 import breadcrumbRouter from './routes/breadcrumb';
-import authRouter from './routes/auth';
 import membersRouter from './routes/members';
 import columnStatsRouter from './routes/columnStats';
 import versionsRouter from './routes/versions';
@@ -60,7 +59,6 @@ app.use('/api/projects/:projectId/folders/:folderId/datasets', folderDatasetsRou
 app.use('/api/datasets', datasetRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/breadcrumb', breadcrumbRouter);
-app.use('/api/auth', authRouter);
 app.use('/api/projects/:projectId/members', membersRouter);
 app.use('/api/datasets', columnStatsRouter);
 app.use('/api/datasets', versionsRouter);

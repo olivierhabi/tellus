@@ -13,11 +13,19 @@ export interface RateLimitCategory {
   windowMs: number;
 }
 
+const IS_TEST_ENV =
+  process.env.NODE_ENV !== "production" ||
+  process.env.RATE_LIMIT_MODE === "relaxed";
+
 export const RATE_LIMIT_CATEGORIES: Record<string, RateLimitCategory> = {
   upload: { max: 10, windowMs: 60_000 },    // 10 requests per minute
   read: { max: 100, windowMs: 60_000 },     // 100 requests per minute
   write: { max: 30, windowMs: 60_000 },     // 30 requests per minute
-  auth: { max: 5, windowMs: 60_000 },       // 5 requests per minute
+  // Relaxed in dev/test so cypress specs don't trip the 5/min cap on
+  // their per-suite `cy.login()` calls.
+  auth: IS_TEST_ENV
+    ? { max: 500, windowMs: 60_000 }
+    : { max: 5, windowMs: 60_000 },
 };
 
 /**

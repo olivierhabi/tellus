@@ -266,6 +266,28 @@ router.post(
           if (stopOnError) {
             stopped = true;
           }
+
+          // Spec §Task 17: "If > 10% fail, abort remaining and return
+          // partial result." Compute the failure ratio over attempted
+          // requests and trip if we're past the 10% threshold.
+          const attempted = i + 1;
+          if (attempted >= 10 && failedCount / attempted > 0.1) {
+            stopped = true;
+            for (let j = i + 1; j < requests.length; j++) {
+              failedCount++;
+              results.push({
+                index: j,
+                status: "skipped",
+                primaryKey: null,
+                operation: null,
+                error: {
+                  code: "BULK_FAILURE_THRESHOLD_EXCEEDED",
+                  message: `Skipped: > 10% of prior requests failed (${failedCount}/${attempted}).`,
+                },
+              });
+            }
+            break;
+          }
         }
       }
 

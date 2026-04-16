@@ -21,6 +21,7 @@ import {
   validateBody,
   CREATE_OBJECT_TYPE_SCHEMA,
 } from "../middleware/validateBody";
+import { setEtag, requireIfMatch } from "../middleware/etag";
 
 const router = Router({ mergeParams: true });
 
@@ -31,10 +32,15 @@ const router = Router({ mergeParams: true });
 const KNOWN_CODES = new Set([
   "OBJECT_TYPE_NOT_FOUND",
   "OBJECT_TYPE_ALREADY_EXISTS",
+  "DUPLICATE_API_NAME",
   "INVALID_API_NAME",
   "VALIDATION_FAILED",
   "ONTOLOGY_NOT_FOUND",
   "INVALID_PARAMETER",
+  "CONCURRENT_EDIT_CONFLICT",
+  "PRECONDITION_REQUIRED",
+  "API_NAME_CONFLICT",
+  "BREAKING_SCHEMA_CHANGE",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -73,6 +79,15 @@ router.post(
         full.funnelState
       );
 
+      const version = Number(
+        (full.objectType as Record<string, unknown>).version ?? 1
+      );
+      setEtag(res, version);
+      res.setHeader(
+        "Location",
+        `/api/v2/ontologies/${req.params.ontologyId}/objectTypes/${full.objectType.api_name}`
+      );
+
       sendCreated(res, formatted);
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
@@ -98,6 +113,8 @@ router.post(
         description,
         icon,
         iconColor,
+        status,
+        onConflict,
         properties,
         primaryKeyProperty,
         titleProperty,
@@ -132,6 +149,8 @@ router.post(
         description,
         icon,
         iconColor,
+        status,
+        onConflict,
         properties,
         primaryKeyProperty,
         titleProperty,
@@ -334,7 +353,9 @@ router.get(
           row,
           row.property_count,
           row.datasource_name || null,
-          row.index_status || null
+          row.index_status || null,
+          row.object_count || 0,
+          row.dependent_count || 0
         )
       );
 
@@ -379,6 +400,42 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// Route 3.5: GET /by-id/:objectTypeId — Get a single object type by UUID
+//
+// Must be declared BEFORE the `/:apiName` route below so that Express's
+// first-match routing picks the specific `/by-id/` path for UUID callers
+// (the /ontology/[objectTypeId]/overview frontend route) instead of
+// hitting the apiName handler.
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/by-id/:objectTypeId",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, objectTypeId } = req.params;
+      const result = await objectTypeService.getById(ontologyId, objectTypeId);
+      const version = Number(
+        (result.objectType as Record<string, unknown>).version ?? 1
+      );
+      setEtag(res, version);
+      const formatted = formatObjectType(
+        result.objectType,
+        result.properties,
+        result.datasource,
+        result.funnelState,
+        result.linkTypes
+      );
+      sendSuccess(res, formatted);
+    } catch (err: any) {
+      if (KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Route 4: GET /:apiName — Get a single object type with full details
 // ---------------------------------------------------------------------------
 
@@ -389,6 +446,11 @@ router.get(
       const { ontologyId, apiName } = req.params;
 
       const result = await objectTypeService.getByApiName(ontologyId, apiName);
+
+      const version = Number(
+        (result.objectType as Record<string, unknown>).version ?? 1
+      );
+      setEtag(res, version);
 
       const formatted = formatObjectType(
         result.objectType,
@@ -417,34 +479,77 @@ router.put(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId, apiName } = req.params;
-      const { displayName, description, icon, iconColor, status } = req.body;
+      const {
+        apiName: newApiName,
+        displayName,
+        pluralName,
+        description,
+        aliases,
+        pointOfContact,
+        contributors,
+        visibility,
+        editsViaActionsOnly,
+        icon,
+        iconColor,
+        status,
+      } = req.body;
 
-      // At least one field must be provided
-      if (
-        displayName === undefined &&
-        description === undefined &&
-        icon === undefined &&
-        iconColor === undefined &&
-        status === undefined
-      ) {
+      // At least one mutable field must be provided.
+      const updatable = {
+        apiName: newApiName,
+        displayName,
+        pluralName,
+        description,
+        aliases,
+        pointOfContact,
+        contributors,
+        visibility,
+        editsViaActionsOnly,
+        icon,
+        iconColor,
+        status,
+      };
+      if (Object.values(updatable).every((v) => v === undefined)) {
         return sendError(
           res,
           "VALIDATION_FAILED",
-          "At least one field must be provided for update."
+          "At least one field must be provided for update.",
         );
       }
 
+      // Spec §2.3 optimistic concurrency: check If-Match against current
+      // version BEFORE applying any mutations. Missing header is permitted
+      // for backward compatibility; stale header is rejected with 409.
+      const current = await objectTypeService.getByApiName(ontologyId, apiName);
+      const currentVersion = Number(
+        (current.objectType as Record<string, unknown>).version ?? 1,
+      );
+      requireIfMatch(req, currentVersion);
+
       const updateData: Record<string, unknown> = {};
-      if (displayName !== undefined) updateData.displayName = displayName;
-      if (description !== undefined) updateData.description = description;
-      if (icon !== undefined) updateData.icon = icon;
-      if (iconColor !== undefined) updateData.iconColor = iconColor;
-      if (status !== undefined) updateData.status = status;
+      for (const [k, v] of Object.entries(updatable)) {
+        if (v !== undefined) updateData[k] = v;
+      }
 
       await objectTypeService.update(ontologyId, apiName, updateData);
 
+      // A successful apiName rename means subsequent reads MUST use the
+      // new name — the row the client posted via the old apiName has a
+      // different primary lookup key now.
+      const effectiveApiName =
+        typeof newApiName === "string" && newApiName.length > 0
+          ? newApiName
+          : apiName;
+
       // Re-fetch the full object type for a complete response
-      const full = await objectTypeService.getByApiName(ontologyId, apiName);
+      const full = await objectTypeService.getByApiName(
+        ontologyId,
+        effectiveApiName,
+      );
+      const newVersion = Number(
+        (full.objectType as Record<string, unknown>).version ?? currentVersion + 1
+      );
+      setEtag(res, newVersion);
 
       const formatted = formatObjectType(
         full.objectType,
@@ -456,7 +561,7 @@ router.put(
       sendSuccess(res, formatted);
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message);
+        return sendError(res, err.code, err.message, err.parameters || {});
       }
       next(err);
     }

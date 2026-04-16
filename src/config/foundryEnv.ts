@@ -1,13 +1,9 @@
-const DEFAULT_JWT_SECRET = 'default-dev-secret-at-least-32-characters';
-
-if (!process.env.JWT_SECRET) {
-  if (process.env.NODE_ENV === 'production') {
-    console.error('FATAL: JWT_SECRET environment variable must be set in production');
-    process.exit(1);
-  } else {
-    console.warn('[foundryEnv] WARNING: Using default JWT_SECRET — set JWT_SECRET env var for production');
-  }
-}
+// NOTE: JWT_SECRET is no longer used anywhere in the tellus backend —
+// the legacy HS256 flow in src/routes/auth.ts + src/services/authService.ts
+// was retired in Phase 3 of ontology/tellus-auth.md. Every JWT the
+// backend now handles is issued by Keycloak (RS256) and verified via
+// JWKS in tellusAuthService. Keep this file focused on the env vars
+// that are actually consumed by the live code.
 
 function parseIntEnv(key: string, fallback: number): number {
   const raw = process.env[key];
@@ -23,7 +19,6 @@ function parseIntEnv(key: string, fallback: number): number {
 export const foundryEnv = {
   MAX_FILE_SIZE_MB: parseIntEnv('MAX_FILE_SIZE_MB', 50),
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
-  JWT_SECRET: process.env.JWT_SECRET || DEFAULT_JWT_SECRET,
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: parseIntEnv('PORT', 3000),
 

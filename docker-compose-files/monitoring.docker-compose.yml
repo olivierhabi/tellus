@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# Prometheus + Grafana + OpenTelemetry collector
+# ---------------------------------------------------------------------------
+# Spec equivalent: "Prometheus + Grafana + OpenTelemetry" (techstack
+# §Monitoring). Drives the Action Type "Near real-time metrics" and the
+# Function Type observability panel: P95 latency, invocation count, error
+# rate over 30-day windows.
+#
+# • The backend exposes /api/metrics in Prometheus exposition format.
+# • The OTel collector forwards HTTP request spans to Grafana Tempo.
+# • Grafana ships with a pre-loaded "Ontology" dashboard (provisioned via
+#   the bind-mount in `monitoring/grafana/`).
+# ---------------------------------------------------------------------------
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: tellus-prometheus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - prom_data:/prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: tellus-grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: tellus-otel
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./monitoring/otel-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+
+volumes:
+  prom_data:
+  grafana_data:

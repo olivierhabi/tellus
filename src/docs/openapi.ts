@@ -1,9 +1,16 @@
 import { Express } from 'express';
+import { ontologyPaths, ontologySchemas } from './ontology-openapi';
 
 /**
- * OpenAPI 3.0 specification for Foundry Backend API.
+ * OpenAPI 3.0 specification for the Tellus Backend.
+ *
+ * Combines two surface areas:
+ *   1. The original Foundry data ingestion API (defined inline below).
+ *   2. The Ontology Manager / Object Explorer API, defined separately in
+ *      `ontology-openapi.ts` and merged in below so the file stays
+ *      navigable.
  */
-export const openApiSpec = {
+const baseSpec = {
   openapi: '3.0.3',
   info: {
     title: 'Foundry Backend API',
@@ -21,12 +28,44 @@ export const openApiSpec = {
   ],
   components: {
     securitySchemes: {
+      // Keycloak-issued RS256 JWT. Obtain via POST /api/v1/auth/login
+      // (direct grant) or GET /api/v1/auth/oidc/authorize (PKCE redirect).
+      // Validated against the realm's JWKS — see
+      // http://localhost:8086/realms/tellus/.well-known/openid-configuration.
       bearerAuth: {
         type: 'http' as const,
         scheme: 'bearer',
         bearerFormat: 'JWT',
+        description:
+          'Keycloak RS256 JWT. Acquire via POST /api/v1/auth/login or the ' +
+          'PKCE flow at GET /api/v1/auth/oidc/authorize. HS256 tokens from ' +
+          'the legacy /api/auth/* surface are no longer accepted.',
+      },
+      // Browser flows may skip the Authorization header entirely and rely
+      // on the httpOnly TELLUS_TOKEN cookie that /api/v1/auth/login sets.
+      cookieAuth: {
+        type: 'apiKey' as const,
+        in: 'cookie' as const,
+        name: 'TELLUS_TOKEN',
+        description:
+          'httpOnly session cookie set by /api/v1/auth/login, refreshed by ' +
+          'the PKCE callback. Shipped automatically by any browser client ' +
+          'using withCredentials: true.',
+      },
+      // Personal Access Tokens (/api/v1/auth/tokens). Prefix tellus_pat_.
+      patAuth: {
+        type: 'http' as const,
+        scheme: 'bearer',
+        bearerFormat: 'PAT',
+        description:
+          'Personal Access Token (tellus_pat_ prefix). Created via POST ' +
+          '/api/v1/auth/tokens, hashed at rest, revocable, cannot mint ' +
+          'other tokens.',
       },
     },
+    // Global default — every operation that does not opt out via
+    // `security: []` requires one of the three Keycloak-sourced credentials.
+    // Callers may satisfy any one of the alternatives.
     schemas: {
       Error: {
         type: 'object' as const,
@@ -258,7 +297,7 @@ export const openApiSpec = {
       },
     },
   },
-  security: [{ bearerAuth: [] }],
+  security: [{ bearerAuth: [] }, { cookieAuth: [] }, { patAuth: [] }],
   paths: {
     '/health': {
       get: {
@@ -273,10 +312,29 @@ export const openApiSpec = {
         },
       },
     },
-    '/auth/register': {
+    // ---------------------------------------------------------------
+    // Authentication — Keycloak-backed (ontology/tellus-auth.md Tasks
+    // 3, 4, 9; Phase 3 in-app credential UX).
+    //
+    // Every authenticated operation requires one of the three credential
+    // types declared in `components.securitySchemes`: bearerAuth (RS256
+    // JWT), cookieAuth (TELLUS_TOKEN httpOnly cookie), or patAuth
+    // (tellus_pat_* Personal Access Token). The legacy HS256
+    // /api/auth/* surface is gone — the router, routes, and path docs
+    // were all removed. Callers that still hit it get a 404 from the
+    // notFoundHandler.
+    // ---------------------------------------------------------------
+    '/v1/auth/login': {
       post: {
         tags: ['Authentication'],
-        summary: 'Register a new user',
+        summary: 'Direct-grant login against Keycloak',
+        description:
+          'Proxies the email/password pair to Keycloak via the OAuth2 ' +
+          'Resource Owner Password Credentials grant against the ' +
+          'tellus-frontend client. On success the backend sets an ' +
+          'httpOnly TELLUS_TOKEN cookie (Max-Age 16h) and also returns the ' +
+          'access token in the response body so programmatic clients can ' +
+          'use the Authorization: Bearer path.',
         security: [],
         requestBody: {
           required: true,
@@ -285,52 +343,58 @@ export const openApiSpec = {
               schema: {
                 type: 'object' as const,
                 properties: {
-                  email: { type: 'string' as const, format: 'email' },
-                  password: { type: 'string' as const, minLength: 8 },
-                  displayName: { type: 'string' as const },
-                },
-                required: ['email', 'password', 'displayName'],
-              },
-            },
-          },
-        },
-        responses: {
-          '201': { description: 'User registered successfully' },
-          '409': { description: 'Email already in use' },
-        },
-      },
-    },
-    '/auth/login': {
-      post: {
-        tags: ['Authentication'],
-        summary: 'Log in and receive JWT tokens',
-        security: [],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object' as const,
-                properties: {
+                  username: { type: 'string' as const, description: 'Email or Keycloak username' },
                   email: { type: 'string' as const, format: 'email' },
                   password: { type: 'string' as const },
                 },
-                required: ['email', 'password'],
+                required: ['password'],
               },
             },
           },
         },
         responses: {
-          '200': { description: 'Login successful, returns tokens' },
-          '401': { description: 'Invalid credentials' },
+          '200': {
+            description: 'Login successful — TELLUS_TOKEN cookie set; body contains accessToken + tokenInfo.',
+          },
+          '401': { description: 'Invalid credentials (Keycloak rejected the direct grant)' },
+          '429': { description: 'AUTH_RATE_LIMIT — too many failed attempts (per IP+username)' },
+          '502': { description: 'KEYCLOAK_UNREACHABLE' },
         },
       },
     },
-    '/auth/refresh': {
+    '/v1/auth/logout': {
       post: {
         tags: ['Authentication'],
-        summary: 'Refresh an access token',
-        security: [],
+        summary: 'Logout + revoke current session',
+        description:
+          'Adds the current jti to the server-side revocation set, calls ' +
+          'Keycloak\'s logout endpoint with the refresh token, and clears ' +
+          'the TELLUS_TOKEN + TELLUS_REFRESH cookies. Idempotent.',
+        responses: { '204': { description: 'Logged out' } },
+      },
+    },
+    '/v1/auth/token-info': {
+      get: {
+        tags: ['Authentication'],
+        summary: 'Decoded session claims for the current caller',
+        description:
+          'Returns sub, jti, org, markings, orgs, realmRoles, session scope ' +
+          'and timing data. Works for both JWT and PAT auth; PATs return ' +
+          '`tokenKind: "pat"` and the `scopes` array.',
+        responses: {
+          '200': { description: 'Session info' },
+          '401': { description: 'TOKEN_INVALID / TOKEN_EXPIRED / TOKEN_REVOKED' },
+        },
+      },
+    },
+    '/v1/auth/check-access': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Centralized hasOperation() authorization check',
+        description:
+          'The Palantir Multipass-equivalent permission probe. Returns ' +
+          '{ allowed, reason } for the (operation, resourceType, resourceRid) ' +
+          'triple evaluated against the caller\'s realm roles.',
         requestBody: {
           required: true,
           content: {
@@ -338,24 +402,161 @@ export const openApiSpec = {
               schema: {
                 type: 'object' as const,
                 properties: {
-                  refreshToken: { type: 'string' as const, minLength: 1 },
+                  operation: { type: 'string' as const },
+                  resourceRid: { type: 'string' as const },
+                  resourceType: { type: 'string' as const },
                 },
-                required: ['refreshToken'],
+                required: ['operation'],
               },
             },
           },
         },
         responses: {
-          '200': { description: 'New access token returned' },
-          '401': { description: 'Invalid or expired refresh token' },
+          '200': { description: '{ allowed: boolean, reason: string }' },
+          '401': { description: 'Unauthenticated' },
         },
       },
     },
-    '/auth/logout': {
+    // /v1/auth/oidc/authorize and /v1/auth/oidc/callback were retired in
+    // Phase 3 (ontology/tellus-auth.md) because they browser-redirected
+    // to the Keycloak hostname. Authentication is now fully in-app via
+    // /v1/auth/login (password, possibly two-step) and /v1/auth/login/mfa
+    // (TOTP or WebAuthn). Only the pure-JSON /oidc/config is still here.
+    '/v1/auth/login/mfa': {
       post: {
         tags: ['Authentication'],
-        summary: 'Logout and invalidate refresh token',
+        summary: 'Complete a two-step login (TOTP code or WebAuthn assertion)',
+        description:
+          'Second step of /api/v1/auth/login when the user has enrolled ' +
+          'TOTP or a WebAuthn passkey. Pass the mfaChallenge from step 1 ' +
+          'plus either a TOTP `code` or a WebAuthn `assertionResponse`. ' +
+          'On success the TELLUS_TOKEN cookie is set and the session goes live.',
         security: [],
+        responses: {
+          '200': { description: 'MFA satisfied — session cookie now set' },
+          '401': { description: 'MFA_CHALLENGE_INVALID / MFA_INVALID' },
+        },
+      },
+    },
+    '/v1/auth/login/mfa/webauthn-options': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Build a WebAuthn authentication request for an in-flight MFA challenge',
+        security: [],
+        responses: { '200': { description: '@simplewebauthn authenticationOptions JSON' } },
+      },
+    },
+    '/v1/auth/me/password': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'In-app password change (old + new, no Keycloak redirect)',
+        description:
+          'Verifies the current password via direct-grant to Keycloak, ' +
+          'then resets the password via the admin API. The new password ' +
+          'is validated against the realm password policy server-side.',
+        responses: {
+          '204': { description: 'Password updated' },
+          '401': { description: 'OLD_PASSWORD_INVALID' },
+          '400': { description: 'PASSWORD_POLICY_VIOLATION' },
+        },
+      },
+    },
+    '/v1/auth/me/totp/start': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Begin TOTP enrollment — returns QR data URL + base32 secret',
+        responses: { '200': { description: 'Enrollment envelope (one-time)' } },
+      },
+    },
+    '/v1/auth/me/totp/verify': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Activate a TOTP secret by proving a valid 6-digit code',
+        responses: { '204': { description: 'Enrollment complete' }, '400': { description: 'INVALID_CODE' } },
+      },
+    },
+    '/v1/auth/me/totp': {
+      delete: {
+        tags: ['Authentication'],
+        summary: 'Disable TOTP for the current user',
+        responses: { '204': { description: 'TOTP disabled' } },
+      },
+    },
+    '/v1/auth/me/totp/status': {
+      get: {
+        tags: ['Authentication'],
+        summary: '{ enabled: boolean } — whether TOTP is verified for this user',
+        responses: { '200': { description: 'Status' } },
+      },
+    },
+    '/v1/auth/me/webauthn/register-options': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Build a WebAuthn registration challenge for in-app passkey enrollment',
+        description:
+          '@simplewebauthn/server generates the PublicKeyCredentialCreationOptions JSON that ' +
+          'the browser passes to navigator.credentials.create(). RP = tellus-fe origin; no ' +
+          'redirect to the Keycloak hostname.',
+        responses: { '200': { description: 'registrationOptions' } },
+      },
+    },
+    '/v1/auth/me/webauthn/register-verify': {
+      post: {
+        tags: ['Authentication'],
+        summary: 'Verify a WebAuthn attestation and persist the credential',
+        responses: { '201': { description: 'Credential stored' }, '400': { description: 'VERIFICATION_FAILED' } },
+      },
+    },
+    '/v1/auth/me/webauthn/credentials': {
+      get: {
+        tags: ['Authentication'],
+        summary: 'List the current user\'s in-app passkeys',
+        responses: { '200': { description: 'Credential list (public metadata only)' } },
+      },
+    },
+    '/v1/auth/me/webauthn/credentials/{id}': {
+      delete: {
+        tags: ['Authentication'],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' as const } }],
+        responses: { '204': { description: 'Deleted' } },
+      },
+    },
+    '/v1/auth/oidc/config': {
+      get: {
+        tags: ['Authentication'],
+        summary: 'Proxied Keycloak OIDC discovery document',
+        security: [],
+        responses: { '200': { description: 'Essential OIDC endpoints for this realm.' } },
+      },
+    },
+    '/v1/auth/saml/metadata': {
+      get: {
+        tags: ['Authentication'],
+        summary: 'SP EntityDescriptor for partner IdP brokering',
+        security: [],
+        responses: {
+          '200': {
+            description: 'application/xml — Keycloak SAML SP descriptor',
+            content: { 'application/xml': { schema: { type: 'string' as const } } },
+          },
+        },
+      },
+    },
+    '/v1/auth/tokens': {
+      get: {
+        tags: ['Authentication'],
+        summary: 'List the caller\'s Personal Access Tokens (metadata only)',
+        description: 'Never returns raw token values — only id, name, tokenPrefix, scopes, timestamps.',
+        responses: { '200': { description: 'Array of PAT metadata objects' } },
+      },
+      post: {
+        tags: ['Authentication'],
+        summary: 'Mint a Personal Access Token (returned exactly once)',
+        description:
+          'The raw token is returned exactly once in the response body. It ' +
+          'is hashed with sha-256 before being written to ' +
+          'personal_access_tokens. PATs cannot mint other PATs (the ' +
+          '/tokens endpoints require a live JWT session).',
         requestBody: {
           required: true,
           content: {
@@ -363,16 +564,89 @@ export const openApiSpec = {
               schema: {
                 type: 'object' as const,
                 properties: {
-                  refreshToken: { type: 'string' as const, minLength: 1 },
+                  name: { type: 'string' as const },
+                  expiresAt: { type: 'string' as const, format: 'date-time' },
+                  scopes: { type: 'array' as const, items: { type: 'string' as const } },
                 },
-                required: ['refreshToken'],
+                required: ['name', 'expiresAt'],
               },
             },
           },
         },
         responses: {
-          '200': { description: 'Logout successful' },
-          '401': { description: 'Invalid refresh token' },
+          '201': { description: 'PAT created — token returned with tellus_pat_ prefix' },
+          '400': { description: 'Invalid expiresAt or request shape' },
+        },
+      },
+    },
+    '/v1/auth/pat-scopes': {
+      get: {
+        tags: ['Authentication'],
+        summary: 'Public PAT scope manifest',
+        description:
+          'Returns the closed enum of PAT scopes plus the route-pattern → ' +
+          'required-scope table enforced by the app-wide patSecurityGate. ' +
+          'Tooling that mints PATs for third-party apps reads this instead ' +
+          'of scraping services/patScopeMap.ts. Public (no auth required).',
+        responses: {
+          '200': {
+            description: 'PatScopeManifest JSON',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object' as const,
+                  properties: {
+                    success: { type: 'boolean' as const },
+                    data: {
+                      type: 'object' as const,
+                      properties: {
+                        scopes: { type: 'array' as const, items: { type: 'string' as const } },
+                        unauthenticatedRoutes: {
+                          type: 'array' as const,
+                          items: { type: 'string' as const },
+                        },
+                        rules: {
+                          type: 'array' as const,
+                          items: {
+                            type: 'object' as const,
+                            properties: {
+                              method: { type: 'string' as const, enum: ['ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+                              prefix: { type: 'string' as const },
+                              scope: { type: 'string' as const },
+                              extraCondition: { type: 'string' as const },
+                            },
+                            required: ['method', 'prefix', 'scope'],
+                          },
+                        },
+                        fallback: {
+                          type: 'object' as const,
+                          properties: {
+                            GET: { type: 'string' as const },
+                            MUTATION: { type: 'string' as const },
+                          },
+                          required: ['GET', 'MUTATION'],
+                        },
+                      },
+                      required: ['scopes', 'unauthenticatedRoutes', 'rules', 'fallback'],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/v1/auth/tokens/{id}': {
+      delete: {
+        tags: ['Authentication'],
+        summary: 'Revoke a Personal Access Token',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        responses: {
+          '204': { description: 'Revoked' },
+          '404': { description: 'Token not found or already revoked' },
         },
       },
     },
@@ -2435,6 +2709,28 @@ export const openApiSpec = {
         },
       },
     },
+  },
+};
+
+// Merge Ontology paths/schemas into the spec exported to consumers.
+export const openApiSpec = {
+  ...baseSpec,
+  info: {
+    ...baseSpec.info,
+    title: 'Tellus Backend API',
+    description:
+      'Combined Foundry data ingestion + Ontology Manager / Object Explorer API.',
+  },
+  components: {
+    ...baseSpec.components,
+    schemas: {
+      ...baseSpec.components.schemas,
+      ...ontologySchemas,
+    },
+  },
+  paths: {
+    ...baseSpec.paths,
+    ...ontologyPaths,
   },
 };
 

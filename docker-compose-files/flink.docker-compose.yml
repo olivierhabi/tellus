@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# Apache Flink — streaming compute for the Object Data Funnel
+# ---------------------------------------------------------------------------
+# Spec equivalent: "Apache Flink" (techstack §Streaming).
+# Roles:
+#   • Tail Kafka topic `ontology.cdc.public.*` (Debezium CDC events) and
+#     write merged change rows into the OpenSearch object indices —
+#     mirroring the Funnel "merge changes → indexing → hydration" stages.
+#   • Read `ontology.actions` topic and emit derived stream metrics that
+#     surface in the "Funnel Streaming Pipeline View" UI.
+#
+# This compose ships the JobManager + a single TaskManager. Submit jobs
+# with `flink run` against the JobManager UI on :8083 (we remap from the
+# default :8081 to avoid colliding with the Redpanda schema registry).
+# ---------------------------------------------------------------------------
+services:
+  flink-jobmanager:
+    image: flink:1.20.0-scala_2.12-java17
+    container_name: tellus-flink-jobmanager
+    restart: unless-stopped
+    command: jobmanager
+    ports:
+      - "127.0.0.1:8083:8081"   # Flink Web UI (remapped)
+      - "127.0.0.1:6123:6123"   # JobManager RPC
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1024m
+    volumes:
+      - flink_jm:/opt/flink/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  flink-taskmanager:
+    image: flink:1.20.0-scala_2.12-java17
+    container_name: tellus-flink-taskmanager
+    restart: unless-stopped
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 1536m
+    volumes:
+      - flink_tm:/opt/flink/data
+
+volumes:
+  flink_jm:
+  flink_tm:

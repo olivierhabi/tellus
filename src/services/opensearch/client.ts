@@ -180,18 +180,45 @@ function logQuery(
 // Wrapper: searchObjects
 // ---------------------------------------------------------------------------
 
+/**
+ * Inject a spec §Task 28 security filter into a search body. The original
+ * query (whatever shape the caller supplied) is moved under `bool.must` and
+ * the security clause is ANDed in alongside it. This is the only place in
+ * the code where ES search queries leave user-controlled data — any route
+ * that bypasses searchObjects() also bypasses security, which is a bug.
+ */
+function injectSecurityFilter(
+  body: Record<string, unknown>,
+  securityFilter: Record<string, unknown> | null | undefined
+): Record<string, unknown> {
+  if (!securityFilter) return body;
+  const original = (body.query as Record<string, unknown> | undefined) || {
+    match_all: {},
+  };
+  return {
+    ...body,
+    query: {
+      bool: {
+        must: [original, securityFilter],
+      },
+    },
+  };
+}
+
 async function searchObjects(
   index: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<any> {
   const start = performance.now();
+  const finalBody = injectSecurityFilter(body, securityFilter);
   const result = await withRetry(
-    () => client.search({ index, body }),
+    () => client.search({ index, body: finalBody }),
     `search(${index})`
   );
   const durationMs = performance.now() - start;
   const hitCount = result.body?.hits?.hits?.length ?? 0;
-  logQuery("search", index, body, result.statusCode ?? 200, durationMs, hitCount);
+  logQuery("search", index, finalBody, result.statusCode ?? 200, durationMs, hitCount);
   return result;
 }
 
@@ -222,15 +249,17 @@ async function getObject(
 
 async function countObjects(
   index: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<any> {
   const start = performance.now();
+  const finalBody = injectSecurityFilter(body, securityFilter);
   const result = await withRetry(
-    () => client.count({ index, body }),
+    () => client.count({ index, body: finalBody }),
     `count(${index})`
   );
   const durationMs = performance.now() - start;
-  logQuery("count", index, body, result.statusCode ?? 200, durationMs);
+  logQuery("count", index, finalBody, result.statusCode ?? 200, durationMs);
   return result;
 }
 

@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Debezium — Postgres CDC into Kafka topics
+# ---------------------------------------------------------------------------
+# Spec equivalent: "Debezium + Kafka Connect" (techstack §CDC).
+# Streams every commit on the `tellus_db` postgres instance into Kafka
+# topics under `ontology.cdc.public.*`, where Apache Flink picks them up
+# and feeds the OpenSearch indexer (the "merge changes → indexing → hydration"
+# stages of the Object Data Funnel pipeline).
+#
+# After bringing this stack up, register the connector by POSTing
+# config/postgres-source.json to http://localhost:8085/connectors/.
+# ---------------------------------------------------------------------------
+services:
+  debezium-connect:
+    image: debezium/connect:2.7.3.Final
+    container_name: tellus-debezium
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8085:8083"   # Kafka Connect REST (remapped)
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:29092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: debezium_connect_configs
+      OFFSET_STORAGE_TOPIC: debezium_connect_offsets
+      STATUS_STORAGE_TOPIC: debezium_connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s

@@ -87,7 +87,49 @@ router.post(
       const { objectType } = req.params;
       await ensureObjectTypeExists(objectType);
 
-      const validated = await validateSearchQuery(req.body || {}, objectType);
+      // Spec §Task 23: the filter model is `{filter: [{property, operator,
+      // value}, ...]}`. Translate into the historical `{where: {type,
+      // field, value}}` shape (or a `{type:"and",filters:[...]}` tree for
+      // multiple filters) before validation.
+      const body = req.body || {};
+      if (Array.isArray(body.filter) && !body.where) {
+        const OP_MAP: Record<string, string> = {
+          eq: "eq", ne: "eq",  // ne handled via not-wrapper below
+          gt: "gt", gte: "gte", lt: "lt", lte: "lte",
+          in: "in", contains: "contains", startsWith: "startsWith",
+          exists: "isNotNull", notExists: "isNull",
+        };
+        const leaves = body.filter
+          .filter((f: any) => f && f.property && f.operator)
+          .map((f: any) => {
+            const type = OP_MAP[f.operator as string] || "eq";
+            const node: Record<string, unknown> = { type, field: f.property };
+            if (type !== "isNull" && type !== "isNotNull") {
+              node.value = f.value ?? f.values;
+            }
+            if (f.operator === "ne") {
+              return { type: "not", filter: node };
+            }
+            return node;
+          });
+        if (leaves.length === 1) {
+          body.where = leaves[0];
+        } else if (leaves.length > 1) {
+          body.where = { type: "and", filters: leaves };
+        }
+        delete body.filter;
+      }
+      // Accept the spec-style `pageSize` / `pageToken` field names.
+      if (body.pageSize !== undefined && body.$pageSize === undefined) {
+        body.$pageSize = body.pageSize;
+        delete body.pageSize;
+      }
+      if (body.pageToken !== undefined && body.$pageToken === undefined) {
+        body.$pageToken = body.pageToken;
+        delete body.pageToken;
+      }
+
+      const validated = await validateSearchQuery(body, objectType);
       const result = await executeSearch(objectType, {
         where: validated.where,
         $orderBy: validated.$orderBy,
@@ -624,10 +666,41 @@ router.get(
 
       const obj = await executeGetObject(objectType, primaryKey);
       if (!obj) {
+        // Spec §Task 28: return 404 (not 403) for unauthorised/missing
+        // lookups to prevent IDOR information leakage.
         throw appError(
           "OBJECT_NOT_FOUND",
           `Object with primary key '${primaryKey}' not found in object type '${objectType}'.`
         );
+      }
+
+      // Spec §Task 28 column-level stripping: remove any property the
+      // caller lacks a matching marking for. Property markings are read
+      // from the `property.marking_required` column — a null value means
+      // the property is public.
+      try {
+        const propResult = await query(
+          `SELECT api_name, marking_required FROM property
+             WHERE object_type_id = (SELECT object_type_id FROM object_type WHERE api_name = $1)
+               AND marking_required IS NOT NULL`,
+          [objectType]
+        );
+        if (propResult.rows.length > 0) {
+          const userMarkings = new Set(
+            ((req as any).security?.markings as string[]) || []
+          );
+          const properties = (obj as { properties?: Record<string, unknown> }).properties;
+          if (properties) {
+            for (const row of propResult.rows) {
+              const required = row.marking_required as string;
+              if (!userMarkings.has(required)) {
+                delete properties[row.api_name as string];
+              }
+            }
+          }
+        }
+      } catch {
+        // property.marking_required may not exist on every schema — skip.
       }
 
       const elapsed = Date.now() - start;
