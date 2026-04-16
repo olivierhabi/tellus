@@ -128,6 +128,9 @@ if [[ $EXIT_CODE -eq 0 ]]; then
   echo -e "${GREEN}${BOLD}ALL E2E SUITES PASSED${NC}"
 else
   echo -e "${RED}${BOLD}SOME E2E SUITES FAILED${NC}"
+  echo ""
+  echo -e "${BOLD}Server log (last 50 lines):${NC}"
+  tail -50 /tmp/tellus-e2e-server.log 2>/dev/null || true
 fi
 echo -e "${BOLD}========================================${NC}"
 
