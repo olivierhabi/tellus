@@ -44,7 +44,11 @@ USER="${TELLUS_USER:-cypress@tellus.local}"
 PASS="${TELLUS_PASS:-Password123!}"
 API="${API_URL:-http://localhost:3000/api}"
 ONTOLOGY="${TELLUS_ONTOLOGY:-default}"
-REPO_ROOT="${REPO_ROOT:-/Users/olivierhabimana/Desktop/projects/tellus}"
+# Default to the repo root inferred from this script's location so the
+# same script works on any developer machine AND on CI (the GitHub
+# runner checks out to /home/runner/work/tellus/tellus, NOT the
+# author's laptop path).
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'

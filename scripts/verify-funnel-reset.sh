@@ -29,7 +29,8 @@ USER="${TELLUS_USER:-cypress@tellus.local}"
 PASS="${TELLUS_PASS:-Password123!}"
 API="${API_URL:-http://localhost:3000/api}"
 ONTOLOGY="${TELLUS_ONTOLOGY:-default}"
-REPO_ROOT="${REPO_ROOT:-/Users/olivierhabimana/Desktop/projects/tellus}"
+# Infer from the script's own location so it works on CI and any laptop.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'

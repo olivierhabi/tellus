@@ -24,8 +24,11 @@
 
 set -o pipefail
 
-REPO_ROOT="${REPO_ROOT:-/Users/olivierhabimana/Desktop/projects/tellus}"
-FE_ROOT="${FE_ROOT:-/Users/olivierhabimana/Desktop/projects/tellus-fe}"
+# Default to the repo root inferred from this script's location so the
+# same script works on CI and on any developer machine.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# tellus-fe sits as a sibling to tellus by convention.
+FE_ROOT="${FE_ROOT:-$(cd "$REPO_ROOT/../tellus-fe" 2>/dev/null && pwd || echo "$REPO_ROOT/../tellus-fe")}"
 API="${API_URL:-http://localhost:3000/api}"
 
 GREEN='\033[0;32m'

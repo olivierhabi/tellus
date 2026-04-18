@@ -33,6 +33,7 @@ import {
   mergeOverlayIntoSearch,
 } from "../services/overlay/writebackOverlay";
 import { getOverlayStore } from "../services/overlay/getOverlayStore";
+import { overlayKey } from "../services/overlay/overlayStore";
 import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 
 const router = Router();
@@ -763,17 +764,44 @@ router.get(
 
       // B7: overlay read — if a recent edit is in the overlay but the
       // index hasn't absorbed it yet, the overlay is authoritative for
-      // this PK. An overlay-only hit (no index doc) still yields the
-      // object so a just-created edit is visible immediately.
+      // this PK.
+      //
+      // Two paths, kept distinct to avoid the "synthetic-stub" bug:
+      //   1. Index HIT  → merge any overlay entry onto the real doc.
+      //   2. Index MISS → do an explicit overlay lookup. Only
+      //      materialise an object when the overlay ACTUALLY has a
+      //      record for this PK. Do NOT pass a `{__pk}` placeholder
+      //      through `applyOverlayToResults` — when the overlay is
+      //      empty it returns the placeholder unchanged, the caller
+      //      treats it as a hit, and every GET of a missing PK
+      //      returns 200 with a stub document (fails the spec §Task 28
+      //      IDOR guard and the GET-single 404 test).
       try {
         const store = await getOverlayStore();
-        const overlayed = await applyOverlayToResults(
-          objectType,
-          obj ? [obj as Record<string, unknown>] : [{ __pk: primaryKey }],
-          store
-        );
-        if (overlayed.length > 0 && overlayed[0] && overlayed[0] !== obj) {
-          obj = overlayed[0] as typeof obj;
+        if (obj) {
+          const overlayed = await applyOverlayToResults(
+            objectType,
+            [obj as Record<string, unknown>],
+            store
+          );
+          // `applyOverlayToResults` returns an EMPTY array when the
+          // overlay says the row is deleted → drop obj so the 404
+          // branch below fires.
+          obj = (overlayed[0] as typeof obj) ?? null;
+        } else {
+          const [record] = await store.mget([overlayKey(objectType, primaryKey)]);
+          if (record && !record.deleted) {
+            // `obj`'s static type is whatever `executeGetObject` returns;
+            // cast via `unknown` because the overlay record's shape is a
+            // plain property map — structurally compatible at runtime,
+            // but TS can't prove it.
+            obj = ({
+              ...record.doc,
+              __pk: record.primaryKey,
+              __version: record.version,
+              __overlay_source: "writeback",
+            } as unknown) as typeof obj;
+          }
         }
       } catch {
         /* overlay optional */
