@@ -99,20 +99,109 @@ export async function signalTemporalWorkflow(
   try {
     const taskQueue = process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
     const workflowId = `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
+
+    // Determine conflict policy — prod-safe default `USE_EXISTING` keeps
+    // the spec's "one long-running parent workflow per OT" invariant.
+    // Opt-in `FUNNEL_TERMINATE_ON_SAVE=true` makes every save forcibly
+    // replace an in-flight workflow (the verify-funnel-reset semantic).
+    // Before terminating we give the workflow up to
+    // FUNNEL_CANCEL_TIMEOUT_MS (default 30s) to exit gracefully via a
+    // cancel — so an activity that's merely retrying a transient PG/S3
+    // error gets to finish its attempt and idempotently commit.
+    const terminateOnSave = process.env.FUNNEL_TERMINATE_ON_SAVE === "true";
+    if (terminateOnSave) {
+      await cancelWithTimeoutIfStuck(workflowId);
+      incrementCounter("funnel_workflow_terminate_on_save_total", {
+        object_type: objectTypeApiName,
+      });
+    }
+
     await temporalClient.workflow.signalWithStart("ObjectTypeFunnelWorkflow", {
       workflowId,
       taskQueue,
       args: [{ ontologyId, objectTypeApiName }],
       signal: signalType,
       signalArgs: [payload],
+      workflowIdConflictPolicy: terminateOnSave ? "TERMINATE_EXISTING" : "USE_EXISTING",
+    });
+    incrementCounter("funnel_signal_with_start_total", {
+      object_type: objectTypeApiName,
+      signal_type: signalType,
     });
     return true;
   } catch (err) {
+    incrementCounter("funnel_signal_with_start_errors_total", {
+      object_type: objectTypeApiName,
+    });
     console.warn(
       `[temporal] signalWithStart failed for ${objectTypeApiName}: ${(err as Error).message}`
     );
     return false;
   }
+}
+
+/**
+ * Graceful-replace pattern: if a workflow for this ID is currently
+ * running and has been for longer than `FUNNEL_CANCEL_STALE_THRESHOLD_MS`
+ * (default 2 min), send a cancel, wait up to `FUNNEL_CANCEL_TIMEOUT_MS`
+ * (default 30s) for it to exit, then let the caller's signalWithStart
+ * with TERMINATE_EXISTING finish the job. Side effects from the
+ * in-flight activity are allowed to complete idempotently — the
+ * activity code is written so that partial writes + retries converge.
+ */
+async function cancelWithTimeoutIfStuck(workflowId: string): Promise<void> {
+  if (!temporalClient) return;
+  const staleMs = Number(process.env.FUNNEL_CANCEL_STALE_THRESHOLD_MS ?? 2 * 60 * 1000);
+  const timeoutMs = Number(process.env.FUNNEL_CANCEL_TIMEOUT_MS ?? 30_000);
+  try {
+    const handle = temporalClient.workflow.getHandle(workflowId);
+    const desc = await handle.describe();
+    if (desc.status.name !== "RUNNING") return;
+    const ageMs = Date.now() - desc.startTime.getTime();
+    if (ageMs < staleMs) return; // still fresh; let signalWithStart reuse or terminate
+    incrementCounter("funnel_workflow_cancel_attempted_total", {
+      object_type: workflowId.replace(/^ObjectTypeFunnelWorkflow-/, ""),
+    });
+    await handle.cancel();
+    const giveUpAt = Date.now() + timeoutMs;
+    while (Date.now() < giveUpAt) {
+      await new Promise((r) => setTimeout(r, 500));
+      const now = await handle.describe();
+      if (now.status.name !== "RUNNING") {
+        incrementCounter("funnel_workflow_cancelled_cleanly_total", {});
+        return;
+      }
+    }
+    incrementCounter("funnel_workflow_cancel_timeout_total", {});
+    // Fall through — caller's signalWithStart(TERMINATE_EXISTING) will
+    // forcibly close the workflow.
+  } catch (err) {
+    const msg = (err as Error).message;
+    // Not-found = workflow doesn't exist yet; nothing to cancel.
+    if (!/not found/i.test(msg) && !/NotFound/i.test(msg)) {
+      console.warn(
+        `[temporal] cancelWithTimeoutIfStuck(${workflowId}): ${msg}`
+      );
+    }
+  }
+}
+
+/** Internal metrics handle — delegates to the ../metrics module when
+ *  available. We require it lazily so the worker module stays usable
+ *  in unit tests where the metrics module might not be wired. */
+function incrementCounter(name: string, labels: Record<string, string>): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const m = require("../metrics") as typeof import("../metrics");
+    m.incCounter(name, labels);
+  } catch {
+    /* metrics module not loaded — no-op */
+  }
+}
+
+/** Internal accessor used by the sweeper. Null when Temporal isn't connected. */
+export function getTemporalClient(): Client | null {
+  return temporalClient;
 }
 
 export function isTemporalConnected(): boolean {

@@ -14,7 +14,8 @@
 // ---------------------------------------------------------------------------
 
 import { readFileSync } from "fs";
-import { Agent } from "https";
+import { Agent, request as httpsRequest } from "https";
+import { URL as NodeURL } from "url";
 
 export interface K8sFlipConfig {
   /** Service name to patch. Default `quickwit-searcher`. */
@@ -103,9 +104,9 @@ export async function flipSearcherServiceSelector(
   };
 }
 
-// A thin fetch wrapper that accepts a Node `https.Agent` — the global
-// `fetch` (undici) exposes dispatcher instead of agent, so for the
-// in-cluster CA we use the `node-fetch`-style signature.
+// ESM-friendly HTTPS PATCH helper. `global.fetch` (undici) exposes a
+// `dispatcher` knob instead of `agent`, so when we need to attach the
+// pod's CA bundle we fall through to the Node https module directly.
 async function nodeFetch(
   url: string,
   init: {
@@ -119,12 +120,9 @@ async function nodeFetch(
   text(): Promise<string>;
   json(): Promise<unknown>;
 }> {
-  // Use Node https directly so we can attach a custom Agent with the
-  // pod CA. `fetch` doesn't expose the agent knob portably.
   return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const https = require("https") as typeof import("https");
-    const req = https.request(
+    const u = new NodeURL(url);
+    const req = httpsRequest(
       {
         host: u.hostname,
         port: u.port || 443,

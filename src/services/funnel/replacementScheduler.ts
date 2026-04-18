@@ -139,6 +139,36 @@ export interface SchedulerTickResult {
   verdicts: Array<{ objectType: string; verdict: SoakVerdict }>;
 }
 
+/** Cache the "B9 prerequisites missing" verdict so a deployment that
+ *  hasn't run migrations 012/013/014 yet doesn't spam the scheduler log
+ *  with `relation "..." does not exist` every tick. The cache is
+ *  invalidated after MIGRATION_RECHECK_INTERVAL_MS so a later migration
+ *  run is picked up without a server restart. */
+const MIGRATION_RECHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+let missingTablesCheckedAt = 0;
+let missingTables: string[] = [];
+
+async function detectMissingAutoTriggerTables(): Promise<string[]> {
+  const now = Date.now();
+  if (missingTables.length > 0 && now - missingTablesCheckedAt < MIGRATION_RECHECK_INTERVAL_MS) {
+    return missingTables;
+  }
+  const required = [
+    "object_instances",
+    "funnel_changelog_watermark",
+    "object_type_active_index_version",
+  ];
+  const res = await query(
+    `SELECT tablename FROM pg_catalog.pg_tables
+      WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
+    [required]
+  );
+  const present = new Set(res.rows.map((r: { tablename: string }) => r.tablename));
+  missingTables = required.filter((t) => !present.has(t));
+  missingTablesCheckedAt = now;
+  return missingTables;
+}
+
 async function autoTriggerVolumeReplacements(): Promise<number> {
   // Per object type: compare the most recent changelog emission (from
   // the watermark table B4 populates) against the current merged row
@@ -146,6 +176,15 @@ async function autoTriggerVolumeReplacements(): Promise<number> {
   // kick off a replacement pipeline. Requires the merged table to have
   // a row count — we read it from object_instances which is the B1
   // system of record.
+  const missing = await detectMissingAutoTriggerTables();
+  if (missing.length > 0) {
+    // Transitional deployment — B9 auto-trigger is inert until the
+    // required migrations run. Skip quietly rather than spamming the
+    // log every tick. The caller can still kick off replacements
+    // manually via POST /replacement/:ot/start.
+    return 0;
+  }
+
   const candidates = await query(
     `SELECT ot.api_name                 AS object_type_api_name,
             COALESCE(w.last_rows_emitted, 0)::bigint AS rows_changed,

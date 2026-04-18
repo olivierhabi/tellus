@@ -20,6 +20,7 @@ import { getInstance } from "../models/objectInstance";
 import { getOverlayStore } from "../services/overlay/getOverlayStore";
 import { overlayKey } from "../services/overlay/overlayStore";
 import { getOverlaySloSnapshot, renderOverlaySliPrometheus } from "../services/overlay/slis";
+import { renderPrometheus as renderFunnelMetrics } from "../services/funnel/metrics";
 import { ensureLinkTablesForAllLinkTypes } from "../services/funnel/clickhouseBootstrap";
 import {
   ensureLinkTable,
@@ -315,6 +316,27 @@ router.get("/slis/metrics", async (_req: Request, res: Response) => {
     res
       .set("content-type", "text/plain; version=0.0.4")
       .send(renderOverlaySliPrometheus());
+  } catch (err) {
+    res.status(500).send(`# error: ${(err as Error).message}\n`);
+  }
+});
+
+// Unified Funnel Prometheus scrape endpoint. Covers the B3/B7 control
+// plane metrics:
+//   funnel_workflow_terminate_on_save_total
+//   funnel_workflow_cancel_attempted_total / cancelled_cleanly_total / cancel_timeout_total
+//   funnel_signal_with_start_total / errors_total
+//   funnel_stage_duration_seconds (histogram, per stage + per object type)
+//   funnel_stage_errors_total
+//   funnel_orphan_runs_swept_total
+//   funnel_iceberg_metadata_emission_failures_total
+router.get("/metrics", async (_req: Request, res: Response) => {
+  try {
+    const funnel = renderFunnelMetrics();
+    const overlay = renderOverlaySliPrometheus();
+    res
+      .set("content-type", "text/plain; version=0.0.4")
+      .send(funnel + overlay);
   } catch (err) {
     res.status(500).send(`# error: ${(err as Error).message}\n`);
   }

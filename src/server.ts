@@ -653,6 +653,27 @@ async function start(): Promise<void> {
       );
     }
 
+    // B3: Sweep funnel_run rows orphaned by a prior worker restart.
+    // A SIGKILL / OOM / container restart mid-activity leaves rows at
+    // status='running' that the UI polls and shows stuck on "sync"
+    // forever. Close them out before a new worker comes up so every
+    // save-to-ontology click after restart starts from a clean slate.
+    try {
+      const { sweepOrphanedFunnelRuns } = await import(
+        "./services/funnel/durableWorkflow"
+      );
+      const swept = await sweepOrphanedFunnelRuns();
+      if (swept.sweptRunIds.length > 0) {
+        console.log(
+          `Swept ${swept.sweptRunIds.length} orphaned funnel_run row(s) + ${swept.sweptStageRuns} stage(s) from prior worker restart`
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: orphaned funnel_run sweep failed: ${(err as Error).message}`
+      );
+    }
+
     // B3: Temporal worker. When Temporal is reachable this is the
     // authoritative execution path; the PG-backed dispatcher above
     // becomes a fallback used only when `isTemporalConnected()` is

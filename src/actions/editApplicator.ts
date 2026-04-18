@@ -25,6 +25,7 @@ import { client as opensearchClient } from "../services/opensearch/client";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { markEditsAsIndexed } from "../models/ontologyEdit";
 import { writeOverlayForEdit } from "../services/overlay/writebackOverlay";
+import { isB1Ready } from "../services/funnel/b1Readiness";
 import type { CompiledEdit, LinkEdit } from "./ruleCompiler";
 
 // ---------------------------------------------------------------------------
@@ -166,16 +167,19 @@ export async function applyEdits(
       editIdMap.set(`${edit.objectType}::${edit.primaryKey}`, editId);
 
       // B1/B7: in the same transaction, land the edit in `object_edits`,
-      // UPSERT `object_instances`, and write the Writeback Overlay so the
-      // edit is visible in search within 1 s independent of Quickwit's
-      // commit cadence. The spec requires every writeback to land in
-      // `object_edits` — resolve the owning ontology from the object type
-      // when the caller didn't pass one. The helper tolerates missing B1
-      // tables so this is safe in transitional deployments.
+      // UPSERT `object_instances`, and write the Writeback Overlay so
+      // the edit is visible in search within 1 s independent of
+      // Quickwit's commit cadence. The spec requires every writeback to
+      // land in `object_edits` — resolve the owning ontology from the
+      // object type when the caller didn't pass one. We gate this on
+      // the boot-time B1-readiness probe so transitional deployments
+      // (migrations not yet applied) pay zero per-edit overhead; a
+      // savepoint is still used once the tables exist, defending
+      // against mid-life drops.
       const ontologyId =
         executionContext.ontologyId ??
         (await resolveOntologyForObjectType(pgClient, edit.objectType));
-      if (ontologyId) {
+      if (ontologyId && (await isB1Ready())) {
         await writeOverlayForEditInTxn(pgClient, {
           ontologyId,
           edit,

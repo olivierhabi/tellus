@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { query } from "../../../db";
+import { observeHistogram, incCounter } from "../metrics";
 import {
   computeChangelog,
   SnapshotDiffReader,
@@ -36,6 +37,73 @@ import { MergedRow } from "../../quickwit/docBuilder";
 import { runHydrationActivity } from "../../quickwit/hydrationActivity";
 import { sleepForStageDelay } from "../stageDelay";
 
+// Heartbeat + stage-duration helper. Every long-running activity wraps
+// its body in `withStageInstrumentation(stage, obj, async () => ...)`.
+// The helper:
+//   * records wall-clock duration into funnel_stage_duration_seconds
+//   * starts a 5s heartbeat so Temporal knows the worker is alive (a
+//     merge/indexing activity that quietly blocks without heartbeating
+//     would otherwise stay in "running" until startToCloseTimeout hits —
+//     precisely the "stuck on sync" symptom we saw in prod)
+//   * counts errors per stage so on-call sees which stage is flaky
+async function withStageInstrumentation<T>(
+  stage: "changelog" | "merge" | "indexing" | "hydration",
+  objectTypeApiName: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const started = Date.now();
+  const heartbeat = startHeartbeatLoop();
+  try {
+    const out = await fn();
+    observeHistogram("funnel_stage_duration_seconds", (Date.now() - started) / 1000, {
+      stage,
+      object_type: objectTypeApiName,
+      result: "success",
+    });
+    return out;
+  } catch (err) {
+    observeHistogram("funnel_stage_duration_seconds", (Date.now() - started) / 1000, {
+      stage,
+      object_type: objectTypeApiName,
+      result: "error",
+    });
+    incCounter("funnel_stage_errors_total", {
+      stage,
+      object_type: objectTypeApiName,
+    });
+    throw err;
+  } finally {
+    heartbeat.stop();
+  }
+}
+
+function startHeartbeatLoop(): { stop: () => void } {
+  let cancelled = false;
+  let timer: NodeJS.Timeout | null = null;
+  const tick = () => {
+    if (cancelled) return;
+    try {
+      // The @temporalio/activity Context is only available when the
+      // activity runs inside a Temporal worker. When these functions
+      // are invoked directly (from the PG dispatcher or a unit test),
+      // `Context.current()` throws — treat that as a no-op heartbeat.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { Context } = require("@temporalio/activity") as typeof import("@temporalio/activity");
+      Context.current().heartbeat();
+    } catch {
+      /* not inside a Temporal activity — no heartbeat needed */
+    }
+    timer = setTimeout(tick, 5000);
+  };
+  timer = setTimeout(tick, 5000);
+  return {
+    stop() {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    },
+  };
+}
+
 export interface ObjectTypeCtx {
   ontologyId: string;
   objectTypeApiName: string;
@@ -46,6 +114,14 @@ export interface ObjectTypeCtx {
 // ---------------------------------------------------------------------------
 
 export async function runChangelogActivity(
+  input: ObjectTypeCtx
+): Promise<{ snapshotId: string; rowsEmitted: number; rows: ChangelogRow[] }> {
+  return withStageInstrumentation("changelog", input.objectTypeApiName, async () =>
+    runChangelogActivityImpl(input)
+  );
+}
+
+async function runChangelogActivityImpl(
   input: ObjectTypeCtx
 ): Promise<{ snapshotId: string; rowsEmitted: number; rows: ChangelogRow[] }> {
   // Optional dev/demo pacing — no-op in production (env default 0).
@@ -111,6 +187,26 @@ export async function runMergeActivity(
     source_transaction_id: string | null;
   }>;
 }> {
+  return withStageInstrumentation("merge", input.objectTypeApiName, async () =>
+    runMergeActivityImpl(input)
+  );
+}
+
+async function runMergeActivityImpl(
+  input: ObjectTypeCtx & { changelogRows: ChangelogRow[] }
+): Promise<{
+  snapshotId: string;
+  upserts: number;
+  deletes: number;
+  editIds: string[];
+  mergedRows: Array<{
+    primary_key: string;
+    properties: Record<string, unknown>;
+    markings: string[];
+    operation: "upsert" | "delete";
+    source_transaction_id: string | null;
+  }>;
+}> {
   await sleepForStageDelay();
   const mergedTable = await ensureTable(input.objectTypeApiName, "merged", "state");
   const pending = await getPendingMergeEdits(input.objectTypeApiName);
@@ -151,6 +247,23 @@ export async function runMergeActivity(
 // ---------------------------------------------------------------------------
 
 export async function runIndexingActivityProxy(
+  input: ObjectTypeCtx & {
+    mergedRows: Array<{
+      primary_key: string;
+      properties: Record<string, unknown>;
+      markings: string[];
+      operation: "upsert" | "delete";
+      source_transaction_id: string | null;
+    }>;
+    editIds: string[];
+  }
+): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
+  return withStageInstrumentation("indexing", input.objectTypeApiName, async () =>
+    runIndexingActivityProxyImpl(input)
+  );
+}
+
+async function runIndexingActivityProxyImpl(
   input: ObjectTypeCtx & {
     mergedRows: Array<{
       primary_key: string;
@@ -210,6 +323,14 @@ export async function runIndexingActivityProxy(
 // ---------------------------------------------------------------------------
 
 export async function runHydrationActivityProxy(
+  input: ObjectTypeCtx & { publishedSplitIds: string[] }
+): Promise<{ prefetched: number }> {
+  return withStageInstrumentation("hydration", input.objectTypeApiName, async () =>
+    runHydrationActivityProxyImpl(input)
+  );
+}
+
+async function runHydrationActivityProxyImpl(
   input: ObjectTypeCtx & { publishedSplitIds: string[] }
 ): Promise<{ prefetched: number }> {
   await sleepForStageDelay();

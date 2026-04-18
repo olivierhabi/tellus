@@ -244,25 +244,146 @@ export async function commitSnapshot(
   }
 }
 
+// Memoised result of "does funnel_snapshot have the retry-tracking
+// columns?" Without this probe, every snapshot commit attempts the
+// UPDATE blindly and the pg pool's own error logger spams the console
+// with "column metadata_emitted_at does not exist" on pre-migration-016
+// deployments — the JS `.catch(() => {})` catches the Promise rejection
+// but only AFTER pg has already logged it. Re-checked every 5 min so
+// applying the migration during server life activates tracking without
+// a restart.
+let metadataTrackingColumnsPresent: boolean | null = null;
+let metadataTrackingCheckedAt = 0;
+const METADATA_TRACKING_RECHECK_MS = 5 * 60 * 1000;
+
+async function hasMetadataTrackingColumns(): Promise<boolean> {
+  const now = Date.now();
+  if (
+    metadataTrackingColumnsPresent !== null &&
+    now - metadataTrackingCheckedAt < METADATA_TRACKING_RECHECK_MS
+  ) {
+    return metadataTrackingColumnsPresent;
+  }
+  try {
+    const res = await query(
+      `SELECT COUNT(*)::int AS c
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'funnel_snapshot'
+          AND column_name IN ('metadata_emitted_at',
+                              'metadata_emit_attempts',
+                              'metadata_last_error')`
+    );
+    metadataTrackingColumnsPresent = (res.rows[0]?.c ?? 0) >= 3;
+  } catch {
+    metadataTrackingColumnsPresent = false;
+  }
+  metadataTrackingCheckedAt = Date.now();
+  return metadataTrackingColumnsPresent;
+}
+
 async function emitMetadataToS3BestEffort(
   tableId: string,
   headSnapshotId: string
 ): Promise<void> {
+  const trackable = await hasMetadataTrackingColumns();
   try {
     const table = await getTableById(tableId);
     if (!table) return;
-    // Snapshots ordered oldest→newest so the Iceberg snapshot-log is
-    // monotonic. We walk from the head backwards then reverse.
     const chain = await snapshotsBetween(tableId, null, headSnapshotId);
-    // `snapshotsBetween` returns oldest-first already; version number is
-    // 1-indexed matching Iceberg convention for metadata-file names.
     const head = chain[chain.length - 1];
     if (!head) return;
     await emitIcebergMetadataForSnapshot(table, head, chain, chain.length);
+    if (trackable) {
+      await query(
+        `UPDATE funnel_snapshot
+            SET metadata_emitted_at = now(),
+                metadata_last_error = NULL
+          WHERE snapshot_id = $1`,
+        [headSnapshotId]
+      );
+    }
   } catch (err) {
-    console.warn(
-      `[iceberg] metadata.json emission failed for ${tableId}: ${(err as Error).message}`
+    const msg = (err as Error).message;
+    console.warn(`[iceberg] metadata.json emission failed for ${tableId}: ${msg}`);
+    if (trackable) {
+      await query(
+        `UPDATE funnel_snapshot
+            SET metadata_emit_attempts = metadata_emit_attempts + 1,
+                metadata_last_error    = $2
+          WHERE snapshot_id = $1`,
+        [headSnapshotId, msg.slice(0, 500)]
+      ).catch(() => {
+        /* race: column dropped between probe and write. */
+      });
+    }
+    try {
+      const metrics = require("./metrics") as typeof import("./metrics");
+      metrics.incCounter("funnel_iceberg_metadata_emission_failures_total", {});
+    } catch {
+      /* metrics optional */
+    }
+  }
+}
+
+/** Force the next hasMetadataTrackingColumns() call to re-probe. */
+export function __resetMetadataTrackingCacheForTesting(): void {
+  metadataTrackingColumnsPresent = null;
+  metadataTrackingCheckedAt = 0;
+}
+
+/**
+ * Iceberg metadata emission sweeper. Runs every N minutes; retries
+ * every funnel_snapshot whose metadata.json is still missing. Bounded
+ * by `maxPerTick` so a large backlog doesn't flood S3.
+ */
+export async function retryPendingIcebergMetadata(
+  maxPerTick: number = 100
+): Promise<{ retried: number; succeeded: number }> {
+  if (!(await hasMetadataTrackingColumns())) {
+    return { retried: 0, succeeded: 0 };
+  }
+  try {
+    const pending = await query(
+      `SELECT s.snapshot_id, s.dataset_table_id
+         FROM funnel_snapshot s
+        WHERE s.metadata_emitted_at IS NULL
+          AND s.metadata_emit_attempts < 10
+        ORDER BY s.committed_at ASC
+        LIMIT $1`,
+      [maxPerTick]
     );
+    let succeeded = 0;
+    for (const row of pending.rows as Array<{
+      snapshot_id: string;
+      dataset_table_id: string;
+    }>) {
+      const before = await query(
+        `SELECT metadata_emitted_at FROM funnel_snapshot WHERE snapshot_id = $1`,
+        [row.snapshot_id]
+      );
+      await emitMetadataToS3BestEffort(row.dataset_table_id, row.snapshot_id);
+      const after = await query(
+        `SELECT metadata_emitted_at FROM funnel_snapshot WHERE snapshot_id = $1`,
+        [row.snapshot_id]
+      );
+      if (
+        before.rows[0]?.metadata_emitted_at == null &&
+        after.rows[0]?.metadata_emitted_at != null
+      ) {
+        succeeded++;
+      }
+    }
+    return { retried: pending.rowCount ?? 0, succeeded };
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (
+      /relation .funnel_snapshot. does not exist/i.test(msg) ||
+      /column .metadata_emitted_at. does not exist/i.test(msg)
+    ) {
+      return { retried: 0, succeeded: 0 };
+    }
+    throw err;
   }
 }
 

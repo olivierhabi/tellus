@@ -303,6 +303,14 @@ export interface SendSignalInput {
   objectTypeApiName: string;
   signalType: SignalType;
   payload?: unknown;
+  /**
+   * Idempotency fingerprint. When provided, a second `sendSignal` with
+   * the same (object_type_api_name, signal_fingerprint) returns the
+   * existing signal_id instead of creating a duplicate. Callers should
+   * use a deterministic key — typical choices: the action `executionId`
+   * or `${requestId}`. Omit to enqueue unconditionally (legacy behaviour).
+   */
+  fingerprint?: string;
   client?: PoolClient;
 }
 
@@ -311,11 +319,34 @@ export interface SendSignalInput {
  * is not running, the signal sits in funnel_signal until a worker picks
  * it up on its next poll. Action writeback uses this (via the same DB
  * txn as the ontology_edit INSERT) to wake the Funnel on every action.
+ *
+ * Idempotent on `fingerprint` — if the caller replays the same signal,
+ * the existing signal_id is returned without creating a second row.
  */
 export async function sendSignal(input: SendSignalInput): Promise<string> {
   const exec = input.client
     ? (sql: string, params: unknown[]) => input.client!.query(sql, params)
     : (sql: string, params: unknown[]) => query(sql, params);
+
+  if (input.fingerprint) {
+    const result = await exec(
+      `INSERT INTO funnel_signal
+         (ontology_id, object_type_api_name, signal_type, payload, signal_fingerprint)
+       VALUES ($1, $2, $3, $4::jsonb, $5)
+       ON CONFLICT (object_type_api_name, signal_fingerprint)
+         WHERE signal_fingerprint IS NOT NULL
+         DO UPDATE SET signal_type = EXCLUDED.signal_type
+       RETURNING signal_id`,
+      [
+        input.ontologyId,
+        input.objectTypeApiName,
+        input.signalType,
+        JSON.stringify(input.payload ?? {}),
+        input.fingerprint,
+      ]
+    );
+    return result.rows[0].signal_id as string;
+  }
 
   const result = await exec(
     `INSERT INTO funnel_signal
@@ -330,6 +361,44 @@ export async function sendSignal(input: SendSignalInput): Promise<string> {
     ]
   );
   return result.rows[0].signal_id as string;
+}
+
+/**
+ * Re-queue signals that were consumed by a workflow we had to terminate
+ * before the pipeline finished. Called by the sweeper after it closes
+ * out orphaned funnel_run rows — Temporal doesn't re-send the signals
+ * that were delivered to the terminated instance, so PG is our
+ * re-delivery channel.
+ *
+ * Safe to call multiple times; `redelivery_count` is the audit trail.
+ */
+export async function requeueSignalsForRun(
+  runIds: string[]
+): Promise<number> {
+  if (runIds.length === 0) return 0;
+  try {
+    const res = await query(
+      `UPDATE funnel_signal
+          SET consumed_at        = NULL,
+              consumed_by_run_id = NULL,
+              redelivery_count   = redelivery_count + 1
+        WHERE consumed_by_run_id = ANY($1::uuid[])
+          AND received_at > now() - interval '24 hours'
+        RETURNING signal_id`,
+      [runIds]
+    );
+    return res.rowCount ?? 0;
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (
+      /relation .funnel_signal. does not exist/i.test(msg) ||
+      /column .*redelivery_count.*does not exist/i.test(msg) ||
+      /column .*consumed_by_run_id.*does not exist/i.test(msg)
+    ) {
+      return 0;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -378,5 +447,202 @@ export async function claimNextSignal(
     throw err;
   } finally {
     client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned-run sweeper — Task B3
+//
+// When a worker is killed mid-activity (SIGKILL, container OOM, deploy
+// restart), any `funnel_run` row it left behind stays at status='running'
+// forever. The UI polls this table and shows the Object Type stuck on
+// "sync" indefinitely, with no way to kick off a fresh run via save —
+// Temporal's `signalWithStart` reuses the live workflow instance while
+// the old funnel_run still reports in-flight.
+//
+// Sweep these rows at server boot: anything in 'running' for longer than
+// the longest stage timeout (+grace) cannot possibly be making progress
+// under a current worker, so mark it failed with a clear reason. Safe to
+// call multiple times; safe to run in production.
+// ---------------------------------------------------------------------------
+
+export interface SweepOrphanedRunsResult {
+  sweptRunIds: string[];
+  sweptStageRuns: number;
+  requeuedSignals: number;
+}
+
+/**
+ * Mark every `funnel_run` still at 'running' that is not represented
+ * by a live Temporal workflow as failed. Prefers Temporal visibility
+ * (`workflow.list()`) as the source of truth; falls back to a wall-
+ * clock `staleAfterMs` heuristic when Temporal is unreachable.
+ *
+ * Using Temporal as the truth source fixes the production concern
+ * that a legitimately long-running indexing activity (3 h on a 1 B-row
+ * OT) would be killed by a naive age-based sweeper.
+ */
+export async function sweepOrphanedFunnelRuns(
+  staleAfterMs: number = (4 * 60 * 60 + 5 * 60) * 1000
+): Promise<SweepOrphanedRunsResult> {
+  // Attempt Temporal-visibility sweep first; on failure (Temporal down,
+  // network partition, module not loaded) fall back to age-based sweep.
+  try {
+    const temporal = await sweepViaTemporalVisibility();
+    if (temporal !== null) return temporal;
+  } catch (err) {
+    console.warn(
+      `[orphan-sweep] Temporal visibility path failed, falling back to age heuristic: ${(err as Error).message}`
+    );
+  }
+  return sweepViaAgeHeuristic(staleAfterMs);
+}
+
+/**
+ * Temporal-visibility-backed sweep. Returns null when Temporal isn't
+ * available so the caller can fall back to the age heuristic.
+ */
+async function sweepViaTemporalVisibility(): Promise<SweepOrphanedRunsResult | null> {
+  // Lazy require so environments without @temporalio/client still compile.
+  let getTemporalClient: (() => import("@temporalio/client").Client | null) | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const workerMod = require("./temporal/worker") as {
+      getTemporalClient?: () => import("@temporalio/client").Client | null;
+    };
+    getTemporalClient = workerMod.getTemporalClient ?? null;
+  } catch {
+    return null;
+  }
+  if (!getTemporalClient) return null;
+  const client = getTemporalClient();
+  if (!client) return null;
+
+  // Load every running funnel_run row we know about.
+  const rows = await query(
+    `SELECT run_id, object_type_api_name, started_at
+       FROM funnel_run
+      WHERE status = 'running'
+        AND workflow_type LIKE 'ObjectTypeFunnelWorkflow%'`
+  );
+  if (rows.rowCount === 0) {
+    return { sweptRunIds: [], sweptStageRuns: 0, requeuedSignals: 0 };
+  }
+
+  // Collect the set of currently-running workflow IDs in Temporal.
+  const aliveWorkflowIds = new Set<string>();
+  try {
+    for await (const wf of client.workflow.list({
+      query: "ExecutionStatus = 'Running'",
+    })) {
+      aliveWorkflowIds.add(wf.workflowId);
+    }
+  } catch (err) {
+    // Temporal unreachable or visibility unsupported — signal the caller
+    // to fall back to the age heuristic.
+    throw err;
+  }
+
+  const orphanRunIds: string[] = [];
+  for (const row of rows.rows as Array<{
+    run_id: string;
+    object_type_api_name: string;
+    started_at: string;
+  }>) {
+    const expected = `ObjectTypeFunnelWorkflow-${row.object_type_api_name}`;
+    if (!aliveWorkflowIds.has(expected)) {
+      orphanRunIds.push(row.run_id);
+    }
+  }
+
+  if (orphanRunIds.length === 0) {
+    return { sweptRunIds: [], sweptStageRuns: 0, requeuedSignals: 0 };
+  }
+
+  const sweptRuns = await query(
+    `UPDATE funnel_run
+        SET status        = 'failed',
+            error_message = COALESCE(error_message,
+              'orphaned (no live Temporal workflow); auto-swept'),
+            completed_at  = COALESCE(completed_at, now())
+      WHERE run_id = ANY($1::uuid[])
+      RETURNING run_id`,
+    [orphanRunIds]
+  );
+  const sweptStages = await query(
+    `UPDATE funnel_stage_run
+        SET status        = 'failed',
+            error_message = COALESCE(error_message,
+              'orphaned (no live Temporal workflow); auto-swept'),
+            finished_at   = COALESCE(finished_at, now())
+      WHERE run_id = ANY($1::uuid[])
+        AND status IN ('pending', 'running')
+      RETURNING stage_run_id`,
+    [orphanRunIds]
+  );
+  const requeued = await requeueSignalsForRun(orphanRunIds);
+  try {
+    const metrics = require("./metrics") as typeof import("./metrics");
+    metrics.incCounter("funnel_orphan_runs_swept_total", { source: "temporal_visibility" }, orphanRunIds.length);
+  } catch {
+    /* metrics optional */
+  }
+  return {
+    sweptRunIds: sweptRuns.rows.map((r: { run_id: string }) => r.run_id),
+    sweptStageRuns: sweptStages.rowCount ?? 0,
+    requeuedSignals: requeued,
+  };
+}
+
+async function sweepViaAgeHeuristic(
+  staleAfterMs: number
+): Promise<SweepOrphanedRunsResult> {
+  try {
+    const seconds = Math.ceil(staleAfterMs / 1000);
+    const sweptRuns = await query(
+      `UPDATE funnel_run
+          SET status        = 'failed',
+              error_message = COALESCE(error_message,
+                'orphaned by worker restart; auto-swept on boot'),
+              completed_at  = COALESCE(completed_at, now())
+        WHERE status = 'running'
+          AND started_at < now() - make_interval(secs => $1)
+        RETURNING run_id`,
+      [seconds]
+    );
+    const runIds = sweptRuns.rows.map((r: { run_id: string }) => r.run_id);
+    if (runIds.length === 0) {
+      return { sweptRunIds: [], sweptStageRuns: 0, requeuedSignals: 0 };
+    }
+    const sweptStages = await query(
+      `UPDATE funnel_stage_run
+          SET status        = 'failed',
+              error_message = COALESCE(error_message,
+                'orphaned by worker restart; auto-swept on boot'),
+              finished_at   = COALESCE(finished_at, now())
+        WHERE run_id = ANY($1::uuid[])
+          AND status IN ('pending', 'running')
+        RETURNING stage_run_id`,
+      [runIds]
+    );
+    // Re-queue signals that were consumed by the orphaned runs so the
+    // next worker picks them up — without this, saves that were in
+    // flight when the old worker died are silently dropped.
+    const requeued = await requeueSignalsForRun(runIds);
+    return {
+      sweptRunIds: runIds,
+      sweptStageRuns: sweptStages.rowCount ?? 0,
+      requeuedSignals: requeued,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Transitional deployments may not have the B3 tables yet — stay quiet.
+    if (
+      /relation .funnel_run. does not exist/i.test(msg) ||
+      /relation .funnel_stage_run. does not exist/i.test(msg)
+    ) {
+      return { sweptRunIds: [], sweptStageRuns: 0, requeuedSignals: 0 };
+    }
+    throw err;
   }
 }
