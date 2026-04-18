@@ -28,12 +28,94 @@ import { resolveLinks, countLinks, searchAround, validateForeignKeys } from "../
 import linkTypeModel from "../models/linkType";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { appError } from "../utils/appError";
+import {
+  applyOverlayToResults,
+  mergeOverlayIntoSearch,
+} from "../services/overlay/writebackOverlay";
+import { getOverlayStore } from "../services/overlay/getOverlayStore";
+import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 
 const router = Router();
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Overlay merge helper — B7. Every search result goes through this so
+ * user edits that landed in the overlay cache but haven't been indexed
+ * yet become visible within the 1-second SLO. The Quickwit/OpenSearch
+ * result is authoritative for everything NOT edited; for edited PKs the
+ * overlay wins.
+ *
+ * Silently falls through to the original results if the overlay store
+ * is unreachable or empty — the overlay is an optimisation, not a
+ * requirement.
+ */
+async function mergeWithOverlay<R extends { data: unknown[] }>(
+  objectType: string,
+  result: R,
+  whereClause?: unknown
+): Promise<R> {
+  try {
+    const store = await getOverlayStore();
+    const filter = buildOverlayFilter(whereClause);
+    const merged = await mergeOverlayIntoSearch({
+      objectType,
+      hits: result.data as Array<Record<string, unknown>>,
+      filter,
+      store,
+    });
+    return { ...result, data: merged } as R;
+  } catch {
+    // Overlay is an optimisation — on any failure we fall back to the
+    // underlying result so queries never fail due to overlay issues.
+    try {
+      const store = await getOverlayStore();
+      const replaced = await applyOverlayToResults(
+        objectType,
+        result.data as Array<Record<string, unknown>>,
+        store
+      );
+      return { ...result, data: replaced } as R;
+    } catch {
+      return result;
+    }
+  }
+}
+
+/**
+ * B7 SCAN discovery: build a minimal filter predicate from the search
+ * `where` clause so `collectFilterMatchingOverlays` can include
+ * overlay-only hits (rows edited within the last overlay TTL that the
+ * index hasn't absorbed yet).
+ *
+ * Deliberately small: we only support equality on top-level properties
+ * which is what the dominant Query API path produces. Unknown or
+ * nested filters fall back to matching everything, which is still
+ * correct — dedup by PK in mergeOverlayIntoSearch keeps the Quickwit
+ * hit authoritative if it exists.
+ */
+function buildOverlayFilter(where: unknown): ((doc: Record<string, unknown>) => boolean) | undefined {
+  if (!where || typeof where !== "object") return undefined;
+  const w = where as Record<string, unknown>;
+  if (w.type === "eq" && typeof w.field === "string") {
+    const field = w.field;
+    const value = w.value;
+    return (doc) => {
+      const dv = doc[field];
+      return dv === value || String(dv) === String(value);
+    };
+  }
+  if (w.type === "and" && Array.isArray(w.filters)) {
+    const sub = w.filters
+      .map(buildOverlayFilter)
+      .filter((f): f is (doc: Record<string, unknown>) => boolean => typeof f === "function");
+    if (sub.length === 0) return undefined;
+    return (doc) => sub.every((f) => f(doc));
+  }
+  return undefined;
+}
 
 const KNOWN_CODES = new Set([
   "QUERY_VALIDATION_ERROR",
@@ -130,13 +212,22 @@ router.post(
       }
 
       const validated = await validateSearchQuery(body, objectType);
-      const result = await executeSearch(objectType, {
+      const rawResult = await executeSearch(objectType, {
         where: validated.where,
         $orderBy: validated.$orderBy,
         $pageSize: validated.$pageSize,
         $pageToken: validated.$pageToken,
         $select: validated.$select,
       });
+
+      // B7: merge the writeback overlay so recent edits are visible
+      // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
+      // the index document for matching PKs; misses pass through.
+      const result = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where);
+
+      // B9: shadow-diff during soak. Fire-and-forget — hurts neither
+      // latency nor correctness if Quickwit is unreachable.
+      recordShadowDiff(objectType, body, result.data as Array<Record<string, unknown>>);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -179,13 +270,15 @@ router.post(
         );
       }
 
-      const result = await executeFullTextSearch(objectType, searchQuery.trim(), {
+      const rawResult = await executeFullTextSearch(objectType, searchQuery.trim(), {
         where,
         $orderBy,
         $pageSize: $pageSize ?? 100,
         $pageToken,
         $select,
       });
+      // B7: overlay merge for immediate edit visibility.
+      const result = await mergeWithOverlay(objectType, rawResult);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -246,12 +339,14 @@ router.get(
         objectType
       );
 
-      const result = await executeSearch(objectType, {
+      const rawResult = await executeSearch(objectType, {
         $orderBy: validated.orderBy.length > 0 ? validated.orderBy : undefined,
         $pageSize: validated.pageSize,
         $pageToken: validated.pageToken,
         $select: validated.select,
       });
+      // B7: overlay merge — recent edits visible within 1s.
+      const result = await mergeWithOverlay(objectType, rawResult);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -664,8 +759,27 @@ router.get(
       const { objectType, primaryKey } = req.params;
       await ensureObjectTypeExists(objectType);
 
-      const obj = await executeGetObject(objectType, primaryKey);
-      if (!obj) {
+      let obj = await executeGetObject(objectType, primaryKey);
+
+      // B7: overlay read — if a recent edit is in the overlay but the
+      // index hasn't absorbed it yet, the overlay is authoritative for
+      // this PK. An overlay-only hit (no index doc) still yields the
+      // object so a just-created edit is visible immediately.
+      try {
+        const store = await getOverlayStore();
+        const overlayed = await applyOverlayToResults(
+          objectType,
+          obj ? [obj as Record<string, unknown>] : [{ __pk: primaryKey }],
+          store
+        );
+        if (overlayed.length > 0 && overlayed[0] && overlayed[0] !== obj) {
+          obj = overlayed[0] as typeof obj;
+        }
+      } catch {
+        /* overlay optional */
+      }
+
+      if (!obj || (obj as { __deleted?: boolean }).__deleted) {
         // Spec §Task 28: return 404 (not 403) for unauthorised/missing
         // lookups to prevent IDOR information leakage.
         throw appError(

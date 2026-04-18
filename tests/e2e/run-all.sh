@@ -106,7 +106,11 @@ echo ""
 # ---------------------------------------------------------------------------
 # Run each day's E2E suite
 # ---------------------------------------------------------------------------
-DAYS=(monday tuesday wednesday thursday friday saturday sunday coverage)
+# `funnel` is appended LAST intentionally — its suite restarts the
+# backend to toggle `FUNNEL_STAGE_DELAY_MS` for pacing tests, so it
+# must come after anything that depends on the initial long-lived
+# server instance above.
+DAYS=(monday tuesday wednesday thursday friday saturday sunday coverage funnel)
 EXIT_CODE=0
 
 for day in "${DAYS[@]}"; do

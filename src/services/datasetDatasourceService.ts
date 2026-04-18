@@ -249,32 +249,40 @@ export async function registerWithDataset(
       );
     }
 
+    // Normalise BOM (U+FEFF) before comparison so legacy datasets
+    // whose first column header was ingested with a UTF-8 BOM still
+    // match user-supplied mappings (which have the BOM stripped by
+    // the JSON body pipeline + inputSanitizer's .trim()).
+    const stripBom = (s: string): string =>
+      s.replace(/^\uFEFF/, "").replace(/\uFEFF/g, "");
+    const normalizedAvailable = new Set(availableColumns.map(stripBom));
+
     // 4. Validate column mapping values against available columns
     for (const [propApiName, columnName] of Object.entries(columnMapping)) {
-      if (!availableColumns.includes(columnName)) {
+      if (!normalizedAvailable.has(stripBom(columnName))) {
         const suggestion = findClosestColumn(columnName, availableColumns);
         const didYouMean = suggestion
-          ? ` Did you mean '${suggestion}'?`
+          ? ` Did you mean '${stripBom(suggestion)}'?`
           : "";
         throw appError(
           "COLUMN_NOT_FOUND",
-          `Column '${columnName}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${c}'`).join(", ")}].${didYouMean}`
+          `Column '${columnName}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${stripBom(c)}'`).join(", ")}].${didYouMean}`
         );
       }
     }
 
     // 5. Validate primaryKeyColumn against available columns
-    if (primaryKeyColumn && !availableColumns.includes(primaryKeyColumn)) {
+    if (primaryKeyColumn && !normalizedAvailable.has(stripBom(primaryKeyColumn))) {
       const suggestion = findClosestColumn(
         primaryKeyColumn,
         availableColumns
       );
       const didYouMean = suggestion
-        ? ` Did you mean '${suggestion}'?`
+        ? ` Did you mean '${stripBom(suggestion)}'?`
         : "";
       throw appError(
         "COLUMN_NOT_FOUND",
-        `Column '${primaryKeyColumn}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${c}'`).join(", ")}].${didYouMean}`
+        `Column '${primaryKeyColumn}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${stripBom(c)}'`).join(", ")}].${didYouMean}`
       );
     }
 
@@ -489,23 +497,34 @@ export async function registerWithFoundryDataset(
         `Wait for the scan worker to finish and try again.`,
     );
   }
+  // Normalise BOM (U+FEFF) on both sides before comparison. Older
+  // datasets were parsed without csv-parse's `bom: true` option, so
+  // their first column header landed in `dataset_columns.column_name`
+  // as "\uFEFForder_id". Meanwhile every client-side path (JSON body,
+  // inputSanitizer's .trim(), clipboard paste, typing) strips BOM, so
+  // the user-supplied mapping shows up without it. Comparing via a
+  // BOM-stripped key makes both side symmetric without forcing a
+  // costly reparse of every already-ingested dataset.
+  const stripBom = (s: string): string => s.replace(/^\uFEFF/, "").replace(/\uFEFF/g, "");
   const availableColumns = fcResult.rows.map(
     (r: { column_name: string }) => r.column_name,
   );
+  const normalizedAvailable = new Set(availableColumns.map(stripBom));
 
   // ----- Validate every mapped source column exists in the dataset ---
   for (const [propApiName, sourceColumn] of Object.entries(columnMapping)) {
-    if (!availableColumns.includes(sourceColumn)) {
+    const key = stripBom(sourceColumn);
+    if (!normalizedAvailable.has(key)) {
       const suggestion = findClosestColumn(sourceColumn, availableColumns);
       throw appError(
         "COLUMN_MAPPING_INVALID",
         `Property '${propApiName}' maps to column '${sourceColumn}', ` +
           `which does not exist in the dataset.` +
-          (suggestion ? ` Did you mean '${suggestion}'?` : ""),
+          (suggestion ? ` Did you mean '${stripBom(suggestion)}'?` : ""),
       );
     }
   }
-  if (!availableColumns.includes(primaryKeyColumn)) {
+  if (!normalizedAvailable.has(stripBom(primaryKeyColumn))) {
     throw appError(
       "PRIMARY_KEY_MISMATCH",
       `primaryKeyColumn '${primaryKeyColumn}' does not exist in the dataset.`,

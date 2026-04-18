@@ -173,6 +173,16 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
       skip_empty_lines: true,
       trim: true,
       relax_column_count: true,
+      // UTF-8 BOM handling: strip the byte-order-mark so the first
+      // column header doesn't end up as "\uFEFForder_id". Every layer
+      // downstream — the client JSON body, the inputSanitizer (which
+      // calls .trim(), and .trim() in V8 treats U+FEFF as whitespace),
+      // and most user-facing tools — normalises BOM away. If we keep
+      // it in `dataset_columns.column_name`, the column-mapping
+      // validator fails to match even when the user clearly typed the
+      // right name. csv-parse's `bom: true` handles this once at the
+      // earliest possible point.
+      bom: true,
     });
 
     const settle = () => {

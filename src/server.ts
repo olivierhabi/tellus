@@ -29,6 +29,7 @@ import { securityContext } from "./middleware/securityContext";
 import { resolveOntologyAlias } from "./middleware/resolveOntologyAlias";
 import datasourceRouter, { suggestMappingRouter } from "./routes/datasources";
 import indexingRouter from "./routes/indexing";
+import objectDataStoreRouter from "./routes/objectDataStore";
 import linkRouter from "./routes/links";
 import actionTypeRouter from "./routes/actionTypes";
 import actionsRouter, { validateRouter, batchRouter } from "./routes/actions";
@@ -40,6 +41,10 @@ import reindexStatusRouter from "./routes/reindexStatus";
 import dataPreviewRouter from "./routes/dataPreview";
 import datasetRouter from "./routes/datasets";
 import reindexRouter from "./routes/reindex";
+import {
+  resolveObjectTypeIdToApiName,
+  saveToOntology,
+} from "./routes/reindexById";
 import interfaceRouter from "./routes/interfaces";
 import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
 import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
@@ -51,6 +56,16 @@ import sqlRouter from "./routes/sql";
 import chartsRouter from "./routes/charts";
 import pipelinesStatusRouter from "./routes/pipelines-status";
 import { shutdownKafka } from "./services/kafkaProducer";
+
+// Object Data Funnel — tasks B1-B10. HTTP control plane + background
+// workers (signal dispatcher + overlay sweeper).
+import funnelRouter from "./routes/funnel";
+import { startFunnelDispatcher, stopFunnelDispatcher } from "./services/funnel/funnelDispatcher";
+import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
+import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
+import { startTemporalWorker, stopTemporalWorker, isTemporalConnected } from "./services/funnel/temporal/worker";
+import { bootstrapLakekeeper } from "./services/funnel/lakekeeperBootstrap";
+import { startReplacementScheduler, stopReplacementScheduler } from "./services/funnel/replacementScheduler";
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
 import foundryProjectsRouter from "./routes/projects";
@@ -364,6 +379,10 @@ app.use(
   indexingRouter
 );
 app.use(
+  "/api/v1/ontology/:ontologyId/objectTypes/:apiName/dataStore",
+  objectDataStoreRouter
+);
+app.use(
   "/api/v1/ontology/:ontologyId/linkTypes",
   linkRouter
 );
@@ -394,6 +413,20 @@ app.use("/api/v1/datasets", datasetRouter);
 app.use("/api/v1/datasets", dataPreviewRouter);
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex",
+  reindexRouter
+);
+// POST commit → emits the async funnel signal. Declared BEFORE the
+// reindexRouter mount below so this handler wins for POST requests and
+// the router only ever serves GET /status and GET /history for the
+// UUID path.
+app.post(
+  "/api/v1/ontology/:ontologyId/objectTypeId/:objectTypeId",
+  resolveObjectTypeIdToApiName,
+  saveToOntology
+);
+app.use(
+  "/api/v1/ontology/:ontologyId/objectTypeId/:objectTypeId",
+  resolveObjectTypeIdToApiName,
   reindexRouter
 );
 app.use(
@@ -432,6 +465,7 @@ app.use("/api/v1/users/me/favorites", favoritesRouter);
 app.use("/api/v1", sqlRouter);
 app.use("/api/v1", chartsRouter);
 app.use("/api/v1", pipelinesStatusRouter);
+app.use("/api/v1/funnel", funnelRouter);
 
 // ---------------------------------------------------------------------------
 // Foundry Data Ingestion Layer routes (BE-003 through BE-030)
@@ -600,6 +634,106 @@ async function start(): Promise<void> {
       );
     });
 
+    // Object Data Funnel background workers.
+    //
+    // The dispatcher drains `funnel_signal` and drives one
+    // ObjectTypeFunnelWorkflow per signal through the four stages
+    // (changelog → merge → indexing → hydration). The overlay sweeper
+    // reconciles Redis overlays against `ontology_edit.applied_to_index_at`.
+    // Both are best-effort startup: a failure just logs and does not
+    // block the server.
+    try {
+      if (process.env.FUNNEL_DISPATCHER_DISABLED !== "true") {
+        startFunnelDispatcher();
+        console.log("Funnel dispatcher started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start Funnel dispatcher: ${(err as Error).message}`
+      );
+    }
+
+    // B3: Temporal worker. When Temporal is reachable this is the
+    // authoritative execution path; the PG-backed dispatcher above
+    // becomes a fallback used only when `isTemporalConnected()` is
+    // false at signal time.
+    void (async () => {
+      try {
+        if (process.env.TEMPORAL_WORKER_DISABLED === "true") return;
+        const ok = await startTemporalWorker();
+        if (ok) console.log("Temporal worker registered on tellus-funnel");
+        else console.log("Temporal unreachable — PG-backed dispatcher remains primary");
+      } catch (err) {
+        console.warn(
+          `WARNING: Temporal worker failed to start: ${(err as Error).message}`
+        );
+      }
+    })();
+    try {
+      if (process.env.OVERLAY_SWEEPER_DISABLED !== "true") {
+        startOverlaySweeper();
+        console.log("Overlay sweeper started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start overlay sweeper: ${(err as Error).message}`
+      );
+    }
+
+    // B9: start the replacement pipeline scheduler. Every 60s it
+    // evaluates SOAK gates and fires cutover when eligible, plus drops
+    // the old index after its 48h retention window. Without this, the
+    // state machine stays stuck at REPLACEMENT_SOAK forever.
+    try {
+      if (process.env.REPLACEMENT_SCHEDULER_DISABLED !== "true") {
+        startReplacementScheduler();
+        console.log("Replacement scheduler started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start replacement scheduler: ${(err as Error).message}`
+      );
+    }
+
+    // B2: bootstrap the Iceberg REST catalog (Lakekeeper). Creates the
+    // `tellus-funnel` warehouse on MinIO and one namespace per Object
+    // Type. Best-effort — if Lakekeeper is unreachable the
+    // PG-backed icebergCatalog.ts remains authoritative.
+    void (async () => {
+      try {
+        const lk = await bootstrapLakekeeper();
+        if (!lk.reachable) {
+          console.warn("Lakekeeper unreachable — Iceberg catalog falls back to PG shim");
+        } else {
+          console.log(
+            `Lakekeeper bootstrap: warehouse=${lk.warehouseId} namespaces=${lk.namespacesCreated}/${lk.objectTypesConsidered * 4}`
+          );
+        }
+      } catch (err) {
+        console.warn(`WARNING: Lakekeeper bootstrap failed: ${(err as Error).message}`);
+      }
+    })();
+
+    // B10: ensure ClickHouse link tables mirror every registered
+    // link_type. Best-effort — a missing ClickHouse just leaves
+    // traversal queries unserved until next refresh.
+    void (async () => {
+      try {
+        const result = await ensureLinkTablesForAllLinkTypes();
+        if (result.skippedUnreachable) {
+          console.warn("ClickHouse unreachable — link tables not bootstrapped");
+        } else {
+          console.log(
+            `ClickHouse link tables ensured: ${result.tablesEnsured}/${result.linkTypesFound}`
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `WARNING: ClickHouse bootstrap failed: ${(err as Error).message}`
+        );
+      }
+    })();
+
     // ----------------------------------------------------------------
     // Bootstrap the tellus-superadmin realm role and seed it onto the
     // designated bootstrap account. This is idempotent and runs on
@@ -617,6 +751,12 @@ async function start(): Promise<void> {
     void (async () => {
       const email =
         process.env.TELLUS_SUPERADMIN_EMAIL || "habimanaolivier6@gmail.com";
+      const password =
+        process.env.TELLUS_SUPERADMIN_PASSWORD || "Olivier0?Tellus";
+      // Auto-create the superadmin in non-prod so `pnpm run dev` on a
+      // fresh Keycloak volume lands with a working login. The prod
+      // container sets NODE_ENV=production, which keeps this off.
+      const autoCreate = process.env.NODE_ENV !== "production";
       try {
         const { getKeycloakAdminService } = await import(
           "./services/keycloakAdminService"
@@ -629,12 +769,23 @@ async function start(): Promise<void> {
           TELLUS_SUPERADMIN_ROLE,
           "Tellus superadmin — full access to /admin/users and system settings",
         );
-        const user = await kc.findUserByEmail(email);
+        let user = await kc.findUserByEmail(email);
         if (!user) {
-          console.warn(
-            `[bootstrap] superadmin email ${email} not found in Keycloak; skipping role grant`
-          );
-          return;
+          if (!autoCreate) {
+            console.warn(
+              `[bootstrap] superadmin email ${email} not found in Keycloak; skipping role grant (set NODE_ENV!=production to auto-create)`
+            );
+            return;
+          }
+          const userId = await kc.createUser({
+            username: email,
+            email,
+            password,
+            enabled: true,
+            emailVerified: true,
+          });
+          user = { id: userId, email, username: email };
+          console.log(`[bootstrap] created superadmin user ${email}`);
         }
         await kc.assignRealmRoleToUser(user.id, TELLUS_SUPERADMIN_ROLE);
         console.log(

@@ -1,6 +1,6 @@
 # API Reference — Tellus Ontology Engine
 
-> Auto-generated on 2026-04-16
+> Auto-generated on 2026-04-18
 > Total endpoints: 75
 
 ## Table of Contents
@@ -98,8 +98,8 @@
 | `POST` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex` | Trigger a full reindex with smart skip logic and atomic locking |
 | `GET` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/status` | Get current reindex status |
 | `GET` | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex/history` | Get paginated reindex history |
-| `GET` | `/api/docs/spec.json` | Returns raw OpenAPI JSON specification |
-| `GET` | `/api/docs` | Swagger UI interactive API documentation |
+| `GET` | `/api/v1/spec` | Returns raw OpenAPI JSON specification |
+| `GET` | `/api/v1/docs` | Swagger UI interactive API documentation |
 
 ## Health & Status
 
@@ -1280,24 +1280,24 @@ curl "http://localhost:3000/api/v1/ontology/{ontologyId}/objectTypes/{apiName}/r
 
 ## Documentation
 
-### `GET /api/docs/spec.json`
+### `GET /api/v1/spec`
 
 Returns raw OpenAPI JSON specification.
 
 **Example:**
 ```bash
-curl http://localhost:3000/api/docs/spec.json
+curl http://localhost:3000/api/v1/spec
 ```
 
 ---
 
-### `GET /api/docs`
+### `GET /api/v1/docs`
 
 Swagger UI interactive API documentation.
 
 **Example:**
 ```bash
-open http://localhost:3000/api/docs
+open http://localhost:3000/api/v1/docs
 ```
 
 ---

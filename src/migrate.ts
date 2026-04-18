@@ -1465,6 +1465,359 @@ async function migrate(): Promise<void> {
 
     console.log("Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)");
 
+    // ------------------------------------------------------------------
+    // tasks-01.md — Object Data Funnel (B1-B5)
+    //
+    // Introduces Postgres as the System of Record for object instances +
+    // edits (B1), an Iceberg-style dataset catalog backed by S3 (B2), a
+    // durable workflow journal per Object Type (B3), and the changelog /
+    // merged Iceberg-style tables produced by the Funnel stages (B4/B5).
+    //
+    // All tables are append-only where possible so that rollbacks and
+    // replays operate on immutable snapshots.
+    // ------------------------------------------------------------------
+
+    // B1.a — Extend ontology_edit with the per-stage timestamps that the
+    // Funnel uses to find pending work. We keep the legacy `indexed` flag
+    // in sync with applied_to_index_at so existing callers continue to
+    // work; new callers should prefer the timestamp columns.
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'ontology_edit' AND column_name = 'ontology_id') THEN
+          ALTER TABLE ontology_edit ADD COLUMN ontology_id UUID;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'ontology_edit' AND column_name = 'applied_to_merged_at') THEN
+          ALTER TABLE ontology_edit ADD COLUMN applied_to_merged_at TIMESTAMPTZ;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'ontology_edit' AND column_name = 'applied_to_index_at') THEN
+          ALTER TABLE ontology_edit ADD COLUMN applied_to_index_at TIMESTAMPTZ;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'ontology_edit' AND column_name = 'edit_strategy') THEN
+          ALTER TABLE ontology_edit ADD COLUMN edit_strategy TEXT NOT NULL DEFAULT 'user_edit_wins'
+            CHECK (edit_strategy IN ('user_edit_wins','latest_wins'));
+        END IF;
+      END
+      $$;
+    `);
+    // Partial indexes on pending-at-each-stage — the Merge and Index
+    // stages scan these to find edits that still need to be consumed.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_edit_pending_merge
+        ON ontology_edit(object_type_api_name, executed_at ASC)
+        WHERE applied_to_merged_at IS NULL
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_edit_pending_index
+        ON ontology_edit(object_type_api_name, executed_at ASC)
+        WHERE applied_to_index_at IS NULL
+    `);
+
+    // B1.b — object_instances: polymorphic SoR populated by the Merge
+    // stage. PK is (ontology_id, object_type_api_name, primary_key).
+    // version bumps on every write so callers can detect staleness.
+    // Table name is plural per §B1 of the ontology spec.
+    //
+    // Pre-spec deployments created this table as singular `object_instance`.
+    // Migrate in place so in-flight edits and merged state survive the
+    // rename — the code never reads from the singular name again.
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM pg_tables
+                    WHERE schemaname = 'public' AND tablename = 'object_instance')
+           AND NOT EXISTS (SELECT 1 FROM pg_tables
+                            WHERE schemaname = 'public' AND tablename = 'object_instances') THEN
+          ALTER TABLE object_instance RENAME TO object_instances;
+        END IF;
+      END $$;
+    `);
+    const objectInstanceExisted = await tableExists(client, "object_instances");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS object_instances (
+        ontology_id             UUID        NOT NULL,
+        object_type_api_name    TEXT        NOT NULL,
+        primary_key             TEXT        NOT NULL,
+        properties              JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        markings                TEXT[]      NOT NULL DEFAULT ARRAY[]::TEXT[],
+        source_datasource_id    UUID,
+        source_transaction_id   UUID,
+        last_modified_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        version                 BIGINT      NOT NULL DEFAULT 1,
+        PRIMARY KEY (ontology_id, object_type_api_name, primary_key)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_object_instances_ot
+        ON object_instances(object_type_api_name);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_object_instances_modified
+        ON object_instances(object_type_api_name, last_modified_at DESC);
+    `);
+    logTableStatus("object_instances", objectInstanceExisted);
+
+    // B2 — Iceberg-style catalog. We model "tables" and their "snapshots"
+    // in Postgres so that stages can be driven by manifest diffs rather
+    // than by directory scans. The actual Parquet data lives in S3.
+    const funnelDatasetExisted = await tableExists(client, "funnel_dataset");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS funnel_dataset (
+        dataset_table_id      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        namespace             TEXT        NOT NULL,
+        table_name            TEXT        NOT NULL,
+        format_version        INTEGER     NOT NULL DEFAULT 2,
+        write_mode            TEXT        NOT NULL DEFAULT 'copy-on-write'
+                               CHECK (write_mode IN ('copy-on-write','merge-on-read')),
+        schema_json           JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        partition_spec_json   JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        latest_snapshot_id    UUID,
+        min_snapshots_to_keep INTEGER     NOT NULL DEFAULT 100,
+        location              TEXT        NOT NULL,
+        created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (namespace, table_name)
+      );
+    `);
+    logTableStatus("funnel_dataset", funnelDatasetExisted);
+
+    const funnelSnapshotExisted = await tableExists(client, "funnel_snapshot");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS funnel_snapshot (
+        snapshot_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        dataset_table_id      UUID        NOT NULL REFERENCES funnel_dataset(dataset_table_id) ON DELETE CASCADE,
+        parent_snapshot_id    UUID        REFERENCES funnel_snapshot(snapshot_id),
+        operation             TEXT        NOT NULL
+                               CHECK (operation IN ('append','overwrite','delete','replace')),
+        manifest_json         JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        summary_json          JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        added_rows            BIGINT      NOT NULL DEFAULT 0,
+        added_files           INTEGER     NOT NULL DEFAULT 0,
+        committed_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_funnel_snapshot_table_committed
+        ON funnel_snapshot(dataset_table_id, committed_at DESC);
+    `);
+    logTableStatus("funnel_snapshot", funnelSnapshotExisted);
+
+    // B3 — Durable workflow journal. One `funnel_run` row per workflow
+    // instance; stage_run rows record each activity attempt so we can
+    // resume at the exact activity boundary after a worker restart.
+    const funnelRunExisted = await tableExists(client, "funnel_run");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS funnel_run (
+        run_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id           UUID        NOT NULL,
+        object_type_api_name  TEXT        NOT NULL,
+        workflow_type         TEXT        NOT NULL DEFAULT 'ObjectTypeFunnelWorkflow',
+        status                TEXT        NOT NULL DEFAULT 'running'
+                               CHECK (status IN ('running','completed','failed','cancelled')),
+        current_stage         TEXT,
+        objects_indexed       BIGINT      NOT NULL DEFAULT 0,
+        error_message         TEXT,
+        signal_payload        JSONB,
+        parent_run_id         UUID        REFERENCES funnel_run(run_id) ON DELETE SET NULL,
+        started_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at          TIMESTAMPTZ
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_funnel_run_ot_started
+        ON funnel_run(object_type_api_name, started_at DESC);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_funnel_run_active
+        ON funnel_run(object_type_api_name)
+        WHERE status = 'running';
+    `);
+    logTableStatus("funnel_run", funnelRunExisted);
+
+    const funnelStageRunExisted = await tableExists(client, "funnel_stage_run");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS funnel_stage_run (
+        stage_run_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id                UUID        NOT NULL REFERENCES funnel_run(run_id) ON DELETE CASCADE,
+        stage                 TEXT        NOT NULL
+                               CHECK (stage IN ('changelog','merge','indexing','hydration')),
+        status                TEXT        NOT NULL DEFAULT 'pending'
+                               CHECK (status IN ('pending','running','succeeded','failed','timed_out')),
+        attempt               INTEGER     NOT NULL DEFAULT 1,
+        input_json            JSONB,
+        output_json           JSONB,
+        error_message         TEXT,
+        timeout_seconds       INTEGER     NOT NULL DEFAULT 3600,
+        started_at            TIMESTAMPTZ,
+        finished_at           TIMESTAMPTZ,
+        UNIQUE (run_id, stage, attempt)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_funnel_stage_run_status
+        ON funnel_stage_run(status, started_at);
+    `);
+    logTableStatus("funnel_stage_run", funnelStageRunExisted);
+
+    // Signal inbox for ObjectTypeFunnelWorkflow. A signal is a durable
+    // request to the workflow to wake up and evaluate new work.
+    const funnelSignalExisted = await tableExists(client, "funnel_signal");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS funnel_signal (
+        signal_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        ontology_id           UUID        NOT NULL,
+        object_type_api_name  TEXT        NOT NULL,
+        signal_type           TEXT        NOT NULL
+                               CHECK (signal_type IN ('sourceTransactionCommitted',
+                                                      'editBatchPending',
+                                                      'schemaChanged')),
+        payload               JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        received_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        consumed_at           TIMESTAMPTZ,
+        consumed_by_run_id    UUID        REFERENCES funnel_run(run_id) ON DELETE SET NULL
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_funnel_signal_pending
+        ON funnel_signal(object_type_api_name, received_at ASC)
+        WHERE consumed_at IS NULL;
+    `);
+    logTableStatus("funnel_signal", funnelSignalExisted);
+
+    // B4 — Changelog snapshot head watermark per (object_type, datasource).
+    // We keep this denormalized from funnel_snapshot so the changelog
+    // activity can quickly look up "what was the last snapshot I emitted
+    // for this source?" without scanning manifests.
+    const changelogWatermarkExisted = await tableExists(client, "funnel_changelog_watermark");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS funnel_changelog_watermark (
+        ontology_id           UUID        NOT NULL,
+        object_type_api_name  TEXT        NOT NULL,
+        source_datasource_id  UUID        NOT NULL,
+        last_from_snapshot_id UUID,
+        last_to_snapshot_id   UUID,
+        last_run_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_rows_emitted     BIGINT      NOT NULL DEFAULT 0,
+        PRIMARY KEY (ontology_id, object_type_api_name, source_datasource_id)
+      );
+    `);
+    logTableStatus("funnel_changelog_watermark", changelogWatermarkExisted);
+
+    console.log("Created Funnel pipeline tables (object_instances, funnel_dataset, funnel_snapshot, funnel_run, funnel_stage_run, funnel_signal, funnel_changelog_watermark)");
+
+    // ------------------------------------------------------------------
+    // B9 — Replacement pipeline (dual-index + soak). Mirrors
+    // src/migrations/013_replacement_pipeline.sql so a fresh `npm run
+    // migrate` brings the tables up without an extra step.
+    // ------------------------------------------------------------------
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'replacement_state') THEN
+          CREATE TYPE replacement_state AS ENUM (
+            'LIVE',
+            'REPLACEMENT_BACKFILL',
+            'REPLACEMENT_SOAK',
+            'CUTOVER_PENDING',
+            'CUTOVER_COMPLETE',
+            'OLD_INDEX_DROPPED',
+            'ROLLED_BACK'
+          );
+        END IF;
+      END $$;
+    `);
+    const otActiveExisted = await tableExists(client, "object_type_active_index_version");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS object_type_active_index_version (
+        object_type_api_name     TEXT              PRIMARY KEY,
+        active_version           INTEGER           NOT NULL DEFAULT 1,
+        pending_version          INTEGER,
+        state                    replacement_state NOT NULL DEFAULT 'LIVE',
+        soak_days                INTEGER           NOT NULL DEFAULT 7
+                                  CHECK (soak_days BETWEEN 1 AND 14),
+        diff_rate_threshold      DOUBLE PRECISION  NOT NULL DEFAULT 0.001,
+        backfill_started_at      TIMESTAMPTZ,
+        soak_started_at          TIMESTAMPTZ,
+        last_cutover_at          TIMESTAMPTZ,
+        last_rollback_at         TIMESTAMPTZ,
+        old_index_retained_until TIMESTAMPTZ,
+        updated_at               TIMESTAMPTZ       NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_otaiv_state
+        ON object_type_active_index_version (state);
+    `);
+    logTableStatus("object_type_active_index_version", otActiveExisted);
+
+    const replDiffExisted = await tableExists(client, "replacement_diff_log");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS replacement_diff_log (
+        id                   BIGSERIAL    PRIMARY KEY,
+        object_type_api_name TEXT         NOT NULL,
+        old_version          INTEGER      NOT NULL,
+        new_version          INTEGER      NOT NULL,
+        query_hash           TEXT         NOT NULL,
+        query_body           JSONB,
+        diff_count           INTEGER      NOT NULL DEFAULT 0,
+        total_hits           INTEGER      NOT NULL DEFAULT 0,
+        recorded_at          TIMESTAMPTZ  NOT NULL DEFAULT now()
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rdl_type_recorded
+        ON replacement_diff_log (object_type_api_name, recorded_at DESC);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rdl_type_versions
+        ON replacement_diff_log (object_type_api_name, old_version, new_version);
+    `);
+    logTableStatus("replacement_diff_log", replDiffExisted);
+
+    console.log("Created B9 replacement pipeline tables (object_type_active_index_version, replacement_diff_log)");
+
+    // ------------------------------------------------------------------
+    // B4 — add iceberg_location to backing_datasource so the DuckDB
+    // iceberg_scan reader knows where to find the source's metadata
+    // (distinct from the legacy raw file_path).
+    // ------------------------------------------------------------------
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'backing_datasource' AND column_name = 'iceberg_location') THEN
+          ALTER TABLE backing_datasource ADD COLUMN iceberg_location TEXT;
+        END IF;
+      END $$;
+    `);
+    console.log("Ensured backing_datasource has iceberg_location column (B4)");
+
+    // ------------------------------------------------------------------
+    // B3 — dedupe funnel_run rows across Temporal stage transitions.
+    // The Temporal path projects `current_stage` on every stage change;
+    // without a stable key it would create a new run row per stage. We
+    // add a temporal_workflow_id column and a unique index so
+    // projectStageToPostgres can UPSERT against it.
+    // ------------------------------------------------------------------
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'funnel_run' AND column_name = 'temporal_workflow_id') THEN
+          ALTER TABLE funnel_run ADD COLUMN temporal_workflow_id TEXT;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_funnel_run_temporal_wf
+        ON funnel_run(temporal_workflow_id)
+        WHERE temporal_workflow_id IS NOT NULL;
+    `);
+    console.log("Ensured funnel_run has temporal_workflow_id UPSERT key (B3)");
+
   } catch (err) {
     await client.query("ROLLBACK");
     const message = err instanceof Error ? err.message : String(err);

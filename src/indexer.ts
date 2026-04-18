@@ -443,6 +443,7 @@ export async function runSelfTests(): Promise<void> {
   ): OntologyEditRow {
     return {
       edit_id: editId,
+      ontology_id: null,
       object_type_api_name: "Employee",
       primary_key: pk,
       operation,
@@ -455,6 +456,9 @@ export async function runSelfTests(): Promise<void> {
       executed_at: executedAt,
       indexed,
       indexed_at: indexed ? executedAt : null,
+      applied_to_merged_at: null,
+      applied_to_index_at: indexed ? executedAt : null,
+      edit_strategy: "user_edit_wins",
       branch_id: null,
     };
   }

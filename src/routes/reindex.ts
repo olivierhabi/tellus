@@ -104,7 +104,14 @@ async function getDatasource(
 router.post(
   "/",
   async (req: Request, res: Response, next: NextFunction) => {
-    const { ontologyId, apiName } = req.params;
+    const { ontologyId } = req.params;
+    // Prefer `req.params.apiName` (legacy `/objectTypes/:apiName/reindex`
+    // mount). Fall back to `res.locals.apiName` for the UUID mount
+    // (`/objectTypeId/:objectTypeId`), where the resolver middleware
+    // stashes the name there — `req.params` does not survive Express's
+    // layer-boundary reset between middleware and this router.
+    const apiName =
+      req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
     const force = req.query.force === "true" || req.body?.force === true;
 
     try {
@@ -275,7 +282,10 @@ router.post(
 router.get(
   "/status",
   async (req: Request, res: Response, next: NextFunction) => {
-    const { ontologyId, apiName } = req.params;
+    const { ontologyId } = req.params;
+    // See POST / above for why we also accept `res.locals.apiName`.
+    const apiName =
+      req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
 
     try {
       // Validation
@@ -417,7 +427,10 @@ router.get(
 router.get(
   "/history",
   async (req: Request, res: Response, next: NextFunction) => {
-    const { ontologyId, apiName } = req.params;
+    const { ontologyId } = req.params;
+    // See POST / above for why we also accept `res.locals.apiName`.
+    const apiName =
+      req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
 
     try {
       // Validation

@@ -23,7 +23,7 @@ function autoBucketCount(docCount: number): number {
 
 async function loadObjectRows(ontologyId: string, apiName: string): Promise<Record<string, unknown>[]> {
   const result = await pool.query(
-    `SELECT properties_json FROM object_instance
+    `SELECT properties_json FROM object_instances
       WHERE object_type_id = (
         SELECT object_type_id FROM object_type WHERE api_name = $1 AND ontology_id = $2
       )

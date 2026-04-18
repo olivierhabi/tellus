@@ -197,6 +197,17 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# Phase 3: Non-day-keyed funnel integration tests
+#
+# The Funnel work (tasks B1–B10) spans several days of the plan, so its
+# tests live under tests/funnel/ rather than a weekday folder. These
+# tests talk to Postgres directly via the shared `query` helper — the
+# already-running server isn't required for this subsuite, but starting
+# one first doesn't hurt either.
+# ---------------------------------------------------------------------------
+run_vitest "funnel" "${ROOT}/tests/funnel/integration"
+
+# ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
 echo -e "${BOLD}========================================${NC}"

@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# Redis — Writeback Overlay (Task B7)
+# ---------------------------------------------------------------------------
+# Holds overlay:<object_type>:<primary_key> keys so that user edits are
+# visible in search results within 1 second despite Quickwit's slow
+# delete cadence. TTL = commit_timeout_secs * 3 (~180s).
+#
+# Hardened:
+#   - AOF persistence with `appendfsync everysec` — lose up to 1s of
+#     overlays on crash, but the overlay *is* a TTL cache, so losing a
+#     few keys only costs freshness, not correctness (the merged
+#     dataset is authoritative).
+#   - protected-mode yes + requirepass so no lateral moves off localhost.
+#   - maxmemory-policy allkeys-lru so a runaway write path cannot OOM
+#     the container — overlay keys are always evictable.
+# ---------------------------------------------------------------------------
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: tellus-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ${REDIS_PASSWORD:-tellus_overlay_pw}
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-512mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --protected-mode
+      - "yes"
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-tellus_overlay_pw} --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    user: redis
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  redis_data:

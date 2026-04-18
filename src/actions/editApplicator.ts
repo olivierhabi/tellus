@@ -18,10 +18,13 @@
 //     database.
 // ---------------------------------------------------------------------------
 
+import type { PoolClient } from "pg";
 import { getClient, query } from "../db";
+import { publishLinkCdc } from "../services/searchAround/cdcLinkProducer";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { markEditsAsIndexed } from "../models/ontologyEdit";
+import { writeOverlayForEdit } from "../services/overlay/writebackOverlay";
 import type { CompiledEdit, LinkEdit } from "./ruleCompiler";
 
 // ---------------------------------------------------------------------------
@@ -34,6 +37,14 @@ export interface ApplyExecutionContext {
   actionTypeApiName: string;
   parameters: Record<string, unknown>;
   executedBy: string;
+  /**
+   * Ontology that owns the edited object types. Optional for legacy callers.
+   * When present, enables the B1/B7 writeback path: each edit also lands in
+   * `object_edits`, `object_instances`, and the Writeback Overlay, so edits
+   * are visible in search within 1 s independent of Quickwit's commit
+   * cadence.
+   */
+  ontologyId?: string;
 }
 
 /** A single successfully applied edit. */
@@ -116,12 +127,16 @@ export async function applyEdits(
 
     // Step 2: Insert ontology_edit rows
     for (const edit of edits) {
+      // B1: every Action writeback lands in the edit store inside the same
+      // DB transaction as the user-visible response. applied_to_merged_at
+      // and applied_to_index_at default to NULL — the Funnel will stamp
+      // them as it consumes the edit.
       const result = await pgClient.query(
         `INSERT INTO ontology_edit
            (object_type_api_name, primary_key, operation, property_values,
             link_edits, action_type_api_name, execution_id, action_parameters,
-            executed_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            executed_by, edit_strategy)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING edit_id`,
         [
           edit.objectType,
@@ -135,6 +150,7 @@ export async function applyEdits(
           executionContext.executionId,
           JSON.stringify(executionContext.parameters ?? {}),
           executionContext.executedBy,
+          "user_edit_wins",
         ]
       );
 
@@ -148,6 +164,25 @@ export async function applyEdits(
       });
 
       editIdMap.set(`${edit.objectType}::${edit.primaryKey}`, editId);
+
+      // B1/B7: in the same transaction, land the edit in `object_edits`,
+      // UPSERT `object_instances`, and write the Writeback Overlay so the
+      // edit is visible in search within 1 s independent of Quickwit's
+      // commit cadence. The spec requires every writeback to land in
+      // `object_edits` — resolve the owning ontology from the object type
+      // when the caller didn't pass one. The helper tolerates missing B1
+      // tables so this is safe in transitional deployments.
+      const ontologyId =
+        executionContext.ontologyId ??
+        (await resolveOntologyForObjectType(pgClient, edit.objectType));
+      if (ontologyId) {
+        await writeOverlayForEditInTxn(pgClient, {
+          ontologyId,
+          edit,
+          editId,
+          actorUserId: executionContext.executedBy,
+        });
+      }
 
       // Step 6: Insert link_edit rows for many-to-many links
       // (inside the same PG transaction for atomicity)
@@ -177,6 +212,24 @@ export async function applyEdits(
     throw err;
   } finally {
     pgClient.release();
+  }
+
+  // B10: publish link_edit rows to the CDC topic. Outside the PG txn so
+  // a down Kafka doesn't roll back the edit; if it fails the
+  // /api/v1/funnel/clickhouse/cdc-lag endpoint surfaces the drift.
+  for (const edit of edits) {
+    if (!edit.linkEdits || edit.linkEdits.length === 0) continue;
+    for (const linkEdit of edit.linkEdits) {
+      // The source-type for a link_edit is the same object type the
+      // action modified; link direction is decoupled via source_pk /
+      // target_pk columns on the link table.
+      void publishLinkCdc(edit.objectType, linkEdit.linkTypeApiName, {
+        source_pk: edit.primaryKey,
+        target_pk: linkEdit.targetPrimaryKey,
+        link_props: {},
+        markings: [],
+      });
+    }
   }
 
   // -----------------------------------------------------------------
@@ -363,6 +416,83 @@ export async function applyEdits(
     failedEdits,
     indexingStatus,
   };
+}
+
+// ---------------------------------------------------------------------------
+// B1/B7 internal helper — writeback into object_edits, object_instances,
+// and Writeback Overlay, all inside the caller's transaction.
+// ---------------------------------------------------------------------------
+
+async function resolveOntologyForObjectType(
+  pgClient: PoolClient,
+  objectTypeApiName: string
+): Promise<string | undefined> {
+  try {
+    const res = await pgClient.query(
+      "SELECT ontology_id FROM object_type WHERE api_name = $1 LIMIT 1",
+      [objectTypeApiName]
+    );
+    return res.rows[0]?.ontology_id ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface WriteOverlayInTxnInput {
+  ontologyId: string;
+  edit: CompiledEdit;
+  editId: string;
+  actorUserId: string;
+}
+
+async function writeOverlayForEditInTxn(
+  pgClient: PoolClient,
+  input: WriteOverlayInTxnInput
+): Promise<void> {
+  const { edit, editId, ontologyId, actorUserId } = input;
+  const deleted = edit.operation === "delete";
+  const doc = deleted ? {} : edit.propertyValues ?? {};
+
+  // Insert an object_edits summary row. One row per compiled edit keeps the
+  // B6 Indexing activity able to mark the whole object's edit as applied
+  // with a single UPDATE by edit_id. Per-property granularity lives in the
+  // legacy `ontology_edit` table for now.
+  try {
+    await pgClient.query(
+      `INSERT INTO object_edits
+         (edit_id, ontology_id, object_type_api_name, primary_key,
+          property_api_name, new_value, edit_strategy, actor_user_id,
+          created_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'user_edit_wins', $7, NOW())
+       ON CONFLICT (edit_id) DO NOTHING`,
+      [
+        editId,
+        ontologyId,
+        edit.objectType,
+        edit.primaryKey,
+        "*",
+        JSON.stringify(doc),
+        actorUserId,
+      ]
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/relation .*object_edits.* does not exist/i.test(msg)) {
+      return; // transitional deployment — skip B1/B7 wiring
+    }
+    throw err;
+  }
+
+  await writeOverlayForEdit(pgClient, {
+    ontologyId,
+    objectType: edit.objectType,
+    primaryKey: edit.primaryKey,
+    doc,
+    deleted,
+    version: 1, // monotonic bump is owned by object_instances UPSERT itself
+    editId,
+    actorUserId,
+  });
 }
 
 // ---------------------------------------------------------------------------

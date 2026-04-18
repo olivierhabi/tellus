@@ -74,7 +74,7 @@ async function getDb(ontologyId: string): Promise<Database> {
     // column DuckDB can introspect).
     const instances = await pool.query(
       `SELECT primary_key_value, properties_json
-         FROM object_instance
+         FROM object_instances
         WHERE object_type_id = (SELECT object_type_id FROM object_type WHERE api_name = $1 AND ontology_id = $2)
         LIMIT 5000`,
       [apiName, ontologyId],
