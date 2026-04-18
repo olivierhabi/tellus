@@ -669,11 +669,16 @@ describe("B7 writeOverlayForEdit", () => {
     setOverlayStoreForTesting(store);
 
     // Fake PoolClient that throws the specific "missing relation" error
-    // first (so the B1 fallback path runs).
+    // for the object_instances INSERT but succeeds on savepoint bookkeeping
+    // — the source now wraps the risky INSERT in a SAVEPOINT so a missing
+    // B1 table in transitional deployments doesn't poison the outer txn.
     const fakeClient = {
-      query: vi.fn(async () => {
-        const e = new Error("relation \"object_instances\" does not exist");
-        throw e;
+      query: vi.fn(async (sql: string) => {
+        const text = typeof sql === "string" ? sql : "";
+        if (/^\s*(SAVEPOINT|ROLLBACK TO SAVEPOINT|RELEASE SAVEPOINT)\b/i.test(text)) {
+          return { rowCount: 0, rows: [] };
+        }
+        throw new Error("relation \"object_instances\" does not exist");
       }),
     };
     const result = await writeOverlayForEdit(fakeClient as never, {

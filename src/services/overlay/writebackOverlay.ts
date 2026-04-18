@@ -82,7 +82,14 @@ export async function writeOverlayForEdit(
   // and the overlay are downstream projections. `version` bumps on every
   // write so query paths can compare for "is the overlay strictly newer
   // than the indexed doc".
+  //
+  // Wrapped in a SAVEPOINT because a missing B1 `object_instances` table
+  // in transitional deployments would otherwise abort the caller's PG
+  // transaction (PG leaves any aborted txn unusable until ROLLBACK; a
+  // plain try/catch here wouldn't rescue it). Rolling back to the
+  // savepoint preserves the outer txn exactly.
   let upsertedInstance = false;
+  await client.query("SAVEPOINT b1_object_instances");
   try {
     const res = await client.query(
       `INSERT INTO object_instances
@@ -104,8 +111,9 @@ export async function writeOverlayForEdit(
       ]
     );
     upsertedInstance = (res.rowCount ?? 0) > 0;
+    await client.query("RELEASE SAVEPOINT b1_object_instances");
   } catch (err) {
-    // Tolerate missing B1 table in transitional deployments.
+    await client.query("ROLLBACK TO SAVEPOINT b1_object_instances");
     const msg = err instanceof Error ? err.message : String(err);
     if (!/relation .*object_instances.* does not exist/i.test(msg)) {
       throw err;

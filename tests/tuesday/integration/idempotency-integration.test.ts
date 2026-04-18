@@ -202,7 +202,7 @@ describe("Action Idempotency Protection (Task 21)", () => {
         {
           type: "modifyObject",
           objectType: "Taxpayer",
-          primaryKey: { source: "parameter", param: "tin" },
+          objectReference: { source: "parameter", param: "tin" },
           properties: {
             fullName: { source: "parameter", param: "fullName" },
           },

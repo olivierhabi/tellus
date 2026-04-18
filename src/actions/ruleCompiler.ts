@@ -206,10 +206,16 @@ export async function compileRules(
  * was not provided — the caller decides whether to skip or error.
  */
 function resolveValue(
-  source: ValueSource,
+  source: ValueSource | undefined | null,
   resolvedParameters: Record<string, unknown>,
   executionContext: ExecutionContext
 ): unknown {
+  // Defensive: action-type rule payloads coming from seed data or imported
+  // ontologies can be missing a ValueSource entirely (e.g. a modifyObject
+  // rule with no `objectReference`). Return undefined so the caller records
+  // a structured "could not resolve" error instead of the action handler
+  // crashing with "Cannot read properties of undefined".
+  if (!source || typeof source !== "object") return undefined;
   switch (source.source) {
     case "parameter":
       return resolvedParameters[source.param!];

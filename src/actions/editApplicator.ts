@@ -453,10 +453,14 @@ async function writeOverlayForEditInTxn(
   const deleted = edit.operation === "delete";
   const doc = deleted ? {} : edit.propertyValues ?? {};
 
-  // Insert an object_edits summary row. One row per compiled edit keeps the
-  // B6 Indexing activity able to mark the whole object's edit as applied
-  // with a single UPDATE by edit_id. Per-property granularity lives in the
-  // legacy `ontology_edit` table for now.
+  // Guard the B1/B7 writeback behind a SAVEPOINT. A missing `object_edits`
+  // or `object_instances` table (transitional deployments where migration
+  // 012 hasn't run yet) would otherwise abort the enclosing PG transaction
+  // and silently kill every subsequent edit — PG leaves the txn in
+  // "current transaction is aborted" state until ROLLBACK, so catching
+  // the error here wouldn't rescue it. Rolling back to the savepoint
+  // preserves the outer txn exactly.
+  await pgClient.query("SAVEPOINT b1_writeback");
   try {
     await pgClient.query(
       `INSERT INTO object_edits
@@ -475,24 +479,30 @@ async function writeOverlayForEditInTxn(
         actorUserId,
       ]
     );
+
+    await writeOverlayForEdit(pgClient, {
+      ontologyId,
+      objectType: edit.objectType,
+      primaryKey: edit.primaryKey,
+      doc,
+      deleted,
+      version: 1, // monotonic bump is owned by object_instances UPSERT itself
+      editId,
+      actorUserId,
+    });
+
+    await pgClient.query("RELEASE SAVEPOINT b1_writeback");
   } catch (err) {
+    await pgClient.query("ROLLBACK TO SAVEPOINT b1_writeback");
     const msg = err instanceof Error ? err.message : String(err);
-    if (/relation .*object_edits.* does not exist/i.test(msg)) {
-      return; // transitional deployment — skip B1/B7 wiring
+    if (
+      /relation .*object_edits.* does not exist/i.test(msg) ||
+      /relation .*object_instances.* does not exist/i.test(msg)
+    ) {
+      return; // transitional deployment — skip B1/B7 wiring for this edit
     }
     throw err;
   }
-
-  await writeOverlayForEdit(pgClient, {
-    ontologyId,
-    objectType: edit.objectType,
-    primaryKey: edit.primaryKey,
-    doc,
-    deleted,
-    version: 1, // monotonic bump is owned by object_instances UPSERT itself
-    editId,
-    actorUserId,
-  });
 }
 
 // ---------------------------------------------------------------------------
