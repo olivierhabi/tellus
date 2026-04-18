@@ -34,6 +34,7 @@ import type { FailureType, AuditResult } from "../models/actionAuditLog";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
+import { query as pgQuery } from "../db";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +79,28 @@ async function objectExists(
   objectType: string,
   primaryKey: string
 ): Promise<boolean> {
+  // 1. Postgres is authoritative — a freshly-created object lands in
+  //    object_instances synchronously inside the same action txn, whereas
+  //    OpenSearch indexing is best-effort and may lag. Check PG first so
+  //    multi-rule actions see objects produced by prior rules in the same
+  //    batch or by a preceding action call.
+  try {
+    const res = await pgQuery(
+      `SELECT 1 FROM object_instances
+        WHERE object_type_api_name = $1 AND primary_key = $2
+        LIMIT 1`,
+      [objectType, primaryKey]
+    );
+    if ((res.rowCount ?? 0) > 0) return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Tolerate missing B1 table in transitional deployments; fall through.
+    if (!/relation .*object_instances.* does not exist/i.test(msg)) {
+      console.warn(`[action:objectExists] PG lookup failed: ${msg}`);
+    }
+  }
+
+  // 2. Fall back to OpenSearch for objects that predate the writeback store.
   try {
     const indexName = getIndexName(objectType);
     await opensearchClient.get({ index: indexName, id: primaryKey });
@@ -96,6 +119,29 @@ async function fetchObject(
   objectType: string,
   primaryKey: string
 ): Promise<Record<string, unknown> | null> {
+  // Prefer Postgres (authoritative writeback store) so rule compilation sees
+  // the latest state of objects modified by earlier rules in the same batch,
+  // or created by a prior action call, without waiting for OpenSearch indexing.
+  try {
+    const res = await pgQuery(
+      `SELECT properties FROM object_instances
+        WHERE object_type_api_name = $1 AND primary_key = $2
+        LIMIT 1`,
+      [objectType, primaryKey]
+    );
+    if ((res.rowCount ?? 0) > 0) {
+      const row = res.rows[0] as { properties: unknown };
+      if (row.properties && typeof row.properties === "object") {
+        return row.properties as Record<string, unknown>;
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/relation .*object_instances.* does not exist/i.test(msg)) {
+      console.warn(`[action:fetchObject] PG lookup failed: ${msg}`);
+    }
+  }
+
   try {
     const indexName = getIndexName(objectType);
     const { body } = await opensearchClient.get({
@@ -395,10 +441,28 @@ export async function executeAction(
       pendingError = err;
       return result;
     }
-    // Unexpected error in the pipeline
-    result.failureType = "unclassified";
-    result.errorMessage =
+    // Unexpected error in the pipeline. Log it + wrap in an
+    // OntologyError so the client gets a structured 500 instead of a
+    // silent HTTP 200 with {result:"failed"}. Previously this branch
+    // swallowed the stack trace AND didn't set `pendingError`, so
+    // the response body carried no actionable info and the route
+    // responded 200 — which broke multi-rule integration tests that
+    // assert `expect(res.body.result).toBe("success")` on an otherwise
+    // legitimate exception (e.g. a missing B1 table mid-transaction).
+    const errorMessage =
       err instanceof Error ? err.message : String(err);
+    const errorStack = err instanceof Error ? err.stack : undefined;
+    console.error(
+      `[action:${actionTypeApiName}] unexpected execution error: ${errorMessage}${errorStack ? "\n" + errorStack : ""}`,
+    );
+    result.failureType = "unclassified";
+    result.errorMessage = errorMessage;
+    pendingError = new OntologyError(
+      `Action '${actionTypeApiName}' failed with an unexpected error: ${errorMessage}`,
+      "ACTION_EXECUTION_FAILED",
+      undefined,
+      { actionTypeApiName, executionId },
+    );
     return result;
   } finally {
     // -----------------------------------------------------------------
