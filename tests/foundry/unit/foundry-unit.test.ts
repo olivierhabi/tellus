@@ -1400,7 +1400,18 @@ describe('BE-020 — Rate Limiter', () => {
 
     it('should define auth category', () => {
       expect(RATE_LIMIT_CATEGORIES.auth).toBeDefined();
-      expect(RATE_LIMIT_CATEGORIES.auth.max).toBe(5);
+      // Source (src/middleware/foundryRateLimiter.ts) relaxes the auth
+      // cap in non-prod environments (NODE_ENV !== "production" OR
+      // RATE_LIMIT_MODE === "relaxed") to 500/min so cypress specs
+      // don't trip the 5/min prod cap on per-suite `cy.login()`
+      // requests. In CI this file runs under vitest which sets
+      // NODE_ENV=test, so the relaxed value is expected.
+      const expected =
+        process.env.NODE_ENV === "production" &&
+        process.env.RATE_LIMIT_MODE !== "relaxed"
+          ? 5
+          : 500;
+      expect(RATE_LIMIT_CATEGORIES.auth.max).toBe(expected);
       expect(RATE_LIMIT_CATEGORIES.auth.windowMs).toBe(60_000);
     });
 
@@ -1879,7 +1890,11 @@ describe('BE-029 — OpenAPI Spec', () => {
 
   it('should have info with title', () => {
     expect(openApiSpec.info).toBeDefined();
-    expect(openApiSpec.info.title).toBe('Foundry Backend API');
+    // Source (src/docs/openapi.ts) titles the spec "Tellus Backend API"
+    // after the Foundry → Tellus rename. This test pre-dated that rename;
+    // the assertion is kept here (updated to match source) as a
+    // regression guard against accidental title reverts.
+    expect(openApiSpec.info.title).toBe('Tellus Backend API');
   });
 
   it('should have info version', () => {
