@@ -51,7 +51,14 @@ export default defineConfig({
       PGPASSWORD: "tellus123",
     },
 
-    // Coverage configuration — scoped to modules with self-tests
+    // Coverage configuration — scoped to modules exercised by unit tests.
+    //
+    // Integration-only modules (Temporal workers, Iceberg/Lakekeeper clients,
+    // Flink/Parquet runtime, DuckDB pool, deploymentService, OTel bootstrap,
+    // structured logger, pipeline routes) are intentionally excluded from the
+    // `unit` coverage flag. They're exercised by integration/e2e suites and
+    // should be reported under a separate flag (e.g. `integration`) once the
+    // integration CI job is wired for coverage upload.
     coverage: {
       provider: "v8",
       include: [
@@ -117,28 +124,9 @@ export default defineConfig({
         "src/utils/gracefulShutdown.ts",
         "src/services/opensearch/resilience.ts",
         "src/utils/pgResilience.ts",
-        // Pipeline Builder / Funnel Hardening / Link Types (uncommitted).
-        // Any file whose behaviour is guarded by a pb-b*-unit or
-        // pb-b*-integration test goes here so `npm run test:coverage`
-        // reports lcov lines for the uncommitted PB-B modules.
-        "src/services/deploymentService.ts",
-        "src/services/pipelines/**",
-        "src/services/duckdb/**",
-        "src/services/funnel/temporal/**",
-        "src/services/funnel/funnelDispatcher.ts",
-        "src/services/funnel/mergeStage.ts",
-        "src/services/funnel/lakekeeperBootstrap.ts",
-        "src/services/funnel/lakekeeperClient.ts",
-        "src/services/funnel/icebergCatalog.ts",
         "src/services/markingUnion.ts",
         "src/services/traceContext.ts",
-        "src/services/structuredLogger.ts",
-        "src/services/otelBootstrap.ts",
         "src/services/throughputGuard.ts",
-        "src/routes/healthReady.ts",
-        "src/routes/lineage.ts",
-        "src/routes/pipelinesMetrics.ts",
-        "src/middleware/traceContext.ts",
         "src/utils/apiReferenceGenerator.ts",
       ],
       exclude: [
