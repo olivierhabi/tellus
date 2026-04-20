@@ -568,15 +568,20 @@ async function writeOverlayForEditInTxn(
 
     await pgClient.query("RELEASE SAVEPOINT b1_writeback");
   } catch (err) {
+    // The B1/B7 writeback is a best-effort performance optimisation
+    // (sub-1s edit visibility through the Redis overlay). It MUST NOT
+    // fail the Action execution — if the column shape, actor_user_id
+    // format, or Redis probe drifts, the user-facing action still has
+    // to land its ontology_edit row and return 200. We roll back the
+    // savepoint, log, and move on. Quickwit's normal indexing cadence
+    // absorbs the edit without the overlay.
     await pgClient.query("ROLLBACK TO SAVEPOINT b1_writeback");
     const msg = err instanceof Error ? err.message : String(err);
-    if (
-      /relation .*object_edits.* does not exist/i.test(msg) ||
-      /relation .*object_instances.* does not exist/i.test(msg)
-    ) {
-      return; // transitional deployment — skip B1/B7 wiring for this edit
-    }
-    throw err;
+    console.warn(
+      `[editApplicator] B1/B7 overlay writeback skipped for edit ` +
+        `${edit.objectType}/${edit.primaryKey}: ${msg}`,
+    );
+    return;
   }
 }
 
