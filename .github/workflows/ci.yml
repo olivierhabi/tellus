@@ -92,8 +92,19 @@ jobs:
       - name: TypeScript compile check
         run: pnpm run build
 
-      - name: Run unit tests
+      - name: Run unit tests with coverage
         run: pnpm run test:unit
+        env:
+          COVERAGE: "1"
+
+      - name: Upload coverage reports to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unit
+          fail_ci_if_error: false
 
   # ===========================================================================
   # Job 2: Integration Tests (PostgreSQL + OpenSearch + Keycloak required)

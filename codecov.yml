@@ -1,0 +1,31 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+ignore:
+  - "tests/**/*"
+  - "dist/**/*"
+  - "scripts/**/*"
+  - "**/*.d.ts"
+  - "src/migrations/**/*"
+  - "src/seeds/**/*"
+
+flags:
+  unit:
+    paths:
+      - src/
+    carryforward: true

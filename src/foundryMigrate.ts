@@ -638,6 +638,75 @@ async function migrateFoundry(): Promise<void> {
     `);
     console.log("  [ok] pipeline_signal + PB-B1 columns");
 
+    // -----------------------------------------------------------------------
+    // PB-B4 invariant + PB-B1 idempotency-key enforcement
+    // (migrations/031_pipeline_snapshot_invariants.sql, inlined here so
+    // a fresh `npm run migrate:foundry` picks them up without a side
+    // runner). Triggers are idempotent via CREATE OR REPLACE + DROP
+    // TRIGGER IF EXISTS.
+    // -----------------------------------------------------------------------
+    await client.query(`
+      CREATE OR REPLACE FUNCTION pipeline_deployments_check_snapshot_invariant()
+      RETURNS TRIGGER AS $$
+      DECLARE
+        fmt TEXT;
+      BEGIN
+        IF NEW.status = 'succeeded' AND NEW.output_snapshot_id IS NULL THEN
+          SELECT p.output_format INTO fmt
+            FROM pipelines p
+           WHERE p.id = NEW.pipeline_id;
+          IF fmt = 'iceberg' THEN
+            RAISE EXCEPTION
+              'PB-B4 invariant: pipeline_deployments.output_snapshot_id must be set when status=succeeded AND pipelines.output_format=iceberg (deployment_id=%)',
+              NEW.id
+              USING ERRCODE = '23514';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_pipeline_deployments_snapshot_invariant
+        ON pipeline_deployments
+    `);
+    await client.query(`
+      CREATE TRIGGER trg_pipeline_deployments_snapshot_invariant
+        BEFORE INSERT OR UPDATE OF status, output_snapshot_id ON pipeline_deployments
+        FOR EACH ROW
+        EXECUTE FUNCTION pipeline_deployments_check_snapshot_invariant()
+    `);
+
+    await client.query(`
+      UPDATE pipeline_deployments
+         SET idempotency_key = 'legacy-' || id::text
+       WHERE idempotency_key IS NULL
+    `);
+    await client.query(`
+      CREATE OR REPLACE FUNCTION pipeline_deployments_require_idempotency_key()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.idempotency_key IS NULL THEN
+          RAISE EXCEPTION
+            'pipeline_deployments.idempotency_key is required (PB-B1 deprecation window closed in migration 031)'
+            USING ERRCODE = '23502';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_pipeline_deployments_require_idempotency_key
+        ON pipeline_deployments
+    `);
+    await client.query(`
+      CREATE TRIGGER trg_pipeline_deployments_require_idempotency_key
+        BEFORE INSERT ON pipeline_deployments
+        FOR EACH ROW
+        EXECUTE FUNCTION pipeline_deployments_require_idempotency_key()
+    `);
+    console.log("  [ok] PB-B4 snapshot invariant + PB-B1 idempotency key triggers");
+
     await client.query("COMMIT");
     console.log("\nFoundry migration complete — all tables created successfully.");
   } catch (err) {

@@ -18,4 +18,9 @@ DIRS+=("tests/funnel/unit")
 # transition timing, etc.) and every other pb-b*-unit.test.ts file.
 DIRS+=("tests/foundry/unit")
 
-exec npx vitest run "${DIRS[@]}"
+EXTRA_ARGS=()
+if [[ "${COVERAGE:-}" == "1" ]]; then
+  EXTRA_ARGS+=("--coverage")
+fi
+
+exec npx vitest run "${DIRS[@]}" "${EXTRA_ARGS[@]}"

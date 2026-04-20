@@ -26,11 +26,16 @@ CREATE TABLE IF NOT EXISTS schema_migrations_applied (
     checksum        TEXT
 );
 
--- Back-fill everything that shipped before this ledger existed. The
--- files are idempotent so we can state they were "applied by prior
--- bootstrap logic" without inspecting the database state — a fresh
--- environment still sees them applied by migrate.ts before this row
--- inserts.
+-- Back-fill ONLY the pre-ledger migrations that migrate.ts runs BEFORE
+-- this one — 001..018 are applied by the inline DDL or the preload
+-- loop in migrate.ts before the ledger is queried. Migrations 019..031
+-- are applied AFTER this ledger bootstraps (see migrate.ts sequenced
+-- loop), so back-filling them here would be a subtle correctness bug:
+-- on a fresh database the sequenced loop would read the ledger, see
+-- 019..031 as "applied", and skip running them. The 031 trigger for
+-- `output_snapshot_id` would never be installed. Entries for 019..031
+-- are therefore written by the sequenced-loop runner itself, after
+-- each file successfully applies.
 INSERT INTO schema_migrations_applied (migration_name, applied_at)
 VALUES
     ('001_initial_schema.sql',                 '1970-01-01T00:00:00Z'),
@@ -47,18 +52,5 @@ VALUES
     ('017_link_type_extensions.sql',           '1970-01-01T00:00:00Z'),
     ('018_funnel_hardening.sql',               '1970-01-01T00:00:00Z'),
     ('018_pipeline_compute_type.sql',          '1970-01-01T00:00:00Z'),
-    ('019_pipeline_output_format.sql',         '1970-01-01T00:00:00Z'),
-    ('020_pipeline_iceberg.sql',               '1970-01-01T00:00:00Z'),
-    ('021_pipeline_streaming.sql',             '1970-01-01T00:00:00Z'),
-    ('022_pipeline_preview_pinning.sql',       '1970-01-01T00:00:00Z'),
-    ('023_pipeline_rbac.sql',                  '1970-01-01T00:00:00Z'),
-    ('024_dataset_lineage.sql',                '1970-01-01T00:00:00Z'),
-    ('025_pipeline_cbac.sql',                  '1970-01-01T00:00:00Z'),
-    ('026_fnl_h3_pipeline_deploy_signal.sql',  '1970-01-01T00:00:00Z'),
-    ('027_bd_foundry_dataset_id.sql',          '1970-01-01T00:00:00Z'),
-    ('028_schema_evolution.sql',               '1970-01-01T00:00:00Z'),
-    ('029_funnel_input_lineage_trigger.sql',   '1970-01-01T00:00:00Z'),
-    ('030_keycloak_group_map.sql',             '1970-01-01T00:00:00Z'),
-    ('031_pipeline_snapshot_invariants.sql',   '1970-01-01T00:00:00Z'),
     ('032_migration_ledger.sql',               now())
 ON CONFLICT (migration_name) DO NOTHING;

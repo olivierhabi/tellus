@@ -1892,77 +1892,25 @@ async function migrate(): Promise<void> {
     }
 
     // ------------------------------------------------------------------
-    // PB-B3..B10 + FNL-H follow-ups (migrations 019–032). Each file is
-    // idempotent (ALTER ... IF NOT EXISTS, CREATE OR REPLACE) so
-    // re-running migrate on an already-bootstrapped environment is
-    // safe. Migration 032 installs the schema_migrations_applied
-    // ledger, so from 032 onwards we both apply and record in the
-    // ledger. Unapplied migrations show up as a diff between the
-    // filename list below and the ledger query.
+    // Install the migrations ledger (032). Migrations 019..031 are
+    // pipeline-specific — they ALTER `pipelines` / `pipeline_deployments`
+    // which this migrate.ts doesn't create. Those tables live in
+    // foundryMigrate.ts, and the same inline DDL over there already
+    // performs every ALTER that 019..030 would perform. Migration 031
+    // (the snapshot-invariant triggers) is inlined into foundryMigrate.ts
+    // as well so the full surface lands in one pass. We therefore do
+    // NOT replay 019..031 here — only install the ledger table so the
+    // invariants are visible to ops queries.
     // ------------------------------------------------------------------
-    const sequencedMigrations = [
-      "019_pipeline_output_format.sql",
-      "020_pipeline_iceberg.sql",
-      "021_pipeline_streaming.sql",
-      "022_pipeline_preview_pinning.sql",
-      "023_pipeline_rbac.sql",
-      "024_dataset_lineage.sql",
-      "025_pipeline_cbac.sql",
-      "026_fnl_h3_pipeline_deploy_signal.sql",
-      "027_bd_foundry_dataset_id.sql",
-      "028_schema_evolution.sql",
-      "029_funnel_input_lineage_trigger.sql",
-      "030_keycloak_group_map.sql",
-      "031_pipeline_snapshot_invariants.sql",
-      "032_migration_ledger.sql",
-    ];
-
-    // First pass: make sure the ledger exists before we try to use it
-    // as a skip-list. 032 is special: once it lands, subsequent runs
-    // consult the ledger.
     try {
       const sqlFile = pathMod.join(__dirname, "migrations", "032_migration_ledger.sql");
       if (fsMod.existsSync(sqlFile)) {
         await client.query(fsMod.readFileSync(sqlFile, "utf-8"));
+        console.log("Applied 032_migration_ledger.sql");
       }
     } catch (sqlErr) {
-      // Not fatal — the ledger will catch up on the next run.
-      console.warn(
-        `[migrate] could not bootstrap ledger: ${sqlErr instanceof Error ? sqlErr.message : String(sqlErr)}`,
-      );
-    }
-
-    // Second pass: walk every sequenced migration. Skip if the ledger
-    // says it's already applied; otherwise apply + record.
-    const crypto = await import("crypto");
-    const applied = await client
-      .query(`SELECT migration_name FROM schema_migrations_applied`)
-      .then((r) => new Set(r.rows.map((row: { migration_name: string }) => row.migration_name)))
-      .catch(() => new Set<string>());
-
-    for (const name of sequencedMigrations) {
-      if (applied.has(name)) {
-        console.log(`Skipping ${name} (already applied per ledger)`);
-        continue;
-      }
-      try {
-        const sqlFile = pathMod.join(__dirname, "migrations", name);
-        if (!fsMod.existsSync(sqlFile)) continue;
-        const sql = fsMod.readFileSync(sqlFile, "utf-8");
-        await client.query(sql);
-        const checksum = crypto.createHash("sha256").update(sql).digest("hex");
-        await client.query(
-          `INSERT INTO schema_migrations_applied (migration_name, checksum)
-           VALUES ($1, $2)
-           ON CONFLICT (migration_name) DO UPDATE
-             SET checksum = EXCLUDED.checksum`,
-          [name, checksum],
-        );
-        console.log(`Applied ${name}`);
-      } catch (sqlErr) {
-        const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
-        throw new Error(`${name} failed: ${msg}`);
-      }
+      const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
+      throw new Error(`032_migration_ledger.sql failed: ${msg}`);
     }
 
   } catch (err) {
