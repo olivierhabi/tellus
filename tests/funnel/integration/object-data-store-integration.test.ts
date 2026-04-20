@@ -61,12 +61,18 @@ describe("GET /dataStore — happy path", () => {
   });
 
   it("maps REPLACEMENT_BACKFILL → schemaStatus: migrating", async () => {
+    // Migration 018 made `target_api_name` NOT NULL on
+    // object_type_active_index_version (so the replacement state
+    // machine can distinguish object-type vs link-type targets). The
+    // test INSERT must now provide it — mirrors the
+    // object_type_api_name value for object-type targets.
     await query(
       `INSERT INTO object_type_active_index_version
-         (object_type_api_name, active_version, pending_version, state)
-       VALUES ($1, 1, 2, 'REPLACEMENT_BACKFILL')
+         (object_type_api_name, target_api_name, active_version, pending_version, state)
+       VALUES ($1, $1, 1, 2, 'REPLACEMENT_BACKFILL')
        ON CONFLICT (object_type_api_name) DO UPDATE
-         SET pending_version = EXCLUDED.pending_version,
+         SET target_api_name = EXCLUDED.target_api_name,
+             pending_version = EXCLUDED.pending_version,
              state = EXCLUDED.state,
              updated_at = now()`,
       [OT_API_NAME],

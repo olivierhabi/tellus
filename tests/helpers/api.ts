@@ -17,15 +17,32 @@ export interface ApiResponse {
   headers: Headers;
 }
 
+// Module-level bearer token. Tests that run behind Keycloak/auth
+// middleware call `setAuthToken()` after their login-bypass step; every
+// subsequent `api()` call auto-attaches `Authorization: Bearer …`
+// unless the caller explicitly passes a different Authorization header.
+// Foundry integration (BE-003..BE-030) depends on this — otherwise
+// every CRUD test returns 401 because the auth header is missing.
+let bearerToken: string | null = null;
+
+export function setAuthToken(token: string | null): void {
+  bearerToken = token && token.length > 0 ? token : null;
+}
+
 export async function api(
   method: string,
   urlPath: string,
   body?: unknown,
   extraHeaders?: Record<string, string>
 ): Promise<ApiResponse> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+    ...extraHeaders,
+  };
   const opts: RequestInit = {
     method,
-    headers: { "Content-Type": "application/json", ...extraHeaders },
+    headers,
   };
   if (body !== undefined) {
     opts.body = JSON.stringify(body);
