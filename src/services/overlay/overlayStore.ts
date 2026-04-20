@@ -53,3 +53,35 @@ export function parseOverlayKey(
   if (!m) return null;
   return { objectType: m[1], primaryKey: m[2] };
 }
+
+// FNL-H5 — per-link overlay keys live in the same Redis namespace but
+// under a separate prefix so sweeper/query code can tell them apart.
+export function linkOverlayKey(
+  linkTypeApiName: string,
+  sourcePk: string,
+  targetPk: string
+): string {
+  return `overlay:link:${linkTypeApiName}:${sourcePk}:${targetPk}`;
+}
+
+export function parseLinkOverlayKey(
+  key: string
+):
+  | { linkTypeApiName: string; sourcePk: string; targetPk: string }
+  | null {
+  const m = /^overlay:link:([^:]+):([^:]+):(.+)$/.exec(key);
+  if (!m) return null;
+  return { linkTypeApiName: m[1], sourcePk: m[2], targetPk: m[3] };
+}
+
+export interface LinkOverlayRecord {
+  linkTypeApiName: string;
+  sourcePk: string;
+  targetPk: string;
+  operation: "ADD" | "REMOVE" | "RETRACT";
+  markings: string[];
+  linkProps?: Record<string, unknown>;
+  createdAt: number;
+  eventId?: string;
+  actorUserId?: string | null;
+}

@@ -225,6 +225,19 @@ export class DatasetController {
         return res.json({ success: true, data: { url, expiresIn: 3600 } });
       }
 
+      // PB-B3 lazy transcoder — `?format=csv` on a Parquet-backed dataset
+      // streams back CSV produced on-the-fly by DuckDB. This keeps legacy
+      // BI tools that parse CSV directly from S3 working through the
+      // Parquet migration. Deprecation timeline: remove after two major
+      // releases, once downstream BI is cut over to Parquet / object
+      // store readers.
+      const requestedFormat = ((req.query.format as string) ?? '').toLowerCase();
+      const datasetFormat = ((dataset as { format?: string }).format ?? 'csv').toLowerCase();
+      if (requestedFormat === 'csv' && datasetFormat === 'parquet') {
+        await this.streamParquetAsCsv(req, res, next, s3Key, dataset);
+        return;
+      }
+
       // Get object metadata for Content-Length
       const meta = await headObject(s3Key);
 
@@ -248,4 +261,72 @@ export class DatasetController {
       });
     } catch (err) { next(err); }
   };
+
+  private async streamParquetAsCsv(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    s3Key: string,
+    dataset: Record<string, unknown>,
+  ): Promise<void> {
+    // Lazy transcode: download the Parquet bytes to a local tmp file,
+    // run DuckDB COPY (read_parquet(…)) TO stdout-like csv path, stream
+    // the resulting file. Two-stage is needed because the node-duckdb
+    // binding we ship (follow-6 upgrades this to @duckdb/node-api) does
+    // not expose a streaming COPY; the tmp file is deleted in the
+    // `finish` handler below.
+    const fs = await import('fs');
+    const os = await import('os');
+    const path = await import('path');
+    const pool = await import('../services/duckdb/pool');
+
+    const stream = await getObjectStream(s3Key);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-b3-download-'));
+    const parquetPath = path.join(dir, 'in.parquet');
+    const csvPath = path.join(dir, 'out.csv');
+
+    const write = fs.createWriteStream(parquetPath);
+    await new Promise<void>((resolve, reject) => {
+      stream.pipe(write).on('finish', () => resolve()).on('error', reject);
+      stream.on('error', reject);
+    });
+
+    const conn = await pool.acquireConnection({ skipHttpfs: true });
+    try {
+      await pool.runAll(
+        conn,
+        `COPY (SELECT * FROM read_parquet('${parquetPath.replace(/'/g, "''")}')) ` +
+          `TO '${csvPath.replace(/'/g, "''")}' (HEADER, FORMAT CSV)`,
+      );
+    } finally {
+      pool.releaseConnection(conn);
+    }
+
+    const fileName = (
+      (dataset.original_filename as string) || 'download.parquet'
+    ).replace(/\.parquet$/i, '.csv').replace(/part-00000\.csv$/, 'export.csv');
+    const size = fs.statSync(csvPath).size;
+    res.set({
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="${fileName}"`,
+      'Content-Length': String(size),
+      'Cache-Control': 'private, max-age=300',
+      'X-PB-B3-Transcoded': 'parquet->csv',
+    });
+    const r = fs.createReadStream(csvPath);
+    r.pipe(res);
+    r.on('error', (err) => {
+      console.error('[download] transcoded stream error:', err);
+      if (!res.headersSent) {
+        next(new AppError('Failed to transcode Parquet → CSV', 500, 'DOWNLOAD_ERROR'));
+      }
+    });
+    res.on('finish', () => {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    });
+  }
 }

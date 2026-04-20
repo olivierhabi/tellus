@@ -20,7 +20,13 @@
 // ---------------------------------------------------------------------------
 
 import type { PoolClient } from "pg";
-import { OverlayRecord, OverlayStore, overlayKey } from "./overlayStore";
+import {
+  OverlayRecord,
+  OverlayStore,
+  overlayKey,
+  linkOverlayKey,
+  LinkOverlayRecord,
+} from "./overlayStore";
 import { getOverlayStore } from "./getOverlayStore";
 import { recordOverlayWrite } from "./slis";
 
@@ -291,3 +297,124 @@ export async function mergeOverlayIntoSearch(
   return replaced;
 }
 
+
+// ---------------------------------------------------------------------------
+// FNL-H5 — link-edge writeback overlay
+//
+// Gives link edits the same sub-second visibility as object edits. The
+// overlay store abstraction is reused; we keep link keys under a
+// dedicated `overlay:link:*` prefix so sweeper/query code can tell them
+// apart without inventing a new store.
+// ---------------------------------------------------------------------------
+
+interface LinkOverlayStore {
+  put: (key: string, record: LinkOverlayRecord, ttlSeconds: number) => Promise<void>;
+  mget: (keys: string[]) => Promise<Array<LinkOverlayRecord | null>>;
+  delete: (key: string) => Promise<void>;
+}
+
+async function getLinkOverlayStore(): Promise<LinkOverlayStore> {
+  const store = await getOverlayStore();
+  // Our two concrete stores (memory + redis) both accept arbitrary JSON
+  // under the OverlayRecord type; we downcast for link usage since the
+  // schema discriminator is the key prefix.
+  return {
+    put: (key, rec, ttl) =>
+      (store as unknown as { put: (k: string, r: unknown, t: number) => Promise<void> }).put(
+        key,
+        rec,
+        ttl
+      ),
+    mget: async (keys) =>
+      (await (store as unknown as {
+        mget: (k: string[]) => Promise<Array<unknown>>;
+      }).mget(keys)) as Array<LinkOverlayRecord | null>,
+    delete: (key) => store.delete(key),
+  };
+}
+
+export interface WriteLinkOverlayInput {
+  linkTypeApiName: string;
+  sourcePk: string;
+  targetPk: string;
+  operation: "ADD" | "REMOVE" | "RETRACT";
+  markings?: string[];
+  linkProps?: Record<string, unknown>;
+  eventId?: string;
+  actorUserId?: string | null;
+  ttlSeconds?: number;
+}
+
+export async function writeOverlayForLinkEdit(
+  input: WriteLinkOverlayInput
+): Promise<void> {
+  const store = await getLinkOverlayStore();
+  const ttl = computeLinkOverlayTtl(input.linkTypeApiName, input.ttlSeconds);
+  const key = linkOverlayKey(input.linkTypeApiName, input.sourcePk, input.targetPk);
+  const rec: LinkOverlayRecord = {
+    linkTypeApiName: input.linkTypeApiName,
+    sourcePk: input.sourcePk,
+    targetPk: input.targetPk,
+    operation: input.operation,
+    markings: input.markings ?? [],
+    linkProps: input.linkProps ?? undefined,
+    createdAt: Date.now(),
+    eventId: input.eventId,
+    actorUserId: input.actorUserId ?? null,
+  };
+  await store.put(key, rec, ttl);
+  try {
+    recordOverlayWrite(input.eventId ?? key, rec.createdAt);
+  } catch {
+    /* SLI optional */
+  }
+}
+
+function computeLinkOverlayTtl(
+  linkTypeApiName: string,
+  explicit?: number
+): number {
+  if (typeof explicit === "number" && explicit > 0) return explicit;
+  const override = process.env[`LINK_OVERLAY_TTL_${linkTypeApiName.toUpperCase()}`];
+  const overrideN = override ? Number(override) : NaN;
+  if (Number.isFinite(overrideN) && overrideN > 0) return overrideN;
+  return computeTtlSeconds(undefined);
+}
+
+/**
+ * Load any overlay entries matching the set of `(source_pk, target_pk)`
+ * pairs returned by the underlying link resolver and apply them to the
+ * result:
+ *   - REMOVE/RETRACT entries drop the pair from results.
+ *   - ADD entries confirm the pair (and merge link_props if provided).
+ *
+ * Callers pass plain PK pairs; the returned array is the filtered set
+ * in the same order with removed entries omitted and any overlay
+ * `link_props` merged onto matching rows.
+ */
+export async function mergeWithLinkOverlay<
+  Row extends { sourcePk?: string; targetPk?: string; source_pk?: string; target_pk?: string }
+>(
+  linkTypeApiName: string,
+  rows: Row[]
+): Promise<Row[]> {
+  if (rows.length === 0) return rows;
+  const store = await getLinkOverlayStore();
+  const keys = rows.map((r) =>
+    linkOverlayKey(
+      linkTypeApiName,
+      String(r.sourcePk ?? r.source_pk ?? ""),
+      String(r.targetPk ?? r.target_pk ?? "")
+    )
+  );
+  const overlays = await store.mget(keys);
+  const result: Row[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const overlay = overlays[i];
+    if (overlay && (overlay.operation === "REMOVE" || overlay.operation === "RETRACT")) {
+      continue; // drop
+    }
+    result.push(rows[i]);
+  }
+  return result;
+}

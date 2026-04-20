@@ -37,6 +37,7 @@ import { bulkUpsertInstances, deleteInstance, UpsertInstanceInput } from "../../
 import { ChangelogRow } from "./changelogStage";
 import { commitSnapshot, ManifestEntry } from "./icebergCatalog";
 import { markEditsAppliedToMerge, OntologyEditRow } from "../../models/ontologyEdit";
+import { unionMarkings } from "../markingUnion";
 
 export type EditStrategy = "user_edit_wins" | "latest_wins";
 
@@ -316,10 +317,10 @@ export async function mergeChanges(input: MergeInput): Promise<MergeResult> {
       }
     }
 
-    const finalMarkings = Array.from(new Set([
-      ...(src?.markings ?? []),
-      ...(ex?.markings ?? []),
-    ])).sort();
+    // PB-B7 — route through the shared union helper so the Pipeline
+    // Builder deploy and the Funnel merge stage cannot drift on the
+    // "effective markings = ⋃ contributing datasources" invariant.
+    const finalMarkings = unionMarkings(src?.markings, ex?.markings);
 
     upserts.push({
       ontology_id: input.ontologyId,

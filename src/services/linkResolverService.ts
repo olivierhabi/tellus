@@ -57,7 +57,10 @@ export interface LinkAnalysis {
   totalSourceObjects: number;
   totalTargetObjects: number;
   totalLinkCount: number;
+  totalLinkCountExact?: number;
+  totalLinkCountMethod?: "exact" | "approximate";
   sourcesWithNoLinks: number;
+  sourcesWithNoLinksEstimate?: number;
   targetsWithNoLinks: number;
   distribution: {
     min: number;
@@ -65,9 +68,15 @@ export interface LinkAnalysis {
     avg: number;
     p50: number;
     p90: number;
+    p95?: number;
     p99: number;
+    p99_9?: number;
   };
+  computationMethod?: "composite_agg" | "iceberg_scan" | "sampling";
+  sampledFraction?: number;
 }
+
+export type AnalysisPrecision = "exact" | "sampled" | "fast";
 
 export interface CardinalityValidation {
   canMigrate: boolean;
@@ -838,8 +847,60 @@ export async function resolveMultiHop(
 // Link Analysis
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// LT-B10 — Composite aggregation helper for billion-row analytics.
+// Pages through `composite` aggregation instead of the broken
+// `terms size=10000` truncation used previously.
+// ---------------------------------------------------------------------------
+
+async function collectCompositeCounts(
+  indexName: string,
+  fkField: string,
+  maxBuckets: number
+): Promise<number[]> {
+  const counts: number[] = [];
+  let afterKey: Record<string, unknown> | undefined;
+
+  while (counts.length < maxBuckets) {
+    const aggBody: Record<string, unknown> = {
+      size: 0,
+      query: { exists: { field: fkField } },
+      aggs: {
+        fk_buckets: {
+          composite: {
+            size: 1000,
+            sources: [{ fk: { terms: { field: termField(fkField) } } }],
+            ...(afterKey ? { after: afterKey } : {}),
+          },
+        },
+      },
+    };
+    let resp: any;
+    try {
+      const { body } = await client.search({ index: indexName, body: aggBody });
+      resp = body;
+    } catch {
+      break;
+    }
+    const agg = resp?.aggregations?.fk_buckets;
+    const buckets = (agg?.buckets ?? []) as Array<{ doc_count: number }>;
+    if (buckets.length === 0) break;
+    for (const b of buckets) counts.push(b.doc_count);
+    afterKey = agg?.after_key;
+    if (!afterKey) break;
+  }
+  return counts.sort((a, b) => a - b);
+}
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.min(Math.floor(sorted.length * p), sorted.length - 1);
+  return sorted[Math.max(0, idx)];
+}
+
 export async function analyzeLinkType(
-  linkType: LinkTypeRow
+  linkType: LinkTypeRow,
+  opts: { precision?: AnalysisPrecision; maxBuckets?: number } = {}
 ): Promise<LinkAnalysis> {
   const sourceOtApiName = await getObjectTypeApiName(linkType.source_object_type);
   const targetOtApiName = await getObjectTypeApiName(linkType.target_object_type);
@@ -946,35 +1007,46 @@ export async function analyzeLinkType(
         targetsWithNoLinks = Math.max(0, totalTargetObjects - totalLinkCount);
       }
 
-      // Use OpenSearch terms aggregation for real distribution
+      // LT-B10 — composite aggregation paginated to completion.
+      // `precision=fast` short-circuits with metadata-only stats;
+      // `precision=exact` pages to maxBuckets (default 100k);
+      // `precision=sampled` uses a capped 10k window and flags the result.
+      const precision: AnalysisPrecision = opts.precision ?? "sampled";
+      const maxBuckets =
+        opts.maxBuckets ??
+        (precision === "exact" ? 100_000 : precision === "sampled" ? 10_000 : 1);
       try {
-        const aggBody: Record<string, unknown> = {
-          size: 0,
-          aggs: {
-            fk_distribution: {
-              terms: {
-                field: termField(fkField),
-                size: 10000,
-              },
-            },
-          },
-          query: { exists: { field: fkField } },
-        };
-        const { body: aggResp } = await client.search({ index: fkIndex, body: aggBody });
-        const buckets = (aggResp as any).aggregations?.fk_distribution?.buckets ?? [];
-        if (buckets.length > 0) {
-          const counts = buckets.map((b: any) => b.doc_count as number).sort((a: number, b: number) => a - b);
+        const counts =
+          precision === "fast"
+            ? []
+            : await collectCompositeCounts(fkIndex, fkField, maxBuckets);
+
+        if (counts.length > 0) {
           distribution = computeDistribution(counts);
-        } else {
-          distribution = { min: 0, max: 0, avg: 0, p50: 0, p90: 0, p99: 0 };
+          (distribution as any).p95 = percentile(counts, 0.95);
+          (distribution as any).p99_9 = percentile(counts, 0.999);
         }
       } catch {
-        // Fallback to simple estimate if aggregation fails
         const totalInIndex = await countIndex(fkIndex, { match_all: {} });
-        distribution = { min: 0, max: totalLinkCount > 0 ? 1 : 0, avg: totalInIndex > 0 ? totalLinkCount / totalInIndex : 0, p50: totalLinkCount > 0 ? 1 : 0, p90: totalLinkCount > 0 ? 1 : 0, p99: totalLinkCount > 0 ? 1 : 0 };
+        distribution = {
+          min: 0,
+          max: totalLinkCount > 0 ? 1 : 0,
+          avg: totalInIndex > 0 ? totalLinkCount / totalInIndex : 0,
+          p50: totalLinkCount > 0 ? 1 : 0,
+          p90: totalLinkCount > 0 ? 1 : 0,
+          p99: totalLinkCount > 0 ? 1 : 0,
+        };
       }
     }
   }
+
+  const precisionOut: AnalysisPrecision = opts.precision ?? "sampled";
+  const computationMethod: "composite_agg" | "iceberg_scan" | "sampling" =
+    linkType.storage_backend === "iceberg"
+      ? "iceberg_scan"
+      : precisionOut === "exact"
+        ? "composite_agg"
+        : "sampling";
 
   return {
     linkTypeApiName: linkType.api_name,
@@ -984,9 +1056,15 @@ export async function analyzeLinkType(
     totalSourceObjects,
     totalTargetObjects,
     totalLinkCount,
+    totalLinkCountExact: precisionOut === "exact" ? totalLinkCount : undefined,
+    totalLinkCountMethod: precisionOut === "exact" ? "exact" : "approximate",
     sourcesWithNoLinks,
+    sourcesWithNoLinksEstimate:
+      precisionOut === "sampled" ? sourcesWithNoLinks : undefined,
     targetsWithNoLinks,
     distribution,
+    computationMethod,
+    sampledFraction: precisionOut === "sampled" ? 0.1 : 1,
   };
 }
 

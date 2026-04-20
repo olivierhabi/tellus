@@ -296,7 +296,12 @@ function sleep(ms: number): Promise<void> {
 export type SignalType =
   | "sourceTransactionCommitted"
   | "editBatchPending"
-  | "schemaChanged";
+  | "schemaChanged"
+  // PB-B8 follow-fnl-h3 — fired by the Pipeline Builder deploy
+  // workflow on completion so Funnel consumers that specifically
+  // want "a pipeline just finished" semantics can subscribe without
+  // inferring from the generic sourceTransactionCommitted fan-out.
+  | "pipelineDeployCompleted";
 
 export interface SendSignalInput {
   ontologyId: string;

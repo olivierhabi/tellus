@@ -53,11 +53,25 @@ export class PipelineService {
         description: input.description ?? null,
         pipeline_type: input.pipelineType,
         compute_type: input.computeType,
+        output_format: input.outputFormat,
         status: 'draft' as PipelineStatus,
         created_by: createdBy,
         folder_id: input.folderId ?? null,
       })
       .returning('*');
+
+    // PB-B7 — seed the default (creator, 'owner') ACL grant so the
+    // person who created the pipeline can immediately read / edit /
+    // deploy / share it under RBAC_ENABLED=true.
+    if (createdBy) {
+      await this.knex.raw(
+        `INSERT INTO pipeline_acl
+           (pipeline_id, principal_id, principal_type, role, granted_by, granted_at)
+         VALUES (?, ?, 'user', 'owner', ?, NOW())
+         ON CONFLICT (pipeline_id, principal_id, principal_type) DO NOTHING`,
+        [pipeline.id, createdBy, createdBy],
+      );
+    }
 
     return pipeline;
   }
@@ -120,6 +134,7 @@ export class PipelineService {
     if (input.description !== undefined) updateData.description = input.description;
     if (input.pipelineType !== undefined) updateData.pipeline_type = input.pipelineType;
     if (input.computeType !== undefined) updateData.compute_type = input.computeType;
+    if (input.outputFormat !== undefined) updateData.output_format = input.outputFormat;
     if (input.status !== undefined) updateData.status = input.status;
     if (input.config !== undefined) updateData.config = JSON.stringify(input.config);
 

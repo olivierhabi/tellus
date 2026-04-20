@@ -135,6 +135,80 @@ for day in "${DAYS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# PB-B / FNL-H / LT-B E2E suites
+#
+# These run against the same long-lived server started above. Order:
+#   1. Consolidated endpoint-coverage E2E (60 asserts / 39 endpoints).
+#   2. Per-task curl smokes (test-pb-b1..b10) — each owns its fixture
+#      bootstrap + teardown so they can run back-to-back.
+#   3. Chaos scripts — docker stop/start containers; run last so a flaky
+#      underlying dep doesn't poison earlier suites.
+#   4. Observability stack verification (OTel Collector + Prometheus +
+#      Grafana end-to-end). Opt-in via OBSERVABILITY_STACK_UP=1 since it
+#      requires `docker compose -f docker-compose-files/monitoring.docker-compose.yml up`.
+# ---------------------------------------------------------------------------
+run_pb_script() {
+  local label="$1"
+  local script="$2"
+  shift 2
+  if [[ ! -x "$script" && ! -f "$script" ]]; then
+    echo -e "${RED}SKIP${NC}  ${label} — ${script} not found"
+    return 0
+  fi
+  echo -e "${BOLD}========================================${NC}"
+  echo -e "${BOLD}  Running ${label}${NC}"
+  echo -e "${BOLD}========================================${NC}"
+  if bash "$script" "$@"; then
+    echo -e "${GREEN}${BOLD}${label}: PASS${NC}"
+  else
+    echo -e "${RED}${BOLD}${label}: FAIL${NC}"
+    EXIT_CODE=1
+  fi
+  echo ""
+}
+
+# 1. Consolidated endpoint E2E covering all 39 created/modified endpoints.
+run_pb_script "pb-all-endpoints-e2e" "${ROOT}/scripts/test-pb-all-endpoints-e2e.sh"
+
+# 2. Per-task smokes. Ordered by task number for traceability in CI logs.
+PB_SMOKES=(
+  "test-pb-b1-supervised-deploys.sh"
+  "test-pb-b2-duckdb-engine.sh"
+  "test-pb-b3-output-format.sh"
+  "test-pb-b4-iceberg.sh"
+  "test-pb-b5-streaming.sh"
+  "test-pb-b6-preview-pinning.sh"
+  "test-pb-b7-rbac.sh"
+  "test-pb-b8-lineage.sh"
+  "test-pb-b9-observability.sh"
+  "test-pb-b10-schema-evolution.sh"
+)
+for smoke in "${PB_SMOKES[@]}"; do
+  run_pb_script "pb-smoke: ${smoke}" "${ROOT}/scripts/${smoke}"
+done
+
+# 3. Chaos suite — each script pauses/kills one dep and asserts
+# /health/ready + pipeline_health_check_failures_total flip.
+CHAOS_SCRIPTS=(
+  "test-pb-b9-db-kill-chaos.sh"
+  "test-pb-b9-lakekeeper-kill-chaos.sh"
+  "test-pb-b9-minio-kill-chaos.sh"
+  "test-pb-b9-temporal-kill-chaos.sh"
+)
+for chaos in "${CHAOS_SCRIPTS[@]}"; do
+  run_pb_script "pb-chaos: ${chaos}" "${ROOT}/scripts/${chaos}"
+done
+
+# 4. Observability stack verification — opt-in because it requires the
+# monitoring docker-compose to be up (OTel Collector + Prometheus +
+# Grafana). CI sets OBSERVABILITY_STACK_UP=1 on the observability job.
+if [[ "${OBSERVABILITY_STACK_UP:-0}" == "1" ]]; then
+  run_pb_script "pb-observability-stack" "${ROOT}/scripts/verify-pb-b9-observability-stack.sh"
+else
+  echo -e "${BOLD}SKIP${NC}  pb-observability-stack (set OBSERVABILITY_STACK_UP=1 to run)"
+fi
+
+# ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
 echo -e "${BOLD}========================================${NC}"

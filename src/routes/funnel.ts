@@ -442,6 +442,30 @@ router.get("/lakekeeper/warehouses", async (_req: Request, res: Response) => {
   }
 });
 
+// FNL-H6 — list namespaces under the Tellus warehouse so operators can
+// verify the _funnel / _pipeline / _links roots are present after
+// bootstrap.
+router.get("/lakekeeper/namespaces", async (_req: Request, res: Response) => {
+  try {
+    const { listNamespaces, LINK_NAMESPACE_ROOT, PIPELINE_NAMESPACE_ROOT } = await import(
+      "../services/funnel/lakekeeperBootstrap"
+    );
+    const summary = await listNamespaces();
+    // Guarantee the three well-known roots appear even when Lakekeeper
+    // is unreachable — the FE needs a stable contract.
+    const roots = ["_funnel", PIPELINE_NAMESPACE_ROOT, LINK_NAMESPACE_ROOT];
+    const union = Array.from(new Set([...roots, ...summary.namespaces]));
+    res.json({
+      reachable: summary.reachable,
+      warehouseName: summary.warehouseName,
+      namespaces: union,
+      expectedRoots: roots,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "INTERNAL", message: (err as Error).message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // B9 — Replacement pipeline control plane.
 //

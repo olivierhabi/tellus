@@ -105,7 +105,16 @@ async function loadLinkTypes(): Promise<LinkTypeDescriptor[]> {
     }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Transitional deployments: the migration hasn't created the table yet.
     if (/relation .*link_type.* does not exist/i.test(msg)) return [];
+    // Shutdown race: the `void (async …)()` at boot was still running when
+    // `shutdown()` called `pool.end()`. Treat this as a clean no-op — the
+    // bootstrap will re-run on next boot via the same loop. Throwing
+    // here just pollutes logs with a scary stacktrace during nodemon
+    // restarts and does nothing useful.
+    if (/pool after calling end on the pool|Pool is ending|cannot use a pool/i.test(msg)) {
+      return [];
+    }
     throw err;
   }
 }

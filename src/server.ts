@@ -1,4 +1,8 @@
 import "dotenv/config";
+// PB-B9: bootstrap OTel BEFORE any instrumented library (pg, express,
+// @temporalio/client, kafkajs) so auto-instrumentations patch the
+// module graph on first require.
+import "./services/otelBootstrap";
 import crypto from "crypto";
 import http from "http";
 import express, { Request, Response, NextFunction } from "express";
@@ -61,10 +65,38 @@ import { shutdownKafka } from "./services/kafkaProducer";
 // workers (signal dispatcher + overlay sweeper).
 import funnelRouter from "./routes/funnel";
 import { startFunnelDispatcher, stopFunnelDispatcher } from "./services/funnel/funnelDispatcher";
+import {
+  startPipelineDispatcher,
+  stopPipelineDispatcher,
+  sweepOrphanPipelineDeployments,
+} from "./services/pipelines/pipelineDispatcher";
+import {
+  startIcebergMaintenance,
+  stopIcebergMaintenance,
+} from "./services/pipelines/icebergMaintenance";
 import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
 import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
+
+// Background boot tasks (Lakekeeper, ClickHouse, superadmin seed, …) are
+// fire-and-forget so they don't delay serving /health. shutdown() races
+// them against a short timeout before calling pool.end() so a nodemon
+// SIGINT during the first few hundred ms of boot doesn't leave an
+// in-flight query hitting a closed pool.
+const bootTasks: Promise<unknown>[] = [];
+function trackBootTask(factory: () => Promise<unknown>): void {
+  const p = factory().catch(() => undefined);
+  bootTasks.push(p);
+}
+async function awaitBootTasksWithDeadline(timeoutMs: number): Promise<void> {
+  if (bootTasks.length === 0) return;
+  await Promise.race([
+    Promise.allSettled(bootTasks),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
 import { startTemporalWorker, stopTemporalWorker, isTemporalConnected } from "./services/funnel/temporal/worker";
 import { bootstrapLakekeeper } from "./services/funnel/lakekeeperBootstrap";
+import { ensurePipelineWarehouse } from "./services/pipelines/lakekeeperBootstrap";
 import { startReplacementScheduler, stopReplacementScheduler } from "./services/funnel/replacementScheduler";
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
@@ -121,6 +153,12 @@ const app = express();
 
 // Security headers (helmet defaults are sensible for APIs)
 app.use(helmet());
+// PB-B9 — trace context + X-Trace-Id response header. Must sit before
+// any handler that might respond (including the helmet chain's early
+// writes) so a user-facing error response ALWAYS carries the trace id
+// the support ticket can attach.
+import { traceContextMiddleware } from "./middleware/traceContext";
+app.use(traceContextMiddleware);
 app.use(serverTiming);
 app.use(contentLanguage);
 
@@ -308,6 +346,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Detailed health check (must be before the foundry /health route)
 app.use("/health", healthDetailedRouter);
 
+// PB-B9 — readiness probe (PG + S3 + Temporal + Lakekeeper).
+import healthReadyRouter from "./routes/healthReady";
+app.use("/health", healthReadyRouter);
+
 /**
  * GET /health
  *
@@ -411,6 +453,16 @@ app.use(
 );
 app.use("/api/v1/datasets", datasetRouter);
 app.use("/api/v1/datasets", dataPreviewRouter);
+
+// PB-B8: v2 lineage surface (new semantics → v2 prefix per the
+// project's framing note).
+import lineageRouter from "./routes/lineage";
+app.use("/api/v2", lineageRouter);
+
+// PB-B9: Prometheus scrape endpoint for the Pipeline Builder,
+// parallel to /api/v1/funnel/metrics.
+import pipelinesMetricsRouter from "./routes/pipelinesMetrics";
+app.use("/api/v1/pipelines", pipelinesMetricsRouter);
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex",
   reindexRouter
@@ -653,6 +705,51 @@ async function start(): Promise<void> {
       );
     }
 
+    // PB-B1: Pipeline dispatcher + one-shot orphan sweep.
+    //
+    // The dispatcher drains pipeline_signal on a 2s tick and runs the
+    // deploy via DeploymentService.executeDeploymentById. Mirrors the
+    // Funnel's posture (Temporal preferred, PG-backed fallback).
+    // The one-shot sweep on boot reconciles deployments orphaned by a
+    // prior pod crash so the UI doesn't poll stuck rows forever.
+    try {
+      const orphans = await sweepOrphanPipelineDeployments();
+      if (orphans.sweptIds.length > 0) {
+        console.log(
+          `Swept ${orphans.sweptIds.length} orphan pipeline_deployment(s) from prior restart`
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: pipeline orphan sweep failed: ${(err as Error).message}`
+      );
+    }
+    try {
+      if (process.env.PIPELINE_DISPATCHER_DISABLED !== "true") {
+        startPipelineDispatcher();
+        console.log("Pipeline dispatcher started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start Pipeline dispatcher: ${(err as Error).message}`
+      );
+    }
+    void stopPipelineDispatcher; // retain symbol for shutdown wiring
+
+    // PB-B4 — Iceberg compaction + expiration loop for _pipeline.* tables.
+    // Best-effort: skipped when PyIceberg sidecar is unreachable.
+    try {
+      if (process.env.PIPELINE_ICEBERG_MAINTENANCE_DISABLED !== "true") {
+        startIcebergMaintenance();
+        console.log("Iceberg maintenance loop started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start Iceberg maintenance: ${(err as Error).message}`
+      );
+    }
+    void stopIcebergMaintenance;
+
     // B3: Sweep funnel_run rows orphaned by a prior worker restart.
     // A SIGKILL / OOM / container restart mid-activity leaves rows at
     // status='running' that the UI polls and shows stuck on "sync"
@@ -682,8 +779,31 @@ async function start(): Promise<void> {
       try {
         if (process.env.TEMPORAL_WORKER_DISABLED === "true") return;
         const ok = await startTemporalWorker();
-        if (ok) console.log("Temporal worker registered on tellus-funnel");
-        else console.log("Temporal unreachable — PG-backed dispatcher remains primary");
+        if (ok) {
+          console.log("Temporal worker registered on tellus-funnel");
+          // PB-B4 follow-3.1 — kick the iceberg compaction+expiration
+          // schedule. Falls back to the in-process interval loop when
+          // Temporal is unreachable (the two paths don't double-execute;
+          // the schedule emits on the same task queue and the loop's
+          // `runIcebergMaintenanceOnce` is idempotent anyway).
+          try {
+            const { ensureIcebergMaintenanceSchedule } = await import(
+              "./services/pipelines/temporal/schedule"
+            );
+            const r = await ensureIcebergMaintenanceSchedule();
+            console.log(
+              `PB-B4 iceberg maintenance schedule: scheduled=${r.scheduled}${
+                r.reason ? ` (${r.reason})` : ""
+              }`,
+            );
+          } catch (err) {
+            console.warn(
+              `WARNING: could not ensure PB-B4 maintenance schedule: ${(err as Error).message}`,
+            );
+          }
+        } else {
+          console.log("Temporal unreachable — PG-backed dispatcher remains primary");
+        }
       } catch (err) {
         console.warn(
           `WARNING: Temporal worker failed to start: ${(err as Error).message}`
@@ -720,25 +840,38 @@ async function start(): Promise<void> {
     // `tellus-funnel` warehouse on MinIO and one namespace per Object
     // Type. Best-effort — if Lakekeeper is unreachable the
     // PG-backed icebergCatalog.ts remains authoritative.
-    void (async () => {
+    trackBootTask(async () => {
       try {
         const lk = await bootstrapLakekeeper();
         if (!lk.reachable) {
           console.warn("Lakekeeper unreachable — Iceberg catalog falls back to PG shim");
         } else {
           console.log(
-            `Lakekeeper bootstrap: warehouse=${lk.warehouseId} namespaces=${lk.namespacesCreated}/${lk.objectTypesConsidered * 4}`
+            `Lakekeeper bootstrap: warehouse=${lk.warehouseId} funnel_namespaces=${lk.namespacesCreated}/${lk.objectTypesConsidered * 4} pipeline_namespaces=${lk.pipelineNamespacesCreated}/${lk.pipelinesConsidered}`
           );
+          // PB-B4 — ensure the `tellus-pipeline` warehouse exists as
+          // well. Pipeline data writes land here (separate from
+          // `tellus-funnel` so remote-signing can be disabled per
+          // warehouse without affecting the funnel). Reuses the SAME
+          // lakekeeperClient via pipelines/lakekeeperBootstrap.
+          try {
+            const pw = await ensurePipelineWarehouse();
+            console.log(`Lakekeeper pipeline bootstrap: warehouse=${pw}`);
+          } catch (err) {
+            console.warn(
+              `WARNING: Lakekeeper pipeline warehouse bootstrap failed: ${(err as Error).message}`,
+            );
+          }
         }
       } catch (err) {
         console.warn(`WARNING: Lakekeeper bootstrap failed: ${(err as Error).message}`);
       }
-    })();
+    });
 
     // B10: ensure ClickHouse link tables mirror every registered
     // link_type. Best-effort — a missing ClickHouse just leaves
     // traversal queries unserved until next refresh.
-    void (async () => {
+    trackBootTask(async () => {
       try {
         const result = await ensureLinkTablesForAllLinkTypes();
         if (result.skippedUnreachable) {
@@ -753,7 +886,7 @@ async function start(): Promise<void> {
           `WARNING: ClickHouse bootstrap failed: ${(err as Error).message}`
         );
       }
-    })();
+    });
 
     // ----------------------------------------------------------------
     // Bootstrap the tellus-superadmin realm role and seed it onto the
@@ -920,6 +1053,16 @@ async function shutdown(signal: string): Promise<void> {
     console.log(JSON.stringify({ type: "foundry_db_disconnected" }));
   } catch (err) {
     console.error(JSON.stringify({ type: "foundry_db_disconnect_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // Give any still-running boot tasks (Lakekeeper / ClickHouse / seed
+  // scripts) a short window to finish so they don't hit pool.end() mid
+  // query. 2s is more than enough on a healthy host and bounded
+  // regardless of what the task is doing.
+  try {
+    await awaitBootTasksWithDeadline(2_000);
+  } catch {
+    /* ignored — we're already shutting down */
   }
 
   try {

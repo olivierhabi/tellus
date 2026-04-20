@@ -3,6 +3,11 @@ import { parse } from 'csv-parse';
 import { AppError } from '../utils/foundryAppError';
 import { convertValue } from '../utils/typeConverter';
 import { getObjectStream } from './storageService';
+import {
+  chainHashFromNodeConfig,
+  fingerprintSchema,
+  hashTransformChain,
+} from './pipelines/previewSnapshot';
 import type {
   CastTargetType,
   CastPreviewInput,
@@ -94,6 +99,27 @@ function normalizeColumnName(name: string, removeSpecial: boolean): string {
 
 export class TransformService {
   constructor(private knex: Knex) {}
+
+  // PB-B6 — pinned-input cache. When deploymentService has preview
+  // snapshot metadata, it pre-reads each input at its captured pin
+  // (Iceberg snapshot_id or S3 VersionId/ETag) and seeds this map. The
+  // readCsvRows path consults the cache first so the downstream
+  // transform chain sees the EXACT rows the preview saw — not whatever
+  // was written to the live upstream between preview and deploy.
+  private pinnedInputCache: Map<string, Array<Record<string, string>>> =
+    new Map();
+
+  setPinnedInputRows(filePath: string, rows: Array<Record<string, string>>): void {
+    this.pinnedInputCache.set(filePath, rows);
+  }
+
+  clearPinnedInputCache(): void {
+    this.pinnedInputCache.clear();
+  }
+
+  private pinnedInputRows(filePath: string): Array<Record<string, string>> | null {
+    return this.pinnedInputCache.get(filePath) ?? null;
+  }
 
   // =========================================================================
   // Cast — Preview
@@ -1251,7 +1277,49 @@ export class TransformService {
       };
     }
 
-    // Read all data and apply the full chain
+    // PB-B2 engine selector — reads pipelines.compute_type.
+    //   'duckdb'        → compile chain into one SQL statement and run
+    //                     via the shared DuckDB pool (default for new
+    //                     pipelines).
+    //   'legacy_nodejs' → the pure-TS engine below (kept for one release
+    //                     cycle so existing pipelines keep green).
+    //
+    // Chains containing `Normalize` fall back to legacy automatically
+    // because Normalize requires the legacy engine's unicode folding
+    // until PB-B2.follow-2 ships the Rust UDF — instead of compiling a
+    // broken SQL statement we route around it so the user's request
+    // still completes with matching semantics.
+    const computeType = await this.getComputeType(pipelineId);
+    const hasNormalize = existingTransforms.some(
+      (t) => (t as { function?: string })?.function === 'Normalize',
+    );
+    if (computeType === 'duckdb' && !hasNormalize) {
+      try {
+        const { executeTransformChain } = await import(
+          './pipelines/duckdbTransformEngine'
+        );
+        const out = await executeTransformChain(
+          existingTransforms as Parameters<typeof executeTransformChain>[0],
+          { inputPath: dataset.file_path, limit: 10_000 },
+        );
+        return {
+          columns: out.columns,
+          rows: out.rows,
+          rowCount: out.rowCount,
+          transformCount: existingTransforms.length,
+          engine: 'duckdb' as const,
+        };
+      } catch (err) {
+        // If the native binding is missing OR compilation rejects the
+        // chain (cross-join, malformed config), surface the typed error
+        // to the caller rather than silently degrading. The controller
+        // turns AppError into a 4xx response; anything else bubbles as 500.
+        if (err instanceof AppError) throw err;
+        throw err;
+      }
+    }
+
+    // Legacy TS engine path.
     const rawRows = await this.readCsvRows(dataset.file_path, 10000);
     const transformedRows = this.applyExistingTransforms(rawRows, existingTransforms);
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, existingTransforms);
@@ -1261,7 +1329,20 @@ export class TransformService {
       rows: transformedRows,
       rowCount: transformedRows.length,
       transformCount: existingTransforms.length,
+      engine: 'legacy_nodejs' as const,
     };
+  }
+
+  private async getComputeType(
+    pipelineId: string,
+  ): Promise<'duckdb' | 'legacy_nodejs'> {
+    const row = await this.knex('pipelines')
+      .where({ id: pipelineId })
+      .first('compute_type');
+    const ct = (row?.compute_type ?? 'legacy_nodejs') as string;
+    // Defensive: the column's CHECK constraint restricts to the two
+    // values, but older seed data may still carry legacy enum values.
+    return ct === 'duckdb' ? 'duckdb' : 'legacy_nodejs';
   }
 
   // =========================================================================
@@ -1280,15 +1361,43 @@ export class TransformService {
     const node = await this.knex('pipeline_nodes as pn')
       .join('pipelines as p', 'pn.pipeline_id', 'p.id')
       .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
-      .select('pn.id', 'pn.config').first();
+      .select('pn.id', 'pn.dataset_id', 'pn.config').first();
     if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
 
     const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    // PB-B6 — capture the chain hash + schema fingerprint so the deploy
+    // path can detect drift (PREVIEW_STALE) and so the frontend GET can
+    // surface a `stale=true` flag when the user edits the chain.
+    //
+    // Upstream version capture (Iceberg snapshot id / S3 version id) is
+    // optional here: the legacy FE saves only the preview rows + chain,
+    // and doesn't know the upstream revision coordinates. When the
+    // deploy path runs PB-B6's stale+pin flow it can re-capture against
+    // the current upstream; for the immediate envelope we at least
+    // record enough to detect chain-level drift.
+    const chainHash = hashTransformChain(input.transforms ?? []);
+    const schemaFingerprint = fingerprintSchema(input.columns ?? []);
+    // PB-B6 follow-transitive — walk the node graph to collect every
+    // upstream dataset (direct sourceNodeId chain + rightNodeId on
+    // join/union nodes). Capture a per-dataset pin so the deploy path
+    // can audit the full input set via `input_snapshots` without
+    // re-discovering the graph.
+    const transitiveInputSnapshots = await this.walkTransitiveInputs(
+      pipelineId,
+      nodeId,
+    );
     config.previewSnapshot = {
+      ...(config.previewSnapshot ?? {}),
       columns: input.columns,
       rows: input.rows,
       rowCount: input.rowCount,
       transforms: input.transforms,
+      chainHash,
+      schemaFingerprint,
+      // nodeId recorded redundantly so downstream readers can tell which
+      // node the envelope was captured against.
+      nodeId,
+      transitiveInputSnapshots,
       savedAt: new Date().toISOString(),
     };
 
@@ -1299,8 +1408,74 @@ export class TransformService {
   }
 
   /**
-   * Retrieve the saved preview snapshot from a node's config.
+   * Retrieve the saved preview snapshot from a node's config. PB-B6 —
+   * augments the payload with `stale=true` when the live transforms on
+   * the node have drifted from the captured chain hash, so the frontend
+   * can render a "Re-preview required" banner without extra RTTs.
    */
+  /**
+   * PB-B6 follow-transitive — walk a pipeline node's upstream graph
+   * and collect the dataset coordinates of every contributor. This
+   * covers:
+   *   * sourceNodeId chains (transform nodes that reference another
+   *     node as their upstream).
+   *   * rightNodeId joins/unions (the right-hand dataset is a distinct
+   *     contributor and must land in input_snapshots).
+   * Visited nodes are tracked so a malformed graph with a cycle
+   * still terminates in O(nodes) work.
+   */
+  private async walkTransitiveInputs(
+    pipelineId: string,
+    startNodeId: string,
+  ): Promise<Array<{
+    nodeId: string;
+    datasetId: string | null;
+    filePath: string | null;
+    format: string | null;
+  }>> {
+    const out: Array<{
+      nodeId: string;
+      datasetId: string | null;
+      filePath: string | null;
+      format: string | null;
+    }> = [];
+    const visited = new Set<string>();
+    const queue: string[] = [startNodeId];
+    while (queue.length > 0) {
+      const nid = queue.shift()!;
+      if (visited.has(nid)) continue;
+      visited.add(nid);
+      const row = await this.knex('pipeline_nodes as pn')
+        .leftJoin('foundry_datasets as fd', 'pn.dataset_id', 'fd.id')
+        .where({ 'pn.id': nid, 'pn.pipeline_id': pipelineId })
+        .select(
+          'pn.id',
+          'pn.dataset_id',
+          'pn.config',
+          'fd.file_path as file_path',
+          'fd.format as format',
+        )
+        .first();
+      if (!row) continue;
+      if (row.dataset_id) {
+        out.push({
+          nodeId: row.id,
+          datasetId: row.dataset_id,
+          filePath: row.file_path ?? null,
+          format: row.format ?? null,
+        });
+      }
+      const cfg =
+        typeof row.config === 'string' ? JSON.parse(row.config) : row.config ?? {};
+      const next: string[] = [];
+      if (typeof cfg.sourceNodeId === 'string') next.push(cfg.sourceNodeId);
+      if (typeof cfg.rightNodeId === 'string') next.push(cfg.rightNodeId);
+      if (typeof cfg.leftNodeId === 'string') next.push(cfg.leftNodeId);
+      for (const id of next) if (!visited.has(id)) queue.push(id);
+    }
+    return out;
+  }
+
   async getPreviewSnapshot(
     projectId: string, pipelineId: string, nodeId: string,
   ) {
@@ -1311,7 +1486,15 @@ export class TransformService {
     if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
 
     const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
-    return config.previewSnapshot ?? null;
+    const snap = config.previewSnapshot;
+    if (!snap) return null;
+    const currentChainHash = chainHashFromNodeConfig(config);
+    const stale = snap.chainHash ? snap.chainHash !== currentChainHash : false;
+    return {
+      ...snap,
+      currentChainHash,
+      stale,
+    };
   }
 
   // =========================================================================
@@ -1697,6 +1880,16 @@ export class TransformService {
     filePath: string,
     limit: number,
   ): Promise<Array<Record<string, string>>> {
+    // PB-B6 — honour the pinned-input cache before falling back to a
+    // live S3 read. The deploy path seeds this cache with the EXACT
+    // rows captured at preview time (via icebergScanAsOf for Iceberg
+    // inputs, getObjectStreamPinned for S3-versioned inputs). Without
+    // this, a write to the upstream between preview and deploy would
+    // leak into the deploy output.
+    const pinned = this.pinnedInputRows(filePath);
+    if (pinned) {
+      return pinned.slice(0, limit);
+    }
     const readStream = await getObjectStream(filePath);
     const ext = filePath.toLowerCase();
     const delimiter = ext.endsWith('.tsv') ? '\t' : ',';

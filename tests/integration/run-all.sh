@@ -208,6 +208,18 @@ echo ""
 run_vitest "funnel" "${ROOT}/tests/funnel/integration"
 
 # ---------------------------------------------------------------------------
+# Phase 4: Pipeline Builder / Funnel Hardening / Link Types integration
+#
+# PB-B1..B10 + FNL-H + LT-B integration tests live under tests/foundry/
+# alongside the funnel unit tests. They talk to Lakekeeper + MinIO +
+# Temporal + the PyIceberg sidecar; the shared env is already up from
+# Phase 1's server restart, so vitest is run against the same pod.
+# Running after `funnel` keeps the two Iceberg-adjacent suites
+# sequential so they don't race for Lakekeeper warehouses.
+# ---------------------------------------------------------------------------
+run_vitest "foundry (pb-b + fnl-h + lt-b)" "${ROOT}/tests/foundry/integration"
+
+# ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
 echo -e "${BOLD}========================================${NC}"

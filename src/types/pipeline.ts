@@ -5,11 +5,22 @@ import { z } from 'zod';
 // ---------------------------------------------------------------------------
 
 export const PIPELINE_TYPES = ['batch', 'streaming'] as const;
-export const COMPUTE_TYPES = ['standard', 'lightweight', 'external'] as const;
+// PB-B2: compute_type is now the TransformService engine selector.
+//   'duckdb'         → default for new pipelines. Compiles transforms to
+//                      one SQL statement and runs via the shared DuckDB
+//                      pool (services/duckdb/pool.ts).
+//   'legacy_nodejs'  → pure-TS engine, kept for one release cycle as a
+//                      fallback. Required for chains with Normalize
+//                      until PB-B2.follow-2 ships the Rust UDF.
+export const COMPUTE_TYPES = ['duckdb', 'legacy_nodejs'] as const;
+// PB-B3: deploy output format. 'csv' is the default for one release;
+// PB-B4 flips the default to 'parquet' once Iceberg catalog lands.
+export const OUTPUT_FORMATS = ['csv', 'parquet', 'iceberg'] as const;
 export const PIPELINE_STATUSES = ['draft', 'active', 'paused', 'failed', 'archived'] as const;
 
 export type PipelineType = (typeof PIPELINE_TYPES)[number];
 export type ComputeType = (typeof COMPUTE_TYPES)[number];
+export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 export type PipelineStatus = (typeof PIPELINE_STATUSES)[number];
 
 // ---------------------------------------------------------------------------
@@ -28,7 +39,10 @@ export const CreatePipelineSchema = z.object({
   }).default('batch'),
   computeType: z.enum(COMPUTE_TYPES, {
     message: `Compute type must be one of: ${COMPUTE_TYPES.join(', ')}`,
-  }).default('standard'),
+  }).default('duckdb'),
+  outputFormat: z.enum(OUTPUT_FORMATS, {
+    message: `Output format must be one of: ${OUTPUT_FORMATS.join(', ')}`,
+  }).default('csv'),
   folderId: z.string().uuid('Invalid folder UUID format').optional().nullable(),
 });
 
@@ -43,6 +57,7 @@ export const UpdatePipelineSchema = z
     description: z.string().max(2000).optional(),
     pipelineType: z.enum(PIPELINE_TYPES).optional(),
     computeType: z.enum(COMPUTE_TYPES).optional(),
+    outputFormat: z.enum(OUTPUT_FORMATS).optional(),
     status: z.enum(PIPELINE_STATUSES).optional(),
     config: z.record(z.string(), z.unknown()).optional(),
   })
@@ -52,6 +67,7 @@ export const UpdatePipelineSchema = z
       data.description !== undefined ||
       data.pipelineType !== undefined ||
       data.computeType !== undefined ||
+      data.outputFormat !== undefined ||
       data.status !== undefined ||
       data.config !== undefined,
     { message: 'At least one field must be provided for update' },
@@ -523,6 +539,13 @@ export type SavePipelineProgressInput = z.infer<typeof SavePipelineProgressSchem
 export const DeployPipelineSchema = z.object({
   /** Which output node IDs to build. If empty/omitted, builds ALL output nodes. */
   outputNodeIds: z.array(z.string().uuid('Invalid output node UUID')).optional(),
+  /**
+   * PB-B6: override the preview-chain-hash stale check. Set to true when
+   * the user has reviewed the transform-chain drift and still wants the
+   * deploy. Without this flag, deploys with a mismatched chain hash
+   * return PREVIEW_STALE.
+   */
+  force: z.boolean().optional(),
 });
 
 export type DeployPipelineInput = z.infer<typeof DeployPipelineSchema>;

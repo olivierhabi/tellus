@@ -196,11 +196,48 @@ async function objectTypeFunnelWorkflow(
       //       dev + pure user-edit workflows.
       const datasource = await loadDatasourceForObjectType(ctx.objectTypeApiName);
       let reader: SnapshotDiffReader;
-      if (datasource?.iceberg_location && isDuckDBAvailable()) {
+      if (datasource?.iceberg_location && /_pipeline[./]/.test(datasource.iceberg_location)) {
+        // PB-B4 acceptance (d) — pipeline outputs live under the
+        // `_pipeline.*` namespace. Route through the PyIceberg-backed
+        // manifest-level scan_delta so the Funnel reads ONLY the rows
+        // added between the last-seen snapshot and the current one.
+        const { pipelineIcebergDiffReader } = await import(
+          "../pipelines/icebergChangelogReader"
+        );
+        // The iceberg_location is stored as `<warehouse>:<namespace>.<table>`
+        // by PB-B4 deploy; split it so the sidecar call site gets the
+        // warehouse + fully-qualified table identifier.
+        const [warehouse, nsTable] = datasource.iceberg_location.split(":");
+        const parts = (nsTable ?? "").split(".");
+        const table = parts.pop() ?? "output";
+        const namespace = parts.join(".");
+        reader = pipelineIcebergDiffReader({
+          warehouse,
+          namespace,
+          table,
+          primaryKeyColumn: datasource.primary_key_column ?? "primary_key",
+        });
+      } else if (datasource?.iceberg_location && isDuckDBAvailable()) {
         reader = duckdbIcebergDiffReader({
           tableLocation: datasource.iceberg_location,
           primaryKeyColumn: datasource.primary_key_column ?? "primary_key",
         });
+      } else if (await hasParquetDatasource(ctx.objectTypeApiName)) {
+        // PB-B3 — Parquet-backed pipeline output. Funnel reads the file
+        // via DuckDB footer-driven scan and yields each row as an
+        // INSERT change-log entry. Merge stage dedups by PK.
+        const bd = await loadParquetBackingDatasource(ctx.objectTypeApiName);
+        if (bd) {
+          const { parquetSnapshotDiffReader } = await import(
+            "../pipelines/parquetDiffReader"
+          );
+          reader = parquetSnapshotDiffReader({
+            path: bd.file_path,
+            primaryKeyColumn: bd.primary_key_column ?? "primary_key",
+          });
+        } else {
+          reader = { async *read() { /* empty */ } };
+        }
       } else {
         const pending = await getPendingMergeEdits(ctx.objectTypeApiName);
         const rows: SourceChangeRow[] = pending.map((e) => ({
@@ -432,6 +469,66 @@ async function loadDatasourceForObjectType(
 
 function zeroUuid(): string {
   return "00000000-0000-0000-0000-000000000000";
+}
+
+// PB-B3 — SnapshotDiffReader recognizes Parquet datasets via
+// `foundry_datasets.format='parquet'` (spec literal). We LEFT JOIN
+// `foundry_datasets` onto `backing_datasource` by foundry_dataset_id
+// (preferred) or legacy dataset_id, and authoritatively key off
+// `fd.format`. The legacy file_format / extension fallback is retained
+// only for datasources registered before migration 027 added the
+// foundry_dataset_id FK.
+async function hasParquetDatasource(objectTypeApiName: string): Promise<boolean> {
+  try {
+    const res = await query(
+      `SELECT 1
+         FROM backing_datasource bd
+         JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+         LEFT JOIN foundry_datasets fd
+               ON fd.id = COALESCE(bd.foundry_dataset_id, bd.dataset_id)
+        WHERE ot.api_name = $1
+          AND (
+               fd.format = 'parquet'
+               OR bd.file_format = 'parquet'
+               OR bd.file_path ILIKE '%.parquet%'
+          )
+        LIMIT 1`,
+      [objectTypeApiName]
+    );
+    return res.rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function loadParquetBackingDatasource(
+  objectTypeApiName: string,
+): Promise<{ file_path: string; primary_key_column: string } | null> {
+  try {
+    const res = await query(
+      `SELECT bd.file_path, bd.primary_key_column
+         FROM backing_datasource bd
+         JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+         LEFT JOIN foundry_datasets fd
+               ON fd.id = COALESCE(bd.foundry_dataset_id, bd.dataset_id)
+        WHERE ot.api_name = $1
+          AND (
+               fd.format = 'parquet'
+               OR bd.file_format = 'parquet'
+               OR bd.file_path ILIKE '%.parquet%'
+          )
+        LIMIT 1`,
+      [objectTypeApiName]
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      file_path: row.file_path,
+      primary_key_column: row.primary_key_column,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**

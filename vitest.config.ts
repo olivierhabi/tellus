@@ -117,6 +117,28 @@ export default defineConfig({
         "src/utils/gracefulShutdown.ts",
         "src/services/opensearch/resilience.ts",
         "src/utils/pgResilience.ts",
+        // Pipeline Builder / Funnel Hardening / Link Types (uncommitted).
+        // Any file whose behaviour is guarded by a pb-b*-unit or
+        // pb-b*-integration test goes here so `npm run test:coverage`
+        // reports lcov lines for the uncommitted PB-B modules.
+        "src/services/deploymentService.ts",
+        "src/services/pipelines/**",
+        "src/services/duckdb/**",
+        "src/services/funnel/temporal/**",
+        "src/services/funnel/funnelDispatcher.ts",
+        "src/services/funnel/mergeStage.ts",
+        "src/services/funnel/lakekeeperBootstrap.ts",
+        "src/services/funnel/lakekeeperClient.ts",
+        "src/services/funnel/icebergCatalog.ts",
+        "src/services/markingUnion.ts",
+        "src/services/traceContext.ts",
+        "src/services/structuredLogger.ts",
+        "src/services/otelBootstrap.ts",
+        "src/services/throughputGuard.ts",
+        "src/routes/healthReady.ts",
+        "src/routes/lineage.ts",
+        "src/routes/pipelinesMetrics.ts",
+        "src/middleware/traceContext.ts",
         "src/utils/apiReferenceGenerator.ts",
       ],
       exclude: [

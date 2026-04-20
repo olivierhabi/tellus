@@ -21,10 +21,18 @@
 import type { PoolClient } from "pg";
 import { getClient, query } from "../db";
 import { publishLinkCdc } from "../services/searchAround/cdcLinkProducer";
+
+function genEventId(): string {
+  try {
+    return require("crypto").randomUUID();
+  } catch {
+    return `evt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+}
 import { client as opensearchClient } from "../services/opensearch/client";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { markEditsAsIndexed } from "../models/ontologyEdit";
-import { writeOverlayForEdit } from "../services/overlay/writebackOverlay";
+import { writeOverlayForEdit, writeOverlayForLinkEdit } from "../services/overlay/writebackOverlay";
 import { isB1Ready } from "../services/funnel/b1Readiness";
 import type { CompiledEdit, LinkEdit } from "./ruleCompiler";
 
@@ -46,6 +54,17 @@ export interface ApplyExecutionContext {
    * cadence.
    */
   ontologyId?: string;
+  /**
+   * FNL-H2 — cross-cutting provenance. `correlationId` ties together
+   * every edit produced by a single HTTP request; `causationId` links
+   * the immediate upstream event; `actionRid` identifies the Action
+   * workflow and `eventId` is the per-edit unique id carried on the CDC
+   * topic. All optional so legacy callers stay source-compatible.
+   */
+  correlationId?: string;
+  causationId?: string;
+  actionRid?: string;
+  eventId?: string;
 }
 
 /** A single successfully applied edit. */
@@ -185,24 +204,40 @@ export async function applyEdits(
           edit,
           editId,
           actorUserId: executionContext.executedBy,
+          correlationId: executionContext.correlationId,
+          causationId: executionContext.causationId,
+          actionRid: executionContext.actionRid ?? executionContext.actionTypeApiName,
         });
       }
 
       // Step 6: Insert link_edit rows for many-to-many links
-      // (inside the same PG transaction for atomicity)
+      // (inside the same PG transaction for atomicity).
+      //
+      // FNL-H2 / LT-B3: carry correlation_id / causation_id / action_rid
+      // / actor through to the link_edit row so the downstream CDC
+      // producer can emit v2.0.0 Avro payloads with full provenance.
       if (edit.linkEdits && edit.linkEdits.length > 0) {
         for (const linkEdit of edit.linkEdits) {
           await pgClient.query(
             `INSERT INTO link_edit
                (link_type_api_name, source_primary_key, target_primary_key,
-                operation, execution_id)
-             VALUES ($1, $2, $3, $4, $5)`,
+                operation, execution_id,
+                event_id, schema_version,
+                actor_principal_id, action_rid,
+                correlation_id, causation_id_uuid)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
             [
               linkEdit.linkTypeApiName,
               edit.primaryKey,
               linkEdit.targetPrimaryKey,
               linkEdit.operation,
               executionContext.executionId,
+              executionContext.eventId ?? genEventId(),
+              "2.0.0",
+              executionContext.executedBy,
+              executionContext.actionRid ?? executionContext.actionTypeApiName,
+              executionContext.correlationId ?? null,
+              executionContext.causationId ?? null,
             ]
           );
         }
@@ -227,10 +262,40 @@ export async function applyEdits(
       // The source-type for a link_edit is the same object type the
       // action modified; link direction is decoupled via source_pk /
       // target_pk columns on the link table.
+      //
+      // LT-B3: emit full v2.0.0 provenance on the per-link CDC topic.
+      const rawOp = (linkEdit.operation ?? "add") as string;
+      const op: "ADD" | "REMOVE" | "RETRACT" =
+        rawOp === "remove"
+          ? "REMOVE"
+          : rawOp === "retract"
+            ? "RETRACT"
+            : "ADD";
       void publishLinkCdc(edit.objectType, linkEdit.linkTypeApiName, {
         source_pk: edit.primaryKey,
         target_pk: linkEdit.targetPrimaryKey,
         link_props: {},
+        markings: [],
+        schema_version: "2.0.0",
+        event_id: genEventId(),
+        event_ts_micros: Date.now() * 1000,
+        ontology_id: executionContext.ontologyId,
+        link_type_api_name: linkEdit.linkTypeApiName,
+        operation: op,
+        actor_principal_id: executionContext.executedBy,
+        action_rid: executionContext.actionRid ?? executionContext.actionTypeApiName ?? null,
+        correlation_id: executionContext.correlationId ?? null,
+        causation_id: executionContext.causationId ?? null,
+        direction: "forward",
+      });
+
+      // FNL-H5 — writeback overlay for the link edit so the resolver
+      // sees the change immediately even if Quickwit/CH ingestion lags.
+      void writeOverlayForLinkEdit({
+        linkTypeApiName: linkEdit.linkTypeApiName,
+        sourcePk: edit.primaryKey,
+        targetPk: linkEdit.targetPrimaryKey,
+        operation: op,
         markings: [],
       });
     }
@@ -447,13 +512,16 @@ interface WriteOverlayInTxnInput {
   edit: CompiledEdit;
   editId: string;
   actorUserId: string;
+  correlationId?: string;
+  causationId?: string;
+  actionRid?: string;
 }
 
 async function writeOverlayForEditInTxn(
   pgClient: PoolClient,
   input: WriteOverlayInTxnInput
 ): Promise<void> {
-  const { edit, editId, ontologyId, actorUserId } = input;
+  const { edit, editId, ontologyId, actorUserId, correlationId, causationId, actionRid } = input;
   const deleted = edit.operation === "delete";
   const doc = deleted ? {} : edit.propertyValues ?? {};
 
@@ -470,8 +538,8 @@ async function writeOverlayForEditInTxn(
       `INSERT INTO object_edits
          (edit_id, ontology_id, object_type_api_name, primary_key,
           property_api_name, new_value, edit_strategy, actor_user_id,
-          created_at)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'user_edit_wins', $7, NOW())
+          created_at, correlation_id, causation_id, action_rid)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'user_edit_wins', $7, NOW(), $8, $9, $10)
        ON CONFLICT (edit_id) DO NOTHING`,
       [
         editId,
@@ -481,6 +549,9 @@ async function writeOverlayForEditInTxn(
         "*",
         JSON.stringify(doc),
         actorUserId,
+        correlationId ?? null,
+        causationId ?? null,
+        actionRid ?? null,
       ]
     );
 

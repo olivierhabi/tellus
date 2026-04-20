@@ -59,6 +59,8 @@ async function getProducer(): Promise<Producer | null> {
   return producer;
 }
 
+export type LinkCdcOperation = "ADD" | "REMOVE" | "RETRACT";
+
 export interface LinkCdcRow {
   source_pk: string;
   target_pk: string;
@@ -66,6 +68,66 @@ export interface LinkCdcRow {
   markings?: string[];
   source_ts?: string;
   cdc_offset?: number;
+  // LT-B3 v2.0.0 — Ontology-edit semantics on the per-link CDC topic.
+  schema_version?: string;
+  event_id?: string;
+  event_ts_micros?: number;
+  ontology_id?: string;
+  link_type_api_name?: string;
+  operation?: LinkCdcOperation;
+  actor_principal_id?: string;
+  action_rid?: string | null;
+  correlation_id?: string | null;
+  causation_id?: string | null;
+  retracts_event_id?: string | null;
+  direction?: "forward" | "reverse";
+}
+
+/**
+ * Validate an outgoing LT-B3 v2 CDC payload before we hit Kafka.
+ * Mirrors the Avro schema contract documented in tasks-02 §LT-B3.
+ */
+export function validateLinkCdcV2(row: LinkCdcRow): { ok: true } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  if (!row.source_pk) errors.push("source_pk is required");
+  if (!row.target_pk) errors.push("target_pk is required");
+  if (!row.event_id) errors.push("event_id is required (v2)");
+  if (!row.event_ts_micros) errors.push("event_ts_micros is required (v2)");
+  if (!row.ontology_id) errors.push("ontology_id is required (v2)");
+  if (!row.link_type_api_name) errors.push("link_type_api_name is required (v2)");
+  if (!row.operation) errors.push("operation is required (v2)");
+  if (row.operation && !["ADD", "REMOVE", "RETRACT"].includes(row.operation)) {
+    errors.push(`operation must be ADD|REMOVE|RETRACT, got ${row.operation}`);
+  }
+  if (row.operation === "RETRACT" && !row.retracts_event_id) {
+    errors.push("RETRACT requires retracts_event_id pointing at the original event");
+  }
+  return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
+function serialisePayload(row: LinkCdcRow): string {
+  return JSON.stringify({
+    // v1 backwards-compatible fields (Kafka engine / ClickHouse MV reads these)
+    source_pk: row.source_pk,
+    target_pk: row.target_pk,
+    link_props: JSON.stringify(row.link_props ?? {}),
+    markings: row.markings ?? [],
+    source_ts: row.source_ts ?? toClickHouseDateTime(new Date()),
+    cdc_offset: row.cdc_offset ?? Date.now(),
+    // v2.0.0 — Ontology edit semantics
+    schema_version: row.schema_version ?? "2.0.0",
+    event_id: row.event_id ?? null,
+    event_ts_micros: row.event_ts_micros ?? Date.now() * 1000,
+    ontology_id: row.ontology_id ?? null,
+    link_type_api_name: row.link_type_api_name ?? null,
+    operation: row.operation ?? "ADD",
+    actor_principal_id: row.actor_principal_id ?? null,
+    action_rid: row.action_rid ?? null,
+    correlation_id: row.correlation_id ?? null,
+    causation_id: row.causation_id ?? null,
+    retracts_event_id: row.retracts_event_id ?? null,
+    direction: row.direction ?? "forward",
+  });
 }
 
 function sanitise(s: string): string {
@@ -95,18 +157,11 @@ export async function publishLinkCdc(
       messages: [
         {
           key: `${row.source_pk}::${row.target_pk}`,
-          value: JSON.stringify({
-            source_pk: row.source_pk,
-            target_pk: row.target_pk,
-            link_props: JSON.stringify(row.link_props ?? {}),
-            markings: row.markings ?? [],
-            // ClickHouse JSONEachRow parses DateTime64(3) as
-          // `YYYY-MM-DD HH:MM:SS.sss`, NOT as ISO-8601 (`T`...`Z`). The
-          // Kafka engine fails with CANNOT_PARSE_INPUT_ASSERTION_FAILED
-          // on ISO input. Format accordingly.
-          source_ts: row.source_ts ?? toClickHouseDateTime(new Date()),
-            cdc_offset: row.cdc_offset ?? Date.now(),
-          }),
+          value: serialisePayload(row),
+          headers: {
+            schema_version: row.schema_version ?? "2.0.0",
+            operation: row.operation ?? "ADD",
+          },
         },
       ],
     });
@@ -137,18 +192,11 @@ export async function publishLinkCdcBatch(
       topic,
       messages: rows.map((row) => ({
         key: `${row.source_pk}::${row.target_pk}`,
-        value: JSON.stringify({
-          source_pk: row.source_pk,
-          target_pk: row.target_pk,
-          link_props: JSON.stringify(row.link_props ?? {}),
-          markings: row.markings ?? [],
-          // ClickHouse JSONEachRow parses DateTime64(3) as
-          // `YYYY-MM-DD HH:MM:SS.sss`, NOT as ISO-8601 (`T`...`Z`). The
-          // Kafka engine fails with CANNOT_PARSE_INPUT_ASSERTION_FAILED
-          // on ISO input. Format accordingly.
-          source_ts: row.source_ts ?? toClickHouseDateTime(new Date()),
-          cdc_offset: row.cdc_offset ?? Date.now(),
-        }),
+        value: serialisePayload(row),
+        headers: {
+          schema_version: row.schema_version ?? "2.0.0",
+          operation: row.operation ?? "ADD",
+        },
       })),
     });
     return rows.length;

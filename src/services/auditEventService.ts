@@ -29,7 +29,10 @@ export type AuditCategory =
   | 'session'
   | 'reauth'
   | 'mfa'
-  | 'admin';
+  | 'admin'
+  // PB-B7 — per-pipeline ACL changes + marking-policy deny events.
+  | 'pipeline_acl'
+  | 'pipeline_marking';
 
 export type AuditAction =
   // password
@@ -62,7 +65,13 @@ export type AuditAction =
   | 'admin.user.delete'
   | 'admin.user.enable'
   | 'admin.user.disable'
-  | 'admin.setting.update';
+  | 'admin.setting.update'
+  // PB-B7
+  | 'pipeline.acl.grant'
+  | 'pipeline.acl.revoke'
+  | 'pipeline.acl.deny'
+  | 'pipeline.marking.deny'
+  | 'pipeline.marking.propagate';
 
 export interface EmitAuditOpts {
   keycloakSub: string;

@@ -1,0 +1,6 @@
+order_id,customer_id,status,amount,internal_notes
+1001,42,open,19.50,ignore
+1002,42,closed,5.00,ignore
+1003,99,open,101.75,
+1004,101,open,null,
+1005,101,cancelled,3.25,

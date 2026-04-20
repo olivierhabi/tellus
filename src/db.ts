@@ -71,11 +71,20 @@ async function query(text: string, values?: unknown[]): Promise<QueryResult> {
   try {
     return await pool.query(text, values);
   } catch (err) {
-    console.error("PostgreSQL query error:", {
-      sql: text,
-      params: values,
-      error: err instanceof Error ? err.message : err,
-    });
+    const msg = err instanceof Error ? err.message : String(err);
+    // Shutdown race: a fire-and-forget boot task (ClickHouse bootstrap,
+    // Lakekeeper, …) hit pool.end() mid-query. The caller already
+    // swallows this as a clean no-op — don't pollute the log with the
+    // full SQL stack dump that makes it look like a real failure.
+    const isShutdownRace =
+      /pool after calling end on the pool|Pool is ending|cannot use a pool/i.test(msg);
+    if (!isShutdownRace) {
+      console.error("PostgreSQL query error:", {
+        sql: text,
+        params: values,
+        error: msg,
+      });
+    }
     throw err;
   }
 }

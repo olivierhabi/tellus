@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# Pipeline Builder — PB-B9 burn-rate alerts.
+#
+# SLO target: deploy success rate ≥ 99.5%.
+# Error budget: 0.5% → burn-rate bands:
+#   * 2% of budget over 1h   (pages fast)
+#   * 5% of budget over 6h   (pages slower)
+#   * 10% of budget over 24h (ticket)
+#
+# Each band pairs a short + long window: alert fires only when BOTH are
+# above the threshold, so a brief incident that resolves in <2m doesn't
+# page. Mirrors the Funnel's alert convention.
+# ---------------------------------------------------------------------------
+
+groups:
+  - name: pipeline_builder_slo
+    interval: 30s
+    rules:
+      # Recording rules — error ratio over rolling windows. The division
+      # is guarded with clamp_min so an empty scrape doesn't NaN.
+      - record: pipeline_builder:deploy_error_ratio:5m
+        expr: |
+          sum(rate(pipeline_deploy_total{status!="succeeded"}[5m]))
+            / clamp_min(sum(rate(pipeline_deploy_total[5m])), 0.001)
+
+      - record: pipeline_builder:deploy_error_ratio:1h
+        expr: |
+          sum(rate(pipeline_deploy_total{status!="succeeded"}[1h]))
+            / clamp_min(sum(rate(pipeline_deploy_total[1h])), 0.001)
+
+      - record: pipeline_builder:deploy_error_ratio:6h
+        expr: |
+          sum(rate(pipeline_deploy_total{status!="succeeded"}[6h]))
+            / clamp_min(sum(rate(pipeline_deploy_total[6h])), 0.001)
+
+      - record: pipeline_builder:deploy_error_ratio:24h
+        expr: |
+          sum(rate(pipeline_deploy_total{status!="succeeded"}[24h]))
+            / clamp_min(sum(rate(pipeline_deploy_total[24h])), 0.001)
+
+      # --- Burn-rate alerts ---
+      #
+      # 2% budget over 1h  → burn rate 14.4x → threshold = 14.4 * 0.005
+      - alert: PipelineBuilderFastBurn
+        expr: |
+          pipeline_builder:deploy_error_ratio:5m > (14.4 * 0.005)
+          and
+          pipeline_builder:deploy_error_ratio:1h > (14.4 * 0.005)
+        for: 2m
+        labels: { severity: page, slo: deploy_success_rate }
+        annotations:
+          summary: "Pipeline Builder deploy success rate is burning >2%/hour of the monthly budget."
+          runbook: "infra/runbooks/pipeline-builder-deploy-failures.md"
+
+      # 5% budget over 6h  → burn rate 6x → threshold = 6 * 0.005
+      - alert: PipelineBuilderSlowBurn
+        expr: |
+          pipeline_builder:deploy_error_ratio:1h > (6 * 0.005)
+          and
+          pipeline_builder:deploy_error_ratio:6h > (6 * 0.005)
+        for: 15m
+        labels: { severity: page, slo: deploy_success_rate }
+        annotations:
+          summary: "Pipeline Builder deploy success rate is burning >5%/6h of the monthly budget."
+          runbook: "infra/runbooks/pipeline-builder-deploy-failures.md"
+
+      # 10% budget over 24h → burn rate 3x → threshold = 3 * 0.005
+      - alert: PipelineBuilderDailyBurn
+        expr: |
+          pipeline_builder:deploy_error_ratio:6h > (3 * 0.005)
+          and
+          pipeline_builder:deploy_error_ratio:24h > (3 * 0.005)
+        for: 1h
+        labels: { severity: ticket, slo: deploy_success_rate }
+        annotations:
+          summary: "Pipeline Builder deploy success rate has burned >10% of the monthly budget over 24h."
+          runbook: "infra/runbooks/pipeline-builder-deploy-failures.md"
+
+      # Readiness probe failures (secondary, immediate).
+      - alert: PipelineBuilderReadinessFailing
+        expr: |
+          sum by (probe) (rate(pipeline_health_check_failures_total[2m])) > 0
+        for: 3m
+        labels: { severity: page }
+        annotations:
+          summary: "/health/ready probe {{ $labels.probe }} is failing."
+          runbook: "infra/runbooks/pipeline-builder-readiness.md"

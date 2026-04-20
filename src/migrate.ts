@@ -1818,6 +1818,123 @@ async function migrate(): Promise<void> {
     `);
     console.log("Ensured funnel_run has temporal_workflow_id UPSERT key (B3)");
 
+    // ------------------------------------------------------------------
+    // LT-B1..B10 — Link Type Extensions (017_link_type_extensions.sql).
+    // Inlined so a fresh `npm run migrate` picks the new columns and
+    // tables up without requiring the side migration runner.
+    // ------------------------------------------------------------------
+    const fsMod = await import("fs");
+    const pathMod = await import("path");
+    try {
+      const sqlFile = pathMod.join(__dirname, "migrations", "017_link_type_extensions.sql");
+      if (fsMod.existsSync(sqlFile)) {
+        const sql = fsMod.readFileSync(sqlFile, "utf-8");
+        await client.query(sql);
+        console.log("Applied 017_link_type_extensions.sql (LT-B1..B10)");
+      } else {
+        // Fall back to dist layout (./migrations next to migrate.js after tsc).
+        const distFile = pathMod.join(__dirname, "..", "src", "migrations", "017_link_type_extensions.sql");
+        if (fsMod.existsSync(distFile)) {
+          await client.query(fsMod.readFileSync(distFile, "utf-8"));
+          console.log("Applied 017_link_type_extensions.sql (LT-B1..B10, dist path)");
+        } else {
+          console.warn("[migrate] 017_link_type_extensions.sql not found — skipping LT extensions");
+        }
+      }
+    } catch (sqlErr) {
+      const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
+      throw new Error(`017_link_type_extensions.sql failed: ${msg}`);
+    }
+
+    // ------------------------------------------------------------------
+    // FNL-H2 / FNL-H3 / FNL-H4 (018_funnel_hardening.sql). Same inlining
+    // pattern as 017 so a fresh `npm run migrate` is self-sufficient.
+    // ------------------------------------------------------------------
+    try {
+      const sqlFile = pathMod.join(__dirname, "migrations", "018_funnel_hardening.sql");
+      if (fsMod.existsSync(sqlFile)) {
+        await client.query(fsMod.readFileSync(sqlFile, "utf-8"));
+        console.log("Applied 018_funnel_hardening.sql (FNL-H2/H3/H4)");
+      }
+    } catch (sqlErr) {
+      const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
+      throw new Error(`018_funnel_hardening.sql failed: ${msg}`);
+    }
+
+    // ------------------------------------------------------------------
+    // PB-B3..B10 + FNL-H follow-ups (migrations 019–032). Each file is
+    // idempotent (ALTER ... IF NOT EXISTS, CREATE OR REPLACE) so
+    // re-running migrate on an already-bootstrapped environment is
+    // safe. Migration 032 installs the schema_migrations_applied
+    // ledger, so from 032 onwards we both apply and record in the
+    // ledger. Unapplied migrations show up as a diff between the
+    // filename list below and the ledger query.
+    // ------------------------------------------------------------------
+    const sequencedMigrations = [
+      "019_pipeline_output_format.sql",
+      "020_pipeline_iceberg.sql",
+      "021_pipeline_streaming.sql",
+      "022_pipeline_preview_pinning.sql",
+      "023_pipeline_rbac.sql",
+      "024_dataset_lineage.sql",
+      "025_pipeline_cbac.sql",
+      "026_fnl_h3_pipeline_deploy_signal.sql",
+      "027_bd_foundry_dataset_id.sql",
+      "028_schema_evolution.sql",
+      "029_funnel_input_lineage_trigger.sql",
+      "030_keycloak_group_map.sql",
+      "031_pipeline_snapshot_invariants.sql",
+      "032_migration_ledger.sql",
+    ];
+
+    // First pass: make sure the ledger exists before we try to use it
+    // as a skip-list. 032 is special: once it lands, subsequent runs
+    // consult the ledger.
+    try {
+      const sqlFile = pathMod.join(__dirname, "migrations", "032_migration_ledger.sql");
+      if (fsMod.existsSync(sqlFile)) {
+        await client.query(fsMod.readFileSync(sqlFile, "utf-8"));
+      }
+    } catch (sqlErr) {
+      // Not fatal — the ledger will catch up on the next run.
+      console.warn(
+        `[migrate] could not bootstrap ledger: ${sqlErr instanceof Error ? sqlErr.message : String(sqlErr)}`,
+      );
+    }
+
+    // Second pass: walk every sequenced migration. Skip if the ledger
+    // says it's already applied; otherwise apply + record.
+    const crypto = await import("crypto");
+    const applied = await client
+      .query(`SELECT migration_name FROM schema_migrations_applied`)
+      .then((r) => new Set(r.rows.map((row: { migration_name: string }) => row.migration_name)))
+      .catch(() => new Set<string>());
+
+    for (const name of sequencedMigrations) {
+      if (applied.has(name)) {
+        console.log(`Skipping ${name} (already applied per ledger)`);
+        continue;
+      }
+      try {
+        const sqlFile = pathMod.join(__dirname, "migrations", name);
+        if (!fsMod.existsSync(sqlFile)) continue;
+        const sql = fsMod.readFileSync(sqlFile, "utf-8");
+        await client.query(sql);
+        const checksum = crypto.createHash("sha256").update(sql).digest("hex");
+        await client.query(
+          `INSERT INTO schema_migrations_applied (migration_name, checksum)
+           VALUES ($1, $2)
+           ON CONFLICT (migration_name) DO UPDATE
+             SET checksum = EXCLUDED.checksum`,
+          [name, checksum],
+        );
+        console.log(`Applied ${name}`);
+      } catch (sqlErr) {
+        const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
+        throw new Error(`${name} failed: ${msg}`);
+      }
+    }
+
   } catch (err) {
     await client.query("ROLLBACK");
     const message = err instanceof Error ? err.message : String(err);

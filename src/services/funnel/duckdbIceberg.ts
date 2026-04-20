@@ -20,87 +20,31 @@
 
 import { SnapshotDiffReader, SourceChangeRow } from "./changelogStage";
 import { DatasourceContribution, MergeInput, MergeResult, mergeChanges } from "./mergeStage";
+import {
+  acquireConnection,
+  installAndLoad,
+  isDuckDBAvailable as poolIsDuckDBAvailable,
+  queryAll,
+  releaseConnection,
+  runAll,
+  type DuckDBConnection,
+} from "../duckdb/pool";
 
 // ---------------------------------------------------------------------------
-// Lazy load DuckDB — same pattern as furnaceSqlService.ts. The native
-// binary is optional; we surface a clear error if the caller tries to
-// use this path without duckdb installed.
+// This module used to open its own DuckDB Database per call. PB-B2 (g)
+// requires a single DuckDB process per pod shared across Funnel + Pipeline
+// Builder, so every entry point now routes through the shared pool in
+// services/duckdb/pool.ts. Bootstrap (memory_limit, temp_directory,
+// httpfs, S3 creds) is applied by the pool; this file only adds the
+// iceberg extension on top.
 // ---------------------------------------------------------------------------
-
-type DuckDBDatabaseCtor = new (p: string) => DuckDBDatabase;
-interface DuckDBDatabase {
-  connect(): DuckDBConnection;
-  close(cb?: (err: Error | null) => void): void;
-}
-interface DuckDBConnection {
-  run(sql: string, cb: (err: Error | null) => void): void;
-  all<T>(sql: string, cb: (err: Error | null, rows: T[]) => void): void;
-}
-
-let DatabaseCtor: DuckDBDatabaseCtor | null = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  DatabaseCtor = require("duckdb").Database as DuckDBDatabaseCtor;
-} catch {
-  /* DuckDB not available — caller must fall back. */
-}
 
 export function isDuckDBAvailable(): boolean {
-  return DatabaseCtor !== null;
-}
-
-function openInMemory(): DuckDBDatabase {
-  if (!DatabaseCtor) {
-    throw new Error(
-      "duckdb native module is not available. Install `duckdb` and the iceberg extension before using the DuckDB paths."
-    );
-  }
-  return new DatabaseCtor(":memory:");
-}
-
-function runAll(conn: DuckDBConnection, sql: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    conn.run(sql, (err) => (err ? reject(err) : resolve()));
-  });
-}
-
-function queryAll<T>(conn: DuckDBConnection, sql: string): Promise<T[]> {
-  return new Promise<T[]>((resolve, reject) => {
-    conn.all<T>(sql, (err, rows) => (err ? reject(err) : resolve(rows)));
-  });
+  return poolIsDuckDBAvailable();
 }
 
 async function ensureIcebergExtension(conn: DuckDBConnection): Promise<void> {
-  // INSTALL is idempotent; LOAD must happen per session.
-  try {
-    await runAll(conn, "INSTALL iceberg");
-  } catch {
-    /* already installed */
-  }
-  await runAll(conn, "LOAD iceberg");
-  // httpfs for s3:// URIs.
-  try {
-    await runAll(conn, "INSTALL httpfs");
-  } catch {
-    /* already installed */
-  }
-  await runAll(conn, "LOAD httpfs");
-  // Set S3 credentials from env. The caller is responsible for matching
-  // these to the MinIO / S3 endpoint serving the Iceberg metadata.
-  const endpoint = (process.env.ICEBERG_S3_ENDPOINT ?? process.env.S3_ENDPOINT ?? "").replace(
-    /^https?:\/\//,
-    ""
-  );
-  const region = process.env.S3_REGION ?? "us-east-1";
-  const akid = process.env.S3_ACCESS_KEY_ID ?? "minioadmin";
-  const sak = process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin";
-  const pathStyle = (process.env.S3_FORCE_PATH_STYLE ?? "true") === "true" ? "true" : "false";
-  await runAll(conn, `SET s3_region='${region}'`);
-  if (endpoint) await runAll(conn, `SET s3_endpoint='${endpoint}'`);
-  await runAll(conn, `SET s3_access_key_id='${akid}'`);
-  await runAll(conn, `SET s3_secret_access_key='${sak}'`);
-  await runAll(conn, `SET s3_url_style='${pathStyle === "true" ? "path" : "vhost"}'`);
-  await runAll(conn, "SET s3_use_ssl=false");
+  await installAndLoad(conn, "iceberg");
 }
 
 // ---------------------------------------------------------------------------
@@ -138,8 +82,7 @@ export async function listIcebergSnapshots(
       "DuckDB not available — call isDuckDBAvailable() before using listIcebergSnapshots"
     );
   }
-  const db = openInMemory();
-  const conn = db.connect();
+  const conn = await acquireConnection();
   try {
     await ensureIcebergExtension(conn);
     const rows = await queryAll<{
@@ -161,11 +104,7 @@ export async function listIcebergSnapshots(
           : String(r.committed_at),
     }));
   } finally {
-    try {
-      db.close();
-    } catch {
-      /* ignore */
-    }
+    releaseConnection(conn);
   }
 }
 
@@ -175,8 +114,7 @@ export function duckdbIcebergDiffReader(opts: DuckDBReaderOptions): SnapshotDiff
       if (!isDuckDBAvailable()) {
         throw new Error("DuckDB not available — call isDuckDBAvailable() before using this reader");
       }
-      const db = openInMemory();
-      const conn = db.connect();
+      const conn = await acquireConnection();
       try {
         await ensureIcebergExtension(conn);
         const predicate = fromSnapshotId
@@ -207,11 +145,7 @@ export function duckdbIcebergDiffReader(opts: DuckDBReaderOptions): SnapshotDiff
           } as SourceChangeRow;
         }
       } finally {
-        try {
-          db.close();
-        } catch {
-          /* ignore */
-        }
+        releaseConnection(conn);
       }
     },
   };
@@ -275,8 +209,7 @@ export async function mergeChangesMaybeDuckDB(input: DuckDBMergeInput): Promise<
  * the Node event loop.
  */
 async function mergeChangesViaDuckDB(input: DuckDBMergeInput): Promise<MergeResult> {
-  const db = openInMemory();
-  const conn = db.connect();
+  const conn = await acquireConnection();
   try {
     await ensureIcebergExtension(conn);
     await runAll(
@@ -350,11 +283,7 @@ async function mergeChangesViaDuckDB(input: DuckDBMergeInput): Promise<MergeResu
       contributions: [synthetic],
     });
   } finally {
-    try {
-      db.close();
-    } catch {
-      /* ignore */
-    }
+    releaseConnection(conn);
   }
 }
 

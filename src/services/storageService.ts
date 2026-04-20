@@ -8,6 +8,7 @@ import {
   HeadObjectCommand,
   HeadBucketCommand,
   CreateBucketCommand,
+  GetBucketVersioningCommand,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -182,6 +183,94 @@ export async function headObject(key: string): Promise<{
     lastModified: response.LastModified,
     metadata: response.Metadata,
   };
+}
+
+/**
+ * PB-B6 — extended head that captures ETag + VersionId so the preview
+ * pinning path can read back an exact object revision. The legacy
+ * `headObject()` is kept for callers that only need length/type.
+ */
+export async function headObjectWithVersion(key: string): Promise<{
+  contentLength: number;
+  contentType: string | undefined;
+  lastModified: Date | undefined;
+  etag: string | null;
+  versionId: string | null;
+}> {
+  const config = getConfig();
+  const client = getClient();
+  const response = await client.send(
+    new HeadObjectCommand({ Bucket: config.bucket, Key: key }),
+  );
+  return {
+    contentLength: response.ContentLength ?? 0,
+    contentType: response.ContentType,
+    lastModified: response.LastModified,
+    etag: response.ETag ? response.ETag.replace(/^"|"$/g, "") : null,
+    versionId: response.VersionId ?? null,
+  };
+}
+
+/**
+ * PB-B6 — read an object by a specific version id (S3 versioning) OR
+ * assert the ETag hasn't moved since the preview (strong-consistency
+ * fallback for unversioned buckets if the caller chose to live with
+ * ETag-only pinning). Throws PREVIEW_SNAPSHOT_EXPIRED when the target
+ * version/etag is gone.
+ */
+export async function getObjectStreamPinned(
+  key: string,
+  pin: { versionId?: string | null; etag?: string | null },
+): Promise<Readable> {
+  const config = getConfig();
+  const client = getClient();
+  try {
+    const response = await client.send(
+      new GetObjectCommand({
+        Bucket: config.bucket,
+        Key: key,
+        VersionId: pin.versionId ?? undefined,
+        IfMatch: pin.etag ? `"${pin.etag}"` : undefined,
+      }),
+    );
+    return response.Body as Readable;
+  } catch (err) {
+    const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+    const notFound =
+      e.name === "NoSuchVersion" ||
+      e.name === "NotFound" ||
+      e.$metadata?.httpStatusCode === 404 ||
+      e.$metadata?.httpStatusCode === 412;
+    if (notFound) {
+      const err2 = new Error(
+        `Object revision for key '${key}' is no longer available (version/etag mismatch).`,
+      );
+      (err2 as Error & { code?: string; httpStatus?: number }).code =
+        "PREVIEW_SNAPSHOT_EXPIRED";
+      (err2 as Error & { httpStatus?: number }).httpStatus = 410;
+      throw err2;
+    }
+    throw err;
+  }
+}
+
+/**
+ * PB-B6 — is the configured bucket S3-versioning-enabled? Preview
+ * creation on non-Iceberg inputs requires this; without it we would
+ * only have ETag-based pinning which doesn't defend against overwrites.
+ * Returns true on `Enabled`, false on `Suspended` / missing / error.
+ */
+export async function isBucketVersioningEnabled(): Promise<boolean> {
+  const config = getConfig();
+  const client = getClient();
+  try {
+    const res = await client.send(
+      new GetBucketVersioningCommand({ Bucket: config.bucket }),
+    );
+    return res.Status === "Enabled";
+  } catch {
+    return false;
+  }
 }
 
 /**

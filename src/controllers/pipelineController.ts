@@ -31,6 +31,7 @@ import {
 } from '../types/pipeline';
 import { AppError } from '../utils/foundryAppError';
 import { DeploymentService } from '../services/deploymentService';
+import foundryDb from '../config/foundryDb';
 
 /**
  * PipelineController — HTTP layer for pipeline CRUD operations.
@@ -61,6 +62,14 @@ export class PipelineController {
       throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
     }
     return user.id;
+  }
+
+  /** Extract the Keycloak sub claim for audit attribution. */
+  private getKeycloakSub(req: Request): string | null {
+    const principal = (req as unknown as {
+      tellusPrincipal?: { sub?: string; userId?: string };
+    }).tellusPrincipal;
+    return principal?.sub ?? null;
   }
 
   /** Extract and validate projectId from route params. */
@@ -150,7 +159,47 @@ export class PipelineController {
         throw new AppError('Pipeline not found', 404, 'NOT_FOUND');
       }
 
-      res.json({ success: true, data: pipeline });
+      // PB-B8 — surface `lineage.feedsObjectTypes` so the frontend can
+      // show "deploys into Object Type: Order" next to the pipeline
+      // name. We look up the latest output dataset for the pipeline
+      // and call the lineage service's OT resolver. Empty list when
+      // the pipeline has never deployed a dataset.
+      let feedsObjectTypes: Array<{
+        ontologyId: string;
+        apiName: string;
+        role: 'backing_datasource';
+      }> = [];
+      try {
+        const outNode = await foundryDb('pipeline_nodes')
+          .where({ pipeline_id: (pipeline as { id: string }).id, node_type: 'output' })
+          .whereNotNull('dataset_id')
+          .orderBy('updated_at', 'desc')
+          .first('dataset_id');
+        if (outNode?.dataset_id) {
+          const { DatasetLineageService } = await import('../services/pipelines/datasetLineage');
+          const lineage = new DatasetLineageService();
+          const ots = await lineage.findObjectTypesFor(outNode.dataset_id);
+          feedsObjectTypes = ots.map((o) => ({
+            ontologyId: o.ontologyId,
+            apiName: o.objectTypeApiName,
+            role: 'backing_datasource' as const,
+          }));
+        }
+      } catch (err) {
+        // Lineage lookup is additive context — a failure should not
+        // break the core GET.
+        console.warn(
+          `[pipelines/getById] lineage lookup failed: ${(err as Error).message}`,
+        );
+      }
+
+      res.json({
+        success: true,
+        data: {
+          ...(pipeline as Record<string, unknown>),
+          lineage: { feedsObjectTypes },
+        },
+      });
     } catch (error) {
       next(error);
     }
@@ -739,7 +788,15 @@ export class PipelineController {
     } catch (error) { next(error); }
   };
 
-  // ── Deploy pipeline (async — returns immediately, builds in background) ──
+  // ── Deploy pipeline (PB-B1 supervised — returns immediately, dispatcher builds) ──
+  //
+  // Idempotency protocol:
+  //   * Clients SHOULD send `Idempotency-Key: <uuid>`. Two POSTs with the
+  //     same key within the dedup window return the same deploymentId.
+  //   * During the deprecation window the server auto-generates a key if
+  //     the header is absent and echoes it back in
+  //     `Idempotency-Key-Generated`. Clients should capture that value on
+  //     the first response and re-use it on retries.
   deployPipeline = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const projectId = this.getProjectId(req);
@@ -747,7 +804,240 @@ export class PipelineController {
       const parsed = DeployPipelineSchema.safeParse(req.body);
       if (!parsed.success) throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
       const userId = this.getUserId(req);
-      const result = await this.deploymentService.startDeployment(projectId, pipelineId, userId, parsed.data);
+      const headerKey = req.header('Idempotency-Key') ?? req.header('idempotency-key');
+      const idempotencyKey = typeof headerKey === 'string' && headerKey.length > 0
+        ? headerKey.slice(0, 256)
+        : undefined;
+      // PB-B6 — `?ignorePreviewSnapshot=true` is an escape hatch that
+      // both skips the preview-chain stale check AND records
+      // divergence_warning on the deployment row. Accept common
+      // truthy spellings so CLI/curl/fe all work.
+      const truthy = (raw: unknown): boolean => {
+        const v = String(raw ?? '').toLowerCase();
+        return v === 'true' || v === '1' || v === 'yes';
+      };
+      const ignorePreviewSnapshot = truthy(req.query.ignorePreviewSnapshot);
+      // PB-B10 — dryRun + force_schema_migration + accept_data_loss.
+      const dryRun = truthy(req.query.dryRun);
+      const forceSchemaMigration = truthy(req.query.force_schema_migration);
+      const acceptDataLoss = truthy(req.query.accept_data_loss);
+      const result = await this.deploymentService.startDeployment(
+        projectId, pipelineId, userId, parsed.data,
+        {
+          idempotencyKey,
+          ignorePreviewSnapshot,
+          dryRun,
+          forceSchemaMigration,
+          acceptDataLoss,
+        },
+      );
+      // PB-B10 — dry-run response: no deployment is created, so we
+      // serve the classified schema diff envelope directly.
+      if ('dryRun' in result && result.dryRun === true) {
+        res.json({ success: true, data: result });
+        return;
+      }
+      const deployResult = result as Extract<typeof result, { deploymentId: string }>;
+      if (deployResult.idempotencyKeyGenerated) {
+        res.setHeader('Idempotency-Key-Generated', deployResult.idempotencyKey);
+      }
+      // Envelope is unchanged from the pre-PB-B1 shape (the new
+      // idempotency / reused fields are additive and older clients
+      // ignore them). This keeps the existing tellus-fe deploy flow
+      // working without any frontend changes.
+      res.json({
+        success: true,
+        data: {
+          deploymentId: deployResult.deploymentId,
+          status: deployResult.status,
+          startedAt: deployResult.startedAt,
+          outputCount: deployResult.outputCount,
+          idempotencyKey: deployResult.idempotencyKey,
+          reused: deployResult.reused,
+        },
+      });
+    } catch (error) { next(error); }
+  };
+
+  // ── ACL management (PB-B7) ───────────────────────────────────────────────
+  //
+  // GET    /:pipelineId/acl                 → list grants
+  // PUT    /:pipelineId/acl/:principalId    → upsert {role, principalType}
+  // DELETE /:pipelineId/acl/:principalId    → revoke (principalType query)
+  //
+  // Route-level middleware already gated all three at `owner`. Every
+  // mutation emits a tellus_audit_events row tagged
+  // category='pipeline_acl' so the access trail is reconstructable.
+  listAcl = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pipelineId = this.getPipelineId(req);
+      const { PipelineAclService } = await import('../services/pipelines/pipelineAcl');
+      const svc = new PipelineAclService();
+      const rows = await svc.list(pipelineId);
+      res.json({ success: true, data: { acl: rows } });
+    } catch (error) { next(error); }
+  };
+
+  upsertAcl = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pipelineId = this.getPipelineId(req);
+      const principalId = req.params.principalId;
+      if (!principalId) throw new AppError('principalId required', 400, 'VALIDATION_ERROR');
+      const principalType = (req.body?.principalType ?? 'user') as 'user' | 'group';
+      const role = req.body?.role as 'owner' | 'editor' | 'viewer';
+      if (!role) throw new AppError('role required', 400, 'VALIDATION_ERROR');
+      const actorUserId = this.getUserId(req);
+      const actorSub = this.getKeycloakSub(req);
+      const { PipelineAclService } = await import('../services/pipelines/pipelineAcl');
+      const svc = new PipelineAclService();
+      const row = await svc.grant({
+        pipelineId, principalId, principalType, role,
+        grantedBy: actorUserId,
+      });
+      // Audit: an ACL grant emits regardless of whether it was a new
+      // row or a role change. Callers can reconcile from the details.
+      const { emitAuditEvent } = await import('../services/auditEventService');
+      await emitAuditEvent({
+        keycloakSub: actorSub ?? actorUserId,
+        category: 'pipeline_acl',
+        action: 'pipeline.acl.grant',
+        result: 'SUCCESS',
+        req,
+        details: {
+          pipelineId, principalId, principalType, role,
+          grantedBy: actorUserId,
+        },
+      });
+      res.json({ success: true, data: row });
+    } catch (error) { next(error); }
+  };
+
+  revokeAcl = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pipelineId = this.getPipelineId(req);
+      const principalId = req.params.principalId;
+      if (!principalId) throw new AppError('principalId required', 400, 'VALIDATION_ERROR');
+      const principalType = (req.query.principalType as 'user' | 'group' | undefined) ?? 'user';
+      const actorUserId = this.getUserId(req);
+      const actorSub = this.getKeycloakSub(req);
+      const { PipelineAclService } = await import('../services/pipelines/pipelineAcl');
+      const svc = new PipelineAclService();
+      const r = await svc.revoke({ pipelineId, principalId, principalType });
+      const { emitAuditEvent } = await import('../services/auditEventService');
+      await emitAuditEvent({
+        keycloakSub: actorSub ?? actorUserId,
+        category: 'pipeline_acl',
+        action: 'pipeline.acl.revoke',
+        result: r.removed ? 'SUCCESS' : 'FAILURE',
+        req,
+        details: { pipelineId, principalId, principalType, removed: r.removed },
+      });
+      res.json({ success: true, data: r });
+    } catch (error) { next(error); }
+  };
+
+  // ── Streaming restart + stats (PB-B5) ────────────────────────────────────
+  //
+  // POST /:pipelineId/deployments/:id/restart — resumes a streaming
+  //   deploy from its savepoint_path; produces a NEW deployment row.
+  // GET  /:pipelineId/deployments/:id/streaming-stats — watermarks,
+  //   lag, checkpoint health via the Flink adapter.
+  restartStreamingDeployment = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const deploymentId = req.params.deploymentId;
+      if (!deploymentId) throw new AppError('Deployment ID required', 400, 'VALIDATION_ERROR');
+      const result = await this.deploymentService.restartStreamingDeploy(
+        projectId, pipelineId, deploymentId,
+      );
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  streamingStats = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const deploymentId = req.params.deploymentId;
+      if (!deploymentId) throw new AppError('Deployment ID required', 400, 'VALIDATION_ERROR');
+      const result = await this.deploymentService.getStreamingStats(
+        projectId, pipelineId, deploymentId,
+      );
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  // ── Iceberg output snapshots + time travel (PB-B4) ───────────────────────
+  //
+  // GET /:pipelineId/output/snapshots       — list {snapshot_id, parent_id, timestamp_ms, operation, summary}
+  // GET /:pipelineId/output?as_of_snapshot=N — rows at that snapshot (default: latest)
+  listOutputSnapshots = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const result = await this.deploymentService.listOutputSnapshots(projectId, pipelineId);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  readOutputAsOf = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const asOf = req.query.as_of_snapshot as string | undefined;
+      const limit = req.query.limit as string | undefined;
+      const result = await this.deploymentService.readOutputAsOf(
+        projectId, pipelineId,
+        {
+          snapshotId: asOf && asOf.length > 0 ? asOf : undefined,
+          limit: limit ? Number(limit) : undefined,
+        },
+      );
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  // ── Migrate output format (PB-B3) ────────────────────────────────────────
+  //
+  // POST /:pipelineId/migrate-output-format
+  // Body: { target: 'parquet' }
+  // Flips pipelines.output_format atomically and triggers a supervised
+  // re-deploy. Rejects with SCHEMA_NOT_TYPED_FOR_PARQUET if any output
+  // column lacks a concrete type (Parquet requires typed columns).
+  migrateOutputFormat = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const userId = this.getUserId(req);
+      const target = (req.body?.target ?? 'parquet') as string;
+      if (target !== 'parquet') {
+        throw new AppError(
+          "Only target='parquet' is supported; 'iceberg' is blocked on PB-B4.",
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+      const result = await this.deploymentService.migrateOutputFormat(
+        projectId, pipelineId, userId, 'parquet',
+      );
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  // ── Cancel deployment (PB-B1) ────────────────────────────────────────────
+  //
+  // Sets `cancellation_requested_at`; the supervisor worker polls the
+  // column between outputs and transitions the row to 'cancelled' within
+  // the time of the current output. Returns the requested timestamp so
+  // the UI can show a "cancelling..." state.
+  cancelDeployment = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const deploymentId = req.params.deploymentId;
+      if (!deploymentId) throw new AppError('Deployment ID required', 400, 'VALIDATION_ERROR');
+      const result = await this.deploymentService.cancelDeployment(projectId, pipelineId, deploymentId);
       res.json({ success: true, data: result });
     } catch (error) { next(error); }
   };

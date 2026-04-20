@@ -14,6 +14,7 @@
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { Client, Connection } from "@temporalio/client";
 import * as activities from "./activities";
+import * as pipelineActivities from "../../pipelines/temporal/activities";
 import type { SignalPayload } from "./workflows";
 
 let workerInstance: Worker | null = null;
@@ -51,16 +52,34 @@ export async function startTemporalWorker(): Promise<boolean> {
       connection: conn.native,
       namespace,
       taskQueue,
-      workflowsPath: require.resolve("./workflows"),
-      activities,
+      // PB-B4 follow-3.1 — register both the Funnel's own workflows
+      // and the Pipeline-Builder workflows under the same worker so
+      // pb-b4 iceberg maintenance runs on the existing task queue.
+      // Worker.create only accepts one workflowsPath per worker, so
+      // we expose a re-exporting bridge module that barrels both sets
+      // into a single package; activities merge cleanly via spread.
+      workflowsPath: require.resolve("./workflowsBundle"),
+      activities: { ...activities, ...pipelineActivities },
       // Keep the worker small for single-process dev; raise these in prod.
       maxConcurrentActivityTaskExecutions: 20,
       maxConcurrentWorkflowTaskExecutions: 10,
     });
     temporalClient = new Client({ connection: conn.client, namespace });
     // Fire-and-forget the run loop.
-    void workerInstance.run().catch((err) => {
+    void workerInstance.run().catch(async (err) => {
       console.error(`[temporal] worker run failed: ${(err as Error).message}`);
+      // PB-B9 — temporal_workflow_failures_total counter.
+      try {
+        const { recordTemporalFailure } = await import(
+          "../../pipelines/metrics"
+        );
+        recordTemporalFailure(
+          "worker",
+          (err as Error).name ?? "unknown",
+        );
+      } catch {
+        /* ignore */
+      }
     });
     console.log(
       `[temporal] worker started on ${address} ns=${namespace} queue=${taskQueue}`
@@ -92,7 +111,11 @@ export async function stopTemporalWorker(): Promise<void> {
 export async function signalTemporalWorkflow(
   ontologyId: string,
   objectTypeApiName: string,
-  signalType: "sourceTransactionCommitted" | "editBatchPending" | "schemaChanged",
+  signalType:
+    | "sourceTransactionCommitted"
+    | "editBatchPending"
+    | "schemaChanged"
+    | "pipelineDeployCompleted",
   payload: SignalPayload = {}
 ): Promise<boolean> {
   if (!temporalClient) return false;
