@@ -1818,13 +1818,43 @@ async function migrate(): Promise<void> {
     `);
     console.log("Ensured funnel_run has temporal_workflow_id UPSERT key (B3)");
 
+    const fsMod = await import("fs");
+    const pathMod = await import("path");
+
+    // ------------------------------------------------------------------
+    // Preload — Funnel foundation migrations (012..016) that the later
+    // hardening migrations depend on. Prior to this block CI would fail
+    // on `018_funnel_hardening.sql` with "relation 'object_edits' does
+    // not exist" because migration 012 (which creates `object_edits`)
+    // was never applied by migrate.ts on a fresh database. Each file is
+    // idempotent (CREATE TABLE IF NOT EXISTS, ALTER TABLE ... IF NOT
+    // EXISTS), so running them here on an already-bootstrapped
+    // environment is a no-op.
+    // ------------------------------------------------------------------
+    for (const name of [
+      "012_funnel_object_edits.sql",
+      "013_replacement_pipeline.sql",
+      "014_funnel_runs.sql",
+      "015_funnel_signal_idempotency.sql",
+      "016_iceberg_metadata_retry.sql",
+    ]) {
+      try {
+        const sqlFile = pathMod.join(__dirname, "migrations", name);
+        if (fsMod.existsSync(sqlFile)) {
+          await client.query(fsMod.readFileSync(sqlFile, "utf-8"));
+          console.log(`Applied ${name}`);
+        }
+      } catch (sqlErr) {
+        const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
+        throw new Error(`${name} failed: ${msg}`);
+      }
+    }
+
     // ------------------------------------------------------------------
     // LT-B1..B10 — Link Type Extensions (017_link_type_extensions.sql).
     // Inlined so a fresh `npm run migrate` picks the new columns and
     // tables up without requiring the side migration runner.
     // ------------------------------------------------------------------
-    const fsMod = await import("fs");
-    const pathMod = await import("path");
     try {
       const sqlFile = pathMod.join(__dirname, "migrations", "017_link_type_extensions.sql");
       if (fsMod.existsSync(sqlFile)) {
