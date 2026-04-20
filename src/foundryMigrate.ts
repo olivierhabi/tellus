@@ -296,6 +296,36 @@ async function migrateFoundry(): Promise<void> {
     `);
     console.log("  [ok] pipelines.compute_type → duckdb default");
 
+    // -----------------------------------------------------------------------
+    // pipeline_deployments — create BEFORE the PB-B3..B10 ALTER blocks
+    // below because they extend this table (output_snapshot_id,
+    // prior_snapshot_id, idempotency_key, cancellation_requested_at,
+    // flink_job_id, etc.). On a fresh CI database `ALTER TABLE
+    // pipeline_deployments ...` without a prior CREATE fails with
+    // PostgreSQL 42P01 (undefined_table).
+    // -----------------------------------------------------------------------
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pipeline_deployments (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        status          VARCHAR(50) NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
+        triggered_by    UUID REFERENCES users(id) ON DELETE SET NULL,
+        started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        finished_at     TIMESTAMPTZ,
+        duration_ms     INTEGER,
+        config          JSONB DEFAULT '{}'::jsonb,
+        error_message   TEXT,
+        build_results   JSONB DEFAULT '[]'::jsonb,
+        created_at      TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_pipeline ON pipeline_deployments(pipeline_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_project ON pipeline_deployments(project_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_status ON pipeline_deployments(status)`);
+    console.log("  [ok] pipeline_deployments (moved before PB-B3..B10 ALTERs)");
+
     // PB-B3 — output_format + dataset format tracking.
     await client.query(`ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS output_format TEXT NOT NULL DEFAULT 'csv'`);
     await client.query(`ALTER TABLE pipelines DROP CONSTRAINT IF EXISTS pipelines_output_format_check`);
@@ -561,32 +591,9 @@ async function migrateFoundry(): Promise<void> {
     }
 
     // -----------------------------------------------------------------------
-    // Pipeline deployments — tracks every deployment execution
-    // -----------------------------------------------------------------------
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS pipeline_deployments (
-        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
-        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-        status          VARCHAR(50) NOT NULL DEFAULT 'running'
-                        CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
-        triggered_by    UUID REFERENCES users(id) ON DELETE SET NULL,
-        started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        finished_at     TIMESTAMPTZ,
-        duration_ms     INTEGER,
-        config          JSONB DEFAULT '{}'::jsonb,
-        error_message   TEXT,
-        build_results   JSONB DEFAULT '[]'::jsonb,
-        created_at      TIMESTAMPTZ DEFAULT NOW()
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_pipeline ON pipeline_deployments(pipeline_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_project ON pipeline_deployments(project_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_deployments_status ON pipeline_deployments(status)`);
-    console.log("  [ok] pipeline_deployments");
-
-    // -----------------------------------------------------------------------
     // PB-B1 — supervised deploys (idempotency, cancellation, orphan sweeper).
+    // (pipeline_deployments itself is created earlier, above the PB-B3..B10
+    // ALTER blocks, so those ALTERs don't fire against an undefined_table.)
     // Mirrors migrations/017_pipeline_supervised_deploys.sql so fresh
     // environments boot with the full surface.
     // -----------------------------------------------------------------------
