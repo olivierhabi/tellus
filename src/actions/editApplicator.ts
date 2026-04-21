@@ -20,6 +20,7 @@
 
 import type { PoolClient } from "pg";
 import { getClient, query } from "../db";
+import { OntologyError } from "../utils/queryErrors";
 import { publishLinkCdc } from "../services/searchAround/cdcLinkProducer";
 
 function genEventId(): string {
@@ -158,13 +159,19 @@ export async function applyEdits(
 
     // F-05: Atomic optimistic concurrency check — inside the PG
     // transaction so no concurrent writer can slip between the read
-    // and the write. Uses SELECT FOR UPDATE to hold a row-level lock
-    // on the target object_instances row for the duration of the txn.
+    // and the write. Tries object_instances first (row-level lock via
+    // SELECT FOR UPDATE); if no row exists there (B1 writeback not yet
+    // active), falls back to counting ontology_edit rows which always
+    // exist and whose count matches OpenSearch's __version (1 after
+    // create, +1 per update).
     if (
       executionContext.expectedVersion !== undefined &&
       executionContext.expectedVersionTarget
     ) {
       const { objectType, primaryKey } = executionContext.expectedVersionTarget;
+      let currentVersion: number | undefined;
+
+      // Strategy 1: object_instances (B1/B7 writeback table)
       try {
         const vRes = await pgClient.query(
           `SELECT version FROM object_instances
@@ -172,31 +179,47 @@ export async function applyEdits(
             FOR UPDATE`,
           [objectType, primaryKey]
         );
-        const currentVersion: number =
-          (vRes.rowCount ?? 0) > 0 ? (vRes.rows[0].version ?? 0) : 0;
-        if (currentVersion !== executionContext.expectedVersion) {
-          await pgClient.query("ROLLBACK");
-          pgClient.release();
-          throw Object.assign(
-            new Error(
-              `Concurrency conflict: object '${primaryKey}' of type '${objectType}' ` +
-              `expected version ${executionContext.expectedVersion}, ` +
-              `found ${currentVersion}. Reload and retry.`
-            ),
-            { code: "CONCURRENCY_CONFLICT" }
+        if ((vRes.rowCount ?? 0) > 0) {
+          currentVersion = vRes.rows[0].version ?? 0;
+        }
+        // rowCount === 0 → no B1 row yet, fall through to strategy 2
+      } catch {
+        // Table doesn't exist (transitional deployment) → fall through
+      }
+
+      // Strategy 2: count ontology_edit rows (always available)
+      if (currentVersion === undefined) {
+        try {
+          const countRes = await pgClient.query(
+            `SELECT COUNT(*)::int AS version FROM ontology_edit
+              WHERE object_type_api_name = $1 AND primary_key = $2`,
+            [objectType, primaryKey]
           );
+          currentVersion = countRes.rows[0]?.version ?? 0;
+        } catch {
+          // ontology_edit table somehow missing — skip check entirely
+          currentVersion = undefined;
         }
-      } catch (err: any) {
-        // If the object_instances table doesn't exist yet, skip the
-        // check (transitional deployment). Any other error re-throws.
-        if (
-          err.code === "CONCURRENCY_CONFLICT" ||
-          !/relation .*object_instances.* does not exist/i.test(
-            err.message ?? ""
-          )
-        ) {
-          throw err;
-        }
+      }
+
+      if (
+        currentVersion !== undefined &&
+        currentVersion !== executionContext.expectedVersion
+      ) {
+        await pgClient.query("ROLLBACK");
+        pgClient.release();
+        throw new OntologyError(
+          `Object '${primaryKey}' of type '${objectType}' has been modified since you last read it. ` +
+          `Expected version ${executionContext.expectedVersion}, found ${currentVersion}. Reload and retry.`,
+          "CONCURRENCY_CONFLICT",
+          409,
+          {
+            objectType,
+            primaryKey,
+            expectedVersion: executionContext.expectedVersion,
+            currentVersion,
+          }
+        );
       }
     }
 

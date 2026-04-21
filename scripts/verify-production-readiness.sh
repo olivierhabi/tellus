@@ -92,6 +92,20 @@ else
   fail "F-05: No SELECT FOR UPDATE found in editApplicator.ts"
 fi
 
+# Check that the OCC fallback counts ontology_edit rows
+if grep -n 'COUNT.*ontology_edit' src/actions/editApplicator.ts >/dev/null 2>&1; then
+  pass "F-05: OCC fallback uses ontology_edit row count when object_instances has no row"
+else
+  fail "F-05: No ontology_edit fallback found in editApplicator.ts"
+fi
+
+# Check that OCC throws OntologyError (not plain Error)
+if grep -q 'new OntologyError' src/actions/editApplicator.ts && grep -q '"CONCURRENCY_CONFLICT"' src/actions/editApplicator.ts; then
+  pass "F-05: OCC throws OntologyError with CONCURRENCY_CONFLICT code (maps to 409)"
+else
+  fail "F-05: OCC does not throw OntologyError — error may not map to 409"
+fi
+
 # Check that actionExecutor no longer does external version fetch
 if grep -n 'fetchObject.*targetEdit' src/actions/actionExecutor.ts >/dev/null 2>&1; then
   fail "F-05: actionExecutor.ts still fetches object externally for version check"
