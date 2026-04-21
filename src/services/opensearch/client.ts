@@ -380,5 +380,6 @@ export {
   getObject,
   countObjects,
   indexExists,
+  injectSecurityFilter,
 };
 export default client;

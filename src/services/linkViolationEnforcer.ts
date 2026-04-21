@@ -41,6 +41,15 @@ export async function enforceOneToOneAdd(input: {
 }): Promise<EnforceResult> {
   const { linkType, ontologyId, sourcePk, targetPk, reasonContext } = input;
 
+  // F-11: ONE_TO_MANY enforcement — a source PK may link to many
+  // targets, but a target PK must NOT appear in more than one source.
+  // MANY_TO_MANY has no cardinality constraint.
+  if (linkType.cardinality === "MANY_TO_MANY") {
+    return { allowed: true, quarantined: false, warnings: [] };
+  }
+  if (linkType.cardinality === "ONE_TO_MANY") {
+    return enforceOneToManyAdd(linkType, ontologyId, sourcePk, targetPk, reasonContext);
+  }
   if (linkType.cardinality !== "ONE_TO_ONE") {
     return { allowed: true, quarantined: false, warnings: [] };
   }
@@ -51,7 +60,10 @@ export async function enforceOneToOneAdd(input: {
     return { allowed: true, quarantined: false, warnings: [] };
   }
 
-  const policy = (linkType.violation_policy ?? "warn") as ViolationPolicy;
+  // F-06: Default policy changed from "warn" to "reject". A ONE_TO_ONE
+  // link must reject duplicate targets by default. Operators can opt in
+  // to "warn" or "quarantine" explicitly on a per-link-type basis.
+  const policy = (linkType.violation_policy ?? "reject") as ViolationPolicy;
   const reason = {
     policy,
     existing_target_pk: existingTarget,
@@ -108,14 +120,81 @@ export async function enforceOneToOneAdd(input: {
 }
 
 /**
+ * F-11: ONE_TO_MANY enforcement — verify that the target PK is not
+ * already claimed by a different source. Uses PG link_edit table
+ * (transactional) instead of OpenSearch (eventually consistent).
+ */
+async function enforceOneToManyAdd(
+  linkType: LinkTypeRow,
+  ontologyId: string,
+  sourcePk: string,
+  targetPk: string,
+  reasonContext?: Record<string, unknown>,
+): Promise<EnforceResult> {
+  try {
+    const res = await query(
+      `SELECT source_primary_key FROM link_edit
+       WHERE link_type_api_name = $1
+         AND target_primary_key = $2
+         AND operation = 'add'
+       ORDER BY created_at DESC LIMIT 1`,
+      [linkType.api_name, targetPk]
+    );
+    if (res.rows.length > 0 && res.rows[0].source_primary_key !== sourcePk) {
+      const existingSource = res.rows[0].source_primary_key;
+      const policy = (linkType.violation_policy ?? "reject") as ViolationPolicy;
+      if (policy === "reject") {
+        throw appError(
+          "ONE_TO_MANY_VIOLATION",
+          `Link '${linkType.api_name}' target '${targetPk}' is already linked from source '${existingSource}'. violation_policy=reject.`,
+          { existing_source_pk: existingSource, attempted_source_pk: sourcePk, target_pk: targetPk, ...reasonContext }
+        );
+      }
+      // warn or quarantine — allow but surface
+      return {
+        allowed: true,
+        quarantined: false,
+        warnings: [
+          `ONE_TO_MANY link '${linkType.api_name}' target ${targetPk} already linked from ${existingSource}; ${policy} policy.`,
+        ],
+      };
+    }
+  } catch (e: any) {
+    if (e?.errorCode === "ONE_TO_MANY_VIOLATION") throw e;
+    // Table may not exist in transitional deployments
+  }
+  return { allowed: true, quarantined: false, warnings: [] };
+}
+
+/**
  * Look up the currently-resolved target PK for a ONE_TO_ONE link.
- * Tries the target OpenSearch index first (FK on source side) and
- * falls back to the source side (FK on target side).
+ * F-06: Uses PG transactional store (link_edit table) instead of
+ * OpenSearch, eliminating the race window where concurrent writes
+ * could both pass the check. Falls back to OpenSearch-based check
+ * if the link_edit table has no data (transitional deployment).
  */
 async function findExistingOneToOneTarget(
   linkType: LinkTypeRow,
   sourcePk: string
 ): Promise<string | null> {
+  // F-06: Try PG (transactional, race-safe) first
+  try {
+    const pgRes = await query(
+      `SELECT target_primary_key FROM link_edit
+       WHERE link_type_api_name = $1
+         AND source_primary_key = $2
+         AND operation = 'add'
+       ORDER BY created_at DESC LIMIT 1`,
+      [linkType.api_name, sourcePk]
+    );
+    if (pgRes.rows.length > 0) {
+      return String(pgRes.rows[0].target_primary_key);
+    }
+  } catch {
+    // link_edit table may not exist yet — fall through to OS
+  }
+
+  // Fallback to OpenSearch for transitional deployments
   try {
     if (linkType.source_property_id) {
       const propResult = await query(

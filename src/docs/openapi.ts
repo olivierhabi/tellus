@@ -1,6 +1,7 @@
 import { Express } from 'express';
 import { ontologyPaths, ontologySchemas } from './ontology-openapi';
 import actionsSpec from '../api-spec/actions.openapi.json';
+import { pbFnlLtPaths, pbFnlLtTags } from './pb-fnl-lt-openapi';
 
 // Strip the `/api` prefix from actions.openapi.json paths so they are
 // relative to the OpenAPI server base URL (`/api`). Also drop the
@@ -2715,7 +2716,12 @@ const orderedTags: Array<{ name: string; description?: string }> = [
   { name: 'Union', description: 'Dataset union operations' },
   { name: 'Output', description: 'Pipeline output sinks' },
 
-  // 7. Infrastructure
+  // 7. Pipeline Builder / Funnel Hardening / Link Types (PB-B*, FNL-H, LT-B)
+  //    Appended in the spec-literal order so Swagger UI groups subsystems
+  //    the way the tasks/Pipeline-builder/tasks-01.md document does.
+  ...pbFnlLtTags,
+
+  // 8. Infrastructure
   { name: 'Deployment', description: 'Deployment status and environment info' },
   { name: 'Dev Tools', description: 'Development seed/reset utilities' },
 ];
@@ -2749,6 +2755,10 @@ export const openApiSpec = {
     ...baseSpec.paths,
     ...ontologyPaths,
     ...actionsPaths,
+    // PB-B1..B10 + FNL-H + LT-B endpoints. Spread last so any base/
+    // ontology/actions path with the same key wins (defensive — there
+    // are no known collisions, but this keeps the merge deterministic).
+    ...pbFnlLtPaths,
   },
 };
 

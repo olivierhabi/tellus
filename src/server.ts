@@ -189,10 +189,13 @@ app.use(
     legacyHeaders: false,
     skip: (req: Request) => RATE_LIMIT_SKIP.has(req.path),
     handler: (_req: Request, res: Response) => {
+      // F-17: Include Retry-After header per RFC 6585 §4.
+      res.set("Retry-After", "60");
       res.status(429).json({
         error: {
           code: "RATE_LIMITED",
           message: "Too many requests, please try again later.",
+          retryAfterSeconds: 60,
         },
       });
     },
@@ -903,10 +906,14 @@ async function start(): Promise<void> {
     // for the dev environment.
     // ----------------------------------------------------------------
     void (async () => {
-      const email =
-        process.env.TELLUS_SUPERADMIN_EMAIL || "habimanaolivier6@gmail.com";
-      const password =
-        process.env.TELLUS_SUPERADMIN_PASSWORD || "Olivier0?Tellus";
+      const email = process.env.TELLUS_SUPERADMIN_EMAIL;
+      const password = process.env.TELLUS_SUPERADMIN_PASSWORD;
+      if (!email || !password) {
+        console.warn(
+          "[bootstrap] TELLUS_SUPERADMIN_EMAIL and TELLUS_SUPERADMIN_PASSWORD must both be set; skipping superadmin bootstrap"
+        );
+        return;
+      }
       // Auto-create the superadmin in non-prod so `pnpm run dev` on a
       // fresh Keycloak volume lands with a working login. The prod
       // container sets NODE_ENV=production, which keeps this off.

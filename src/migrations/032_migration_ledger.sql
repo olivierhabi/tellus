@@ -48,9 +48,9 @@ VALUES
     ('014_funnel_runs.sql',                    '1970-01-01T00:00:00Z'),
     ('015_funnel_signal_idempotency.sql',      '1970-01-01T00:00:00Z'),
     ('016_iceberg_metadata_retry.sql',         '1970-01-01T00:00:00Z'),
-    ('017_pipeline_supervised_deploys.sql',    '1970-01-01T00:00:00Z'),
+    ('033_pipeline_supervised_deploys.sql',    '1970-01-01T00:00:00Z'),
     ('017_link_type_extensions.sql',           '1970-01-01T00:00:00Z'),
     ('018_funnel_hardening.sql',               '1970-01-01T00:00:00Z'),
-    ('018_pipeline_compute_type.sql',          '1970-01-01T00:00:00Z'),
+    ('034_pipeline_compute_type.sql',          '1970-01-01T00:00:00Z'),
     ('032_migration_ledger.sql',               now())
 ON CONFLICT (migration_name) DO NOTHING;

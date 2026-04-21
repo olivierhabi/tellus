@@ -321,13 +321,11 @@ export async function executeAction(
     // -----------------------------------------------------------------
     // STAGE 4b: Optimistic Concurrency Check (Task 22)
     //
-    // If the caller provided $expectedVersion, verify that the target
-    // object's current __version matches. This prevents lost updates
-    // when two clients modify the same object concurrently.
-    //
-    // Week 1 scope: Only supported for single-object modify actions.
-    // Multi-object actions with $expectedVersion return a 400 error.
+    // Pre-flight validation only: reject unsupported configurations.
+    // The actual version check is performed atomically inside the PG
+    // transaction in editApplicator.ts (F-05 fix).
     // -----------------------------------------------------------------
+    let occTarget: { objectType: string; primaryKey: string } | undefined;
     if (context.expectedVersion !== undefined) {
       // Count how many modify (update) rules produced edits
       const modifyEdits = compilation.edits.filter(
@@ -350,7 +348,7 @@ export async function executeAction(
       if (compilation.edits.length > 1) {
         result.failureType = "unclassified";
         result.errorMessage =
-          "Optimistic concurrency control is only supported for single-object actions in week 1";
+          "Optimistic concurrency control is only supported for single-object actions";
         pendingError = new OntologyError(
           result.errorMessage,
           "INVALID_PARAMETER",
@@ -360,35 +358,10 @@ export async function executeAction(
         return result;
       }
 
-      // Single modify edit — fetch the current object and check __version
-      const targetEdit = modifyEdits[0];
-      const currentObject = await fetchObject(
-        targetEdit.objectType,
-        targetEdit.primaryKey
-      );
-      const currentVersion: number =
-        (currentObject as any)?.__version ?? 0;
-
-      if (currentVersion !== context.expectedVersion) {
-        result.failureType = "unclassified";
-        result.errorMessage =
-          `Object '${targetEdit.primaryKey}' of type '${targetEdit.objectType}' has been modified since you last read it. ` +
-          `Expected version ${context.expectedVersion}, current version ${currentVersion}. ` +
-          `Reload the object and try again.`;
-        pendingError = new OntologyError(
-          result.errorMessage,
-          "CONCURRENCY_CONFLICT",
-          undefined,
-          {
-            objectType: targetEdit.objectType,
-            primaryKey: targetEdit.primaryKey,
-            expectedVersion: context.expectedVersion,
-            currentVersion,
-            executionId,
-          }
-        );
-        return result;
-      }
+      occTarget = {
+        objectType: modifyEdits[0].objectType,
+        primaryKey: modifyEdits[0].primaryKey,
+      };
     }
 
     // -----------------------------------------------------------------
@@ -403,6 +376,8 @@ export async function executeAction(
       actionTypeApiName,
       parameters: resolvedParameters,
       executedBy: context.executedBy || "system",
+      expectedVersion: context.expectedVersion,
+      expectedVersionTarget: occTarget,
     });
 
     result.success = application.success;

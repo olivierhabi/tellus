@@ -28,6 +28,7 @@ import { resolveLinks, countLinks, searchAround, validateForeignKeys } from "../
 import linkTypeModel from "../models/linkType";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { appError } from "../utils/appError";
+import { buildSecurityFilter } from "../middleware/securityContext";
 import {
   applyOverlayToResults,
   mergeOverlayIntoSearch,
@@ -212,6 +213,7 @@ router.post(
         delete body.pageToken;
       }
 
+      const secFilter = buildSecurityFilter(req.security);
       const validated = await validateSearchQuery(body, objectType);
       const rawResult = await executeSearch(objectType, {
         where: validated.where,
@@ -219,7 +221,7 @@ router.post(
         $pageSize: validated.$pageSize,
         $pageToken: validated.$pageToken,
         $select: validated.$select,
-      });
+      }, secFilter);
 
       // B7: merge the writeback overlay so recent edits are visible
       // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
@@ -271,13 +273,14 @@ router.post(
         );
       }
 
+      const secFilter = buildSecurityFilter(req.security);
       const rawResult = await executeFullTextSearch(objectType, searchQuery.trim(), {
         where,
         $orderBy,
         $pageSize: $pageSize ?? 100,
         $pageToken,
         $select,
-      });
+      }, secFilter);
       // B7: overlay merge for immediate edit visibility.
       const result = await mergeWithOverlay(objectType, rawResult);
 
@@ -305,11 +308,12 @@ router.post(
       const { objectType } = req.params;
       await ensureObjectTypeExists(objectType);
 
+      const secFilter = buildSecurityFilter(req.security);
       const validated = await validateAggregateQuery(req.body || {}, objectType);
       const result = await executeAggregate(objectType, {
         where: validated.where,
         aggregations: validated.aggregations,
-      });
+      }, secFilter);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -340,12 +344,13 @@ router.get(
         objectType
       );
 
+      const secFilter = buildSecurityFilter(req.security);
       const rawResult = await executeSearch(objectType, {
         $orderBy: validated.orderBy.length > 0 ? validated.orderBy : undefined,
         $pageSize: validated.pageSize,
         $pageToken: validated.pageToken,
         $select: validated.select,
-      });
+      }, secFilter);
       // B7: overlay merge — recent edits visible within 1s.
       const result = await mergeWithOverlay(objectType, rawResult);
 
@@ -397,9 +402,10 @@ router.post(
       }
 
       const effectiveDirection = (direction || $direction) as "forward" | "reverse";
+      const secFilter = buildSecurityFilter(req.security);
       const result = await searchAround(linkType, effectiveDirection, {
         sourceFilter, targetFilter, pageSize, pageToken,
-      });
+      }, secFilter);
 
       return sendSuccess(res, result);
     } catch (err: any) {
@@ -425,7 +431,7 @@ router.post(
       );
       const { object_type_id, ontology_id } = otResult.rows[0];
 
-      const result = await validateForeignKeys(object_type_id, req.body, ontology_id);
+      const result = await validateForeignKeys(object_type_id, req.body, ontology_id, buildSecurityFilter(req.security));
       return sendSuccess(res, result);
     } catch (err: any) {
       return handleError(err, res, next);
@@ -469,11 +475,12 @@ router.get(
         effectiveDirection = "reverse";
       }
 
+      const secFilter = buildSecurityFilter(req.security);
       const result = await resolveLinks(linkType, primaryKey, effectiveDirection, {
         pageSize: pageSize ? parseInt(pageSize as string, 10) : undefined,
         pageToken: pageToken as string,
         select: select ? (select as string).split(",") : undefined,
-      });
+      }, secFilter);
 
       // Format based on cardinality
       const isSingle = (
@@ -525,7 +532,7 @@ router.get(
         effectiveDirection = "reverse";
       }
 
-      const count = await countLinks(linkType, primaryKey, effectiveDirection);
+      const count = await countLinks(linkType, primaryKey, effectiveDirection, buildSecurityFilter(req.security));
       return sendSuccess(res, { linkTypeApiName, direction: effectiveDirection, count });
     } catch (err: any) {
       return handleError(err, res, next);
@@ -760,7 +767,7 @@ router.get(
       const { objectType, primaryKey } = req.params;
       await ensureObjectTypeExists(objectType);
 
-      let obj = await executeGetObject(objectType, primaryKey);
+      let obj = await executeGetObject(objectType, primaryKey, buildSecurityFilter(req.security));
 
       // B7: overlay read — if a recent edit is in the overlay but the
       // index hasn't absorbed it yet, the overlay is authoritative for

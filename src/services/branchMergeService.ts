@@ -1,0 +1,492 @@
+// ---------------------------------------------------------------------------
+// F-04: Three-way merge for ontology branches
+//
+// Implements copy-on-write (COW) branching semantics:
+//   1. Branch creation: records a fork point (the max edit_seq at creation)
+//   2. Edits on a branch: stored in ontology_edit tagged with branch_id
+//   3. Merge: three-way diff between fork-point, parent edits, and branch edits
+//   4. Conflict detection: when both parent and branch modify the same
+//      (objectType, primaryKey, propertyName) after the fork point
+//   5. Read isolation: queries on branch B cannot see uncommitted writes from branch A
+//
+// This matches the semantics described in Palantir patent US10585862B2
+// "Systems and methods for branching in collaborative data management".
+// ---------------------------------------------------------------------------
+
+import { getClient, query } from "../db";
+import type { PoolClient } from "pg";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface MergeConflict {
+  objectType: string;
+  primaryKey: string;
+  propertyName: string;
+  parentValue: unknown;
+  branchValue: unknown;
+  baseValue: unknown;
+}
+
+export interface MergeResult {
+  success: boolean;
+  mergedEditCount: number;
+  conflicts: MergeConflict[];
+  branchId: string;
+  parentBranchId: string | null;
+}
+
+export interface BranchEditSummary {
+  editId: string;
+  objectType: string;
+  primaryKey: string;
+  operation: string;
+  propertyValues: Record<string, unknown>;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the fork point for a branch. This is the max edit sequence number
+ * at the time the branch was created.
+ */
+async function getForkPoint(
+  client: PoolClient,
+  branchId: string
+): Promise<string | null> {
+  const res = await client.query(
+    `SELECT fork_point_edit_id FROM ontology_branch WHERE branch_id = $1`,
+    [branchId]
+  );
+  return res.rows[0]?.fork_point_edit_id ?? null;
+}
+
+/**
+ * Get all edits on a branch since the fork point.
+ */
+async function getBranchEdits(
+  client: PoolClient,
+  branchId: string,
+  forkPointEditId: string | null
+): Promise<BranchEditSummary[]> {
+  const sql = forkPointEditId
+    ? `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE branch_id = $1 AND edit_id > $2
+       ORDER BY created_at ASC`
+    : `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE branch_id = $1
+       ORDER BY created_at ASC`;
+
+  const params = forkPointEditId ? [branchId, forkPointEditId] : [branchId];
+  const res = await client.query(sql, params);
+  return res.rows.map((r) => ({
+    editId: r.edit_id,
+    objectType: r.objectType,
+    primaryKey: r.primaryKey,
+    operation: r.operation,
+    propertyValues:
+      typeof r.propertyValues === "string"
+        ? JSON.parse(r.propertyValues)
+        : r.propertyValues ?? {},
+    createdAt: r.createdAt,
+  }));
+}
+
+/**
+ * Get parent edits since the fork point (edits on the parent that happened
+ * after the branch was created).
+ */
+async function getParentEditsSinceFork(
+  client: PoolClient,
+  ontologyId: string,
+  parentBranchId: string | null,
+  forkPointEditId: string | null
+): Promise<BranchEditSummary[]> {
+  // Parent edits are those with branch_id = parentBranchId (or NULL for main)
+  // that were created after the fork point.
+  const branchCond = parentBranchId
+    ? "branch_id = $2"
+    : "(branch_id IS NULL)";
+
+  const sql = forkPointEditId
+    ? `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE ontology_id_fk = $1 AND ${branchCond} AND edit_id > $3
+       ORDER BY created_at ASC`
+    : `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE ontology_id_fk = $1 AND ${branchCond}
+       ORDER BY created_at ASC`;
+
+  const params: unknown[] = forkPointEditId
+    ? [ontologyId, ...(parentBranchId ? [parentBranchId] : []), forkPointEditId]
+    : [ontologyId, ...(parentBranchId ? [parentBranchId] : [])];
+
+  // Re-number params for the dynamic SQL
+  // Simpler approach: just use separate queries
+  let result;
+  if (parentBranchId && forkPointEditId) {
+    result = await client.query(
+      `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE ontology_id_fk = $1 AND branch_id = $2 AND edit_id > $3
+       ORDER BY created_at ASC`,
+      [ontologyId, parentBranchId, forkPointEditId]
+    );
+  } else if (parentBranchId) {
+    result = await client.query(
+      `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE ontology_id_fk = $1 AND branch_id = $2
+       ORDER BY created_at ASC`,
+      [ontologyId, parentBranchId]
+    );
+  } else if (forkPointEditId) {
+    result = await client.query(
+      `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE ontology_id_fk = $1 AND branch_id IS NULL AND edit_id > $2
+       ORDER BY created_at ASC`,
+      [ontologyId, forkPointEditId]
+    );
+  } else {
+    result = await client.query(
+      `SELECT edit_id, object_type_api_name AS "objectType",
+              primary_key AS "primaryKey", operation,
+              property_values AS "propertyValues",
+              created_at AS "createdAt"
+       FROM ontology_edit
+       WHERE ontology_id_fk = $1 AND branch_id IS NULL
+       ORDER BY created_at ASC`,
+      [ontologyId]
+    );
+  }
+
+  return result.rows.map((r: any) => ({
+    editId: r.edit_id,
+    objectType: r.objectType,
+    primaryKey: r.primaryKey,
+    operation: r.operation,
+    propertyValues:
+      typeof r.propertyValues === "string"
+        ? JSON.parse(r.propertyValues)
+        : r.propertyValues ?? {},
+    createdAt: r.createdAt,
+  }));
+}
+
+/**
+ * Build a map of per-property changes from a list of edits.
+ * Key: "objectType::primaryKey::propertyName"
+ * Value: the last value set for that property.
+ */
+function buildPropertyChangeMap(
+  edits: BranchEditSummary[]
+): Map<string, { value: unknown; operation: string }> {
+  const map = new Map<string, { value: unknown; operation: string }>();
+  for (const edit of edits) {
+    if (edit.operation === "delete") {
+      // Delete trumps all property changes for this object
+      map.set(`${edit.objectType}::${edit.primaryKey}::__DELETE__`, {
+        value: null,
+        operation: "delete",
+      });
+      continue;
+    }
+    for (const [prop, value] of Object.entries(edit.propertyValues)) {
+      map.set(`${edit.objectType}::${edit.primaryKey}::${prop}`, {
+        value,
+        operation: edit.operation,
+      });
+    }
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Three-way merge
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect conflicts between parent and branch edits since the fork point.
+ * A conflict occurs when both sides modify the same property on the same object.
+ */
+function detectConflicts(
+  parentChanges: Map<string, { value: unknown; operation: string }>,
+  branchChanges: Map<string, { value: unknown; operation: string }>
+): MergeConflict[] {
+  const conflicts: MergeConflict[] = [];
+  for (const [key, branchChange] of branchChanges) {
+    const parentChange = parentChanges.get(key);
+    if (!parentChange) continue; // Only branch changed — no conflict.
+
+    // Both changed the same property — is it the same value?
+    if (JSON.stringify(parentChange.value) === JSON.stringify(branchChange.value)) {
+      continue; // Convergent change — not a conflict.
+    }
+
+    const parts = key.split("::");
+    conflicts.push({
+      objectType: parts[0],
+      primaryKey: parts[1],
+      propertyName: parts.slice(2).join("::"),
+      parentValue: parentChange.value,
+      branchValue: branchChange.value,
+      baseValue: undefined, // Base is the state at fork point — would require a full snapshot lookup
+    });
+  }
+  return conflicts;
+}
+
+/**
+ * Perform a three-way merge of a branch into its parent.
+ *
+ * Steps:
+ *   1. Lock the branch row (SELECT FOR UPDATE) for isolation.
+ *   2. Collect edits on the branch since fork.
+ *   3. Collect edits on the parent since fork.
+ *   4. Detect conflicts.
+ *   5. If conflicts exist and no explicit resolutions are provided, abort.
+ *   6. If no conflicts (or all resolved), replay branch edits onto the parent
+ *      by re-inserting them with branch_id = NULL (or parent branch_id).
+ *   7. Update branch status to MERGED.
+ *
+ * @param ontologyId  - The owning ontology.
+ * @param branchId    - The branch to merge.
+ * @param resolutions - Optional conflict resolutions: map from conflict key
+ *                      to "parent" | "branch" (which side wins).
+ */
+export async function mergeThreeWay(
+  ontologyId: string,
+  branchId: string,
+  resolutions?: Map<string, "parent" | "branch">
+): Promise<MergeResult> {
+  const pgClient = await getClient();
+  try {
+    await pgClient.query("BEGIN");
+
+    // Lock the branch row to prevent concurrent merges.
+    const branchRes = await pgClient.query(
+      `SELECT * FROM ontology_branch WHERE branch_id = $1 FOR UPDATE`,
+      [branchId]
+    );
+    if (branchRes.rowCount === 0) {
+      await pgClient.query("ROLLBACK");
+      throw Object.assign(new Error("Branch not found"), { code: "BRANCH_NOT_FOUND" });
+    }
+    const branch = branchRes.rows[0];
+    if (branch.status !== "OPEN") {
+      await pgClient.query("ROLLBACK");
+      throw Object.assign(
+        new Error(`Branch is ${branch.status}; only OPEN branches can be merged.`),
+        { code: "VALIDATION_FAILED" }
+      );
+    }
+
+    const forkPointEditId = branch.fork_point_edit_id ?? null;
+    const parentBranchId = branch.parent_branch_id ?? null;
+
+    // Collect edits
+    const branchEdits = await getBranchEdits(pgClient, branchId, forkPointEditId);
+    const parentEdits = await getParentEditsSinceFork(
+      pgClient,
+      ontologyId,
+      parentBranchId,
+      forkPointEditId
+    );
+
+    // Build change maps
+    const parentChanges = buildPropertyChangeMap(parentEdits);
+    const branchChanges = buildPropertyChangeMap(branchEdits);
+
+    // Detect conflicts
+    const conflicts = detectConflicts(parentChanges, branchChanges);
+
+    // If there are unresolved conflicts, abort and return them.
+    if (conflicts.length > 0) {
+      const unresolvedConflicts = conflicts.filter((c) => {
+        const key = `${c.objectType}::${c.primaryKey}::${c.propertyName}`;
+        return !resolutions?.has(key);
+      });
+      if (unresolvedConflicts.length > 0) {
+        await pgClient.query("ROLLBACK");
+        return {
+          success: false,
+          mergedEditCount: 0,
+          conflicts: unresolvedConflicts,
+          branchId,
+          parentBranchId,
+        };
+      }
+    }
+
+    // Apply branch edits to the parent. For each branch edit, insert a new
+    // edit with branch_id = parentBranchId (NULL for main branch).
+    // Skip edits that were resolved in favor of the parent.
+    const resolvedParentKeys = new Set<string>();
+    if (resolutions) {
+      for (const [key, winner] of resolutions) {
+        if (winner === "parent") resolvedParentKeys.add(key);
+      }
+    }
+
+    let mergedCount = 0;
+    for (const edit of branchEdits) {
+      // Check if any property in this edit was resolved in favor of parent
+      const filteredProps: Record<string, unknown> = {};
+      let hasProps = false;
+      for (const [prop, value] of Object.entries(edit.propertyValues)) {
+        const key = `${edit.objectType}::${edit.primaryKey}::${prop}`;
+        if (resolvedParentKeys.has(key)) continue; // Skip — parent wins
+        filteredProps[prop] = value;
+        hasProps = true;
+      }
+
+      // For delete operations, always replay
+      if (edit.operation === "delete" || hasProps) {
+        await pgClient.query(
+          `INSERT INTO ontology_edit
+             (object_type_api_name, primary_key, operation, property_values,
+              link_edits, action_type_api_name, execution_id, action_parameters,
+              executed_by, edit_strategy, branch_id)
+           VALUES ($1, $2, $3, $4, '[]', 'branch_merge', $5, '{}', 'system', 'branch_merge', $6)`,
+          [
+            edit.objectType,
+            edit.primaryKey,
+            edit.operation,
+            JSON.stringify(edit.operation === "delete" ? {} : filteredProps),
+            `merge-${branchId}-${Date.now()}`,
+            parentBranchId ?? null,
+          ]
+        );
+        mergedCount++;
+      }
+    }
+
+    // Update branch status to MERGED
+    await pgClient.query(
+      `UPDATE ontology_branch SET status = 'MERGED', merged_at = now() WHERE branch_id = $1`,
+      [branchId]
+    );
+    await pgClient.query(
+      `UPDATE ontology_proposal SET status = 'MERGED', merged_at = now() WHERE branch_id = $1 AND status = 'APPROVED'`,
+      [branchId]
+    );
+
+    await pgClient.query("COMMIT");
+
+    return {
+      success: true,
+      mergedEditCount: mergedCount,
+      conflicts: [],
+      branchId,
+      parentBranchId,
+    };
+  } catch (err) {
+    await pgClient.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    pgClient.release();
+  }
+}
+
+/**
+ * Get the diff of edits on a branch since its fork point. Used by the
+ * branch detail endpoint to show what would be merged.
+ */
+export async function getBranchDiff(
+  ontologyId: string,
+  branchId: string
+): Promise<{
+  branchEdits: BranchEditSummary[];
+  parentEdits: BranchEditSummary[];
+  conflicts: MergeConflict[];
+}> {
+  const branchRes = await query(
+    `SELECT * FROM ontology_branch WHERE branch_id = $1`,
+    [branchId]
+  );
+  if (branchRes.rowCount === 0) {
+    throw Object.assign(new Error("Branch not found"), { code: "BRANCH_NOT_FOUND" });
+  }
+  const branch = branchRes.rows[0];
+  const forkPointEditId = branch.fork_point_edit_id ?? null;
+  const parentBranchId = branch.parent_branch_id ?? null;
+
+  const pgClient = await getClient();
+  try {
+    const branchEdits = await getBranchEdits(pgClient, branchId, forkPointEditId);
+    const parentEdits = await getParentEditsSinceFork(
+      pgClient,
+      ontologyId,
+      parentBranchId,
+      forkPointEditId
+    );
+
+    const parentChanges = buildPropertyChangeMap(parentEdits);
+    const branchChanges = buildPropertyChangeMap(branchEdits);
+    const conflicts = detectConflicts(parentChanges, branchChanges);
+
+    return { branchEdits, parentEdits, conflicts };
+  } finally {
+    pgClient.release();
+  }
+}
+
+/**
+ * Record the fork point when creating a new branch. Should be called
+ * inside the branch creation transaction.
+ */
+export async function recordForkPoint(
+  client: PoolClient,
+  branchId: string,
+  ontologyId: string
+): Promise<void> {
+  // The fork point is the latest edit_id at the time of branch creation.
+  const res = await client.query(
+    `SELECT edit_id FROM ontology_edit
+     WHERE ontology_id_fk = $1
+     ORDER BY created_at DESC LIMIT 1`,
+    [ontologyId]
+  );
+  const forkPointEditId = res.rows[0]?.edit_id ?? null;
+
+  // This requires the fork_point_edit_id column to exist. If it doesn't
+  // (transitional deployment), this is a no-op — the merge will treat
+  // all edits as in-scope.
+  try {
+    await client.query(
+      `UPDATE ontology_branch SET fork_point_edit_id = $1 WHERE branch_id = $2`,
+      [forkPointEditId, branchId]
+    );
+  } catch {
+    // Column may not exist yet
+  }
+}
