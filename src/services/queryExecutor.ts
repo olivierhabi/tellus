@@ -7,7 +7,7 @@
 // Task 8: Core query execution engine
 // ---------------------------------------------------------------------------
 
-import { client } from "./opensearch/client";
+import { client, injectSecurityFilter } from "./opensearch/client";
 import { getIndexName } from "./opensearch/indexLifecycleManager";
 import { translateFilter, buildSortClause } from "./queryTranslator";
 import { resolveAllProperties } from "./propertyResolver";
@@ -54,7 +54,8 @@ export interface AggregateParams {
 
 export async function executeSearch(
   objectTypeApiName: string,
-  params: SearchParams
+  params: SearchParams,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<FormattedListResponse> {
   const indexName = getIndexName(objectTypeApiName);
   const pageSize = params.$pageSize ?? 100;
@@ -91,10 +92,13 @@ export async function executeSearch(
     body._source = sourceFields;
   }
 
+  // Inject mandatory security filter (§Task 28)
+  const finalBody = injectSecurityFilter(body, securityFilter);
+
   // Execute
   let response: any;
   try {
-    const result = await client.search({ index: indexName, body });
+    const result = await client.search({ index: indexName, body: finalBody });
     response = result.body;
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -124,12 +128,36 @@ export async function executeSearch(
 
 export async function executeGetObject(
   objectTypeApiName: string,
-  primaryKey: string
+  primaryKey: string,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<Record<string, unknown> | null> {
   const indexName = getIndexName(objectTypeApiName);
 
   try {
     const { body } = await client.get({ index: indexName, id: primaryKey });
+
+    // Post-fetch security check (§Task 28): client.get() bypasses query-
+    // level filters, so when a security filter is active and the document
+    // carries security metadata we verify access via a filtered search.
+    if (securityFilter) {
+      const source = (body as any)?._source;
+      if (source?._security) {
+        try {
+          const checkBody = injectSecurityFilter(
+            { query: { ids: { values: [primaryKey] } }, size: 0, track_total_hits: true },
+            securityFilter
+          );
+          const { body: checkResp } = await client.search({ index: indexName, body: checkBody });
+          const total = (checkResp as any).hits?.total;
+          const count = typeof total === "object" ? total.value : total;
+          if (count === 0) return null;
+        } catch {
+          // Security verification failed — deny access to prevent leaks
+          return null;
+        }
+      }
+    }
+
     return formatSingleObject(body, objectTypeApiName);
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -145,7 +173,8 @@ export async function executeGetObject(
 
 export async function executeAggregate(
   objectTypeApiName: string,
-  params: AggregateParams
+  params: AggregateParams,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<Record<string, unknown>> {
   const indexName = getIndexName(objectTypeApiName);
 
@@ -165,9 +194,12 @@ export async function executeAggregate(
     track_total_hits: true,
   };
 
+  // Inject mandatory security filter (§Task 28)
+  const finalBody = injectSecurityFilter(body, securityFilter);
+
   let response: any;
   try {
-    const result = await client.search({ index: indexName, body });
+    const result = await client.search({ index: indexName, body: finalBody });
     response = result.body;
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -228,7 +260,8 @@ function buildAggClause(def: AggregateParams["aggregations"][0]): Record<string,
 export async function executeFullTextSearch(
   objectTypeApiName: string,
   searchText: string,
-  params: SearchParams
+  params: SearchParams,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<FormattedListResponse> {
   const indexName = getIndexName(objectTypeApiName);
   const pageSize = params.$pageSize ?? 100;
@@ -318,9 +351,12 @@ export async function executeFullTextSearch(
     body._source = [...new Set([...params.$select, "__pk", "__objectType"])];
   }
 
+  // Inject mandatory security filter (§Task 28)
+  const finalBody = injectSecurityFilter(body, securityFilter);
+
   let response: any;
   try {
-    const result = await client.search({ index: indexName, body });
+    const result = await client.search({ index: indexName, body: finalBody });
     response = result.body;
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {

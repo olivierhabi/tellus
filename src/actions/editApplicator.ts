@@ -47,6 +47,17 @@ export interface ApplyExecutionContext {
   parameters: Record<string, unknown>;
   executedBy: string;
   /**
+   * F-05: Optimistic concurrency — when set, the PG transaction will
+   * SELECT FOR UPDATE the target object_instances row and verify its
+   * version matches before applying edits. If the version diverges,
+   * the transaction is rolled back and an error is thrown. This
+   * eliminates the TOCTOU race that existed when the check lived
+   * outside the transaction.
+   */
+  expectedVersion?: number;
+  /** The single (objectType, primaryKey) pair the version check applies to. */
+  expectedVersionTarget?: { objectType: string; primaryKey: string };
+  /**
    * Ontology that owns the edited object types. Optional for legacy callers.
    * When present, enables the B1/B7 writeback path: each edit also lands in
    * `object_edits`, `object_instances`, and the Writeback Overlay, so edits
@@ -144,6 +155,50 @@ export async function applyEdits(
   const pgClient = await getClient();
   try {
     await pgClient.query("BEGIN");
+
+    // F-05: Atomic optimistic concurrency check — inside the PG
+    // transaction so no concurrent writer can slip between the read
+    // and the write. Uses SELECT FOR UPDATE to hold a row-level lock
+    // on the target object_instances row for the duration of the txn.
+    if (
+      executionContext.expectedVersion !== undefined &&
+      executionContext.expectedVersionTarget
+    ) {
+      const { objectType, primaryKey } = executionContext.expectedVersionTarget;
+      try {
+        const vRes = await pgClient.query(
+          `SELECT version FROM object_instances
+            WHERE object_type_api_name = $1 AND primary_key = $2
+            FOR UPDATE`,
+          [objectType, primaryKey]
+        );
+        const currentVersion: number =
+          (vRes.rowCount ?? 0) > 0 ? (vRes.rows[0].version ?? 0) : 0;
+        if (currentVersion !== executionContext.expectedVersion) {
+          await pgClient.query("ROLLBACK");
+          pgClient.release();
+          throw Object.assign(
+            new Error(
+              `Concurrency conflict: object '${primaryKey}' of type '${objectType}' ` +
+              `expected version ${executionContext.expectedVersion}, ` +
+              `found ${currentVersion}. Reload and retry.`
+            ),
+            { code: "CONCURRENCY_CONFLICT" }
+          );
+        }
+      } catch (err: any) {
+        // If the object_instances table doesn't exist yet, skip the
+        // check (transitional deployment). Any other error re-throws.
+        if (
+          err.code === "CONCURRENCY_CONFLICT" ||
+          !/relation .*object_instances.* does not exist/i.test(
+            err.message ?? ""
+          )
+        ) {
+          throw err;
+        }
+      }
+    }
 
     // Step 2: Insert ontology_edit rows
     for (const edit of edits) {

@@ -24,6 +24,7 @@ import {
 } from "../services/propertyMetadataService";
 import { executeGetObject } from "../services/queryExecutor";
 import { countLinks, resolveLinks } from "../services/linkResolverService";
+import { buildSecurityFilter } from "../middleware/securityContext";
 import linkTypeModel from "../models/linkType";
 
 const router = Router({ mergeParams: true });
@@ -113,7 +114,8 @@ async function getInterfaceImplementations(
 async function getLinkSummary(
   ontologyId: string,
   objectTypeId: string,
-  primaryKey: string
+  primaryKey: string,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<Array<Record<string, unknown>>> {
   // Get all link types where this object type is source or target
   const linkTypes = await linkTypeModel.listByOntology(ontologyId);
@@ -132,7 +134,7 @@ async function getLinkSummary(
       const direction: "forward" | "reverse" = isSource ? "forward" : "reverse";
 
       try {
-        const count = await countLinks(lt, primaryKey, direction);
+        const count = await countLinks(lt, primaryKey, direction, securityFilter);
         return {
           linkTypeApiName: lt.api_name,
           linkTypeDisplayName: lt.display_name,
@@ -170,10 +172,11 @@ async function buildObjectView(
   objectTypeApiName: string,
   objectTypeId: string,
   primaryKey: string,
-  include: string[] = ["properties", "links", "interfaces"]
+  include: string[] = ["properties", "links", "interfaces"],
+  securityFilter?: Record<string, unknown> | null
 ): Promise<Record<string, unknown>> {
   // Fetch the raw object from OpenSearch
-  const rawObject = await executeGetObject(objectTypeApiName, primaryKey);
+  const rawObject = await executeGetObject(objectTypeApiName, primaryKey, securityFilter);
   if (!rawObject) {
     throw appError(
       "OBJECT_NOT_FOUND",
@@ -213,7 +216,8 @@ async function buildObjectView(
     view.linkedObjectsSummary = await getLinkSummary(
       ontologyId,
       objectTypeId,
-      primaryKey
+      primaryKey,
+      securityFilter
     );
   }
 
@@ -236,11 +240,14 @@ router.get(
         objectTypeApiName
       );
 
+      const secFilter = buildSecurityFilter(req.security);
       const view = await buildObjectView(
         ontologyId,
         objectTypeApiName,
         objectTypeId,
-        primaryKey
+        primaryKey,
+        undefined,
+        secFilter
       );
 
       const elapsed = Date.now() - start;
@@ -301,6 +308,8 @@ router.get(
         }
       }
 
+      const secFilter = buildSecurityFilter(req.security);
+
       // Resolve linked objects for each link type
       const linkGroups: Array<Record<string, unknown>> = [];
 
@@ -324,7 +333,7 @@ router.get(
           const result = await resolveLinks(lt, primaryKey, direction, {
             pageSize,
             pageToken: pageToken as string | undefined,
-          });
+          }, secFilter);
 
           linkGroups.push({
             linkTypeApiName: lt.api_name,
@@ -415,6 +424,8 @@ router.post(
         objectTypeApiName
       );
 
+      const secFilter = buildSecurityFilter(req.security);
+
       // Build views for all primary keys in parallel
       const settled = await Promise.allSettled(
         primaryKeys.map(async (pk: string) => {
@@ -424,7 +435,8 @@ router.post(
               objectTypeApiName,
               objectTypeId,
               pk,
-              effectiveInclude
+              effectiveInclude,
+              secFilter
             );
           } catch (err: any) {
             // Return a partial result with error info
@@ -504,11 +516,14 @@ objectViewsByTypeRouter.get(
       const { objectType, primaryKey } = req.params;
       const { ontologyId, objectTypeId } = await resolveObjectType(objectType);
 
+      const secFilter = buildSecurityFilter(req.security);
       const view = await buildObjectView(
         ontologyId,
         objectType,
         objectTypeId,
-        primaryKey
+        primaryKey,
+        undefined,
+        secFilter
       );
 
       const elapsed = Date.now() - start;
@@ -561,6 +576,7 @@ objectViewsByTypeRouter.get(
         }
       }
 
+      const secFilter = buildSecurityFilter(req.security);
       const linkGroups: Array<Record<string, unknown>> = [];
 
       for (const lt of relevantLinks) {
@@ -578,7 +594,7 @@ objectViewsByTypeRouter.get(
           const result = await resolveLinks(lt, primaryKey, direction, {
             pageSize,
             pageToken: pageToken as string | undefined,
-          });
+          }, secFilter);
 
           linkGroups.push({
             linkTypeApiName: lt.api_name,
@@ -657,6 +673,7 @@ objectViewsByTypeRouter.post(
         : validIncludes;
 
       const { ontologyId, objectTypeId } = await resolveObjectType(objectType);
+      const secFilter = buildSecurityFilter(req.security);
 
       const settled = await Promise.allSettled(
         primaryKeys.map(async (pk: string) => {
@@ -666,7 +683,8 @@ objectViewsByTypeRouter.post(
               objectType,
               objectTypeId,
               pk,
-              effectiveInclude
+              effectiveInclude,
+              secFilter
             );
           } catch (err: any) {
             return {

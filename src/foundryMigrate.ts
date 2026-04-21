@@ -594,7 +594,7 @@ async function migrateFoundry(): Promise<void> {
     // PB-B1 — supervised deploys (idempotency, cancellation, orphan sweeper).
     // (pipeline_deployments itself is created earlier, above the PB-B3..B10
     // ALTER blocks, so those ALTERs don't fire against an undefined_table.)
-    // Mirrors migrations/017_pipeline_supervised_deploys.sql so fresh
+    // Mirrors migrations/033_pipeline_supervised_deploys.sql so fresh
     // environments boot with the full surface.
     // -----------------------------------------------------------------------
     await client.query(`ALTER TABLE pipeline_deployments ADD COLUMN IF NOT EXISTS idempotency_key TEXT`);

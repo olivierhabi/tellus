@@ -20,10 +20,11 @@ const pool = new Pool({
   user: process.env.PGUSER,
   password: process.env.PGPASSWORD,
 
-  // Maximum number of clients in the pool. Our Express server can handle
-  // dozens of concurrent requests and each request may need its own
-  // database connection.
-  max: 20,
+  // Maximum number of clients in the pool. Configurable via PG_POOL_MAX
+  // env var. Default 20 is adequate for moderate load; production
+  // deployments should tune based on expected concurrency and PG
+  // max_connections (pool across all replicas must not exceed it).
+  max: parseInt(process.env.PG_POOL_MAX || "20", 10),
 
   // A connection sitting idle for 30 seconds is released back to PostgreSQL.
   idleTimeoutMillis: 30_000,

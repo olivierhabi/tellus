@@ -7,7 +7,7 @@
 // support, multi-hop traversal, link analysis, and Search Around.
 // ---------------------------------------------------------------------------
 
-import { client } from "./opensearch/client";
+import { client, injectSecurityFilter } from "./opensearch/client";
 import { getIndexName } from "./opensearch/indexLifecycleManager";
 import { query } from "../db";
 import { appError } from "../utils/appError";
@@ -151,7 +151,8 @@ async function searchIndex(
   musts: Array<Record<string, unknown>>,
   from: number,
   size: number,
-  sort?: Array<Record<string, unknown>>
+  sort?: Array<Record<string, unknown>>,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<{ hits: Array<Record<string, unknown>>; total: number }> {
   const body: Record<string, unknown> = {
     from,
@@ -162,8 +163,11 @@ async function searchIndex(
     body.sort = sort;
   }
 
+  // Inject mandatory security filter (§Task 28)
+  const finalBody = injectSecurityFilter(body, securityFilter);
+
   try {
-    const { body: resp } = await client.search({ index: indexName, body });
+    const { body: resp } = await client.search({ index: indexName, body: finalBody });
     const hitsObj = (resp as any).hits;
     const total = typeof hitsObj.total === "object" ? hitsObj.total.value : hitsObj.total;
     const hits = (hitsObj.hits as any[]).map((h: any) => h._source as Record<string, unknown>);
@@ -178,10 +182,12 @@ async function searchIndex(
 
 async function countIndex(
   indexName: string,
-  queryBody: Record<string, unknown>
+  queryBody: Record<string, unknown>,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<number> {
   try {
-    const { body: resp } = await client.count({ index: indexName, body: { query: queryBody } });
+    const countBody = injectSecurityFilter({ query: queryBody }, securityFilter);
+    const { body: resp } = await client.count({ index: indexName, body: countBody });
     return (resp as any).count ?? 0;
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -193,8 +199,16 @@ async function countIndex(
 
 async function getDocByPK(
   indexName: string,
-  pk: string
+  pk: string,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<Record<string, unknown> | null> {
+  if (securityFilter) {
+    // Use search so OpenSearch enforces the security filter
+    const { hits } = await searchIndex(
+      indexName, [{ term: { __pk: pk } }], 0, 1, undefined, securityFilter
+    );
+    return hits.length > 0 ? hits[0] : null;
+  }
   try {
     const { body } = await client.get({ index: indexName, id: pk });
     return (body as any)._source as Record<string, unknown>;
@@ -257,7 +271,8 @@ export async function resolveLinks(
   linkType: LinkTypeRow,
   objectPK: string,
   direction: "forward" | "reverse",
-  options: ResolveOptions = {}
+  options: ResolveOptions = {},
+  securityFilter?: Record<string, unknown> | null
 ): Promise<ResolveResult> {
   const pageSize = Math.min(options.pageSize ?? 100, 1000);
   const from = decodeToken(options.pageToken);
@@ -275,9 +290,9 @@ export async function resolveLinks(
   }
 
   if (direction === "forward") {
-    return resolveForward(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, from, pageSize, filterClauses);
+    return resolveForward(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, from, pageSize, filterClauses, securityFilter);
   } else {
-    return resolveReverse(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, from, pageSize, filterClauses);
+    return resolveReverse(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, from, pageSize, filterClauses, securityFilter);
   }
 }
 
@@ -289,7 +304,8 @@ async function resolveForward(
   cardinality: Cardinality,
   from: number,
   size: number,
-  filterClauses: Array<Record<string, unknown>>
+  filterClauses: Array<Record<string, unknown>>,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<ResolveResult> {
   const targetIndex = getIndexName(targetOtApiName);
   const sourceIndex = getIndexName(sourceOtApiName);
@@ -306,7 +322,7 @@ async function resolveForward(
         { term: { [termField(targetPropName)]: sourcePK } },
         ...filterClauses,
       ];
-      const { hits, total } = await searchIndex(targetIndex, musts, from, size);
+      const { hits, total } = await searchIndex(targetIndex, musts, from, size, undefined, securityFilter);
       const nextPageToken = from + size < total ? encodeToken(from + size) : null;
       return { linkedObjects: hits, totalCount: total, nextPageToken };
     }
@@ -318,7 +334,7 @@ async function resolveForward(
       if (!sourcePropName) {
         return { linkedObjects: [], totalCount: 0, nextPageToken: null };
       }
-      const sourceDoc = await getDocByPK(sourceIndex, sourcePK);
+      const sourceDoc = await getDocByPK(sourceIndex, sourcePK, securityFilter);
       if (!sourceDoc) {
         return { linkedObjects: [], totalCount: 0, nextPageToken: null };
       }
@@ -330,14 +346,14 @@ async function resolveForward(
         { term: { __pk: String(fkValue) } },
         ...filterClauses,
       ];
-      const { hits, total } = await searchIndex(targetIndex, musts, from, size);
+      const { hits, total } = await searchIndex(targetIndex, musts, from, size, undefined, securityFilter);
       return { linkedObjects: hits, totalCount: total, nextPageToken: null };
     }
 
     case "ONE_TO_ONE": {
       if (linkType.source_property_id) {
         const sourcePropName = await getPropertyApiName(linkType.source_property_id);
-        const sourceDoc = await getDocByPK(sourceIndex, sourcePK);
+        const sourceDoc = await getDocByPK(sourceIndex, sourcePK, securityFilter);
         if (!sourceDoc) return { linkedObjects: [], totalCount: 0, nextPageToken: null };
         const fkValue = sourceDoc[sourcePropName];
         if (fkValue === null || fkValue === undefined || fkValue === "") {
@@ -347,7 +363,7 @@ async function resolveForward(
           { term: { __pk: String(fkValue) } },
           ...filterClauses,
         ];
-        const { hits, total } = await searchIndex(targetIndex, musts, 0, 1);
+        const { hits, total } = await searchIndex(targetIndex, musts, 0, 1, undefined, securityFilter);
         if (hits.length > 1) {
           console.warn(`[ONE_TO_ONE_VIOLATION] Link '${linkType.api_name}': source ${sourcePK} has ${total} targets`);
         }
@@ -359,7 +375,7 @@ async function resolveForward(
           { term: { [termField(targetPropName)]: sourcePK } },
           ...filterClauses,
         ];
-        const { hits, total } = await searchIndex(targetIndex, musts, 0, 1);
+        const { hits, total } = await searchIndex(targetIndex, musts, 0, 1, undefined, securityFilter);
         if (total > 1) {
           console.warn(`[ONE_TO_ONE_VIOLATION] Link '${linkType.api_name}': source ${sourcePK} has ${total} targets`);
         }
@@ -380,7 +396,7 @@ async function resolveForward(
           { terms: { __pk: cappedPKs } },
           ...filterClauses,
         ];
-        const { hits, total } = await searchIndex(targetIndex, musts, from, size);
+        const { hits, total } = await searchIndex(targetIndex, musts, from, size, undefined, securityFilter);
         const nextPageToken = from + size < total ? encodeToken(from + size) : null;
         return { linkedObjects: hits, totalCount: total, nextPageToken };
       }
@@ -395,7 +411,7 @@ async function resolveForward(
         { term: { [termField(targetPropName)]: sourcePK } },
         ...filterClauses,
       ];
-      const { hits, total } = await searchIndex(targetIndex, musts, from, size);
+      const { hits, total } = await searchIndex(targetIndex, musts, from, size, undefined, securityFilter);
       const nextPageToken = from + size < total ? encodeToken(from + size) : null;
       return { linkedObjects: hits, totalCount: total, nextPageToken };
     }
@@ -413,7 +429,8 @@ async function resolveReverse(
   cardinality: Cardinality,
   from: number,
   size: number,
-  filterClauses: Array<Record<string, unknown>>
+  filterClauses: Array<Record<string, unknown>>,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<ResolveResult> {
   const sourceIndex = getIndexName(sourceOtApiName);
   const targetIndex = getIndexName(targetOtApiName);
@@ -426,7 +443,7 @@ async function resolveReverse(
       if (!targetPropName) {
         return { linkedObjects: [], totalCount: 0, nextPageToken: null };
       }
-      const targetDoc = await getDocByPK(targetIndex, targetPK);
+      const targetDoc = await getDocByPK(targetIndex, targetPK, securityFilter);
       if (!targetDoc) return { linkedObjects: [], totalCount: 0, nextPageToken: null };
       const fkValue = targetDoc[targetPropName];
       if (fkValue === null || fkValue === undefined || fkValue === "") {
@@ -436,7 +453,7 @@ async function resolveReverse(
         { term: { __pk: String(fkValue) } },
         ...filterClauses,
       ];
-      const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1);
+      const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1, undefined, securityFilter);
       return { linkedObjects: hits, totalCount: total, nextPageToken: null };
     }
 
@@ -451,7 +468,7 @@ async function resolveReverse(
         { term: { [termField(sourcePropName)]: targetPK } },
         ...filterClauses,
       ];
-      const { hits, total } = await searchIndex(sourceIndex, musts, from, size);
+      const { hits, total } = await searchIndex(sourceIndex, musts, from, size, undefined, securityFilter);
       const nextPageToken = from + size < total ? encodeToken(from + size) : null;
       return { linkedObjects: hits, totalCount: total, nextPageToken };
     }
@@ -463,12 +480,12 @@ async function resolveReverse(
           { term: { [termField(sourcePropName)]: targetPK } },
           ...filterClauses,
         ];
-        const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1);
+        const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1, undefined, securityFilter);
         return { linkedObjects: hits, totalCount: total, nextPageToken: null };
       }
       if (linkType.target_property_id) {
         const targetPropName = await getPropertyApiName(linkType.target_property_id);
-        const targetDoc = await getDocByPK(targetIndex, targetPK);
+        const targetDoc = await getDocByPK(targetIndex, targetPK, securityFilter);
         if (!targetDoc) return { linkedObjects: [], totalCount: 0, nextPageToken: null };
         const fkValue = targetDoc[targetPropName];
         if (fkValue === null || fkValue === undefined || fkValue === "") {
@@ -478,7 +495,7 @@ async function resolveReverse(
           { term: { __pk: String(fkValue) } },
           ...filterClauses,
         ];
-        const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1);
+        const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1, undefined, securityFilter);
         return { linkedObjects: hits, totalCount: total, nextPageToken: null };
       }
       return { linkedObjects: [], totalCount: 0, nextPageToken: null };
@@ -496,7 +513,7 @@ async function resolveReverse(
           { terms: { __pk: cappedPKs } },
           ...filterClauses,
         ];
-        const { hits, total } = await searchIndex(sourceIndex, musts, from, size);
+        const { hits, total } = await searchIndex(sourceIndex, musts, from, size, undefined, securityFilter);
         const nextPageToken = from + size < total ? encodeToken(from + size) : null;
         return { linkedObjects: hits, totalCount: total, nextPageToken };
       }
@@ -511,7 +528,7 @@ async function resolveReverse(
         { term: { [termField(sourcePropName)]: targetPK } },
         ...filterClauses,
       ];
-      const { hits, total } = await searchIndex(sourceIndex, musts, from, size);
+      const { hits, total } = await searchIndex(sourceIndex, musts, from, size, undefined, securityFilter);
       const nextPageToken = from + size < total ? encodeToken(from + size) : null;
       return { linkedObjects: hits, totalCount: total, nextPageToken };
     }
@@ -528,7 +545,8 @@ async function resolveReverse(
 export async function countLinks(
   linkType: LinkTypeRow,
   objectPK: string,
-  direction: "forward" | "reverse"
+  direction: "forward" | "reverse",
+  securityFilter?: Record<string, unknown> | null
 ): Promise<number> {
   const sourceOtApiName = await getObjectTypeApiName(linkType.source_object_type);
   const targetOtApiName = await getObjectTypeApiName(linkType.target_object_type);
@@ -540,20 +558,20 @@ export async function countLinks(
         const targetPropName = linkType.target_property_id
           ? await getPropertyApiName(linkType.target_property_id) : null;
         if (!targetPropName) return 0;
-        return countIndex(getIndexName(targetOtApiName), { term: { [termField(targetPropName)]: objectPK } });
+        return countIndex(getIndexName(targetOtApiName), { term: { [termField(targetPropName)]: objectPK } }, securityFilter);
       }
       case "MANY_TO_ONE": {
         const sourcePropName = linkType.source_property_id
           ? await getPropertyApiName(linkType.source_property_id) : null;
         if (!sourcePropName) return 0;
-        const sourceDoc = await getDocByPK(getIndexName(sourceOtApiName), objectPK);
+        const sourceDoc = await getDocByPK(getIndexName(sourceOtApiName), objectPK, securityFilter);
         if (!sourceDoc) return 0;
         const fkVal = sourceDoc[sourcePropName];
         if (fkVal === null || fkVal === undefined || fkVal === "") return 0;
-        return countIndex(getIndexName(targetOtApiName), { term: { __pk: String(fkVal) } });
+        return countIndex(getIndexName(targetOtApiName), { term: { __pk: String(fkVal) } }, securityFilter);
       }
       case "ONE_TO_ONE": {
-        const res = await resolveForward(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, 0, 1, []);
+        const res = await resolveForward(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, 0, 1, [], securityFilter);
         return res.totalCount;
       }
       case "MANY_TO_MANY": {
@@ -564,24 +582,24 @@ export async function countLinks(
         const targetPropName = linkType.target_property_id
           ? await getPropertyApiName(linkType.target_property_id) : null;
         if (!targetPropName) return 0;
-        return countIndex(getIndexName(targetOtApiName), { term: { [termField(targetPropName)]: objectPK } });
+        return countIndex(getIndexName(targetOtApiName), { term: { [termField(targetPropName)]: objectPK } }, securityFilter);
       }
       default: return 0;
     }
   } else {
     switch (cardinality) {
       case "ONE_TO_MANY": {
-        const res = await resolveReverse(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, 0, 1, []);
+        const res = await resolveReverse(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, 0, 1, [], securityFilter);
         return res.totalCount;
       }
       case "MANY_TO_ONE": {
         const sourcePropName = linkType.source_property_id
           ? await getPropertyApiName(linkType.source_property_id) : null;
         if (!sourcePropName) return 0;
-        return countIndex(getIndexName(sourceOtApiName), { term: { [termField(sourcePropName)]: objectPK } });
+        return countIndex(getIndexName(sourceOtApiName), { term: { [termField(sourcePropName)]: objectPK } }, securityFilter);
       }
       case "ONE_TO_ONE": {
-        const res = await resolveReverse(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, 0, 1, []);
+        const res = await resolveReverse(linkType, objectPK, sourceOtApiName, targetOtApiName, cardinality, 0, 1, [], securityFilter);
         return res.totalCount;
       }
       case "MANY_TO_MANY": {
@@ -592,7 +610,7 @@ export async function countLinks(
         const sourcePropName = linkType.source_property_id
           ? await getPropertyApiName(linkType.source_property_id) : null;
         if (!sourcePropName) return 0;
-        return countIndex(getIndexName(sourceOtApiName), { term: { [termField(sourcePropName)]: objectPK } });
+        return countIndex(getIndexName(sourceOtApiName), { term: { [termField(sourcePropName)]: objectPK } }, securityFilter);
       }
       default: return 0;
     }
@@ -606,14 +624,15 @@ export async function countLinks(
 export async function bulkCountLinks(
   ontologyId: string,
   objectTypeId: string,
-  objectPK: string
+  objectPK: string,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<Array<{ linkTypeApiName: string; direction: string; count: number | null; error?: string }>> {
   const { listByObjectType } = await import("../models/linkType");
   const linkTypes = await listByObjectType(ontologyId, objectTypeId);
 
   const results = await Promise.allSettled(
     linkTypes.map(async (lt) => {
-      const count = await countLinks(lt, objectPK, lt.direction);
+      const count = await countLinks(lt, objectPK, lt.direction, securityFilter);
       return { linkTypeApiName: lt.api_name, direction: lt.direction, count };
     })
   );
@@ -638,7 +657,8 @@ export async function bulkCountLinks(
 export async function searchAround(
   linkType: LinkTypeRow,
   direction: "forward" | "reverse",
-  options: SearchAroundOptions = {}
+  options: SearchAroundOptions = {},
+  securityFilter?: Record<string, unknown> | null
 ): Promise<ResolveResult & { warnings?: string[] }> {
   const sourceOtApiName = await getObjectTypeApiName(linkType.source_object_type);
   const targetOtApiName = await getObjectTypeApiName(linkType.target_object_type);
@@ -660,7 +680,7 @@ export async function searchAround(
   try {
     const { body: resp } = await client.search({
       index: searchIndexName,
-      body: { size: MAX_SOURCE, _source: ["__pk"], query: sourceQuery },
+      body: injectSecurityFilter({ size: MAX_SOURCE, _source: ["__pk"], query: sourceQuery }, securityFilter),
     });
     const hitsObj = (resp as any).hits;
     const totalHits = typeof hitsObj.total === "object" ? hitsObj.total.value : hitsObj.total;
@@ -706,7 +726,7 @@ export async function searchAround(
       { terms: { [termField(fkField)]: sourcePKs } },
       ...targetFilterClauses,
     ];
-    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize);
+    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, undefined, securityFilter);
     const nextPageToken = from + pageSize < total ? encodeToken(from + pageSize) : null;
     return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
   }
@@ -729,7 +749,7 @@ export async function searchAround(
       { terms: { __pk: Array.from(allTargetPKs).slice(0, 100000) } },
       ...targetFilterClauses,
     ];
-    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize);
+    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, undefined, securityFilter);
     const nextPageToken = from + pageSize < total ? encodeToken(from + pageSize) : null;
     return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
   }
@@ -743,7 +763,7 @@ export async function searchAround(
       pageSize: 1000,
       targetFilter: options.targetFilter,
       excludeSelf: true,
-    });
+    }, securityFilter);
     for (const obj of result.linkedObjects) {
       const objPK = String(obj.__pk ?? "");
       if (!seenPKs.has(objPK)) {
@@ -773,7 +793,8 @@ export interface MultiHopStep {
 export async function resolveMultiHop(
   steps: MultiHopStep[],
   startingPKs: string[],
-  options: ResolveOptions = {}
+  options: ResolveOptions = {},
+  securityFilter?: Record<string, unknown> | null
 ): Promise<ResolveResult & { hopsCompleted: number }> {
   if (steps.length > 5) {
     throw appError("VALIDATION_FAILED", "Maximum 5 hops allowed.");
@@ -800,7 +821,7 @@ export async function resolveMultiHop(
       const result = await resolveLinks(linkType, pk, step.direction, {
         pageSize: isLastHop ? options.pageSize : 1000,
         excludeSelf: true,
-      });
+      }, securityFilter);
       for (const obj of result.linkedObjects) {
         nextPKs.add(String(obj.__pk ?? ""));
       }
@@ -829,7 +850,7 @@ export async function resolveMultiHop(
         { terms: { __pk: allPKs } },
         ...filterClauses,
       ];
-      const { hits, total } = await searchIndex(targetIndex, musts, from, pageSize);
+      const { hits, total } = await searchIndex(targetIndex, musts, from, pageSize, undefined, securityFilter);
       const nextPageToken = from + pageSize < total ? encodeToken(from + pageSize) : null;
       return { linkedObjects: hits, totalCount: total, nextPageToken, hopsCompleted: i + 1 };
     }
@@ -856,7 +877,8 @@ export async function resolveMultiHop(
 async function collectCompositeCounts(
   indexName: string,
   fkField: string,
-  maxBuckets: number
+  maxBuckets: number,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<number[]> {
   const counts: number[] = [];
   let afterKey: Record<string, unknown> | undefined;
@@ -877,7 +899,7 @@ async function collectCompositeCounts(
     };
     let resp: any;
     try {
-      const { body } = await client.search({ index: indexName, body: aggBody });
+      const { body } = await client.search({ index: indexName, body: injectSecurityFilter(aggBody, securityFilter) });
       resp = body;
     } catch {
       break;
@@ -900,7 +922,8 @@ function percentile(sorted: number[], p: number): number {
 
 export async function analyzeLinkType(
   linkType: LinkTypeRow,
-  opts: { precision?: AnalysisPrecision; maxBuckets?: number } = {}
+  opts: { precision?: AnalysisPrecision; maxBuckets?: number } = {},
+  securityFilter?: Record<string, unknown> | null
 ): Promise<LinkAnalysis> {
   const sourceOtApiName = await getObjectTypeApiName(linkType.source_object_type);
   const targetOtApiName = await getObjectTypeApiName(linkType.target_object_type);
@@ -908,8 +931,8 @@ export async function analyzeLinkType(
   const targetIndex = getIndexName(targetOtApiName);
 
   // Get total counts
-  const totalSourceObjects = await countIndex(sourceIndex, { match_all: {} });
-  const totalTargetObjects = await countIndex(targetIndex, { match_all: {} });
+  const totalSourceObjects = await countIndex(sourceIndex, { match_all: {} }, securityFilter);
+  const totalTargetObjects = await countIndex(targetIndex, { match_all: {} }, securityFilter);
 
   let totalLinkCount = 0;
   let sourcesWithNoLinks = 0;
@@ -960,11 +983,11 @@ export async function analyzeLinkType(
 
     if (fkField) {
       // Count objects with non-null FK
-      totalLinkCount = await countIndex(fkIndex, { exists: { field: fkField } });
+      totalLinkCount = await countIndex(fkIndex, { exists: { field: fkField } }, securityFilter);
 
       // Count objects without the FK field (sources with no links)
-      const totalInFkIndex = await countIndex(fkIndex, { match_all: {} });
-      const withFk = await countIndex(fkIndex, { exists: { field: fkField } });
+      const totalInFkIndex = await countIndex(fkIndex, { match_all: {} }, securityFilter);
+      const withFk = await countIndex(fkIndex, { exists: { field: fkField } }, securityFilter);
       sourcesWithNoLinks = totalInFkIndex - withFk;
 
       // Compute targetsWithNoLinks: objects on the non-FK side that nobody points to
@@ -981,7 +1004,7 @@ export async function analyzeLinkType(
             },
             query: { exists: { field: fkField } },
           };
-          const { body: aggResp } = await client.search({ index: fkIndex, body: aggBody });
+          const { body: aggResp } = await client.search({ index: fkIndex, body: injectSecurityFilter(aggBody, securityFilter) });
           const uniqueRefs = (aggResp as any).aggregations?.unique_refs?.value ?? 0;
           // Sources that no target points to
           sourcesWithNoLinks = Math.max(0, totalSourceObjects - uniqueRefs);
@@ -996,7 +1019,7 @@ export async function analyzeLinkType(
             },
             query: { exists: { field: fkField } },
           };
-          const { body: aggResp } = await client.search({ index: fkIndex, body: aggBody });
+          const { body: aggResp } = await client.search({ index: fkIndex, body: injectSecurityFilter(aggBody, securityFilter) });
           const uniqueRefs = (aggResp as any).aggregations?.unique_refs?.value ?? 0;
           targetsWithNoLinks = Math.max(0, totalTargetObjects - uniqueRefs);
         } else {
@@ -1019,7 +1042,7 @@ export async function analyzeLinkType(
         const counts =
           precision === "fast"
             ? []
-            : await collectCompositeCounts(fkIndex, fkField, maxBuckets);
+            : await collectCompositeCounts(fkIndex, fkField, maxBuckets, securityFilter);
 
         if (counts.length > 0) {
           distribution = computeDistribution(counts);
@@ -1027,7 +1050,7 @@ export async function analyzeLinkType(
           (distribution as any).p99_9 = percentile(counts, 0.999);
         }
       } catch {
-        const totalInIndex = await countIndex(fkIndex, { match_all: {} });
+        const totalInIndex = await countIndex(fkIndex, { match_all: {} }, securityFilter);
         distribution = {
           min: 0,
           max: totalLinkCount > 0 ? 1 : 0,
@@ -1143,7 +1166,8 @@ export async function validateCardinalityChange(
 export async function validateForeignKeys(
   objectTypeId: string,
   objectData: Record<string, unknown>,
-  ontologyId: string
+  ontologyId: string,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<FKValidationResult> {
   const warnings: string[] = [];
   const orphanedReferences: Array<{ property: string; value: string; targetType: string }> = [];
@@ -1164,7 +1188,7 @@ export async function validateForeignKeys(
 
     const targetOtApiName = await getObjectTypeApiName(lt.target_object_type);
     const targetIndex = getIndexName(targetOtApiName);
-    const doc = await getDocByPK(targetIndex, String(fkValue));
+    const doc = await getDocByPK(targetIndex, String(fkValue), securityFilter);
 
     if (!doc) {
       orphanedReferences.push({ property: propName, value: String(fkValue), targetType: targetOtApiName });
@@ -1184,7 +1208,8 @@ export async function validateForeignKeys(
 // ---------------------------------------------------------------------------
 
 export async function validateJoinTable(
-  linkType: LinkTypeRow
+  linkType: LinkTypeRow,
+  securityFilter?: Record<string, unknown> | null
 ): Promise<JoinTableValidation> {
   if (!linkType.join_table_file_path) {
     return {
@@ -1231,7 +1256,7 @@ export async function validateJoinTable(
   // Check sources exist
   if (sourceArr.length > 0) {
     try {
-      const existing = await searchIndex(sourceIndex, [{ terms: { __pk: sourceArr.slice(0, 10000) } }], 0, 10000);
+      const existing = await searchIndex(sourceIndex, [{ terms: { __pk: sourceArr.slice(0, 10000) } }], 0, 10000, undefined, securityFilter);
       const existingPKs = new Set(existing.hits.map((h) => String(h.__pk)));
       for (const pk of sourceArr.slice(0, 10000)) {
         if (!existingPKs.has(pk)) {
@@ -1246,7 +1271,7 @@ export async function validateJoinTable(
   // Check targets exist
   if (targetArr.length > 0) {
     try {
-      const existing = await searchIndex(targetIndex, [{ terms: { __pk: targetArr.slice(0, 10000) } }], 0, 10000);
+      const existing = await searchIndex(targetIndex, [{ terms: { __pk: targetArr.slice(0, 10000) } }], 0, 10000, undefined, securityFilter);
       const existingPKs = new Set(existing.hits.map((h) => String(h.__pk)));
       for (const pk of targetArr.slice(0, 10000)) {
         if (!existingPKs.has(pk)) {

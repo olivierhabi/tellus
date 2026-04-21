@@ -49,6 +49,9 @@ export default defineConfig({
       PGDATABASE: "tellus_db",
       PGUSER: "tellus",
       PGPASSWORD: "tellus123",
+      // F-09: Disable rate limiter during tests to prevent cross-run
+      // 429 failures when vitest restarts within the same 60s window.
+      RATE_LIMIT_MAX: "999999",
     },
 
     // Coverage configuration — scoped to modules exercised by unit tests.

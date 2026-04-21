@@ -24,14 +24,8 @@ import {
   validateForeignKeys,
   validateJoinTable,
 } from "../services/linkResolverService";
-import {
-  sendSuccess,
-  sendCreated,
-  sendNoContent,
-  sendError,
-  encodePageToken,
-  decodePageToken,
-} from "../utils/responseFormatter";
+import { sendSuccess, sendCreated, sendNoContent, sendError, encodePageToken, decodePageToken } from "../utils/responseFormatter";
+import { buildSecurityFilter } from "../middleware/securityContext";
 import type { Cardinality, LinkTypeRow } from "../models/linkType";
 import {
   applyReverseProjectionAll,
@@ -296,7 +290,7 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
           if (!linkType) {
             return { linkTypeApiName: r.linkTypeApiName, direction: r.direction, objectPK: r.objectPK, count: null, error: "Link type not found" };
           }
-          const count = await countLinks(linkType, r.objectPK, r.direction);
+          const count = await countLinks(linkType, r.objectPK, r.direction, buildSecurityFilter(req.security));
           return { linkTypeApiName: r.linkTypeApiName, direction: r.direction, objectPK: r.objectPK, count };
         })
       );
@@ -326,7 +320,7 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
       return sendError(res, "OBJECT_TYPE_NOT_FOUND", `Object type '${objectTypeApiName}' not found.`);
     }
 
-    const results = await bulkCountLinks(ontologyId, otResult.rows[0].object_type_id, objectPK);
+    const results = await bulkCountLinks(ontologyId, otResult.rows[0].object_type_id, objectPK, buildSecurityFilter(req.security));
     return sendSuccess(res, { results });
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -361,7 +355,7 @@ router.post("/multiHop", async (req: Request, res: Response, next: NextFunction)
       pageSize,
       pageToken,
       targetFilter,
-    });
+    }, buildSecurityFilter(req.security));
 
     return sendSuccess(res, result);
   } catch (err: any) {
@@ -488,8 +482,27 @@ router.delete("/:apiName", async (req: Request, res: Response, next: NextFunctio
     (formatted as any).deletedAt = new Date().toISOString();
 
     if (deleted.join_table_file_path) {
-      console.warn(`[ORPHANED_JOIN_TABLE] Link type '${apiName}' deleted but join table file remains: ${deleted.join_table_file_path}`);
-      (formatted as any).warnings = [`Orphaned join table file: ${deleted.join_table_file_path}`];
+      // F-10: Cascade cleanup — delete the orphaned join table file.
+      try {
+        const fs = require("fs");
+        if (fs.existsSync(deleted.join_table_file_path)) {
+          fs.unlinkSync(deleted.join_table_file_path);
+          console.info(`[CASCADE_CLEANUP] Deleted join table file: ${deleted.join_table_file_path}`);
+        }
+      } catch (cleanupErr: any) {
+        console.warn(`[CASCADE_CLEANUP_FAILED] Could not delete join table file ${deleted.join_table_file_path}: ${cleanupErr.message}`);
+        (formatted as any).warnings = [`Failed to delete orphaned join table file: ${deleted.join_table_file_path}`];
+      }
+    }
+
+    // F-10: Cascade cleanup — purge link_edit and quarantine rows for this link type.
+    try {
+      const { query: pgQuery } = require("../db");
+      await pgQuery("DELETE FROM link_edit WHERE link_type_api_name = $1", [apiName]);
+      await pgQuery("DELETE FROM link_quarantine WHERE link_type_api_name = $1", [apiName]);
+    } catch (cascadeErr: any) {
+      // Tables may not exist in transitional deployments.
+      console.warn(`[CASCADE_CLEANUP] link_edit/quarantine purge for '${apiName}': ${cascadeErr.message}`);
     }
 
     return sendSuccess(res, formatted);
@@ -549,7 +562,7 @@ router.post("/:apiName/resolve", async (req: Request, res: Response, next: NextF
 
     const result = await resolveLinks(linkType, objectPK, direction, {
       pageSize, pageToken, targetFilter, select,
-    });
+    }, buildSecurityFilter(req.security));
 
     // LT-B6 — strip reverse-only projection from hits before responding.
     const projectedHits = applyReverseProjectionAll(
@@ -635,7 +648,7 @@ router.post("/:apiName/count", async (req: Request, res: Response, next: NextFun
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
-    const count = await countLinks(linkType, objectPK, direction);
+    const count = await countLinks(linkType, objectPK, direction, buildSecurityFilter(req.security));
     return sendSuccess(res, { linkTypeApiName: apiName, direction, count });
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -680,7 +693,7 @@ router.post("/:apiName/searchAround", async (req: Request, res: Response, next: 
 
     const result = await searchAround(linkType, direction, {
       sourceFilter, targetFilter, pageSize, pageToken,
-    });
+    }, buildSecurityFilter(req.security));
 
     return sendSuccess(res, result);
   } catch (err: any) {
@@ -783,7 +796,7 @@ router.post("/:apiName/validate", async (req: Request, res: Response, next: Next
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
-    const validation = await validateJoinTable(linkType);
+    const validation = await validateJoinTable(linkType, buildSecurityFilter(req.security));
     return sendSuccess(res, validation);
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -811,7 +824,7 @@ router.get("/:apiName/analysis", async (req: Request, res: Response, next: NextF
       precisionRaw === "exact" || precisionRaw === "sampled" || precisionRaw === "fast"
         ? precisionRaw
         : undefined;
-    const analysis = await analyzeLinkType(linkType, { precision });
+    const analysis = await analyzeLinkType(linkType, { precision }, buildSecurityFilter(req.security));
     return sendSuccess(res, analysis);
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {

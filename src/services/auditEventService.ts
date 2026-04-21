@@ -12,9 +12,17 @@
  * endpoint merges these rows with the Keycloak event stream so the
  * settings UI surfaces one unified history.
  *
- * The emit() helper is intentionally fire-and-forget: a failure to
- * write an audit row must never block the user-visible operation.
- * We log the error to stderr and move on.
+ * F-07: Audit writes are now **durable before ack**. The emitAuditEvent
+ * function throws on failure so callers abort the operation rather than
+ * returning a success response with a silently dropped audit row. This
+ * is non-negotiable under Rwandan tax law (Data Protection Law
+ * No. 058/2021) and the EAC Data Protection Framework.
+ *
+ * F-08: Extended audit categories cover object reads, writes, link
+ * traversals, and search queries — not just auth lifecycle events.
+ *
+ * F-15: Prometheus counter `tellus_audit_emit_failures_total` is
+ * incremented on every write failure for alerting.
  */
 
 import type { Request } from 'express';
@@ -32,7 +40,12 @@ export type AuditCategory =
   | 'admin'
   // PB-B7 — per-pipeline ACL changes + marking-policy deny events.
   | 'pipeline_acl'
-  | 'pipeline_marking';
+  | 'pipeline_marking'
+  // F-08: Data-plane audit categories for regulatory compliance.
+  | 'object'
+  | 'link'
+  | 'search'
+  | 'action';
 
 export type AuditAction =
   // password
@@ -71,7 +84,19 @@ export type AuditAction =
   | 'pipeline.acl.revoke'
   | 'pipeline.acl.deny'
   | 'pipeline.marking.deny'
-  | 'pipeline.marking.propagate';
+  | 'pipeline.marking.propagate'
+  // F-08: Data-plane audit actions
+  | 'object.read'
+  | 'object.create'
+  | 'object.update'
+  | 'object.delete'
+  | 'object.search'
+  | 'link.traverse'
+  | 'link.create'
+  | 'link.delete'
+  | 'search.execute'
+  | 'action.execute'
+  | 'action.validate';
 
 export interface EmitAuditOpts {
   keycloakSub: string;
@@ -96,6 +121,27 @@ function extractUserAgent(req?: Request): string | null {
   return Array.isArray(ua) ? ua[0]?.slice(0, 512) ?? null : ua.slice(0, 512);
 }
 
+// F-15: Prometheus counter for audit write failures.
+let auditFailureCounter: { inc: () => void } | undefined;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const prom = require('prom-client');
+  auditFailureCounter = new prom.Counter({
+    name: 'tellus_audit_emit_failures_total',
+    help: 'Total number of audit event write failures',
+  });
+} catch {
+  // prom-client not available — counter is a no-op
+}
+
+/**
+ * F-07: Audit writes are durable before ack. This function **throws**
+ * on failure so that the calling operation aborts rather than returning
+ * success with a silently dropped audit row.
+ *
+ * For auth-lifecycle events (where blocking the login flow on an audit
+ * failure would lock users out), use `emitAuditEventBestEffort` instead.
+ */
 export async function emitAuditEvent(opts: EmitAuditOpts): Promise<void> {
   try {
     await (foundryDb as unknown as Knex)('tellus_audit_events').insert({
@@ -108,10 +154,46 @@ export async function emitAuditEvent(opts: EmitAuditOpts): Promise<void> {
       details: opts.details ? JSON.stringify(opts.details) : '{}',
     });
   } catch (err) {
-    // Audit must never block the caller — log and swallow.
+    auditFailureCounter?.inc();
     console.error(
       JSON.stringify({
         type: 'audit_emit_failed',
+        timestamp: new Date().toISOString(),
+        action: opts.action,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    // F-07: Re-throw so the caller aborts. Audit durability is
+    // non-negotiable under Rwandan Data Protection Law No. 058/2021.
+    throw new Error(
+      `Audit write failed for action '${opts.action}': ${
+        err instanceof Error ? err.message : String(err)
+      }. Operation aborted to preserve audit trail integrity.`
+    );
+  }
+}
+
+/**
+ * Best-effort audit emit for auth-lifecycle events where blocking
+ * the user operation on audit failure would cause lockout. Logs
+ * and increments the Prometheus counter but does NOT throw.
+ */
+export async function emitAuditEventBestEffort(opts: EmitAuditOpts): Promise<void> {
+  try {
+    await (foundryDb as unknown as Knex)('tellus_audit_events').insert({
+      keycloak_sub: opts.keycloakSub,
+      category: opts.category,
+      action: opts.action,
+      result: opts.result,
+      ip: extractIp(opts.req),
+      user_agent: extractUserAgent(opts.req),
+      details: opts.details ? JSON.stringify(opts.details) : '{}',
+    });
+  } catch (err) {
+    auditFailureCounter?.inc();
+    console.error(
+      JSON.stringify({
+        type: 'audit_emit_failed_best_effort',
         timestamp: new Date().toISOString(),
         action: opts.action,
         error: err instanceof Error ? err.message : String(err),

@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";
-import { query } from "../db";
+import { query, getClient } from "../db";
 import {
   sendSuccess,
   sendCreated,
@@ -20,6 +20,7 @@ import {
   sendNoContent,
 } from "../utils/responseFormatter";
 import { OntologyError } from "../utils/queryErrors";
+import { mergeThreeWay, getBranchDiff, recordForkPoint } from "../services/branchMergeService";
 
 const router = Router({ mergeParams: true });
 
@@ -81,8 +82,12 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
 
     const createdBy = (req as any).user?.id || "system";
     let row;
+    // F-04: Use a transaction to atomically create the branch and record
+    // the fork point (the latest edit_id at the time of fork).
+    const pgClient = await getClient();
     try {
-      const result = await query(
+      await pgClient.query("BEGIN");
+      const result = await pgClient.query(
         `INSERT INTO ontology_branch
            (ontology_id, name, parent_branch_id, created_by)
          VALUES ($1, $2, $3, $4)
@@ -90,7 +95,10 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
         [ontologyId, name, parentId, createdBy]
       );
       row = result.rows[0];
+      await recordForkPoint(pgClient, row.branch_id, ontologyId);
+      await pgClient.query("COMMIT");
     } catch (err: any) {
+      await pgClient.query("ROLLBACK").catch(() => {});
       if (err.code === "23505") {
         throw appError(
           "API_NAME_CONFLICT",
@@ -98,6 +106,8 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
         );
       }
       throw err;
+    } finally {
+      pgClient.release();
     }
 
     sendCreated(res, { branch: row, description: description || null });
@@ -175,6 +185,9 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId, branchName } = req.params;
+      const { resolutions } = req.body || {};
+
+      // Look up the branch
       const branch = await query(
         "SELECT * FROM ontology_branch WHERE ontology_id = $1 AND name = $2",
         [ontologyId, branchName]
@@ -208,20 +221,39 @@ router.post(
         );
       }
 
-      await query(
-        "UPDATE ontology_branch SET status = 'MERGED', merged_at = now() WHERE branch_id = $1",
-        [row.branch_id]
+      // F-04: Three-way merge with conflict detection.
+      // Convert resolutions from JSON object to Map if provided.
+      let resolutionMap: Map<string, "parent" | "branch"> | undefined;
+      if (resolutions && typeof resolutions === "object") {
+        resolutionMap = new Map(
+          Object.entries(resolutions) as Array<[string, "parent" | "branch"]>
+        );
+      }
+
+      const mergeResult = await mergeThreeWay(
+        ontologyId,
+        row.branch_id,
+        resolutionMap
       );
-      await query(
-        "UPDATE ontology_proposal SET status = 'MERGED', merged_at = now() WHERE branch_id = $1 AND status = 'APPROVED'",
-        [row.branch_id]
-      );
+
+      if (!mergeResult.success) {
+        // Conflicts detected — return 409 with conflict details.
+        return res.status(409).json({
+          error: {
+            code: "BRANCH_MERGE_CONFLICT",
+            message: `Merge conflict: ${mergeResult.conflicts.length} conflicting property change(s). Provide resolutions to proceed.`,
+            conflicts: mergeResult.conflicts,
+          },
+        });
+      }
 
       sendSuccess(res, {
         branchId: row.branch_id,
         status: "MERGED",
+        mergedEditCount: mergeResult.mergedEditCount,
       });
-    } catch (err) {
+    } catch (err: any) {
+      if (KNOWN.has(err.code)) return sendError(res, err.code, err.message);
       next(err);
     }
   }
