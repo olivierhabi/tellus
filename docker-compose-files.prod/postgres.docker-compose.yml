@@ -3,8 +3,15 @@ services:
     image: postgres:16-alpine
     container_name: tellus-db
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:5432:5432"
+    # Host port binding intentionally omitted. The main `docker-compose.yml`
+    # (project `tellus`) already owns 127.0.0.1:5432 for the application's
+    # primary PG. This prod-stack postgres is a second instance dedicated to
+    # infrastructure services (lakekeeper, temporal, quickwit) and is only
+    # reached over the `docker-compose-filesprod_default`,
+    # `tellus-lakekeeper-internal`, and `tellus-temporal-internal` bridge
+    # networks as the hostname `postgres`.
+    # ports:
+    #   - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${DB_USER:-tellus}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-tellus123}

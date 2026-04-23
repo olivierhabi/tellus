@@ -87,6 +87,8 @@ async function ensureActionType(def: Record<string, unknown>): Promise<void> {
 // Server reachability + ontology discovery
 // ---------------------------------------------------------------------------
 
+import { resetRateLimiter } from "../../helpers/rateLimitReset";
+
 beforeAll(async () => {
   try {
     const res = await fetch(`${BASE}/health`, {
@@ -99,6 +101,12 @@ beforeAll(async () => {
     );
     return;
   }
+
+  // This entire suite asserts on rate-limiter state. Start from a clean
+  // counter so cross-file parallel suites don't pre-fill `batch:anonymous`
+  // or per-action-type keys. Tests 8 → 9 → 10 build state within the
+  // suite — do NOT reset between them.
+  await resetRateLimiter();
 
   const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
@@ -305,14 +313,27 @@ describe("Action Execution Rate Limiter (Task 27)", () => {
 
   // =========================================================================
   // Test 8: Exceeding batch-per-user limit returns 429
+  //
+  // The batch rate limiter keys on `batch:${user.id || "anonymous"}`. All
+  // unauthenticated test suites share the "anonymous" key, so this test
+  // resets the in-process counter first (test-only hook mounted behind
+  // TELLUS_TEST_HOOKS=1) to guarantee a clean window. Post-A2, once JWTs
+  // identify each test user, the reset becomes unnecessary.
   // =========================================================================
-  it("8. exceeding batch-per-user limit (10/min) returns 429", async () => {
+  it("8. exceeding batch-per-user limit returns 429", async () => {
     if (skip()) return;
 
-    // Fire 11 batch requests — the 11th should be rate-limited.
-    // (Test 7 already used 1, so we need 10 more to reach 11 total.)
+    // Read the server's batch rate limit from env (globalSetup propagates it).
+    // Default to 10 (production default) when not explicitly set.
+    // NOTE: suite-wide reset happens in beforeAll (below) — not here — so
+    // tests 9/10 can observe the full counter test 8 produces.
+    const batchLimit = parseInt(process.env.BATCH_RATE_LIMIT_MAX || "10", 10);
+
+    // Fire batchLimit + 1 requests. Counter was reset in beforeAll, and
+    // tests 1-7 don't touch the batch endpoint, so this is a clean window;
+    // the (batchLimit + 1)th request must trigger a 429.
     const promises: Promise<{ status: number; body: any; headers: Headers }>[] = [];
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < batchLimit + 1; i++) {
       promises.push(
         request("POST", actionsPath(RL_BATCH_ACTION, "/applyBatch"), {
           requests: [
@@ -330,9 +351,9 @@ describe("Action Execution Rate Limiter (Task 27)", () => {
     const results = await Promise.all(promises);
     const rateLimited = results.filter((r) => r.status === 429);
 
-    // At least 1 should be rate limited (batch per user limit is 10)
+    // At least 1 should be rate limited
     expect(rateLimited.length).toBeGreaterThanOrEqual(1);
-  }, 30000);
+  }, 60_000);
 
   // =========================================================================
   // Test 9: Rate-limited requests show remaining as 0

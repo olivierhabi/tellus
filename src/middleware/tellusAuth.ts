@@ -25,6 +25,7 @@ import { AppError } from '../utils/foundryAppError';
 import { TellusAuthService, TellusClaims } from '../services/tellusAuthService';
 import { ensureLocalUserForClaims } from '../services/userProvisioning';
 import foundryDb from '../config/foundryDb';
+import { getKeycloakRealm } from "../auth/keycloakConfig"; // F-P4-26
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -52,7 +53,7 @@ function svc(): TellusAuthService {
   if (!service) {
     service = new TellusAuthService(foundryDb as never, {
       kcUrl: process.env.KEYCLOAK_URL || 'http://localhost:8086',
-      kcRealm: process.env.KEYCLOAK_REALM || 'tellus',
+      kcRealm: getKeycloakRealm(),
       kcFrontendClientId: process.env.KEYCLOAK_FRONTEND_CLIENT_ID || 'tellus-frontend',
     });
   }

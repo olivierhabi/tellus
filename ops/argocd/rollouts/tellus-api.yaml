@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: tellus-api
+  namespace: tellus
+spec:
+  replicas: 3
+  strategy:
+    canary:
+      canaryService: tellus-api-canary
+      stableService: tellus-api-stable
+      trafficRouting:
+        istio:
+          virtualService:
+            name: tellus-api
+      steps:
+        - setWeight: 1       # Stage 1: 1% traffic
+        - pause: { duration: 14d }
+        - analysis:
+            templates: [{ templateName: slo-burn-rate }]
+        - setWeight: 10      # Stage 2: 10%
+        - pause: { duration: 14d }
+        - analysis:
+            templates: [{ templateName: slo-burn-rate }]
+        - setWeight: 50      # Stage 3: 50%
+        - pause: { duration: 7d }
+        - analysis:
+            templates: [{ templateName: slo-burn-rate }]
+        - setWeight: 100     # Stage 4: 100% of first tenant
+        - pause: { duration: 14d }
+  selector: { matchLabels: { app: tellus-api } }
+  template:
+    metadata: { labels: { app: tellus-api } }
+    spec:
+      serviceAccountName: tellus-api
+      containers:
+        - name: api
+          image: ghcr.io/tellus/api:STABLE
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /api/v1/ready, port: 3000 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 3000 }
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+            allowPrivilegeEscalation: false

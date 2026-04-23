@@ -87,5 +87,5 @@ export function setPools(input: { primary: Searcher[]; secondary?: Searcher[] })
 export function __resetSearcherPoolsForTesting(): void {
   primary = [];
   secondary = [];
-  loaded = false;
+  loaded = true; // keep loaded=true so getPrimaryPool() returns [] without re-reading env
 }

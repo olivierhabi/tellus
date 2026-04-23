@@ -92,6 +92,8 @@ async function fetchObject(objectType: string, primaryKey: string) {
 // Server reachability + ontology discovery
 // ---------------------------------------------------------------------------
 
+import { resetRateLimiter } from "../../helpers/rateLimitReset";
+
 beforeAll(async () => {
   try {
     const res = await fetch(`${BASE}/health`, {
@@ -104,6 +106,11 @@ beforeAll(async () => {
     );
     return;
   }
+
+  // Reset the batch-per-user rate-limit counter so cross-file parallel suites
+  // don't deplete the shared `batch:anonymous` key before this suite runs.
+  // Removed in Phase A2 once per-JWT user keys isolate each suite naturally.
+  await resetRateLimiter();
 
   const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {

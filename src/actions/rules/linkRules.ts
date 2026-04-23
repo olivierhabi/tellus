@@ -254,7 +254,8 @@ async function processLinkRule(
       targetPk,
       operation,
       ruleLabel,
-      warnings
+      warnings,
+      context,
     );
   }
 
@@ -282,7 +283,8 @@ async function handleManyToMany(
   targetPk: string,
   operation: "add" | "remove",
   ruleLabel: string,
-  warnings: string[]
+  warnings: string[],
+  context: RuleContext,
 ): Promise<LinkRuleResult> {
   if (operation === "add") {
     // Check for duplicate: is this link already active?
@@ -290,7 +292,8 @@ async function handleManyToMany(
       const netState = await getLinkNetState(
         linkType.api_name,
         sourcePk,
-        targetPk
+        targetPk,
+        context.branchId,
       );
       if (netState > 0) {
         warnings.push(
@@ -306,7 +309,8 @@ async function handleManyToMany(
       const netState = await getLinkNetState(
         linkType.api_name,
         sourcePk,
-        targetPk
+        targetPk,
+        context.branchId,
       );
       if (netState <= 0) {
         return {
@@ -479,12 +483,38 @@ async function safeObjectExists(
 /**
  * Get the net state of a many-to-many link (add count minus remove count).
  * A positive value means the link is currently active.
+ *
+ * F-P3-12: when `branchId` is supplied the query is scoped to that
+ * branch so dup-add / remove-of-missing idempotency checks don't see
+ * cross-branch writes. When `branchId` is `undefined` (legacy
+ * preview or tests that don't resolve a branch) the query scans
+ * across all branches with a justification comment — this is a
+ * best-effort user-visible warning, not a correctness boundary,
+ * and the writer path always resolves the branch at
+ * `actionExecutor` -> `applyEdits` before the actual INSERT.
  */
 async function getLinkNetState(
   linkTypeApiName: string,
   sourcePk: string,
-  targetPk: string
+  targetPk: string,
+  branchId?: string,
 ): Promise<number> {
+  if (branchId) {
+    const result = await query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END), 0)::int AS net
+       FROM link_edit
+       WHERE link_type_api_name = $1
+         AND source_primary_key = $2
+         AND target_primary_key = $3
+         AND branch_id = $4`,
+      [linkTypeApiName, sourcePk, targetPk, branchId]
+    );
+    return result.rows[0]?.net ?? 0;
+  }
+  // F-P3-12 fallback: caller didn't thread a branch (legacy preview).
+  // Scan cross-branch; caller treats the net state as an advisory
+  // signal for idempotency warnings only.
   const result = await query(
     `SELECT
        COALESCE(SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END), 0)::int AS net

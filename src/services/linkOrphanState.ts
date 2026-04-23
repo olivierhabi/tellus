@@ -77,6 +77,14 @@ async function hasPendingIndexWrite(
   // LT-B3 link_edit.applied_to_index_at — the FK target could be from a
   // link edit, not an object edit. Look for any recent unindexed add/remove
   // mentioning this PK.
+  //
+  // F-P3-12 audit: this read is intentionally cross-branch. It asks
+  // "is there ANY pending index write for this PK anywhere in the
+  // ontology?" — the indexer's back-pressure signal must see writes
+  // on every branch, not just the reader's. Scoping by branch_id
+  // would cause the resolver to return stale data immediately after a
+  // cross-branch edit. This is internal indexer plumbing, not a
+  // user-visible read.
   const linkRow = await query(
     `SELECT 1 FROM link_edit
        WHERE (source_primary_key = $1 OR target_primary_key = $1)

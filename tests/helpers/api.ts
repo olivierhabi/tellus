@@ -23,7 +23,15 @@ export interface ApiResponse {
 // unless the caller explicitly passes a different Authorization header.
 // Foundry integration (BE-003..BE-030) depends on this — otherwise
 // every CRUD test returns 401 because the auth header is missing.
-let bearerToken: string | null = null;
+//
+// F-01 / Phase A2: sub-process test suites (run via selfTestBridge's
+// `runInChildProcess`) inherit the parent's env but not its module
+// state. To keep those suites authenticated without rewriting them,
+// the TELLUS_TEST_BEARER env var — populated by tests/setupFiles.ts
+// and propagated to child processes by selfTestBridge — seeds the
+// initial token here. The parent vitest process overrides this via
+// setAuthToken() after its own direct-grant call.
+let bearerToken: string | null = process.env.TELLUS_TEST_BEARER || null;
 
 export function setAuthToken(token: string | null): void {
   bearerToken = token && token.length > 0 ? token : null;

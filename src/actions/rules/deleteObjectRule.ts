@@ -139,7 +139,10 @@ export async function processDeleteObjectRule(
       primaryKey,
       context.ontologyId,
       context.schemaCache,
-      warnings
+      warnings,
+      // F-P3-12: thread optional branch id so dangling-link counts
+      // are scoped to the branch the delete is issued on.
+      context.branchId,
     );
   } catch {
     // Link checking is best-effort — don't fail the delete if it errors
@@ -178,7 +181,8 @@ async function checkDanglingLinks(
   primaryKey: string,
   ontologyId: string,
   schemaCache: Map<string, ObjectTypeSchema>,
-  warnings: string[]
+  warnings: string[],
+  branchId?: string,
 ): Promise<void> {
   // Load the object type schema to get the object_type_id
   let schema: ObjectTypeSchema;
@@ -206,7 +210,7 @@ async function checkDanglingLinks(
 
     if (lt.cardinality === "MANY_TO_MANY") {
       // Check the link_edit table for active links
-      await checkManyToManyLinks(lt, primaryKey, isSource, warnings);
+      await checkManyToManyLinks(lt, primaryKey, isSource, warnings, branchId);
     } else {
       // FK-based link: check for objects referencing this one
       await checkFkLinks(lt, primaryKey, isSource, isTarget, warnings);
@@ -216,27 +220,49 @@ async function checkDanglingLinks(
 
 /**
  * Check for many-to-many links in the link_edit table.
+ *
+ * F-P3-12: when `branchId` is supplied the count is scoped to that
+ * branch so a delete on branch A does not warn about links that only
+ * exist on branch B. When `branchId` is `undefined` (legacy preview or
+ * tests without a branch header) the count spans all branches —
+ * documented cross-branch scan, best-effort warning only.
  */
 async function checkManyToManyLinks(
   linkType: LinkTypeRow,
   primaryKey: string,
   isSource: boolean,
-  warnings: string[]
+  warnings: string[],
+  branchId?: string,
 ): Promise<void> {
   // Count net active links where this object is source or target
   const column = isSource ? "source_primary_key" : "target_primary_key";
 
-  const result = await query(
-    `SELECT COUNT(*)::int AS count FROM (
-       SELECT source_primary_key, target_primary_key,
-              SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END) AS net
-       FROM link_edit
-       WHERE link_type_api_name = $1 AND ${column} = $2
-       GROUP BY source_primary_key, target_primary_key
-       HAVING SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END) > 0
-     ) active_links`,
-    [linkType.api_name, primaryKey]
-  );
+  const result = branchId
+    ? await query(
+        `SELECT COUNT(*)::int AS count FROM (
+           SELECT source_primary_key, target_primary_key,
+                  SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END) AS net
+           FROM link_edit
+           WHERE link_type_api_name = $1
+             AND ${column} = $2
+             AND branch_id = $3
+           GROUP BY source_primary_key, target_primary_key
+           HAVING SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END) > 0
+         ) active_links`,
+        [linkType.api_name, primaryKey, branchId]
+      )
+    : await query(
+        // F-P3-12 fallback: cross-branch scan, best-effort warning.
+        `SELECT COUNT(*)::int AS count FROM (
+           SELECT source_primary_key, target_primary_key,
+                  SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END) AS net
+           FROM link_edit
+           WHERE link_type_api_name = $1 AND ${column} = $2
+           GROUP BY source_primary_key, target_primary_key
+           HAVING SUM(CASE WHEN operation = 'add' THEN 1 ELSE -1 END) > 0
+         ) active_links`,
+        [linkType.api_name, primaryKey]
+      );
 
   const count = result.rows[0]?.count ?? 0;
   if (count > 0) {

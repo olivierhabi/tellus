@@ -30,12 +30,15 @@ async function getProducer(): Promise<Producer | null> {
   if (!connecting) {
     connecting = (async () => {
       try {
+        // F-P4-06: explicit requestTimeout bounds broker silences so a
+        // wedged controller can't stall a link-edit write path.
         const kafka = new Kafka({
           clientId: "tellus-funnel-cdc-links",
           brokers: BROKERS,
           logLevel: logLevel.ERROR,
-          retry: { retries: 3, initialRetryTime: 300 },
+          retry: { retries: 3, initialRetryTime: 300, maxRetryTime: 2000 },
           connectionTimeout: 2000,
+          requestTimeout: 5000,
         });
         const p = kafka.producer({
           allowAutoTopicCreation: true,
@@ -228,11 +231,14 @@ export async function ensureLinkCdcTopic(
   const topic = linkCdcTopic(sourceObjectType, linkName);
   try {
     if (!adminClient) {
+      // F-P4-06: admin calls (createTopics) need requestTimeout too
+      // — metadata requests hang indefinitely against a non-leader.
       adminKafka = new Kafka({
         clientId: "tellus-funnel-cdc-admin",
         brokers: BROKERS,
         logLevel: logLevel.ERROR,
         connectionTimeout: 2000,
+        requestTimeout: 5000,
       });
       adminClient = adminKafka.admin();
       await adminClient.connect();

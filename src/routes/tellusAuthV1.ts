@@ -58,6 +58,7 @@ import {
   KNOWN_SETTINGS,
   type KnownSettingKey,
 } from '../services/systemSettingsService';
+import { getKeycloakRealm } from '../auth/keycloakConfig'; // F-P4-26
 
 const TELLUS_COOKIE = 'TELLUS_TOKEN';
 const TELLUS_REFRESH_COOKIE = 'TELLUS_REFRESH';
@@ -67,7 +68,7 @@ const router = Router();
 
 const kcConfig = {
   kcUrl: process.env.KEYCLOAK_URL || 'http://localhost:8086',
-  kcRealm: process.env.KEYCLOAK_REALM || 'tellus',
+  kcRealm: getKeycloakRealm(),
   kcFrontendClientId: process.env.KEYCLOAK_FRONTEND_CLIENT_ID || 'tellus-frontend',
   kcConfidentialClientId: process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_ID,
   kcConfidentialClientSecret: process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET,
@@ -742,7 +743,11 @@ router.post('/check-access', requireTellusAuth(), (req: Request, res: Response) 
 router.get('/saml/metadata', async (req: Request, res: Response) => {
   try {
     const url = `${kcConfig.kcUrl}/realms/${kcConfig.kcRealm}/protocol/saml/descriptor`;
-    const upstream = await fetch(url);
+    // F-P4-08: SAML SP metadata reverse proxy. A frozen Keycloak must
+    // not be allowed to hold this route's request handler open past
+    // the 5 s budget — otherwise connection slots on the Tellus
+    // dispatcher go to waste on stalled IdP trust probes.
+    const upstream = await fetch(url, { signal: AbortSignal.timeout(5_000) });
     if (!upstream.ok) throw new AppError('SP metadata unavailable', 502, 'METADATA_UNAVAILABLE');
     const body = await upstream.text();
     if (!body.includes('EntityDescriptor')) {
@@ -760,7 +765,9 @@ router.get('/saml/metadata', async (req: Request, res: Response) => {
 router.get('/oidc/config', async (req: Request, res: Response) => {
   try {
     const url = `${kcConfig.kcUrl}/realms/${kcConfig.kcRealm}/.well-known/openid-configuration`;
-    const upstream = await fetch(url);
+    // F-P4-08: same bound as /saml/metadata — the FE calls this on every
+    // login page load, so an unbounded fetch here would wedge logins.
+    const upstream = await fetch(url, { signal: AbortSignal.timeout(5_000) });
     if (!upstream.ok) throw new AppError('OIDC discovery unavailable', 502, 'OIDC_UNAVAILABLE');
     const doc = await upstream.json() as {
       issuer: string;
@@ -1131,14 +1138,26 @@ router.post('/me/password', requireTellusAuth({ allowPat: false }), async (req: 
       client_id: process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_ID || 'tellus-confidential',
       client_secret: process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET || 'tellus-confidential-secret-change-me',
     });
+    // F-P4-08: client_credentials token exchange inside the
+    // password-reset path. 5 s matches tellusAuthService.loginWithPassword
+    // so a slow Keycloak surfaces as a typed 502 rather than a hung
+    // PUT /auth/password.
     const tokenRes = await fetch(
       `${kcConfig.kcUrl}/realms/${kcConfig.kcRealm}/protocol/openid-connect/token`,
-      { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body },
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+        signal: AbortSignal.timeout(5_000),
+      },
     );
     if (!tokenRes.ok) {
       throw new AppError('Admin token exchange failed', 502, 'KEYCLOAK_UNREACHABLE');
     }
     const { access_token } = (await tokenRes.json()) as { access_token: string };
+    // F-P4-08: reset-password call. 8 s matches keycloakAdminService.call
+    // — long enough for p99 realm-scan latency, short enough to surface
+    // as 502 KEYCLOAK_UNREACHABLE rather than hanging forever.
     const resetRes = await fetch(
       `${kcConfig.kcUrl}/admin/realms/${kcConfig.kcRealm}/users/${claims.sub}/reset-password`,
       {
@@ -1152,6 +1171,7 @@ router.post('/me/password', requireTellusAuth({ allowPat: false }), async (req: 
           value: parsed.data.newPassword,
           temporary: false,
         }),
+        signal: AbortSignal.timeout(8_000),
       },
     );
     if (!resetRes.ok) {

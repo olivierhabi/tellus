@@ -15,7 +15,14 @@
 //     environments that don't run Redpanda/Kafka)
 // ---------------------------------------------------------------------------
 
-import { Kafka, type Producer, logLevel, CompressionTypes } from "kafkajs";
+import { Kafka, type Producer, logLevel, CompressionTypes, CompressionCodecs } from "kafkajs";
+// kafkajs ships no codec implementations for Snappy/LZ4 — they must be
+// registered at process start or producer.send() with Snappy compression
+// throws "Snappy compression not implemented" at runtime. The audit's test
+// suite failed on exactly this case (F-XX — tracked as part of Phase A
+// test-determinism work). See https://kafka.js.org/docs/producing#compression.
+import SnappyCodec from "kafkajs-snappy";
+CompressionCodecs[CompressionTypes.Snappy] = SnappyCodec;
 
 const BROKERS = (process.env.KAFKA_BROKERS ?? "localhost:9092").split(",");
 const ENABLED = process.env.KAFKA_ENABLED !== "false";
@@ -31,12 +38,15 @@ async function getProducer(): Promise<Producer | null> {
   if (!connecting) {
     connecting = (async () => {
       try {
+        // F-P4-06: explicit requestTimeout bounds broker silences so the
+        // merged-CDC producer can't stall Quickwit backfills indefinitely.
         const kafka = new Kafka({
           clientId: "tellus-funnel-merged",
           brokers: BROKERS,
           logLevel: logLevel.ERROR,
-          retry: { retries: 3, initialRetryTime: 300 },
+          retry: { retries: 3, initialRetryTime: 300, maxRetryTime: 2000 },
           connectionTimeout: 2000,
+          requestTimeout: 5000,
         });
         const p = kafka.producer({
           allowAutoTopicCreation: true,

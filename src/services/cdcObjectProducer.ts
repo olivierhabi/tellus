@@ -100,12 +100,16 @@ async function getProducer(): Promise<Producer | null> {
   if (!connecting) {
     connecting = (async () => {
       try {
+        // F-P4-06: explicit requestTimeout bounds broker silences on
+        // object-edit CDC sends. Without it the outbox drainer can
+        // block indefinitely holding a PG row lock.
         const kafka = new Kafka({
           clientId: "tellus-object-cdc",
           brokers: BROKERS,
           logLevel: logLevel.ERROR,
-          retry: { retries: 3, initialRetryTime: 300 },
+          retry: { retries: 3, initialRetryTime: 300, maxRetryTime: 2000 },
           connectionTimeout: 2000,
+          requestTimeout: 5000,
         });
         const p = kafka.producer({
           allowAutoTopicCreation: true,

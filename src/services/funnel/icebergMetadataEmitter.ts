@@ -18,6 +18,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { randomUUID } from "crypto";
+import { envWithDefault, requireSecret } from "../../utils/requireEnv";
 import type {
   FunnelDatasetRow,
   FunnelSnapshotRow,
@@ -69,14 +70,23 @@ interface IcebergSnapshotEntry {
 let singletonClient: S3Client | null = null;
 function getS3(): S3Client {
   if (singletonClient) return singletonClient;
+  // F-P4-24: credentials fail-closed; no minioadmin default.
+  // F-P4-07: AWS SDK v3 defaults requestHandler timeout to 0 (infinite).
+  // Pin a finite upper bound so a stuck S3 endpoint cannot hold event-loop
+  // slots indefinitely. 30s is the p99 upper bound the metadata emitter
+  // is willing to wait before surfacing a typed failure to the caller.
   singletonClient = new S3Client({
-    endpoint: process.env.S3_ENDPOINT || "http://localhost:9000",
-    region: process.env.S3_REGION || "us-east-1",
+    endpoint: envWithDefault("S3_ENDPOINT", "http://localhost:9000"),
+    region: envWithDefault("S3_REGION", "us-east-1"),
     credentials: {
-      accessKeyId: process.env.S3_ACCESS_KEY_ID || "minioadmin",
-      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || "minioadmin",
+      accessKeyId: requireSecret("S3_ACCESS_KEY_ID", "Iceberg metadata emitter requires S3 access key."),
+      secretAccessKey: requireSecret("S3_SECRET_ACCESS_KEY", "Iceberg metadata emitter requires S3 secret key."),
     },
     forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false",
+    requestHandler: {
+      connectionTimeout: 5_000,
+      requestTimeout: 30_000,
+    } as unknown as NonNullable<ConstructorParameters<typeof S3Client>[0]>["requestHandler"],
   });
   return singletonClient;
 }

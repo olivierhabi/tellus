@@ -29,8 +29,16 @@ import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import { applyEdits } from "./editApplicator";
-import { logActionExecution } from "../models/actionAuditLog";
-import type { FailureType, AuditResult } from "../models/actionAuditLog";
+import {
+  appendAuditRow,
+  logStandaloneFailureAudit,
+  AuditDurabilityError,
+  type AuditLogEntry,
+  type FailureType,
+  type AuditResult,
+} from "../models/actionAuditLog";
+import { incCounter } from "../services/funnel/metrics";
+import { resolveBranchIdOrMain } from "../services/branchContext";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
@@ -202,6 +210,32 @@ export async function executeAction(
   // Track whether we should throw an OntologyError after audit logging
   let pendingError: OntologyError | null = null;
 
+  // F-P3-11: tracks whether the durable-before-ack audit row was
+  // committed inside the applyEdits transaction. If true, the finally
+  // block skips the standalone audit write (the hash chain is already
+  // extended). If false, the finally block writes a failure audit via
+  // logStandaloneFailureAudit — failure-path events (stages 1-5) and
+  // mid-apply-edits exceptions both reach audit durability this way.
+  let auditCommitted = false;
+
+  const buildAuditEntry = (): AuditLogEntry => ({
+    action_type_api_name: actionTypeApiName,
+    action_type_display_name:
+      actionType?.display_name || actionTypeApiName,
+    execution_id: executionId,
+    parameters,
+    affected_objects: result.affectedObjects,
+    affected_object_count: result.affectedObjects.length,
+    result: result.result,
+    failure_type: result.failureType,
+    error_message: result.errorMessage,
+    duration_ms: result.durationMs,
+    executed_by: context.executedBy || "system",
+    source_ip: context.sourceIp || null,
+    branch_id: context.branchId || null,
+    metadata: {},
+  });
+
   try {
     // -----------------------------------------------------------------
     // STAGE 1: Load the action type definition
@@ -262,6 +296,13 @@ export async function executeAction(
     // -----------------------------------------------------------------
     // STAGE 4: Compile rules into edits
     // -----------------------------------------------------------------
+    // F-P3-12: thread the (possibly unresolved) caller-supplied branchId
+    // into the rule-compilation context so read-path helpers
+    // (`linkRules.getLinkNetState`, `deleteObjectRule.checkManyToManyLinks`)
+    // scope their link_edit lookups to the correct branch. The writer
+    // boundary further down the function resolves an unset branch to
+    // `main`; rule compilation still sees `undefined` for that case
+    // and its readers comment on the cross-branch fallback.
     const compilation = await compileRules(
       actionType.rules as any[],
       resolvedParameters,
@@ -269,6 +310,7 @@ export async function executeAction(
       {
         executedBy: context.executedBy || "system",
         ontologyId,
+        branchId: context.branchId ?? undefined,
       }
     );
 
@@ -369,8 +411,44 @@ export async function executeAction(
     // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
-    // STAGE 6: Apply edits
+    // STAGE 6: Apply edits (with F-P3-11 durable-before-ack audit hook)
+    //
+    // The preCommitHook runs AFTER all edits have been inserted but
+    // BEFORE the PG COMMIT. If the hash-chain append fails, the outer
+    // transaction rolls back — edits and audit are atomic. We
+    // pre-stamp `result.result` to "success" here so the audit row
+    // records the intended outcome; if COMMIT subsequently fails (very
+    // rare — PG connection loss between hook and COMMIT), the catch
+    // below flips it to "failed" and the finally block writes a
+    // standalone failure audit recording the rollback.
     // -----------------------------------------------------------------
+    result.durationMs = Date.now() - startTime;
+    result.result = "success";
+    result.affectedObjects = compilation.edits.map((e) => ({
+      objectType: e.objectType,
+      primaryKey: e.primaryKey,
+      operation: e.operation,
+    }));
+
+    const preCommitHook = async (pg: any) => {
+      // Recompute duration at commit time for a tighter audit number.
+      result.durationMs = Date.now() - startTime;
+      const entry = buildAuditEntry();
+      await appendAuditRow(pg, entry);
+      auditCommitted = true;
+    };
+
+    // F-P3-12: resolve branch at the single executor boundary. The
+    // writer (`applyEdits`) requires `branchId: string` — a missing
+    // branch is a compile-time error. `resolveBranchIdOrMain` falls
+    // back to the ontology's `main` branch UUID when the caller did
+    // not thread one (classic untagged writes); any other downstream
+    // code is forbidden from performing this fallback again.
+    const resolvedBranchId = await resolveBranchIdOrMain(
+      ontologyId,
+      context.branchId,
+    );
+
     const application = await applyEdits(compilation.edits, {
       executionId,
       actionTypeApiName,
@@ -378,6 +456,9 @@ export async function executeAction(
       executedBy: context.executedBy || "system",
       expectedVersion: context.expectedVersion,
       expectedVersionTarget: occTarget,
+      preCommitHook,
+      ontologyId,
+      branchId: resolvedBranchId,
     });
 
     result.success = application.success;
@@ -409,6 +490,25 @@ export async function executeAction(
 
     return result;
   } catch (err: unknown) {
+    // Audit-durability failures are first-class — they must translate to
+    // 503 Service Unavailable at the route layer and MUST NOT be swallowed
+    // or downgraded. auditCommitted stays false, so the finally block will
+    // attempt a standalone failure audit; if that also fails, the client
+    // still sees the AuditDurabilityError.
+    if (err instanceof AuditDurabilityError) {
+      result.result = "failed";
+      result.failureType = "unclassified";
+      result.errorMessage = err.message;
+      pendingError = new OntologyError(
+        err.message,
+        "AUDIT_DURABILITY_FAILED",
+        503,
+        { executionId },
+      );
+      incCounter("tellus_action_audit_rollback_total", { reason: "hash_chain" });
+      return result;
+    }
+
     // Re-throw OntologyErrors (they were already classified)
     if (err instanceof OntologyError) {
       result.failureType = "unclassified";
@@ -445,22 +545,42 @@ export async function executeAction(
     // -----------------------------------------------------------------
     result.durationMs = Date.now() - startTime;
 
-    await logActionExecution({
-      action_type_api_name: actionTypeApiName,
-      action_type_display_name:
-        actionType?.display_name || actionTypeApiName,
-      execution_id: executionId,
-      parameters,
-      affected_objects: result.affectedObjects,
-      affected_object_count: result.affectedObjects.length,
-      result: result.result,
-      failure_type: result.failureType,
-      error_message: result.errorMessage,
-      duration_ms: result.durationMs,
-      executed_by: context.executedBy || "system",
-      source_ip: context.sourceIp || null,
-      branch_id: context.branchId || null,
-    });
+    // F-P3-11: if the hash-chain append succeeded inside the applyEdits
+    // PG transaction, the audit row is already committed — skip the
+    // standalone write. If not (stages 1-5 failure or mid-apply
+    // exception), write a failure audit now. AuditDurabilityError from
+    // this standalone path is surfaced as a 503 OntologyError so the
+    // client sees the real contract violation.
+    if (!auditCommitted) {
+      try {
+        await logStandaloneFailureAudit(buildAuditEntry());
+      } catch (auditErr) {
+        if (auditErr instanceof AuditDurabilityError) {
+          incCounter("tellus_action_audit_rollback_total", { reason: "standalone" });
+          // If we didn't already have a pending error, this becomes it.
+          // Otherwise, prefer the original business error but still log
+          // the audit failure.
+          if (!pendingError) {
+            pendingError = new OntologyError(
+              auditErr.message,
+              "AUDIT_DURABILITY_FAILED",
+              503,
+              { executionId },
+            );
+          } else {
+            console.error(
+              `[action:${actionTypeApiName}] audit durability failed during failure-path log: ${auditErr.message}`,
+            );
+          }
+        } else {
+          console.error(
+            `[action:${actionTypeApiName}] unexpected error from logStandaloneFailureAudit: ${
+              auditErr instanceof Error ? auditErr.message : String(auditErr)
+            }`,
+          );
+        }
+      }
+    }
 
     // ---------------------------------------------------------------------
     // STAGE 9: Publish to Kafka so the streaming pipeline (Apache Flink)

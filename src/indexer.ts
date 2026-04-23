@@ -39,6 +39,7 @@ import { getIndexName } from "./services/opensearch/indexMappingGenerator";
 import { getAllEditsByObjectType, getPendingEdits, markEditsAsIndexed } from "./models/ontologyEdit";
 import type { OntologyEditRow } from "./models/ontologyEdit";
 import client from "./services/opensearch/client";
+import { ensureDocumentSecurity } from "./services/security/documentSecurity";
 import type { QueryResult } from "pg";
 
 // ---------------------------------------------------------------------------
@@ -325,10 +326,23 @@ export async function reindexObjectType(
   // =========================================================================
 
   if (bulkOps.length > 0) {
+    // Phase A4 (F-03) — stamp `_security.markings` on every doc line of the
+    // bulk body. OpenSearch bulk bodies alternate action/document pairs;
+    // `delete` actions have no accompanying doc line. A doc line is
+    // identified as "an entry where the previous entry has a top-level
+    // `index` or `create` action key".
+    const stamped: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < bulkOps.length; i++) {
+      const entry = bulkOps[i] as Record<string, unknown>;
+      const prev = i > 0 ? (bulkOps[i - 1] as Record<string, unknown>) : null;
+      const isDocLine =
+        prev && (("index" in prev) || ("create" in prev));
+      stamped.push(isDocLine ? ensureDocumentSecurity(entry) : entry);
+    }
     if (deps?.bulkWrite) {
-      await deps.bulkWrite(bulkOps);
+      await deps.bulkWrite(stamped);
     } else {
-      await client.bulk({ body: bulkOps as Array<Record<string, any>>, refresh: "wait_for" });
+      await client.bulk({ body: stamped as Array<Record<string, any>>, refresh: "wait_for" });
     }
   }
 

@@ -108,6 +108,13 @@ export type ObjectFetcher = (
 export interface ExecutionContext {
   executedBy: string;
   ontologyId: string;
+  /**
+   * F-P3-12: optional branch UUID. The rule compiler does not use it
+   * directly today, but the field is retained so the write-path
+   * callers (`actionExecutor`) can pass it through for downstream
+   * rule handlers and read-path helpers that need branch scoping.
+   */
+  branchId?: string;
 }
 
 // ---------------------------------------------------------------------------

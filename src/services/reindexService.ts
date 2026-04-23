@@ -38,6 +38,7 @@ import {
   createIndex,
 } from "./opensearch/indexLifecycleManager";
 import { getObjectBuffer } from "./storageService";
+import { ensureDocumentSecurity } from "./security/documentSecurity";
 import type { PropertyInput } from "./mapping/typeMapper";
 
 // ---------------------------------------------------------------------------
@@ -711,13 +712,19 @@ export async function reindexObjectType(
 
     for (const [pk, doc] of objectMap) {
       bulkBody.push({ index: { _index: indexName, _id: pk } });
-      bulkBody.push({
-        __pk: pk,
-        __objectType: objectTypeApiName,
-        __lastModified: new Date().toISOString(),
-        __version: 1,
-        ...doc,
-      });
+      // Phase A4 (F-03) — stamp `_security.markings` via the shared helper
+      // so reindexed docs are visible to marking-constrained users. The
+      // helper is idempotent: if the source doc already carries
+      // `_security`, its classification is preserved.
+      bulkBody.push(
+        ensureDocumentSecurity({
+          __pk: pk,
+          __objectType: objectTypeApiName,
+          __lastModified: new Date().toISOString(),
+          __version: 1,
+          ...doc,
+        }),
+      );
     }
 
     console.log(

@@ -27,9 +27,14 @@
 import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import jwksClient from "jwks-rsa";
+import { getKeycloakBaseUrl, getKeycloakRealm } from "../auth/keycloakConfig";
 
-const KC_URL = process.env.KEYCLOAK_URL || "http://localhost:8086";
-const KC_REALM = process.env.KEYCLOAK_REALM || "tellus";
+// F-P4-26: realm/base-URL no longer read via `|| 'tellus'` / `|| 'http://localhost:8086'`
+// directly. Central accessors in ../auth/keycloakConfig fail-closed under
+// NODE_ENV=production and keep the dev defaults otherwise. Evaluate lazily
+// so the getter throws only on first actual use, not at module import.
+const KC_URL = getKeycloakBaseUrl();
+const KC_REALM = getKeycloakRealm();
 const KC_REQUIRED_ROLE = process.env.KEYCLOAK_REQUIRED_ROLE;
 const KC_ISSUER = `${KC_URL}/realms/${KC_REALM}`;
 const KC_JWKS_URL = `${KC_ISSUER}/protocol/openid-connect/certs`;

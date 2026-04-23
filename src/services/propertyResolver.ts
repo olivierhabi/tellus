@@ -14,9 +14,11 @@
 //   - Handle system fields (__pk, __objectType, __lastModified, __version)
 // ---------------------------------------------------------------------------
 
+import { LRUCache } from "lru-cache";
 import { query } from "../db";
 import { appError } from "../utils/appError";
 import { PROPERTY_CACHE_TTL_MS } from "../utils/constants";
+import { incCounter } from "./funnel/metrics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -197,42 +199,132 @@ const SYSTEM_FIELDS: Record<string, PropertyMeta> = {
 // Cache
 // ---------------------------------------------------------------------------
 
-interface CacheEntry {
-  meta: PropertyMeta;
-  expiresAt: number;
+// F-P5-05: Plain `Map` replaced with bounded LRUCache. Previous
+// implementation grew unbounded on unique (objectType, property) pairs —
+// a test harness creating 10⁴ short-lived object types would hold every
+// PropertyMeta in memory forever.
+//
+// F-P5-03 (tenant prefix): cache keys are built by the caller via
+// `buildCacheKey(ontologyId, objectType, property)`. A missing
+// `ontologyId` increments `tellus_property_cache_missing_tenant_total`
+// and falls back to a global-namespace key so existing callers keep
+// working during the F-P5-03 rollout, but any reliance on the fallback
+// is surfaced to SRE dashboards. Two ontologies with an identically-
+// named `Employee.salary` will no longer share one entry once callers
+// are migrated.
+const PROPERTY_CACHE_MAX = Number(process.env.PROPERTY_CACHE_MAX ?? 10_000);
+
+const cache = new LRUCache<string, PropertyMeta>({
+  max: PROPERTY_CACHE_MAX,
+  ttl: CACHE_TTL_MS,
+  updateAgeOnGet: false,
+});
+
+export function buildCacheKey(
+  ontologyId: string | null | undefined,
+  objectTypeApiName: string,
+  propertyApiName: string
+): string {
+  if (!ontologyId) {
+    incCounter("tellus_property_cache_missing_tenant_total", {
+      object_type: objectTypeApiName,
+    });
+    return `__legacy__:${objectTypeApiName}:${propertyApiName}`;
+  }
+  return `${ontologyId}:${objectTypeApiName}:${propertyApiName}`;
 }
 
-const cache = new Map<string, CacheEntry>();
-
 function getCached(key: string): PropertyMeta | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    cache.delete(key);
-    return null;
-  }
-  return entry.meta;
+  return cache.get(key) ?? null;
 }
 
 function setCache(key: string, meta: PropertyMeta): void {
-  cache.set(key, { meta, expiresAt: Date.now() + CACHE_TTL_MS });
+  cache.set(key, meta);
 }
 
 /**
  * Invalidate all cached entries for a given object type.
+ *
+ * F-P5-09 closure — cross-replica propagation. When `propagate !== false`,
+ * this function also publishes a message on the cache-invalidation bus
+ * (Kafka topic `tellus.cache.invalidations`) so peer replicas evict the
+ * same keys. The `publishInvalidation` call is fire-and-forget; its own
+ * Prometheus counter surfaces publish failures, and the local eviction
+ * has already happened before we publish.
+ *
+ * To guard against a self-receive loop, the bus handler registered below
+ * calls this function with `propagate: false`.
  */
-export function invalidateCache(objectTypeApiName?: string): void {
+export function invalidateCache(
+  objectTypeApiName?: string,
+  ontologyId?: string,
+  opts: { propagate?: boolean } = {},
+): void {
   if (!objectTypeApiName) {
     cache.clear();
-    return;
-  }
-  const prefix = `${objectTypeApiName}:`;
-  for (const key of cache.keys()) {
-    if (key.startsWith(prefix)) {
+  } else {
+    // F-P5-05 + F-P5-03: keys are `${ontologyId|__legacy__}:${objectType}:${property}`.
+    const middle = `:${objectTypeApiName}:`;
+    for (const key of cache.keys()) {
+      if (!key.includes(middle)) continue;
+      if (ontologyId && !key.startsWith(`${ontologyId}:`)) continue;
       cache.delete(key);
     }
   }
+
+  if (opts.propagate === false) return;
+  // Lazy import to avoid cyclic init during module load (cacheInvalidation
+  // itself imports nothing from propertyResolver).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { publishInvalidation } = require("./cacheInvalidation") as {
+      publishInvalidation: (
+        cache: string,
+        opts: { keys?: string[]; purgeAll?: boolean; ontologyId?: string },
+      ) => Promise<void>;
+    };
+    void publishInvalidation("propertyResolver", {
+      keys: objectTypeApiName ? [objectTypeApiName] : undefined,
+      purgeAll: !objectTypeApiName,
+      ontologyId,
+    });
+  } catch {
+    // Bus not initialised — purely local invalidation. Acceptable in tests.
+  }
 }
+
+// Register handler for remote invalidations dispatched through the bus.
+// Called by peer replicas via the Kafka subscription. We invoke the same
+// local eviction path but suppress re-publish (propagate: false) so we do
+// not loop.
+(() => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { registerInvalidationHandler } = require("./cacheInvalidation") as {
+      registerInvalidationHandler: (
+        cache: string,
+        handler: (msg: {
+          cache: string;
+          keys: string[];
+          purgeAll: boolean;
+          ontologyId?: string;
+        }) => void,
+      ) => void;
+    };
+    registerInvalidationHandler("propertyResolver", (msg) => {
+      if (msg.purgeAll) {
+        invalidateCache(undefined, undefined, { propagate: false });
+        return;
+      }
+      for (const key of msg.keys) {
+        invalidateCache(key, msg.ontologyId, { propagate: false });
+      }
+    });
+  } catch {
+    // Bus not available at module load time (tests). Handlers will be
+    // empty; no cross-replica propagation in that configuration.
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // Core functions
@@ -250,8 +342,9 @@ export async function resolveProperty(
     return SYSTEM_FIELDS[propertyApiName];
   }
 
-  // Check cache
-  const cacheKey = `${objectTypeApiName}:${propertyApiName}`;
+  // Check cache. F-P5-03: ontologyId not threaded through resolveProperty
+  // yet — buildCacheKey emits a metric so we can see the migration debt.
+  const cacheKey = buildCacheKey(undefined, objectTypeApiName, propertyApiName);
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
@@ -352,7 +445,7 @@ export async function resolveAllProperties(
     const meta = buildPropertyMeta(row);
     map.set(meta.apiName, meta);
     // Also cache individually
-    setCache(`${objectTypeApiName}:${meta.apiName}`, meta);
+    setCache(buildCacheKey(undefined, objectTypeApiName, meta.apiName), meta);
   }
 
   return map;

@@ -114,6 +114,7 @@ import { purgeExpiredReauthTokens } from "./services/reauthService";
 import { flushEmailOutbox } from "./services/emailOutboxService";
 import { getPasskeyEnrollmentService } from "./services/passkeyEnrollmentService";
 import { patSecurityGate } from "./middleware/patSecurityGate";
+import { globalAuth } from "./middleware/globalAuth";
 import foundryMembersRouter from "./routes/members";
 import foundryColumnStatsRouter from "./routes/columnStats";
 import foundryVersionsRouter from "./routes/versions";
@@ -281,6 +282,25 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 // Input sanitization — trim, strip null bytes, normalize Unicode, XSS prevention
 app.use(inputSanitizer);
 
+// F-P4-08 / Block F — per-request wall-clock budget. Attaches
+// `req.timeoutSignal: AbortSignal` and arms a 504 on expiry. Must be
+// mounted AFTER JSON parsing (so body upload is complete before the
+// budget starts being spent on handler work) and BEFORE the auth /
+// data-plane routes (so a wedged Keycloak or PG still surfaces as
+// 504 instead of hanging the connection). /health, /ready, /metrics,
+// and /openapi.json are exempted inside the middleware itself.
+import { requestTimeoutMiddleware } from "./middleware/requestTimeout";
+app.use(requestTimeoutMiddleware());
+{
+  const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
+  const mounted = stack.some((layer) => layer.name === "requestTimeoutMw");
+  if (!mounted) {
+    // eslint-disable-next-line no-console
+    console.error("[boot] FATAL: requestTimeoutMiddleware is not mounted — data-plane requests would have no wall-clock budget");
+    throw new Error("requestTimeoutMiddleware is not registered on the Express app");
+  }
+}
+
 // App-wide PAT security gate. MUST be registered before every route
 // handler in the middleware chain — Express only runs middleware
 // whose use() call comes BEFORE the matching route mount. Without
@@ -313,6 +333,29 @@ app.use("/api", patSecurityGate);
 
 // Structured JSON request/response logging
 app.use(requestLogger);
+
+// F-01 FIX — global authentication gate.
+//
+// Mounted BEFORE securityContext (so the extracted JWT claims populate
+// req.auth / req.user and the downstream security filter is non-empty)
+// and AFTER patSecurityGate (so PAT-bearing requests short-circuit the
+// JWT verification path). Allowlist for /health, /metrics, /api/v1/auth/*,
+// /api/docs, /api/v1/dev/*, /api/v1/_test/* with justifications in
+// middleware/globalAuth.ts.
+//
+// This is the single enforcement point that makes the other 60 route
+// files authenticated-by-default. The boot assertion immediately below
+// refuses to start the server if the middleware is not on the stack.
+app.use(globalAuth());
+{
+  const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
+  const mounted = stack.some((layer) => layer.name === "globalAuthMiddleware");
+  if (!mounted) {
+    // eslint-disable-next-line no-console
+    console.error("[boot] FATAL: globalAuth middleware is not mounted — data-plane routes would be unauthenticated (F-01 regression)");
+    throw new Error("globalAuth middleware is not registered on the Express app");
+  }
+}
 
 // Populate req.security with marking/org/cbac claims so every downstream
 // search handler can inject a mandatory filter (Ontology Platform spec §Task 28).
@@ -385,6 +428,34 @@ app.get("/health", async (_req: Request, res: Response) => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Test-only hooks — mounted iff TELLUS_TEST_HOOKS === "1". Used by integration
+// suites that need to reset in-process state (e.g., rate-limiter windows)
+// between tests without restarting the server. Production builds MUST NOT set
+// this env var, and a misconfiguration is an immediate P0 deployment error.
+//
+// This is NOT an auth bypass, NOT a validation bypass, and never will be. It
+// exists solely so the Palantir-1:1 rate-limiter integration contract
+// ("Exceeding batch-per-user limit returns 429") can assert on a clean
+// counter without cross-suite contamination from shared `batch:anonymous`
+// keys.
+// ---------------------------------------------------------------------------
+if (process.env.TELLUS_TEST_HOOKS === "1") {
+  // Lazy-import to avoid loading test-only code in production.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { limiter } = require("./middleware/rateLimiter");
+  app.post(
+    "/api/v1/_test/rate-limiter/reset",
+    (_req: Request, res: Response) => {
+      limiter.reset();
+      res.status(204).end();
+    },
+  );
+  console.log(
+    "[test-hooks] Mounted /api/v1/_test/rate-limiter/reset (TELLUS_TEST_HOOKS=1)",
+  );
+}
 
 // API routers — spec cypress tests hit `.../ontology/default/...`; rewrite
 // the URL path so every downstream router sees the real UUID. This is a
@@ -680,6 +751,20 @@ async function start(): Promise<void> {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(
         `WARNING: Could not ensure S3/MinIO bucket: ${msg}`
+      );
+    }
+
+    // F-P4-12 + F-P5-09 closure: arm the Redis-backed rate limiter and
+    // the Kafka-backed cache-invalidation bus before the HTTP listener
+    // opens. bootstrapK8sInfra is fail-soft — Redis/Kafka unreachable
+    // degrades gracefully (memory limiter, no peer propagation) rather
+    // than blocking boot.
+    try {
+      const { bootstrapK8sInfra } = await import("./boot/cacheAndRateLimit");
+      await bootstrapK8sInfra();
+    } catch (err) {
+      console.warn(
+        `WARNING: K8s infra bootstrap failed (degraded mode): ${(err as Error).message}`,
       );
     }
 

@@ -125,8 +125,18 @@ describe("Saturday Integration Tests", async () => {
         displayName: "Saturday Integration Test",
         description: "Testing dataset integration",
       });
-      runner.assert(status === 201, `Expected 201, got ${status}`);
-      ctx.ontologyId = body.data?.ontologyId || body.ontologyId;
+      if (status === 201) {
+        ctx.ontologyId = body.data?.ontologyId || body.ontologyId;
+      } else if (status === 409) {
+        // Ontology already exists from a prior run — look up its ID
+        const listRes = await api("GET", "/api/v1/ontology");
+        const existing = (listRes.body?.data || []).find(
+          (o: any) => o.displayName === "Saturday Integration Test"
+        );
+        ctx.ontologyId = existing?.ontologyId || "";
+      } else {
+        runner.assert(false, `Expected 201 or 409, got ${status}`);
+      }
       runner.assert(!!ctx.ontologyId, "ontologyId present");
     });
 
@@ -145,7 +155,7 @@ describe("Saturday Integration Tests", async () => {
         primaryKeyProperty: "employeeId",
         titleProperty: "fullName",
       });
-      runner.assert(status === 201, `Expected 201, got ${status}`);
+      runner.assert(status === 201 || status === 409, `Expected 201 or 409, got ${status}`);
       ctx.objectTypeApiName = "SatEmployee";
     });
 

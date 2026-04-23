@@ -40,6 +40,11 @@ TEST_USER="${KC_TEST_USER:-cypress@tellus.local}"
 TEST_PASS="${KC_TEST_PASS:-Password123!}"
 ADMIN_TEST_USER="${KC_ADMIN_TEST_USER:-cypress-admin@tellus.local}"
 VIEWER_TEST_USER="${KC_VIEWER_TEST_USER:-cypress-viewer@tellus.local}"
+# Fail-closed archetype ("dave") — user exists and can log in, but has NO
+# realm roles, NO groups, NO attributes. Used by Phase A3 CBAC tests to
+# assert that a valid JWT with zero clearance is rejected by the security
+# filter, not silently allowed through.
+NOGROUPS_TEST_USER="${KC_NOGROUPS_TEST_USER:-cypress-nogroups@tellus.local}"
 CONF_SECRET="${TELLUS_CONF_SECRET:-tellus-confidential-secret-change-me}"
 SSL_REQUIRED="${KC_SSL_REQUIRED:-none}"  # set to "all" for prod
 
@@ -135,8 +140,20 @@ fi
 ok "realm '$REALM' hardened to spec (brute-force, 16h session, WebAuthn, password policy)"
 
 # --- 2. Roles -----------------------------------------------------------------
-for role in ontology-editor ontology-viewer ontology-admin audit-viewer; do
-  exists=$(ADMIN -o /dev/null -w '%{http_code}' "$KC/admin/realms/$REALM/roles/$role")
+#
+# Two role families:
+#   (1) CBAC groups — `ontology-*` realm roles mapped to req.security.cbac
+#   (2) Markings    — `marking:<NAME>` realm roles mapped to
+#                     req.security.markings (parsed by securityContext via
+#                     the `marking:` prefix convention; see F-02/A3 doc).
+#
+# Markings follow a conservative 4-level lattice that mirrors Palantir's
+# public training materials: PUBLIC < CONFIDENTIAL < SECRET < TOP_SECRET.
+# Membership is additive — a user bearing all four can see anything.
+for role in ontology-editor ontology-viewer ontology-admin audit-viewer \
+            "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET" "marking:TOP_SECRET"; do
+  role_enc=$(printf '%s' "$role" | jq -sRr @uri)
+  exists=$(ADMIN -o /dev/null -w '%{http_code}' "$KC/admin/realms/$REALM/roles/$role_enc")
   if [[ "$exists" != "200" ]]; then
     ADMIN -X POST "$KC/admin/realms/$REALM/roles" \
       -H "Content-Type: application/json" \
@@ -313,8 +330,26 @@ if echo "$WA" | jq -e '.alias=="webauthn-register"' >/dev/null 2>&1; then
 fi
 
 # --- 6. Users ----------------------------------------------------------------
+#
+# Roles per archetype (Phase A3 Palantir-1:1 CBAC/Markings):
+#
+#   cypress-admin   (alice)  — ontology-admin  + marking:{PUBLIC,CONFIDENTIAL,SECRET,TOP_SECRET}
+#   cypress         (bob)    — ontology-editor + marking:{PUBLIC,CONFIDENTIAL,SECRET}
+#   cypress-viewer  (carol)  — ontology-viewer + marking:{PUBLIC}
+#   cypress-nogroups (dave)  — NONE (fail-closed archetype)
+#
+# A user's markings are the union of the `marking:*` roles. Tests assert:
+#   • alice reads a TOP_SECRET doc
+#   • bob cannot read a TOP_SECRET doc but reads SECRET/CONFIDENTIAL/PUBLIC
+#   • carol reads only PUBLIC
+#   • dave reads nothing
+#
+# Idempotency: the role-mapping POST is safe to repeat; Keycloak ignores
+# duplicate assignments.
 create_user() {
-  local uname="$1" role="$2"
+  local uname="$1"
+  shift
+  local roles=("$@")
   local uid
   uid=$(ADMIN "$KC/admin/realms/$REALM/users?username=$uname" | jq -r '.[0].id // empty')
   if [[ -z "$uid" ]]; then
@@ -327,13 +362,29 @@ create_user() {
       -H "Content-Type: application/json" \
       -d "{\"type\":\"password\",\"value\":\"$TEST_PASS\",\"temporary\":false}" \
       -o /dev/null
-    local role_repr
-    role_repr=$(ADMIN "$KC/admin/realms/$REALM/roles/$role")
-    ADMIN -X POST "$KC/admin/realms/$REALM/users/$uid/role-mappings/realm" \
-      -H "Content-Type: application/json" \
-      -d "[$role_repr]" \
-      -o /dev/null
-    ok "user '$uname' created with role '$role'"
+    ok "user '$uname' created"
+  fi
+  # Assign (or re-assign — idempotent) each role to the user. We POST one
+  # role at a time because jq's interpolation of role JSON into an array
+  # body is fragile across bash versions.
+  if [[ ${#roles[@]} -eq 0 ]]; then
+    ok "user '$uname' has NO realm roles (fail-closed archetype)"
+  else
+    for role in "${roles[@]}"; do
+      local role_enc
+      role_enc=$(printf '%s' "$role" | jq -sRr @uri)
+      local role_repr
+      role_repr=$(ADMIN "$KC/admin/realms/$REALM/roles/$role_enc")
+      if echo "$role_repr" | jq -e '.name' >/dev/null 2>&1; then
+        ADMIN -X POST "$KC/admin/realms/$REALM/users/$uid/role-mappings/realm" \
+          -H "Content-Type: application/json" \
+          -d "[$role_repr]" \
+          -o /dev/null
+      else
+        warn "role '$role' not found — skipping assignment to $uname"
+      fi
+    done
+    ok "user '$uname' assigned roles: ${roles[*]}"
   fi
   # Test users bypass required actions so direct-grant login works in tests.
   ADMIN -X PUT "$KC/admin/realms/$REALM/users/$uid" \
@@ -342,9 +393,16 @@ create_user() {
     -o /dev/null
 }
 
-create_user "$TEST_USER" ontology-editor
-create_user "$ADMIN_TEST_USER" ontology-admin
-create_user "$VIEWER_TEST_USER" ontology-viewer
+create_user "$TEST_USER" \
+  ontology-editor \
+  "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET"
+create_user "$NOGROUPS_TEST_USER"
+create_user "$ADMIN_TEST_USER" \
+  ontology-admin \
+  "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET" "marking:TOP_SECRET"
+create_user "$VIEWER_TEST_USER" \
+  ontology-viewer \
+  "marking:PUBLIC"
 
 # --- 7. Smoke test -----------------------------------------------------------
 USER_TOKEN_RESP=$(curl -sf -X POST \

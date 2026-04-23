@@ -39,7 +39,17 @@ export async function getOverlayStore(): Promise<OverlayStore> {
         store = new MemoryOverlayStore();
         return store;
       }
-      const client = mod.createClient({ url });
+      // F-P4-05: Redis client with bounded connect + socket timeouts.
+      // Default node-redis@4 connectTimeout is 5000 ms; set it explicitly
+      // so the contract is visible. Reconnect strategy caps at 30 s so a
+      // Redis outage cannot burn event-loop slots forever.
+      const client = mod.createClient({
+        url,
+        socket: {
+          connectTimeout: 5_000,
+          reconnectStrategy: (retries: number) => Math.min(retries * 500, 30_000),
+        },
+      });
       client.on("error", (err: Error) => {
         console.warn(`[overlay] Redis error: ${err.message}`);
       });
@@ -74,8 +84,16 @@ export async function getOverlayStore(): Promise<OverlayStore> {
   return resolved;
 }
 
+interface RedisClientOptions {
+  url: string;
+  socket?: {
+    connectTimeout?: number;
+    reconnectStrategy?: (retries: number) => number | Error;
+  };
+}
+
 interface RedisLikeClientFactory {
-  createClient(opts: { url: string }): RedisLikeClient;
+  createClient(opts: RedisClientOptions): RedisLikeClient;
 }
 
 interface RedisLikeClient {

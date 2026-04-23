@@ -9,6 +9,18 @@ export default defineConfig({
     root: path.resolve(__dirname),
     globals: true,
 
+    // F-05 FIX: globalSetup spawns the server process with RATE_LIMIT_MAX
+    // propagated so integration tests (which hit http://localhost:3000) do
+    // not get 429'd by the server's default limit of 200 req/min.
+    globalSetup: "tests/globalSetup.ts",
+
+    // F-01 FIX (Phase A2): setupFiles runs BEFORE every test file in the
+    // worker and obtains a Keycloak JWT for the `alice` archetype, installing
+    // it on the shared api() helper so all integration tests are
+    // authenticated by default. Tests that want unauth or a different
+    // archetype opt in explicitly via setAuthToken(...) / getToken("bob").
+    setupFiles: ["tests/setupFiles.ts"],
+
     // Timeouts — integration tests can be slow
     testTimeout: 120_000,
     hookTimeout: 120_000,
@@ -38,10 +50,19 @@ export default defineConfig({
     // Tests are organized by day (monday, tuesday) and type (unit, integration).
     // Vitest discovers all .test.ts files and groups them by directory.
 
-    // Ensure sequential execution for integration tests that share state
+    // Ensure sequential execution for integration tests that share state.
+    // `concurrent: false` serializes tests within a single file. To also
+    // serialize across files, we disable file parallelism below. This is
+    // necessary because the whole integration suite talks to a single
+    // spawned server process (see tests/globalSetup.ts), and shared
+    // in-process state (rate-limiter windows keyed on `batch:anonymous`,
+    // overlay cache, action type registry) would otherwise race. Phase A2
+    // (F-01 JWTs) will let each suite run with its own user and re-enable
+    // parallelism for throughput.
     sequence: {
       concurrent: false,
     },
+    fileParallelism: false,
 
     // Environment
     env: {
@@ -52,6 +73,10 @@ export default defineConfig({
       // F-09: Disable rate limiter during tests to prevent cross-run
       // 429 failures when vitest restarts within the same 60s window.
       RATE_LIMIT_MAX: "999999",
+      // Match the elevated batch limit from globalSetup so rate-limiter
+      // tests can read it and calibrate request counts accordingly.
+      // Kept in sync with tests/globalSetup.ts:BATCH_RATE_LIMIT_MAX.
+      BATCH_RATE_LIMIT_MAX: "500",
     },
 
     // Coverage configuration — scoped to modules exercised by unit tests.
@@ -65,6 +90,39 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: [
+        // ---------------------------------------------------------------
+        // PHASE A EXIT GATE — Critical-path modules (branch coverage ≥ 80%)
+        // Per remediation brief Phase A Exit Gate: editApplicator,
+        // actionExecutor, queryExecutor, branchMergeService,
+        // linkViolationEnforcer, all route handlers must be measured.
+        // ---------------------------------------------------------------
+        "src/actions/editApplicator.ts",
+        "src/actions/actionExecutor.ts",
+        "src/actions/actionValidator.ts",
+        "src/actions/idempotency.ts",
+        "src/actions/objectChecker.ts",
+        "src/actions/parameterValidator.ts",
+        "src/actions/propertyValidator.ts",
+        "src/actions/ruleCompiler.ts",
+        "src/services/queryExecutor.ts",
+        "src/services/branchMergeService.ts",
+        "src/services/linkViolationEnforcer.ts",
+        "src/services/linkResolverService.ts",
+        "src/services/auditEventService.ts",
+        "src/services/security/documentSecurity.ts",
+        "src/services/opensearch/client.ts",
+        "src/middleware/globalAuth.ts",
+        "src/middleware/keycloakAuth.ts",
+        "src/middleware/securityContext.ts",
+        "src/middleware/patSecurityGate.ts",
+        "src/middleware/rateLimiter.ts",
+        "src/middleware/errorHandler.ts",
+        "src/routes/objects.ts",
+        "src/routes/actions.ts",
+        "src/routes/links.ts",
+        "src/routes/search.ts",
+        "src/routes/ontology.ts",
+        "src/routes/audit.ts",
         // Monday
         "src/utils/typeSystem.ts",
         "src/utils/apiNameValidator.ts",

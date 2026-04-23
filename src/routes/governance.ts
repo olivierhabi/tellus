@@ -15,6 +15,8 @@ import { computeLineage, MAX_LINEAGE_DEPTH } from "../services/lineageService";
 import { scanObjectType } from "../services/piiScanner";
 import { searchObjects } from "../services/opensearch/client";
 import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { incCounter } from "../services/funnel/metrics";
 
 const router = Router({ mergeParams: true });
 
@@ -62,10 +64,17 @@ router.post(
 
       if (samples.length === 0) {
         try {
+          // F-P3-13: thread branch filter so PII-scan samples respect branch isolation.
+          const branchId = readBranchHeader(req);
+          incCounter("tellus_read_branch_filtered_total", {
+            route: "governance.piiScan",
+            scoped: String(branchId !== null),
+          });
           const result = await searchObjects(
             `ontology-${objectTypeApiName.toLowerCase()}`,
             { size: PII_SCAN_BATCH_SIZE, query: { match_all: {} } },
-            buildSecurityFilter(req.security)
+            buildSecurityFilter(req.security),
+            branchId
           );
           const hits = result.body?.hits?.hits ?? [];
           samples = hits.map((h: { _source: Record<string, unknown> }) => h._source || {});

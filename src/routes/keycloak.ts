@@ -13,11 +13,12 @@
 
 import { Router, type Request, type Response } from "express";
 import { keycloakAuth } from "../middleware/keycloakAuth";
+import { getKeycloakRealm } from "../auth/keycloakConfig"; // F-P4-26
 
 const router = Router();
 
 const KC_URL = process.env.KEYCLOAK_URL || "http://localhost:8086";
-const KC_REALM = process.env.KEYCLOAK_REALM || "tellus";
+const KC_REALM = getKeycloakRealm();
 const KC_FRONTEND_CLIENT =
   process.env.KEYCLOAK_FRONTEND_CLIENT_ID || "tellus-frontend";
 
