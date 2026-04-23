@@ -97,7 +97,15 @@ async function getRedis(): Promise<RedisLike | null> {
   try {
     const mod: any = await import("redis");
     const url = process.env.REDIS_URL ?? "redis://localhost:6379";
-    const client = mod.createClient({ url });
+    // F-P4-05: explicit connect timeout + bounded reconnect backoff so a
+    // Redis outage cannot hold the pagination path open indefinitely.
+    const client = mod.createClient({
+      url,
+      socket: {
+        connectTimeout: 5_000,
+        reconnectStrategy: (retries: number) => Math.min(retries * 500, 30_000),
+      },
+    });
     client.on("error", () => {
       /* silenced — fall back to Postgres */
     });

@@ -84,11 +84,16 @@ export async function runStreamingChangelog(
   input: StreamingChangelogInput
 ): Promise<StreamingChangelogHandle> {
   const brokers = (process.env.KAFKA_BROKERS ?? "localhost:9092").split(",");
+  // F-P4-06: pin consumer-side timeouts too. Unbounded heartbeats let a
+  // wedged coordinator stall the streaming changelog indefinitely and
+  // mask the failure as "just slow".
   const kafka = new Kafka({
     clientId: `tellus-funnel-changelog-${input.objectTypeApiName}`,
     brokers,
     logLevel: logLevel.ERROR,
-    retry: { retries: 5, initialRetryTime: 200 },
+    retry: { retries: 5, initialRetryTime: 200, maxRetryTime: 2000 },
+    connectionTimeout: 2000,
+    requestTimeout: 10000,
   });
 
   const groupId = `funnel.${input.objectTypeApiName}.changelog.${input.datasourceId}`;

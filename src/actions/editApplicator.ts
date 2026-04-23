@@ -22,6 +22,7 @@ import type { PoolClient } from "pg";
 import { getClient, query } from "../db";
 import { OntologyError } from "../utils/queryErrors";
 import { publishLinkCdc } from "../services/searchAround/cdcLinkProducer";
+import { incCounter } from "../services/funnel/metrics";
 
 function genEventId(): string {
   try {
@@ -35,6 +36,7 @@ import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { markEditsAsIndexed } from "../models/ontologyEdit";
 import { writeOverlayForEdit, writeOverlayForLinkEdit } from "../services/overlay/writebackOverlay";
 import { isB1Ready } from "../services/funnel/b1Readiness";
+import { ensureDocumentSecurity } from "../services/security/documentSecurity";
 import type { CompiledEdit, LinkEdit } from "./ruleCompiler";
 
 // ---------------------------------------------------------------------------
@@ -67,6 +69,19 @@ export interface ApplyExecutionContext {
    */
   ontologyId?: string;
   /**
+   * F-P3-12 — branch isolation. The UUID of the `ontology_branch` row
+   * this write belongs to. REQUIRED: migration 040 promoted
+   * `link_edit.branch_id` to NOT NULL + FK, so every link-edit insert
+   * must carry a resolved UUID. The caller (normally the executor at
+   * `actionExecutor.ts`) is responsible for resolving `context.branchId`
+   * to the ontology's `main` branch UUID via
+   * `src/services/branchContext.ts:resolveBranchIdOrMain` when the HTTP
+   * request omits the header. If this field is missing, TypeScript
+   * compilation fails — there is no runtime fallback inside
+   * `applyEdits` itself.
+   */
+  branchId: string;
+  /**
    * FNL-H2 — cross-cutting provenance. `correlationId` ties together
    * every edit produced by a single HTTP request; `causationId` links
    * the immediate upstream event; `actionRid` identifies the Action
@@ -77,6 +92,18 @@ export interface ApplyExecutionContext {
   causationId?: string;
   actionRid?: string;
   eventId?: string;
+  /**
+   * F-P3-11 — durable-before-ack audit. Called AFTER all edits have been
+   * inserted into ontology_edit/link_edit/object_instances (inside the
+   * same PG transaction) but BEFORE the COMMIT. The hook MUST write the
+   * action_audit_log row via insertAuditRowWithHashChain so the audit
+   * row + edit rows commit atomically. If the hook throws, the
+   * transaction rolls back and the caller sees the thrown error —
+   * client ultimately receives 503 Service Unavailable. This is the
+   * single place the audit-durability contract lives for the success
+   * path; no other branch of the code may skip or defer it.
+   */
+  preCommitHook?: (client: PoolClient) => Promise<void>;
 }
 
 /** A single successfully applied edit. */
@@ -171,7 +198,15 @@ export async function applyEdits(
       const { objectType, primaryKey } = executionContext.expectedVersionTarget;
       let currentVersion: number | undefined;
 
-      // Strategy 1: object_instances (B1/B7 writeback table)
+      // Strategy 1: object_instances (B1/B7 writeback table).
+      //
+      // F-19 FIX: `object_instances.version` is BIGINT; node-postgres
+      // returns BIGINT as a STRING by default to avoid precision loss.
+      // The strict !== comparison below would ALWAYS fire if we kept
+      // the string, because the caller's expectedVersion arrives as a
+      // JS number. Normalize via Number() on all three branches so
+      // the type never mismatches. Strategy 2 already returned an
+      // int thanks to COUNT(*)::int, but belt-and-braces.
       try {
         const vRes = await pgClient.query(
           `SELECT version FROM object_instances
@@ -180,7 +215,8 @@ export async function applyEdits(
           [objectType, primaryKey]
         );
         if ((vRes.rowCount ?? 0) > 0) {
-          currentVersion = vRes.rows[0].version ?? 0;
+          const raw = vRes.rows[0].version ?? 0;
+          currentVersion = Number(raw);
         }
         // rowCount === 0 → no B1 row yet, fall through to strategy 2
       } catch {
@@ -195,7 +231,7 @@ export async function applyEdits(
               WHERE object_type_api_name = $1 AND primary_key = $2`,
             [objectType, primaryKey]
           );
-          currentVersion = countRes.rows[0]?.version ?? 0;
+          currentVersion = Number(countRes.rows[0]?.version ?? 0);
         } catch {
           // ontology_edit table somehow missing — skip check entirely
           currentVersion = undefined;
@@ -207,7 +243,10 @@ export async function applyEdits(
         currentVersion !== executionContext.expectedVersion
       ) {
         await pgClient.query("ROLLBACK");
-        pgClient.release();
+        // Do NOT release pgClient here — the finally block at the end
+        // of this try/catch handles release unconditionally. Releasing
+        // here causes a double-release: throw → catch → ROLLBACK on
+        // released client → finally → release() on released client.
         throw new OntologyError(
           `Object '${primaryKey}' of type '${objectType}' has been modified since you last read it. ` +
           `Expected version ${executionContext.expectedVersion}, found ${currentVersion}. Reload and retry.`,
@@ -302,8 +341,9 @@ export async function applyEdits(
                 operation, execution_id,
                 event_id, schema_version,
                 actor_principal_id, action_rid,
-                correlation_id, causation_id_uuid)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+                correlation_id, causation_id_uuid,
+                branch_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
             [
               linkEdit.linkTypeApiName,
               edit.primaryKey,
@@ -316,16 +356,34 @@ export async function applyEdits(
               executionContext.actionRid ?? executionContext.actionTypeApiName,
               executionContext.correlationId ?? null,
               executionContext.causationId ?? null,
+              // F-P3-12: non-null. Caller guarantees resolution.
+              executionContext.branchId,
             ]
           );
+
+          // F-P3-12: Prometheus counter per link_edit write, partitioned
+          // by branch so ops can see per-branch write traffic and spot
+          // unexpected cross-branch bleed at ingest time.
+          incCounter("tellus_link_edit_writes_total", {
+            branch_id: executionContext.branchId,
+            link_type: linkEdit.linkTypeApiName,
+            operation: linkEdit.operation,
+          });
         }
       }
+    }
+
+    // Step 2.5 (F-P3-11): durable-before-ack audit insert BEFORE commit.
+    // If the hook throws, the catch block below rolls back — audit and
+    // edits are atomic.
+    if (executionContext.preCommitHook) {
+      await executionContext.preCommitHook(pgClient);
     }
 
     // Step 3: Commit the PG transaction
     await pgClient.query("COMMIT");
   } catch (err) {
-    await pgClient.query("ROLLBACK");
+    await pgClient.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
     pgClient.release();
@@ -393,15 +451,29 @@ export async function applyEdits(
     const now = new Date().toISOString();
 
     if (edit.operation === "create") {
-      // Build the full document including system properties
-      const doc: Record<string, unknown> = {
+      // Build the full document including system properties. Phase A4
+      // (F-03): every indexed document MUST carry `_security.markings` or
+      // it becomes invisible to marking-constrained users after the
+      // public-leak branch in buildSecurityFilter was removed. The
+      // caller may pre-populate `edit.propertyValues._security` for
+      // action types that explicitly classify their output (e.g., seed
+      // fixtures that tag some rows as SECRET); otherwise we stamp the
+      // default PUBLIC classification via ensureDocumentSecurity.
+      const rawDoc: Record<string, unknown> = {
         __pk: edit.primaryKey,
         __objectType: edit.objectType,
         __lastModified: now,
         __editedBy: executionContext.executedBy,
         __version: 1,
+        // F-P3-13: stamp branch on every create so the read-path
+        // security filter's `term: { __branch: ... }` clause matches.
+        // The writer boundary guarantees `branchId` is a resolved UUID
+        // (see F-P3-12); legacy docs without this field remain visible
+        // under the transitional OR clause in `injectSecurityFilter`.
+        __branch: executionContext.branchId,
         ...edit.propertyValues,
       };
+      const doc = ensureDocumentSecurity(rawDoc);
 
       bulkBody.push({ index: { _index: indexName, _id: edit.primaryKey } });
       bulkBody.push(doc);
@@ -412,14 +484,21 @@ export async function applyEdits(
       bulkBody.push({ update: { _index: indexName, _id: edit.primaryKey } });
       bulkBody.push({
         script: {
+          // F-P3-13: back-fill `__branch` on updates of legacy docs that
+          // predate the field, and keep it in sync when an edit moves a
+          // document between branches. The `?:` guards the "no existing
+          // value" case so a first-ever update on a pre-F-P3-13 doc sets
+          // the branch without overwriting a mismatch detected earlier.
           source:
             "ctx._source.__version = (ctx._source.__version ?: 0) + 1; " +
             "ctx._source.__lastModified = params.now; " +
             "ctx._source.__editedBy = params.editedBy; " +
+            "ctx._source.__branch = params.branchId; " +
             "for (entry in params.props.entrySet()) { ctx._source[entry.getKey()] = entry.getValue(); }",
           params: {
             now,
             editedBy: executionContext.executedBy,
+            branchId: executionContext.branchId,
             props: edit.propertyValues ?? {},
           },
         },

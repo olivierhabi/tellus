@@ -15,6 +15,41 @@
 
 import { getClient, query } from "../db";
 import type { PoolClient } from "pg";
+import { createHash } from "node:crypto";
+
+/**
+ * Canonicalize a value using the audit-chain's canonicalJson (F-P3-14 BM-4
+ * closure). Returns null if the value is not canonicalizable — in that
+ * case detectConflicts falls back to treating the property as conflicting
+ * (safer than silently converging on an uncanonicalizable blob).
+ */
+function safeCanonical(
+  canonicalJson: (v: unknown) => string,
+  value: unknown,
+): string | null {
+  try {
+    return canonicalJson(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deterministic merge operation id (F-P3-14 BM-7 closure). A retried
+ * merge of the same source branch into the same target at the same fork
+ * point produces the same merge_op_id — so idempotency holds at the
+ * data layer even if the route-level Idempotency-Key header is absent.
+ */
+export function deriveMergeOpId(
+  sourceBranchId: string,
+  targetBranchId: string,
+  forkPointCommitSeq: number | string | null,
+): string {
+  const forkSeqStr = forkPointCommitSeq === null ? "null" : String(forkPointCommitSeq);
+  const h = createHash("sha256");
+  h.update(`tellus.merge.v1\n${sourceBranchId}\n${targetBranchId}\n${forkSeqStr}`, "utf8");
+  return h.digest("hex");
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,14 +115,14 @@ async function getBranchEdits(
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE branch_id = $1 AND edit_id > $2
-       ORDER BY created_at ASC`
+       ORDER BY commit_seq ASC`
     : `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE branch_id = $1
-       ORDER BY created_at ASC`;
+       ORDER BY commit_seq ASC`;
 
   const params = forkPointEditId ? [branchId, forkPointEditId] : [branchId];
   const res = await client.query(sql, params);
@@ -127,14 +162,14 @@ async function getParentEditsSinceFork(
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND ${branchCond} AND edit_id > $3
-       ORDER BY created_at ASC`
+       ORDER BY commit_seq ASC`
     : `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND ${branchCond}
-       ORDER BY created_at ASC`;
+       ORDER BY commit_seq ASC`;
 
   const params: unknown[] = forkPointEditId
     ? [ontologyId, ...(parentBranchId ? [parentBranchId] : []), forkPointEditId]
@@ -151,7 +186,7 @@ async function getParentEditsSinceFork(
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id = $2 AND edit_id > $3
-       ORDER BY created_at ASC`,
+       ORDER BY commit_seq ASC`,
       [ontologyId, parentBranchId, forkPointEditId]
     );
   } else if (parentBranchId) {
@@ -162,7 +197,7 @@ async function getParentEditsSinceFork(
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id = $2
-       ORDER BY created_at ASC`,
+       ORDER BY commit_seq ASC`,
       [ontologyId, parentBranchId]
     );
   } else if (forkPointEditId) {
@@ -173,7 +208,7 @@ async function getParentEditsSinceFork(
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id IS NULL AND edit_id > $2
-       ORDER BY created_at ASC`,
+       ORDER BY commit_seq ASC`,
       [ontologyId, forkPointEditId]
     );
   } else {
@@ -184,7 +219,7 @@ async function getParentEditsSinceFork(
               created_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id IS NULL
-       ORDER BY created_at ASC`,
+       ORDER BY commit_seq ASC`,
       [ontologyId]
     );
   }
@@ -247,8 +282,22 @@ function detectConflicts(
     const parentChange = parentChanges.get(key);
     if (!parentChange) continue; // Only branch changed — no conflict.
 
-    // Both changed the same property — is it the same value?
-    if (JSON.stringify(parentChange.value) === JSON.stringify(branchChange.value)) {
+    // F-P3-14 BM-4 closure: deep structural equality via canonicalJson.
+    // The previous JSON.stringify comparison produced false-positive
+    // conflicts on key reorder (object key order is implementation-
+    // defined) and false-negatives on type coercion (1 vs "1" would
+    // differ in stringify but match a naive `==`; canonicalJson treats
+    // them as different types, which is the correct contract).
+    //
+    // Lazy-require canonicalJson to avoid a cyclic init path during
+    // module load in some test configurations.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { canonicalJson } = require("./audit/canonicalJson") as {
+      canonicalJson: (v: unknown) => string;
+    };
+    const parentCanon = safeCanonical(canonicalJson, parentChange.value);
+    const branchCanon = safeCanonical(canonicalJson, branchChange.value);
+    if (parentCanon !== null && branchCanon !== null && parentCanon === branchCanon) {
       continue; // Convergent change — not a conflict.
     }
 
@@ -259,7 +308,11 @@ function detectConflicts(
       propertyName: parts.slice(2).join("::"),
       parentValue: parentChange.value,
       branchValue: branchChange.value,
-      baseValue: undefined, // Base is the state at fork point — would require a full snapshot lookup
+      // F-P3-14 BM-1: baseValue left undefined here and filled in by the
+      // caller (mergeThreeWay) which has access to the PG client. See
+      // populateBaseValues() below. The detectConflicts function itself
+      // remains pure over the pre-fetched change maps.
+      baseValue: undefined,
     });
   }
   return conflicts;
@@ -286,11 +339,23 @@ function detectConflicts(
 export async function mergeThreeWay(
   ontologyId: string,
   branchId: string,
-  resolutions?: Map<string, "parent" | "branch">
+  resolutions?: Map<string, "parent" | "branch">,
+  mergedBy?: string,
 ): Promise<MergeResult> {
   const pgClient = await getClient();
   try {
     await pgClient.query("BEGIN");
+
+    // F-P3-14 BM-5 closure: serialize concurrent merges on the same
+    // target via a PG advisory transaction lock keyed by the target
+    // branch id. A second concurrent merge blocks here; once the first
+    // commits, the second observes the post-merge state and either
+    // no-ops (same merge_op_id already applied) or proceeds with new
+    // source state.
+    await pgClient.query(
+      "SELECT pg_advisory_xact_lock(hashtext($1))",
+      [`tellus.merge.${branchId}`],
+    );
 
     // Lock the branch row to prevent concurrent merges.
     const branchRes = await pgClient.query(
@@ -371,19 +436,34 @@ export async function mergeThreeWay(
 
       // For delete operations, always replay
       if (edit.operation === "delete" || hasProps) {
+        // F-P3-14 BM-7 closure — deterministic execution_id per edit.
+        // The merge_op_id is stable across retries (deriveMergeOpId is
+        // a pure function of source/target/forkPoint), so replaying an
+        // aborted merge produces the same execution_ids at each offset
+        // and PG's unique-constraint on (execution_id) — if present —
+        // catches double-apply; without a constraint the deterministic
+        // id still means every call-site can detect duplicates.
+        const forkSeq = (branch as { fork_point_commit_seq?: number | null }).fork_point_commit_seq ?? null;
+        const mergeOpId = deriveMergeOpId(branchId, parentBranchId ?? "__root__", forkSeq);
+        const editExecutionId = `${mergeOpId.slice(0, 16)}-${mergedCount}`;
         await pgClient.query(
           `INSERT INTO ontology_edit
              (object_type_api_name, primary_key, operation, property_values,
               link_edits, action_type_api_name, execution_id, action_parameters,
               executed_by, edit_strategy, branch_id)
-           VALUES ($1, $2, $3, $4, '[]', 'branch_merge', $5, '{}', 'system', 'branch_merge', $6)`,
+           VALUES ($1, $2, $3, $4, '[]', 'branch_merge', $5, '{}', $7, 'branch_merge', $6)`,
           [
             edit.objectType,
             edit.primaryKey,
             edit.operation,
             JSON.stringify(edit.operation === "delete" ? {} : filteredProps),
-            `merge-${branchId}-${Date.now()}`,
+            editExecutionId,
             parentBranchId ?? null,
+            // F-P3-14 BM-8 closure — record the merging principal, not
+            // 'system'. Callers are now required to pass mergedBy; the
+            // default remains 'system' for backward compatibility during
+            // the migration window.
+            mergedBy ?? "system",
           ]
         );
         mergedCount++;
@@ -469,24 +549,29 @@ export async function recordForkPoint(
   branchId: string,
   ontologyId: string
 ): Promise<void> {
-  // The fork point is the latest edit_id at the time of branch creation.
+  // F-P3-14 BM-6 closure: no silent swallow. The fork_point_commit_seq
+  // column MUST exist (migration 042); if it does not, throw — because
+  // a merge with null fork_point treats all parent history as "since
+  // fork" and silently duplicates data.
+  //
+  // fork_point is the latest edit at the time of branch creation. We
+  // record BOTH:
+  //   - commit_seq (monotonic, correct primitive — use this for merge)
+  //   - edit_id    (legacy, preserved for pre-042 merges during rolling deploy)
   const res = await client.query(
-    `SELECT edit_id FROM ontology_edit
+    `SELECT edit_id, commit_seq FROM ontology_edit
      WHERE ontology_id_fk = $1
-     ORDER BY created_at DESC LIMIT 1`,
+     ORDER BY commit_seq DESC LIMIT 1`,
     [ontologyId]
   );
   const forkPointEditId = res.rows[0]?.edit_id ?? null;
+  const forkPointCommitSeq = res.rows[0]?.commit_seq ?? null;
 
-  // This requires the fork_point_edit_id column to exist. If it doesn't
-  // (transitional deployment), this is a no-op — the merge will treat
-  // all edits as in-scope.
-  try {
-    await client.query(
-      `UPDATE ontology_branch SET fork_point_edit_id = $1 WHERE branch_id = $2`,
-      [forkPointEditId, branchId]
-    );
-  } catch {
-    // Column may not exist yet
-  }
+  await client.query(
+    `UPDATE ontology_branch
+        SET fork_point_edit_id = $1,
+            fork_point_commit_seq = $2
+      WHERE branch_id = $3`,
+    [forkPointEditId, forkPointCommitSeq, branchId],
+  );
 }

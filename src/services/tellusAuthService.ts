@@ -146,9 +146,17 @@ export class TellusAuthService {
       scope: 'openid profile email offline_access',
     });
 
+    // F-P4-08: bound the password-grant call. Keycloak p99 under normal
+    // load is ~300ms; 5s gives generous slack while still preventing a
+    // frozen authenticator from starving login traffic.
     const res = await fetch(
       `${this.issuer}/protocol/openid-connect/token`,
-      { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body },
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+        signal: AbortSignal.timeout(5_000),
+      },
     );
 
     if (!res.ok) {
@@ -188,10 +196,13 @@ export class TellusAuthService {
       client_id: this.config.kcFrontendClientId,
       refresh_token: refreshToken,
     });
+    // F-P4-08: same 5s bound as loginWithPassword; callers expect
+    // token-rotation to be cheap.
     const res = await fetch(`${this.issuer}/protocol/openid-connect/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) {
       if (res.status === 400 || res.status === 401) {
@@ -260,10 +271,14 @@ export class TellusAuthService {
         client_id: this.config.kcFrontendClientId,
         refresh_token: refreshToken,
       });
+      // F-P4-08: logout is best-effort; 3s is enough. The outer
+      // `.catch(() => undefined)` swallows timeout so logout still
+      // succeeds locally when Keycloak is slow.
       await fetch(`${this.issuer}/protocol/openid-connect/logout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
+        signal: AbortSignal.timeout(3_000),
       }).catch(() => undefined);
     }
   }

@@ -24,6 +24,7 @@
 import { spawn } from "child_process";
 import path from "path";
 import { AppError } from "../../utils/foundryAppError";
+import { requireSecret } from "../../utils/requireEnv";
 
 const SIDECAR_PATH =
   process.env.PB_B4_SIDECAR_PATH ??
@@ -293,9 +294,15 @@ function commonEnv(input: SidecarCommonConfig): Record<string, unknown> {
       process.env.S3_ENDPOINT ??
       "http://localhost:9000",
     s3_region: input.s3Region ?? process.env.S3_REGION ?? "us-east-1",
-    s3_access_key_id: input.s3AccessKeyId ?? process.env.S3_ACCESS_KEY_ID ?? "minioadmin",
+    // F-P4-24: caller may still supply an explicit credential via `input.*`;
+    // otherwise fail-closed on missing env rather than silently using the
+    // well-known minioadmin default.
+    s3_access_key_id:
+      input.s3AccessKeyId ??
+      requireSecret("S3_ACCESS_KEY_ID", "Iceberg sidecar requires S3 access key."),
     s3_secret_access_key:
-      input.s3SecretAccessKey ?? process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin",
+      input.s3SecretAccessKey ??
+      requireSecret("S3_SECRET_ACCESS_KEY", "Iceberg sidecar requires S3 secret key."),
   };
 }
 

@@ -14,6 +14,16 @@ const BASE = "http://localhost:3000";
 async function skipIfNoServer(): Promise<boolean> {
   try {
     const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) throw new Error(`health probe returned ${res.status}`);
+    return false; // server reachable, do not skip
+  } catch (err) {
+    throw new Error(
+      "F-P2-01: integration server unreachable at " + BASE +
+      " — beforeAll fails loudly rather than ghost-passing. " +
+      "Root cause: " + ((err as Error)?.message || err)
+    );
+  }
+}/health`, { signal: AbortSignal.timeout(2000) });
     return !res.ok;
   } catch {
     return true;
@@ -31,7 +41,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 1. GET /api/docs/spec.json returns 200
   // -----------------------------------------------------------------------
   it("should return 200 from /api/docs/spec.json", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     expect(res.status).toBe(200);
   });
@@ -40,7 +49,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 2. /api/docs/spec.json returns valid JSON with openapi field
   // -----------------------------------------------------------------------
   it("should return valid JSON with openapi version", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     expect(spec.openapi).toBe("3.0.3");
@@ -50,7 +58,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 3. Spec contains info block with title and version
   // -----------------------------------------------------------------------
   it("should include info block with title and version", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     expect(spec.info).toBeDefined();
@@ -62,7 +69,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 4. Spec contains Actions API paths (merged from actions.openapi.json)
   // -----------------------------------------------------------------------
   it("should contain all expected Actions API paths", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const paths = Object.keys(spec.paths);
@@ -93,7 +99,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 5. Spec contains reusable component schemas
   // -----------------------------------------------------------------------
   it("should define reusable component schemas", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const schemas = Object.keys(spec.components?.schemas ?? {});
@@ -122,7 +127,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 6. Action types path has POST, GET methods
   // -----------------------------------------------------------------------
   it("should define POST and GET on actionTypes path", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
@@ -136,7 +140,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 7. Single action type path has GET, PUT, DELETE methods
   // -----------------------------------------------------------------------
   it("should define GET, PUT, DELETE on single actionType path", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
@@ -151,7 +154,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 8. Spec includes tags for categorization
   // -----------------------------------------------------------------------
   it("should include tags for endpoint categorization", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     expect(Array.isArray(spec.tags)).toBe(true);
@@ -166,7 +168,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 9. GET /api/docs returns HTML (Swagger UI)
   // -----------------------------------------------------------------------
   it("should serve Swagger UI HTML at /api/docs", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs`, {
       redirect: "follow",
     });
@@ -181,7 +182,6 @@ describe("Task 29 — OpenAPI Specification", () => {
   // 10. Spec content-type is application/json
   // -----------------------------------------------------------------------
   it("should return application/json content-type for /api/docs/spec.json", async () => {
-    if (skip) return;
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const contentType = res.headers.get("content-type") ?? "";
     expect(contentType).toContain("application/json");

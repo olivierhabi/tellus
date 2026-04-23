@@ -12,10 +12,32 @@ import {
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { Readable } from 'stream';
+import { envWithDefault, requireSecret } from '../utils/requireEnv';
+import { withBreaker } from '../resilience/circuitBreaker';
+
+// F-P4-11: classify failures. AWS SDK error objects carry `$metadata`
+// with `httpStatusCode`; everything in the 5xx band or a network/DNS
+// error counts against the breaker, 4xx responses (NoSuchKey, access
+// denied, validation error) are caller bugs and must not trip it.
+function isS3Failure(err: unknown): boolean {
+  if (!(err instanceof Error)) return true;
+  const meta = (err as { $metadata?: { httpStatusCode?: number } }).$metadata;
+  const status = meta?.httpStatusCode;
+  if (typeof status === 'number') return status >= 500 || status === 0;
+  if (err.name === 'TimeoutError' || err.name === 'AbortError') return true;
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/.test(err.message)) {
+    return true;
+  }
+  return false;
+}
+
+const S3_BREAKER_LABEL = 's3';
 
 // ---------------------------------------------------------------------------
-// Configuration — all from environment, with safe defaults for local dev
+// Configuration — non-sensitive knobs have dev defaults; credentials are
+// fail-closed via `requireSecret` (F-P4-24). No `|| 'minioadmin'`.
 // ---------------------------------------------------------------------------
 
 export interface StorageConfig {
@@ -31,13 +53,13 @@ export interface StorageConfig {
 
 function loadStorageConfig(): StorageConfig {
   return {
-    endpoint: process.env.S3_ENDPOINT || 'http://localhost:9000',
-    region: process.env.S3_REGION || 'us-east-1',
-    bucket: process.env.S3_BUCKET || 'tellus-uploads',
-    accessKeyId: process.env.S3_ACCESS_KEY_ID || 'minioadmin',
-    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || 'minioadmin',
+    endpoint: envWithDefault('S3_ENDPOINT', 'http://localhost:9000'),
+    region: envWithDefault('S3_REGION', 'us-east-1'),
+    bucket: envWithDefault('S3_BUCKET', 'tellus-uploads'),
+    accessKeyId: requireSecret('S3_ACCESS_KEY_ID', 'S3/MinIO access key required for storageService.'),
+    secretAccessKey: requireSecret('S3_SECRET_ACCESS_KEY', 'S3/MinIO secret key required for storageService.'),
     forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== 'false',
-    presignedUrlExpiry: parseInt(process.env.S3_PRESIGNED_URL_EXPIRY || '3600', 10),
+    presignedUrlExpiry: parseInt(envWithDefault('S3_PRESIGNED_URL_EXPIRY', '3600'), 10),
   };
 }
 
@@ -51,6 +73,16 @@ let _config: StorageConfig | null = null;
 function getClient(): S3Client {
   if (!_client) {
     _config = loadStorageConfig();
+    // F-P4-07: pin AWS SDK v3 timeouts explicitly via NodeHttpHandler.
+    // Without this the SDK uses a 0-timeout socket which inherits OS TCP
+    // defaults (2+ minutes on Linux) and a wedged MinIO endpoint stalls
+    // every upload/download path for the full CI/HTTP timeout window.
+    // connectionTimeout: 2000ms to bail out of DNS/handshake hangs.
+    // requestTimeout:    10000ms covers large PUT bodies; GET/HEAD resolve
+    //                   well before this in steady state.
+    // socketTimeout:     unset — Upload streams need long idle intervals.
+    // maxAttempts:       2 gives one retry on 5xx / throttling without
+    //                    compounding latency across call sites.
     _client = new S3Client({
       endpoint: _config.endpoint,
       region: _config.region,
@@ -59,7 +91,26 @@ function getClient(): S3Client {
         secretAccessKey: _config.secretAccessKey,
       },
       forcePathStyle: _config.forcePathStyle,
+      maxAttempts: 2,
+      requestHandler: new NodeHttpHandler({
+        connectionTimeout: 2000,
+        requestTimeout: 10000,
+      }),
     });
+    // F-P4-11: route every command through the shared "s3" breaker.
+    // We patch `send` on the instance rather than use a middleware so
+    // `Upload` (from @aws-sdk/lib-storage) — which also calls
+    // client.send(cmd) internally for each part — is covered without
+    // a second wrapping layer.
+    const origSend = _client.send.bind(_client);
+    type SendFn = typeof _client.send;
+    _client.send = ((cmd: Parameters<SendFn>[0]) =>
+      withBreaker(
+        S3_BREAKER_LABEL,
+        () => origSend(cmd),
+        {},
+        isS3Failure,
+      )) as SendFn;
   }
   return _client;
 }

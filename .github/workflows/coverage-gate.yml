@@ -1,0 +1,89 @@
+name: coverage-gate
+on:
+  pull_request:
+  push: { branches: [main] }
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: tellus123, POSTGRES_USER: tellus, POSTGRES_DB: tellus_db }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tellus -d tellus_db"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGDATABASE: tellus_db
+      REDIS_URL: redis://localhost:6379
+      KEYCLOAK_URL: http://localhost:8086
+      KEYCLOAK_REALM: tellus
+      KEYCLOAK_CLIENT_ID: tellus-api
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_ENDPOINT: http://localhost:9000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - name: Unit coverage (critical path)
+        run: pnpm vitest run --config vitest.unit.config.ts --coverage --coverage.reporter=json-summary --coverage.reporter=text --coverage.reportsDirectory=coverage
+      - name: Enforce 80% branch on critical-path modules
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const candidates = [
+              "./coverage/coverage-summary.json",
+              "./coverage/unit/coverage-summary.json",
+            ];
+            const summaryPath = candidates.find(p => fs.existsSync(p));
+            if (!summaryPath) {
+              console.error("coverage gate FAIL: no coverage-summary.json in " + candidates.join(" or "));
+              process.exit(1);
+            }
+            const s = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+            const CRIT = [
+              "src/actions/editApplicator.ts",
+              "src/actions/actionExecutor.ts",
+              "src/services/queryExecutor.ts",
+              "src/services/linkResolverService.ts",
+              "src/services/linkViolationEnforcer.ts",
+              "src/services/branchMergeService.ts",
+              "src/services/audit/canonicalJson.ts",
+              "src/services/audit/hashChain.ts",
+              "src/services/security/cbacPolicy.ts",
+              "src/services/rateLimit/redisRateLimiter.ts",
+              "src/utils/requireEnv.ts",
+            ];
+            const fails = [];
+            for (const [path, m] of Object.entries(s)) {
+              if (!CRIT.some(c => path.endsWith(c))) continue;
+              const br = m.branches?.pct ?? 0;
+              if (br < 80) fails.push(`${path}: ${br}% branch`);
+            }
+            if (fails.length) { console.error("coverage gate FAIL:\n" + fails.join("\n")); process.exit(1); }
+            console.log("coverage gate OK");
+          '
+      - uses: actions/upload-artifact@v4
+        with: { name: coverage-report, path: coverage/ }
+  ghost-pass-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for ghost-pass patterns
+        run: |
+          if grep -rnE "if \(!(HAS_DATA|serverAvailable|serverReachable|hasData)\) return|Server not reachable — skipping" tests/ ; then
+            echo "ghost-pass pattern found — fail" ; exit 1
+          fi
+          echo "ghost-pass gate OK"

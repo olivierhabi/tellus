@@ -9,6 +9,7 @@
 import { query } from "../../db";
 import { getLakekeeperClient } from "./lakekeeperClient";
 import { funnelNamespace } from "./icebergCatalog";
+import { envWithDefault, requireSecret } from "../../utils/requireEnv";
 import {
   pipelineNamespace,
   slugForNamespace,
@@ -58,15 +59,18 @@ export async function bootstrapLakekeeper(): Promise<LakekeeperBootstrapResult> 
     };
   }
 
-  const warehouseName = process.env.LAKEKEEPER_WAREHOUSE ?? "tellus-funnel";
+  const warehouseName = envWithDefault("LAKEKEEPER_WAREHOUSE", "tellus-funnel");
   let warehouseId: string | null = null;
   try {
+    // F-P4-24: no minioadmin fallback.
     warehouseId = await client.ensureWarehouse({
       warehouseName,
-      bucket: process.env.ICEBERG_BUCKET ?? "iceberg-warehouse",
-      endpoint: process.env.ICEBERG_S3_ENDPOINT ?? process.env.S3_ENDPOINT ?? "http://minio:9000",
-      accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin",
-      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin",
+      bucket: envWithDefault("ICEBERG_BUCKET", "iceberg-warehouse"),
+      endpoint:
+        envWithDefault("ICEBERG_S3_ENDPOINT", "") ||
+        envWithDefault("S3_ENDPOINT", "http://minio:9000"),
+      accessKeyId: requireSecret("S3_ACCESS_KEY_ID", "Lakekeeper bootstrap requires S3 access key."),
+      secretAccessKey: requireSecret("S3_SECRET_ACCESS_KEY", "Lakekeeper bootstrap requires S3 secret key."),
       pathStyleAccess: true,
     });
   } catch (err) {

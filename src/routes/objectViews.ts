@@ -25,6 +25,8 @@ import {
 import { executeGetObject } from "../services/queryExecutor";
 import { countLinks, resolveLinks } from "../services/linkResolverService";
 import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { incCounter } from "../services/funnel/metrics";
 import linkTypeModel from "../models/linkType";
 
 const router = Router({ mergeParams: true });
@@ -115,7 +117,8 @@ async function getLinkSummary(
   ontologyId: string,
   objectTypeId: string,
   primaryKey: string,
-  securityFilter?: Record<string, unknown> | null
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<Array<Record<string, unknown>>> {
   // Get all link types where this object type is source or target
   const linkTypes = await linkTypeModel.listByOntology(ontologyId);
@@ -134,7 +137,7 @@ async function getLinkSummary(
       const direction: "forward" | "reverse" = isSource ? "forward" : "reverse";
 
       try {
-        const count = await countLinks(lt, primaryKey, direction, securityFilter);
+        const count = await countLinks(lt, primaryKey, direction, securityFilter, branchId);
         return {
           linkTypeApiName: lt.api_name,
           linkTypeDisplayName: lt.display_name,
@@ -173,10 +176,12 @@ async function buildObjectView(
   objectTypeId: string,
   primaryKey: string,
   include: string[] = ["properties", "links", "interfaces"],
-  securityFilter?: Record<string, unknown> | null
+  securityFilter?: Record<string, unknown> | null,
+  branchId: string | null = null,
 ): Promise<Record<string, unknown>> {
-  // Fetch the raw object from OpenSearch
-  const rawObject = await executeGetObject(objectTypeApiName, primaryKey, securityFilter);
+  // Fetch the raw object from OpenSearch.
+  // F-P3-13: branchId forwarded so reads respect branch isolation.
+  const rawObject = await executeGetObject(objectTypeApiName, primaryKey, securityFilter, branchId);
   if (!rawObject) {
     throw appError(
       "OBJECT_NOT_FOUND",
@@ -217,7 +222,8 @@ async function buildObjectView(
       ontologyId,
       objectTypeId,
       primaryKey,
-      securityFilter
+      securityFilter,
+      branchId,
     );
   }
 
@@ -241,13 +247,19 @@ router.get(
       );
 
       const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.single",
+        scoped: String(branchId !== null),
+      });
       const view = await buildObjectView(
         ontologyId,
         objectTypeApiName,
         objectTypeId,
         primaryKey,
         undefined,
-        secFilter
+        secFilter,
+        branchId
       );
 
       const elapsed = Date.now() - start;
@@ -309,6 +321,11 @@ router.get(
       }
 
       const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.linked",
+        scoped: String(branchId !== null),
+      });
 
       // Resolve linked objects for each link type
       const linkGroups: Array<Record<string, unknown>> = [];
@@ -333,7 +350,7 @@ router.get(
           const result = await resolveLinks(lt, primaryKey, direction, {
             pageSize,
             pageToken: pageToken as string | undefined,
-          }, secFilter);
+          }, secFilter, branchId);
 
           linkGroups.push({
             linkTypeApiName: lt.api_name,
@@ -517,13 +534,19 @@ objectViewsByTypeRouter.get(
       const { ontologyId, objectTypeId } = await resolveObjectType(objectType);
 
       const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.byType.single",
+        scoped: String(branchId !== null),
+      });
       const view = await buildObjectView(
         ontologyId,
         objectType,
         objectTypeId,
         primaryKey,
         undefined,
-        secFilter
+        secFilter,
+        branchId,
       );
 
       const elapsed = Date.now() - start;
@@ -577,6 +600,11 @@ objectViewsByTypeRouter.get(
       }
 
       const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.byType.linked",
+        scoped: String(branchId !== null),
+      });
       const linkGroups: Array<Record<string, unknown>> = [];
 
       for (const lt of relevantLinks) {
@@ -594,7 +622,7 @@ objectViewsByTypeRouter.get(
           const result = await resolveLinks(lt, primaryKey, direction, {
             pageSize,
             pageToken: pageToken as string | undefined,
-          }, secFilter);
+          }, secFilter, branchId);
 
           linkGroups.push({
             linkTypeApiName: lt.api_name,

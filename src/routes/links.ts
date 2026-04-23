@@ -26,6 +26,8 @@ import {
 } from "../services/linkResolverService";
 import { sendSuccess, sendCreated, sendNoContent, sendError, encodePageToken, decodePageToken } from "../utils/responseFormatter";
 import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { incCounter } from "../services/funnel/metrics";
 import type { Cardinality, LinkTypeRow } from "../models/linkType";
 import {
   applyReverseProjectionAll,
@@ -43,6 +45,7 @@ import {
   dismissQuarantineEntry,
 } from "../models/linkQuarantine";
 import { enforceOneToOneAdd } from "../services/linkViolationEnforcer";
+import { resolveBranchIdOrMain } from "../services/branchContext";
 import {
   resolveFKWithState,
   runOrphanScan,
@@ -280,6 +283,13 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
     const { ontologyId } = req.params;
     const { objectTypeApiName, objectPK, requests } = req.body;
 
+    // F-P3-13: read branch once at the ingress boundary.
+    const branchId = readBranchHeader(req);
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.bulkCount",
+      scoped: String(branchId !== null),
+    });
+
     // If requests array is provided, use it directly
     if (Array.isArray(requests) && requests.length > 0) {
       const results: Array<{ linkTypeApiName: string; direction: string; objectPK: string; count: number | null; error?: string }> = [];
@@ -290,7 +300,8 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
           if (!linkType) {
             return { linkTypeApiName: r.linkTypeApiName, direction: r.direction, objectPK: r.objectPK, count: null, error: "Link type not found" };
           }
-          const count = await countLinks(linkType, r.objectPK, r.direction, buildSecurityFilter(req.security));
+          // F-P3-13: count scoped to caller's branch.
+          const count = await countLinks(linkType, r.objectPK, r.direction, buildSecurityFilter(req.security), branchId);
           return { linkTypeApiName: r.linkTypeApiName, direction: r.direction, objectPK: r.objectPK, count };
         })
       );
@@ -320,7 +331,7 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
       return sendError(res, "OBJECT_TYPE_NOT_FOUND", `Object type '${objectTypeApiName}' not found.`);
     }
 
-    const results = await bulkCountLinks(ontologyId, otResult.rows[0].object_type_id, objectPK, buildSecurityFilter(req.security));
+    const results = await bulkCountLinks(ontologyId, otResult.rows[0].object_type_id, objectPK, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, { results });
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -351,11 +362,16 @@ router.post("/multiHop", async (req: Request, res: Response, next: NextFunction)
       ontologyId,
     }));
 
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.multiHop",
+      scoped: String(branchId !== null),
+    });
     const result = await resolveMultiHop(stepsWithOntology, startingPKs, {
       pageSize,
       pageToken,
       targetFilter,
-    }, buildSecurityFilter(req.security));
+    }, buildSecurityFilter(req.security), branchId);
 
     return sendSuccess(res, result);
   } catch (err: any) {
@@ -496,6 +512,13 @@ router.delete("/:apiName", async (req: Request, res: Response, next: NextFunctio
     }
 
     // F-10: Cascade cleanup — purge link_edit and quarantine rows for this link type.
+    //
+    // F-P3-12 audit: this DELETE is intentionally cross-branch. A link
+    // TYPE being deleted at the ontology level has no remaining scope
+    // on any branch — the type is gone, so every per-branch edit row
+    // for that type becomes orphaned and must be purged. Scoping this
+    // by branch_id would leave zombie rows referencing a non-existent
+    // link_type on other branches.
     try {
       const { query: pgQuery } = require("../db");
       await pgQuery("DELETE FROM link_edit WHERE link_type_api_name = $1", [apiName]);
@@ -560,9 +583,14 @@ router.post("/:apiName/resolve", async (req: Request, res: Response, next: NextF
       }
     }
 
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.resolve",
+      scoped: String(branchId !== null),
+    });
     const result = await resolveLinks(linkType, objectPK, direction, {
       pageSize, pageToken, targetFilter, select,
-    }, buildSecurityFilter(req.security));
+    }, buildSecurityFilter(req.security), branchId);
 
     // LT-B6 — strip reverse-only projection from hits before responding.
     const projectedHits = applyReverseProjectionAll(
@@ -648,7 +676,12 @@ router.post("/:apiName/count", async (req: Request, res: Response, next: NextFun
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
-    const count = await countLinks(linkType, objectPK, direction, buildSecurityFilter(req.security));
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.count",
+      scoped: String(branchId !== null),
+    });
+    const count = await countLinks(linkType, objectPK, direction, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, { linkTypeApiName: apiName, direction, count });
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -691,9 +724,14 @@ router.post("/:apiName/searchAround", async (req: Request, res: Response, next: 
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.searchAround",
+      scoped: String(branchId !== null),
+    });
     const result = await searchAround(linkType, direction, {
       sourceFilter, targetFilter, pageSize, pageToken,
-    }, buildSecurityFilter(req.security));
+    }, buildSecurityFilter(req.security), branchId);
 
     return sendSuccess(res, result);
   } catch (err: any) {
@@ -796,7 +834,12 @@ router.post("/:apiName/validate", async (req: Request, res: Response, next: Next
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
-    const validation = await validateJoinTable(linkType, buildSecurityFilter(req.security));
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.validateJoinTable",
+      scoped: String(branchId !== null),
+    });
+    const validation = await validateJoinTable(linkType, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, validation);
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -824,7 +867,12 @@ router.get("/:apiName/analysis", async (req: Request, res: Response, next: NextF
       precisionRaw === "exact" || precisionRaw === "sampled" || precisionRaw === "fast"
         ? precisionRaw
         : undefined;
-    const analysis = await analyzeLinkType(linkType, { precision }, buildSecurityFilter(req.security));
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.analysis",
+      scoped: String(branchId !== null),
+    });
+    const analysis = await analyzeLinkType(linkType, { precision }, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, analysis);
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -1056,9 +1104,17 @@ router.post(
       if (!linkType) {
         return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
       }
+      // F-P3-12: resolve branch from request header — the enforcer
+      // refuses to run without a branch UUID. `resolveBranchIdOrMain`
+      // is the single fallback point and hits `main` when the caller
+      // did not tag the request.
+      const headerBranch =
+        (req.get("x-branch-id") ?? (req.body?.branchId as string | undefined)) || null;
+      const branchId = await resolveBranchIdOrMain(ontologyId, headerBranch);
       const result = await enforceOneToOneAdd({
         linkType,
         ontologyId,
+        branchId,
         sourcePk,
         targetPk,
       });
@@ -1362,7 +1418,13 @@ router.get(
 
       // Visible + hidden counts come from a cheap analysis call with
       // precision=fast (manifest stats for Iceberg, _count for FK).
-      const analysis = await analyzeLinkType(linkType, { precision: "fast" });
+      // F-P3-13: MCP visibility estimate scoped to caller's branch.
+      const mcpBranchId = readBranchHeader(req);
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "links.mcpVisibility",
+        scoped: String(mcpBranchId !== null),
+      });
+      const analysis = await analyzeLinkType(linkType, { precision: "fast" }, null, mcpBranchId);
       const total = analysis.totalLinkCount ?? 0;
       // Without actual row markings we estimate "hidden" as the naive
       // proportion of edges whose required markings aren't in the user

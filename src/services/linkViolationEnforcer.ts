@@ -14,6 +14,19 @@ import { insertQuarantineEntry, bumpViolationCounter } from "../models/linkQuara
 import { client as osClient } from "./opensearch/client";
 import { getIndexName } from "./opensearch/indexLifecycleManager";
 import { query } from "../db";
+import { incCounter } from "./funnel/metrics";
+
+// F-P3-04: PG SQLSTATE codes we tolerate as "pre-migration transitional".
+// 42P01 = undefined_table. Any other error (including 42703 undefined_column,
+// which hid this bug for months) MUST fail loudly — silent catch-all
+// swallowing was the direct cause of ONE_TO_ONE / ONE_TO_MANY enforcement
+// being dead code.
+const PG_UNDEFINED_TABLE = "42P01";
+
+function isTransitionalMissingTable(err: unknown): boolean {
+  const code = (err as { code?: string } | null | undefined)?.code;
+  return code === PG_UNDEFINED_TABLE;
+}
 
 export interface EnforceResult {
   allowed: boolean;
@@ -35,11 +48,22 @@ export interface EnforceResult {
 export async function enforceOneToOneAdd(input: {
   linkType: LinkTypeRow;
   ontologyId: string;
+  /**
+   * F-P3-12: the branch this add is scoped to. REQUIRED — without a
+   * branch filter the ONE_TO_ONE / ONE_TO_MANY cardinality check
+   * aggregates link_edit rows across every branch of the ontology,
+   * so a branch-A write would spuriously conflict with a branch-B
+   * write. All cardinality queries below inject `AND branch_id = $N`.
+   * Callers that do not know the branch up front must resolve it via
+   * `src/services/branchContext.ts:resolveBranchIdOrMain` before
+   * entering the enforcer.
+   */
+  branchId: string;
   sourcePk: string;
   targetPk: string;
   reasonContext?: Record<string, unknown>;
 }): Promise<EnforceResult> {
-  const { linkType, ontologyId, sourcePk, targetPk, reasonContext } = input;
+  const { linkType, ontologyId, branchId, sourcePk, targetPk, reasonContext } = input;
 
   // F-11: ONE_TO_MANY enforcement — a source PK may link to many
   // targets, but a target PK must NOT appear in more than one source.
@@ -48,13 +72,13 @@ export async function enforceOneToOneAdd(input: {
     return { allowed: true, quarantined: false, warnings: [] };
   }
   if (linkType.cardinality === "ONE_TO_MANY") {
-    return enforceOneToManyAdd(linkType, ontologyId, sourcePk, targetPk, reasonContext);
+    return enforceOneToManyAdd(linkType, ontologyId, branchId, sourcePk, targetPk, reasonContext);
   }
   if (linkType.cardinality !== "ONE_TO_ONE") {
     return { allowed: true, quarantined: false, warnings: [] };
   }
 
-  const existingTarget = await findExistingOneToOneTarget(linkType, sourcePk);
+  const existingTarget = await findExistingOneToOneTarget(linkType, branchId, sourcePk);
   // No existing target = no conflict. The add is trivially allowed.
   if (!existingTarget || existingTarget === targetPk) {
     return { allowed: true, quarantined: false, warnings: [] };
@@ -77,6 +101,12 @@ export async function enforceOneToOneAdd(input: {
       console.warn(
         `[ONE_TO_ONE_VIOLATION] link '${linkType.api_name}' source=${sourcePk} already links to ${existingTarget}; ignoring new target ${targetPk}`
       );
+      // F-P3-04 / Hard Rule §6: Prometheus counter for every enforcement decision.
+      incCounter("tellus_link_violation_allowed_total", {
+        cardinality: "ONE_TO_ONE",
+        policy: "warn",
+        link_type: linkType.api_name,
+      });
       await bumpViolationCounter(linkType.link_type_id).catch(() => undefined);
       return {
         allowed: true,
@@ -87,6 +117,11 @@ export async function enforceOneToOneAdd(input: {
       };
     }
     case "reject": {
+      incCounter("tellus_link_violation_blocked_total", {
+        cardinality: "ONE_TO_ONE",
+        policy: "reject",
+        link_type: linkType.api_name,
+      });
       await bumpViolationCounter(linkType.link_type_id).catch(() => undefined);
       throw appError(
         "ONE_TO_ONE_VIOLATION",
@@ -102,6 +137,11 @@ export async function enforceOneToOneAdd(input: {
         sourcePk,
         targetPk,
         reason,
+      });
+      incCounter("tellus_link_violation_allowed_total", {
+        cardinality: "ONE_TO_ONE",
+        policy: "quarantine",
+        link_type: linkType.api_name,
       });
       await bumpViolationCounter(linkType.link_type_id).catch(() => undefined);
       return {
@@ -127,23 +167,45 @@ export async function enforceOneToOneAdd(input: {
 async function enforceOneToManyAdd(
   linkType: LinkTypeRow,
   ontologyId: string,
+  branchId: string,
   sourcePk: string,
   targetPk: string,
   reasonContext?: Record<string, unknown>,
 ): Promise<EnforceResult> {
+  // `ontologyId` is preserved on the signature for future per-ontology
+  // scoping hooks even though the current query filters by link_type +
+  // branch. Touch it for the linter without changing semantics.
+  void ontologyId;
   try {
+    // F-P3-04: column is `executed_at`, not `created_at`. The previous
+    // `ORDER BY created_at DESC` raised SQLSTATE 42703 on every call and
+    // was silently swallowed — enforcement returned `{allowed:true}`
+    // unconditionally. See `017_link_type_extensions.sql:143` for the
+    // canonical column and its covering index.
+    //
+    // F-P3-12: `AND branch_id = $3` scopes the cardinality check to the
+    // writer's branch. Without this clause a ONE_TO_MANY add on branch
+    // A would see branch B's conflicting row and spuriously reject.
+    // Matching composite index: `idx_link_edit_type_branch_time` in
+    // migration 043.
     const res = await query(
       `SELECT source_primary_key FROM link_edit
        WHERE link_type_api_name = $1
          AND target_primary_key = $2
+         AND branch_id = $3
          AND operation = 'add'
-       ORDER BY created_at DESC LIMIT 1`,
-      [linkType.api_name, targetPk]
+       ORDER BY executed_at DESC LIMIT 1`,
+      [linkType.api_name, targetPk, branchId]
     );
     if (res.rows.length > 0 && res.rows[0].source_primary_key !== sourcePk) {
       const existingSource = res.rows[0].source_primary_key;
       const policy = (linkType.violation_policy ?? "reject") as ViolationPolicy;
       if (policy === "reject") {
+        incCounter("tellus_link_violation_blocked_total", {
+          cardinality: "ONE_TO_MANY",
+          policy: "reject",
+          link_type: linkType.api_name,
+        });
         throw appError(
           "ONE_TO_MANY_VIOLATION",
           `Link '${linkType.api_name}' target '${targetPk}' is already linked from source '${existingSource}'. violation_policy=reject.`,
@@ -151,6 +213,11 @@ async function enforceOneToManyAdd(
         );
       }
       // warn or quarantine — allow but surface
+      incCounter("tellus_link_violation_allowed_total", {
+        cardinality: "ONE_TO_MANY",
+        policy,
+        link_type: linkType.api_name,
+      });
       return {
         allowed: true,
         quarantined: false,
@@ -160,8 +227,27 @@ async function enforceOneToManyAdd(
       };
     }
   } catch (e: any) {
-    if (e?.errorCode === "ONE_TO_MANY_VIOLATION") throw e;
-    // Table may not exist in transitional deployments
+    if (e?.code === "ONE_TO_MANY_VIOLATION") throw e;
+    if (isTransitionalMissingTable(e)) {
+      incCounter("tellus_link_enforcement_degraded_total", {
+        reason: "missing_table",
+        cardinality: "ONE_TO_MANY",
+      });
+      return { allowed: true, quarantined: false, warnings: [] };
+    }
+    // F-P3-04: any other error — undefined_column, permission denied,
+    // syntax error — is a real defect. Fail the write with a typed error
+    // so the operator sees the regression instead of silently ignoring
+    // cardinality.
+    incCounter("tellus_link_enforcement_degraded_total", {
+      reason: "query_error",
+      cardinality: "ONE_TO_MANY",
+    });
+    throw appError(
+      "LINK_ENFORCEMENT_UNAVAILABLE",
+      `Cardinality check for link '${linkType.api_name}' failed: ${e?.message ?? "unknown"}`,
+      { cause: e?.code ?? e?.message, cardinality: "ONE_TO_MANY" }
+    );
   }
   return { allowed: true, quarantined: false, warnings: [] };
 }
@@ -175,22 +261,46 @@ async function enforceOneToManyAdd(
  */
 async function findExistingOneToOneTarget(
   linkType: LinkTypeRow,
+  branchId: string,
   sourcePk: string
 ): Promise<string | null> {
-  // F-06: Try PG (transactional, race-safe) first
+  // F-06 + F-P3-04: Try PG (transactional, race-safe) first using the
+  // correct `executed_at` column. A bare `catch {}` here used to hide
+  // the 42703 column-rename bug; now we only swallow 42P01 (table missing)
+  // and surface every other SQLSTATE as a typed error.
+  //
+  // F-P3-12: `AND branch_id = $3` scopes the lookup to the writer's
+  // branch. Composite index `idx_link_edit_type_branch_time`
+  // (migration 043) covers the predicate.
   try {
     const pgRes = await query(
       `SELECT target_primary_key FROM link_edit
        WHERE link_type_api_name = $1
          AND source_primary_key = $2
+         AND branch_id = $3
          AND operation = 'add'
-       ORDER BY created_at DESC LIMIT 1`,
-      [linkType.api_name, sourcePk]
+       ORDER BY executed_at DESC LIMIT 1`,
+      [linkType.api_name, sourcePk, branchId]
     );
     if (pgRes.rows.length > 0) {
       return String(pgRes.rows[0].target_primary_key);
     }
-  } catch {
+  } catch (e: unknown) {
+    if (!isTransitionalMissingTable(e)) {
+      incCounter("tellus_link_enforcement_degraded_total", {
+        reason: "query_error",
+        cardinality: "ONE_TO_ONE",
+      });
+      throw appError(
+        "LINK_ENFORCEMENT_UNAVAILABLE",
+        `ONE_TO_ONE lookup for link '${linkType.api_name}' failed: ${(e as { message?: string })?.message ?? "unknown"}`,
+        { cause: (e as { code?: string })?.code, cardinality: "ONE_TO_ONE" }
+      );
+    }
+    incCounter("tellus_link_enforcement_degraded_total", {
+      reason: "missing_table",
+      cardinality: "ONE_TO_ONE",
+    });
     // link_edit table may not exist yet — fall through to OS
   }
 

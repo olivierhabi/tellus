@@ -29,6 +29,7 @@ import { AppError } from '../utils/foundryAppError';
 import { TellusAuthService } from '../services/tellusAuthService';
 import { getRequiredPatScope } from '../services/patScopeMap';
 import foundryDb from '../config/foundryDb';
+import { getKeycloakRealm } from "../auth/keycloakConfig"; // F-P4-26
 
 const PAT_PREFIX = 'tellus_pat_';
 // Mandatory-passkey enrollment bearer. These tokens are minted by
@@ -48,7 +49,7 @@ function svc(): TellusAuthService {
   if (!_service) {
     _service = new TellusAuthService(foundryDb as never, {
       kcUrl: process.env.KEYCLOAK_URL || 'http://localhost:8086',
-      kcRealm: process.env.KEYCLOAK_REALM || 'tellus',
+      kcRealm: getKeycloakRealm(),
       kcFrontendClientId: process.env.KEYCLOAK_FRONTEND_CLIENT_ID || 'tellus-frontend',
     });
   }

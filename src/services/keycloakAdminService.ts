@@ -22,6 +22,25 @@
  */
 
 import { AppError } from '../utils/foundryAppError';
+import { getKeycloakRealm } from "../auth/keycloakConfig"; // F-P4-26
+import { withBreaker } from "../resilience/circuitBreaker";
+
+// F-P4-11: classify failures so 401/403/404 from a *working* Keycloak
+// (caller supplied wrong token, realm-mgmt role missing, user not
+// found) do NOT trip the breaker — only 5xx/network/abort counts.
+function isKcFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return true;
+  // AppError carries a statusCode we set ourselves.
+  const code = (err as { statusCode?: number }).statusCode;
+  if (typeof code === "number") return code >= 500;
+  // AbortError from AbortSignal.timeout → upstream too slow.
+  if (err.name === "AbortError" || err.name === "TimeoutError") return true;
+  // Network / DNS errors.
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed/.test(err.message)) {
+    return true;
+  }
+  return false;
+}
 
 export interface KeycloakAdminConfig {
   kcUrl: string;
@@ -90,11 +109,23 @@ export class KeycloakAdminService {
       client_id: this.config.clientId,
       client_secret: this.config.clientSecret,
     });
-    const res = await fetch(`${this.issuer}/protocol/openid-connect/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
+    // F-P4-08: bound the token exchange. Without an AbortSignal a
+    // wedged Keycloak stalls every route that ever calls getToken() for
+    // the full HTTP client window (no default timeout on undici fetch).
+    // F-P4-11: route through the "kc" breaker so a dead Keycloak trips
+    // once, not once per in-flight request.
+    const res = await withBreaker(
+      'kc',
+      () =>
+        fetch(`${this.issuer}/protocol/openid-connect/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body,
+          signal: AbortSignal.timeout(5_000),
+        }),
+      {},
+      isKcFailure,
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new AppError(
@@ -125,14 +156,25 @@ export class KeycloakAdminService {
           .join('&')
       : '';
     const url = `${this.adminBase}${path}${qs}`;
-    const res = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
+    // F-P4-08: bound every Keycloak admin REST call. 8s upper bound
+    // covers the p99 realm-scan latency on slow clusters; anything
+    // longer surfaces as a typed 502 instead of hanging the event loop.
+    // F-P4-11: shared breaker with getToken() — one wedge trips both.
+    const res = await withBreaker(
+      'kc',
+      () =>
+        fetch(url, {
+          method,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+          },
+          body: opts.body ? JSON.stringify(opts.body) : undefined,
+          signal: AbortSignal.timeout(8_000),
+        }),
+      {},
+      isKcFailure,
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       if (res.status === 404) {
@@ -522,7 +564,7 @@ export function getKeycloakAdminService(): KeycloakAdminService {
   if (!singleton) {
     singleton = new KeycloakAdminService({
       kcUrl: process.env.KEYCLOAK_URL || 'http://localhost:8086',
-      kcRealm: process.env.KEYCLOAK_REALM || 'tellus',
+      kcRealm: getKeycloakRealm(),
       clientId:
         process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_ID || 'tellus-confidential',
       clientSecret:

@@ -1,22 +1,25 @@
 // ---------------------------------------------------------------------------
-// Marking filter — Task B10
+// Marking predicate — `userSees` only.
 //
-// Palantir's access model is a hybrid of ABAC and mandatory access
-// controls: every object/link carries a `markings` array, and a user
-// "sees" a row iff *every* marking on that row is in the user's granted
-// marking set. (Markings are AND-composed, not OR-composed — missing one
-// means the row is withheld.)
+// F-P3-17: The post-filter helpers `filterByMarkings` and `filterLinkRows`
+// that previously lived here were DEAD CODE — no in-tree call sites. They
+// were a foot-gun: a post-filter path applied after the result set is
+// materialised leaks cardinality via timing/CPU/span duration, which is
+// the P0 existence-leak class the live pre-filter path in
+// `searchAround/clickhouseTraversal.ts:118` (`arrayAll(x -> has(...))`)
+// deliberately avoids. Keeping unused post-filter code next to live
+// pre-filter code guaranteed someone would wire them up.
 //
-// This module implements the AND-composition filter at the API boundary.
-// We keep it intentionally thin: callers (query path, traversal path)
-// just `filter(rows, userMarkings)` and trust the output to be
-// ACL-safe.
+// The remaining `userSees` predicate is still used by the query path
+// (`searchAroundService.ts:40`) to verify markings on a specific row that
+// has ALREADY been fetched under a pre-filter security scope. That
+// usage is safe: it does not bound a query with a post-filter, it only
+// asserts a positive invariant on a single row.
+//
+// Palantir marking semantics: `userSees(rowMarkings, userMarkings)` iff
+// every marking on the row is in the user's granted marking set
+// (AND-composition, not OR).
 // ---------------------------------------------------------------------------
-
-export interface MarkedRow<T extends object> {
-  row: T;
-  markings: string[];
-}
 
 export function userSees(
   rowMarkings: readonly string[],
@@ -26,33 +29,4 @@ export function userSees(
     if (!userMarkings.has(m)) return false;
   }
   return true;
-}
-
-export function filterByMarkings<T extends object>(
-  rows: Array<MarkedRow<T>>,
-  userMarkings: ReadonlySet<string>
-): T[] {
-  const out: T[] = [];
-  for (const r of rows) {
-    if (userSees(r.markings, userMarkings)) out.push(r.row);
-  }
-  return out;
-}
-
-/**
- * Subtract PKs the user cannot see. Works against the row shape
- * ClickHouse's link tables produce (`{ source_pk, target_pk, markings }`).
- *
- * Semantics: the user must be cleared for the *link's* markings (not the
- * markings of the endpoints — those are enforced by the per-Object-Type
- * query path). This is B10's narrow contract: it drops links.
- */
-export function filterLinkRows<
-  T extends { source_pk: string; target_pk: string; markings?: string[] | null }
->(rows: T[], userMarkings: ReadonlySet<string>): T[] {
-  const out: T[] = [];
-  for (const r of rows) {
-    if (userSees(r.markings ?? [], userMarkings)) out.push(r);
-  }
-  return out;
 }

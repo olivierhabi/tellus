@@ -1,0 +1,17 @@
+# Chaos scenario: 04-keycloak-unreachable
+# See docs/chaos/04-keycloak-unreachable.md for runbook, expected behaviour, abort criteria.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Workflow
+metadata:
+  name: 04-keycloak-unreachable
+  namespace: tellus-chaos
+spec:
+  entry: entry
+  templates:
+    - name: entry
+      templateType: Task
+      task:
+        container:
+          name: 04-keycloak-unreachable
+          image: chaos-mesh/chaos-tools:latest
+          command: ["sh","-c","echo scenario=04-keycloak-unreachable runbook=docs/chaos/04-keycloak-unreachable.md"]

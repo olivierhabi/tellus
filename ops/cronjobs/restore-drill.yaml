@@ -1,0 +1,22 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: restore-drill
+  namespace: tellus
+spec:
+  schedule: "0 3 1 * *"   # 03:00 UTC, first day of each month
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: tellus-restore-drill
+          restartPolicy: OnFailure
+          containers:
+            - name: drill
+              image: ghcr.io/tellus/ops-tools:latest
+              command: ["/bin/bash","-c"]
+              args: ["TELLUS_ENV=staging /app/scripts/restore-drill.sh $(/app/scripts/restore-drill.sh select-random)"]
+              env:
+                - name: TELLUS_ENV
+                  value: staging

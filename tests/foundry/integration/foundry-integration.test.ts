@@ -65,12 +65,11 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     }
 
     if (!serverAvailable) {
-      console.warn(
-        "\n  Server not reachable at " +
-          BASE_URL +
-          " — all foundry integration tests will be skipped.\n"
+      throw new Error(
+        "F-P2-01: integration server unreachable at " + BASE_URL +
+        " — beforeAll fails loudly rather than ghost-passing. " +
+        "Start the server (pnpm dev) before running foundry integration tests."
       );
-      return;
     }
 
     // 2. Connect to PostgreSQL for direct DB verification
@@ -79,7 +78,7 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
       port: parseInt(process.env.PGPORT || "5432", 10),
       database: process.env.PGDATABASE || "tellus_db",
       user: process.env.PGUSER || "tellus",
-      password: process.env.PGPASSWORD || "tellus123",
+      password: process.env.PGPASSWORD || "" /* F-P4-23: no hardcoded fallback; tests expect env to be set */,
       connectionTimeoutMillis: 5000,
     });
 
@@ -111,7 +110,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-001 + BE-023: GET /health", () => {
     it("should return 200 with status and timestamp", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/health");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("status");
@@ -119,7 +117,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should include a valid parseable timestamp", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/health");
       // Timestamp may be PG format or ISO — just verify it's parseable
       const parsed = new Date(res.body.timestamp);
@@ -127,14 +124,12 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should include status field indicating health", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/health");
       // Existing ontology health returns "healthy", foundry health returns "ok"
       expect(["healthy", "ok"]).toContain(res.body.status);
     });
 
     it("should respond with application/json content-type", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/health");
       const ct = res.headers.get("content-type");
       expect(ct).toContain("application/json");
@@ -146,7 +141,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-002: Database Schema", () => {
     it("should have the projects table", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'projects'"
       );
@@ -154,7 +148,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should have the folders table", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'folders'"
       );
@@ -162,7 +155,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should have the foundry_datasets table (or datasets)", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('foundry_datasets', 'datasets')"
       );
@@ -170,7 +162,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should have the dataset_columns table", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'dataset_columns'"
       );
@@ -178,7 +169,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should have the users table", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'users'"
       );
@@ -186,7 +176,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should have the refresh_tokens table", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'refresh_tokens'"
       );
@@ -194,7 +183,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should have the project_members table", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'project_members'"
       );
@@ -202,7 +190,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("should have ltree extension enabled", async () => {
-      if (!serverAvailable) return;
       const result = await pool.query(
         "SELECT extname FROM pg_extension WHERE extname = 'ltree'"
       );
@@ -216,7 +203,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-013: Auth Endpoints (Keycloak)", () => {
     it("GET /api/v1/auth/health → 200", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/auth/health");
       expect(res.status).toBe(200);
       // Endpoint was migrated to the standard {success:true, data:{…}}
@@ -231,7 +217,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/auth/_test/login-bypass → 200 with accessToken", async () => {
-      if (!serverAvailable) return;
       const res = await api(
         "POST",
         "/api/v1/auth/_test/login-bypass",
@@ -250,7 +235,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/auth/login → 200 with valid credentials", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/auth/login", {
         username: AUTH_EMAIL,
         password: AUTH_PASSWORD,
@@ -261,7 +245,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/auth/login → 401 wrong password", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/auth/login", {
         username: AUTH_EMAIL,
         password: "WrongPassword!",
@@ -270,7 +253,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/auth/login → 401 non-existent user", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/auth/login", {
         username: "ghost@nowhere.com",
         password: AUTH_PASSWORD,
@@ -279,7 +261,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/auth/login → 400 missing fields", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/auth/login", {
         username: "",
         password: "",
@@ -314,7 +295,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("re-login via bypass for subsequent tests", async () => {
-      if (!serverAvailable) return;
       const res = await api(
         "POST",
         "/api/v1/auth/_test/login-bypass",
@@ -333,7 +313,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-003: Project CRUD", () => {
     it("POST /api/v1/projects → 201 creates a project", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", {
         name: createdProjectName,
       });
@@ -345,7 +324,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/projects → 409 duplicate name", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", {
         name: createdProjectName,
       });
@@ -354,20 +332,17 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/projects → 400 empty name", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", { name: "" });
       expect(res.status).toBe(400);
       expect(res.body.error).toHaveProperty("code", "VALIDATION_ERROR");
     });
 
     it("POST /api/v1/projects → 400 missing name field", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", {});
       expect(res.status).toBe(400);
     });
 
     it("POST /api/v1/projects → 400 name exceeds 255 chars", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", {
         name: "a".repeat(256),
       });
@@ -376,7 +351,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/projects → 200 returns array including created project", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/projects");
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
@@ -389,7 +363,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/projects/:id → 200 with root_folders", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", `/api/v1/projects/${createdProjectId}`);
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
@@ -402,21 +375,18 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/projects/:id → 404 non-existent UUID", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", `/api/v1/projects/${NON_EXISTENT_UUID}`);
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe("NOT_FOUND");
     });
 
     it("GET /api/v1/projects/not-a-uuid → 400 invalid UUID", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", `/api/v1/projects/${INVALID_UUID}`);
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe("VALIDATION_ERROR");
     });
 
     it("PUT /api/v1/projects/:id → 200 update name", async () => {
-      if (!serverAvailable) return;
       const newName = `Renamed-${AUTH_TIMESTAMP}`;
       const res = await api("PUT", `/api/v1/projects/${createdProjectId}`, {
         name: newName,
@@ -428,13 +398,11 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("PUT /api/v1/projects/:id → 400 empty body", async () => {
-      if (!serverAvailable) return;
       const res = await api("PUT", `/api/v1/projects/${createdProjectId}`, {});
       expect(res.status).toBe(400);
     });
 
     it("PUT /api/v1/projects/:id → 404 non-existent project", async () => {
-      if (!serverAvailable) return;
       const res = await api("PUT", `/api/v1/projects/${NON_EXISTENT_UUID}`, {
         name: "GhostProject",
       });
@@ -442,7 +410,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("DELETE /api/v1/projects/:id → 204 (separate project)", async () => {
-      if (!serverAvailable) return;
       // Create a project specifically for deletion
       const createRes = await api("POST", "/api/v1/projects", {
         name: `DeleteMe-${AUTH_TIMESTAMP}`,
@@ -472,7 +439,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-004: Folder CRUD", () => {
     beforeAll(async () => {
-      if (!serverAvailable) return;
       // Create a dedicated project for folder tests
       const res = await api("POST", "/api/v1/projects", {
         name: `FolderTestProject-${AUTH_TIMESTAMP}`,
@@ -543,7 +509,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("POST /api/v1/projects/:id/folders → 400 invalid project UUID", async () => {
-      if (!serverAvailable) return;
       const res = await api(
         "POST",
         `/api/v1/projects/${INVALID_UUID}/folders`,
@@ -679,7 +644,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-010: Search", () => {
     it("GET /api/v1/search?q=Foundry → 200 with results", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/search?q=Foundry");
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
@@ -688,21 +652,18 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/search?q= → 200 with empty or all results", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/search?q=");
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
     });
 
     it("GET /api/v1/search?q=nonexistent_xyz_999 → 200 with empty results", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/search?q=nonexistent_xyz_999");
       expect(res.status).toBe(200);
       expect(res.body.results).toHaveLength(0);
     });
 
     it("GET /api/v1/search?q=Folder&type=folder → 200 filtered by type", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/search?q=Folder&type=folder");
       expect(res.status).toBe(200);
       if (res.body.data && res.body.data.length > 0) {
@@ -713,7 +674,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/search/suggest?q=Foun → 200 with suggestions", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/search/suggest?q=Foun");
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
@@ -721,7 +681,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/search/suggest?q= → 200 with suggestions (empty query)", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/v1/search/suggest?q=");
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
@@ -751,7 +710,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/breadcrumb/project/:id → 404 non-existent", async () => {
-      if (!serverAvailable) return;
       const res = await api(
         "GET",
         `/api/v1/breadcrumb/project/${NON_EXISTENT_UUID}`
@@ -761,7 +719,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/breadcrumb/invalid_type/:id → 400", async () => {
-      if (!serverAvailable) return;
       const res = await api(
         "GET",
         `/api/v1/breadcrumb/invalid_type/${NON_EXISTENT_UUID}`
@@ -771,7 +728,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/breadcrumb/folder/:id → 400 invalid UUID", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", `/api/v1/breadcrumb/folder/${INVALID_UUID}`);
       expect(res.status).toBe(400);
     });
@@ -782,7 +738,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-022: Error Envelope Format", () => {
     it("POST /api/v1/projects with empty name → 400 with error.code", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", { name: "" });
       expect(res.status).toBe(400);
       expect(res.body).toHaveProperty("error");
@@ -793,7 +748,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/projects/:id with invalid UUID → 400 error envelope", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", `/api/v1/projects/${INVALID_UUID}`);
       expect(res.status).toBe(400);
       expect(res.body.error).toHaveProperty("code");
@@ -801,7 +755,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/v1/projects/:id with non-existent UUID → 404 error envelope", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", `/api/v1/projects/${NON_EXISTENT_UUID}`);
       expect(res.status).toBe(404);
       expect(res.body.error).toHaveProperty("code", "NOT_FOUND");
@@ -809,7 +762,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("error code is a known error code string", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", { name: "" });
       const knownCodes = [
         "VALIDATION_ERROR",
@@ -822,7 +774,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("malformed JSON body returns error envelope", async () => {
-      if (!serverAvailable) return;
       const raw = await fetch(`${BASE_URL}/api/v1/projects`, {
         method: "POST",
         headers: {
@@ -860,7 +811,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("BE-029: Swagger / API Docs", () => {
     it("GET /api/docs → 200 returns HTML (Swagger UI)", async () => {
-      if (!serverAvailable) return;
       const raw = await fetch(`${BASE_URL}/api/docs`, {
         redirect: "follow",
       });
@@ -872,7 +822,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("GET /api/docs/spec.json → 200 returns OpenAPI spec", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/docs/spec.json");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("openapi");
@@ -882,14 +831,12 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("OpenAPI spec has required info fields", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/docs/spec.json");
       expect(res.body.info).toHaveProperty("title");
       expect(res.body.info).toHaveProperty("version");
     });
 
     it("OpenAPI spec includes documented paths", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/docs/spec.json");
       // Tolerate 429 when prior tests have depleted the IP-scoped
       // budget — spec-shape correctness is exercised in the adjacent
@@ -912,7 +859,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("Cross-cutting: Request Tracking & Headers", () => {
     it("responses include a request tracking header (X-Request-Id or X-Correlation-ID)", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/health");
       const reqId = res.headers.get("x-request-id");
       const corrId = res.headers.get("x-correlation-id");
@@ -923,7 +869,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("tracking ID is unique across requests", async () => {
-      if (!serverAvailable) return;
       const res1 = await api("GET", "/health");
       const res2 = await api("GET", "/health");
       const id1 = res1.headers.get("x-request-id") ?? res1.headers.get("x-correlation-id");
@@ -934,14 +879,12 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("responses include security headers from helmet", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/health");
       const xcto = res.headers.get("x-content-type-options");
       expect(xcto).toBe("nosniff");
     });
 
     it("helmet sets x-frame-options header", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/health");
       const xfo = res.headers.get("x-frame-options");
       // Helmet sets SAMEORIGIN or DENY by default
@@ -951,7 +894,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
 
   describe("Cross-cutting: CORS", () => {
     it("responds with access-control-allow-origin for allowed origin", async () => {
-      if (!serverAvailable) return;
       const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
       const raw = await fetch(`${BASE_URL}/health`, {
         headers: { Origin: FRONTEND_URL },
@@ -965,22 +907,23 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
 
   describe("Cross-cutting: Unknown Routes", () => {
     it("GET /api/nonexistent → 404 or appropriate error", async () => {
-      if (!serverAvailable) return;
       const res = await api("GET", "/api/nonexistent-foundry-route");
       expect([404, 500].includes(res.status)).toBe(true);
     });
 
-    it("GET /totally-unknown-path → 404", async () => {
-      if (!serverAvailable) return;
-      const raw = await fetch(`${BASE_URL}/totally-unknown-path-foundry`);
-      expect([404, 500].includes(raw.status)).toBe(true);
-      await raw.text(); // consume body
+    it("GET /totally-unknown-path → 404 (when authenticated), 401 (when not)", async () => {
+      // F-01 / Phase A2: the globalAuth gate rejects non-allowlisted paths
+      // with 401 BEFORE the router produces a 404. This is the Palantir
+      // Multipass contract: an unauthenticated caller cannot probe which
+      // paths exist. Route through `api()` so the default alice JWT is
+      // attached — only then does the notFoundHandler produce 404.
+      const res = await api("GET", "/totally-unknown-path-foundry");
+      expect([404, 500]).toContain(res.status);
     });
   });
 
   describe("Cross-cutting: Request Body Limits", () => {
     it("POST /api/v1/projects with very large body → rejects", async () => {
-      if (!serverAvailable) return;
       const hugeString = "x".repeat(11 * 1024 * 1024); // 11MB
       try {
         const raw = await fetch(`${BASE_URL}/api/v1/projects`, {
@@ -1002,7 +945,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
   // ═══════════════════════════════════════════════════════════════════════
   describe("DB Verification: Data integrity", () => {
     it("project created via API is persisted in the DB", async () => {
-      if (!serverAvailable) return;
       const res = await api("POST", "/api/v1/projects", {
         name: `VerifyProject-${AUTH_TIMESTAMP}`,
       });
@@ -1069,7 +1011,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("Keycloak user is auto-provisioned in local users table", async () => {
-      if (!serverAvailable) return;
       if (!accessToken) return;
       // After login-bypass, ensureLocalUserForClaims creates a shadow row
       const result = await pool.query(
@@ -1101,7 +1042,6 @@ describe("Foundry Integration Tests (BE-001 → BE-030)", () => {
     });
 
     it("project row is gone after deletion", async () => {
-      if (!serverAvailable) return;
       // Use the deleteProjectId from project CRUD tests
       if (!deleteProjectId) return;
       const result = await pool.query(

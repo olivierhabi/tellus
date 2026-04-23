@@ -186,19 +186,27 @@ export async function installAndLoad(
   await runAll(conn, `LOAD ${extension}`);
 }
 
+// F-P4-24: `minioadmin` fallbacks removed. DuckDB S3 credentials now
+// fail loudly via requireSecret; a misconfigured pod cannot silently
+// connect to prod S3 with the well-known MinIO root credential.
+// Also: quote-escape credentials before interpolating into DuckDB SQL
+// so a secret containing `'` does not produce malformed SQL.
 async function applyS3Credentials(conn: DuckDBConnection): Promise<void> {
+  const { envWithDefault, requireSecret } = await import("../../utils/requireEnv");
   const endpoint = (
-    process.env.ICEBERG_S3_ENDPOINT ?? process.env.S3_ENDPOINT ?? ""
+    envWithDefault("ICEBERG_S3_ENDPOINT", "") ||
+    envWithDefault("S3_ENDPOINT", "")
   ).replace(/^https?:\/\//, "");
-  const region = process.env.S3_REGION ?? "us-east-1";
-  const akid = process.env.S3_ACCESS_KEY_ID ?? "minioadmin";
-  const sak = process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin";
+  const region = envWithDefault("S3_REGION", "us-east-1");
+  const akid = requireSecret("S3_ACCESS_KEY_ID", "DuckDB S3 access key required.");
+  const sak = requireSecret("S3_SECRET_ACCESS_KEY", "DuckDB S3 secret key required.");
   const pathStyle =
-    (process.env.S3_FORCE_PATH_STYLE ?? "true") === "true" ? "path" : "vhost";
-  await runAll(conn, `SET s3_region='${region}'`);
-  if (endpoint) await runAll(conn, `SET s3_endpoint='${endpoint}'`);
-  await runAll(conn, `SET s3_access_key_id='${akid}'`);
-  await runAll(conn, `SET s3_secret_access_key='${sak}'`);
-  await runAll(conn, `SET s3_url_style='${pathStyle}'`);
+    envWithDefault("S3_FORCE_PATH_STYLE", "true") === "true" ? "path" : "vhost";
+  const sqlQuote = (v: string) => v.replace(/'/g, "''");
+  await runAll(conn, `SET s3_region='${sqlQuote(region)}'`);
+  if (endpoint) await runAll(conn, `SET s3_endpoint='${sqlQuote(endpoint)}'`);
+  await runAll(conn, `SET s3_access_key_id='${sqlQuote(akid)}'`);
+  await runAll(conn, `SET s3_secret_access_key='${sqlQuote(sak)}'`);
+  await runAll(conn, `SET s3_url_style='${sqlQuote(pathStyle)}'`);
   await runAll(conn, "SET s3_use_ssl=false");
 }

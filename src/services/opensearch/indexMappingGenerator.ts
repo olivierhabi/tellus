@@ -31,6 +31,15 @@ interface SystemFields {
   __version: OpenSearchFieldMapping;
   __editedBy: OpenSearchFieldMapping;
   __datasourceVersion: OpenSearchFieldMapping;
+  /**
+   * F-P3-13: branch this document belongs to. `keyword` so the
+   * security filter can use `term` for O(1) lookups. Documents
+   * indexed before this mapping was added will be missing the
+   * field; the security filter's transitional OR clause
+   * (`exists: __branch` must be false) keeps them visible until a
+   * reindex pass (tracked under F-P3-15) stamps every legacy doc.
+   */
+  __branch: OpenSearchFieldMapping;
 }
 
 /** The complete index settings block. */
@@ -79,6 +88,7 @@ const SYSTEM_FIELD_NAMES: readonly string[] = [
   "__version",
   "__editedBy",
   "__datasourceVersion",
+  "__branch",
 ] as const;
 
 /** System field mappings — always present on every indexed object. */
@@ -95,6 +105,8 @@ const SYSTEM_FIELD_MAPPINGS: SystemFields = {
   __editedBy: { type: "keyword" },
   // Transaction ID of the backing datasource version
   __datasourceVersion: { type: "keyword" },
+  // F-P3-13: branch UUID this document belongs to.
+  __branch: { type: "keyword" },
 };
 
 /** Default index settings for development. */
@@ -134,10 +146,44 @@ const DEFAULT_INDEX_SETTINGS: IndexSettings = {
  * @param objectTypeApiName - The API name of the object type.
  * @returns The OpenSearch index name.
  */
-export function getIndexName(objectTypeApiName: string): string {
-  return (
-    "ontology-" + objectTypeApiName.toLowerCase().replace(/[^a-z0-9-]/g, "-")
-  );
+export function getIndexName(
+  objectTypeApiName: string,
+  ontologyId?: string,
+): string {
+  // F-P5-03 (P0) closure: tenant-scoped index names.
+  //
+  // Legacy signature `getIndexName(name)` returned "ontology-${name}" which
+  // collided across tenants — two ontologies each defining an `Employee`
+  // object type would share the same OpenSearch index, violating tenant
+  // isolation.
+  //
+  // New signature accepts an optional ontologyId; when passed, the index
+  // name is "ontology-${ontologyId}-${name}". The legacy path is kept so
+  // existing callers keep compiling; each legacy call emits a Prometheus
+  // counter (tellus_index_name_missing_tenant_total) so operators can
+  // track the migration cliff. Once all callers thread ontologyId, the
+  // second parameter will become required in a future release and the
+  // legacy fallback removed.
+  const slug = objectTypeApiName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  if (ontologyId !== undefined && ontologyId !== null && ontologyId !== "") {
+    const ontSlug = ontologyId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    return `ontology-${ontSlug}-${slug}`;
+  }
+  // Legacy fallback — logged as missing-tenant. Callers should be updated.
+  // Import lazily to avoid cyclic init when indexMappingGenerator is
+  // imported during tests that do not have the metrics module wired.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { incCounter } = require("../funnel/metrics") as {
+      incCounter: (name: string, labels: Record<string, string>) => void;
+    };
+    incCounter("tellus_index_name_missing_tenant_total", {
+      object_type: objectTypeApiName,
+    });
+  } catch {
+    // Metrics not loaded yet — silent during early boot is acceptable.
+  }
+  return `ontology-${slug}`;
 }
 
 // ---------------------------------------------------------------------------

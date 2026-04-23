@@ -17,8 +17,7 @@ describe("Query Aggregations (Task 28)", () => {
       const res = await fetch("http://localhost:3000/health");
       if (res.status !== 200) throw new Error("not healthy");
     } catch {
-      console.warn("Server not reachable — skipping aggregation tests");
-      return;
+      throw new Error("F-P2-01: integration server unreachable — beforeAll fails loudly rather than ghost-passing");
     }
 
     const { body } = await api("POST", "/api/v1/ontology", {
@@ -26,7 +25,7 @@ describe("Query Aggregations (Task 28)", () => {
       description: "Task 28",
     });
     ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
-    if (!ONTOLOGY_ID) return;
+    if (!ONTOLOGY_ID) throw new Error("F-P2-01: ontology create returned no id — beforeAll fails loudly");
 
     await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T28Employee",

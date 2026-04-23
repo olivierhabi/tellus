@@ -19,13 +19,14 @@ import foundryDb from '../config/foundryDb';
 import { getKeycloakAdminService } from '../services/keycloakAdminService';
 import { TellusAuthService } from '../services/tellusAuthService';
 import { AppError } from '../utils/foundryAppError';
+import { getKeycloakRealm } from "../auth/keycloakConfig"; // F-P4-26
 
 let _svc: TellusAuthService | null = null;
 function tellusSvc(): TellusAuthService {
   if (!_svc) {
     _svc = new TellusAuthService(foundryDb as unknown as Knex, {
       kcUrl: process.env.KEYCLOAK_URL || 'http://localhost:8086',
-      kcRealm: process.env.KEYCLOAK_REALM || 'tellus',
+      kcRealm: getKeycloakRealm(),
       kcFrontendClientId: process.env.KEYCLOAK_FRONTEND_CLIENT_ID || 'tellus-frontend',
     });
   }

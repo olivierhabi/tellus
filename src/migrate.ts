@@ -1892,6 +1892,23 @@ async function migrate(): Promise<void> {
     }
 
     // ------------------------------------------------------------------
+    // FNL-H3 signal enum fix (026_fnl_h3_pipeline_deploy_signal.sql).
+    // Migration 018 restricts the signal_type CHECK to exclude
+    // 'editBatchPending'; 026 re-adds it alongside 'pipelineDeployCompleted'.
+    // Apply here so the constraint is correct after a fresh migrate.
+    // ------------------------------------------------------------------
+    try {
+      const sqlFile026 = pathMod.join(__dirname, "migrations", "026_fnl_h3_pipeline_deploy_signal.sql");
+      if (fsMod.existsSync(sqlFile026)) {
+        await client.query(fsMod.readFileSync(sqlFile026, "utf-8"));
+        console.log("Applied 026_fnl_h3_pipeline_deploy_signal.sql (FNL-H3 signal enum)");
+      }
+    } catch (sqlErr) {
+      const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
+      throw new Error(`026_fnl_h3_pipeline_deploy_signal.sql failed: ${msg}`);
+    }
+
+    // ------------------------------------------------------------------
     // Install the migrations ledger (032). Migrations 019..031 are
     // pipeline-specific — they ALTER `pipelines` / `pipeline_deployments`
     // which this migrate.ts doesn't create. Those tables live in

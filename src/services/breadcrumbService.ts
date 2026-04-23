@@ -19,8 +19,29 @@ export class BreadcrumbService {
     });
   }
 
-  async getBreadcrumb(type: string, id: string, includeChildren = false) {
-    const cacheKey = `${type}:${id}:${includeChildren}`;
+  async getBreadcrumb(
+    type: string,
+    id: string,
+    includeChildren = false,
+    ontologyId?: string,
+  ) {
+    // F-P5-03 closure: tenant-scoped cache key. When ontologyId is passed,
+    // prefix the cache key with it so two tenants cannot read each other's
+    // cached breadcrumbs. When omitted, emit a missing-tenant counter so
+    // operators can track caller-side remediation.
+    const tenant = ontologyId && ontologyId.length > 0 ? ontologyId : "__no_tenant__";
+    if (tenant === "__no_tenant__") {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { incCounter } = require("./funnel/metrics") as {
+          incCounter: (name: string, labels: Record<string, string>) => void;
+        };
+        incCounter("tellus_breadcrumb_cache_missing_tenant_total", { type });
+      } catch {
+        // metrics unavailable during early boot — silent is acceptable
+      }
+    }
+    const cacheKey = `${tenant}:${type}:${id}:${includeChildren}`;
     const cached = this.cache.get(cacheKey);
     if (cached) return { breadcrumb: cached.breadcrumb, children: cached.children };
 

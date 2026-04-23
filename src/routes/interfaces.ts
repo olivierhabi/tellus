@@ -510,7 +510,7 @@ router.get(
       }
 
       const interfaces = groupInterfaceRows(result.rows as FlatRow[]);
-      sendSuccess(res, interfaces[0]);
+      sendSuccess(res, { data: interfaces[0] });
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
         return sendError(res, err.code, err.message);
@@ -811,7 +811,7 @@ router.put(
       );
 
       const interfaces = groupInterfaceRows(refreshed.rows as FlatRow[]);
-      sendSuccess(res, interfaces[0]);
+      sendSuccess(res, { data: interfaces[0] });
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
         return sendError(res, err.code, err.message);

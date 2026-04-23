@@ -30,7 +30,12 @@ services:
     environment:
       - discovery.type=single-node
       - plugins.security.disabled=true
-      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=admin
+      # OpenSearch 2.12+ enforces a strong initial admin password even when
+      # the security plugin is disabled (the demo installer runs first).
+      # Must be >=8 chars with upper/lower/digit/special. Security is still
+      # disabled via `plugins.security.disabled=true` above; this value is
+      # only consumed by the demo installer and never authenticated against.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Str0ng!P@ssw0rd-Tellus-9a7b3Cz
       - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
       - "127.0.0.1:9200:9200"
@@ -48,6 +53,12 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      # Whitelist the four-letter words the healthcheck (`ruok`) and
+      # operations tooling (`mntr`, `stat`) need. ZK 3.5+ refuses these
+      # by default; without the whitelist the cp-zookeeper image starts
+      # cleanly but the healthcheck always fails, which then blocks
+      # `kafka:` from starting via depends_on.
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat,mntr,conf,cons,dirs,dump,envi,gtmk,hash,isro,wchc,wchp,wchs"
     ports:
       - "127.0.0.1:2181:2181"
     healthcheck:

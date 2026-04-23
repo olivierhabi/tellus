@@ -15,6 +15,8 @@ import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { searchObjects } from "../services/opensearch/client";
 import { mapFilters } from "../services/opensearch/filterMapper";
 import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { incCounter } from "../services/funnel/metrics";
 
 const router = Router({ mergeParams: true });
 
@@ -50,10 +52,17 @@ router.post(
         },
       };
       try {
+        // F-P3-13: thread branch filter to isolate per-branch geo aggregations.
+        const branchId = readBranchHeader(req);
+        incCounter("tellus_read_branch_filtered_total", {
+          route: "geo.geohash",
+          scoped: String(branchId !== null),
+        });
         const result = await searchObjects(
           `ontology-${objectTypeApiName.toLowerCase()}`,
           body,
-          buildSecurityFilter(req.security)
+          buildSecurityFilter(req.security),
+          branchId
         );
         const buckets = result.body?.aggregations?.geo?.buckets ?? [];
         sendSuccess(res, { precision, buckets, geopointProperty });
@@ -97,10 +106,17 @@ router.post(
         },
       };
       try {
+        // F-P3-13: thread branch filter to isolate per-branch choropleth aggregations.
+        const branchId = readBranchHeader(req);
+        incCounter("tellus_read_branch_filtered_total", {
+          route: "geo.choropleth",
+          scoped: String(branchId !== null),
+        });
         const result = await searchObjects(
           `ontology-${objectTypeApiName.toLowerCase()}`,
           body,
-          buildSecurityFilter(req.security)
+          buildSecurityFilter(req.security),
+          branchId
         );
         const regions = result.body?.aggregations?.regions?.buckets ?? [];
         sendSuccess(res, { level, regions, regionProperty });

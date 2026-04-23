@@ -1,49 +1,60 @@
 // ---------------------------------------------------------------------------
-// Action Audit Log Model
+// src/models/actionAuditLog.ts
 //
-// Data access layer for the immutable action_audit_log table. This table
-// records every action execution attempt — successful or failed — with
-// full parameter snapshots, affected objects, results, timing, and failure
-// classification.
+// Audit-log model — rewritten for F-P3-11.
 //
-// The audit log is separate from the ontology_edit table:
-//   - ontology_edit: the actual data changes (edits to objects)
-//   - action_audit_log: metadata about the execution itself (who, when,
-//     what parameters, what happened, how long, success/failure, why)
+// The previous contract stated: "logActionExecution() must NEVER throw —
+// a failed audit log should not break the action pipeline." That
+// contract is REVOKED. Durable-before-ack is now mandatory: a failed
+// audit write MUST cause the Action's PG transaction to roll back and
+// the client to see a 503, not a 200 with a silently dropped audit row.
 //
-// IMPORTANT: logActionExecution() must NEVER throw — a failed audit log
-// write should not cause the action itself to fail. If the insert fails,
-// it logs to stderr and returns null.
+// This file offers two entry points:
 //
-// The table is immutable: no UPDATE or DELETE operations are permitted
-// (enforced by REVOKE at the database level).
+//   appendAuditRow(client, entry)
+//     Invoked INSIDE an existing PG transaction — used as the
+//     preCommitHook on applyEdits for success-path Actions. Writes the
+//     audit row via insertAuditRowWithHashChain so the hash chain is
+//     extended atomically with the Action's edits.
+//
+//   logStandaloneFailureAudit(entry)
+//     Invoked when there IS no Action transaction — e.g. a Stage 1-5
+//     validation failure that never reached editApplicator. Opens a
+//     short-lived PG connection + transaction, appends a hash-chained
+//     audit row, and commits. If that write fails, the function throws
+//     — the route layer must translate to 503.
 // ---------------------------------------------------------------------------
 
-import { query } from "../db";
+import type { PoolClient } from "pg";
+import { randomUUID } from "node:crypto";
+import { getClient } from "../db";
+import {
+  insertAuditRowWithHashChain,
+  AuditHashChainError,
+  type AuditRowBody,
+} from "../services/audit/hashChain";
+import { incCounter } from "../services/funnel/metrics";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** Valid execution result values. */
+/** Result classification mirrored in DB CHECK (action_audit_log.result). */
 export type AuditResult = "success" | "failed" | "partial";
 
-/** Valid failure type values, matching Palantir's documented failure types. */
+/** Failure-type classification — used only when result != "success". */
 export type FailureType =
   | "invalid_parameter"
-  | "scale_limit"
-  | "authentication"
   | "object_not_found"
   | "duplicate_primary_key"
-  | "required_property_missing"
-  | "type_mismatch"
-  | "side_effect"
-  | "function_failure"
-  | "unclassified";
+  | "scale_limit"
+  | "permission_denied"
+  | "concurrency_conflict"
+  | "unclassified"
+  | null;
 
-/** A row from the action_audit_log table. */
-export interface AuditLogRow {
-  audit_id: string;
+/**
+ * Public-shape entry — what callers construct. The audit_id is
+ * auto-generated inside this module so callers never have to coordinate
+ * UUIDs with the hash-chain writer.
+ */
+export interface AuditLogEntry {
   action_type_api_name: string;
   action_type_display_name: string;
   execution_id: string;
@@ -51,380 +62,124 @@ export interface AuditLogRow {
   affected_objects: unknown[];
   affected_object_count: number;
   result: AuditResult;
-  failure_type: FailureType | null;
+  failure_type: FailureType;
   error_message: string | null;
   duration_ms: number;
   executed_by: string;
-  executed_at: string;
-  branch_id: string | null;
-  source_ip: string | null;
-  metadata: Record<string, unknown>;
-}
-
-/** Input for logActionExecution(). */
-export interface LogActionExecutionInput {
-  action_type_api_name: string;
-  action_type_display_name: string;
-  execution_id: string;
-  parameters?: Record<string, unknown>;
-  affected_objects?: unknown[];
-  affected_object_count?: number;
-  result: AuditResult;
-  failure_type?: FailureType | null;
-  error_message?: string | null;
-  duration_ms?: number;
-  executed_by?: string;
-  branch_id?: string | null;
   source_ip?: string | null;
+  branch_id?: string | null;
   metadata?: Record<string, unknown>;
 }
 
-/** Filters for getAuditLog(). */
-export interface AuditLogFilters {
-  actionTypeApiName?: string;
-  executedBy?: string;
-  result?: AuditResult;
-  failureType?: FailureType;
-  startTime?: string;
-  endTime?: string;
-  pageSize?: number;
-  pageToken?: string;
-}
-
-/** Paginated result from getAuditLog(). */
-export interface AuditLogPage {
-  data: AuditLogRow[];
-  nextPageToken: string | null;
-  totalCount: number;
-}
-
-/** Aggregate statistics from getAuditStats(). */
-export interface AuditStats {
-  totalExecutions: number;
-  successCount: number;
-  failedCount: number;
-  partialCount: number;
-  avgDurationMs: number;
-  p95DurationMs: number;
-  failureBreakdown: Record<string, number>;
-  topActionTypes: Array<{ apiName: string; count: number }>;
-}
-
-// ---------------------------------------------------------------------------
-// 1. logActionExecution — Insert audit log record (never throws)
-// ---------------------------------------------------------------------------
-
 /**
- * Insert a new audit log record. This function must NEVER throw an error
- * that would prevent the caller from continuing. If the insert fails
- * (e.g., database connectivity issue), it logs the error to stderr and
- * returns null.
- *
- * Rationale: a failed audit log write should NOT cause the action itself
- * to fail. The action edits are more important than the audit metadata.
- * However, the caller SHOULD log a critical warning if this returns null.
+ * Raised when a standalone audit write fails. The route layer translates
+ * this to a 503 Service Unavailable with Retry-After; the Action (if any
+ * PG transaction was open) is already rolled back by the caller.
  */
-async function logActionExecution(
-  logEntry: LogActionExecutionInput
-): Promise<AuditLogRow | null> {
-  try {
-    const result = await query(
-      `INSERT INTO action_audit_log
-         (action_type_api_name, action_type_display_name, execution_id,
-          parameters, affected_objects, affected_object_count,
-          result, failure_type, error_message, duration_ms,
-          executed_by, branch_id, source_ip, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       RETURNING *`,
-      [
-        logEntry.action_type_api_name,
-        logEntry.action_type_display_name,
-        logEntry.execution_id,
-        JSON.stringify(logEntry.parameters ?? {}),
-        JSON.stringify(logEntry.affected_objects ?? []),
-        logEntry.affected_object_count ?? 0,
-        logEntry.result,
-        logEntry.failure_type ?? null,
-        logEntry.error_message ?? null,
-        logEntry.duration_ms ?? 0,
-        logEntry.executed_by ?? "system",
-        logEntry.branch_id ?? null,
-        logEntry.source_ip ?? null,
-        JSON.stringify(logEntry.metadata ?? {}),
-      ]
-    );
-    return result.rows[0] as AuditLogRow;
-  } catch (err) {
-    // CRITICAL: Do NOT re-throw. Log to stderr and return null.
-    console.error(
-      "CRITICAL: Failed to write action audit log entry:",
-      {
-        execution_id: logEntry.execution_id,
-        action_type: logEntry.action_type_api_name,
-        result: logEntry.result,
-        error: err instanceof Error ? err.message : String(err),
-      }
-    );
-    return null;
+export class AuditDurabilityError extends Error {
+  public readonly code = "AUDIT_DURABILITY_FAILED";
+  public readonly statusCode = 503;
+  constructor(message: string, public readonly cause: unknown) {
+    super(`audit durability failed: ${message}`);
+    this.name = "AuditDurabilityError";
   }
 }
 
-// ---------------------------------------------------------------------------
-// 2. getAuditLog — Query with filters and pagination
-// ---------------------------------------------------------------------------
-
-/**
- * Query the audit log with optional filters and cursor-based pagination.
- *
- * Pagination uses cursor-based approach with executed_at as the cursor,
- * encoded as a base64 page token. This is more efficient than OFFSET-based
- * pagination for large audit logs.
- *
- * Returns: { data, nextPageToken, totalCount }
- */
-async function getAuditLog(
-  filters: AuditLogFilters = {}
-): Promise<AuditLogPage> {
-  const pageSize = Math.min(Math.max(filters.pageSize ?? 50, 1), 1000);
-
-  // Build WHERE clause dynamically
-  const conditions: string[] = [];
-  const values: unknown[] = [];
-  let paramIndex = 1;
-
-  if (filters.actionTypeApiName) {
-    conditions.push(`action_type_api_name = $${paramIndex++}`);
-    values.push(filters.actionTypeApiName);
-  }
-  if (filters.executedBy) {
-    conditions.push(`executed_by = $${paramIndex++}`);
-    values.push(filters.executedBy);
-  }
-  if (filters.result) {
-    conditions.push(`result = $${paramIndex++}`);
-    values.push(filters.result);
-  }
-  if (filters.failureType) {
-    conditions.push(`failure_type = $${paramIndex++}`);
-    values.push(filters.failureType);
-  }
-  if (filters.startTime) {
-    conditions.push(`executed_at >= $${paramIndex++}`);
-    values.push(filters.startTime);
-  }
-  if (filters.endTime) {
-    conditions.push(`executed_at <= $${paramIndex++}`);
-    values.push(filters.endTime);
-  }
-
-  // Decode page token (cursor-based: executed_at of last result)
-  if (filters.pageToken) {
-    try {
-      const decoded = JSON.parse(
-        Buffer.from(filters.pageToken, "base64").toString()
-      );
-      if (decoded.cursor) {
-        conditions.push(`executed_at < $${paramIndex++}`);
-        values.push(decoded.cursor);
-      }
-    } catch {
-      // Invalid page token — ignore and start from beginning
-    }
-  }
-
-  const whereClause =
-    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
-  // Count total (without cursor pagination, but with other filters applied)
-  const countConditions: string[] = [];
-  const countValues: unknown[] = [];
-  let countParamIndex = 1;
-
-  if (filters.actionTypeApiName) {
-    countConditions.push(`action_type_api_name = $${countParamIndex++}`);
-    countValues.push(filters.actionTypeApiName);
-  }
-  if (filters.executedBy) {
-    countConditions.push(`executed_by = $${countParamIndex++}`);
-    countValues.push(filters.executedBy);
-  }
-  if (filters.result) {
-    countConditions.push(`result = $${countParamIndex++}`);
-    countValues.push(filters.result);
-  }
-  if (filters.failureType) {
-    countConditions.push(`failure_type = $${countParamIndex++}`);
-    countValues.push(filters.failureType);
-  }
-  if (filters.startTime) {
-    countConditions.push(`executed_at >= $${countParamIndex++}`);
-    countValues.push(filters.startTime);
-  }
-  if (filters.endTime) {
-    countConditions.push(`executed_at <= $${countParamIndex++}`);
-    countValues.push(filters.endTime);
-  }
-
-  const countWhereClause =
-    countConditions.length > 0
-      ? `WHERE ${countConditions.join(" AND ")}`
-      : "";
-
-  const countResult = await query(
-    `SELECT COUNT(*)::int AS count FROM action_audit_log ${countWhereClause}`,
-    countValues
-  );
-  const totalCount: number = countResult.rows[0].count;
-
-  // Fetch data page
-  values.push(pageSize);
-  const dataResult = await query(
-    `SELECT * FROM action_audit_log ${whereClause}
-     ORDER BY executed_at DESC
-     LIMIT $${paramIndex}`,
-    values
-  );
-
-  const data = dataResult.rows as AuditLogRow[];
-
-  // Compute next page token
-  let nextPageToken: string | null = null;
-  if (data.length === pageSize) {
-    const lastEntry = data[data.length - 1];
-    nextPageToken = Buffer.from(
-      JSON.stringify({ cursor: lastEntry.executed_at })
-    ).toString("base64");
-  }
-
-  return { data, nextPageToken, totalCount };
-}
-
-// ---------------------------------------------------------------------------
-// 3. getAuditEntry — Get single entry by execution ID
-// ---------------------------------------------------------------------------
-
-/**
- * Get a single audit log entry by execution ID. Returns null if not found.
- */
-async function getAuditEntry(
-  executionId: string
-): Promise<AuditLogRow | null> {
-  const result = await query(
-    "SELECT * FROM action_audit_log WHERE execution_id = $1",
-    [executionId]
-  );
-  return result.rows.length > 0 ? (result.rows[0] as AuditLogRow) : null;
-}
-
-// ---------------------------------------------------------------------------
-// 4. getAuditStats — Aggregate statistics for a time period
-// ---------------------------------------------------------------------------
-
-/**
- * Returns aggregate statistics for the given time period. Uses
- * PostgreSQL's PERCENTILE_CONT for p95 duration calculation.
- *
- * If actionTypeApiName is provided, filter stats to that action type only;
- * otherwise, return stats across all action types.
- *
- * Note: this function does NOT take an ontologyId parameter because the
- * action_audit_log table has no ontology_id column.
- */
-async function getAuditStats(
-  startTime: string,
-  endTime: string,
-  actionTypeApiName?: string
-): Promise<AuditStats> {
-  // Build the shared WHERE clause for all sub-queries
-  const conditions: string[] = [
-    "executed_at >= $1",
-    "executed_at <= $2",
-  ];
-  const values: unknown[] = [startTime, endTime];
-
-  if (actionTypeApiName) {
-    conditions.push("action_type_api_name = $3");
-    values.push(actionTypeApiName);
-  }
-
-  const whereClause = `WHERE ${conditions.join(" AND ")}`;
-
-  // --- Sub-query 1: Aggregate counts, avg duration, p95 duration ---
-  const aggregateResult = await query(
-    `SELECT
-       COUNT(*)::int AS total_executions,
-       COUNT(*) FILTER (WHERE result = 'success')::int AS success_count,
-       COUNT(*) FILTER (WHERE result = 'failed')::int AS failed_count,
-       COUNT(*) FILTER (WHERE result = 'partial')::int AS partial_count,
-       COALESCE(ROUND(AVG(duration_ms))::int, 0) AS avg_duration_ms,
-       COALESCE(
-         ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms))::int,
-         0
-       ) AS p95_duration_ms
-     FROM action_audit_log
-     ${whereClause}`,
-    values
-  );
-
-  const agg = aggregateResult.rows[0];
-
-  // --- Sub-query 2: Failure breakdown ---
-  const failureResult = await query(
-    `SELECT failure_type, COUNT(*)::int AS count
-     FROM action_audit_log
-     ${whereClause} AND failure_type IS NOT NULL
-     GROUP BY failure_type
-     ORDER BY count DESC`,
-    values
-  );
-
-  const failureBreakdown: Record<string, number> = {};
-  for (const row of failureResult.rows) {
-    failureBreakdown[row.failure_type] = row.count;
-  }
-
-  // --- Sub-query 3: Top 10 action types by execution count ---
-  const topResult = await query(
-    `SELECT action_type_api_name AS api_name, COUNT(*)::int AS count
-     FROM action_audit_log
-     ${whereClause}
-     GROUP BY action_type_api_name
-     ORDER BY count DESC
-     LIMIT 10`,
-    values
-  );
-
-  const topActionTypes = topResult.rows.map((row) => ({
-    apiName: row.api_name as string,
-    count: row.count as number,
-  }));
-
+function toRowBody(entry: AuditLogEntry): AuditRowBody {
   return {
-    totalExecutions: agg.total_executions,
-    successCount: agg.success_count,
-    failedCount: agg.failed_count,
-    partialCount: agg.partial_count,
-    avgDurationMs: agg.avg_duration_ms,
-    p95DurationMs: agg.p95_duration_ms,
-    failureBreakdown,
-    topActionTypes,
+    audit_id: randomUUID(),
+    action_type_api_name: entry.action_type_api_name,
+    action_type_display_name: entry.action_type_display_name,
+    execution_id: entry.execution_id,
+    parameters: entry.parameters ?? {},
+    affected_objects: entry.affected_objects ?? [],
+    affected_object_count: entry.affected_object_count,
+    result: entry.result,
+    failure_type: entry.failure_type ?? null,
+    error_message: entry.error_message ?? null,
+    duration_ms: entry.duration_ms,
+    executed_by: entry.executed_by,
+    executed_at: new Date().toISOString(),
+    branch_id: entry.branch_id ?? null,
+    source_ip: entry.source_ip ?? null,
+    metadata: entry.metadata ?? {},
   };
 }
 
-// ---------------------------------------------------------------------------
-// Exports
-// ---------------------------------------------------------------------------
+/**
+ * Append an audit row on an existing PG transaction. Intended as a
+ * preCommitHook for applyEdits — the audit row is committed atomically
+ * with the Action's edits.
+ *
+ * Throws if the hash-chain append fails. The caller MUST let that throw
+ * propagate so the transaction rolls back (durable-before-ack).
+ */
+export async function appendAuditRow(
+  client: PoolClient,
+  entry: AuditLogEntry,
+): Promise<{ auditId: string; rowHash: string }> {
+  const body = toRowBody(entry);
+  try {
+    const { auditId, rowHash } = await insertAuditRowWithHashChain(client, body);
+    return { auditId, rowHash };
+  } catch (err) {
+    // Observability: increment a counter so a chain-head-missing deploy
+    // or an exhausted connection surfaces in Prometheus immediately.
+    incCounter("tellus_action_audit_inline_failed_total", {
+      reason: err instanceof AuditHashChainError ? err.code : "unknown",
+    });
+    throw err;
+  }
+}
+
+/**
+ * Write a standalone audit row for a failure that never entered an
+ * Action transaction (Stage 1-5 pipeline errors). Opens its own PG
+ * connection + transaction, appends via the hash chain, commits, and
+ * releases the connection.
+ *
+ * Throws AuditDurabilityError on any failure — the route layer MUST
+ * translate to 503.
+ */
+export async function logStandaloneFailureAudit(
+  entry: AuditLogEntry,
+): Promise<{ auditId: string; rowHash: string }> {
+  const body = toRowBody(entry);
+  const client = await getClient();
+  try {
+    await client.query("BEGIN");
+    const { auditId, rowHash } = await insertAuditRowWithHashChain(client, body);
+    await client.query("COMMIT");
+    return { auditId, rowHash };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    incCounter("tellus_action_audit_standalone_failed_total", {
+      reason: err instanceof AuditHashChainError ? err.code : "unknown",
+    });
+    throw new AuditDurabilityError(
+      err instanceof Error ? err.message : String(err),
+      err,
+    );
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Legacy compatibility alias. Existing callers import `logActionExecution`
+ * from this module; the new durable contract reaches them through the
+ * standalone path. Throws on failure — the previous "NEVER throw"
+ * contract is explicitly revoked per F-P3-11.
+ */
+export async function logActionExecution(
+  entry: AuditLogEntry,
+): Promise<{ auditId: string; rowHash: string }> {
+  return logStandaloneFailureAudit(entry);
+}
 
 export default {
+  appendAuditRow,
+  logStandaloneFailureAudit,
   logActionExecution,
-  getAuditLog,
-  getAuditEntry,
-  getAuditStats,
-};
-
-export {
-  logActionExecution,
-  getAuditLog,
-  getAuditEntry,
-  getAuditStats,
+  AuditDurabilityError,
 };

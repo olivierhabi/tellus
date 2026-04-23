@@ -18,8 +18,7 @@ describe("Query Basic Operations (Task 26)", () => {
       const res = await fetch("http://localhost:3000/health");
       if (res.status !== 200) throw new Error("not healthy");
     } catch {
-      console.warn("Server not reachable — skipping query-basic tests");
-      return;
+      throw new Error("F-P2-01: integration server unreachable — beforeAll fails loudly rather than ghost-passing");
     }
 
     const { body } = await api("POST", "/api/v1/ontology", {
@@ -27,7 +26,7 @@ describe("Query Basic Operations (Task 26)", () => {
       description: "Task 26 integration",
     });
     ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
-    if (!ONTOLOGY_ID) return;
+    if (!ONTOLOGY_ID) throw new Error("F-P2-01: ontology create returned no id — beforeAll fails loudly");
 
     await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T26Employee",

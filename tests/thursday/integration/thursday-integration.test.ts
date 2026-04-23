@@ -9,39 +9,33 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeAll } from "vitest";
+import { api, BASE_URL } from "../../helpers/api";
 
-const BASE = "http://localhost:3000";
+const BASE = BASE_URL;
 
 let serverReachable = false;
 
+// F-01 / Phase A2: route requests through the shared `api()` helper so the
+// default alice JWT (installed by tests/setupFiles.ts) is attached on every
+// call. A bare `fetch()` here would 401 against the globalAuth gate.
 async function request(method: string, path: string, body?: unknown) {
-  const opts: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json" },
-  };
-  if (body !== undefined) {
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(`${BASE}${path}`, opts);
-  const text = await res.text();
-  let json: any;
-  try { json = JSON.parse(text); } catch { json = text; }
-  return { status: res.status, body: json, headers: res.headers };
+  return api(method, path, body);
 }
 
 beforeAll(async () => {
   try {
     const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(2000) });
-    serverReachable = res.ok;
-  } catch {
-    console.warn("Server not reachable — skipping integration tests");
+    if (!res.ok) throw new Error(`health probe returned ${res.status}`);
+    serverReachable = true;
+  } catch (err) {
+    throw new Error(
+      "F-P2-01: integration server unreachable at " + BASE +
+      " — beforeAll fails loudly rather than ghost-passing. " +
+      "Start the server (pnpm dev) before running integration tests. " +
+      "Root cause: " + ((err as Error)?.message || err)
+    );
   }
 });
-
-function skipIfNoServer() {
-  if (!serverReachable) return true;
-  return false;
-}
 
 describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
@@ -49,7 +43,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should create a link type", async () => {
-    if (skipIfNoServer()) return;
 
     // First get an ontology
     const ont = await request("GET", "/api/v1/ontology");
@@ -76,7 +69,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should list link types", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -90,7 +82,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should return 404 for non-existent link type", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -101,7 +92,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should validate create — missing fields", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -114,7 +104,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should validate create — invalid cardinality", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -131,7 +120,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should validate PUT — immutable field rejection", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -150,7 +138,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should require objectPK and direction for resolve", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -161,7 +148,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should require direction for searchAround", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -172,7 +158,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should require objectPK and direction for count", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -187,7 +172,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate bulkCount requests", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -202,7 +186,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate multiHop — missing steps", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -215,7 +198,6 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should validate multiHop — missing startingPKs", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -232,7 +214,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should export link types as JSON", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -251,7 +232,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate import — missing linkTypes array", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -266,7 +246,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate migration — missing targetCardinality", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -281,7 +260,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should return 404 for link on non-existent object type", async () => {
-    if (skipIfNoServer()) return;
 
     const res = await request("GET", "/api/v1/objects/NonExistentType/pk1/links/someLink");
     expect(res.status).toBe(404);
@@ -292,7 +270,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate searchAround — missing linkType", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
@@ -312,7 +289,6 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should delete the test link type", async () => {
-    if (skipIfNoServer()) return;
 
     const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
