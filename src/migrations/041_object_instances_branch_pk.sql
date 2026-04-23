@@ -31,6 +31,34 @@ BEGIN;
 ALTER TABLE object_instances
   ADD COLUMN IF NOT EXISTS branch_id UUID;
 
+-- 041.1a Drop orphaned object_instances rows that reference a non-existent
+-- ontology. These can accumulate in dev DBs when ontologies are deleted
+-- before the FK cascade was in place. On a fresh CI DB this is a no-op.
+-- Without this cleanup the UPDATE below would leave NULL branch_ids on
+-- orphan rows and the subsequent SET NOT NULL would fail.
+DELETE FROM object_instances
+ WHERE NOT EXISTS (
+   SELECT 1 FROM ontology o WHERE o.ontology_id = object_instances.ontology_id
+ );
+
+-- 041.1b Ensure every live ontology has a `main` branch. Migration 040
+-- already does this for rows that existed at its apply time; we repeat
+-- here defensively in case any ontology slipped in between 040 and 041
+-- (possible on a long-running dev DB or during a rolling deploy).
+INSERT INTO ontology_branch (branch_id, ontology_id, name, status, created_by)
+SELECT
+  uuid_generate_v5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid, o.ontology_id::text || ':main'),
+  o.ontology_id,
+  'main',
+  'OPEN',
+  'migration-041'
+FROM ontology o
+WHERE NOT EXISTS (
+  SELECT 1 FROM ontology_branch b
+   WHERE b.ontology_id = o.ontology_id
+     AND b.name = 'main'
+);
+
 -- Backfill to the row's ontology `main` branch.
 UPDATE object_instances
    SET branch_id = (

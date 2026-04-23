@@ -223,8 +223,13 @@ const DAY_SUITES = [
 // Env vars passed to all child processes — matches the elevated rate limits
 // used by the managed server so that tests can detect elevated limits and
 // skip rate-limiter-specific tests.
-const CHILD_ENV = {
-  ...process.env,
+//
+// TELLUS_TEST_BEARER is populated later (after server + Keycloak are up) by
+// acquireAliceToken(). Day-suite child processes read it at module load
+// in tests/helpers/api.ts and use it as the default bearer for every
+// request — without this, every data-plane call returns 401 under F-01.
+const CHILD_ENV: Record<string, string> = {
+  ...(process.env as Record<string, string>),
   NODE_ENV: "test",
   RATE_LIMIT_MAX: "10000",
   ACTION_RATE_LIMIT_MAX: "10000",
@@ -232,6 +237,61 @@ const CHILD_ENV = {
   GLOBAL_ACTION_RATE_LIMIT_MAX: "100000",
   BATCH_RATE_LIMIT_MAX: "1000",
 };
+
+/**
+ * Direct-grant a JWT for alice from the Keycloak test realm and install
+ * it on CHILD_ENV.TELLUS_TEST_BEARER so subsequently-spawned day-suite
+ * processes authenticate under F-01. Non-fatal: if Keycloak isn't up or
+ * alice isn't bootstrapped, we print a loud warning and proceed without
+ * a token — tests that hit auth'd routes will fail with a clean 401
+ * rather than a mysterious stall.
+ */
+async function acquireAliceToken(): Promise<void> {
+  const kcUrl = process.env.KEYCLOAK_URL || "http://localhost:8086";
+  const kcRealm = process.env.KEYCLOAK_REALM || "tellus";
+  const kcClient = process.env.KEYCLOAK_FRONTEND_CLIENT_ID || "tellus-frontend";
+  const username =
+    process.env.KEYCLOAK_ADMIN_TEST_USER || "cypress-admin@tellus.local";
+  const password = process.env.KEYCLOAK_TEST_PASS || "Password123!";
+
+  const body = new URLSearchParams({
+    grant_type: "password",
+    client_id: kcClient,
+    username,
+    password,
+    scope: "openid",
+  });
+
+  try {
+    const res = await fetch(
+      `${kcUrl}/realms/${kcRealm}/protocol/openid-connect/token`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        signal: AbortSignal.timeout(5000),
+      },
+    );
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      console.warn(
+        `  [runAll] Direct-grant failed for ${username}: HTTP ${res.status} ${txt.slice(0, 180)} — day suites will 401 on data-plane routes`,
+      );
+      return;
+    }
+    const data = (await res.json()) as { access_token?: string };
+    if (!data.access_token) {
+      console.warn("  [runAll] Direct-grant response missing access_token — day suites will 401");
+      return;
+    }
+    CHILD_ENV.TELLUS_TEST_BEARER = data.access_token;
+    console.log(`  Alice JWT acquired (${data.access_token.length} chars) for child suites.`);
+  } catch (err) {
+    console.warn(
+      `  [runAll] Keycloak unreachable at ${kcUrl} (${(err as Error).message}) — day suites will 401 on data-plane routes`,
+    );
+  }
+}
 
 function runCommand(
   command: string,
@@ -370,6 +430,7 @@ async function runAll(): Promise<void> {
   console.log("  Starting server with elevated rate limits...");
   console.log("=".repeat(60));
   await startServer();
+  await acquireAliceToken();
 
   // =========================================================================
   // Phase 2: Day test suites
@@ -400,6 +461,11 @@ async function runAll(): Promise<void> {
   console.log("=".repeat(60));
 
   await restartServer();
+  // Refresh the JWT — Keycloak default access-token TTL is 5 minutes and
+  // Phase 2 may have consumed most of it. Vitest has its own per-file
+  // setupFiles.ts that re-acquires, but a refreshed CHILD_ENV also helps
+  // any deeper child processes the vitest suites spawn.
+  await acquireAliceToken();
 
   // Files to exclude from Tuesday integration (rate-limiter needs default limits)
   const TUESDAY_INTEGRATION_EXCLUDE = "rate-limiter-integration";

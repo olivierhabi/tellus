@@ -21,10 +21,13 @@ BEGIN;
 -- ---------------------------------------------------------------------------
 -- 039.1 Ensure the synthetic `main` ontology exists for backfill.
 -- ---------------------------------------------------------------------------
-INSERT INTO ontology (ontology_id, api_name, display_name, description, created_at, created_by)
+-- The inline schema in src/migrate.ts does not carry `api_name` on
+-- `ontology` (it's a Phase-2 addition that hasn't been merged into the
+-- inline migrator). Reference only columns we're guaranteed to have:
+-- ontology_id, display_name, description, created_at, created_by.
+INSERT INTO ontology (ontology_id, display_name, description, created_at, created_by)
 VALUES (
   'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid,
-  '__main_synthetic__',
   'Synthetic Main Ontology (backfill anchor)',
   'F-P4-27 backfill anchor for rows whose original ontology_id was NULL. Never delete.',
   now(),

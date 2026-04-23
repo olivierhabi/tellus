@@ -31,10 +31,12 @@ BEGIN;
 ALTER TABLE ontology_edit
   ADD COLUMN IF NOT EXISTS commit_seq BIGINT;
 
--- Backfill — order rows by created_at and edit_id so re-runs are stable.
+-- Backfill — order rows by executed_at and edit_id so re-runs are stable.
+-- The ontology_edit table uses `executed_at` (not `created_at`) for its
+-- authoritative timestamp column — see the inline schema in src/migrate.ts.
 WITH numbered AS (
   SELECT edit_id,
-         ROW_NUMBER() OVER (ORDER BY created_at ASC, edit_id ASC) AS rn
+         ROW_NUMBER() OVER (ORDER BY executed_at ASC, edit_id ASC) AS rn
     FROM ontology_edit
    WHERE commit_seq IS NULL
 )

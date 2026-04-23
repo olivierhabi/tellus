@@ -1930,6 +1930,75 @@ async function migrate(): Promise<void> {
       throw new Error(`032_migration_ledger.sql failed: ${msg}`);
     }
 
+    // ------------------------------------------------------------------
+    // Auto-apply any remaining forward SQL migrations that aren't
+    // inlined above and haven't been recorded in the ledger.
+    //
+    // Covers 035..N: branch_three_way_merge, audit_hash_chain,
+    // action_type_cbac, ontology_id_not_null, branch_id_on_edits,
+    // object_instances_branch_pk, commit_seq, and anything that lands
+    // after. Each file runs in its own transaction and is recorded in
+    // schema_migrations_applied on success so reruns are idempotent.
+    //
+    // Skipped:
+    //   * *.down.sql            — reverse migrations, not forward
+    //   * *.ts                  — handled by a separate migrator
+    //   * ledger rows already   — file previously applied
+    //   * files <= 032          — already handled inline above
+    //
+    // Failures are loud but don't poison earlier migrations: the
+    // per-file transaction rolls back, the ledger is not updated,
+    // and the process exits non-zero so CI catches it.
+    // ------------------------------------------------------------------
+    try {
+      const migrationsDir = pathMod.join(__dirname, "migrations");
+      if (fsMod.existsSync(migrationsDir)) {
+        const applied = await client.query<{ migration_name: string }>(
+          "SELECT migration_name FROM schema_migrations_applied"
+        );
+        const appliedSet = new Set(applied.rows.map((r) => r.migration_name));
+
+        const all = fsMod
+          .readdirSync(migrationsDir)
+          .filter((f: string) => f.endsWith(".sql"))
+          .filter((f: string) => !f.endsWith(".down.sql"))
+          .filter((f: string) => {
+            const m = /^(\d{3})_/.exec(f);
+            if (!m) return false;
+            return parseInt(m[1], 10) >= 33;
+          })
+          .filter((f: string) => !appliedSet.has(f))
+          .sort();
+
+        for (const fname of all) {
+          const fpath = pathMod.join(migrationsDir, fname);
+          const sql = fsMod.readFileSync(fpath, "utf-8");
+          try {
+            // Each migration owns its own transaction boundary. If the
+            // .sql file itself contains BEGIN/COMMIT, Postgres treats a
+            // nested BEGIN as a no-op warning; the outer COMMIT below
+            // closes the transaction either way.
+            await client.query("BEGIN");
+            await client.query(sql);
+            await client.query(
+              "INSERT INTO schema_migrations_applied(migration_name, applied_at) VALUES ($1, now()) ON CONFLICT DO NOTHING",
+              [fname]
+            );
+            await client.query("COMMIT");
+            console.log(`Applied ${fname}`);
+          } catch (migErr) {
+            await client.query("ROLLBACK").catch(() => {});
+            const msg = migErr instanceof Error ? migErr.message : String(migErr);
+            throw new Error(`${fname} failed: ${msg}`);
+          }
+        }
+      }
+    } catch (sqlErr) {
+      const msg = sqlErr instanceof Error ? sqlErr.message : String(sqlErr);
+      console.error("Forward SQL migration scan failed:", msg);
+      process.exit(1);
+    }
+
   } catch (err) {
     await client.query("ROLLBACK");
     const message = err instanceof Error ? err.message : String(err);

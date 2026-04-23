@@ -44,6 +44,11 @@
 -- real row.
 -- ---------------------------------------------------------------------------
 
+-- pgcrypto supplies `digest()` used in the genesis-row seed below.
+-- Create it up-front (idempotent) so the INSERT ... encode(digest(...))
+-- has the function available.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- ---------------------------------------------------------------------------
 -- 036.1 Add hash-chain columns to action_audit_log.
 -- ---------------------------------------------------------------------------
