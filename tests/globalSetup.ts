@@ -314,6 +314,21 @@ export async function setup(): Promise<void> {
       // reset in-process counter state without restarting the server.
       TELLUS_TEST_HOOKS: "1",
       RATE_LIMIT_MAX: "999999",
+      // Restore action-specific rate limits to their production defaults.
+      // CI workflows (and some developer shells) set these to elevated
+      // values to avoid cross-suite interference on the global express
+      // limiter, but the rate-limiter integration suite fires exactly
+      // 101 requests expecting the default 100/min perActionType limit
+      // to fire. Without these explicit overrides, CI's
+      // ACTION_RATE_LIMIT_MAX=10000 leaks through `...process.env` and
+      // tests 2-5 + 9-10 of rate-limiter-integration.test.ts fail with
+      // "expected 200 to be 429". All other action tests use unique
+      // action-type names and fire <100 requests per action per minute,
+      // so defaults are safe. See rate-limiter-integration.test.ts for
+      // the contract these defaults satisfy.
+      ACTION_RATE_LIMIT_MAX: "100",
+      USER_RATE_LIMIT_MAX: "50000",
+      GLOBAL_ACTION_RATE_LIMIT_MAX: "100000",
       // F-CI-POOL: bump PG pool to handle concurrent vitest workers + the
       // batch action / rate-limiter suites that fan out 100+ inflight
       // requests against a single server. Default 20 exhausts under load
