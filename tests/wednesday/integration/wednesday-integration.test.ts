@@ -7,7 +7,12 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 
-const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
+// IMPORTANT: don't read `process.env.BASE_URL` — Vitest (via Vite) sets
+// `BASE_URL="/"` in the worker env by default (it mirrors its `base` config),
+// which would make every fetch URL become `//health`, `//api/v1/ontology`
+// and throw `Failed to parse URL`. Every other test file in this repo reads
+// `TEST_BASE_URL` via tests/helpers/api.ts for exactly this reason.
+const BASE_URL = process.env.TEST_BASE_URL || "http://localhost:3000";
 
 async function api(method: string, path: string, body?: unknown) {
   const opts: RequestInit = {
@@ -24,21 +29,41 @@ let ONTOLOGY_ID: string;
 
 describe("Wednesday Integration Tests", () => {
   beforeAll(async () => {
-    // Check server is up
+    // Check server is up.
+    //
+    // IMPORTANT: /health is allowlisted by the globalAuth middleware
+    // (src/middleware/globalAuth.ts) and must not carry an Authorization
+    // header — otherwise the universal fetch interceptor in
+    // tests/setupFiles.ts attaches `Bearer <alice-jwt>`, and some
+    // JWT-rejection paths (clock skew, JWKS cache miss) can make /health
+    // spuriously 4xx at the very start of a vitest worker's lifetime.
+    // Passing an explicit empty Authorization bypasses the interceptor.
     try {
-      const res = await fetch(`${BASE_URL}/health`);
-      if (res.status !== 200) throw new Error("Server not healthy");
-    } catch {
-      throw new Error("F-P2-01: integration server unreachable — beforeAll fails loudly rather than ghost-passing");
+      const res = await fetch(`${BASE_URL}/health`, {
+        headers: { Authorization: "" },
+      });
+      if (res.status !== 200) {
+        throw new Error(`Server /health returned ${res.status}`);
+      }
+    } catch (err) {
+      // Surface the real cause so CI logs are actionable instead of
+      // always reporting a generic "unreachable".
+      throw new Error(
+        `F-P2-01: integration server unreachable — beforeAll fails loudly: ${(err as Error).message}`,
+      );
     }
 
     // Create test ontology
-    const { body: ontBody } = await api("POST", "/api/v1/ontology", {
+    const { status: ontStatus, body: ontBody } = await api("POST", "/api/v1/ontology", {
       displayName: "WedIntTest",
       description: "Wednesday integration tests",
     });
     ONTOLOGY_ID = ontBody?.data?.ontologyId || ontBody?.ontologyId;
-    if (!ONTOLOGY_ID) throw new Error("F-P2-01: ontology create returned no id — beforeAll fails loudly");
+    if (!ONTOLOGY_ID) {
+      throw new Error(
+        `F-P2-01: ontology create returned no id — beforeAll fails loudly. status=${ontStatus} body=${JSON.stringify(ontBody)?.slice(0, 300)}`,
+      );
+    }
 
     // Create Employee object type
     await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {

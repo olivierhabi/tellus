@@ -314,6 +314,12 @@ export async function setup(): Promise<void> {
       // reset in-process counter state without restarting the server.
       TELLUS_TEST_HOOKS: "1",
       RATE_LIMIT_MAX: "999999",
+      // F-CI-POOL: bump PG pool to handle concurrent vitest workers + the
+      // batch action / rate-limiter suites that fan out 100+ inflight
+      // requests against a single server. Default 20 exhausts under load
+      // and surfaces as `timeout exceeded when trying to connect`.
+      PG_POOL_MAX: process.env.PG_POOL_MAX || "40",
+      PG_CONNECT_TIMEOUT_MS: process.env.PG_CONNECT_TIMEOUT_MS || "20000",
       // Elevate the batch-per-user limit to 500. The batch rate limiter
       // keys on `batch:${user.id || "anonymous"}`, and every
       // unauthenticated integration test shares the "anonymous" key.

@@ -26,49 +26,22 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # ---------------------------------------------------------------------------
-# Restart server with elevated rate limit
+# Migrations + seeds BEFORE the server starts.
+#
+# Historical ordering was start-server-then-migrate, which meant on a fresh
+# CI Postgres service container the server booted against an empty schema.
+# Every boot-time orphan sweeper (pipeline_deployments, funnel_run) and
+# warmup query (link_type / object_type registries) logged
+# `relation \"...\" does not exist` into /tmp/tellus-e2e-server-err.log,
+# drowning the later failure-summary dump and — more worryingly — priming
+# any in-process ontology cache with empty results that would never refresh.
+# Running migrations + seeds first removes both issues for free.
 # ---------------------------------------------------------------------------
-echo -e "${BOLD}Restarting server with RATE_LIMIT_MAX=10000 ...${NC}"
 lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 sleep 1
 
 export DATA_DIR="${DATA_DIR:-${ROOT}/data}"
-RATE_LIMIT_MAX=10000 DATA_DIR="$DATA_DIR" nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>/tmp/tellus-e2e-server-err.log &
-SERVER_PID=$!
 
-# Ensure server is killed on script exit
-cleanup() {
-  echo ""
-  echo -e "${BOLD}Stopping server (PID ${SERVER_PID}) ...${NC}"
-  kill "$SERVER_PID" 2>/dev/null || true
-  # Also kill anything left on port 3000
-  lsof -ti:3000 | xargs kill -9 2>/dev/null || true
-}
-trap cleanup EXIT
-
-# Wait for server to be ready
-echo -n "Waiting for server..."
-for i in $(seq 1 30); do
-  if curl -sf "http://localhost:3000/health" >/dev/null 2>&1; then
-    echo " ready (PID ${SERVER_PID})."
-    break
-  fi
-  if [[ $i -eq 30 ]]; then
-    echo " TIMEOUT."
-    echo "Server log:"
-    tail -20 /tmp/tellus-e2e-server.log
-    exit 1
-  fi
-  sleep 1
-  echo -n "."
-done
-
-echo ""
-
-# ---------------------------------------------------------------------------
-# Re-seed the database so that tests have a clean, predictable state.
-# The seed scripts are idempotent (delete-then-recreate).
-# ---------------------------------------------------------------------------
 echo -e "${BOLD}Running migrations ...${NC}"
 npx tsx "${ROOT}/src/migrate.ts" > /tmp/tellus-migrate.log 2>&1 || {
   echo -e "${RED}Migration failed. Log:${NC}"
@@ -101,6 +74,43 @@ DATA_DIR=/tmp/ontology-testdata npx tsx "${ROOT}/src/seeds/actionTypes.seed.ts" 
   exit 1
 }
 echo "  Action types seed complete."
+echo ""
+
+# ---------------------------------------------------------------------------
+# Now start the server against a fully-migrated + seeded database. Boot-time
+# orphan sweeps and registry warmups see real tables and emit no errors.
+# ---------------------------------------------------------------------------
+echo -e "${BOLD}Starting server with RATE_LIMIT_MAX=10000 ...${NC}"
+RATE_LIMIT_MAX=10000 DATA_DIR="$DATA_DIR" nohup npx tsx "${ROOT}/src/server.ts" > /tmp/tellus-e2e-server.log 2>/tmp/tellus-e2e-server-err.log &
+SERVER_PID=$!
+
+# Ensure server is killed on script exit
+cleanup() {
+  echo ""
+  echo -e "${BOLD}Stopping server (PID ${SERVER_PID}) ...${NC}"
+  kill "$SERVER_PID" 2>/dev/null || true
+  # Also kill anything left on port 3000
+  lsof -ti:3000 | xargs kill -9 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Wait for server to be ready
+echo -n "Waiting for server..."
+for i in $(seq 1 30); do
+  if curl -sf "http://localhost:3000/health" >/dev/null 2>&1; then
+    echo " ready (PID ${SERVER_PID})."
+    break
+  fi
+  if [[ $i -eq 30 ]]; then
+    echo " TIMEOUT."
+    echo "Server log:"
+    tail -20 /tmp/tellus-e2e-server.log
+    exit 1
+  fi
+  sleep 1
+  echo -n "."
+done
+
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -320,14 +330,15 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
   echo -e "${RED}${BOLD}SOME E2E SUITES FAILED${NC}"
   echo ""
-  echo -e "${BOLD}Server 500 errors:${NC}"
-  grep -i '"statusCode":500\|"status":500\|Error\|error.*500\|INTERNAL\|stack.*at ' /tmp/tellus-e2e-server.log 2>/dev/null | head -30 || true
+  echo -e "${BOLD}Server 500 errors (last 30):${NC}"
+  # tail (not head) so we see errors near the failure, not boot-time noise.
+  grep -i '"statusCode":500\|"status":500\|Error\|error.*500\|INTERNAL\|stack.*at ' /tmp/tellus-e2e-server.log 2>/dev/null | tail -30 || true
   echo ""
-  echo -e "${BOLD}Server log (first batch create attempt):${NC}"
-  grep -A2 'batch\|500' /tmp/tellus-e2e-server.log 2>/dev/null | head -40 || true
+  echo -e "${BOLD}Server log (last batch/500 lines):${NC}"
+  grep -A2 'batch\|500' /tmp/tellus-e2e-server.log 2>/dev/null | tail -40 || true
   echo ""
-  echo -e "${BOLD}Server stderr:${NC}"
-  cat /tmp/tellus-e2e-server-err.log 2>/dev/null | head -50 || true
+  echo -e "${BOLD}Server stderr (last 50 lines):${NC}"
+  tail -50 /tmp/tellus-e2e-server-err.log 2>/dev/null || true
 fi
 echo -e "${BOLD}========================================${NC}"
 

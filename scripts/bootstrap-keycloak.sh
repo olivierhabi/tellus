@@ -105,7 +105,7 @@ REALM_UPDATE=$(cat <<JSON
   "ssoSessionMaxLifespan": 57600,
   "ssoSessionIdleTimeout": 57600,
   "offlineSessionIdleTimeout": 2592000,
-  "accessTokenLifespan": 300,
+  "accessTokenLifespan": 3600,
   "accessTokenLifespanForImplicitFlow": 900,
   "accessCodeLifespan": 600,
   "accessCodeLifespanUserAction": 600,

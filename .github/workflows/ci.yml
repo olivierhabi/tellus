@@ -632,7 +632,9 @@ jobs:
           done
 
       - name: Run full test suite
-        run: pnpm run test:all
+        run: |
+          set -o pipefail
+          pnpm run test:all 2>&1 | tee /tmp/test-all.log
 
       - name: Stop server
         if: always()
@@ -644,4 +646,12 @@ jobs:
         with:
           name: test-all-server-log
           path: /tmp/tellus-server.log
+          retention-days: 7
+
+      - name: Upload test:all console log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-all-console-log
+          path: /tmp/test-all.log
           retention-days: 7

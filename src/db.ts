@@ -56,9 +56,14 @@ const pool = new Pool({
   // A connection sitting idle for 30 seconds is released back to PostgreSQL.
   idleTimeoutMillis: 30_000,
 
-  // If a new connection cannot be established within 5 seconds the query
-  // fails with a timeout error.
-  connectionTimeoutMillis: 5_000,
+  // If a new connection cannot be established within the timeout the query
+  // fails with a timeout error. Default 5s; bump via PG_CONNECT_TIMEOUT_MS
+  // for test/CI environments where parallel suites can briefly queue past
+  // the pool max under bursty action-batch load.
+  connectionTimeoutMillis: parseInt(
+    process.env.PG_CONNECT_TIMEOUT_MS || "5000",
+    10,
+  ),
 });
 
 // ---------------------------------------------------------------------------

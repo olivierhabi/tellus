@@ -103,11 +103,31 @@ async function startServer(): Promise<void> {
     cwd: ROOT,
     env: {
       ...process.env,
+      // Mirror tests/globalSetup.ts:303-339 so the runAll-owned server is
+      // test-equivalent to the one globalSetup spawns. Without this, Phase 3
+      // vitest suites run against a server that still has background workers
+      // live (funnel/pipeline/temporal dispatchers), whose CPU contention on
+      // GitHub's 2-core runners intermittently pushes POST /api/v1/ontology
+      // into 5xx territory — which is what triggers the "ontology create
+      // returned no id" beforeAll crashes in tests/wednesday/integration/*.
+      TELLUS_TEST_HOOKS: "1",
       RATE_LIMIT_MAX: "10000",
       ACTION_RATE_LIMIT_MAX: "10000",
       USER_RATE_LIMIT_MAX: "50000",
       GLOBAL_ACTION_RATE_LIMIT_MAX: "100000",
       BATCH_RATE_LIMIT_MAX: "1000",
+      // F-CI-POOL: bump PG pool to handle Phase 3's parallel vitest workers
+      // hitting the same shared server. Default 20 exhausts under the
+      // batch / rate-limiter test load and surfaces as
+      // `timeout exceeded when trying to connect`.
+      PG_POOL_MAX: process.env.PG_POOL_MAX || "60",
+      PG_CONNECT_TIMEOUT_MS: process.env.PG_CONNECT_TIMEOUT_MS || "15000",
+      FUNNEL_DISPATCHER_DISABLED: "true",
+      PIPELINE_DISPATCHER_DISABLED: "true",
+      PIPELINE_ICEBERG_MAINTENANCE_DISABLED: "true",
+      OVERLAY_SWEEPER_DISABLED: "true",
+      REPLACEMENT_SCHEDULER_DISABLED: "true",
+      TEMPORAL_WORKER_DISABLED: "true",
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
@@ -426,12 +446,19 @@ function isUnitPattern(pattern: string): boolean {
   return /(^|\/)unit(\/|$)/.test(pattern);
 }
 
+// Per-suite vitest timeout. 300 s was tight enough that friday's 42-test
+// integration suite consistently SIGKILLed on GitHub Actions (2-core
+// ubuntu-latest) before any test output reached stdout — see the
+// "Duration  300036ms" signature. 600 s is still well inside the CI job's
+// 30-minute cap and leaves headroom for tuesday (40 s local → 2× on CI).
+const VITEST_SUITE_TIMEOUT_MS = 600_000;
+
 function runVitestSuite(pattern: string, label: string): SuiteResult {
   const configFlag = isUnitPattern(pattern) ? " --config vitest.unit.config.ts" : "";
   const result = runCommand(
     `npx vitest run ${pattern}${configFlag} --reporter=verbose`,
     label,
-    300_000,
+    VITEST_SUITE_TIMEOUT_MS,
   );
   result.category = "vitest";
   return result;
@@ -556,7 +583,7 @@ async function runAll(): Promise<void> {
         const result = runCommand(
           `npx vitest run ${filePaths} --reporter=verbose`,
           `vitest:${day}:integration`,
-          300_000
+          VITEST_SUITE_TIMEOUT_MS
         );
         result.category = "vitest";
         results.push(result);
@@ -653,12 +680,23 @@ function printReport(results: SuiteResult[], startTime: number): void {
     totalFailed += catFailed;
     totalSkipped += catSkipped;
 
-    // Show failed suites
+    // Show failed suites — dump captured stdout/stderr so CI logs contain
+    // the actual vitest/tsx failure output instead of just the first stderr
+    // line (which is almost always a harmless `npm warn Unknown env config`
+    // and tells you nothing about the real failure).
     for (const r of catResults.filter((r) => !r.passed && !r.output.startsWith("SKIP"))) {
       console.log(`    FAIL: ${r.name}`);
+      if (r.output) {
+        const tail = r.output.split("\n").slice(-80).join("\n");
+        console.log("    ----- captured stdout (last 80 lines) -----");
+        for (const line of tail.split("\n")) console.log(`      ${line}`);
+        console.log("    ----- end stdout -----");
+      }
       if (r.error) {
-        const firstLine = r.error.split("\n")[0];
-        console.log(`      ${firstLine}`);
+        const tail = r.error.split("\n").slice(-40).join("\n");
+        console.log("    ----- captured stderr (last 40 lines) -----");
+        for (const line of tail.split("\n")) console.log(`      ${line}`);
+        console.log("    ----- end stderr -----");
       }
     }
   }

@@ -50,7 +50,8 @@ ALTER TABLE link_edit
 
 ALTER TABLE link_edit
   ADD CONSTRAINT link_edit_ontology_fk
-  FOREIGN KEY (ontology_id) REFERENCES ontology(ontology_id);
+  FOREIGN KEY (ontology_id) REFERENCES ontology(ontology_id)
+  ON DELETE CASCADE;
 
 CREATE INDEX IF NOT EXISTS idx_link_edit_ontology
   ON link_edit(ontology_id, link_type_api_name);
@@ -75,7 +76,8 @@ BEGIN
   ) THEN
     ALTER TABLE ontology_edit
       ADD CONSTRAINT ontology_edit_ontology_fk
-      FOREIGN KEY (ontology_id) REFERENCES ontology(ontology_id);
+      FOREIGN KEY (ontology_id) REFERENCES ontology(ontology_id)
+      ON DELETE CASCADE;
   END IF;
 END $$;
 
