@@ -264,6 +264,28 @@ export async function applyEdits(
 
     // Step 2: Insert ontology_edit rows
     for (const edit of edits) {
+      // F-P3-12 / migration 039+040: resolve the owning ontology BEFORE
+      // the INSERT so `ontology_id` and `branch_id` can be supplied as
+      // NOT NULL columns. The caller may pass `ontologyId` explicitly;
+      // if not, fall back to resolving from the object type. Without
+      // this, every action write fails with
+      //   null value in column "ontology_id" of relation "ontology_edit"
+      //   violates not-null constraint
+      // which surfaces as a 500 on /actions/:apiName/apply.
+      const ontologyId =
+        executionContext.ontologyId ??
+        (await resolveOntologyForObjectType(pgClient, edit.objectType));
+      if (!ontologyId) {
+        throw new OntologyError(
+          `Cannot resolve ontology for object type '${edit.objectType}'. ` +
+            `The action executor must pass context.ontologyId, or the ` +
+            `object type must be registered under exactly one ontology.`,
+          "ONTOLOGY_NOT_FOUND",
+          400,
+          { objectType: edit.objectType }
+        );
+      }
+
       // B1: every Action writeback lands in the edit store inside the same
       // DB transaction as the user-visible response. applied_to_merged_at
       // and applied_to_index_at default to NULL — the Funnel will stamp
@@ -272,8 +294,8 @@ export async function applyEdits(
         `INSERT INTO ontology_edit
            (object_type_api_name, primary_key, operation, property_values,
             link_edits, action_type_api_name, execution_id, action_parameters,
-            executed_by, edit_strategy)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            executed_by, edit_strategy, ontology_id, branch_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING edit_id`,
         [
           edit.objectType,
@@ -288,6 +310,8 @@ export async function applyEdits(
           JSON.stringify(executionContext.parameters ?? {}),
           executionContext.executedBy,
           "user_edit_wins",
+          ontologyId,
+          executionContext.branchId,
         ]
       );
 
@@ -306,16 +330,12 @@ export async function applyEdits(
       // UPSERT `object_instances`, and write the Writeback Overlay so
       // the edit is visible in search within 1 s independent of
       // Quickwit's commit cadence. The spec requires every writeback to
-      // land in `object_edits` — resolve the owning ontology from the
-      // object type when the caller didn't pass one. We gate this on
-      // the boot-time B1-readiness probe so transitional deployments
-      // (migrations not yet applied) pay zero per-edit overhead; a
-      // savepoint is still used once the tables exist, defending
-      // against mid-life drops.
-      const ontologyId =
-        executionContext.ontologyId ??
-        (await resolveOntologyForObjectType(pgClient, edit.objectType));
-      if (ontologyId && (await isB1Ready())) {
+      // land in `object_edits` — we use the `ontologyId` resolved above.
+      // We gate this on the boot-time B1-readiness probe so transitional
+      // deployments (migrations not yet applied) pay zero per-edit
+      // overhead; a savepoint is still used once the tables exist,
+      // defending against mid-life drops.
+      if (await isB1Ready()) {
         await writeOverlayForEditInTxn(pgClient, {
           ontologyId,
           edit,

@@ -208,12 +208,22 @@ const SELF_TEST_MODULES = [
 // Day test suites
 // ---------------------------------------------------------------------------
 
+// DAY_SUITES drives Phase 2 (the nested `tsx tests/<day>/index.ts` chain).
+//
+// `friday` is intentionally dropped here: its integration file (15 groups,
+// 42 tests) runs through a 3-deep tsx→tsx→tsx→vitest pipeline plus the
+// long-lived server on port 3000, which overruns the GitHub Actions
+// 7 GB runner and the kernel OOM-kills the whole group with exit 137.
+//
+// Phase 3 below already runs `vitest run tests/friday/integration` as a
+// single direct child of this process, so removing friday here is not a
+// coverage reduction — it eliminates a duplicate run that is also the
+// memory hot-spot.
 const DAY_SUITES = [
   "monday",
   "tuesday",
   "wednesday",
   "thursday",
-  "friday",
 ];
 
 // ---------------------------------------------------------------------------
@@ -228,9 +238,22 @@ const DAY_SUITES = [
 // acquireAliceToken(). Day-suite child processes read it at module load
 // in tests/helpers/api.ts and use it as the default bearer for every
 // request — without this, every data-plane call returns 401 under F-01.
+// NODE_OPTIONS pins the child-process V8 heap so the GitHub runner can't
+// be OOM-killed silently. At ~1 GB per child, runAll + server + two concurrent
+// vitest workers stays comfortably under the 7 GB runner limit. If any
+// individual vitest overruns this cap it exits with a clear `JavaScript heap
+// out of memory` rather than SIGKILL (exit 137) that takes down siblings.
+//
+// Honours a caller-supplied NODE_OPTIONS by appending rather than overwriting.
+const EXISTING_NODE_OPTIONS = (process.env.NODE_OPTIONS ?? "").trim();
+const CHILD_NODE_OPTIONS = EXISTING_NODE_OPTIONS.includes("--max-old-space-size")
+  ? EXISTING_NODE_OPTIONS
+  : `${EXISTING_NODE_OPTIONS} --max-old-space-size=1024`.trim();
+
 const CHILD_ENV: Record<string, string> = {
   ...(process.env as Record<string, string>),
   NODE_ENV: "test",
+  NODE_OPTIONS: CHILD_NODE_OPTIONS,
   RATE_LIMIT_MAX: "10000",
   ACTION_RATE_LIMIT_MAX: "10000",
   USER_RATE_LIMIT_MAX: "50000",
