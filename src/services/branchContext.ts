@@ -40,7 +40,7 @@ const DNS_NS = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
  * `uuid_generate_v5(dns_ns, ontology_id || ':main')` that the migration
  * 040 backfill used.
  */
-function deriveMainBranchId(ontologyId: string): string {
+export function deriveMainBranchId(ontologyId: string): string {
   return uuidv5(`${ontologyId}:main`, DNS_NS);
 }
 

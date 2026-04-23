@@ -29,6 +29,7 @@ import {
 } from "./overlayStore";
 import { getOverlayStore } from "./getOverlayStore";
 import { recordOverlayWrite } from "./slis";
+import { deriveMainBranchId } from "../branchContext";
 
 export interface WriteOverlayInput {
   ontologyId: string;
@@ -97,13 +98,22 @@ export async function writeOverlayForEdit(
   let upsertedInstance = false;
   await client.query("SAVEPOINT b1_object_instances");
   try {
+    // Migration 041 extended the object_instances PK to include branch_id
+    // (src/migrations/041_object_instances_branch_pk.sql). The old 3-col
+    // ON CONFLICT target no longer matches any unique constraint and PG
+    // rejects with "there is no unique or exclusion constraint matching
+    // the ON CONFLICT specification". Thread the main-branch UUID through
+    // so the INSERT resolves and branch isolation semantics are preserved
+    // (future branch-aware callers will pass input.branchId explicitly;
+    // today every write path operates on 'main').
+    const branchId = deriveMainBranchId(input.ontologyId);
     const res = await client.query(
       `INSERT INTO object_instances
-         (ontology_id, object_type_api_name, primary_key, properties,
+         (ontology_id, branch_id, object_type_api_name, primary_key, properties,
           markings, source_datasource_id, source_transaction_id,
           last_modified_at, version)
-       VALUES ($1, $2, $3, $4::jsonb, ARRAY[]::text[], NULL, NULL, NOW(), $5)
-       ON CONFLICT (ontology_id, object_type_api_name, primary_key)
+       VALUES ($1, $6::uuid, $2, $3, $4::jsonb, ARRAY[]::text[], NULL, NULL, NOW(), $5)
+       ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
          DO UPDATE SET properties        = EXCLUDED.properties,
                        last_modified_at  = NOW(),
                        version           = object_instances.version + 1
@@ -114,6 +124,7 @@ export async function writeOverlayForEdit(
         input.primaryKey,
         JSON.stringify(input.doc),
         input.version,
+        branchId,
       ]
     );
     upsertedInstance = (res.rowCount ?? 0) > 0;

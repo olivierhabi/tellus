@@ -15,6 +15,7 @@
 
 import { PoolClient } from "pg";
 import { query, getClient } from "../db";
+import { deriveMainBranchId } from "../services/branchContext";
 
 export interface ObjectInstanceRow {
   ontology_id: string;
@@ -51,12 +52,16 @@ export async function upsertInstance(
     ? (sql: string, params: unknown[]) => client.query(sql, params)
     : (sql: string, params: unknown[]) => query(sql, params);
 
+  // Migration 041 made branch_id part of the PK — see writebackOverlay.ts
+  // header for the same rationale. All non-branch-aware callers default to
+  // the ontology's 'main' branch.
+  const branchId = deriveMainBranchId(input.ontology_id);
   const result = await runner(
     `INSERT INTO object_instances
-       (ontology_id, object_type_api_name, primary_key, properties, markings,
+       (ontology_id, branch_id, object_type_api_name, primary_key, properties, markings,
         source_datasource_id, source_transaction_id, last_modified_at, version)
-     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, now(), 1)
-     ON CONFLICT (ontology_id, object_type_api_name, primary_key)
+     VALUES ($1, $8::uuid, $2, $3, $4::jsonb, $5, $6, $7, now(), 1)
+     ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
      DO UPDATE SET
        properties            = EXCLUDED.properties,
        markings              = EXCLUDED.markings,
@@ -73,6 +78,7 @@ export async function upsertInstance(
       input.markings ?? [],
       input.source_datasource_id ?? null,
       input.source_transaction_id ?? null,
+      branchId,
     ]
   );
   return result.rows[0] as ObjectInstanceRow;
@@ -105,19 +111,19 @@ export async function bulkUpsertInstances(
       const chunk = rows.slice(i, i + BULK_UPSERT_CHUNK_SIZE);
       await pg.query(
         `INSERT INTO object_instances
-           (ontology_id, object_type_api_name, primary_key, properties, markings,
+           (ontology_id, branch_id, object_type_api_name, primary_key, properties, markings,
             source_datasource_id, source_transaction_id, last_modified_at, version)
          SELECT
-           ontology_id, object_type_api_name, primary_key, properties::jsonb, markings,
+           ontology_id, branch_id, object_type_api_name, primary_key, properties::jsonb, markings,
            source_datasource_id, source_transaction_id, now(), 1
          FROM unnest(
            $1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[][],
-           $6::uuid[], $7::uuid[]
+           $6::uuid[], $7::uuid[], $8::uuid[]
          ) AS t(
            ontology_id, object_type_api_name, primary_key, properties, markings,
-           source_datasource_id, source_transaction_id
+           source_datasource_id, source_transaction_id, branch_id
          )
-         ON CONFLICT (ontology_id, object_type_api_name, primary_key)
+         ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
          DO UPDATE SET
            properties            = EXCLUDED.properties,
            markings              = EXCLUDED.markings,
@@ -133,6 +139,7 @@ export async function bulkUpsertInstances(
           chunk.map((r) => r.markings ?? []),
           chunk.map((r) => r.source_datasource_id ?? null),
           chunk.map((r) => r.source_transaction_id ?? null),
+          chunk.map((r) => deriveMainBranchId(r.ontology_id)),
         ]
       );
     }
