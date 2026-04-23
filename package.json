@@ -65,6 +65,7 @@
     "@opentelemetry/exporter-trace-otlp-http": "^0.215.0",
     "@opentelemetry/sdk-node": "^0.215.0",
     "@simplewebauthn/server": "^13.3.0",
+    "@smithy/node-http-handler": "^4.5.0",
     "@temporalio/activity": "^1.11.6",
     "@temporalio/client": "^1.11.6",
     "@temporalio/worker": "^1.11.6",
@@ -124,5 +125,13 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
+  },
+  "pnpm": {
+    "overrides": {
+      "tar@<7.5.11": "^7.5.11",
+      "fast-xml-parser@<5.5.6": "^5.5.6",
+      "path-to-regexp@<0.1.13": "^0.1.13",
+      "lodash@<4.18.0": "^4.18.0"
+    }
   }
 }
