@@ -24,6 +24,11 @@ const EXEMPT_PATHS = [
   "/api/v1/ready",
   "/api/metrics",
   "/openapi.json",
+  // Admin/test endpoint that synchronously drains pending funnel signals
+  // by starting one workflow per pending signal. Latency is proportional
+  // to the queue depth and routinely exceeds the 5s data-plane budget.
+  // It is not user-facing and never on the hot path.
+  "/api/v1/funnel/drain",
 ];
 
 export interface RequestTimeoutOptions {

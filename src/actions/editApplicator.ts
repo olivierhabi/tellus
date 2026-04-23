@@ -362,8 +362,8 @@ export async function applyEdits(
                 event_id, schema_version,
                 actor_principal_id, action_rid,
                 correlation_id, causation_id_uuid,
-                branch_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+                ontology_id, branch_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
             [
               linkEdit.linkTypeApiName,
               edit.primaryKey,
@@ -376,7 +376,10 @@ export async function applyEdits(
               executionContext.actionRid ?? executionContext.actionTypeApiName,
               executionContext.correlationId ?? null,
               executionContext.causationId ?? null,
-              // F-P3-12: non-null. Caller guarantees resolution.
+              // Migration 039/040: ontology_id + branch_id are NOT NULL on
+              // link_edit. ontologyId was resolved at top of this function;
+              // branchId is required on the execution context.
+              ontologyId,
               executionContext.branchId,
             ]
           );
