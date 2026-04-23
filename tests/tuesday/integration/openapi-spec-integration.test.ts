@@ -23,11 +23,6 @@ async function skipIfNoServer(): Promise<boolean> {
       "Root cause: " + ((err as Error)?.message || err)
     );
   }
-}/health`, { signal: AbortSignal.timeout(2000) });
-    return !res.ok;
-  } catch {
-    return true;
-  }
 }
 
 describe("Task 29 — OpenAPI Specification", () => {

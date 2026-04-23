@@ -28,11 +28,7 @@ import {
   ADMIN_MAX_CAP,
 } from "../../../src/services/searchAround/clickhouseTraversal";
 import { traverse } from "../../../src/services/searchAround/searchAroundService";
-import {
-  filterByMarkings,
-  filterLinkRows,
-  userSees,
-} from "../../../src/services/searchAround/markingFilter";
+import { userSees } from "../../../src/services/searchAround/markingFilter";
 import { CDC_LAG_ALERT_SECONDS, readCdcLag } from "../../../src/services/searchAround/cdcLag";
 import {
   ClickHouseClient,
@@ -354,26 +350,8 @@ describe("B10 marking filter", () => {
     expect(userSees([], user)).toBe(true);
   });
 
-  it("filterByMarkings drops unseen rows", () => {
-    const rows = [
-      { row: { pk: "A" }, markings: ["PII"] },
-      { row: { pk: "B" }, markings: ["SECRET"] },
-    ];
-    const user = new Set(["PII"]);
-    const out = filterByMarkings(rows, user);
-    expect(out).toEqual([{ pk: "A" }]);
-  });
-
-  it("filterLinkRows drops links whose markings user lacks", () => {
-    const rows = [
-      { source_pk: "O-1", target_pk: "C-1", markings: ["PII"] },
-      { source_pk: "O-2", target_pk: "C-2", markings: ["SECRET"] },
-      { source_pk: "O-3", target_pk: "C-3", markings: [] },
-    ];
-    const user = new Set(["PII"]);
-    const out = filterLinkRows(rows, user);
-    expect(out.map((r) => r.source_pk)).toEqual(["O-1", "O-3"]);
-  });
+  // F-P3-17: the post-filter helpers `filterByMarkings` and `filterLinkRows`
+  // were dead-code removed. Only `userSees` remains, and is covered above.
 });
 
 // ---------------------------------------------------------------------------
