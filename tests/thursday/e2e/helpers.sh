@@ -92,6 +92,10 @@ do_request() {
 
     local curl_args=(-s -w "\n%{http_code}" -D "$tmpfile" -X "$method")
     curl_args+=(-H "Content-Type: application/json")
+    # F-01: attach JWT so globalAuth() does not 401 data-plane routes.
+    if [[ -n "${AUTH_TOKEN:-}" ]]; then
+      curl_args+=(-H "Authorization: Bearer ${AUTH_TOKEN}")
+    fi
 
     if [[ -n "$data" ]]; then
       curl_args+=(-d "$data")
@@ -119,7 +123,12 @@ do_upload() {
   tmpfile=$(mktemp)
 
   local response
+  local auth_args=()
+  if [[ -n "${AUTH_TOKEN:-}" ]]; then
+    auth_args=(-H "Authorization: Bearer ${AUTH_TOKEN}")
+  fi
   response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+    "${auth_args[@]}" \
     -F "file=@${filepath}" \
     "${BASE_URL}${path}" 2>/dev/null) || true
 

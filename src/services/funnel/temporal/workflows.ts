@@ -92,20 +92,29 @@ export interface ObjectTypeFunnelInput {
    */
   seedCompletedRuns?: number;
   seedLastProcessedSignalId?: string;
+  /**
+   * Override for `CONTINUE_AS_NEW_DEFAULT_THRESHOLD`. Resolved on the
+   * host side (worker.ts reads `FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD`
+   * and forwards it here). The Temporal workflow sandbox has no `process`
+   * global, so env reads MUST happen outside the workflow and be threaded
+   * in via input — otherwise the workflow throws
+   * `ReferenceError: process is not defined` on startup.
+   */
+  continueAsNewThreshold?: number;
 }
 
 /**
  * Default threshold at which the workflow self-truncates via
- * `continueAsNew`. Override via `FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD`.
- * Read at workflow-start only (env reads are deterministic across replays
- * because Temporal snapshots the worker's environment per history tick).
+ * `continueAsNew`. Override via `FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD`
+ * on the worker/host side (see `signalTemporalWorkflow` in `worker.ts`).
  */
 export const CONTINUE_AS_NEW_DEFAULT_THRESHOLD = 100;
 
-function continueAsNewThreshold(): number {
-  const raw = process.env.FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD;
-  const n = raw ? Number(raw) : NaN;
-  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+function resolveContinueAsNewThreshold(input: ObjectTypeFunnelInput): number {
+  const n = input.continueAsNewThreshold;
+  if (typeof n === "number" && Number.isFinite(n) && n > 0) {
+    return Math.floor(n);
+  }
   return CONTINUE_AS_NEW_DEFAULT_THRESHOLD;
 }
 
@@ -129,7 +138,7 @@ export async function ObjectTypeFunnelWorkflow(
   let pendingDrainedCount = 0;
   let completedRuns = input.seedCompletedRuns ?? 0;
   let lastProcessedSignalId = input.seedLastProcessedSignalId;
-  const threshold = continueAsNewThreshold();
+  const threshold = resolveContinueAsNewThreshold(input);
 
   while (true) {
     // Block until we have work OR a 5-minute heartbeat tick (keeps
@@ -216,6 +225,10 @@ export async function ObjectTypeFunnelWorkflow(
         objectTypeApiName: input.objectTypeApiName,
         seedCompletedRuns: 0,
         seedLastProcessedSignalId: lastProcessedSignalId,
+        // Preserve the host-resolved threshold across the continue-as-new
+        // boundary so the child workflow doesn't fall back to the default
+        // when the operator has configured a non-default value.
+        continueAsNewThreshold: input.continueAsNewThreshold,
       });
       // Unreachable — continueAsNew throws internally — but TS needs it.
       return;

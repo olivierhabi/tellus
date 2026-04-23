@@ -104,6 +104,45 @@ echo "  Action types seed complete."
 echo ""
 
 # ---------------------------------------------------------------------------
+# F-01 / Phase A2: acquire a Keycloak JWT so the E2E suites can present a
+# Bearer token on every data-plane request. Without this, every CRUD call
+# hits the globalAuth() middleware and gets a 401. Exported as AUTH_TOKEN
+# so each day's helpers.sh can pick it up.
+# Non-fatal: if Keycloak is unreachable, we continue with AUTH_TOKEN unset
+# — suites exercising only unauthenticated surfaces (health, CORS, 401s)
+# still pass. Data-plane suites fail loud, which is the correct signal.
+# ---------------------------------------------------------------------------
+echo -e "${BOLD}Acquiring Keycloak JWT for E2E suites ...${NC}"
+KC_URL="${KEYCLOAK_URL:-http://localhost:8086}"
+KC_REALM="${KEYCLOAK_REALM:-tellus}"
+KC_CLIENT_ID="${KEYCLOAK_FRONTEND_CLIENT_ID:-tellus-frontend}"
+KC_USER="${KEYCLOAK_ADMIN_TEST_USER:-cypress-admin@tellus.local}"
+KC_PASS="${KEYCLOAK_TEST_PASS:-Password123!}"
+
+KC_TOKEN_RESPONSE=$(curl -sf -m 10 -X POST \
+  "${KC_URL}/realms/${KC_REALM}/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=password" \
+  --data-urlencode "client_id=${KC_CLIENT_ID}" \
+  --data-urlencode "username=${KC_USER}" \
+  --data-urlencode "password=${KC_PASS}" \
+  --data-urlencode "scope=openid" 2>/dev/null || true)
+
+# Portable JSON extraction (no jq dependency in CI).
+AUTH_TOKEN=$(echo "$KC_TOKEN_RESPONSE" \
+  | grep -o '"access_token"[[:space:]]*:[[:space:]]*"[^"]*"' \
+  | head -1 \
+  | sed 's/"access_token"[[:space:]]*:[[:space:]]*"//;s/"$//' || true)
+
+if [[ -n "$AUTH_TOKEN" ]]; then
+  echo "  JWT acquired (user=${KC_USER})."
+  export AUTH_TOKEN
+else
+  echo "  WARN: Keycloak at ${KC_URL} unreachable or direct-grant rejected — data-plane E2E calls will 401."
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
 # Run each day's E2E suite
 # ---------------------------------------------------------------------------
 # `funnel` is appended LAST intentionally — its suite restarts the

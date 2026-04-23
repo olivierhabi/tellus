@@ -139,10 +139,26 @@ export async function signalTemporalWorkflow(
       });
     }
 
+    // Resolve the continue-as-new threshold HERE on the host. Temporal
+    // workflow code runs inside a V8 isolate sandbox with no `process`
+    // global, so `process.env.*` MUST NOT be read inside workflows.ts —
+    // doing so throws `ReferenceError: process is not defined` the moment
+    // the workflow starts. See ObjectTypeFunnelInput.continueAsNewThreshold.
+    const continueAsNewThresholdRaw =
+      process.env.FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD;
+    const continueAsNewThresholdParsed = continueAsNewThresholdRaw
+      ? Number(continueAsNewThresholdRaw)
+      : NaN;
+    const continueAsNewThreshold =
+      Number.isFinite(continueAsNewThresholdParsed) &&
+      continueAsNewThresholdParsed > 0
+        ? Math.floor(continueAsNewThresholdParsed)
+        : undefined;
+
     await temporalClient.workflow.signalWithStart("ObjectTypeFunnelWorkflow", {
       workflowId,
       taskQueue,
-      args: [{ ontologyId, objectTypeApiName }],
+      args: [{ ontologyId, objectTypeApiName, continueAsNewThreshold }],
       signal: signalType,
       signalArgs: [payload],
       workflowIdConflictPolicy: terminateOnSave ? "TERMINATE_EXISTING" : "USE_EXISTING",
