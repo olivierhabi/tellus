@@ -32,12 +32,17 @@ BEGIN;
 -- ---------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- status='OPEN' matches the `ontology_branch_status_check` constraint
+-- installed with the table (OPEN | MERGED | CLOSED). The earlier draft
+-- of this migration used 'active' which would have violated the check
+-- had any ontology existed at migration time; it only ran clean because
+-- fresh DBs have zero rows in `ontology` when 040 applies.
 INSERT INTO ontology_branch (branch_id, ontology_id, name, status, created_at, created_by, fork_point_edit_id)
 SELECT
   uuid_generate_v5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid, ontology_id::text || ':main'),
   ontology_id,
   'main',
-  'active',
+  'OPEN',
   now(),
   'migration-040',
   NULL

@@ -19,6 +19,7 @@
 // place and not inlined into many call sites.
 // ---------------------------------------------------------------------------
 
+import { v5 as uuidv5 } from "uuid";
 import { query } from "../db";
 
 // UUID v5 DNS namespace, matching the literal in
@@ -26,6 +27,22 @@ import { query } from "../db";
 // both must change in lockstep or backfilled rows and freshly-resolved
 // rows will diverge.
 const DNS_NS = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+
+/**
+ * Compute the deterministic `main` branch UUID for a given ontology.
+ * Kept in Node (rather than calling `uuid_generate_v5` in PG) so the
+ * code path does not depend on the `uuid-ossp` extension being in the
+ * connection's search_path — migration 040 installs it, but standalone
+ * deployments and some managed databases put it in a non-default
+ * schema.
+ *
+ * The output is byte-identical to Postgres'
+ * `uuid_generate_v5(dns_ns, ontology_id || ':main')` that the migration
+ * 040 backfill used.
+ */
+function deriveMainBranchId(ontologyId: string): string {
+  return uuidv5(`${ontologyId}:main`, DNS_NS);
+}
 
 // In-memory cache: ontologyId → mainBranchId. Branch rows never change
 // their UUID once created, so this is safe to cache for process lifetime.
@@ -35,10 +52,10 @@ const mainBranchCache = new Map<string, string>();
 /**
  * Resolve the UUID of the ontology's `main` branch. Looks up
  * `ontology_branch(ontology_id, name='main')`. Returns null when the
- * ontology has no `main` branch yet — callers must treat null as a
- * hard error and refuse the write (the migration 040 backfill inserts
- * `main` for every ontology, so null can only happen if migration 040
- * hasn't run, which is itself a wiring bug).
+ * ontology has no `main` branch yet.
+ *
+ * Note: this is a pure read. Callers that want the lazy-create
+ * backstop should go through `resolveBranchIdOrMain` instead.
  */
 export async function resolveMainBranchId(
   ontologyId: string,
@@ -65,9 +82,63 @@ export async function resolveMainBranchId(
 }
 
 /**
+ * Ensure the ontology has a `main` branch, creating it if missing.
+ * Uses the same deterministic UUID recipe as migration 040
+ * (uuid_generate_v5 of DNS namespace + `<ontology_id>:main`) so the
+ * generated UUID is byte-identical to what the backfill would have
+ * produced. The INSERT is guarded by ON CONFLICT DO NOTHING so
+ * concurrent callers converge on the same row.
+ *
+ * Returns the branch_id. Throws only if the ontology itself doesn't
+ * exist (FK violation) or the database is unreachable.
+ */
+export async function ensureMainBranchId(
+  ontologyId: string,
+): Promise<string> {
+  const existing = await resolveMainBranchId(ontologyId);
+  if (existing) return existing;
+
+  // Lazy create. Uses the deterministic UUID recipe from migration
+  // 040.1 (now computed in Node — see deriveMainBranchId) and the
+  // status value that satisfies the `ontology_branch_status_check`
+  // constraint from the table's creating migration
+  // (OPEN | MERGED | CLOSED). Migration 040's SQL backfill uses
+  // 'active' which would actually violate the check; it only happens
+  // to succeed in CI because fresh DBs have no ontologies at migration
+  // time so the backfill INSERT inserts 0 rows. 'OPEN' is the correct
+  // in-constraint equivalent for a live branch.
+  const branchId = deriveMainBranchId(ontologyId);
+  const insert = await query(
+    `INSERT INTO ontology_branch
+       (branch_id, ontology_id, name, status, created_at, created_by, fork_point_edit_id)
+     VALUES ($1::uuid, $2::uuid, 'main', 'OPEN', now(), 'ontologyService.create', NULL)
+     ON CONFLICT DO NOTHING
+     RETURNING branch_id`,
+    [branchId, ontologyId],
+  );
+
+  if (insert.rows.length > 0) {
+    const id = String(insert.rows[0].branch_id);
+    mainBranchCache.set(ontologyId, id);
+    return id;
+  }
+
+  // Concurrent caller won the race — re-read.
+  const afterRace = await resolveMainBranchId(ontologyId);
+  if (afterRace) return afterRace;
+
+  throw new Error(
+    `Failed to ensure 'main' branch for ontology '${ontologyId}' — ` +
+      `INSERT returned no row and follow-up SELECT found none.`,
+  );
+}
+
+/**
  * Resolve branchId, falling back to the ontology's `main` branch.
- * Throws if neither an explicit branchId nor a resolvable `main` is
- * available — this is the single runtime backstop and it fails loud.
+ * If `main` is missing (ontology was created without going through
+ * the migration 040 backfill, e.g. via direct seed INSERT), it is
+ * lazily created with the deterministic UUID so this call always
+ * succeeds for a valid ontology.
  *
  * This is the ONLY module permitted to perform this fallback. All
  * downstream code must accept branchId as a required parameter.
@@ -77,14 +148,7 @@ export async function resolveBranchIdOrMain(
   branchId: string | null | undefined,
 ): Promise<string> {
   if (branchId) return branchId;
-  const main = await resolveMainBranchId(ontologyId);
-  if (!main) {
-    throw new Error(
-      `No branch_id provided and no 'main' branch exists for ontology '${ontologyId}'. ` +
-        `Run migration 040 or pass x-branch-id explicitly.`,
-    );
-  }
-  return main;
+  return ensureMainBranchId(ontologyId);
 }
 
 /** Test-only — reset the ontology → main-branch cache. */
