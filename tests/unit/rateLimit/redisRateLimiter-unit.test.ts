@@ -160,4 +160,81 @@ describe("RedisRateLimiter", () => {
     expect(resA.allowed).toBe(false);
     expect(resB.allowed).toBe(true);
   });
+
+  it("record() emits tellus_rate_limit_record_failed_total and returns -1 on Redis error", async () => {
+    // F-P4-12 write-path degraded: record should not propagate the error
+    // up to the caller — it returns -1 and emits the failure counter.
+    const redis = new FakeRedis();
+    redis.failNext = true;
+    const limiter = makeLimiter(5, redis);
+    const count = await limiter.record("user-1");
+    expect(count).toBe(-1);
+    expect(incMock).toHaveBeenCalledWith(
+      "tellus_rate_limit_record_failed_total",
+      { scope: "test_scope" },
+    );
+  });
+
+  it("record() surfaces non-Error thrown values in warn log path", async () => {
+    // Redis client may throw a non-Error. Code path uses String(err) —
+    // cover the `err instanceof Error ? err.message : String(err)` branch.
+    const redis = {
+      async eval() {
+        throw "plain-string-failure";
+      },
+    };
+    const limiter = makeLimiter(5, redis as any);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const count = await limiter.record("user-1");
+      expect(count).toBe(-1);
+      expect(warnSpy).toHaveBeenCalled();
+      const logged = warnSpy.mock.calls[0][0] as string;
+      expect(logged).toContain("plain-string-failure");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("check() surfaces non-Error thrown values in warn log path", async () => {
+    const redis = {
+      async eval() {
+        throw "another-plain-error";
+      },
+    };
+    const limiter = makeLimiter(5, redis as any);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const res = await limiter.check("user-1");
+      expect(res.failedOpen).toBe(true);
+      expect(res.allowed).toBe(true);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("checkAndRecord reduces remaining by 1 on allow path", async () => {
+    const redis = new FakeRedis();
+    const limiter = makeLimiter(5, redis);
+    const res = await limiter.checkAndRecord("user-1");
+    expect(res.allowed).toBe(true);
+    // precheck.remaining = 5, after recording we advertise 4.
+    expect(res.remaining).toBe(4);
+  });
+
+  it("retryAfterMs is at least 1 ms (Math.max clamp)", async () => {
+    // Force oldestMs to equal nowMs so retry window calculation would
+    // otherwise be 0 — clamp to >= 1.
+    const redis: any = {
+      async eval() {
+        // return count >= maxRequests so precheck denies
+        return [3, Date.now() - 60_000]; // oldest is the cutoff edge
+      },
+    };
+    const limiter = makeLimiter(1, redis);
+    const res = await limiter.check("user-1");
+    expect(res.allowed).toBe(false);
+    expect(res.retryAfterMs).toBeGreaterThanOrEqual(1);
+  });
 });

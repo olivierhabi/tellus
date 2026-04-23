@@ -246,4 +246,102 @@ describe("verifyChainSegment — forward-walk verifier", () => {
     const report = await verifyChainSegment(client as any, { limit: 3 });
     expect(report.breaks.length).toBeGreaterThan(0);
   });
+
+  it("handles genesis row (null prev_hash, first row has expectedPrev=null)", async () => {
+    // Genesis row: prev_hash null, expectedPrev still null — must not be
+    // reported as a break. Exercises the `expectedPrev !== null` short-circuit.
+    const body = makeBody({ audit_id: "genesis", executed_at: "2026-04-23T00:00:00.000Z" });
+    const row_hash = expectedRowHash("", body);
+    const rows = [
+      {
+        ...body,
+        executed_at: new Date(body.executed_at),
+        prev_hash: null,
+        row_hash,
+      },
+    ];
+    const client = { query: vi.fn(async () => ({ rowCount: 1, rows })) };
+    const report = await verifyChainSegment(client as any, { limit: 1 });
+    expect(report.breaks).toEqual([]);
+    expect(report.verified).toBe(1);
+  });
+
+  it("defaults limit and startAfterExecutedAt when not provided", async () => {
+    const client = { query: vi.fn(async () => ({ rowCount: 0, rows: [] })) };
+    const report = await verifyChainSegment(client as any);
+    expect(report.verified).toBe(0);
+    expect(report.breaks).toEqual([]);
+    expect(report.last_verified_audit_id).toBeNull();
+    expect(report.last_verified_row_hash).toBeNull();
+    // Verify default args reached the query (default limit 1000, default date 1970)
+    const args = (client.query as any).mock.calls[0][1];
+    expect(args[1]).toBe(1000);
+    expect(String(args[0])).toContain("1970");
+  });
+
+  it("tolerates string executed_at (non-Date) column values", async () => {
+    const body = makeBody({ audit_id: "row-str" });
+    const row_hash = expectedRowHash("genesis-hash", body);
+    const rows = [
+      {
+        ...body,
+        executed_at: body.executed_at, // string, not Date
+        prev_hash: "genesis-hash",
+        row_hash,
+      },
+    ];
+    const client = { query: vi.fn(async () => ({ rowCount: 1, rows })) };
+    const report = await verifyChainSegment(client as any, { limit: 1 });
+    // Because executed_at is a string, it's coerced via String(); canonicalJson
+    // of the row body also uses the same string — recompute matches stored.
+    expect(report.breaks).toEqual([]);
+    expect(report.verified).toBe(1);
+  });
+
+  it("defaults null parameters/affected_objects/metadata to empty", async () => {
+    // Row with null collection fields — exercises the ?? fallbacks.
+    const base = makeBody({ audit_id: "null-fields" });
+    const storedBody: AuditRowBody = {
+      ...base,
+      parameters: {},
+      affected_objects: [],
+      metadata: {},
+    };
+    const row_hash = expectedRowHash("genesis-hash", storedBody);
+    const rows = [
+      {
+        ...base,
+        parameters: null,
+        affected_objects: null,
+        metadata: null,
+        executed_at: new Date(base.executed_at),
+        prev_hash: "genesis-hash",
+        row_hash,
+      },
+    ];
+    const client = { query: vi.fn(async () => ({ rowCount: 1, rows })) };
+    const report = await verifyChainSegment(client as any, { limit: 1 });
+    expect(report.breaks).toEqual([]);
+    expect(report.verified).toBe(1);
+  });
+
+  it("does not emit breaks counter when chain is clean", async () => {
+    const rows = chain(2);
+    const client = { query: vi.fn(async () => ({ rowCount: 2, rows })) };
+    await verifyChainSegment(client as any, { limit: 2 });
+    expect(incMock).not.toHaveBeenCalledWith(
+      "tellus_audit_chain_breaks_total",
+      expect.any(Object),
+    );
+  });
+});
+
+describe("AuditHashChainError — error class branches", () => {
+  it("carries code + name + message", () => {
+    const err = new AuditHashChainError("CODE_X", "boom");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("AuditHashChainError");
+    expect(err.code).toBe("CODE_X");
+    expect(err.message).toBe("boom");
+  });
 });

@@ -2,11 +2,15 @@ name: m1-continuous-green
 on:
   schedule: [{ cron: "0 2 * * *" }]
   workflow_dispatch:
+env:
+  # Force JavaScript actions still bundled for Node 20 to run under Node 24
+  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 jobs:
   m1:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Query Prometheus for M.1 invariants
         run: |
           echo "M.1.1 coverage gate — checked by coverage-gate.yml"
