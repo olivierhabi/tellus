@@ -107,11 +107,16 @@ export async function ensureMainBranchId(
   // to succeed in CI because fresh DBs have no ontologies at migration
   // time so the backfill INSERT inserts 0 rows. 'OPEN' is the correct
   // in-constraint equivalent for a live branch.
+  // Only the columns that exist in ALL historical schemas of
+  // ontology_branch — `fork_point_edit_id` is added by migration 035
+  // via ALTER TABLE, and `parent_branch_id` is nullable by default.
+  // Keeping the column list minimal lets this INSERT succeed regardless
+  // of whether later migrations have finished populating the table.
   const branchId = deriveMainBranchId(ontologyId);
   const insert = await query(
     `INSERT INTO ontology_branch
-       (branch_id, ontology_id, name, status, created_at, created_by, fork_point_edit_id)
-     VALUES ($1::uuid, $2::uuid, 'main', 'OPEN', now(), 'ontologyService.create', NULL)
+       (branch_id, ontology_id, name, status, created_by)
+     VALUES ($1::uuid, $2::uuid, 'main', 'OPEN', 'ontologyService.create')
      ON CONFLICT DO NOTHING
      RETURNING branch_id`,
     [branchId, ontologyId],
