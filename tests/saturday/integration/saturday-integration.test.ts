@@ -72,8 +72,18 @@ describe("Saturday Integration Tests", async () => {
   beforeAll(async () => {
     await ensureServer();
 
-    // Create test data directory
-    const dataDir = path.join(process.cwd(), "data");
+    // Create test data directory.
+    //
+    // datasourceService.resolveAndValidatePath (src/services/datasourceService.ts:24-36)
+    // rejects any filePath outside process.env.DATA_DIR (default "./data"). CI sets
+    // DATA_DIR=/tmp/ontology-testdata globally (.github/workflows/ci.yml:40) and
+    // globalSetup mirrors that for the seed processes (tests/globalSetup.ts:58,115).
+    // If this test wrote to process.cwd()/data the server would reject with 400
+    // VALIDATION_FAILED "File path is outside the allowed data directory". Honor
+    // DATA_DIR here so fixture CSVs land inside the allowlist.
+    const dataDir = process.env.DATA_DIR
+      ? path.resolve(process.env.DATA_DIR)
+      : path.join(process.cwd(), "data");
     fs.mkdirSync(dataDir, { recursive: true });
 
     // Create test CSV files
