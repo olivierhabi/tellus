@@ -206,7 +206,51 @@ async function waitForPg(maxWaitMs = 30_000): Promise<void> {
   );
 }
 
+/**
+ * Reuse branch — set by tests/runAll.ts via TELLUS_REUSE_SERVER=1.
+ *
+ * When runAll already owns a healthy server on :3000 (it calls startServer()
+ * before Phase 3), each vitest invocation must NOT:
+ *   - kill port 3000 (that nukes runAll's server mid-run)
+ *   - re-run src/seed.ts + actionTypes.seed.ts (wasted ~4s each, ~400 MB
+ *     peak RSS in two tsx children)
+ *   - re-bootstrap Keycloak (the CI workflow already did it at
+ *     .github/workflows/ci.yml:554-578, and runAll's server depends on it)
+ *   - spawn a duplicate `tsx src/server.ts` (the root cause of the OOM —
+ *     two app servers and five tsx children concurrent on a 7 GB runner
+ *     reliably tripped the kernel OOM killer, exit 137).
+ *
+ * We still run the v8 coverage dir prep if COVERAGE_COLLECT_SERVER=1, and
+ * we still probe :3000/health so the caller sees a clear error if the
+ * runAll-owned server died since it was last verified.
+ */
+async function isServerHealthy(): Promise<boolean> {
+  try {
+    const res = await fetch("http://localhost:3000/health", {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function setup(): Promise<void> {
+  if (process.env.TELLUS_REUSE_SERVER === "1") {
+    if (await isServerHealthy()) {
+      console.log(
+        "[globalSetup] TELLUS_REUSE_SERVER=1 and :3000 is healthy — " +
+          "reusing caller-managed server (skipping seed, Keycloak bootstrap, and server spawn).",
+      );
+      return;
+    }
+    console.warn(
+      "[globalSetup] TELLUS_REUSE_SERVER=1 but :3000 is NOT healthy — " +
+        "falling through to full setup. Caller (runAll.ts) should have " +
+        "started the server before invoking vitest.",
+    );
+  }
+
   // Step 0: Ensure PostgreSQL is reachable before spawning the server.
   // Docker Desktop on macOS can take several seconds to wake up.
   console.log("[globalSetup] Waiting for PostgreSQL...");
@@ -343,6 +387,14 @@ export async function setup(): Promise<void> {
 }
 
 export async function teardown(): Promise<void> {
+  // Reuse branch: we did NOT spawn a server (serverProcess is null) because
+  // runAll.ts owns it. Killing :3000 here would destroy the caller's server
+  // between vitest invocations and break the subsequent Phase 3 suites.
+  // Leave lifecycle management entirely to runAll in that mode.
+  if (process.env.TELLUS_REUSE_SERVER === "1" && !serverProcess) {
+    return;
+  }
+
   if (serverProcess?.pid) {
     try {
       // Kill the entire process group (negative PID) since detached=true.

@@ -245,15 +245,25 @@ const DAY_SUITES = [
 // out of memory` rather than SIGKILL (exit 137) that takes down siblings.
 //
 // Honours a caller-supplied NODE_OPTIONS by appending rather than overwriting.
+// 2048 MB is generous enough for a warm tsx + vitest worker loading OTel
+// auto-instrumentations and the full server module graph; 1024 MB was the
+// former cap and caused V8 to force GC churn that slowed Phase 3 without
+// bounding RSS (native modules like duckdb/pg/nodejs-polars live off-heap).
 const EXISTING_NODE_OPTIONS = (process.env.NODE_OPTIONS ?? "").trim();
 const CHILD_NODE_OPTIONS = EXISTING_NODE_OPTIONS.includes("--max-old-space-size")
   ? EXISTING_NODE_OPTIONS
-  : `${EXISTING_NODE_OPTIONS} --max-old-space-size=1024`.trim();
+  : `${EXISTING_NODE_OPTIONS} --max-old-space-size=2048`.trim();
 
 const CHILD_ENV: Record<string, string> = {
   ...(process.env as Record<string, string>),
   NODE_ENV: "test",
   NODE_OPTIONS: CHILD_NODE_OPTIONS,
+  // Signal to tests/globalSetup.ts that a healthy server on :3000 is already
+  // under runAll's management; it must NOT kill-port, re-seed, re-bootstrap
+  // Keycloak, or spawn a duplicate server. Phase 3 was OOM-killed because
+  // every vitest call with the default config did all four again on top of
+  // runAll's server. See globalSetup.ts:setup() for the reuse branch.
+  TELLUS_REUSE_SERVER: "1",
   RATE_LIMIT_MAX: "10000",
   ACTION_RATE_LIMIT_MAX: "10000",
   USER_RATE_LIMIT_MAX: "50000",
@@ -329,6 +339,11 @@ function runCommand(
       timeout: timeoutMs,
       stdio: ["pipe", "pipe", "pipe"],
       env: CHILD_ENV,
+      // Default is 1 MiB which vitest --reporter=verbose trivially overflows,
+      // killing the child with ENOBUFS mid-run. 64 MiB is ample for every
+      // suite we have today and bounded enough that the parent tsx process
+      // does not balloon while buffering child output.
+      maxBuffer: 64 * 1024 * 1024,
     });
     const durationMs = Date.now() - start;
 
@@ -396,8 +411,28 @@ function runDaySuite(day: string): SuiteResult {
   return result;
 }
 
+/**
+ * Pick the right vitest config for a test pattern.
+ *
+ * Unit patterns (`tests/<day>/unit`) must use vitest.unit.config.ts so that
+ * vitest does NOT run tests/globalSetup.ts — which otherwise kills port 3000,
+ * respawns seeds + Keycloak bootstrap + a duplicate server, and OOM-kills
+ * the whole runner. Integration patterns genuinely need the full globalSetup
+ * (server on :3000), so they fall through to the default vitest.config.ts;
+ * `TELLUS_REUSE_SERVER=1` in CHILD_ENV tells that globalSetup to reuse the
+ * server runAll already manages instead of respawning one.
+ */
+function isUnitPattern(pattern: string): boolean {
+  return /(^|\/)unit(\/|$)/.test(pattern);
+}
+
 function runVitestSuite(pattern: string, label: string): SuiteResult {
-  const result = runCommand(`npx vitest run ${pattern} --reporter=verbose`, label, 300_000);
+  const configFlag = isUnitPattern(pattern) ? " --config vitest.unit.config.ts" : "";
+  const result = runCommand(
+    `npx vitest run ${pattern}${configFlag} --reporter=verbose`,
+    label,
+    300_000,
+  );
   result.category = "vitest";
   return result;
 }
