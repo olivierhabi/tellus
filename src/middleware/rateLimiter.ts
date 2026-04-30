@@ -19,6 +19,8 @@
 
 import crypto from "crypto";
 import { Request, Response, NextFunction } from "express";
+import { RedisRateLimiter } from "../services/rateLimit/redisRateLimiter";
+import { incCounter } from "../services/funnel/metrics";
 
 // ---------------------------------------------------------------------------
 // Rate Limit Configuration
@@ -36,11 +38,76 @@ export const RATE_LIMITS = {
   perActionType: { maxRequests: envInt("ACTION_RATE_LIMIT_MAX", 100), windowMs: 60 * 1000 },
   /** Per user: max 500 executions per minute across all action types (override: USER_RATE_LIMIT_MAX). */
   perUser: { maxRequests: envInt("USER_RATE_LIMIT_MAX", 500), windowMs: 60 * 1000 },
-  /** Global: max 2000 executions per minute across entire system (override: GLOBAL_ACTION_RATE_LIMIT_MAX). */
-  global: { maxRequests: envInt("GLOBAL_ACTION_RATE_LIMIT_MAX", 2000), windowMs: 60 * 1000 },
+  /**
+   * Global: max 5000 executions per minute across entire system
+   * (override: GLOBAL_ACTION_RATE_LIMIT_MAX).
+   *
+   * Raised from 2000/min (33/s) to 5000/min (83/s) to provide 67% headroom
+   * above the 50 actions/s SLO. F-P4-12 override-prompt §3 Block D.1.
+   */
+  global: { maxRequests: envInt("GLOBAL_ACTION_RATE_LIMIT_MAX", 5000), windowMs: 60 * 1000 },
   /** Batch endpoint: max 10 batch requests per minute per user (override: BATCH_RATE_LIMIT_MAX). */
   batchPerUser: { maxRequests: envInt("BATCH_RATE_LIMIT_MAX", 10), windowMs: 60 * 1000 },
 };
+
+// ---------------------------------------------------------------------------
+// Redis-backed limiter registry (F-P4-12 closure).
+//
+// When RATE_LIMIT_BACKEND=redis, the middleware routes all rate-limit
+// check/record operations through a shared Redis sliding window via
+// RedisRateLimiter. Under K8s multi-replica deployments this is the only
+// correct behaviour — the in-memory Map path below is kept for
+// single-replica dev/test bring-up only.
+//
+// Initialization: src/server.ts calls initRedisRateLimiters(redisClient)
+// once, after the Redis client has connected. Before that call the
+// registry is empty and the middleware falls back to the in-memory path
+// (tagged in Prometheus via tellus_rate_limit_backend_selected_total).
+// ---------------------------------------------------------------------------
+
+let redisLimiters: {
+  perActionType: RedisRateLimiter;
+  perUser: RedisRateLimiter;
+  global: RedisRateLimiter;
+  batchPerUser: RedisRateLimiter;
+} | null = null;
+
+export function initRedisRateLimiters(client: any /* RedisClientType */): void {
+  redisLimiters = {
+    perActionType: new RedisRateLimiter({
+      client,
+      keyPrefix: "tellus:rl:action_type",
+      windowMs: RATE_LIMITS.perActionType.windowMs,
+      maxRequests: RATE_LIMITS.perActionType.maxRequests,
+      scope: "action_type",
+    }),
+    perUser: new RedisRateLimiter({
+      client,
+      keyPrefix: "tellus:rl:user",
+      windowMs: RATE_LIMITS.perUser.windowMs,
+      maxRequests: RATE_LIMITS.perUser.maxRequests,
+      scope: "user",
+    }),
+    global: new RedisRateLimiter({
+      client,
+      keyPrefix: "tellus:rl:global",
+      windowMs: RATE_LIMITS.global.windowMs,
+      maxRequests: RATE_LIMITS.global.maxRequests,
+      scope: "global",
+    }),
+    batchPerUser: new RedisRateLimiter({
+      client,
+      keyPrefix: "tellus:rl:batch",
+      windowMs: RATE_LIMITS.batchPerUser.windowMs,
+      maxRequests: RATE_LIMITS.batchPerUser.maxRequests,
+      scope: "batch_per_user",
+    }),
+  };
+}
+
+function useRedisBackend(): boolean {
+  return process.env.RATE_LIMIT_BACKEND === "redis" && redisLimiters !== null;
+}
 
 // ---------------------------------------------------------------------------
 // RateLimiter Class
@@ -220,6 +287,12 @@ export function actionRateLimiter(
   res: Response,
   next: NextFunction
 ): void {
+  if (useRedisBackend()) {
+    void actionRateLimiterRedis(req, res, next);
+    return;
+  }
+  incCounter("tellus_rate_limit_backend_selected_total", { backend: "memory" });
+
   const actionType = req.params.actionTypeApiName;
   const user = (req as any).user?.id || "anonymous";
 
@@ -273,6 +346,113 @@ export function actionRateLimiter(
 }
 
 // ---------------------------------------------------------------------------
+// Async Redis-backed variants (F-P4-12 closure).
+//
+// Invoked from the sync entrypoints when `RATE_LIMIT_BACKEND=redis` and
+// the Redis registry has been initialized. Structured identically to the
+// in-memory variants — two-phase check, same 429 envelope, same headers —
+// but using RedisRateLimiter so all replicas share state.
+// ---------------------------------------------------------------------------
+
+function emit429(
+  res: Response,
+  scope: string,
+  retryAfterMs: number,
+): void {
+  const retryAfterSec = Math.ceil((retryAfterMs || 1000) / 1000);
+  res.set("Retry-After", String(retryAfterSec));
+  res.set("X-RateLimit-Scope", scope);
+  res.set("X-RateLimit-Remaining", "0");
+  res.status(429).json({
+    errorCode: "RATE_LIMIT_EXCEEDED",
+    errorName: "RateLimitExceededError",
+    errorInstanceId: crypto.randomUUID(),
+    message: `Rate limit exceeded for scope '${scope}'. Retry after ${retryAfterSec} seconds.`,
+    parameters: { scope, retryAfterMs },
+  });
+  incCounter("tellus_rate_limit_exceeded_total", { scope });
+}
+
+async function actionRateLimiterRedis(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  incCounter("tellus_rate_limit_backend_selected_total", { backend: "redis" });
+  const r = redisLimiters!;
+  const actionType = req.params.actionTypeApiName ?? "unknown";
+  const user = (req as any).user?.id || "anonymous";
+
+  // Phase 1 — parallel checks on all three scopes, no recording.
+  const [checkAction, checkUser, checkGlobal] = await Promise.all([
+    r.perActionType.check(actionType),
+    r.perUser.check(user),
+    r.global.check("all"),
+  ]);
+
+  const blocked =
+    !checkAction.allowed ? { res: checkAction, scope: "action_type" } :
+    !checkUser.allowed   ? { res: checkUser,   scope: "user" } :
+    !checkGlobal.allowed ? { res: checkGlobal, scope: "global" } :
+    null;
+
+  if (blocked) {
+    emit429(res, blocked.scope, blocked.res.retryAfterMs ?? 1000);
+    return;
+  }
+
+  // Phase 2 — record on all three scopes. Parallel; failures surface via
+  // the RedisRateLimiter's own fail-open counters and are non-fatal.
+  await Promise.all([
+    r.perActionType.record(actionType),
+    r.perUser.record(user),
+    r.global.record("all"),
+  ]);
+
+  const minRemaining = Math.min(
+    Math.max(0, checkAction.remaining - 1),
+    Math.max(0, checkUser.remaining - 1),
+    Math.max(0, checkGlobal.remaining - 1),
+  );
+  res.set("X-RateLimit-Remaining", String(minRemaining));
+  next();
+}
+
+async function batchRateLimiterRedis(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  incCounter("tellus_rate_limit_backend_selected_total", { backend: "redis" });
+  const r = redisLimiters!;
+  const user = (req as any).user?.id || "anonymous";
+
+  const [checkBatch, checkGlobal] = await Promise.all([
+    r.batchPerUser.check(user),
+    r.global.check("all"),
+  ]);
+
+  const blocked =
+    !checkBatch.allowed  ? { res: checkBatch,  scope: "batch_per_user" } :
+    !checkGlobal.allowed ? { res: checkGlobal, scope: "global" } :
+    null;
+
+  if (blocked) {
+    emit429(res, blocked.scope, blocked.res.retryAfterMs ?? 1000);
+    return;
+  }
+
+  await Promise.all([r.batchPerUser.record(user), r.global.record("all")]);
+
+  const minRemaining = Math.min(
+    Math.max(0, checkBatch.remaining - 1),
+    Math.max(0, checkGlobal.remaining - 1),
+  );
+  res.set("X-RateLimit-Remaining", String(minRemaining));
+  next();
+}
+
+// ---------------------------------------------------------------------------
 // Express Middleware: Batch Rate Limiter
 //
 // Applied to POST /:actionTypeApiName/applyBatch
@@ -284,6 +464,12 @@ export function batchRateLimiter(
   res: Response,
   next: NextFunction
 ): void {
+  if (useRedisBackend()) {
+    void batchRateLimiterRedis(req, res, next);
+    return;
+  }
+  incCounter("tellus_rate_limit_backend_selected_total", { backend: "memory" });
+
   const user = (req as any).user?.id || "anonymous";
 
   // Scope definitions: key, limit config, and human-readable scope name.

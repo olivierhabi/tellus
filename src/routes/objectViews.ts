@@ -6,7 +6,7 @@
 // query endpoints in objects.ts — views are designed for UI consumption with
 // property metadata, interface implementations, and linked object summaries.
 //
-// Mounted at: /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName
+// Mounted at: /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName
 //
 // Endpoints:
 //   GET  .../objects/:primaryKey/view      — Single object view (Task 11)
@@ -24,6 +24,9 @@ import {
 } from "../services/propertyMetadataService";
 import { executeGetObject } from "../services/queryExecutor";
 import { countLinks, resolveLinks } from "../services/linkResolverService";
+import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { incCounter } from "../services/funnel/metrics";
 import linkTypeModel from "../models/linkType";
 
 const router = Router({ mergeParams: true });
@@ -113,7 +116,9 @@ async function getInterfaceImplementations(
 async function getLinkSummary(
   ontologyId: string,
   objectTypeId: string,
-  primaryKey: string
+  primaryKey: string,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<Array<Record<string, unknown>>> {
   // Get all link types where this object type is source or target
   const linkTypes = await linkTypeModel.listByOntology(ontologyId);
@@ -132,7 +137,7 @@ async function getLinkSummary(
       const direction: "forward" | "reverse" = isSource ? "forward" : "reverse";
 
       try {
-        const count = await countLinks(lt, primaryKey, direction);
+        const count = await countLinks(lt, primaryKey, direction, securityFilter, branchId);
         return {
           linkTypeApiName: lt.api_name,
           linkTypeDisplayName: lt.display_name,
@@ -170,10 +175,13 @@ async function buildObjectView(
   objectTypeApiName: string,
   objectTypeId: string,
   primaryKey: string,
-  include: string[] = ["properties", "links", "interfaces"]
+  include: string[] = ["properties", "links", "interfaces"],
+  securityFilter?: Record<string, unknown> | null,
+  branchId: string | null = null,
 ): Promise<Record<string, unknown>> {
-  // Fetch the raw object from OpenSearch
-  const rawObject = await executeGetObject(objectTypeApiName, primaryKey);
+  // Fetch the raw object from OpenSearch.
+  // F-P3-13: branchId forwarded so reads respect branch isolation.
+  const rawObject = await executeGetObject(objectTypeApiName, primaryKey, securityFilter, branchId);
   if (!rawObject) {
     throw appError(
       "OBJECT_NOT_FOUND",
@@ -213,7 +221,9 @@ async function buildObjectView(
     view.linkedObjectsSummary = await getLinkSummary(
       ontologyId,
       objectTypeId,
-      primaryKey
+      primaryKey,
+      securityFilter,
+      branchId,
     );
   }
 
@@ -236,11 +246,20 @@ router.get(
         objectTypeApiName
       );
 
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.single",
+        scoped: String(branchId !== null),
+      });
       const view = await buildObjectView(
         ontologyId,
         objectTypeApiName,
         objectTypeId,
-        primaryKey
+        primaryKey,
+        undefined,
+        secFilter,
+        branchId
       );
 
       const elapsed = Date.now() - start;
@@ -301,6 +320,13 @@ router.get(
         }
       }
 
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.linked",
+        scoped: String(branchId !== null),
+      });
+
       // Resolve linked objects for each link type
       const linkGroups: Array<Record<string, unknown>> = [];
 
@@ -324,7 +350,7 @@ router.get(
           const result = await resolveLinks(lt, primaryKey, direction, {
             pageSize,
             pageToken: pageToken as string | undefined,
-          });
+          }, secFilter, branchId);
 
           linkGroups.push({
             linkTypeApiName: lt.api_name,
@@ -415,6 +441,8 @@ router.post(
         objectTypeApiName
       );
 
+      const secFilter = buildSecurityFilter(req.security);
+
       // Build views for all primary keys in parallel
       const settled = await Promise.allSettled(
         primaryKeys.map(async (pk: string) => {
@@ -424,7 +452,8 @@ router.post(
               objectTypeApiName,
               objectTypeId,
               pk,
-              effectiveInclude
+              effectiveInclude,
+              secFilter
             );
           } catch (err: any) {
             // Return a partial result with error info
@@ -467,7 +496,7 @@ router.post(
 
 // ---------------------------------------------------------------------------
 // Spec-compliant routes without ontologyId in path (Tasks 11-13)
-// Mounted at: /api/v2/objects/:objectType
+// Mounted at: /api/v1/objects/:objectType
 // ontologyId is resolved by looking up the Object Type in PostgreSQL.
 // ---------------------------------------------------------------------------
 
@@ -495,7 +524,7 @@ async function resolveObjectType(
   };
 }
 
-// GET /api/v2/objects/:objectType/:primaryKey/view
+// GET /api/v1/objects/:objectType/:primaryKey/view
 objectViewsByTypeRouter.get(
   "/:primaryKey/view",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -504,11 +533,20 @@ objectViewsByTypeRouter.get(
       const { objectType, primaryKey } = req.params;
       const { ontologyId, objectTypeId } = await resolveObjectType(objectType);
 
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.byType.single",
+        scoped: String(branchId !== null),
+      });
       const view = await buildObjectView(
         ontologyId,
         objectType,
         objectTypeId,
-        primaryKey
+        primaryKey,
+        undefined,
+        secFilter,
+        branchId,
       );
 
       const elapsed = Date.now() - start;
@@ -523,7 +561,7 @@ objectViewsByTypeRouter.get(
   }
 );
 
-// GET /api/v2/objects/:objectType/:primaryKey/linked
+// GET /api/v1/objects/:objectType/:primaryKey/linked
 objectViewsByTypeRouter.get(
   "/:primaryKey/linked",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -561,6 +599,12 @@ objectViewsByTypeRouter.get(
         }
       }
 
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objectViews.byType.linked",
+        scoped: String(branchId !== null),
+      });
       const linkGroups: Array<Record<string, unknown>> = [];
 
       for (const lt of relevantLinks) {
@@ -578,7 +622,7 @@ objectViewsByTypeRouter.get(
           const result = await resolveLinks(lt, primaryKey, direction, {
             pageSize,
             pageToken: pageToken as string | undefined,
-          });
+          }, secFilter, branchId);
 
           linkGroups.push({
             linkTypeApiName: lt.api_name,
@@ -621,7 +665,7 @@ objectViewsByTypeRouter.get(
   }
 );
 
-// POST /api/v2/objects/:objectType/batchView
+// POST /api/v1/objects/:objectType/batchView
 objectViewsByTypeRouter.post(
   "/batchView",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -657,6 +701,7 @@ objectViewsByTypeRouter.post(
         : validIncludes;
 
       const { ontologyId, objectTypeId } = await resolveObjectType(objectType);
+      const secFilter = buildSecurityFilter(req.security);
 
       const settled = await Promise.allSettled(
         primaryKeys.map(async (pk: string) => {
@@ -666,7 +711,8 @@ objectViewsByTypeRouter.post(
               objectType,
               objectTypeId,
               pk,
-              effectiveInclude
+              effectiveInclude,
+              secFilter
             );
           } catch (err: any) {
             return {

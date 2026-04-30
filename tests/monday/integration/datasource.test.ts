@@ -46,7 +46,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Register datasource with column mapping (Tasks 17, 23)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/datasource`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/datasource`,
       {
         datasetName: "Employee Dataset",
         filePath: CSV_PATH,
@@ -77,7 +77,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Duplicate datasource fails (Task 17)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/datasource`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/datasource`,
       {
         datasetName: "Dup",
         filePath: CSV_PATH,
@@ -92,7 +92,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Bad column mapping rejected (Task 23)", async () => {
     const { status: createStatus } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/batch`,
       {
         apiName: "TempWorker",
         displayName: "Temp Worker",
@@ -109,7 +109,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
 
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/TempWorker/datasource`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/TempWorker/datasource`,
       {
         datasetName: "Bad Mapping DS",
         filePath: tempCsvPath,
@@ -122,13 +122,13 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
     t.assert(body.error.message.includes("does not exist"), "mentions non-existent property");
 
     fs.unlinkSync(tempCsvPath);
-    await api("DELETE", `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/TempWorker`);
+    await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/TempWorker`);
   });
 
   await t.test("Get datasource (Task 18)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/datasource`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/datasource`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.datasetName === "Employee Dataset", "datasetName matches");
@@ -138,7 +138,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Scan datasource (Task 24)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/datasource/scan`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/datasource/scan`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(typeof body.schemaChanged === "boolean", "schemaChanged is boolean");

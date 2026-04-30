@@ -5,14 +5,14 @@
 // primary interface for action execution — all action executions go through
 // this route.
 //
-// Mounted at: /api/v2/ontologies/:ontologyId/actions
+// Mounted at: /api/v1/ontology/:ontologyId/actions
 //
 // Endpoints:
 //   POST /:actionTypeApiName/apply      — Execute an action
 //   POST /:actionTypeApiName/applyBatch — Bulk-execute an action (Task 25)
 //   POST /:actionTypeApiName/validate   — Dry-run validation (no edits applied)
 //
-// The /validate and /applyBatch endpoints are also mounted at /api/v2/actions
+// The /validate and /applyBatch endpoints are also mounted at /api/v1/actions
 // (without ontologyId) via the validateRouter and batchRouter exports. In
 // that case, the default ontology is used automatically.
 // ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ import { OntologyError } from "../utils/queryErrors";
 import {
   checkIdempotencyKey,
   storeIdempotencyKey,
+  withIdempotencyLock,
 } from "../actions/idempotency";
 import { actionRateLimiter, batchRateLimiter } from "../middleware/rateLimiter";
 
@@ -69,35 +70,23 @@ router.post(
       }
 
       // ---------------------------------------------------------------
-      // Idempotency check (Task 21)
+      // Idempotency (Task 21, Phase A5 F-04)
       //
-      // If the client includes an Idempotency-Key header, check whether
-      // we already have a cached result for this key + action type pair.
-      // If so, return the cached result immediately without re-executing.
+      // If the client supplied an `Idempotency-Key` header we must:
+      //   1. Serialize concurrent requests for that key (advisory lock).
+      //   2. Re-check the cache inside the lock — a concurrent first
+      //      winner may have just cached a result.
+      //   3. Execute the action.
+      //   4. Cache the result (success or error) before releasing.
+      //
+      // Without step 1, two requests that arrive inside a ~1ms window
+      // both miss the cache, both execute, both cache — F-04 exactly.
+      // The advisory lock turns the window into a queue: the loser
+      // wakes on step 2 and returns the cached result.
       // ---------------------------------------------------------------
       const idempotencyKey = req.headers["idempotency-key"] as
         | string
         | undefined;
-
-      if (idempotencyKey) {
-        const cached = await checkIdempotencyKey(
-          idempotencyKey,
-          actionTypeApiName
-        );
-        if (cached) {
-          // Replay the cached response. The cached payload stores
-          // _httpStatus and _isError so we know how to respond.
-          const { _httpStatus, _isError, ...body } = cached as {
-            _httpStatus: number;
-            _isError: boolean;
-            [key: string]: unknown;
-          };
-          const status =
-            typeof _httpStatus === "number" ? _httpStatus : 200;
-          res.setHeader("X-Idempotency-Cached", "true");
-          return res.status(status).json(body);
-        }
-      }
 
       // Optimistic concurrency: validate $expectedVersion early (Task 22)
       let expectedVersion: number | undefined;
@@ -125,61 +114,86 @@ router.post(
         expectedVersion,
       };
 
-      // Execute the action — throws OntologyError on failure (after audit log)
-      const result = await executeAction(
-        ontologyId,
-        actionTypeApiName,
-        parameters,
-        context
-      );
+      // Core execute+store closure. Runs EITHER bare (no idempotency key)
+      // OR under a session-level advisory lock (with a key). Both paths
+      // share the same body so that on a cache-hit inside the lock we
+      // still produce the cached response to the client.
+      const doExecute = async () => {
+        // Step 2: cache re-check inside the lock (or first check if no lock).
+        if (idempotencyKey) {
+          const cached = await checkIdempotencyKey(
+            idempotencyKey,
+            actionTypeApiName,
+          );
+          if (cached) {
+            const { _httpStatus, _isError, ...body } = cached as {
+              _httpStatus: number;
+              _isError: boolean;
+              [key: string]: unknown;
+            };
+            const status =
+              typeof _httpStatus === "number" ? _httpStatus : 200;
+            res.setHeader("X-Idempotency-Cached", "true");
+            res.status(status).json(body);
+            return;
+          }
+        }
 
-      // If we reach here, execution succeeded
-      const successBody = {
-        executionId: result.executionId,
-        result: result.result,
-        affectedObjects: result.affectedObjects,
-        durationMs: result.durationMs,
+        try {
+          // Step 3: execute the action
+          const result = await executeAction(
+            ontologyId,
+            actionTypeApiName,
+            parameters,
+            context,
+          );
+
+          const successBody = {
+            executionId: result.executionId,
+            result: result.result,
+            affectedObjects: result.affectedObjects,
+            durationMs: result.durationMs,
+          };
+
+          // Step 4a: cache success
+          if (idempotencyKey) {
+            await storeIdempotencyKey(
+              idempotencyKey,
+              actionTypeApiName,
+              result.executionId,
+              { _httpStatus: 200, _isError: false, ...successBody },
+            );
+          }
+
+          res.status(200).json(successBody);
+        } catch (err: unknown) {
+          // Step 4b: cache error (same key → same error on retry)
+          if (err instanceof OntologyError && idempotencyKey) {
+            const errorBody = err.toResponse();
+            const execId =
+              (err.parameters?.executionId as string) ||
+              crypto.randomUUID();
+            await storeIdempotencyKey(
+              idempotencyKey,
+              actionTypeApiName,
+              execId,
+              {
+                _httpStatus: err.statusCode,
+                _isError: true,
+                ...errorBody,
+              },
+            );
+          }
+          throw err;
+        }
       };
 
-      // Cache the successful result if an idempotency key was provided
       if (idempotencyKey) {
-        await storeIdempotencyKey(
-          idempotencyKey,
-          actionTypeApiName,
-          result.executionId,
-          { _httpStatus: 200, _isError: false, ...successBody }
-        );
+        await withIdempotencyLock(idempotencyKey, doExecute);
+      } else {
+        await doExecute();
       }
-
-      return res.status(200).json(successBody);
     } catch (err: any) {
-      // ---------------------------------------------------------------
-      // Idempotency: cache failed results too (Task 21)
-      //
-      // If the client provided an idempotency key and the action failed,
-      // cache the error response so that retries get the same error back
-      // without re-executing. We build the standardized error body here,
-      // cache it, then re-throw so the global error handler sends it.
-      // ---------------------------------------------------------------
-      if (err instanceof OntologyError) {
-        const idempotencyKey = req.headers["idempotency-key"] as
-          | string
-          | undefined;
-        if (idempotencyKey) {
-          const errorBody = err.toResponse();
-          // Use a synthetic execution ID from the error parameters if
-          // available (the executor includes it), otherwise generate one
-          const execId =
-            (err.parameters?.executionId as string) ||
-            crypto.randomUUID();
-          await storeIdempotencyKey(idempotencyKey, req.params.actionTypeApiName, execId, {
-            _httpStatus: err.statusCode,
-            _isError: true,
-            ...errorBody,
-          });
-        }
-        return next(err);
-      }
       next(err);
     }
   }
@@ -425,8 +439,8 @@ router.post(
   "/:actionTypeApiName/validate",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // ontologyId may come from the URL (/api/v2/ontologies/:ontologyId/actions)
-      // or be resolved from the default ontology (/api/v2/actions)
+      // ontologyId may come from the URL (/api/v1/ontology/:ontologyId/actions)
+      // or be resolved from the default ontology (/api/v1/actions)
       let ontologyId = req.params.ontologyId;
       const { actionTypeApiName } = req.params;
 
@@ -495,7 +509,7 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// Validate-only router (mounted at /api/v2/actions — no ontologyId)
+// Validate-only router (mounted at /api/v1/actions — no ontologyId)
 // ---------------------------------------------------------------------------
 
 const validateRouter = Router({ mergeParams: true });
@@ -568,9 +582,9 @@ validateRouter.post(
 );
 
 // ---------------------------------------------------------------------------
-// Batch-only router (mounted at /api/v2/actions — no ontologyId)
+// Batch-only router (mounted at /api/v1/actions — no ontologyId)
 //
-// This allows clients to call POST /api/v2/actions/:actionTypeApiName/applyBatch
+// This allows clients to call POST /api/v1/actions/:actionTypeApiName/applyBatch
 // without specifying the ontologyId in the URL. The default ontology is used.
 // ---------------------------------------------------------------------------
 

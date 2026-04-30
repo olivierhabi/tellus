@@ -103,11 +103,31 @@ async function startServer(): Promise<void> {
     cwd: ROOT,
     env: {
       ...process.env,
+      // Mirror tests/globalSetup.ts:303-339 so the runAll-owned server is
+      // test-equivalent to the one globalSetup spawns. Without this, Phase 3
+      // vitest suites run against a server that still has background workers
+      // live (funnel/pipeline/temporal dispatchers), whose CPU contention on
+      // GitHub's 2-core runners intermittently pushes POST /api/v1/ontology
+      // into 5xx territory — which is what triggers the "ontology create
+      // returned no id" beforeAll crashes in tests/wednesday/integration/*.
+      TELLUS_TEST_HOOKS: "1",
       RATE_LIMIT_MAX: "10000",
       ACTION_RATE_LIMIT_MAX: "10000",
       USER_RATE_LIMIT_MAX: "50000",
       GLOBAL_ACTION_RATE_LIMIT_MAX: "100000",
       BATCH_RATE_LIMIT_MAX: "1000",
+      // F-CI-POOL: bump PG pool to handle Phase 3's parallel vitest workers
+      // hitting the same shared server. Default 20 exhausts under the
+      // batch / rate-limiter test load and surfaces as
+      // `timeout exceeded when trying to connect`.
+      PG_POOL_MAX: process.env.PG_POOL_MAX || "60",
+      PG_CONNECT_TIMEOUT_MS: process.env.PG_CONNECT_TIMEOUT_MS || "15000",
+      FUNNEL_DISPATCHER_DISABLED: "true",
+      PIPELINE_DISPATCHER_DISABLED: "true",
+      PIPELINE_ICEBERG_MAINTENANCE_DISABLED: "true",
+      OVERLAY_SWEEPER_DISABLED: "true",
+      REPLACEMENT_SCHEDULER_DISABLED: "true",
+      TEMPORAL_WORKER_DISABLED: "true",
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
@@ -208,12 +228,22 @@ const SELF_TEST_MODULES = [
 // Day test suites
 // ---------------------------------------------------------------------------
 
+// DAY_SUITES drives Phase 2 (the nested `tsx tests/<day>/index.ts` chain).
+//
+// `friday` is intentionally dropped here: its integration file (15 groups,
+// 42 tests) runs through a 3-deep tsx→tsx→tsx→vitest pipeline plus the
+// long-lived server on port 3000, which overruns the GitHub Actions
+// 7 GB runner and the kernel OOM-kills the whole group with exit 137.
+//
+// Phase 3 below already runs `vitest run tests/friday/integration` as a
+// single direct child of this process, so removing friday here is not a
+// coverage reduction — it eliminates a duplicate run that is also the
+// memory hot-spot.
 const DAY_SUITES = [
   "monday",
   "tuesday",
   "wednesday",
   "thursday",
-  "friday",
 ];
 
 // ---------------------------------------------------------------------------
@@ -223,15 +253,98 @@ const DAY_SUITES = [
 // Env vars passed to all child processes — matches the elevated rate limits
 // used by the managed server so that tests can detect elevated limits and
 // skip rate-limiter-specific tests.
-const CHILD_ENV = {
-  ...process.env,
+//
+// TELLUS_TEST_BEARER is populated later (after server + Keycloak are up) by
+// acquireAliceToken(). Day-suite child processes read it at module load
+// in tests/helpers/api.ts and use it as the default bearer for every
+// request — without this, every data-plane call returns 401 under F-01.
+// NODE_OPTIONS pins the child-process V8 heap so the GitHub runner can't
+// be OOM-killed silently. At ~1 GB per child, runAll + server + two concurrent
+// vitest workers stays comfortably under the 7 GB runner limit. If any
+// individual vitest overruns this cap it exits with a clear `JavaScript heap
+// out of memory` rather than SIGKILL (exit 137) that takes down siblings.
+//
+// Honours a caller-supplied NODE_OPTIONS by appending rather than overwriting.
+// 2048 MB is generous enough for a warm tsx + vitest worker loading OTel
+// auto-instrumentations and the full server module graph; 1024 MB was the
+// former cap and caused V8 to force GC churn that slowed Phase 3 without
+// bounding RSS (native modules like duckdb/pg/nodejs-polars live off-heap).
+const EXISTING_NODE_OPTIONS = (process.env.NODE_OPTIONS ?? "").trim();
+const CHILD_NODE_OPTIONS = EXISTING_NODE_OPTIONS.includes("--max-old-space-size")
+  ? EXISTING_NODE_OPTIONS
+  : `${EXISTING_NODE_OPTIONS} --max-old-space-size=2048`.trim();
+
+const CHILD_ENV: Record<string, string> = {
+  ...(process.env as Record<string, string>),
   NODE_ENV: "test",
+  NODE_OPTIONS: CHILD_NODE_OPTIONS,
+  // Signal to tests/globalSetup.ts that a healthy server on :3000 is already
+  // under runAll's management; it must NOT kill-port, re-seed, re-bootstrap
+  // Keycloak, or spawn a duplicate server. Phase 3 was OOM-killed because
+  // every vitest call with the default config did all four again on top of
+  // runAll's server. See globalSetup.ts:setup() for the reuse branch.
+  TELLUS_REUSE_SERVER: "1",
   RATE_LIMIT_MAX: "10000",
   ACTION_RATE_LIMIT_MAX: "10000",
   USER_RATE_LIMIT_MAX: "50000",
   GLOBAL_ACTION_RATE_LIMIT_MAX: "100000",
   BATCH_RATE_LIMIT_MAX: "1000",
 };
+
+/**
+ * Direct-grant a JWT for alice from the Keycloak test realm and install
+ * it on CHILD_ENV.TELLUS_TEST_BEARER so subsequently-spawned day-suite
+ * processes authenticate under F-01. Non-fatal: if Keycloak isn't up or
+ * alice isn't bootstrapped, we print a loud warning and proceed without
+ * a token — tests that hit auth'd routes will fail with a clean 401
+ * rather than a mysterious stall.
+ */
+async function acquireAliceToken(): Promise<void> {
+  const kcUrl = process.env.KEYCLOAK_URL || "http://localhost:8086";
+  const kcRealm = process.env.KEYCLOAK_REALM || "tellus";
+  const kcClient = process.env.KEYCLOAK_FRONTEND_CLIENT_ID || "tellus-frontend";
+  const username =
+    process.env.KEYCLOAK_ADMIN_TEST_USER || "cypress-admin@tellus.local";
+  const password = process.env.KEYCLOAK_TEST_PASS || "Password123!";
+
+  const body = new URLSearchParams({
+    grant_type: "password",
+    client_id: kcClient,
+    username,
+    password,
+    scope: "openid",
+  });
+
+  try {
+    const res = await fetch(
+      `${kcUrl}/realms/${kcRealm}/protocol/openid-connect/token`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        signal: AbortSignal.timeout(5000),
+      },
+    );
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      console.warn(
+        `  [runAll] Direct-grant failed for ${username}: HTTP ${res.status} ${txt.slice(0, 180)} — day suites will 401 on data-plane routes`,
+      );
+      return;
+    }
+    const data = (await res.json()) as { access_token?: string };
+    if (!data.access_token) {
+      console.warn("  [runAll] Direct-grant response missing access_token — day suites will 401");
+      return;
+    }
+    CHILD_ENV.TELLUS_TEST_BEARER = data.access_token;
+    console.log(`  Alice JWT acquired (${data.access_token.length} chars) for child suites.`);
+  } catch (err) {
+    console.warn(
+      `  [runAll] Keycloak unreachable at ${kcUrl} (${(err as Error).message}) — day suites will 401 on data-plane routes`,
+    );
+  }
+}
 
 function runCommand(
   command: string,
@@ -246,6 +359,11 @@ function runCommand(
       timeout: timeoutMs,
       stdio: ["pipe", "pipe", "pipe"],
       env: CHILD_ENV,
+      // Default is 1 MiB which vitest --reporter=verbose trivially overflows,
+      // killing the child with ENOBUFS mid-run. 64 MiB is ample for every
+      // suite we have today and bounded enough that the parent tsx process
+      // does not balloon while buffering child output.
+      maxBuffer: 64 * 1024 * 1024,
     });
     const durationMs = Date.now() - start;
 
@@ -313,8 +431,35 @@ function runDaySuite(day: string): SuiteResult {
   return result;
 }
 
+/**
+ * Pick the right vitest config for a test pattern.
+ *
+ * Unit patterns (`tests/<day>/unit`) must use vitest.unit.config.ts so that
+ * vitest does NOT run tests/globalSetup.ts — which otherwise kills port 3000,
+ * respawns seeds + Keycloak bootstrap + a duplicate server, and OOM-kills
+ * the whole runner. Integration patterns genuinely need the full globalSetup
+ * (server on :3000), so they fall through to the default vitest.config.ts;
+ * `TELLUS_REUSE_SERVER=1` in CHILD_ENV tells that globalSetup to reuse the
+ * server runAll already manages instead of respawning one.
+ */
+function isUnitPattern(pattern: string): boolean {
+  return /(^|\/)unit(\/|$)/.test(pattern);
+}
+
+// Per-suite vitest timeout. 300 s was tight enough that friday's 42-test
+// integration suite consistently SIGKILLed on GitHub Actions (2-core
+// ubuntu-latest) before any test output reached stdout — see the
+// "Duration  300036ms" signature. 600 s is still well inside the CI job's
+// 30-minute cap and leaves headroom for tuesday (40 s local → 2× on CI).
+const VITEST_SUITE_TIMEOUT_MS = 600_000;
+
 function runVitestSuite(pattern: string, label: string): SuiteResult {
-  const result = runCommand(`npx vitest run ${pattern} --reporter=verbose`, label, 300_000);
+  const configFlag = isUnitPattern(pattern) ? " --config vitest.unit.config.ts" : "";
+  const result = runCommand(
+    `npx vitest run ${pattern}${configFlag} --reporter=verbose`,
+    label,
+    VITEST_SUITE_TIMEOUT_MS,
+  );
   result.category = "vitest";
   return result;
 }
@@ -370,6 +515,7 @@ async function runAll(): Promise<void> {
   console.log("  Starting server with elevated rate limits...");
   console.log("=".repeat(60));
   await startServer();
+  await acquireAliceToken();
 
   // =========================================================================
   // Phase 2: Day test suites
@@ -400,6 +546,11 @@ async function runAll(): Promise<void> {
   console.log("=".repeat(60));
 
   await restartServer();
+  // Refresh the JWT — Keycloak default access-token TTL is 5 minutes and
+  // Phase 2 may have consumed most of it. Vitest has its own per-file
+  // setupFiles.ts that re-acquires, but a refreshed CHILD_ENV also helps
+  // any deeper child processes the vitest suites spawn.
+  await acquireAliceToken();
 
   // Files to exclude from Tuesday integration (rate-limiter needs default limits)
   const TUESDAY_INTEGRATION_EXCLUDE = "rate-limiter-integration";
@@ -432,7 +583,7 @@ async function runAll(): Promise<void> {
         const result = runCommand(
           `npx vitest run ${filePaths} --reporter=verbose`,
           `vitest:${day}:integration`,
-          300_000
+          VITEST_SUITE_TIMEOUT_MS
         );
         result.category = "vitest";
         results.push(result);
@@ -529,12 +680,23 @@ function printReport(results: SuiteResult[], startTime: number): void {
     totalFailed += catFailed;
     totalSkipped += catSkipped;
 
-    // Show failed suites
+    // Show failed suites — dump captured stdout/stderr so CI logs contain
+    // the actual vitest/tsx failure output instead of just the first stderr
+    // line (which is almost always a harmless `npm warn Unknown env config`
+    // and tells you nothing about the real failure).
     for (const r of catResults.filter((r) => !r.passed && !r.output.startsWith("SKIP"))) {
       console.log(`    FAIL: ${r.name}`);
+      if (r.output) {
+        const tail = r.output.split("\n").slice(-80).join("\n");
+        console.log("    ----- captured stdout (last 80 lines) -----");
+        for (const line of tail.split("\n")) console.log(`      ${line}`);
+        console.log("    ----- end stdout -----");
+      }
       if (r.error) {
-        const firstLine = r.error.split("\n")[0];
-        console.log(`      ${firstLine}`);
+        const tail = r.error.split("\n").slice(-40).join("\n");
+        console.log("    ----- captured stderr (last 40 lines) -----");
+        for (const line of tail.split("\n")) console.log(`      ${line}`);
+        console.log("    ----- end stderr -----");
       }
     }
   }

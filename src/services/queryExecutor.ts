@@ -7,7 +7,7 @@
 // Task 8: Core query execution engine
 // ---------------------------------------------------------------------------
 
-import { client } from "./opensearch/client";
+import { client, injectSecurityFilter } from "./opensearch/client";
 import { getIndexName } from "./opensearch/indexLifecycleManager";
 import { translateFilter, buildSortClause } from "./queryTranslator";
 import { resolveAllProperties } from "./propertyResolver";
@@ -54,7 +54,9 @@ export interface AggregateParams {
 
 export async function executeSearch(
   objectTypeApiName: string,
-  params: SearchParams
+  params: SearchParams,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<FormattedListResponse> {
   const indexName = getIndexName(objectTypeApiName);
   const pageSize = params.$pageSize ?? 100;
@@ -91,10 +93,13 @@ export async function executeSearch(
     body._source = sourceFields;
   }
 
+  // Inject mandatory security filter (§Task 28) + F-P3-13 branch filter
+  const finalBody = injectSecurityFilter(body, securityFilter, branchId);
+
   // Execute
   let response: any;
   try {
-    const result = await client.search({ index: indexName, body });
+    const result = await client.search({ index: indexName, body: finalBody });
     response = result.body;
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -124,12 +129,50 @@ export async function executeSearch(
 
 export async function executeGetObject(
   objectTypeApiName: string,
-  primaryKey: string
+  primaryKey: string,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<Record<string, unknown> | null> {
   const indexName = getIndexName(objectTypeApiName);
 
   try {
     const { body } = await client.get({ index: indexName, id: primaryKey });
+
+    // Post-fetch security check (§Task 28 + F-03 remediation): client.get()
+    // bypasses query-level filters, so we re-issue the fetch as a filtered
+    // search to honor the security context. The check runs UNCONDITIONALLY
+    // when a filter is active — the pre-remediation `if (source?._security)`
+    // gate leaked existence of documents that predated the marking model,
+    // because a missing `_security` field skipped the check entirely.
+    //
+    // A document without `_security.markings` now fails the filter (because
+    // `buildSecurityFilter` no longer emits a `must_not.exists` branch),
+    // so this path returns null — the document becomes invisible, not
+    // leaked. System principals bypass this via a null filter from
+    // `buildSecurityFilter`, matching Foundry's service-token contract.
+    // F-P3-13: run the post-fetch check when either a security filter
+    // is active OR a branch filter is active. `branchId === null` with
+    // no security filter means "cross-branch and unsecured" — rare,
+    // documented by the caller; in that case we skip the check.
+    if (securityFilter || branchId !== null) {
+      try {
+        const checkBody = injectSecurityFilter(
+          { query: { ids: { values: [primaryKey] } }, size: 0, track_total_hits: true },
+          securityFilter,
+          branchId,
+        );
+        const { body: checkResp } = await client.search({ index: indexName, body: checkBody });
+        const total = (checkResp as any).hits?.total;
+        const count = typeof total === "object" ? total.value : total;
+        if (count === 0) return null;
+      } catch {
+        // Security verification failed — deny access to prevent leaks.
+        // This includes OS failures and transient network errors: we
+        // prefer a spurious 404 over an unauthorized leak.
+        return null;
+      }
+    }
+
     return formatSingleObject(body, objectTypeApiName);
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -145,7 +188,9 @@ export async function executeGetObject(
 
 export async function executeAggregate(
   objectTypeApiName: string,
-  params: AggregateParams
+  params: AggregateParams,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<Record<string, unknown>> {
   const indexName = getIndexName(objectTypeApiName);
 
@@ -165,9 +210,12 @@ export async function executeAggregate(
     track_total_hits: true,
   };
 
+  // Inject mandatory security filter (§Task 28) + F-P3-13 branch filter
+  const finalBody = injectSecurityFilter(body, securityFilter, branchId);
+
   let response: any;
   try {
-    const result = await client.search({ index: indexName, body });
+    const result = await client.search({ index: indexName, body: finalBody });
     response = result.body;
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -228,7 +276,9 @@ function buildAggClause(def: AggregateParams["aggregations"][0]): Record<string,
 export async function executeFullTextSearch(
   objectTypeApiName: string,
   searchText: string,
-  params: SearchParams
+  params: SearchParams,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<FormattedListResponse> {
   const indexName = getIndexName(objectTypeApiName);
   const pageSize = params.$pageSize ?? 100;
@@ -318,9 +368,12 @@ export async function executeFullTextSearch(
     body._source = [...new Set([...params.$select, "__pk", "__objectType"])];
   }
 
+  // Inject mandatory security filter (§Task 28) + F-P3-13 branch filter
+  const finalBody = injectSecurityFilter(body, securityFilter, branchId);
+
   let response: any;
   try {
-    const result = await client.search({ index: indexName, body });
+    const result = await client.search({ index: indexName, body: finalBody });
     response = result.body;
   } catch (err: any) {
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
@@ -345,9 +398,11 @@ export async function executeFullTextSearch(
 // Self-test
 // ---------------------------------------------------------------------------
 
+/* v8 ignore start */
 if (require.main === module) {
   console.log("=== QueryExecutor self-test ===");
   console.log("  (No offline tests — requires OpenSearch. Tested via integration.)");
   console.log("\n0 passed, 0 failed");
   process.exit(0);
 }
+/* v8 ignore stop */

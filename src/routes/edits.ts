@@ -5,7 +5,7 @@
 // table) that have been applied to objects via Actions.
 //
 // Mounted at:
-//   /api/v2/ontology/:ontologyId/objectTypes/:apiName/edits
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/edits
 //
 // Endpoints:
 //   GET /                    — List all edits with filtering and pagination
@@ -22,6 +22,12 @@ import {
   encodePageToken,
   decodePageToken,
 } from "../utils/responseFormatter";
+import {
+  loadEditForUndo,
+  computeInverse,
+  persistInverse,
+} from "../services/undoService";
+import { OntologyError } from "../utils/queryErrors";
 
 const router = Router({ mergeParams: true });
 
@@ -502,6 +508,37 @@ router.get(
         "INTERNAL_ERROR",
         `Failed to generate diff: ${message}`
       );
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /:editId/undo — Undo a prior edit (Ontology Platform spec §Task 17)
+//
+// Computes the inverse of the target edit, persists it as a new edit row
+// that references the original via `reverts_edit_id`, and returns the new
+// edit id. Restricted to the 7-day undo window.
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/:editId/undo",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { editId } = req.params;
+      const edit = await loadEditForUndo(editId);
+      const inverse = computeInverse(edit);
+      const executedBy = (req as any).user?.id || "system";
+      const newEditId = await persistInverse(inverse, executedBy);
+      sendSuccess(res, {
+        undoEditId: newEditId,
+        sourceEditId: editId,
+        inverse,
+      });
+    } catch (err: any) {
+      if (err instanceof OntologyError) {
+        return sendError(res, err.code, err.message, err.parameters || {});
+      }
+      next(err);
     }
   }
 );

@@ -5,7 +5,7 @@
 // parameter sets in a single API call. Each request in the bulk is
 // independent and executed sequentially.
 //
-// Mounted at: /api/v2/actions
+// Mounted at: /api/v1/actions
 //
 // Endpoint:
 //   POST /:actionTypeApiName/applyBulk — Bulk-execute an action
@@ -53,7 +53,7 @@ router.post(
       const bulkId = crypto.randomUUID();
 
       // -----------------------------------------------------------------
-      // Resolve ontology — use default ontology for /api/v2/actions mount
+      // Resolve ontology — use default ontology for /api/v1/actions mount
       // -----------------------------------------------------------------
       let ontologyId = req.params.ontologyId;
       if (!ontologyId) {
@@ -265,6 +265,28 @@ router.post(
           // If stopOnError is enabled, mark the run as stopped
           if (stopOnError) {
             stopped = true;
+          }
+
+          // Spec §Task 17: "If > 10% fail, abort remaining and return
+          // partial result." Compute the failure ratio over attempted
+          // requests and trip if we're past the 10% threshold.
+          const attempted = i + 1;
+          if (attempted >= 10 && failedCount / attempted > 0.1) {
+            stopped = true;
+            for (let j = i + 1; j < requests.length; j++) {
+              failedCount++;
+              results.push({
+                index: j,
+                status: "skipped",
+                primaryKey: null,
+                operation: null,
+                error: {
+                  code: "BULK_FAILURE_THRESHOLD_EXCEEDED",
+                  message: `Skipped: > 10% of prior requests failed (${failedCount}/${attempted}).`,
+                },
+              });
+            }
+            break;
           }
         }
       }

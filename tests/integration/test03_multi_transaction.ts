@@ -102,13 +102,13 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.1 Setup: ontology + Product type
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v2/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontology", {
       displayName: "Multi-Transaction Test",
       description: "Test 03 — append and snapshot",
     });
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
-    const otRes = await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/batch`, {
+    const otRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Product",
       displayName: "Product",
       primaryKeyProperty: "productId",
@@ -130,7 +130,7 @@ async function run() {
     const file1 = tmpPath("initial");
     fs.writeFileSync(file1, csv1);
 
-    const up1 = await uploadFile(`${BASE}/api/v2/datasets/upload`, file1, {
+    const up1 = await uploadFile(`${BASE}/api/v1/datasets/upload`, file1, {
       name: "product_data_test03",
       transactionType: "SNAPSHOT",
     });
@@ -140,7 +140,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.3 Register datasource + reindex (50 objects)
     // -----------------------------------------------------------------------
-    await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/Product/datasource`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Product/datasource`, {
       datasetId,
       columnMapping: {
         productId: "product_id",
@@ -151,7 +151,7 @@ async function run() {
       },
     });
 
-    const rix1 = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Product/reindex?force=true`);
+    const rix1 = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Product/reindex?force=true`);
     const indexed1 = rix1.body?.data?.result?.totalObjectsIndexed ?? -1;
     assert(indexed1 === 50, "3.3 Reindex — 50 objects indexed", `indexed=${indexed1}`);
 
@@ -161,7 +161,7 @@ async function run() {
     const originalPrices: Record<string, number> = {};
     for (let i = 46; i <= 50; i++) {
       const pk = `PROD-${String(i).padStart(4, "0")}`;
-      const r = await api("GET", `/api/v2/objects/Product/${pk}`);
+      const r = await api("GET", `/api/v1/objects/Product/${pk}`);
       originalPrices[pk] = r.body?.data?.price ?? r.body?.price ?? -1;
     }
     assert(
@@ -197,7 +197,7 @@ async function run() {
     mb2 += `--${boundary2}\r\nContent-Disposition: form-data; name="file"; filename="append.csv"\r\nContent-Type: text/csv\r\n\r\n`;
     const buf2 = Buffer.concat([Buffer.from(mb2), fc2, Buffer.from(`\r\n--${boundary2}--\r\n`)]);
 
-    const appendRes = await fetch(`${BASE}/api/v2/datasets/${datasetId}/transactions`, {
+    const appendRes = await fetch(`${BASE}/api/v1/datasets/${datasetId}/transactions`, {
       method: "POST",
       headers: { "Content-Type": `multipart/form-data; boundary=${boundary2}` },
       body: buf2,
@@ -210,7 +210,7 @@ async function run() {
     //     50 original + 10 new = 60 (overlapping PKs merge, not duplicate)
     //     Expect 60 total objects
     // -----------------------------------------------------------------------
-    const rix2 = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Product/reindex?force=true`);
+    const rix2 = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Product/reindex?force=true`);
     const indexed2 = rix2.body?.data?.result?.totalObjectsIndexed ?? -1;
     // With PK-based merging, overlapping rows replace, so 50 + 10 new = 60
     assert(indexed2 === 60, "3.6 Reindex after append — 60 total", `indexed=${indexed2}`);
@@ -218,8 +218,8 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.7 Verify new products exist (PROD-0051, PROD-0060)
     // -----------------------------------------------------------------------
-    const new51 = await api("GET", "/api/v2/objects/Product/PROD-0051");
-    const new60 = await api("GET", "/api/v2/objects/Product/PROD-0060");
+    const new51 = await api("GET", "/api/v1/objects/Product/PROD-0051");
+    const new60 = await api("GET", "/api/v1/objects/Product/PROD-0060");
     assert(
       new51.status === 200 && new60.status === 200,
       "3.7 Verify new products exist (PROD-0051, PROD-0060)",
@@ -232,7 +232,7 @@ async function run() {
     let overlapCorrect = true;
     for (let i = 46; i <= 50; i++) {
       const pk = `PROD-${String(i).padStart(4, "0")}`;
-      const r = await api("GET", `/api/v2/objects/Product/${pk}`);
+      const r = await api("GET", `/api/v1/objects/Product/${pk}`);
       const p = r.body?.data?.price ?? r.body?.price ?? -1;
       if (p !== 888.88) {
         overlapCorrect = false;
@@ -244,7 +244,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.9 Verify untouched products unchanged (PROD-0001)
     // -----------------------------------------------------------------------
-    const untouched = await api("GET", "/api/v2/objects/Product/PROD-0001");
+    const untouched = await api("GET", "/api/v1/objects/Product/PROD-0001");
     const untouchedPrice = untouched.body?.data?.price ?? untouched.body?.price ?? -1;
     assert(untouchedPrice > 0 && untouchedPrice !== 888.88, "3.9 Untouched products unchanged", `price=${untouchedPrice}`);
 
@@ -261,7 +261,7 @@ async function run() {
     mb3 += `--${boundary3}\r\nContent-Disposition: form-data; name="file"; filename="snapshot.csv"\r\nContent-Type: text/csv\r\n\r\n`;
     const buf3 = Buffer.concat([Buffer.from(mb3), fc3, Buffer.from(`\r\n--${boundary3}--\r\n`)]);
 
-    const snapRes = await fetch(`${BASE}/api/v2/datasets/${datasetId}/transactions`, {
+    const snapRes = await fetch(`${BASE}/api/v1/datasets/${datasetId}/transactions`, {
       method: "POST",
       headers: { "Content-Type": `multipart/form-data; boundary=${boundary3}` },
       body: buf3,
@@ -271,7 +271,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.11 Reindex — verify 25 total (SNAPSHOT replaces all)
     // -----------------------------------------------------------------------
-    const rix3 = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Product/reindex?force=true`);
+    const rix3 = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Product/reindex?force=true`);
     const indexed3 = rix3.body?.data?.result?.totalObjectsIndexed ?? -1;
     assert(indexed3 === 25, "3.11 Reindex after SNAPSHOT — 25 total", `indexed=${indexed3}`);
 
@@ -280,8 +280,8 @@ async function run() {
     // Cleanup
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
-    if (ontologyId) await api("DELETE", `/api/v2/ontologies/${ontologyId}`).catch(() => {});
-    if (datasetId) await api("DELETE", `/api/v2/datasets/${datasetId}?force=true`).catch(() => {});
+    if (ontologyId) await api("DELETE", `/api/v1/ontology/${ontologyId}`).catch(() => {});
+    if (datasetId) await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`).catch(() => {});
     for (const f of tmpFiles) {
       if (fs.existsSync(f)) fs.unlinkSync(f);
     }

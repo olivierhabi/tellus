@@ -91,13 +91,13 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.1 Setup: ontology + Employee type + upload + register + reindex
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v2/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontology", {
       displayName: "Edit Preservation Test",
       description: "Test 02 — edit preservation",
     });
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
-    await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/batch`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Employee",
       displayName: "Employee",
       primaryKeyProperty: "employeeId",
@@ -119,13 +119,13 @@ async function run() {
     const csv = generateCSV(100);
     fs.writeFileSync(tmpFile, csv);
 
-    const upRes = await uploadFile(`${BASE}/api/v2/datasets/upload`, tmpFile, {
+    const upRes = await uploadFile(`${BASE}/api/v1/datasets/upload`, tmpFile, {
       name: "edit_pres_data",
       transactionType: "SNAPSHOT",
     });
     datasetId = upRes.body?.data?.dataset?.datasetId ?? null;
 
-    await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/Employee/datasource`, {
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`, {
       datasetId,
       columnMapping: {
         employeeId: "emp_id", fullName: "full_name", email: "email",
@@ -135,14 +135,14 @@ async function run() {
       },
     });
 
-    const rixRes = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+    const rixRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
     const indexed = rixRes.body?.data?.result?.totalObjectsIndexed ?? -1;
     assert(indexed === 100, "2.1 Setup + reindex (100 objects)", `indexed=${indexed}`);
 
     // -----------------------------------------------------------------------
     // 2.2 Create updateEmployeeSalary action type
     // -----------------------------------------------------------------------
-    const actRes = await api("POST", `/api/v2/ontologies/${ontologyId}/actionTypes`, {
+    const actRes = await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
       apiName: "updateEmployeeSalary",
       displayName: "Update Employee Salary",
       parameters: [
@@ -161,14 +161,14 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.3 Record original salary of EMP-0001
     // -----------------------------------------------------------------------
-    const origRes = await api("GET", "/api/v2/objects/Employee/EMP-0001");
+    const origRes = await api("GET", "/api/v1/objects/Employee/EMP-0001");
     const origSalary = origRes.body?.data?.salary ?? origRes.body?.salary ?? null;
     assert(origSalary !== null && origSalary !== 999999, "2.3 Record original salary of EMP-0001", `salary=${origSalary}`);
 
     // -----------------------------------------------------------------------
     // 2.4 Update EMP-0001 salary to 999999
     // -----------------------------------------------------------------------
-    const applyRes = await api("POST", `/api/v2/ontologies/${ontologyId}/actions/updateEmployeeSalary/apply`, {
+    const applyRes = await api("POST", `/api/v1/ontology/${ontologyId}/actions/updateEmployeeSalary/apply`, {
       parameters: { employeeId: "EMP-0001", newSalary: 999999 },
     });
     assert(applyRes.status === 200, "2.4 Update EMP-0001 salary to 999999", `status=${applyRes.status}`);
@@ -176,35 +176,35 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.5 Verify salary changed
     // -----------------------------------------------------------------------
-    const checkRes = await api("GET", "/api/v2/objects/Employee/EMP-0001");
+    const checkRes = await api("GET", "/api/v1/objects/Employee/EMP-0001");
     const newSalary = checkRes.body?.data?.salary ?? checkRes.body?.salary ?? null;
     assert(newSalary === 999999, "2.5 Verify salary changed", `salary=${newSalary}`);
 
     // -----------------------------------------------------------------------
     // 2.6 Verify edit recorded
     // -----------------------------------------------------------------------
-    const editsRes = await api("GET", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/edits?primaryKey=EMP-0001`);
+    const editsRes = await api("GET", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/edits?primaryKey=EMP-0001`);
     const editCount = editsRes.body?.data?.data?.length ?? editsRes.body?.data?.summary?.total ?? 0;
     assert(editCount > 0, "2.6 Verify edit recorded", `editCount=${editCount}`);
 
     // -----------------------------------------------------------------------
     // 2.7 CRITICAL: Reindex — verify salary STILL 999999
     // -----------------------------------------------------------------------
-    await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
-    const afterRix = await api("GET", "/api/v2/objects/Employee/EMP-0001");
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+    const afterRix = await api("GET", "/api/v1/objects/Employee/EMP-0001");
     const salaryAfterRix = afterRix.body?.data?.salary ?? afterRix.body?.salary ?? null;
     assert(salaryAfterRix === 999999, "2.7 CRITICAL: Salary preserved after reindex", `salary=${salaryAfterRix}`);
 
     // -----------------------------------------------------------------------
     // 2.8 Check diff endpoint
     // -----------------------------------------------------------------------
-    const diffRes = await api("GET", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/edits/diff/EMP-0001`);
+    const diffRes = await api("GET", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/edits/diff/EMP-0001`);
     assert(diffRes.status === 200, "2.8 Diff endpoint returns 200", `status=${diffRes.status}`);
 
     // -----------------------------------------------------------------------
     // 2.9 Create createEmployee action type
     // -----------------------------------------------------------------------
-    const createActRes = await api("POST", `/api/v2/ontologies/${ontologyId}/actionTypes`, {
+    const createActRes = await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
       apiName: "createEmployee",
       displayName: "Create Employee",
       parameters: [
@@ -231,7 +231,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.10 Create new employee EMP-NEW-TEST via action
     // -----------------------------------------------------------------------
-    const createEmpRes = await api("POST", `/api/v2/ontologies/${ontologyId}/actions/createEmployee/apply`, {
+    const createEmpRes = await api("POST", `/api/v1/ontology/${ontologyId}/actions/createEmployee/apply`, {
       parameters: {
         employeeId: "EMP-NEW-TEST",
         fullName: "New Test Employee",
@@ -245,20 +245,20 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.11 Verify new employee exists
     // -----------------------------------------------------------------------
-    const newEmpRes = await api("GET", "/api/v2/objects/Employee/EMP-NEW-TEST");
+    const newEmpRes = await api("GET", "/api/v1/objects/Employee/EMP-NEW-TEST");
     assert(newEmpRes.status === 200, "2.11 Verify EMP-NEW-TEST exists", `status=${newEmpRes.status}`);
 
     // -----------------------------------------------------------------------
     // 2.12 CRITICAL: Reindex — verify EMP-NEW-TEST STILL exists
     // -----------------------------------------------------------------------
-    await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
-    const afterRix2 = await api("GET", "/api/v2/objects/Employee/EMP-NEW-TEST");
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+    const afterRix2 = await api("GET", "/api/v1/objects/Employee/EMP-NEW-TEST");
     assert(afterRix2.status === 200, "2.12 CRITICAL: EMP-NEW-TEST survives reindex", `status=${afterRix2.status}`);
 
     // -----------------------------------------------------------------------
     // 2.13 Create deleteEmployee action type
     // -----------------------------------------------------------------------
-    const delActRes = await api("POST", `/api/v2/ontologies/${ontologyId}/actionTypes`, {
+    const delActRes = await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
       apiName: "deleteEmployee",
       displayName: "Delete Employee",
       parameters: [
@@ -275,7 +275,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.14 Delete EMP-0002 via action
     // -----------------------------------------------------------------------
-    const deleteRes = await api("POST", `/api/v2/ontologies/${ontologyId}/actions/deleteEmployee/apply`, {
+    const deleteRes = await api("POST", `/api/v1/ontology/${ontologyId}/actions/deleteEmployee/apply`, {
       parameters: { employeeId: "EMP-0002" },
     });
     assert(deleteRes.status === 200, "2.14 Delete EMP-0002 via action", `status=${deleteRes.status}`);
@@ -283,14 +283,14 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.15 Verify deleted
     // -----------------------------------------------------------------------
-    const delCheck = await api("GET", "/api/v2/objects/Employee/EMP-0002");
+    const delCheck = await api("GET", "/api/v1/objects/Employee/EMP-0002");
     assert(delCheck.status === 404, "2.15 Verify EMP-0002 deleted", `status=${delCheck.status}`);
 
     // -----------------------------------------------------------------------
     // 2.16 CRITICAL: Reindex — verify EMP-0002 STILL deleted
     // -----------------------------------------------------------------------
-    await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
-    const afterRix3 = await api("GET", "/api/v2/objects/Employee/EMP-0002");
+    await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+    const afterRix3 = await api("GET", "/api/v1/objects/Employee/EMP-0002");
     assert(afterRix3.status === 404, "2.16 CRITICAL: EMP-0002 stays deleted after reindex", `status=${afterRix3.status}`);
 
   } finally {
@@ -298,8 +298,8 @@ async function run() {
     // Cleanup
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
-    if (ontologyId) await api("DELETE", `/api/v2/ontologies/${ontologyId}`).catch(() => {});
-    if (datasetId) await api("DELETE", `/api/v2/datasets/${datasetId}?force=true`).catch(() => {});
+    if (ontologyId) await api("DELETE", `/api/v1/ontology/${ontologyId}`).catch(() => {});
+    if (datasetId) await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`).catch(() => {});
     if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }
 

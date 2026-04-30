@@ -326,7 +326,7 @@ export function scanFileSync(
 // Inline self-tests (run directly: npx tsx src/services/fileScannerService.ts)
 // ---------------------------------------------------------------------------
 
-async function runSelfTests(): Promise<void> {
+export async function runSelfTests(): Promise<void> {
   let passed = 0;
   let failed = 0;
   const path = await import("path");
@@ -336,6 +336,7 @@ async function runSelfTests(): Promise<void> {
       passed++;
       console.log(`  PASS: ${label}`);
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -506,13 +507,17 @@ async function runSelfTests(): Promise<void> {
   if (failed === 0) {
     console.log("\nAll file scanner tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests().catch((err) => {
     console.error(err);
+    /* v8 ignore next */
     process.exit(1);
   });
 }
+/* v8 ignore stop */

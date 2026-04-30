@@ -5,7 +5,7 @@
 // historical reindex runs.
 //
 // Mounted at:
-//   /api/v2/ontologies/:ontologyId/objectTypes/:apiName/index
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/index
 //
 // Endpoints:
 //   GET /reindex/status   — Current reindex status and health assessment

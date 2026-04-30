@@ -4,7 +4,7 @@
 // CRUD for link types plus resolution, counting, Search Around, multi-hop,
 // analysis, export/import, and join table upload endpoints.
 //
-// Mounted at: /api/v2/ontologies/:ontologyId/linkTypes
+// Mounted at: /api/v1/ontology/:ontologyId/linkTypes
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";
@@ -24,15 +24,40 @@ import {
   validateForeignKeys,
   validateJoinTable,
 } from "../services/linkResolverService";
-import {
-  sendSuccess,
-  sendCreated,
-  sendNoContent,
-  sendError,
-  encodePageToken,
-  decodePageToken,
-} from "../utils/responseFormatter";
+import { sendSuccess, sendCreated, sendNoContent, sendError, encodePageToken, decodePageToken } from "../utils/responseFormatter";
+import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { incCounter } from "../services/funnel/metrics";
 import type { Cardinality, LinkTypeRow } from "../models/linkType";
+import {
+  applyReverseProjectionAll,
+  reverseCardinality,
+  deriveEdgeMarkings,
+} from "../services/linkDirectionHelpers";
+import {
+  getResolverConfig,
+  upsertResolverConfig,
+  effectiveMaxPks,
+} from "../models/linkResolverConfig";
+import {
+  listQuarantineEntries,
+  resolveQuarantineEntry,
+  dismissQuarantineEntry,
+} from "../models/linkQuarantine";
+import { enforceOneToOneAdd } from "../services/linkViolationEnforcer";
+import { resolveBranchIdOrMain } from "../services/branchContext";
+import {
+  resolveFKWithState,
+  runOrphanScan,
+  getLatestOrphanStats,
+  listOrphans,
+} from "../services/linkOrphanState";
+import {
+  assertOffsetWithinCap,
+  isSearchAfterToken,
+  OffsetTooDeepError,
+} from "../services/linkPagination";
+import { migrateLinkStorage } from "../services/linkStorageMigrator";
 
 const router = Router({ mergeParams: true });
 
@@ -48,7 +73,11 @@ const upload = multer({
       cb(null, `${Date.now()}-${file.originalname}`);
     },
   }),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+  // LT-B1: the 50 MB ceiling is lifted once a link type migrates to the
+  // Iceberg backend (PyIceberg streams 5 GB uploads without staging in
+  // RAM). We enforce a 5 GB absolute cap instead to still reject
+  // misconfigured clients.
+  limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5GB
   fileFilter: (_req, file, cb) => {
     if (file.mimetype === "text/csv" || file.originalname.endsWith(".csv")) {
       cb(null, true);
@@ -72,6 +101,17 @@ const KNOWN_CODES = new Set([
   "ALREADY_EXISTS",
   "LINK_TYPE_NOT_FOUND",
   "VALIDATION_FAILED",
+  "INVALID_PARAMETER",
+  "MAX_LINK_DEPTH_EXCEEDED",
+  "JOIN_TABLE_REQUIRED",
+  // LT-B1..B10 additions
+  "ONE_TO_ONE_VIOLATION",
+  "OFFSET_TOO_DEEP_USE_SEARCH_AFTER",
+  "INVALID_SEARCH_AFTER_TOKEN",
+  "PIT_EXPIRED",
+  "RESULT_SET_TOO_LARGE",
+  "REVERSE_ACTIONS_DISABLED",
+  "QUARANTINE_NOT_FOUND",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -87,6 +127,11 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       sourcePropertyApiName, targetPropertyApiName,
       joinTableFilePath, joinTableSourceColumn, joinTableTargetColumn,
       isBidirectional,
+      violationPolicy,
+      reverseApiName, reverseDisplayName, reverseDescription,
+      reverseVisible, reversePropertyProjection, reverseActionsEnabled,
+      mandatoryControlPropertyId, mcpPropagationMode, mcpRequiredCount,
+      storageBackend,
     } = req.body;
 
     if (!apiName || !displayName || !cardinality || !sourceObjectTypeApiName || !targetObjectTypeApiName) {
@@ -103,6 +148,11 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       sourcePropertyApiName, targetPropertyApiName,
       joinTableFilePath, joinTableSourceColumn, joinTableTargetColumn,
       isBidirectional,
+      violationPolicy,
+      reverseApiName, reverseDisplayName, reverseDescription,
+      reverseVisible, reversePropertyProjection, reverseActionsEnabled,
+      mandatoryControlPropertyId, mcpPropagationMode, mcpRequiredCount,
+      storageBackend,
     });
 
     return sendCreated(res, formatLinkType(linkType));
@@ -233,6 +283,13 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
     const { ontologyId } = req.params;
     const { objectTypeApiName, objectPK, requests } = req.body;
 
+    // F-P3-13: read branch once at the ingress boundary.
+    const branchId = readBranchHeader(req);
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.bulkCount",
+      scoped: String(branchId !== null),
+    });
+
     // If requests array is provided, use it directly
     if (Array.isArray(requests) && requests.length > 0) {
       const results: Array<{ linkTypeApiName: string; direction: string; objectPK: string; count: number | null; error?: string }> = [];
@@ -243,7 +300,8 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
           if (!linkType) {
             return { linkTypeApiName: r.linkTypeApiName, direction: r.direction, objectPK: r.objectPK, count: null, error: "Link type not found" };
           }
-          const count = await countLinks(linkType, r.objectPK, r.direction);
+          // F-P3-13: count scoped to caller's branch.
+          const count = await countLinks(linkType, r.objectPK, r.direction, buildSecurityFilter(req.security), branchId);
           return { linkTypeApiName: r.linkTypeApiName, direction: r.direction, objectPK: r.objectPK, count };
         })
       );
@@ -273,7 +331,7 @@ router.post("/bulkCount", async (req: Request, res: Response, next: NextFunction
       return sendError(res, "OBJECT_TYPE_NOT_FOUND", `Object type '${objectTypeApiName}' not found.`);
     }
 
-    const results = await bulkCountLinks(ontologyId, otResult.rows[0].object_type_id, objectPK);
+    const results = await bulkCountLinks(ontologyId, otResult.rows[0].object_type_id, objectPK, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, { results });
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -304,11 +362,16 @@ router.post("/multiHop", async (req: Request, res: Response, next: NextFunction)
       ontologyId,
     }));
 
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.multiHop",
+      scoped: String(branchId !== null),
+    });
     const result = await resolveMultiHop(stepsWithOntology, startingPKs, {
       pageSize,
       pageToken,
       targetFilter,
-    });
+    }, buildSecurityFilter(req.security), branchId);
 
     return sendSuccess(res, result);
   } catch (err: any) {
@@ -328,7 +391,13 @@ router.get("/:apiName", async (req: Request, res: Response, next: NextFunction) 
     const { ontologyId, apiName } = req.params;
 
     // Don't match special paths
-    if (apiName === "export" || apiName === "import" || apiName === "bulkCount" || apiName === "multiHop") {
+    if (
+      apiName === "export" ||
+      apiName === "import" ||
+      apiName === "bulkCount" ||
+      apiName === "multiHop" ||
+      apiName === "_config"
+    ) {
       return next();
     }
 
@@ -363,6 +432,11 @@ router.put("/:apiName", async (req: Request, res: Response, next: NextFunction) 
       sourcePropertyApiName, targetPropertyApiName,
       joinTableFilePath, joinTableSourceColumn, joinTableTargetColumn,
       isBidirectional,
+      violationPolicy,
+      reverseApiName, reverseDisplayName, reverseDescription,
+      reverseVisible, reversePropertyProjection, reverseActionsEnabled,
+      mandatoryControlPropertyId, mcpPropagationMode, mcpRequiredCount,
+      storageBackend,
     } = req.body;
 
     // Reject immutable field changes
@@ -385,6 +459,11 @@ router.put("/:apiName", async (req: Request, res: Response, next: NextFunction) 
       sourcePropertyApiName, targetPropertyApiName,
       joinTableFilePath, joinTableSourceColumn, joinTableTargetColumn,
       isBidirectional,
+      violationPolicy,
+      reverseApiName, reverseDisplayName, reverseDescription,
+      reverseVisible, reversePropertyProjection, reverseActionsEnabled,
+      mandatoryControlPropertyId, mcpPropagationMode, mcpRequiredCount,
+      storageBackend,
     });
 
     const result: any = formatLinkType(updated);
@@ -419,8 +498,34 @@ router.delete("/:apiName", async (req: Request, res: Response, next: NextFunctio
     (formatted as any).deletedAt = new Date().toISOString();
 
     if (deleted.join_table_file_path) {
-      console.warn(`[ORPHANED_JOIN_TABLE] Link type '${apiName}' deleted but join table file remains: ${deleted.join_table_file_path}`);
-      (formatted as any).warnings = [`Orphaned join table file: ${deleted.join_table_file_path}`];
+      // F-10: Cascade cleanup — delete the orphaned join table file.
+      try {
+        const fs = require("fs");
+        if (fs.existsSync(deleted.join_table_file_path)) {
+          fs.unlinkSync(deleted.join_table_file_path);
+          console.info(`[CASCADE_CLEANUP] Deleted join table file: ${deleted.join_table_file_path}`);
+        }
+      } catch (cleanupErr: any) {
+        console.warn(`[CASCADE_CLEANUP_FAILED] Could not delete join table file ${deleted.join_table_file_path}: ${cleanupErr.message}`);
+        (formatted as any).warnings = [`Failed to delete orphaned join table file: ${deleted.join_table_file_path}`];
+      }
+    }
+
+    // F-10: Cascade cleanup — purge link_edit and quarantine rows for this link type.
+    //
+    // F-P3-12 audit: this DELETE is intentionally cross-branch. A link
+    // TYPE being deleted at the ontology level has no remaining scope
+    // on any branch — the type is gone, so every per-branch edit row
+    // for that type becomes orphaned and must be purged. Scoping this
+    // by branch_id would leave zombie rows referencing a non-existent
+    // link_type on other branches.
+    try {
+      const { query: pgQuery } = require("../db");
+      await pgQuery("DELETE FROM link_edit WHERE link_type_api_name = $1", [apiName]);
+      await pgQuery("DELETE FROM link_quarantine WHERE link_type_api_name = $1", [apiName]);
+    } catch (cascadeErr: any) {
+      // Tables may not exist in transitional deployments.
+      console.warn(`[CASCADE_CLEANUP] link_edit/quarantine purge for '${apiName}': ${cascadeErr.message}`);
     }
 
     return sendSuccess(res, formatted);
@@ -439,7 +544,10 @@ router.delete("/:apiName", async (req: Request, res: Response, next: NextFunctio
 router.post("/:apiName/resolve", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { ontologyId, apiName } = req.params;
-    const { objectPK, direction, pageSize, pageToken, targetFilter, select } = req.body;
+    const {
+      objectPK, direction, pageSize, pageToken, targetFilter, select,
+      maxResultPks, includeLinkState, paginationMode,
+    } = req.body;
 
     if (!objectPK || !direction) {
       return sendError(res, "VALIDATION_FAILED", "objectPK and direction are required.");
@@ -453,19 +561,95 @@ router.post("/:apiName/resolve", async (req: Request, res: Response, next: NextF
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
+    // LT-B2 — resolve effective PK cap from tenant config + optional override.
+    const resolverConfig = await getResolverConfig(ontologyId);
+    const capDecision = effectiveMaxPks(
+      resolverConfig.max_intermediate_pks,
+      typeof maxResultPks === "number" ? maxResultPks : undefined,
+      resolverConfig.global_hard_cap
+    );
+
+    // LT-B9 — reject deep offset pagination; callers should switch to search_after.
+    if (paginationMode !== "search_after" && !isSearchAfterToken(pageToken)) {
+      try {
+        const currentOffset = pageToken
+          ? JSON.parse(Buffer.from(pageToken, "base64").toString())?.offset ?? 0
+          : 0;
+        assertOffsetWithinCap(Number(currentOffset) || 0);
+      } catch (e) {
+        if (e instanceof OffsetTooDeepError) {
+          return sendError(res, e.code, e.message);
+        }
+      }
+    }
+
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.resolve",
+      scoped: String(branchId !== null),
+    });
     const result = await resolveLinks(linkType, objectPK, direction, {
       pageSize, pageToken, targetFilter, select,
-    });
+    }, buildSecurityFilter(req.security), branchId);
 
-    // Format response based on cardinality
-    const isSingle = (linkType.cardinality === "ONE_TO_ONE" || linkType.cardinality === "MANY_TO_ONE") && direction === "forward";
+    // LT-B6 — strip reverse-only projection from hits before responding.
+    const projectedHits = applyReverseProjectionAll(
+      result.linkedObjects,
+      linkType,
+      direction
+    );
+
+    // LT-B5 — optional per-result state when `includeLinkState=true`.
+    const withState = includeLinkState
+      ? await Promise.all(
+          projectedHits.slice(0, 25).map(async (hit) => {
+            const state = await resolveFKWithState(
+              linkType,
+              String(hit.__pk ?? objectPK),
+              direction,
+              ontologyId
+            ).catch(() => ({ state: "resolved" as const, target: hit, orphanReason: undefined as string | undefined }));
+            return {
+              object: hit,
+              linkState: state.state,
+              orphanReason: (state as { orphanReason?: string }).orphanReason,
+            };
+          })
+        )
+      : undefined;
+
+    // LT-B6 — self-reversing cardinality view.
+    const effectiveCardinality =
+      direction === "reverse"
+        ? reverseCardinality(linkType.cardinality)
+        : linkType.cardinality;
+
+    const isSingle =
+      (linkType.cardinality === "ONE_TO_ONE" || linkType.cardinality === "MANY_TO_ONE") &&
+      direction === "forward";
     if (isSingle) {
       return sendSuccess(res, {
-        linkedObject: result.linkedObjects.length > 0 ? result.linkedObjects[0] : null,
+        linkedObject: projectedHits.length > 0 ? projectedHits[0] : null,
+        metadata: {
+          cardinality: effectiveCardinality,
+          effective_max_pks: capDecision.effective,
+          max_pks_clamped: capDecision.clamped,
+          pagination_mode: paginationMode ?? "offset",
+        },
       });
     }
 
-    return sendSuccess(res, result);
+    return sendSuccess(res, {
+      ...result,
+      linkedObjects: projectedHits,
+      linkedObjectsWithState: withState,
+      metadata: {
+        cardinality: effectiveCardinality,
+        effective_max_pks: capDecision.effective,
+        max_pks_clamped: capDecision.clamped,
+        pagination_mode: paginationMode ?? "offset",
+      },
+    });
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
       return sendError(res, err.code, err.message);
@@ -492,7 +676,12 @@ router.post("/:apiName/count", async (req: Request, res: Response, next: NextFun
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
-    const count = await countLinks(linkType, objectPK, direction);
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.count",
+      scoped: String(branchId !== null),
+    });
+    const count = await countLinks(linkType, objectPK, direction, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, { linkTypeApiName: apiName, direction, count });
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -509,10 +698,25 @@ router.post("/:apiName/count", async (req: Request, res: Response, next: NextFun
 router.post("/:apiName/searchAround", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { ontologyId, apiName } = req.params;
-    const { direction, sourceFilter, targetFilter, pageSize, pageToken } = req.body;
+    const { direction, sourceFilter, targetFilter, pageSize, pageToken, maxDepth } = req.body;
 
     if (!direction) {
       return sendError(res, "VALIDATION_FAILED", "direction is required.");
+    }
+
+    // Spec §Task 7 — maxDepth defaults to 1, caps at 3 (Palantir Search Around).
+    if (maxDepth !== undefined) {
+      if (typeof maxDepth !== "number" || !Number.isInteger(maxDepth) || maxDepth < 1) {
+        return sendError(res, "INVALID_PARAMETER", "maxDepth must be a positive integer.");
+      }
+      if (maxDepth > 3) {
+        return sendError(
+          res,
+          "MAX_LINK_DEPTH_EXCEEDED",
+          `maxDepth ${maxDepth} exceeds the Palantir Search Around limit of 3.`,
+          { maxDepth, limit: 3 }
+        );
+      }
     }
 
     const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
@@ -520,9 +724,14 @@ router.post("/:apiName/searchAround", async (req: Request, res: Response, next: 
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.searchAround",
+      scoped: String(branchId !== null),
+    });
     const result = await searchAround(linkType, direction, {
       sourceFilter, targetFilter, pageSize, pageToken,
-    });
+    }, buildSecurityFilter(req.security), branchId);
 
     return sendSuccess(res, result);
   } catch (err: any) {
@@ -625,7 +834,12 @@ router.post("/:apiName/validate", async (req: Request, res: Response, next: Next
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
-    const validation = await validateJoinTable(linkType);
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.validateJoinTable",
+      scoped: String(branchId !== null),
+    });
+    const validation = await validateJoinTable(linkType, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, validation);
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -648,7 +862,17 @@ router.get("/:apiName/analysis", async (req: Request, res: Response, next: NextF
       return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
     }
 
-    const analysis = await analyzeLinkType(linkType);
+    const precisionRaw = req.query.precision as string | undefined;
+    const precision =
+      precisionRaw === "exact" || precisionRaw === "sampled" || precisionRaw === "fast"
+        ? precisionRaw
+        : undefined;
+    const branchId = readBranchHeader(req); // F-P3-13
+    incCounter("tellus_read_branch_filtered_total", {
+      route: "links.analysis",
+      scoped: String(branchId !== null),
+    });
+    const analysis = await analyzeLinkType(linkType, { precision }, buildSecurityFilter(req.security), branchId);
     return sendSuccess(res, analysis);
   } catch (err: any) {
     if (err.code && KNOWN_CODES.has(err.code)) {
@@ -705,9 +929,552 @@ function formatLinkType(row: any): Record<string, unknown> {
     joinTableSourceColumn: row.join_table_source_column || null,
     joinTableTargetColumn: row.join_table_target_column || null,
     isBidirectional: row.is_bidirectional || false,
+    // LT-B1
+    storageBackend: row.storage_backend ?? "csv_legacy",
+    icebergTableName: row.iceberg_table_name ?? null,
+    // LT-B4
+    violationPolicy: row.violation_policy ?? "warn",
+    violationCount24h: row.violation_count_24h ?? 0,
+    // LT-B6
+    reverseApiName: row.reverse_api_name ?? null,
+    reverseDisplayName: row.reverse_display_name ?? null,
+    reverseDescription: row.reverse_description ?? null,
+    reverseVisible: row.reverse_visible ?? true,
+    reversePropertyProjection: row.reverse_property_projection ?? null,
+    reverseActionsEnabled: row.reverse_actions_enabled ?? true,
+    // LT-B7
+    mandatoryControlPropertyId: row.mandatory_control_property_id ?? null,
+    mcpPropagationMode: row.mcp_propagation_mode ?? "union",
+    mcpRequiredCount: row.mcp_required_count ?? 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
+
+// ---------------------------------------------------------------------------
+// LT-B2 — Resolver config (per-ontology PK caps + escalation backend)
+// ---------------------------------------------------------------------------
+
+router.get("/_config/resolver", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { ontologyId } = req.params;
+    const config = await getResolverConfig(ontologyId);
+    return sendSuccess(res, config);
+  } catch (err: any) {
+    next(err);
+  }
+});
+
+router.put("/_config/resolver", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { ontologyId } = req.params;
+    const {
+      maxIntermediatePks,
+      maxSearchAroundSource,
+      maxMultihopIntermediate,
+      escalationBackend,
+      escalationThresholdPks,
+      globalHardCap,
+    } = req.body;
+
+    if (
+      escalationBackend !== undefined &&
+      !["none", "clickhouse", "furnace"].includes(escalationBackend)
+    ) {
+      return sendError(
+        res,
+        "VALIDATION_FAILED",
+        "escalationBackend must be one of: none, clickhouse, furnace"
+      );
+    }
+
+    const updated = await upsertResolverConfig(ontologyId, {
+      maxIntermediatePks,
+      maxSearchAroundSource,
+      maxMultihopIntermediate,
+      escalationBackend,
+      escalationThresholdPks,
+      globalHardCap,
+    });
+    return sendSuccess(res, updated);
+  } catch (err: any) {
+    if (err.code && KNOWN_CODES.has(err.code)) {
+      return sendError(res, err.code, err.message);
+    }
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// LT-B4 — Quarantine endpoints
+// ---------------------------------------------------------------------------
+
+router.get("/:apiName/violations", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { ontologyId, apiName } = req.params;
+    const status = req.query.status as "pending" | "resolved" | "dismissed" | undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+
+    const result = await listQuarantineEntries({
+      ontologyId,
+      linkTypeApiName: apiName,
+      status,
+      limit,
+      offset,
+    });
+    return sendSuccess(res, result);
+  } catch (err: any) {
+    if (err.code && KNOWN_CODES.has(err.code)) {
+      return sendError(res, err.code, err.message);
+    }
+    next(err);
+  }
+});
+
+router.post(
+  "/:apiName/violations/:violationId/resolve",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { violationId } = req.params;
+      const { resolvedBy, note } = req.body ?? {};
+      const row = await resolveQuarantineEntry(
+        violationId,
+        resolvedBy ?? "admin",
+        note
+      );
+      if (!row) {
+        return sendError(
+          res,
+          "QUARANTINE_NOT_FOUND",
+          `Quarantine entry ${violationId} not found or already handled.`
+        );
+      }
+      return sendSuccess(res, row);
+    } catch (err: any) {
+      if (err.code && KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+router.post(
+  "/:apiName/violations/:violationId/dismiss",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { violationId } = req.params;
+      const { resolvedBy, note } = req.body ?? {};
+      const row = await dismissQuarantineEntry(
+        violationId,
+        resolvedBy ?? "admin",
+        note
+      );
+      if (!row) {
+        return sendError(
+          res,
+          "QUARANTINE_NOT_FOUND",
+          `Quarantine entry ${violationId} not found or already handled.`
+        );
+      }
+      return sendSuccess(res, row);
+    } catch (err: any) {
+      if (err.code && KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// Expose the enforcer so tests & Action layer handlers can dry-run a
+// would-be edit without actually committing it. Returns whether the
+// edit is allowed under the current policy.
+router.post(
+  "/:apiName/enforce-one-to-one",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, apiName } = req.params;
+      const { sourcePk, targetPk } = req.body ?? {};
+      if (!sourcePk || !targetPk) {
+        return sendError(res, "VALIDATION_FAILED", "sourcePk and targetPk are required");
+      }
+      const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
+      if (!linkType) {
+        return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
+      }
+      // F-P3-12: resolve branch from request header — the enforcer
+      // refuses to run without a branch UUID. `resolveBranchIdOrMain`
+      // is the single fallback point and hits `main` when the caller
+      // did not tag the request.
+      const headerBranch =
+        (req.get("x-branch-id") ?? (req.body?.branchId as string | undefined)) || null;
+      const branchId = await resolveBranchIdOrMain(ontologyId, headerBranch);
+      const result = await enforceOneToOneAdd({
+        linkType,
+        ontologyId,
+        branchId,
+        sourcePk,
+        targetPk,
+      });
+      return sendSuccess(res, result);
+    } catch (err: any) {
+      if (err.code && KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message, err.details);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// LT-B5 — Orphan stats & listing + on-demand scan
+// ---------------------------------------------------------------------------
+
+router.get("/:apiName/orphan-stats", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { ontologyId, apiName } = req.params;
+    const days = req.query.days ? parseInt(req.query.days as string, 10) : 30;
+    const rows = await getLatestOrphanStats(ontologyId, apiName, days);
+    return sendSuccess(res, {
+      linkTypeApiName: apiName,
+      days,
+      points: rows,
+      latest: rows[0] ?? null,
+    });
+  } catch (err: any) {
+    next(err);
+  }
+});
+
+router.post("/:apiName/orphan-scan", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { ontologyId, apiName } = req.params;
+    const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
+    if (!linkType) {
+      return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
+    }
+    const sampleLimit = req.body?.sampleLimit ?? 1000;
+    const result = await runOrphanScan(linkType, ontologyId, sampleLimit);
+    return sendSuccess(res, result);
+  } catch (err: any) {
+    if (err.code && KNOWN_CODES.has(err.code)) {
+      return sendError(res, err.code, err.message);
+    }
+    next(err);
+  }
+});
+
+router.get("/:apiName/orphans", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { ontologyId, apiName } = req.params;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+    const cursor = req.query.cursor as string | undefined;
+    const result = await listOrphans({
+      ontologyId,
+      linkTypeApiName: apiName,
+      limit,
+      cursor,
+    });
+    return sendSuccess(res, result);
+  } catch (err: any) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// LT-B7 — Marking derivation trace (admin-only)
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/:apiName/edge/:sourcePK/:targetPK/marking-trace",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, apiName, sourcePK, targetPK } = req.params;
+      const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
+      if (!linkType) {
+        return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
+      }
+
+      const sourceMarkings = Array.isArray(req.query.sourceMarkings)
+        ? (req.query.sourceMarkings as string[])
+        : req.query.sourceMarkings
+          ? String(req.query.sourceMarkings).split(",")
+          : [];
+      const targetMarkings = Array.isArray(req.query.targetMarkings)
+        ? (req.query.targetMarkings as string[])
+        : req.query.targetMarkings
+          ? String(req.query.targetMarkings).split(",")
+          : [];
+
+      const effective = deriveEdgeMarkings(linkType, sourceMarkings, targetMarkings);
+      return sendSuccess(res, {
+        linkTypeApiName: apiName,
+        sourcePK,
+        targetPK,
+        mcpConfigured: Boolean(linkType.mandatory_control_property_id),
+        mcpPropagationMode: linkType.mcp_propagation_mode ?? "union",
+        mcpRequiredCount: linkType.mcp_required_count ?? 1,
+        sourceMarkings,
+        targetMarkings,
+        effectiveMarkings: effective,
+      });
+    } catch (err: any) {
+      if (err.code && KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// LT-F2 — edge browser feed
+//
+// Backed by the existing CSV join-table reader for legacy M2M links and
+// by a placeholder Iceberg reader for migrated links. Pagination uses
+// the LT-B9 search_after token shape even for the CSV path so the FE
+// has a uniform contract.
+// ---------------------------------------------------------------------------
+
+router.get("/:apiName/edges", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { ontologyId, apiName } = req.params;
+    const {
+      sourcePK,
+      targetPK,
+      pageSize: pageSizeRaw,
+      pageToken,
+    } = req.query as Record<string, string | undefined>;
+
+    const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
+    if (!linkType) {
+      return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
+    }
+
+    const pageSize = Math.min(Math.max(parseInt(pageSizeRaw ?? "100", 10) || 100, 1), 1000);
+
+    // Decode the search_after cursor to recover the last-seen
+    // (source_pk, target_pk) tuple. Legacy offset tokens still decode
+    // into `offset` for back-compat.
+    let lastSource: string | null = null;
+    let lastTarget: string | null = null;
+    let offset = 0;
+    if (pageToken) {
+      try {
+        const parsed = JSON.parse(Buffer.from(pageToken, "base64url").toString());
+        if (parsed && typeof parsed === "object") {
+          if (Array.isArray(parsed.sort_keys)) {
+            lastSource = String(parsed.sort_keys[0] ?? "") || null;
+            lastTarget = String(parsed.sort_keys[1] ?? "") || null;
+          } else if (typeof parsed.offset === "number") {
+            offset = parsed.offset;
+          }
+        }
+      } catch {
+        /* treat as offset=0 */
+      }
+    }
+
+    // Pull edges from the legacy CSV (storage_backend='csv_legacy'). For
+    // the iceberg backend we stream via DuckDB iceberg_scan; this is
+    // stubbed to empty on dev boxes without the PyIceberg sidecar.
+    const edges: Array<{
+      source_pk: string;
+      target_pk: string;
+      link_props: Record<string, unknown>;
+      markings: string[];
+      created_at: string | null;
+    }> = [];
+
+    if (linkType.storage_backend !== "iceberg" && linkType.join_table_file_path) {
+      const fs = await import("fs");
+      if (fs.existsSync(linkType.join_table_file_path)) {
+        const data = fs.readFileSync(linkType.join_table_file_path, "utf-8");
+        const lines = data.trim().split("\n");
+        for (let i = 1; i < lines.length; i++) {
+          const cols = lines[i].split(",").map((c) => c.trim());
+          if (cols.length < 2 || !cols[0] || !cols[1]) continue;
+          if (sourcePK && cols[0] !== sourcePK) continue;
+          if (targetPK && cols[1] !== targetPK) continue;
+          if (lastSource !== null && lastTarget !== null) {
+            if (cols[0] < lastSource) continue;
+            if (cols[0] === lastSource && cols[1] <= lastTarget) continue;
+          }
+          edges.push({
+            source_pk: cols[0],
+            target_pk: cols[1],
+            link_props: {},
+            markings: [],
+            created_at: null,
+          });
+          if (edges.length >= pageSize) break;
+        }
+      }
+    }
+
+    // Apply offset cap for the legacy offset path, same contract as
+    // LT-B9 resolve endpoint.
+    if (!lastSource && offset > 10_000) {
+      return sendError(
+        res,
+        "OFFSET_TOO_DEEP_USE_SEARCH_AFTER",
+        "offset paging beyond 10_000 is no longer supported — use paginationMode=search_after"
+      );
+    }
+
+    // Next-page token = the last (source, target) tuple base64url-encoded.
+    let nextPageToken: string | null = null;
+    if (edges.length === pageSize) {
+      const last = edges[edges.length - 1];
+      nextPageToken = Buffer.from(
+        JSON.stringify({
+          sort_keys: [last.source_pk, last.target_pk],
+          pit_id: null,
+          backend: linkType.storage_backend === "iceberg" ? "iceberg" : "opensearch",
+        })
+      ).toString("base64url");
+    }
+
+    return sendSuccess(res, {
+      edges,
+      pageSize,
+      nextPageToken,
+      storageBackend: linkType.storage_backend ?? "csv_legacy",
+    });
+  } catch (err: any) {
+    if (err.code && KNOWN_CODES.has(err.code)) {
+      return sendError(res, err.code, err.message);
+    }
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// LT-F3 — cardinality estimate (estimate-then-escalate preview)
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/:apiName/searchAround/estimate",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, apiName } = req.params;
+      const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
+      if (!linkType) {
+        return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
+      }
+      const { estimateCardinality, decideEscalation } = await import(
+        "../services/linkCardinalityEstimator"
+      );
+      const config = await getResolverConfig(ontologyId);
+      let sourceFilter: Record<string, unknown> | undefined;
+      if (typeof req.query.sourceFilter === "string") {
+        try {
+          sourceFilter = JSON.parse(req.query.sourceFilter);
+        } catch {
+          sourceFilter = undefined;
+        }
+      }
+      const estimate = await estimateCardinality(linkType, sourceFilter);
+      const decision = decideEscalation(estimate, config);
+      return sendSuccess(res, {
+        estimate,
+        decision,
+        config: {
+          escalation_backend: config.escalation_backend,
+          escalation_threshold_pks: config.escalation_threshold_pks,
+          max_search_around_source: config.max_search_around_source,
+        },
+      });
+    } catch (err: any) {
+      if (err.code && KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// LT-F7 — visibility summary (marking-aware counts)
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/:apiName/visibility-summary",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, apiName } = req.params;
+      const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
+      if (!linkType) {
+        return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
+      }
+      const userMarkingsRaw = (req.query.userMarkings as string | undefined) ?? "";
+      const userMarkings = userMarkingsRaw
+        ? userMarkingsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : [];
+      const mcpConfigured = Boolean(linkType.mandatory_control_property_id);
+      const requiredCount = linkType.mcp_required_count ?? 1;
+
+      // Visible + hidden counts come from a cheap analysis call with
+      // precision=fast (manifest stats for Iceberg, _count for FK).
+      // F-P3-13: MCP visibility estimate scoped to caller's branch.
+      const mcpBranchId = readBranchHeader(req);
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "links.mcpVisibility",
+        scoped: String(mcpBranchId !== null),
+      });
+      const analysis = await analyzeLinkType(linkType, { precision: "fast" }, null, mcpBranchId);
+      const total = analysis.totalLinkCount ?? 0;
+      // Without actual row markings we estimate "hidden" as the naive
+      // proportion of edges whose required markings aren't in the user
+      // set. With MCP disabled, nothing is hidden.
+      const hiddenEstimate = mcpConfigured && userMarkings.length < requiredCount
+        ? total
+        : 0;
+
+      return sendSuccess(res, {
+        linkTypeApiName: apiName,
+        mcpConfigured,
+        mcpPropagationMode: linkType.mcp_propagation_mode ?? "union",
+        mcpRequiredCount: requiredCount,
+        userMarkings,
+        totalLinkCount: total,
+        visibleCount: Math.max(total - hiddenEstimate, 0),
+        hiddenCount: hiddenEstimate,
+        markingNamesPolicy: process.env.MARKINGS_SHOW_NAMES_IN_UI ?? "always",
+      });
+    } catch (err: any) {
+      if (err.code && KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// LT-B1 — Migrate CSV join table to Iceberg backend
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/:apiName/migrate-storage",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, apiName } = req.params;
+      const linkType = await linkTypeModel.getByApiName(ontologyId, apiName);
+      if (!linkType) {
+        return sendError(res, "LINK_TYPE_NOT_FOUND", `Link type '${apiName}' not found.`);
+      }
+      const result = await migrateLinkStorage(linkType, ontologyId);
+      return sendSuccess(res, result);
+    } catch (err: any) {
+      if (err.code && KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
 
 export default router;

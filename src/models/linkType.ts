@@ -22,6 +22,9 @@ import { validateLinkTypeName } from "../utils/apiNameValidator";
 // ---------------------------------------------------------------------------
 
 export type Cardinality = "ONE_TO_ONE" | "ONE_TO_MANY" | "MANY_TO_ONE" | "MANY_TO_MANY";
+export type StorageBackend = "csv_legacy" | "iceberg";
+export type ViolationPolicy = "warn" | "reject" | "quarantine";
+export type McpPropagationMode = "source" | "target" | "union" | "intersection";
 
 export interface LinkTypeRow {
   link_type_id: string;
@@ -40,6 +43,26 @@ export interface LinkTypeRow {
   is_bidirectional: boolean;
   created_at: string;
   updated_at: string;
+  // LT-B1 — Iceberg storage backend
+  storage_backend?: StorageBackend;
+  iceberg_table_name?: string | null;
+  migration_started_at?: string | null;
+  migration_completed_at?: string | null;
+  // LT-B4 — ONE_TO_ONE violation policy
+  violation_policy?: ViolationPolicy;
+  violation_count_24h?: number;
+  // LT-B6 — Bidirectional reverse spec
+  reverse_api_name?: string | null;
+  reverse_display_name?: string | null;
+  reverse_description?: string | null;
+  reverse_visible?: boolean;
+  reverse_property_projection?: { included?: string[]; excluded?: string[] } | null;
+  reverse_actions_enabled?: boolean;
+  bidirectional_migrated_at?: string | null;
+  // LT-B7 — Mandatory Control Properties
+  mandatory_control_property_id?: string | null;
+  mcp_propagation_mode?: McpPropagationMode;
+  mcp_required_count?: number;
 }
 
 export interface CreateLinkTypeInput {
@@ -55,6 +78,18 @@ export interface CreateLinkTypeInput {
   joinTableSourceColumn?: string | null;
   joinTableTargetColumn?: string | null;
   isBidirectional?: boolean;
+  // LT-B4 / LT-B6 / LT-B7 — additive
+  violationPolicy?: ViolationPolicy;
+  reverseApiName?: string | null;
+  reverseDisplayName?: string | null;
+  reverseDescription?: string | null;
+  reverseVisible?: boolean;
+  reversePropertyProjection?: { included?: string[]; excluded?: string[] } | null;
+  reverseActionsEnabled?: boolean;
+  mandatoryControlPropertyId?: string | null;
+  mcpPropagationMode?: McpPropagationMode;
+  mcpRequiredCount?: number;
+  storageBackend?: StorageBackend;
 }
 
 export interface UpdateLinkTypeInput {
@@ -67,6 +102,17 @@ export interface UpdateLinkTypeInput {
   joinTableSourceColumn?: string | null;
   joinTableTargetColumn?: string | null;
   isBidirectional?: boolean;
+  violationPolicy?: ViolationPolicy;
+  reverseApiName?: string | null;
+  reverseDisplayName?: string | null;
+  reverseDescription?: string | null;
+  reverseVisible?: boolean;
+  reversePropertyProjection?: { included?: string[]; excluded?: string[] } | null;
+  reverseActionsEnabled?: boolean;
+  mandatoryControlPropertyId?: string | null;
+  mcpPropagationMode?: McpPropagationMode;
+  mcpRequiredCount?: number;
+  storageBackend?: StorageBackend;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,14 +192,37 @@ async function create(
     targetPropId = await resolvePropertyId(targetOtId, input.targetPropertyApiName);
   }
 
+  // LT-B4: default policy for new ONE_TO_ONE links is 'reject'. Pre-existing
+  // O2O links keep the migration-level 'warn' default for backwards compat.
+  const violationPolicy: ViolationPolicy =
+    input.violationPolicy ??
+    (input.cardinality === "ONE_TO_ONE" ? "reject" : "warn");
+
+  // LT-B6: when caller marks the link bidirectional without providing an
+  // explicit reverse api_name, populate reasonable defaults.
+  const reverseApiName = input.isBidirectional
+    ? (input.reverseApiName ?? `${input.apiName}_reverse`)
+    : (input.reverseApiName ?? null);
+  const reverseDisplayName = input.isBidirectional
+    ? (input.reverseDisplayName ?? `${input.displayName} (reverse)`)
+    : (input.reverseDisplayName ?? null);
+
   try {
     const result = await query(
       `INSERT INTO link_type
          (ontology_id, api_name, display_name, description, cardinality,
           source_object_type, target_object_type, source_property_id, target_property_id,
           join_table_file_path, join_table_source_column, join_table_target_column,
-          is_bidirectional)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          is_bidirectional,
+          storage_backend, violation_policy,
+          reverse_api_name, reverse_display_name, reverse_description,
+          reverse_visible, reverse_property_projection, reverse_actions_enabled,
+          bidirectional_migrated_at,
+          mandatory_control_property_id, mcp_propagation_mode, mcp_required_count)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+               $14, $15, $16, $17, $18, $19, $20, $21,
+               CASE WHEN $13::boolean THEN now() ELSE NULL END,
+               $22, $23, $24)
        RETURNING *`,
       [
         ontologyId,
@@ -169,6 +238,19 @@ async function create(
         input.joinTableSourceColumn ?? null,
         input.joinTableTargetColumn ?? null,
         input.isBidirectional ?? false,
+        input.storageBackend ?? "csv_legacy",
+        violationPolicy,
+        reverseApiName,
+        reverseDisplayName,
+        input.reverseDescription ?? null,
+        input.reverseVisible ?? true,
+        input.reversePropertyProjection
+          ? JSON.stringify(input.reversePropertyProjection)
+          : null,
+        input.reverseActionsEnabled ?? true,
+        input.mandatoryControlPropertyId ?? null,
+        input.mcpPropagationMode ?? "union",
+        input.mcpRequiredCount ?? 1,
       ]
     );
     return result.rows[0] as LinkTypeRow;
@@ -217,6 +299,21 @@ async function update(
     }
   }
 
+  const nextIsBidirectional =
+    input.isBidirectional !== undefined ? input.isBidirectional : existing.is_bidirectional;
+  const nextReverseApiName =
+    input.reverseApiName !== undefined
+      ? input.reverseApiName
+      : nextIsBidirectional && !existing.reverse_api_name
+        ? `${existing.api_name}_reverse`
+        : (existing.reverse_api_name ?? null);
+  const nextReverseDisplayName =
+    input.reverseDisplayName !== undefined
+      ? input.reverseDisplayName
+      : nextIsBidirectional && !existing.reverse_display_name
+        ? `${existing.display_name} (reverse)`
+        : (existing.reverse_display_name ?? null);
+
   const result = await query(
     `UPDATE link_type SET
        display_name = $1,
@@ -228,6 +325,21 @@ async function update(
        join_table_source_column = $7,
        join_table_target_column = $8,
        is_bidirectional = $9,
+       violation_policy = $12,
+       reverse_api_name = $13,
+       reverse_display_name = $14,
+       reverse_description = $15,
+       reverse_visible = $16,
+       reverse_property_projection = $17,
+       reverse_actions_enabled = $18,
+       mandatory_control_property_id = $19,
+       mcp_propagation_mode = $20,
+       mcp_required_count = $21,
+       storage_backend = $22,
+       bidirectional_migrated_at = CASE
+         WHEN $9::boolean AND bidirectional_migrated_at IS NULL THEN now()
+         ELSE bidirectional_migrated_at
+       END,
        updated_at = now()
      WHERE ontology_id = $10 AND api_name = $11
      RETURNING *`,
@@ -240,9 +352,22 @@ async function update(
       input.joinTableFilePath !== undefined ? input.joinTableFilePath : existing.join_table_file_path,
       input.joinTableSourceColumn !== undefined ? input.joinTableSourceColumn : existing.join_table_source_column,
       input.joinTableTargetColumn !== undefined ? input.joinTableTargetColumn : existing.join_table_target_column,
-      input.isBidirectional !== undefined ? input.isBidirectional : existing.is_bidirectional,
+      nextIsBidirectional,
       ontologyId,
       apiName,
+      input.violationPolicy ?? existing.violation_policy ?? "warn",
+      nextReverseApiName,
+      nextReverseDisplayName,
+      input.reverseDescription !== undefined ? input.reverseDescription : (existing.reverse_description ?? null),
+      input.reverseVisible !== undefined ? input.reverseVisible : (existing.reverse_visible ?? true),
+      input.reversePropertyProjection !== undefined
+        ? (input.reversePropertyProjection ? JSON.stringify(input.reversePropertyProjection) : null)
+        : (existing.reverse_property_projection ? JSON.stringify(existing.reverse_property_projection) : null),
+      input.reverseActionsEnabled !== undefined ? input.reverseActionsEnabled : (existing.reverse_actions_enabled ?? true),
+      input.mandatoryControlPropertyId !== undefined ? input.mandatoryControlPropertyId : (existing.mandatory_control_property_id ?? null),
+      input.mcpPropagationMode ?? existing.mcp_propagation_mode ?? "union",
+      input.mcpRequiredCount ?? existing.mcp_required_count ?? 1,
+      input.storageBackend ?? existing.storage_backend ?? "csv_legacy",
     ]
   );
 
@@ -375,7 +500,7 @@ export { create, update, getByApiName, listByOntology, listByObjectType, remove,
 // Inline self-tests
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -445,10 +570,13 @@ function runSelfTests(): void {
   if (failed === 0) {
     console.log("\nAll linkType model tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

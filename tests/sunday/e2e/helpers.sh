@@ -35,6 +35,8 @@ do_request() {
   for attempt in 1 2; do
     local tmpfile; tmpfile=$(mktemp)
     local curl_args=(-s -w "\n%{http_code}" -D "$tmpfile" -X "$method" -H "Content-Type: application/json")
+    # F-01: attach JWT so globalAuth() does not 401 data-plane routes.
+    if [[ -n "${AUTH_TOKEN:-}" ]]; then curl_args+=(-H "Authorization: Bearer ${AUTH_TOKEN}"); fi
     if [[ -n "$data" ]]; then curl_args+=(-d "$data"); fi
     local response; response=$(curl "${curl_args[@]}" "${BASE_URL}${path}" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)

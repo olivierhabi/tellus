@@ -409,7 +409,7 @@ export function generateTicketCSV(
 // Inline self-tests (run: npx tsx src/tests/helpers/testDataGenerator.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -418,6 +418,7 @@ function runSelfTests(): void {
       passed++;
       console.log(`  PASS: ${label}`);
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -904,6 +905,7 @@ function runSelfTests(): void {
   if (failed === 0) {
     console.log("\nAll testDataGenerator tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
@@ -949,6 +951,8 @@ function parseCSVLine(line: string): string[] {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

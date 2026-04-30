@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { api } from "../../helpers/api";
 
-const BASE = "/api/v2/objects";
+const BASE = "/api/v1/objects";
 let ONTOLOGY_ID: string;
 let READY = false;
 
@@ -18,18 +18,17 @@ describe("Query Basic Operations (Task 26)", () => {
       const res = await fetch("http://localhost:3000/health");
       if (res.status !== 200) throw new Error("not healthy");
     } catch {
-      console.warn("Server not reachable — skipping query-basic tests");
-      return;
+      throw new Error("F-P2-01: integration server unreachable — beforeAll fails loudly rather than ghost-passing");
     }
 
-    const { body } = await api("POST", "/api/v2/ontologies", {
+    const { body } = await api("POST", "/api/v1/ontology", {
       displayName: "T26 Basic Test",
       description: "Task 26 integration",
     });
     ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
-    if (!ONTOLOGY_ID) return;
+    if (!ONTOLOGY_ID) throw new Error("F-P2-01: ontology create returned no id — beforeAll fails loudly");
 
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T26Employee",
       displayName: "T26 Employee",
       description: "Test",
@@ -45,13 +44,13 @@ describe("Query Basic Operations (Task 26)", () => {
       { apiName: "email", displayName: "Email", baseType: "string" },
     ];
     for (const p of props) {
-      await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/T26Employee/properties`, p);
+      await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/T26Employee/properties`, p);
     }
     READY = true;
   }, 30_000);
 
   afterAll(async () => {
-    if (ONTOLOGY_ID) await api("DELETE", `/api/v2/ontologies/${ONTOLOGY_ID}`);
+    if (ONTOLOGY_ID) await api("DELETE", `/api/v1/ontology/${ONTOLOGY_ID}`);
   }, 10_000);
 
   // 1. List all objects (empty index returns 200 with empty data)

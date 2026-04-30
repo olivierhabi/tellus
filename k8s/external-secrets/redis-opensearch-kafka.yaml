@@ -1,0 +1,78 @@
+# ---------------------------------------------------------------------------
+# k8s/external-secrets/redis-opensearch-kafka.yaml
+#
+# F-P4-25 closure — External Secrets for Redis, OpenSearch, and Kafka.
+# Completes the vault-sourced credential set enumerated in docs/SECRETS.md.
+# ---------------------------------------------------------------------------
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: tellus-redis
+  namespace: tellus
+  annotations: { reloader.stakater.com/match: "true" }
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: aws-secrets, kind: SecretStore }
+  target:
+    name: tellus-redis-credentials
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      data:
+        REDIS_URL: "{{ .url }}"
+        REDIS_PASSWORD: "{{ .password }}"
+  data:
+    - { secretKey: url,      remoteRef: { key: /tellus/prod/redis, property: url } }
+    - { secretKey: password, remoteRef: { key: /tellus/prod/redis, property: password } }
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: tellus-opensearch
+  namespace: tellus
+  annotations: { reloader.stakater.com/match: "true" }
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: aws-secrets, kind: SecretStore }
+  target:
+    name: tellus-opensearch-credentials
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      data:
+        OPENSEARCH_URL: "{{ .url }}"
+        OPENSEARCH_USERNAME: "{{ .username }}"
+        OPENSEARCH_PASSWORD: "{{ .password }}"
+        OPENSEARCH_CA_CERT: "{{ .ca_cert }}"
+  data:
+    - { secretKey: url,       remoteRef: { key: /tellus/prod/opensearch, property: url } }
+    - { secretKey: username,  remoteRef: { key: /tellus/prod/opensearch, property: username } }
+    - { secretKey: password,  remoteRef: { key: /tellus/prod/opensearch, property: password } }
+    - { secretKey: ca_cert,   remoteRef: { key: /tellus/prod/opensearch, property: ca_cert_pem } }
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: tellus-kafka
+  namespace: tellus
+  annotations: { reloader.stakater.com/match: "true" }
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: aws-secrets, kind: SecretStore }
+  target:
+    name: tellus-kafka-credentials
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      data:
+        KAFKA_BOOTSTRAP_SERVERS: "{{ .bootstrap_servers }}"
+        KAFKA_SASL_MECHANISM: "{{ .sasl_mechanism }}"
+        KAFKA_SASL_USERNAME: "{{ .sasl_username }}"
+        KAFKA_SASL_PASSWORD: "{{ .sasl_password }}"
+        KAFKA_SSL_CA_CERT: "{{ .ssl_ca_cert }}"
+  data:
+    - { secretKey: bootstrap_servers, remoteRef: { key: /tellus/prod/kafka, property: bootstrap_servers } }
+    - { secretKey: sasl_mechanism,    remoteRef: { key: /tellus/prod/kafka, property: sasl_mechanism } }
+    - { secretKey: sasl_username,     remoteRef: { key: /tellus/prod/kafka, property: sasl_username } }
+    - { secretKey: sasl_password,     remoteRef: { key: /tellus/prod/kafka, property: sasl_password } }
+    - { secretKey: ssl_ca_cert,       remoteRef: { key: /tellus/prod/kafka, property: ssl_ca_cert_pem } }

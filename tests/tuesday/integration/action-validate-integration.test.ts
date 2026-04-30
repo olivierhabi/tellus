@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Action Validation Endpoint Integration Tests (Task 19)
 //
-// Verifies that POST /api/v2/actions/:actionTypeApiName/validate performs
+// Verifies that POST /api/v1/actions/:actionTypeApiName/validate performs
 // a dry-run validation without applying edits. The endpoint runs Stages 1,
 // 2, and 4 of the execution pipeline and returns a preview of what the
 // action would do, or a list of validation errors.
@@ -48,7 +48,7 @@ async function request(method: string, path: string, body?: unknown) {
 async function ensureActionType(def: Record<string, unknown>): Promise<void> {
   const res = await request(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actionTypes`,
+    `/api/v1/ontology/${ontologyId}/actionTypes`,
     def
   );
   if (res.status !== 201 && res.status !== 409) {
@@ -59,7 +59,7 @@ async function ensureActionType(def: Record<string, unknown>): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: validate an action (uses the ontology-less /api/v2/actions path)
+// Helper: validate an action (uses the ontology-less /api/v1/actions path)
 // ---------------------------------------------------------------------------
 
 async function validateAction(
@@ -68,7 +68,7 @@ async function validateAction(
 ) {
   return request(
     "POST",
-    `/api/v2/actions/${actionTypeApiName}/validate`,
+    `/api/v1/actions/${actionTypeApiName}/validate`,
     { parameters }
   );
 }
@@ -83,7 +83,7 @@ async function validateActionWithOntology(
 ) {
   return request(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actions/${actionTypeApiName}/validate`,
+    `/api/v1/ontology/${ontologyId}/actions/${actionTypeApiName}/validate`,
     { parameters }
   );
 }
@@ -98,7 +98,7 @@ async function executeAction(
 ) {
   return request(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actions/${actionTypeApiName}/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/${actionTypeApiName}/apply`,
     { parameters }
   );
 }
@@ -110,7 +110,7 @@ async function executeAction(
 async function fetchObject(objectType: string, primaryKey: string) {
   return request(
     "GET",
-    `/api/v2/objects/${objectType}/${encodeURIComponent(primaryKey)}`
+    `/api/v1/objects/${objectType}/${encodeURIComponent(primaryKey)}`
   );
 }
 
@@ -132,9 +132,9 @@ beforeAll(async () => {
   }
 
   // Discover the first ontology (seed ontology)
-  const ont = await request("GET", "/api/v2/ontologies");
+  const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
-    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology") || ont.body.data[0];
+    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;
   } else {
     console.warn("No ontologies found — skipping action validation tests");
@@ -567,7 +567,7 @@ describe("Action Validation Endpoint (Task 19)", () => {
 
       const res = await request(
         "POST",
-        "/api/v2/actions/avtUpdateRiskScore/validate",
+        "/api/v1/actions/avtUpdateRiskScore/validate",
         {}
       );
 

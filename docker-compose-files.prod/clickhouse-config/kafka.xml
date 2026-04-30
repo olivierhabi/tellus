@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse Kafka engine librdkafka overrides — Task B10.
+
+  Defaults to consuming from the start of the topic on first
+  subscription. The Funnel's CDC topics are low-volume, and the
+  e2e/verify tests publish messages shortly after the Kafka engine
+  table is created; without `earliest`, librdkafka's `latest` default
+  silently drops messages that land before the subscription is fully
+  established. Production clusters override this per-table where
+  latest-only semantics are preferred.
+-->
+<clickhouse>
+  <kafka>
+    <auto_offset_reset>earliest</auto_offset_reset>
+    <enable_partition_eof>false</enable_partition_eof>
+    <debug>cgrp,topic,fetch</debug>
+    <!-- Per-consumer tuning: short fetch for low-latency CDC. -->
+    <fetch_wait_max_ms>100</fetch_wait_max_ms>
+  </kafka>
+</clickhouse>

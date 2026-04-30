@@ -9,7 +9,7 @@ export class ColumnStatsController {
   constructor(private columnStatsService: ColumnStatsService) {}
 
   /**
-   * GET /api/datasets/:datasetId/columns/:columnName/stats
+   * GET /api/v1/datasets/:datasetId/columns/:columnName/stats
    * Get statistics for a single column.
    */
   getColumnStats = async (req: Request, res: Response, next: NextFunction) => {
@@ -32,7 +32,7 @@ export class ColumnStatsController {
   };
 
   /**
-   * GET /api/datasets/:datasetId/profile
+   * GET /api/v1/datasets/:datasetId/profile
    * Get full dataset profile with all column statistics.
    */
   getDatasetProfile = async (req: Request, res: Response, next: NextFunction) => {

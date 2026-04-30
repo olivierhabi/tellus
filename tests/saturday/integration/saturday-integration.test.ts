@@ -72,8 +72,18 @@ describe("Saturday Integration Tests", async () => {
   beforeAll(async () => {
     await ensureServer();
 
-    // Create test data directory
-    const dataDir = path.join(process.cwd(), "data");
+    // Create test data directory.
+    //
+    // datasourceService.resolveAndValidatePath (src/services/datasourceService.ts:24-36)
+    // rejects any filePath outside process.env.DATA_DIR (default "./data"). CI sets
+    // DATA_DIR=/tmp/ontology-testdata globally (.github/workflows/ci.yml:40) and
+    // globalSetup mirrors that for the seed processes (tests/globalSetup.ts:58,115).
+    // If this test wrote to process.cwd()/data the server would reject with 400
+    // VALIDATION_FAILED "File path is outside the allowed data directory". Honor
+    // DATA_DIR here so fixture CSVs land inside the allowlist.
+    const dataDir = process.env.DATA_DIR
+      ? path.resolve(process.env.DATA_DIR)
+      : path.join(process.cwd(), "data");
     fs.mkdirSync(dataDir, { recursive: true });
 
     // Create test CSV files
@@ -100,10 +110,10 @@ describe("Saturday Integration Tests", async () => {
     // Cleanup test data
     try {
       if (ctx.ontologyId) {
-        await api("DELETE", `/api/v2/ontologies/${ctx.ontologyId}`);
+        await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
       }
       if (ctx.datasetId) {
-        await api("DELETE", `/api/v2/datasets/${ctx.datasetId}?force=true`);
+        await api("DELETE", `/api/v1/datasets/${ctx.datasetId}?force=true`);
       }
     } catch { /* ignore cleanup errors */ }
 
@@ -121,17 +131,27 @@ describe("Saturday Integration Tests", async () => {
     const beforeFailed = runner.failed;
 
     await runner.test("Create ontology", async () => {
-      const { status, body } = await api("POST", "/api/v2/ontologies", {
+      const { status, body } = await api("POST", "/api/v1/ontology", {
         displayName: "Saturday Integration Test",
         description: "Testing dataset integration",
       });
-      runner.assert(status === 201, `Expected 201, got ${status}`);
-      ctx.ontologyId = body.data?.ontologyId || body.ontologyId;
+      if (status === 201) {
+        ctx.ontologyId = body.data?.ontologyId || body.ontologyId;
+      } else if (status === 409) {
+        // Ontology already exists from a prior run — look up its ID
+        const listRes = await api("GET", "/api/v1/ontology");
+        const existing = (listRes.body?.data || []).find(
+          (o: any) => o.displayName === "Saturday Integration Test"
+        );
+        ctx.ontologyId = existing?.ontologyId || "";
+      } else {
+        runner.assert(false, `Expected 201 or 409, got ${status}`);
+      }
       runner.assert(!!ctx.ontologyId, "ontologyId present");
     });
 
     await runner.test("Create Employee object type", async () => {
-      const { status } = await api("POST", `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/batch`, {
+      const { status } = await api("POST", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/batch`, {
         apiName: "SatEmployee",
         displayName: "Saturday Employee",
         description: "Employee type for Saturday tests",
@@ -145,7 +165,7 @@ describe("Saturday Integration Tests", async () => {
         primaryKeyProperty: "employeeId",
         titleProperty: "fullName",
       });
-      runner.assert(status === 201, `Expected 201, got ${status}`);
+      runner.assert(status === 201 || status === 409, `Expected 201 or 409, got ${status}`);
       ctx.objectTypeApiName = "SatEmployee";
     });
 
@@ -156,15 +176,15 @@ describe("Saturday Integration Tests", async () => {
   it("Dataset: Upload and list", async () => {
     const beforeFailed = runner.failed;
 
-    await runner.test("GET /api/v2/datasets returns empty list", async () => {
-      const { status, body } = await api("GET", "/api/v2/datasets");
+    await runner.test("GET /api/v1/datasets returns empty list", async () => {
+      const { status, body } = await api("GET", "/api/v1/datasets");
       runner.assert(status === 200, `Expected 200, got ${status}`);
     });
 
     // Dataset upload uses multipart - test via datasource registration instead
     await runner.test("Register backing datasource (legacy path)", async () => {
       const { status, body } = await api("POST",
-        `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/datasource`, {
+        `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/datasource`, {
           datasetName: "Saturday Employee Dataset",
           filePath: ctx.employeeCsvPath,
           fileFormat: "csv",
@@ -190,7 +210,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("Trigger indexing", async () => {
         const { status, body } = await api("POST",
-          `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index`,
+          `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/index`,
           { forceRecreateIndex: true }
         );
         runner.assert(status === 200, `Expected 200, got ${status}`);
@@ -200,7 +220,7 @@ describe("Saturday Integration Tests", async () => {
       await new Promise(r => setTimeout(r, 2000));
 
       await runner.test("Query indexed employees", async () => {
-        const { status, body } = await api("POST", "/api/v2/objects/SatEmployee/search", {
+        const { status, body } = await api("POST", "/api/v1/objects/SatEmployee/search", {
           $pageSize: 10,
         });
         runner.assert(status === 200, `Expected 200, got ${status}`);
@@ -209,12 +229,12 @@ describe("Saturday Integration Tests", async () => {
       });
 
       await runner.test("Get single employee by PK", async () => {
-        const { status, body } = await api("GET", "/api/v2/objects/SatEmployee/E001");
+        const { status, body } = await api("GET", "/api/v1/objects/SatEmployee/E001");
         runner.assert(status === 200, `Expected 200, got ${status}`);
       });
 
       await runner.test("Search with filter", async () => {
-        const { status, body } = await api("POST", "/api/v2/objects/SatEmployee/search", {
+        const { status, body } = await api("POST", "/api/v1/objects/SatEmployee/search", {
           where: { type: "eq", field: "department", value: "Engineering" },
           $pageSize: 10,
         });
@@ -222,7 +242,7 @@ describe("Saturday Integration Tests", async () => {
       });
 
       await runner.test("Aggregate", async () => {
-        const { status, body } = await api("POST", "/api/v2/objects/SatEmployee/aggregate", {
+        const { status, body } = await api("POST", "/api/v1/objects/SatEmployee/aggregate", {
           aggregations: [
             { type: "count", name: "total" },
             { type: "avg", field: "salary", name: "avgSalary" },
@@ -240,7 +260,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("Get reindex status", async () => {
         const { status } = await api("GET",
-          `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/SatEmployee/index/reindex/status`
+          `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/index/reindex/status`
         );
         // May be 200 or 404 depending on route registration
         runner.assert(status === 200 || status === 404, `Expected 200 or 404, got ${status}`);
@@ -255,7 +275,7 @@ describe("Saturday Integration Tests", async () => {
 
       await runner.test("List edits (should be empty initially)", async () => {
         const { status } = await api("GET",
-          `/api/v2/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/edits`
+          `/api/v1/ontology/${ctx.ontologyId}/objectTypes/SatEmployee/edits`
         );
         runner.assert(status === 200 || status === 404, `Expected 200/404, got ${status}`);
       });
@@ -271,7 +291,7 @@ describe("Saturday Integration Tests", async () => {
     const beforeFailed = runner.failed;
 
     await runner.test("List datasets", async () => {
-      const { status } = await api("GET", "/api/v2/datasets");
+      const { status } = await api("GET", "/api/v1/datasets");
       runner.assert(status === 200, `Expected 200, got ${status}`);
     });
 
@@ -282,13 +302,13 @@ describe("Saturday Integration Tests", async () => {
   it("Health: Enhanced health and status endpoints", async () => {
     const beforeFailed = runner.failed;
 
-    await runner.test("GET /api/v2/health returns healthy", async () => {
-      const { status, body } = await api("GET", "/api/v2/health");
+    await runner.test("GET /api/v1/health returns healthy", async () => {
+      const { status, body } = await api("GET", "/api/v1/health");
       runner.assert(status === 200 || status === 503, `Expected 200/503, got ${status}`);
     });
 
-    await runner.test("GET /api/v2/status returns system info", async () => {
-      const { status, body } = await api("GET", "/api/v2/status");
+    await runner.test("GET /api/v1/status returns system info", async () => {
+      const { status, body } = await api("GET", "/api/v1/status");
       runner.assert(status === 200, `Expected 200, got ${status}`);
     });
 

@@ -109,7 +109,7 @@ let testOntologyId: string | null = null;
 
 export async function setupTestData(): Promise<string> {
   // Create ontology
-  const { body: ontBody } = await api("POST", "/api/v2/ontologies", {
+  const { body: ontBody } = await api("POST", "/api/v1/ontology", {
     displayName: "QueryTestOntology",
     description: "Test ontology for query integration tests",
   });
@@ -117,7 +117,7 @@ export async function setupTestData(): Promise<string> {
   if (!testOntologyId) throw new Error("Failed to create test ontology");
 
   // Create Employee object type
-  await api("POST", `/api/v2/ontologies/${testOntologyId}/objectTypes`, {
+  await api("POST", `/api/v1/ontology/${testOntologyId}/objectTypes`, {
     apiName: "QueryTestEmployee",
     displayName: "Query Test Employee",
     description: "Employee for query testing",
@@ -136,19 +136,19 @@ export async function setupTestData(): Promise<string> {
   ];
 
   for (const p of props) {
-    await api("POST", `/api/v2/ontologies/${testOntologyId}/objectTypes/QueryTestEmployee/properties`, p);
+    await api("POST", `/api/v1/ontology/${testOntologyId}/objectTypes/QueryTestEmployee/properties`, p);
   }
 
   // Create Company object type (empty — for pagination cross-type test)
-  await api("POST", `/api/v2/ontologies/${testOntologyId}/objectTypes`, {
+  await api("POST", `/api/v1/ontology/${testOntologyId}/objectTypes`, {
     apiName: "QueryTestCompany",
     displayName: "Query Test Company",
     description: "Company for query testing",
   });
-  await api("POST", `/api/v2/ontologies/${testOntologyId}/objectTypes/QueryTestCompany/properties`, {
+  await api("POST", `/api/v1/ontology/${testOntologyId}/objectTypes/QueryTestCompany/properties`, {
     apiName: "companyId", displayName: "Company ID", baseType: "string",
   });
-  await api("POST", `/api/v2/ontologies/${testOntologyId}/objectTypes/QueryTestCompany/properties`, {
+  await api("POST", `/api/v1/ontology/${testOntologyId}/objectTypes/QueryTestCompany/properties`, {
     apiName: "name", displayName: "Name", baseType: "string",
   });
 
@@ -157,7 +157,7 @@ export async function setupTestData(): Promise<string> {
 
 export async function teardownTestData(): Promise<void> {
   if (testOntologyId) {
-    await api("DELETE", `/api/v2/ontologies/${testOntologyId}`);
+    await api("DELETE", `/api/v1/ontology/${testOntologyId}`);
     testOntologyId = null;
   }
 }

@@ -19,6 +19,17 @@ const uploadController = new UploadController(uploadService, projectService, fol
 // POST /projects/:projectId/upload — upload files to project root
 router.post('/upload', authenticate, authorizeRoles('editor', 'owner'), uploadController.uploadToProject);
 
+// GET /projects/:projectId/datasets/all — list ALL datasets in the project (all folders + root)
+router.get('/datasets/all', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const projectId = req.params.projectId as string;
+    const datasets = await datasetService.listAllProjectDatasets(projectId);
+    res.json({ success: true, data: datasets });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /projects/:projectId/datasets — list datasets at project root (folder_id IS NULL)
 router.get('/datasets', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {

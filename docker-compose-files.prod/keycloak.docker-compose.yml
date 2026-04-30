@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# Keycloak — SSO + OAuth 2.0 + MFA (Markings & Roles)
+# ---------------------------------------------------------------------------
+# Spec equivalent: "Keycloak or Auth0 + OAuth 2.0" (techstack §Auth).
+# Stands in for Palantir's SSO/CBAC layer:
+#   - Realm `tellus` with an `ontology-frontend` client (PKCE) and an
+#     `ontology-api` resource server.
+#   - Roles map 1:1 to the spec's "Ontology Roles" (Editor, Viewer, Admin,
+#     SecurityOfficer).
+#   - Optional groups carry classification labels for CBAC.
+#
+# In dev we use the H2 in-memory DB; switch `KC_DB=postgres` for production.
+# ---------------------------------------------------------------------------
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: tellus-keycloak
+    restart: unless-stopped
+    command: ["start-dev"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # dev-file persists the H2 DB in a volume. dev-mem drops the schema
+      # after idle periods in Keycloak 25, so direct grants start returning
+      # "Table USER_ENTITY not found" mid-run — make sure to use the
+      # persistent variant for any integration testing.
+      KC_DB: dev-file
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_PORT: 8086
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      - "127.0.0.1:8086:8086"
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+    healthcheck:
+      # The Keycloak image doesn't ship curl/wget, so probe via the JVM's
+      # built-in HTTP client instead. The management interface always
+      # exposes /health/ready on port 9000 in dev mode.
+      test:
+        - "CMD-SHELL"
+        - "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+volumes:
+  keycloak_data:

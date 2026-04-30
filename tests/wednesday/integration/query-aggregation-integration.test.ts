@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { api } from "../../helpers/api";
 
-const BASE = "/api/v2/objects";
+const BASE = "/api/v1/objects";
 let ONTOLOGY_ID: string;
 let READY = false;
 
@@ -17,18 +17,17 @@ describe("Query Aggregations (Task 28)", () => {
       const res = await fetch("http://localhost:3000/health");
       if (res.status !== 200) throw new Error("not healthy");
     } catch {
-      console.warn("Server not reachable — skipping aggregation tests");
-      return;
+      throw new Error("F-P2-01: integration server unreachable — beforeAll fails loudly rather than ghost-passing");
     }
 
-    const { body } = await api("POST", "/api/v2/ontologies", {
+    const { body } = await api("POST", "/api/v1/ontology", {
       displayName: "T28 Agg Test",
       description: "Task 28",
     });
     ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
-    if (!ONTOLOGY_ID) return;
+    if (!ONTOLOGY_ID) throw new Error("F-P2-01: ontology create returned no id — beforeAll fails loudly");
 
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T28Employee",
       displayName: "T28 Employee",
       description: "Test",
@@ -43,14 +42,14 @@ describe("Query Aggregations (Task 28)", () => {
       { apiName: "isActive", displayName: "Is Active", baseType: "boolean" },
     ];
     for (const p of props) {
-      await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/T28Employee/properties`, p);
+      await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/T28Employee/properties`, p);
     }
 
     READY = true;
   }, 30_000);
 
   afterAll(async () => {
-    if (ONTOLOGY_ID) await api("DELETE", `/api/v2/ontologies/${ONTOLOGY_ID}`);
+    if (ONTOLOGY_ID) await api("DELETE", `/api/v1/ontology/${ONTOLOGY_ID}`);
   }, 10_000);
 
   // 1. Count aggregation

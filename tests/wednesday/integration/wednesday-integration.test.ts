@@ -7,7 +7,12 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 
-const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
+// IMPORTANT: don't read `process.env.BASE_URL` — Vitest (via Vite) sets
+// `BASE_URL="/"` in the worker env by default (it mirrors its `base` config),
+// which would make every fetch URL become `//health`, `//api/v1/ontology`
+// and throw `Failed to parse URL`. Every other test file in this repo reads
+// `TEST_BASE_URL` via tests/helpers/api.ts for exactly this reason.
+const BASE_URL = process.env.TEST_BASE_URL || "http://localhost:3000";
 
 async function api(method: string, path: string, body?: unknown) {
   const opts: RequestInit = {
@@ -21,29 +26,47 @@ async function api(method: string, path: string, body?: unknown) {
 }
 
 let ONTOLOGY_ID: string;
-let HAS_DATA = false;
 
 describe("Wednesday Integration Tests", () => {
   beforeAll(async () => {
-    // Check server is up
+    // Check server is up.
+    //
+    // IMPORTANT: /health is allowlisted by the globalAuth middleware
+    // (src/middleware/globalAuth.ts) and must not carry an Authorization
+    // header — otherwise the universal fetch interceptor in
+    // tests/setupFiles.ts attaches `Bearer <alice-jwt>`, and some
+    // JWT-rejection paths (clock skew, JWKS cache miss) can make /health
+    // spuriously 4xx at the very start of a vitest worker's lifetime.
+    // Passing an explicit empty Authorization bypasses the interceptor.
     try {
-      const res = await fetch(`${BASE_URL}/health`);
-      if (res.status !== 200) throw new Error("Server not healthy");
-    } catch {
-      console.warn("Server not reachable — skipping integration tests");
-      return;
+      const res = await fetch(`${BASE_URL}/health`, {
+        headers: { Authorization: "" },
+      });
+      if (res.status !== 200) {
+        throw new Error(`Server /health returned ${res.status}`);
+      }
+    } catch (err) {
+      // Surface the real cause so CI logs are actionable instead of
+      // always reporting a generic "unreachable".
+      throw new Error(
+        `F-P2-01: integration server unreachable — beforeAll fails loudly: ${(err as Error).message}`,
+      );
     }
 
     // Create test ontology
-    const { body: ontBody } = await api("POST", "/api/v2/ontologies", {
+    const { status: ontStatus, body: ontBody } = await api("POST", "/api/v1/ontology", {
       displayName: "WedIntTest",
       description: "Wednesday integration tests",
     });
     ONTOLOGY_ID = ontBody?.data?.ontologyId || ontBody?.ontologyId;
-    if (!ONTOLOGY_ID) return;
+    if (!ONTOLOGY_ID) {
+      throw new Error(
+        `F-P2-01: ontology create returned no id — beforeAll fails loudly. status=${ontStatus} body=${JSON.stringify(ontBody)?.slice(0, 300)}`,
+      );
+    }
 
     // Create Employee object type
-    await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes`, {
+    await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "WedEmployee",
       displayName: "Wed Employee",
       description: "Test employee",
@@ -59,56 +82,50 @@ describe("Wednesday Integration Tests", () => {
     ];
 
     for (const p of props) {
-      await api("POST", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`, p);
+      await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`, p);
     }
 
     // Set PK property
-    const propsRes = await api("GET", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`);
+    const propsRes = await api("GET", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/WedEmployee/properties`);
     const employeeIdProp = (propsRes.body?.data || []).find((p: any) => p.apiName === "employeeId" || p.api_name === "employeeId");
     if (employeeIdProp) {
-      await api("PUT", `/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/WedEmployee`, {
+      await api("PUT", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/WedEmployee`, {
         primaryKeyPropertyId: employeeIdProp.propertyId || employeeIdProp.property_id,
       });
     }
 
-    HAS_DATA = true;
   }, 30000);
 
   afterAll(async () => {
     if (ONTOLOGY_ID) {
-      await api("DELETE", `/api/v2/ontologies/${ONTOLOGY_ID}`);
+      await api("DELETE", `/api/v1/ontology/${ONTOLOGY_ID}`);
     }
   }, 10000);
 
   it("should return 404 for non-existent object type", async () => {
-    if (!HAS_DATA) return;
-    const { status, body } = await api("GET", "/api/v2/objects/NonExistentType123");
+    const { status, body } = await api("GET", "/api/v1/objects/NonExistentType123");
     expect(status).toBe(404);
     expect(body?.error?.code).toBe("OBJECT_TYPE_NOT_FOUND");
   });
 
   it("should return empty data for unindexed object type", async () => {
-    if (!HAS_DATA) return;
-    const { status, body } = await api("GET", "/api/v2/objects/WedEmployee");
+    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee");
     expect(status).toBe(200);
     expect(body?.data?.data || body?.data || []).toEqual([]);
   });
 
   it("should reject invalid $pageSize", async () => {
-    if (!HAS_DATA) return;
-    const { status, body } = await api("GET", "/api/v2/objects/WedEmployee?$pageSize=0");
+    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=0");
     expect(status).toBe(400);
   });
 
   it("should reject $pageSize > 10000", async () => {
-    if (!HAS_DATA) return;
-    const { status } = await api("GET", "/api/v2/objects/WedEmployee?$pageSize=10001");
+    const { status } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=10001");
     expect(status).toBe(400);
   });
 
   it("should validate search body — reject unexpected fields", async () => {
-    if (!HAS_DATA) return;
-    const { status, body } = await api("POST", "/api/v2/objects/WedEmployee/search", {
+    const { status, body } = await api("POST", "/api/v1/objects/WedEmployee/search", {
       $pgeSize: 10,
     });
     expect(status).toBe(400);
@@ -116,8 +133,7 @@ describe("Wednesday Integration Tests", () => {
   });
 
   it("should validate search body — reject unknown filter type", async () => {
-    if (!HAS_DATA) return;
-    const { status, body } = await api("POST", "/api/v2/objects/WedEmployee/search", {
+    const { status, body } = await api("POST", "/api/v1/objects/WedEmployee/search", {
       where: { type: "unknownFilter" },
     });
     expect(status).toBe(400);
@@ -125,44 +141,38 @@ describe("Wednesday Integration Tests", () => {
   });
 
   it("should validate search body — accept empty body", async () => {
-    if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/search", {});
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/search", {});
     expect(status).toBe(200);
   });
 
   it("should validate search body — reject empty $select", async () => {
-    if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/search", {
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/search", {
       $select: [],
     });
     expect(status).toBe(400);
   });
 
   it("should return 404 for non-existent object type on search", async () => {
-    if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/FakeType999/search", {});
+    const { status } = await api("POST", "/api/v1/objects/FakeType999/search", {});
     expect(status).toBe(404);
   });
 
   it("should validate fulltext search — reject empty query", async () => {
-    if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/searchFullText", {
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/searchFullText", {
       query: "",
     });
     expect(status).toBe(400);
   });
 
   it("should validate aggregate — reject empty aggregations", async () => {
-    if (!HAS_DATA) return;
-    const { status } = await api("POST", "/api/v2/objects/WedEmployee/aggregate", {
+    const { status } = await api("POST", "/api/v1/objects/WedEmployee/aggregate", {
       aggregations: [],
     });
     expect(status).toBe(400);
   });
 
   it("should return 404 for single object not found", async () => {
-    if (!HAS_DATA) return;
-    const { status } = await api("GET", "/api/v2/objects/WedEmployee/NONEXISTENT");
+    const { status } = await api("GET", "/api/v1/objects/WedEmployee/NONEXISTENT");
     expect(status).toBe(404);
   });
 });

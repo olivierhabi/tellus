@@ -130,7 +130,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.1 Create ontology
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v2/ontologies", {
+    const ontRes = await api("POST", "/api/v1/ontology", {
       displayName: "RRA Tax System",
       description: "Integration test ontology for RRA",
     });
@@ -140,7 +140,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.2 Create Employee object type (batch) with 10 properties
     // -----------------------------------------------------------------------
-    const otRes = await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/batch`, {
+    const otRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
       apiName: "Employee",
       displayName: "Employee",
       description: "RRA employee record",
@@ -167,7 +167,7 @@ async function run() {
     const csv = generateCSV(100);
     fs.writeFileSync(tmpFile, csv);
 
-    const uploadRes = await uploadFile(`${BASE}/api/v2/datasets/upload`, tmpFile, {
+    const uploadRes = await uploadFile(`${BASE}/api/v1/datasets/upload`, tmpFile, {
       name: "employee_data_test01",
       description: "Test 01 employee data",
       transactionType: "SNAPSHOT",
@@ -180,7 +180,7 @@ async function run() {
     // -----------------------------------------------------------------------
     const dsRes = await api(
       "POST",
-      `/api/v2/ontologies/${ontologyId}/objectTypes/Employee/datasource`,
+      `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`,
       {
         datasetId,
         columnMapping: {
@@ -202,7 +202,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.5 Trigger reindex, verify 100 objects indexed
     // -----------------------------------------------------------------------
-    const rixRes = await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+    const rixRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
     const totalIndexed = rixRes.body?.data?.result?.totalObjectsIndexed ?? rixRes.body?.result?.totalObjectsIndexed ?? -1;
     assert(
       rixRes.status === 200 && totalIndexed === 100,
@@ -213,14 +213,14 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.6 Query all employees, verify count
     // -----------------------------------------------------------------------
-    const listRes = await api("GET", "/api/v2/objects/Employee?$pageSize=200");
+    const listRes = await api("GET", "/api/v1/objects/Employee?$pageSize=200");
     const listCount = listRes.body?.data?.totalCount ?? listRes.body?.totalCount ?? -1;
     assert(listCount === 100, "1.6 List all employees (100)", `count=${listCount}`);
 
     // -----------------------------------------------------------------------
     // 1.7 Get single employee by PK
     // -----------------------------------------------------------------------
-    const getRes = await api("GET", "/api/v2/objects/Employee/EMP-0001");
+    const getRes = await api("GET", "/api/v1/objects/Employee/EMP-0001");
     const pkVal = getRes.body?.data?.employeeId ?? getRes.body?.employeeId ?? null;
     assert(getRes.status === 200 && pkVal === "EMP-0001", "1.7 Get EMP-0001 by PK", `pk=${pkVal}`);
 
@@ -228,7 +228,7 @@ async function run() {
     // 1.8 Search with eq filter on department
     // -----------------------------------------------------------------------
     const targetDept = "Finance";
-    const searchRes = await api("POST", "/api/v2/objects/Employee/search", {
+    const searchRes = await api("POST", "/api/v1/objects/Employee/search", {
       where: { field: "department", op: "eq", value: targetDept },
       $pageSize: 200,
     });
@@ -239,7 +239,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.9 Search with compound AND filter
     // -----------------------------------------------------------------------
-    const compoundRes = await api("POST", "/api/v2/objects/Employee/search", {
+    const compoundRes = await api("POST", "/api/v1/objects/Employee/search", {
       where: {
         type: "and",
         value: [
@@ -255,7 +255,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.10 Aggregation (count, avg salary, terms on department)
     // -----------------------------------------------------------------------
-    const aggRes = await api("POST", "/api/v2/objects/Employee/aggregate", {
+    const aggRes = await api("POST", "/api/v1/objects/Employee/aggregate", {
       aggregations: [
         { type: "count", name: "total" },
         { type: "avg", field: "salary", name: "avgSalary" },
@@ -268,7 +268,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.11 Full-text search
     // -----------------------------------------------------------------------
-    const ftsRes = await api("POST", "/api/v2/objects/Employee/searchFullText", {
+    const ftsRes = await api("POST", "/api/v1/objects/Employee/searchFullText", {
       query: "Kigali",
       $pageSize: 200,
     });
@@ -280,10 +280,10 @@ async function run() {
     // -----------------------------------------------------------------------
     console.log("\n  [cleanup] Removing test data...");
     if (ontologyId) {
-      await api("DELETE", `/api/v2/ontologies/${ontologyId}`).catch(() => {});
+      await api("DELETE", `/api/v1/ontology/${ontologyId}`).catch(() => {});
     }
     if (datasetId) {
-      await api("DELETE", `/api/v2/datasets/${datasetId}?force=true`).catch(() => {});
+      await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`).catch(() => {});
     }
     if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }

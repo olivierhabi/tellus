@@ -63,13 +63,29 @@ export interface OpenSearchError {
 
 const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "http://localhost:9200";
 
+// F-P4-04: retry budget capped to < 10 s cumulative.
+//
+// Previous: requestTimeout=30_000 × maxRetries=3 = 90 s worst-case upper
+// bound per call. Under a degraded OpenSearch cluster that meant a
+// single slow request could hold an event-loop slot for a minute and a
+// half, head-of-line-blocking every concurrent request on the same Node
+// process. With the documented SLO of p99 reads < 250 ms, no single
+// request should wait more than 8 s for OpenSearch under any condition.
+//
+// New: 5 s per attempt × 1 retry = ~10 s hard cap. Heavy batch callers
+// that genuinely need more can override with `OPENSEARCH_REQUEST_TIMEOUT`
+// and `OPENSEARCH_MAX_RETRIES` env vars so the looser budget is
+// explicit at deploy time.
+const OS_REQUEST_TIMEOUT = Number(process.env.OPENSEARCH_REQUEST_TIMEOUT ?? 5_000);
+const OS_MAX_RETRIES = Number(process.env.OPENSEARCH_MAX_RETRIES ?? 1);
+
 const client = new Client({
   node: OPENSEARCH_URL,
   ssl: {
     rejectUnauthorized: false,
   },
-  requestTimeout: 30_000,
-  maxRetries: 3,
+  requestTimeout: OS_REQUEST_TIMEOUT,
+  maxRetries: OS_MAX_RETRIES,
 });
 
 // ---------------------------------------------------------------------------
@@ -180,18 +196,86 @@ function logQuery(
 // Wrapper: searchObjects
 // ---------------------------------------------------------------------------
 
+/**
+ * Inject a spec §Task 28 security filter and an F-P3-13 branch filter
+ * into a search body.
+ *
+ * The original query (whatever shape the caller supplied) is moved
+ * under `bool.must` and the security + branch clauses are ANDed
+ * alongside it. This is the only place in the code where ES search
+ * queries leave user-controlled data — any route that bypasses
+ * searchObjects() also bypasses security and branch isolation, which
+ * is a bug.
+ *
+ * `branchId` semantics:
+ *   - `string`  → filter to `__branch === branchId` OR documents
+ *                 missing `__branch` (transitional for legacy docs
+ *                 indexed before F-P3-13's mapping change; reindex
+ *                 tracked under F-P3-15).
+ *   - `null`    → explicit cross-branch read. Caller documented it.
+ *                 Legacy internal endpoints only; every user-visible
+ *                 route threads a UUID.
+ *
+ * `branchId` is a REQUIRED parameter (not optional). TypeScript forces
+ * every call site to make a conscious decision. Mirrors the write-side
+ * discipline introduced by F-P3-12 on `ApplyExecutionContext.branchId`.
+ */
+function injectSecurityFilter(
+  body: Record<string, unknown>,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
+): Record<string, unknown> {
+  // Collect every must-clause we need to add beside the original query.
+  const clauses: Record<string, unknown>[] = [];
+  if (securityFilter) clauses.push(securityFilter);
+  if (typeof branchId === "string" && branchId.length > 0) {
+    // Match this branch exactly OR a legacy doc with no `__branch`
+    // field at all. The second disjunct lets reads succeed on data
+    // indexed before the mapping change; F-P3-15's reindex pass will
+    // eventually backfill every legacy doc and this OR can be tightened
+    // in a follow-up session.
+    clauses.push({
+      bool: {
+        should: [
+          { term: { __branch: branchId } },
+          { bool: { must_not: [{ exists: { field: "__branch" } }] } },
+        ],
+        minimum_should_match: 1,
+      },
+    });
+  }
+  if (clauses.length === 0) return body;
+
+  const original = (body.query as Record<string, unknown> | undefined) || {
+    match_all: {},
+  };
+  return {
+    ...body,
+    query: {
+      bool: {
+        must: [original, ...clauses],
+      },
+    },
+  };
+}
+
 async function searchObjects(
   index: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<any> {
   const start = performance.now();
+  // F-P3-13: branchId is required by signature. Every caller must
+  // consciously pass a UUID or `null`.
+  const finalBody = injectSecurityFilter(body, securityFilter, branchId);
   const result = await withRetry(
-    () => client.search({ index, body }),
+    () => client.search({ index, body: finalBody }),
     `search(${index})`
   );
   const durationMs = performance.now() - start;
   const hitCount = result.body?.hits?.hits?.length ?? 0;
-  logQuery("search", index, body, result.statusCode ?? 200, durationMs, hitCount);
+  logQuery("search", index, finalBody, result.statusCode ?? 200, durationMs, hitCount);
   return result;
 }
 
@@ -222,15 +306,18 @@ async function getObject(
 
 async function countObjects(
   index: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
 ): Promise<any> {
   const start = performance.now();
+  const finalBody = injectSecurityFilter(body, securityFilter, branchId);
   const result = await withRetry(
-    () => client.count({ index, body }),
+    () => client.count({ index, body: finalBody }),
     `count(${index})`
   );
   const durationMs = performance.now() - start;
-  logQuery("count", index, body, result.statusCode ?? 200, durationMs);
+  logQuery("count", index, finalBody, result.statusCode ?? 200, durationMs);
   return result;
 }
 
@@ -351,5 +438,6 @@ export {
   getObject,
   countObjects,
   indexExists,
+  injectSecurityFilter,
 };
 export default client;

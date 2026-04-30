@@ -12,7 +12,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Create single property (Task 15)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties`,
       { apiName: "email", displayName: "Email", baseType: "string" }
     );
     t.assert(status === 201, `Expected 201, got ${status}`);
@@ -25,7 +25,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Invalid baseType rejected (Task 7)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties`,
       { apiName: "bad", displayName: "Bad", baseType: "invalid" }
     );
     t.assert(status === 400, `Expected 400, got ${status}`);
@@ -35,7 +35,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Struct property with schema (Task 22)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties`,
       {
         apiName: "address",
         displayName: "Address",
@@ -57,7 +57,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Invalid struct schema rejected (Task 22)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties`,
       {
         apiName: "badStruct",
         displayName: "Bad Struct",
@@ -75,7 +75,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("structSchema on non-struct rejected (Task 22)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties`,
       {
         apiName: "badProp",
         displayName: "Bad Prop",
@@ -90,7 +90,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Property batch create (Task 26)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/batch`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties/batch`,
       {
         properties: [
           { apiName: "phone", displayName: "Phone", baseType: "string" },
@@ -106,7 +106,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("List properties (Task 16)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.data.length === 10, `Expected 10 props, got ${body.data.length}`);
@@ -115,7 +115,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Get single property (Task 16)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/email`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties/email`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.apiName === "email", "apiName = email");
@@ -124,7 +124,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Update property (Task 16)", async () => {
     const { status, body } = await api(
       "PUT",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/email`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties/email`,
       { displayName: "Work Email", isRequired: true }
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
@@ -135,17 +135,17 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Immutable field rejected on update (Task 16)", async () => {
     const { status, body } = await api(
       "PUT",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/properties/email`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/properties/email`,
       { baseType: "integer" }
     );
-    t.assert(status === 400, `Expected 400, got ${status}`);
-    t.assert(body.error.code === "VALIDATION_FAILED", `code = ${body.error.code}`);
+    t.assert(status === 422, `Expected 422, got ${status}`);
+    t.assert(body.error.code === "BREAKING_SCHEMA_CHANGE", `code = ${body.error.code}`);
   });
 
   await t.test("Set primary key (Task 16)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/primaryKey`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/primaryKey`,
       { propertyApiName: "employeeId" }
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
@@ -155,7 +155,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Set title property (Task 16)", async () => {
     const { status, body } = await api(
       "POST",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/titleProperty`,
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/titleProperty`,
       { propertyApiName: "fullName" }
     );
     t.assert(status === 200, `Expected 200, got ${status}`);

@@ -3,7 +3,7 @@
 //
 // REST API endpoint for previewing raw dataset data with column statistics.
 //
-// Mounted at: /api/v2/datasets
+// Mounted at: /api/v1/datasets
 //
 // Endpoint:
 //   GET /:datasetId/preview — Preview dataset rows with column statistics
@@ -21,9 +21,13 @@
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { query } from "../db";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { readCSV } from "../services/indexing/csvReader";
+import { getObjectBuffer } from "../services/storageService";
 
 const router = Router({ mergeParams: true });
 
@@ -233,7 +237,7 @@ router.get(
       const transactionId = req.query.transactionId as string | undefined;
 
       // -----------------------------------------------------------------
-      // Validate dataset exists
+      // Validate dataset exists (check both dataset and foundry_datasets)
       // -----------------------------------------------------------------
       const dsResult = await query(
         `SELECT dataset_id, name, file_format, storage_path,
@@ -243,22 +247,51 @@ router.get(
         [datasetId]
       );
 
-      if (dsResult.rows.length === 0) {
-        return sendError(
-          res,
-          "DATASOURCE_NOT_FOUND",
-          `Dataset '${datasetId}' not found.`
-        );
-      }
+      let dataset: Record<string, unknown>;
+      let isFoundryDataset = false;
 
-      const dataset = dsResult.rows[0];
+      if (dsResult.rows.length > 0) {
+        dataset = dsResult.rows[0];
+      } else {
+        // Fallback: check foundry_datasets table
+        const foundryResult = await query(
+          `SELECT id AS dataset_id, name, file_path AS storage_path,
+                  row_count AS total_rows, file_size_bytes AS total_size_bytes,
+                  schema_info AS schema_definition
+           FROM foundry_datasets
+           WHERE id = $1`,
+          [datasetId]
+        );
+
+        if (foundryResult.rows.length === 0) {
+          return sendError(
+            res,
+            "DATASOURCE_NOT_FOUND",
+            `Dataset '${datasetId}' not found.`
+          );
+        }
+
+        dataset = foundryResult.rows[0];
+        isFoundryDataset = true;
+      }
 
       // -----------------------------------------------------------------
       // Determine which file to read
       // -----------------------------------------------------------------
       let filePath: string;
 
-      if (transactionId) {
+      if (isFoundryDataset) {
+        // Foundry datasets store the file path directly
+        if (dataset.storage_path) {
+          filePath = dataset.storage_path as string;
+        } else {
+          return sendError(
+            res,
+            "DATASOURCE_NOT_FOUND",
+            `Dataset '${datasetId}' has no file path.`
+          );
+        }
+      } else if (transactionId) {
         // Validate transaction exists and belongs to this dataset
         const txnResult = await query(
           `SELECT transaction_id, file_path, status, row_count
@@ -301,7 +334,7 @@ router.get(
         if (latestTxnResult.rows.length > 0) {
           filePath = latestTxnResult.rows[0].file_path;
         } else if (dataset.storage_path) {
-          filePath = dataset.storage_path;
+          filePath = dataset.storage_path as string;
         } else {
           return sendError(
             res,
@@ -314,7 +347,32 @@ router.get(
       // -----------------------------------------------------------------
       // Read ALL rows for statistics, but only return first N for preview
       // -----------------------------------------------------------------
-      const csvResult = await readCSV(filePath);
+      // For foundry datasets, the file is in S3 — download to a temp file first
+      let localFilePath = filePath;
+      let tempFile: string | null = null;
+
+      if (isFoundryDataset) {
+        try {
+          const buffer = await getObjectBuffer(filePath);
+          tempFile = path.join(os.tmpdir(), `tellus-preview-${datasetId}-${Date.now()}.csv`);
+          fs.writeFileSync(tempFile, buffer);
+          localFilePath = tempFile;
+        } catch (s3Err: unknown) {
+          const s3Msg = s3Err instanceof Error ? s3Err.message : String(s3Err);
+          return sendError(
+            res,
+            "DATASOURCE_FILE_NOT_FOUND",
+            `Failed to read dataset file from storage: ${s3Msg}`
+          );
+        }
+      }
+
+      const csvResult = await readCSV(localFilePath);
+
+      // Clean up temp file
+      if (tempFile) {
+        try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
+      }
 
       if (!csvResult.success) {
         return sendError(
@@ -341,14 +399,14 @@ router.get(
       return sendSuccess(res, {
         datasetId,
         datasetName: dataset.name,
-        fileFormat: dataset.file_format,
+        fileFormat: dataset.file_format || filePath.split('.').pop() || 'csv',
         filePath,
         transactionId: transactionId || null,
         totalRows: allRows.length,
         previewRowCount: previewRows.length,
         requestedRows: rowLimit,
         columns,
-        preview: previewRows,
+        rows: previewRows,
         columnStats,
         schemaDefinition: dataset.schema_definition || null,
       });

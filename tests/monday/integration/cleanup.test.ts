@@ -14,13 +14,13 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Unregister datasource (Task 18)", async () => {
     const { status } = await api(
       "DELETE",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/datasource`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/datasource`
     );
     t.assert(status === 204, `Expected 204, got ${status}`);
 
     const { status: getStatus } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/datasource`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/datasource`
     );
     t.assert(getStatus === 404, `Expected 404 after unregister, got ${getStatus}`);
   });
@@ -28,22 +28,22 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Delete object type + verify cascade (Tasks 3-6)", async () => {
     const { status } = await api(
       "DELETE",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee`
     );
     t.assert(status === 204, `Expected 204, got ${status}`);
 
     const { status: getStatus } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee`
     );
     t.assert(getStatus === 404, `Expected 404 after delete, got ${getStatus}`);
   });
 
   await t.test("Delete ontology (Task 12)", async () => {
-    const { status } = await api("DELETE", `/api/v2/ontologies/${ctx.ontologyId}`);
+    const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
     t.assert(status === 204, `Expected 204, got ${status}`);
 
-    const { status: getStatus } = await api("GET", `/api/v2/ontologies/${ctx.ontologyId}`);
+    const { status: getStatus } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}`);
     t.assert(getStatus === 404, `Expected 404 after delete, got ${getStatus}`);
   });
 }
@@ -54,14 +54,14 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
 
 export async function cleanupLeftovers(): Promise<void> {
   try {
-    const { body: listBody } = await api("GET", "/api/v2/ontologies");
+    const { body: listBody } = await api("GET", "/api/v1/ontology");
     if (listBody && Array.isArray(listBody.data)) {
       for (const ont of listBody.data) {
         if (
           ont.displayName.includes("Test Ontology") ||
           ont.displayName.includes("(imported)")
         ) {
-          await api("DELETE", `/api/v2/ontologies/${ont.ontologyId}`);
+          await api("DELETE", `/api/v1/ontology/${ont.ontologyId}`);
         }
       }
     }

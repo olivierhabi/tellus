@@ -63,11 +63,11 @@ async function request(
 // ---------------------------------------------------------------------------
 
 function actionTypesPath(suffix = "") {
-  return `/api/v2/ontologies/${ontologyId}/actionTypes${suffix}`;
+  return `/api/v1/ontology/${ontologyId}/actionTypes${suffix}`;
 }
 
 function actionsPath(actionApiName: string, suffix = "") {
-  return `/api/v2/ontologies/${ontologyId}/actions/${actionApiName}${suffix}`;
+  return `/api/v1/ontology/${ontologyId}/actions/${actionApiName}${suffix}`;
 }
 
 async function getActionType(apiName: string) {
@@ -82,7 +82,7 @@ async function executeAction(
 }
 
 async function fetchObject(objectType: string, primaryKey: string) {
-  return request("GET", `/api/v2/objects/${objectType}/${encodeURIComponent(primaryKey)}`);
+  return request("GET", `/api/v1/objects/${objectType}/${encodeURIComponent(primaryKey)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,9 +102,9 @@ beforeAll(async () => {
     return;
   }
 
-  const ont = await request("GET", "/api/v2/ontologies");
+  const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
-    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology") || ont.body.data[0];
+    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;
   } else {
     console.warn("No ontologies found — skipping seed tests");

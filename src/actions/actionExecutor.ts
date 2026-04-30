@@ -4,7 +4,7 @@
 // Master orchestrator that ties together parameter validation, rule
 // compilation, edit application, and audit logging into a single coherent
 // action execution pipeline. This is the main entry point — when someone
-// calls POST /api/v2/actions/:actionTypeApiName/apply, this runs.
+// calls POST /api/v1/actions/:actionTypeApiName/apply, this runs.
 //
 // Palantir's action execution has 8 documented stages. In week 1, we
 // implement 6 of them (skipping submission criteria and side effects):
@@ -29,11 +29,20 @@ import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import { applyEdits } from "./editApplicator";
-import { logActionExecution } from "../models/actionAuditLog";
-import type { FailureType, AuditResult } from "../models/actionAuditLog";
+import {
+  appendAuditRow,
+  logStandaloneFailureAudit,
+  AuditDurabilityError,
+  type AuditLogEntry,
+  type FailureType,
+  type AuditResult,
+} from "../models/actionAuditLog";
+import { incCounter } from "../services/funnel/metrics";
+import { resolveBranchIdOrMain } from "../services/branchContext";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
+import { query as pgQuery } from "../db";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +87,28 @@ async function objectExists(
   objectType: string,
   primaryKey: string
 ): Promise<boolean> {
+  // 1. Postgres is authoritative — a freshly-created object lands in
+  //    object_instances synchronously inside the same action txn, whereas
+  //    OpenSearch indexing is best-effort and may lag. Check PG first so
+  //    multi-rule actions see objects produced by prior rules in the same
+  //    batch or by a preceding action call.
+  try {
+    const res = await pgQuery(
+      `SELECT 1 FROM object_instances
+        WHERE object_type_api_name = $1 AND primary_key = $2
+        LIMIT 1`,
+      [objectType, primaryKey]
+    );
+    if ((res.rowCount ?? 0) > 0) return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Tolerate missing B1 table in transitional deployments; fall through.
+    if (!/relation .*object_instances.* does not exist/i.test(msg)) {
+      console.warn(`[action:objectExists] PG lookup failed: ${msg}`);
+    }
+  }
+
+  // 2. Fall back to OpenSearch for objects that predate the writeback store.
   try {
     const indexName = getIndexName(objectType);
     await opensearchClient.get({ index: indexName, id: primaryKey });
@@ -96,6 +127,29 @@ async function fetchObject(
   objectType: string,
   primaryKey: string
 ): Promise<Record<string, unknown> | null> {
+  // Prefer Postgres (authoritative writeback store) so rule compilation sees
+  // the latest state of objects modified by earlier rules in the same batch,
+  // or created by a prior action call, without waiting for OpenSearch indexing.
+  try {
+    const res = await pgQuery(
+      `SELECT properties FROM object_instances
+        WHERE object_type_api_name = $1 AND primary_key = $2
+        LIMIT 1`,
+      [objectType, primaryKey]
+    );
+    if ((res.rowCount ?? 0) > 0) {
+      const row = res.rows[0] as { properties: unknown };
+      if (row.properties && typeof row.properties === "object") {
+        return row.properties as Record<string, unknown>;
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/relation .*object_instances.* does not exist/i.test(msg)) {
+      console.warn(`[action:fetchObject] PG lookup failed: ${msg}`);
+    }
+  }
+
   try {
     const indexName = getIndexName(objectType);
     const { body } = await opensearchClient.get({
@@ -155,6 +209,32 @@ export async function executeAction(
 
   // Track whether we should throw an OntologyError after audit logging
   let pendingError: OntologyError | null = null;
+
+  // F-P3-11: tracks whether the durable-before-ack audit row was
+  // committed inside the applyEdits transaction. If true, the finally
+  // block skips the standalone audit write (the hash chain is already
+  // extended). If false, the finally block writes a failure audit via
+  // logStandaloneFailureAudit — failure-path events (stages 1-5) and
+  // mid-apply-edits exceptions both reach audit durability this way.
+  let auditCommitted = false;
+
+  const buildAuditEntry = (): AuditLogEntry => ({
+    action_type_api_name: actionTypeApiName,
+    action_type_display_name:
+      actionType?.display_name || actionTypeApiName,
+    execution_id: executionId,
+    parameters,
+    affected_objects: result.affectedObjects,
+    affected_object_count: result.affectedObjects.length,
+    result: result.result,
+    failure_type: result.failureType,
+    error_message: result.errorMessage,
+    duration_ms: result.durationMs,
+    executed_by: context.executedBy || "system",
+    source_ip: context.sourceIp || null,
+    branch_id: context.branchId || null,
+    metadata: {},
+  });
 
   try {
     // -----------------------------------------------------------------
@@ -216,6 +296,13 @@ export async function executeAction(
     // -----------------------------------------------------------------
     // STAGE 4: Compile rules into edits
     // -----------------------------------------------------------------
+    // F-P3-12: thread the (possibly unresolved) caller-supplied branchId
+    // into the rule-compilation context so read-path helpers
+    // (`linkRules.getLinkNetState`, `deleteObjectRule.checkManyToManyLinks`)
+    // scope their link_edit lookups to the correct branch. The writer
+    // boundary further down the function resolves an unset branch to
+    // `main`; rule compilation still sees `undefined` for that case
+    // and its readers comment on the cross-branch fallback.
     const compilation = await compileRules(
       actionType.rules as any[],
       resolvedParameters,
@@ -223,6 +310,7 @@ export async function executeAction(
       {
         executedBy: context.executedBy || "system",
         ontologyId,
+        branchId: context.branchId ?? undefined,
       }
     );
 
@@ -275,13 +363,11 @@ export async function executeAction(
     // -----------------------------------------------------------------
     // STAGE 4b: Optimistic Concurrency Check (Task 22)
     //
-    // If the caller provided $expectedVersion, verify that the target
-    // object's current __version matches. This prevents lost updates
-    // when two clients modify the same object concurrently.
-    //
-    // Week 1 scope: Only supported for single-object modify actions.
-    // Multi-object actions with $expectedVersion return a 400 error.
+    // Pre-flight validation only: reject unsupported configurations.
+    // The actual version check is performed atomically inside the PG
+    // transaction in editApplicator.ts (F-05 fix).
     // -----------------------------------------------------------------
+    let occTarget: { objectType: string; primaryKey: string } | undefined;
     if (context.expectedVersion !== undefined) {
       // Count how many modify (update) rules produced edits
       const modifyEdits = compilation.edits.filter(
@@ -304,7 +390,7 @@ export async function executeAction(
       if (compilation.edits.length > 1) {
         result.failureType = "unclassified";
         result.errorMessage =
-          "Optimistic concurrency control is only supported for single-object actions in week 1";
+          "Optimistic concurrency control is only supported for single-object actions";
         pendingError = new OntologyError(
           result.errorMessage,
           "INVALID_PARAMETER",
@@ -314,35 +400,10 @@ export async function executeAction(
         return result;
       }
 
-      // Single modify edit — fetch the current object and check __version
-      const targetEdit = modifyEdits[0];
-      const currentObject = await fetchObject(
-        targetEdit.objectType,
-        targetEdit.primaryKey
-      );
-      const currentVersion: number =
-        (currentObject as any)?.__version ?? 0;
-
-      if (currentVersion !== context.expectedVersion) {
-        result.failureType = "unclassified";
-        result.errorMessage =
-          `Object '${targetEdit.primaryKey}' of type '${targetEdit.objectType}' has been modified since you last read it. ` +
-          `Expected version ${context.expectedVersion}, current version ${currentVersion}. ` +
-          `Reload the object and try again.`;
-        pendingError = new OntologyError(
-          result.errorMessage,
-          "CONCURRENCY_CONFLICT",
-          undefined,
-          {
-            objectType: targetEdit.objectType,
-            primaryKey: targetEdit.primaryKey,
-            expectedVersion: context.expectedVersion,
-            currentVersion,
-            executionId,
-          }
-        );
-        return result;
-      }
+      occTarget = {
+        objectType: modifyEdits[0].objectType,
+        primaryKey: modifyEdits[0].primaryKey,
+      };
     }
 
     // -----------------------------------------------------------------
@@ -350,13 +411,54 @@ export async function executeAction(
     // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
-    // STAGE 6: Apply edits
+    // STAGE 6: Apply edits (with F-P3-11 durable-before-ack audit hook)
+    //
+    // The preCommitHook runs AFTER all edits have been inserted but
+    // BEFORE the PG COMMIT. If the hash-chain append fails, the outer
+    // transaction rolls back — edits and audit are atomic. We
+    // pre-stamp `result.result` to "success" here so the audit row
+    // records the intended outcome; if COMMIT subsequently fails (very
+    // rare — PG connection loss between hook and COMMIT), the catch
+    // below flips it to "failed" and the finally block writes a
+    // standalone failure audit recording the rollback.
     // -----------------------------------------------------------------
+    result.durationMs = Date.now() - startTime;
+    result.result = "success";
+    result.affectedObjects = compilation.edits.map((e) => ({
+      objectType: e.objectType,
+      primaryKey: e.primaryKey,
+      operation: e.operation,
+    }));
+
+    const preCommitHook = async (pg: any) => {
+      // Recompute duration at commit time for a tighter audit number.
+      result.durationMs = Date.now() - startTime;
+      const entry = buildAuditEntry();
+      await appendAuditRow(pg, entry);
+      auditCommitted = true;
+    };
+
+    // F-P3-12: resolve branch at the single executor boundary. The
+    // writer (`applyEdits`) requires `branchId: string` — a missing
+    // branch is a compile-time error. `resolveBranchIdOrMain` falls
+    // back to the ontology's `main` branch UUID when the caller did
+    // not thread one (classic untagged writes); any other downstream
+    // code is forbidden from performing this fallback again.
+    const resolvedBranchId = await resolveBranchIdOrMain(
+      ontologyId,
+      context.branchId,
+    );
+
     const application = await applyEdits(compilation.edits, {
       executionId,
       actionTypeApiName,
       parameters: resolvedParameters,
       executedBy: context.executedBy || "system",
+      expectedVersion: context.expectedVersion,
+      expectedVersionTarget: occTarget,
+      preCommitHook,
+      ontologyId,
+      branchId: resolvedBranchId,
     });
 
     result.success = application.success;
@@ -388,6 +490,25 @@ export async function executeAction(
 
     return result;
   } catch (err: unknown) {
+    // Audit-durability failures are first-class — they must translate to
+    // 503 Service Unavailable at the route layer and MUST NOT be swallowed
+    // or downgraded. auditCommitted stays false, so the finally block will
+    // attempt a standalone failure audit; if that also fails, the client
+    // still sees the AuditDurabilityError.
+    if (err instanceof AuditDurabilityError) {
+      result.result = "failed";
+      result.failureType = "unclassified";
+      result.errorMessage = err.message;
+      pendingError = new OntologyError(
+        err.message,
+        "AUDIT_DURABILITY_FAILED",
+        503,
+        { executionId },
+      );
+      incCounter("tellus_action_audit_rollback_total", { reason: "hash_chain" });
+      return result;
+    }
+
     // Re-throw OntologyErrors (they were already classified)
     if (err instanceof OntologyError) {
       result.failureType = "unclassified";
@@ -395,10 +516,28 @@ export async function executeAction(
       pendingError = err;
       return result;
     }
-    // Unexpected error in the pipeline
-    result.failureType = "unclassified";
-    result.errorMessage =
+    // Unexpected error in the pipeline. Log it + wrap in an
+    // OntologyError so the client gets a structured 500 instead of a
+    // silent HTTP 200 with {result:"failed"}. Previously this branch
+    // swallowed the stack trace AND didn't set `pendingError`, so
+    // the response body carried no actionable info and the route
+    // responded 200 — which broke multi-rule integration tests that
+    // assert `expect(res.body.result).toBe("success")` on an otherwise
+    // legitimate exception (e.g. a missing B1 table mid-transaction).
+    const errorMessage =
       err instanceof Error ? err.message : String(err);
+    const errorStack = err instanceof Error ? err.stack : undefined;
+    console.error(
+      `[action:${actionTypeApiName}] unexpected execution error: ${errorMessage}${errorStack ? "\n" + errorStack : ""}`,
+    );
+    result.failureType = "unclassified";
+    result.errorMessage = errorMessage;
+    pendingError = new OntologyError(
+      `Action '${actionTypeApiName}' failed with an unexpected error: ${errorMessage}`,
+      "ACTION_EXECUTION_FAILED",
+      undefined,
+      { actionTypeApiName, executionId },
+    );
     return result;
   } finally {
     // -----------------------------------------------------------------
@@ -406,22 +545,63 @@ export async function executeAction(
     // -----------------------------------------------------------------
     result.durationMs = Date.now() - startTime;
 
-    await logActionExecution({
-      action_type_api_name: actionTypeApiName,
-      action_type_display_name:
-        actionType?.display_name || actionTypeApiName,
-      execution_id: executionId,
-      parameters,
-      affected_objects: result.affectedObjects,
-      affected_object_count: result.affectedObjects.length,
-      result: result.result,
-      failure_type: result.failureType,
-      error_message: result.errorMessage,
-      duration_ms: result.durationMs,
-      executed_by: context.executedBy || "system",
-      source_ip: context.sourceIp || null,
-      branch_id: context.branchId || null,
-    });
+    // F-P3-11: if the hash-chain append succeeded inside the applyEdits
+    // PG transaction, the audit row is already committed — skip the
+    // standalone write. If not (stages 1-5 failure or mid-apply
+    // exception), write a failure audit now. AuditDurabilityError from
+    // this standalone path is surfaced as a 503 OntologyError so the
+    // client sees the real contract violation.
+    if (!auditCommitted) {
+      try {
+        await logStandaloneFailureAudit(buildAuditEntry());
+      } catch (auditErr) {
+        if (auditErr instanceof AuditDurabilityError) {
+          incCounter("tellus_action_audit_rollback_total", { reason: "standalone" });
+          // If we didn't already have a pending error, this becomes it.
+          // Otherwise, prefer the original business error but still log
+          // the audit failure.
+          if (!pendingError) {
+            pendingError = new OntologyError(
+              auditErr.message,
+              "AUDIT_DURABILITY_FAILED",
+              503,
+              { executionId },
+            );
+          } else {
+            console.error(
+              `[action:${actionTypeApiName}] audit durability failed during failure-path log: ${auditErr.message}`,
+            );
+          }
+        } else {
+          console.error(
+            `[action:${actionTypeApiName}] unexpected error from logStandaloneFailureAudit: ${
+              auditErr instanceof Error ? auditErr.message : String(auditErr)
+            }`,
+          );
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // STAGE 9: Publish to Kafka so the streaming pipeline (Apache Flink)
+    // and the Object Explorer "Action Run History" panel see the event in
+    // near-real-time. Best-effort — we don't block the action result on
+    // broker availability.
+    // ---------------------------------------------------------------------
+    try {
+      const { publishEvent } = await import("../services/kafkaProducer");
+      void publishEvent("ontology.actions", {
+        ontologyId,
+        actionTypeApiName,
+        executionId,
+        result: result.result,
+        affectedCount: result.affectedObjects.length,
+        durationMs: result.durationMs,
+        executedBy: context.executedBy ?? "system",
+      });
+    } catch {
+      /* ignore — observability must never break the action path */
+    }
 
     // After audit logging, throw the deferred OntologyError. This causes
     // the Promise<ExecutionResult> to reject — the caller never receives

@@ -15,10 +15,14 @@
 //
 // Keys expire after 24 hours. After expiry, the key can be reused.
 //
-// Race condition (known limitation for week 1): If two identical requests
-// arrive simultaneously, both will execute. The ON CONFLICT DO UPDATE
-// ensures the result is cached regardless, but does not prevent double
-// execution. In production, use SELECT ... FOR UPDATE or PG advisory locks.
+// Race condition FIX (Phase A5, F-04): `withIdempotencyLock` serializes
+// concurrent requests for the same idempotency key via a session-scoped
+// PostgreSQL advisory lock (`pg_advisory_lock(hashtext(key))`). Two
+// identical requests now queue: the first runs, caches its result, and
+// the second — after waking on the lock — finds the cached result and
+// returns it. The lock is session-scoped (not transaction-scoped) so it
+// can guard the entire check → execute → store sequence without
+// interleaving with the action's own internal transactions.
 //
 // Cross-action-type reuse: If a client reuses the same idempotency key
 // for a different action type, the cache is bypassed (the old result is
@@ -28,7 +32,7 @@
 // from cache.
 // ---------------------------------------------------------------------------
 
-import { query } from "../db";
+import { query, getClient } from "../db";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -133,4 +137,100 @@ export async function cleanupExpiredKeys(): Promise<number> {
   return result.rowCount ?? 0;
 }
 
-export default { checkIdempotencyKey, storeIdempotencyKey, cleanupExpiredKeys };
+/**
+ * Execute `fn` while holding a PostgreSQL advisory lock keyed on
+ * `idempotencyKey`. Two concurrent requests with the same key queue on
+ * this lock: the first wins, runs the callback (check + execute + store),
+ * and on release the second sees the cached result and returns it.
+ *
+ * Implementation note (F-04 + F-10 interaction):
+ *   A naive session-scoped lock pins the pool client for the entire
+ *   action duration. With 50 concurrent requests against a 20-connection
+ *   pool the lock-holding client and the action-path client deadlock.
+ *
+ *   We use `pg_try_advisory_lock` (non-blocking) with exponential
+ *   backoff instead. The lock client is held only for the ~ms it takes
+ *   to issue the SELECT, released immediately, and reacquired for each
+ *   subsequent attempt. The action's own getClient() never competes.
+ *
+ *   The lock is SESSION-scoped so it persists across client release —
+ *   the pool client returns to PG still owning the lock, and any later
+ *   client checked out from the pool that tries to acquire the same
+ *   lock fails `pg_try_advisory_lock` until the unlock runs on the
+ *   ORIGINAL session. To guarantee the unlock reaches the original
+ *   session we retain `lockClient` across the callback and release it
+ *   at the end.
+ *
+ * Fail-safe contract (F-04):
+ *   - The lock is always released, even if `fn` throws. `pg_advisory_unlock`
+ *     is idempotent — calling it without a held lock is a no-op warning.
+ *   - The dedicated client is always returned to the pool.
+ *   - Advisory locks use `hashtext(key)` (built-in 32-bit hash). Collisions
+ *     merely serialize unrelated keys; they never corrupt data.
+ *
+ * @param idempotencyKey - Client-supplied idempotency key (any string)
+ * @param fn             - Callback to run under the lock
+ */
+export async function withIdempotencyLock<T>(
+  idempotencyKey: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const MAX_WAIT_MS = 30_000;
+  const startedAt = Date.now();
+  let attempt = 0;
+
+  // Acquire phase: try-lock with exponential backoff. The advisory lock is
+  // session-scoped, so the ORIGINAL client that succeeds at pg_try_advisory_lock
+  // is the one that must later call pg_advisory_unlock. We therefore retain
+  // `lockClient` from the successful attempt onward.
+  let lockClient: Awaited<ReturnType<typeof getClient>> | null = null;
+  while (true) {
+    const client = await getClient();
+    try {
+      const res = await client.query(
+        "SELECT pg_try_advisory_lock(hashtext($1)) AS acquired",
+        [idempotencyKey],
+      );
+      if (res.rows[0]?.acquired === true) {
+        lockClient = client;
+        break;
+      }
+    } catch (err) {
+      client.release();
+      throw err;
+    }
+    client.release();
+
+    if (Date.now() - startedAt >= MAX_WAIT_MS) {
+      throw new Error(
+        `withIdempotencyLock: failed to acquire advisory lock for key within ${MAX_WAIT_MS}ms`,
+      );
+    }
+    // Exponential backoff with jitter: 10ms → 20ms → 40ms ... cap at 250ms
+    const base = Math.min(10 * 2 ** attempt, 250);
+    const jitter = Math.random() * base * 0.25;
+    await new Promise((r) => setTimeout(r, base + jitter));
+    attempt += 1;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    try {
+      await lockClient!.query(
+        "SELECT pg_advisory_unlock(hashtext($1))",
+        [idempotencyKey],
+      );
+    } catch {
+      // Non-fatal: if unlock fails the lock is released on session close.
+    }
+    lockClient!.release();
+  }
+}
+
+export default {
+  checkIdempotencyKey,
+  storeIdempotencyKey,
+  cleanupExpiredKeys,
+  withIdempotencyLock,
+};

@@ -249,32 +249,40 @@ export async function registerWithDataset(
       );
     }
 
+    // Normalise BOM (U+FEFF) before comparison so legacy datasets
+    // whose first column header was ingested with a UTF-8 BOM still
+    // match user-supplied mappings (which have the BOM stripped by
+    // the JSON body pipeline + inputSanitizer's .trim()).
+    const stripBom = (s: string): string =>
+      s.replace(/^\uFEFF/, "").replace(/\uFEFF/g, "");
+    const normalizedAvailable = new Set(availableColumns.map(stripBom));
+
     // 4. Validate column mapping values against available columns
     for (const [propApiName, columnName] of Object.entries(columnMapping)) {
-      if (!availableColumns.includes(columnName)) {
+      if (!normalizedAvailable.has(stripBom(columnName))) {
         const suggestion = findClosestColumn(columnName, availableColumns);
         const didYouMean = suggestion
-          ? ` Did you mean '${suggestion}'?`
+          ? ` Did you mean '${stripBom(suggestion)}'?`
           : "";
         throw appError(
           "COLUMN_NOT_FOUND",
-          `Column '${columnName}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${c}'`).join(", ")}].${didYouMean}`
+          `Column '${columnName}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${stripBom(c)}'`).join(", ")}].${didYouMean}`
         );
       }
     }
 
     // 5. Validate primaryKeyColumn against available columns
-    if (primaryKeyColumn && !availableColumns.includes(primaryKeyColumn)) {
+    if (primaryKeyColumn && !normalizedAvailable.has(stripBom(primaryKeyColumn))) {
       const suggestion = findClosestColumn(
         primaryKeyColumn,
         availableColumns
       );
       const didYouMean = suggestion
-        ? ` Did you mean '${suggestion}'?`
+        ? ` Did you mean '${stripBom(suggestion)}'?`
         : "";
       throw appError(
         "COLUMN_NOT_FOUND",
-        `Column '${primaryKeyColumn}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${c}'`).join(", ")}].${didYouMean}`
+        `Column '${primaryKeyColumn}' does not exist in dataset '${datasetId}'. Available columns: [${availableColumns.map((c) => `'${stripBom(c)}'`).join(", ")}].${didYouMean}`
       );
     }
 
@@ -389,11 +397,247 @@ export async function registerWithDataset(
 }
 
 // ---------------------------------------------------------------------------
+// registerWithFoundryDataset
+//
+// Bridge between the Foundry upload system (`foundry_datasets` +
+// `dataset_columns`, S3-backed) and the Ontology layer (`backing_datasource`).
+//
+// The original `registerWithDataset` path above assumes the "Ontology
+// dataset" model: a row in the `dataset` table with at least one
+// committed `dataset_transaction` pointing to a file on the local
+// filesystem. That model is disconnected from the file uploads exposed
+// through `/api/v1/projects/:id/upload`, which land in `foundry_datasets`
+// with a schema scanned from an S3 object.
+//
+// This function lets the "Create a new object type" wizard — which
+// drives its Step 1 "Select a datasource" picker off `foundry_datasets`
+// — register that selection as a backing datasource without any file
+// round-trip. Columns are taken from `dataset_columns`, no filesystem
+// access is performed, and the resulting `backing_datasource` row
+// mirrors exactly what the legacy path would have produced.
+// ---------------------------------------------------------------------------
+
+export interface RegisterWithFoundryDatasetInput {
+  foundryDatasetId: string;
+  columnMapping: Record<string, string>;
+  primaryKeyColumn: string;
+}
+
+export async function registerWithFoundryDataset(
+  objectTypeId: string,
+  data: RegisterWithFoundryDatasetInput,
+): Promise<RegisterResult> {
+  const { foundryDatasetId, columnMapping, primaryKeyColumn } = data;
+
+  if (!foundryDatasetId) {
+    throw appError("VALIDATION_FAILED", "foundryDatasetId is required.");
+  }
+  if (!columnMapping || Object.keys(columnMapping).length === 0) {
+    throw appError("VALIDATION_FAILED", "columnMapping is required and must be non-empty.");
+  }
+  if (!primaryKeyColumn) {
+    throw appError("VALIDATION_FAILED", "primaryKeyColumn is required.");
+  }
+
+  // ----- Object type --------------------------------------------------
+  const otResult = await query(
+    "SELECT * FROM object_type WHERE object_type_id = $1",
+    [objectTypeId],
+  );
+  if (otResult.rows.length === 0) {
+    throw appError(
+      "OBJECT_TYPE_NOT_FOUND",
+      `Object type '${objectTypeId}' not found.`,
+    );
+  }
+  const objectType = otResult.rows[0];
+
+  // ----- Object type properties (for column mapping validation) -------
+  const propsResult = await query(
+    "SELECT property_id, api_name FROM property WHERE object_type_id = $1",
+    [objectTypeId],
+  );
+  const propertyApiNames = new Set<string>(
+    propsResult.rows.map((p: { api_name: string }) => p.api_name),
+  );
+  for (const propApiName of Object.keys(columnMapping)) {
+    if (!propertyApiNames.has(propApiName)) {
+      throw appError(
+        "COLUMN_MAPPING_INVALID",
+        `columnMapping references unknown property '${propApiName}'.`,
+      );
+    }
+  }
+
+  // ----- Foundry dataset ----------------------------------------------
+  // Uses the same `foundry_datasets` table that the upload endpoint
+  // writes to, so any file the user has uploaded through tellus-fe is
+  // a valid candidate.
+  const fdResult = await query(
+    "SELECT id, name, file_path, original_filename, row_count FROM foundry_datasets WHERE id = $1",
+    [foundryDatasetId],
+  );
+  if (fdResult.rows.length === 0) {
+    throw appError(
+      "DATASET_NOT_FOUND",
+      `Foundry dataset '${foundryDatasetId}' was not found.`,
+    );
+  }
+  const fd = fdResult.rows[0];
+
+  // ----- Foundry columns ----------------------------------------------
+  const fcResult = await query(
+    "SELECT column_name FROM dataset_columns WHERE dataset_id = $1 ORDER BY ordinal_position ASC",
+    [foundryDatasetId],
+  );
+  if (fcResult.rows.length === 0) {
+    throw appError(
+      "DATASET_EMPTY",
+      `Foundry dataset '${foundryDatasetId}' has no columns yet. ` +
+        `Wait for the scan worker to finish and try again.`,
+    );
+  }
+  // Normalise BOM (U+FEFF) on both sides before comparison. Older
+  // datasets were parsed without csv-parse's `bom: true` option, so
+  // their first column header landed in `dataset_columns.column_name`
+  // as "\uFEFForder_id". Meanwhile every client-side path (JSON body,
+  // inputSanitizer's .trim(), clipboard paste, typing) strips BOM, so
+  // the user-supplied mapping shows up without it. Comparing via a
+  // BOM-stripped key makes both side symmetric without forcing a
+  // costly reparse of every already-ingested dataset.
+  const stripBom = (s: string): string => s.replace(/^\uFEFF/, "").replace(/\uFEFF/g, "");
+  const availableColumns = fcResult.rows.map(
+    (r: { column_name: string }) => r.column_name,
+  );
+  const normalizedAvailable = new Set(availableColumns.map(stripBom));
+
+  // ----- Validate every mapped source column exists in the dataset ---
+  for (const [propApiName, sourceColumn] of Object.entries(columnMapping)) {
+    const key = stripBom(sourceColumn);
+    if (!normalizedAvailable.has(key)) {
+      const suggestion = findClosestColumn(sourceColumn, availableColumns);
+      throw appError(
+        "COLUMN_MAPPING_INVALID",
+        `Property '${propApiName}' maps to column '${sourceColumn}', ` +
+          `which does not exist in the dataset.` +
+          (suggestion ? ` Did you mean '${stripBom(suggestion)}'?` : ""),
+      );
+    }
+  }
+  if (!normalizedAvailable.has(stripBom(primaryKeyColumn))) {
+    throw appError(
+      "PRIMARY_KEY_MISMATCH",
+      `primaryKeyColumn '${primaryKeyColumn}' does not exist in the dataset.`,
+    );
+  }
+
+  // ----- One-datasource-per-object-type rule --------------------------
+  const existingDs = await query(
+    "SELECT mapping_id FROM backing_datasource WHERE object_type_id = $1",
+    [objectTypeId],
+  );
+  if (existingDs.rows.length > 0) {
+    throw appError(
+      "DATASOURCE_ALREADY_REGISTERED",
+      "This object type already has a registered datasource.",
+    );
+  }
+
+  // ----- Insert -------------------------------------------------------
+  // `backing_datasource` has a UNIQUE index on `file_path` (see
+  // `idx_ds_file_path` in migrate.ts). That constraint was designed
+  // for the legacy filesystem path where `file_path` actually points
+  // at a real file on disk and "each file backs one object type"
+  // makes sense. For the Foundry bridge we're storing a synthetic
+  // identifier instead, so we key it on BOTH the foundry dataset id
+  // AND the object type id — two object types backed by the same
+  // foundry dataset therefore get two distinct synthetic paths, and
+  // re-running the wizard after any partial failure never collides
+  // with a dead row from a previous attempt.
+  const tag = `foundry-dataset:${foundryDatasetId}#object-type:${objectTypeId}`;
+  const filePathValue = fd.file_path
+    ? `${fd.file_path}#${tag}`
+    : tag;
+  const fileFormat = inferFoundryFileFormat(fd.original_filename || fd.file_path || "");
+
+  let insertResult;
+  try {
+    insertResult = await query(
+      `INSERT INTO backing_datasource
+         (object_type_id, dataset_name, file_path, file_format,
+          column_mapping, primary_key_column, row_count, column_names)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        objectTypeId,
+        fd.name || fd.original_filename || "unnamed",
+        filePathValue,
+        fileFormat,
+        JSON.stringify(columnMapping),
+        primaryKeyColumn,
+        fd.row_count ?? null,
+        availableColumns,
+      ],
+    );
+  } catch (err: any) {
+    // Defensive: if the unique index ever fires anyway — e.g. a
+    // future migration tightens it — surface a clear DATASOURCE_
+    // ALREADY_REGISTERED so the frontend can show a meaningful
+    // message instead of a generic 500.
+    if (err.code === "23505") {
+      throw appError(
+        "DATASOURCE_ALREADY_REGISTERED",
+        "Another backing datasource is already registered for this object type or file path.",
+      );
+    }
+    throw err;
+  }
+  const row = insertResult.rows[0];
+
+  // ----- Funnel state bookkeeping -------------------------------------
+  const fsResult = await query(
+    "SELECT * FROM funnel_state WHERE object_type_id = $1",
+    [objectTypeId],
+  );
+  if (fsResult.rows.length > 0) {
+    const currentStatus = fsResult.rows[0].status;
+    let newStatus = currentStatus;
+    if (currentStatus === "indexed") newStatus = "stale";
+    else if (currentStatus === "failed") newStatus = "not_indexed";
+    if (newStatus !== currentStatus) {
+      await query(
+        "UPDATE funnel_state SET status = $1, updated_at = NOW() WHERE object_type_id = $2",
+        [newStatus, objectTypeId],
+      );
+    }
+  }
+
+  return {
+    objectType: objectType.api_name,
+    datasetId: foundryDatasetId,
+    datasetName: fd.name || fd.original_filename || null,
+    filePath: filePathValue,
+    columnMapping,
+    primaryKeyColumn,
+    registeredAt: row.registered_at,
+  };
+}
+
+/** Infer backing_datasource.file_format from a Foundry filename. */
+function inferFoundryFileFormat(filename: string): "csv" | "json" | "parquet" {
+  const lower = (filename || "").toLowerCase();
+  if (lower.endsWith(".parquet")) return "parquet";
+  if (lower.endsWith(".json") || lower.endsWith(".jsonl")) return "json";
+  return "csv";
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
 export default {
   registerWithDataset,
+  registerWithFoundryDataset,
   levenshteinDistance,
   findClosestColumn,
 };
@@ -405,7 +649,7 @@ export { findClosestColumn };
 // (run: npx tsx src/services/datasetDatasourceService.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -413,6 +657,7 @@ function runSelfTests(): void {
     if (condition) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -573,10 +818,13 @@ function runSelfTests(): void {
   if (failed === 0) {
     console.log("\nAll datasetDatasourceService tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

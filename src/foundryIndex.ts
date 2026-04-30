@@ -24,7 +24,6 @@ import uploadsRouter from './routes/uploads';
 import { folderDatasetsRouter, datasetRouter } from './routes/foundryDatasets';
 import searchRouter from './routes/search';
 import breadcrumbRouter from './routes/breadcrumb';
-import authRouter from './routes/auth';
 import membersRouter from './routes/members';
 import columnStatsRouter from './routes/columnStats';
 import versionsRouter from './routes/versions';
@@ -53,19 +52,18 @@ app.use(morgan(foundryEnv.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // Register routes
 app.use('/health', healthRouter);
-app.use('/api/projects', projectsRouter);
-app.use('/api/projects/:projectId/folders', foldersRouter);
-app.use('/api/projects/:projectId/folders/:folderId', uploadsRouter);
-app.use('/api/projects/:projectId/folders/:folderId/datasets', folderDatasetsRouter);
-app.use('/api/datasets', datasetRouter);
-app.use('/api/search', searchRouter);
-app.use('/api/breadcrumb', breadcrumbRouter);
-app.use('/api/auth', authRouter);
-app.use('/api/projects/:projectId/members', membersRouter);
-app.use('/api/datasets', columnStatsRouter);
-app.use('/api/datasets', versionsRouter);
-app.use('/api/datasets', datasetDeduplicateRouter);
-app.use('/api/projects', projectDuplicatesRouter);
+app.use('/api/v1/projects', projectsRouter);
+app.use('/api/v1/projects/:projectId/folders', foldersRouter);
+app.use('/api/v1/projects/:projectId/folders/:folderId', uploadsRouter);
+app.use('/api/v1/projects/:projectId/folders/:folderId/datasets', folderDatasetsRouter);
+app.use('/api/v1/datasets', datasetRouter);
+app.use('/api/v1/search', searchRouter);
+app.use('/api/v1/breadcrumb', breadcrumbRouter);
+app.use('/api/v1/projects/:projectId/members', membersRouter);
+app.use('/api/v1/datasets', columnStatsRouter);
+app.use('/api/v1/datasets', versionsRouter);
+app.use('/api/v1/datasets', datasetDeduplicateRouter);
+app.use('/api/v1/projects', projectDuplicatesRouter);
 app.use('/api/users/me/preferences', foundryPreferencesRouter);
 
 // OpenAPI/Swagger Documentation

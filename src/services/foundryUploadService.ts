@@ -49,6 +49,8 @@ export class UploadService {
               mime_type: file.mimetype,
               file_size_bytes: file.size,
               status: 'pending',
+              created_by: ownerId,
+              updated_by: ownerId,
             })
             .returning('*');
           datasets.push(dataset);

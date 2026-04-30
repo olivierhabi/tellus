@@ -286,7 +286,7 @@ export default {
 // Inline self-tests (run: npx tsx src/models/funnelState.ts)
 // ---------------------------------------------------------------------------
 
-async function runSelfTests(): Promise<void> {
+export async function runSelfTests(): Promise<void> {
   let passed = 0;
   let failed = 0;
 
@@ -294,6 +294,7 @@ async function runSelfTests(): Promise<void> {
     if (condition) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -850,10 +851,13 @@ async function runSelfTests(): Promise<void> {
   if (failed === 0) {
     console.log("\nAll funnelState model tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

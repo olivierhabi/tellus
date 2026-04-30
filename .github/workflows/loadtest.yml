@@ -1,0 +1,25 @@
+name: loadtest
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        type: choice
+        options: [baseline, target, breaking, stress, overload, soak]
+        default: baseline
+env:
+  # Force JavaScript actions still bundled for Node 20 to run under Node 24
+  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+jobs:
+  k6:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: grafana/setup-k6-action@v1
+      - run: k6 run --summary-export=k6-summary.json ops/loadtest/k6-scenario.js
+        env:
+          K6_PROFILE: ${{ inputs.profile }}
+          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+          STAGING_TOKEN: ${{ secrets.STAGING_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with: { name: k6-summary-${{ inputs.profile }}, path: k6-summary.json }

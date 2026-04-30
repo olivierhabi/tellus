@@ -9,39 +9,33 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeAll } from "vitest";
+import { api, BASE_URL } from "../../helpers/api";
 
-const BASE = "http://localhost:3000";
+const BASE = BASE_URL;
 
 let serverReachable = false;
 
+// F-01 / Phase A2: route requests through the shared `api()` helper so the
+// default alice JWT (installed by tests/setupFiles.ts) is attached on every
+// call. A bare `fetch()` here would 401 against the globalAuth gate.
 async function request(method: string, path: string, body?: unknown) {
-  const opts: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json" },
-  };
-  if (body !== undefined) {
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(`${BASE}${path}`, opts);
-  const text = await res.text();
-  let json: any;
-  try { json = JSON.parse(text); } catch { json = text; }
-  return { status: res.status, body: json, headers: res.headers };
+  return api(method, path, body);
 }
 
 beforeAll(async () => {
   try {
     const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(2000) });
-    serverReachable = res.ok;
-  } catch {
-    console.warn("Server not reachable — skipping integration tests");
+    if (!res.ok) throw new Error(`health probe returned ${res.status}`);
+    serverReachable = true;
+  } catch (err) {
+    throw new Error(
+      "F-P2-01: integration server unreachable at " + BASE +
+      " — beforeAll fails loudly rather than ghost-passing. " +
+      "Start the server (pnpm dev) before running integration tests. " +
+      "Root cause: " + ((err as Error)?.message || err)
+    );
   }
 });
-
-function skipIfNoServer() {
-  if (!serverReachable) return true;
-  return false;
-}
 
 describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
@@ -49,22 +43,21 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should create a link type", async () => {
-    if (skipIfNoServer()) return;
 
     // First get an ontology
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
     // Check if object types exist
-    const ot = await request("GET", `/api/v2/ontologies/${ontologyId}/objectTypes`);
+    const ot = await request("GET", `/api/v1/ontology/${ontologyId}/objectTypes`);
     if (ot.status !== 200 || !ot.body?.data?.length || ot.body.data.length < 2) return;
 
     const srcType = ot.body.data[0].apiName;
     const tgtType = ot.body.data.length > 1 ? ot.body.data[1].apiName : ot.body.data[0].apiName;
 
     // Try to create a link type (may already exist)
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes`, {
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes`, {
       apiName: "integTestLink",
       displayName: "Integration Test Link",
       cardinality: "ONE_TO_MANY",
@@ -76,13 +69,12 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should list link types", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("GET", `/api/v2/ontologies/${ontologyId}/linkTypes`);
+    const res = await request("GET", `/api/v1/ontology/${ontologyId}/linkTypes`);
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("data");
     expect(res.body).toHaveProperty("totalCount");
@@ -90,37 +82,34 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should return 404 for non-existent link type", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("GET", `/api/v2/ontologies/${ontologyId}/linkTypes/nonExistentLink`);
+    const res = await request("GET", `/api/v1/ontology/${ontologyId}/linkTypes/nonExistentLink`);
     expect(res.status).toBe(404);
   });
 
   it("should validate create — missing fields", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes`, {
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes`, {
       apiName: "testBad",
     });
     expect(res.status).toBe(400);
   });
 
   it("should validate create — invalid cardinality", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes`, {
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes`, {
       apiName: "testBadCard",
       displayName: "Bad Card",
       cardinality: "INVALID",
@@ -131,14 +120,13 @@ describe("Thursday Integration Tests", () => {
   });
 
   it("should validate PUT — immutable field rejection", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
     // Try to change apiName via PUT
-    const res = await request("PUT", `/api/v2/ontologies/${ontologyId}/linkTypes/integTestLink`, {
+    const res = await request("PUT", `/api/v1/ontology/${ontologyId}/linkTypes/integTestLink`, {
       apiName: "renamedLink",
     });
     // Should return 400 (immutable) or 404 (not found)
@@ -150,35 +138,32 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should require objectPK and direction for resolve", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/integTestLink/resolve`, {});
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/integTestLink/resolve`, {});
     expect([400, 404]).toContain(res.status);
   });
 
   it("should require direction for searchAround", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/integTestLink/searchAround`, {});
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/integTestLink/searchAround`, {});
     expect([400, 404]).toContain(res.status);
   });
 
   it("should require objectPK and direction for count", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/integTestLink/count`, {});
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/integTestLink/count`, {});
     expect([400, 404]).toContain(res.status);
   });
 
@@ -187,13 +172,12 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate bulkCount requests", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/bulkCount`, {});
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/bulkCount`, {});
     expect(res.status).toBe(400);
   });
 
@@ -202,26 +186,24 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate multiHop — missing steps", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/multiHop`, {
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/multiHop`, {
       startingPKs: ["pk1"],
     });
     expect(res.status).toBe(400);
   });
 
   it("should validate multiHop — missing startingPKs", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/multiHop`, {
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/multiHop`, {
       steps: [{ linkTypeApiName: "test", direction: "forward" }],
     });
     expect(res.status).toBe(400);
@@ -232,13 +214,12 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should export link types as JSON", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("GET", `/api/v2/ontologies/${ontologyId}/linkTypes/export`);
+    const res = await request("GET", `/api/v1/ontology/${ontologyId}/linkTypes/export`);
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("ontologyId");
     expect(res.body).toHaveProperty("exportedAt");
@@ -251,13 +232,12 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate import — missing linkTypes array", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/import`, {});
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/import`, {});
     expect(res.status).toBe(400);
   });
 
@@ -266,13 +246,12 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate migration — missing targetCardinality", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("POST", `/api/v2/ontologies/${ontologyId}/linkTypes/integTestLink/validateMigration`, {});
+    const res = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes/integTestLink/validateMigration`, {});
     expect([400, 404]).toContain(res.status);
   });
 
@@ -281,9 +260,8 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should return 404 for link on non-existent object type", async () => {
-    if (skipIfNoServer()) return;
 
-    const res = await request("GET", "/api/v2/objects/NonExistentType/pk1/links/someLink");
+    const res = await request("GET", "/api/v1/objects/NonExistentType/pk1/links/someLink");
     expect(res.status).toBe(404);
   });
 
@@ -292,16 +270,15 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should validate searchAround — missing linkType", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
-    const ot = await request("GET", `/api/v2/ontologies/${ontologyId}/objectTypes`);
+    const ot = await request("GET", `/api/v1/ontology/${ontologyId}/objectTypes`);
     if (ot.status !== 200 || !ot.body?.data?.length) return;
 
     const objectType = ot.body.data[0].apiName;
-    const res = await request("POST", `/api/v2/objects/${objectType}/searchAround`, {
+    const res = await request("POST", `/api/v1/objects/${objectType}/searchAround`, {
       direction: "forward",
     });
     expect(res.status).toBe(400);
@@ -312,13 +289,12 @@ describe("Thursday Integration Tests", () => {
   // ---------------------------------------------------------------------------
 
   it("should delete the test link type", async () => {
-    if (skipIfNoServer()) return;
 
-    const ont = await request("GET", "/api/v2/ontologies");
+    const ont = await request("GET", "/api/v1/ontology");
     if (ont.status !== 200 || !ont.body?.data?.length) return;
     const ontologyId = ont.body.data[0].ontologyId;
 
-    const res = await request("DELETE", `/api/v2/ontologies/${ontologyId}/linkTypes/integTestLink`);
+    const res = await request("DELETE", `/api/v1/ontology/${ontologyId}/linkTypes/integTestLink`);
     expect([200, 204, 404]).toContain(res.status);
   });
 });

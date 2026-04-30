@@ -3,9 +3,9 @@
 //
 // Endpoints for managing which Interfaces an Object Type implements:
 //
-//   POST   /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements
-//   DELETE /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName
-//   GET    /api/v2/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements
+//   POST   /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements
+//   DELETE /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements/:interfaceApiName
+//   GET    /api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements
 //
 // Task 6: "Implements Interface" API
 // ---------------------------------------------------------------------------

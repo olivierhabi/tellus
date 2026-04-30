@@ -18,7 +18,7 @@ describe("Sunday Unit Tests", () => {
     { name: "Input Sanitizer Middleware",    file: "src/middleware/inputSanitizer.ts",              task: "Task 18" },
     { name: "System Health Routes",         file: "src/routes/systemHealth.ts",                    task: "Task 19" },
     { name: "Not Found Handler",            file: "src/middleware/notFoundHandler.ts",              task: "Task 20" },
-    { name: "Graceful Shutdown",            file: "src/utils/gracefulShutdown.ts",                  task: "Task 21" },
+    { name: "Graceful Shutdown",            file: "src/utils/gracefulShutdown.ts",                  task: "Task 21", subprocess: true },
     { name: "OpenSearch Resilience",        file: "src/services/opensearch/resilience.ts",          task: "Task 22" },
     { name: "PostgreSQL Resilience",        file: "src/utils/pgResilience.ts",                      task: "Task 23" },
     { name: "API Reference Generator",     file: "src/utils/apiReferenceGenerator.ts",             task: "Task 25" },

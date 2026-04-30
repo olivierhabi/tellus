@@ -4,7 +4,7 @@
 // Middleware for unmatched routes that returns a helpful error response
 // with a reference to the API documentation endpoint.
 //
-// Also provides GET /api/v2/docs/endpoints to list all registered routes.
+// Also provides GET /api/docs to list all registered routes.
 //
 // Run self-tests: npx tsx src/middleware/notFoundHandler.ts
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ export function notFoundHandler(req: Request, res: Response): void {
     error: {
       code: "ROUTE_NOT_FOUND",
       message: `${req.method} ${req.path} is not a valid API endpoint`,
-      availableEndpoints: "/api/v2/docs/endpoints",
+      availableEndpoints: "/api/docs",
       timestamp: new Date().toISOString(),
     },
   });
@@ -129,19 +129,19 @@ function extractPathFromRegexp(regexp: RegExp, keys: Array<{ name: string }>): s
 // ---------------------------------------------------------------------------
 
 /**
- * Create a router that provides the /api/v2/docs/endpoints listing.
+ * Create a router that provides the /api/docs endpoint listing.
  * The app reference is needed to extract registered routes.
  */
 export function createDocsRouter(app: Express): Router {
   const router = Router();
 
-  router.get("/api/v2/docs/endpoints", (_req: Request, res: Response) => {
+  router.get("/api/docs", (_req: Request, res: Response) => {
     const routes = extractRoutes(app);
 
     // Group by path prefix
     const grouped: Record<string, RouteInfo[]> = {};
     for (const route of routes) {
-      // Extract group from path (e.g., "/api/v2/ontologies" -> "ontologies")
+      // Extract group from path (e.g., "/api/v1/ontology" -> "ontologies")
       const parts = route.path.split("/").filter(Boolean);
       const group = parts[2] || parts[1] || "root";
       if (!grouped[group]) grouped[group] = [];
@@ -152,7 +152,7 @@ export function createDocsRouter(app: Express): Router {
       totalRoutes: routes.length,
       endpoints: routes,
       groups: grouped,
-      documentation: "/api/v2/docs",
+      documentation: "/api/docs",
       timestamp: new Date().toISOString(),
     });
   });
@@ -166,7 +166,7 @@ export default notFoundHandler;
 // Inline self-tests (run: npx tsx src/middleware/notFoundHandler.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -176,6 +176,7 @@ function runSelfTests(): void {
       passed++;
     } else {
       console.error(`  FAIL: ${label}`);
+      /* v8 ignore next 2 */
       failed++;
     }
   }
@@ -192,7 +193,7 @@ function runSelfTests(): void {
 
     const mockReq = {
       method: "GET",
-      path: "/api/v2/nonexistent",
+      path: "/api/v1/nonexistent",
     } as Request;
 
     const mockRes = {
@@ -205,11 +206,11 @@ function runSelfTests(): void {
     assert(statusCode === 404, "status is 404");
     assert(responseBody.error.code === "ROUTE_NOT_FOUND", "error code is ROUTE_NOT_FOUND");
     assert(
-      responseBody.error.message === "GET /api/v2/nonexistent is not a valid API endpoint",
+      responseBody.error.message === "GET /api/v1/nonexistent is not a valid API endpoint",
       "error message includes method and path"
     );
     assert(
-      responseBody.error.availableEndpoints === "/api/v2/docs/endpoints",
+      responseBody.error.availableEndpoints === "/api/docs",
       "includes availableEndpoints reference"
     );
     assert(typeof responseBody.error.timestamp === "string", "has timestamp");
@@ -224,7 +225,7 @@ function runSelfTests(): void {
 
     const mockReq = {
       method: "POST",
-      path: "/api/v2/unknown",
+      path: "/api/v1/unknown",
     } as Request;
 
     const mockRes = {
@@ -249,7 +250,7 @@ function runSelfTests(): void {
 
     const mockReq = {
       method: "DELETE",
-      path: "/api/v2/things/123",
+      path: "/api/v1/things/123",
     } as Request;
 
     const mockRes = {
@@ -260,7 +261,7 @@ function runSelfTests(): void {
     notFoundHandler(mockReq, mockRes);
 
     assert(
-      responseBody.error.message === "DELETE /api/v2/things/123 is not a valid API endpoint",
+      responseBody.error.message === "DELETE /api/v1/things/123 is not a valid API endpoint",
       "DELETE message correct"
     );
   }
@@ -271,15 +272,15 @@ function runSelfTests(): void {
   console.log("\n=== 4. extractPathFromRegexp ===");
   {
     // Simple path
-    const simple = extractPathFromRegexp(/^\/api\/v2\/health\/?(?=\/|$)/i, []);
+    const simple = extractPathFromRegexp(/^\/api\/v1\/health\/?(?=\/|$)/i, []);
     assert(simple.includes("api") && simple.includes("health"), "extracts simple path components");
 
     // With params
     const withParams = extractPathFromRegexp(
-      /^\/api\/v2\/ontologies\/(?:([^\/]+?))\/?(?=\/|$)/i,
+      /^\/api\/v1\/ontology\/(?:([^\/]+?))\/?(?=\/|$)/i,
       [{ name: "ontologyId" } as any]
     );
-    assert(withParams.includes("ontologies"), "extracts parameterized path");
+    assert(withParams.includes("ontology"), "extracts parameterized path");
   }
 
   // =========================================================================
@@ -348,10 +349,13 @@ function runSelfTests(): void {
   if (failed === 0) {
     console.log("\nAll notFoundHandler tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

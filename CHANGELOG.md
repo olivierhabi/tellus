@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Interface System (Polymorphism)**
   - `interface` and `interface_property` PostgreSQL tables with CHECK constraints
   - `object_type_interface` junction table for Object Type → Interface mapping
-  - Full CRUD API for Interfaces (`POST/GET/PUT/DELETE /api/v2/ontology/:id/interfaces`)
+  - Full CRUD API for Interfaces (`POST/GET/PUT/DELETE /api/v1/ontology/:id/interfaces`)
   - "Implements Interface" API for Object Types (`POST/GET/DELETE .../implements`)
   - Interface property mapping validation service with type compatibility checks
   - Polymorphic search across all implementing Object Types (`POST .../interfaces/:name/search`)
@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `reindex_history` table for audit trail
   - `dataset_id` foreign key on `backing_datasource` table
   - File upload handler with Multer (CSV/JSON/JSONL, 500MB limit)
-  - Dataset creation API (`POST /api/v2/datasets/upload`)
+  - Dataset creation API (`POST /api/v1/datasets/upload`)
   - Dataset listing, detail, and deletion endpoints
   - Append transaction endpoint with schema compatibility validation
 

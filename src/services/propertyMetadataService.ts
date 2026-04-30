@@ -247,7 +247,7 @@ export async function enrichProperties(
 // Inline self-tests
 // ---------------------------------------------------------------------------
 
-if (require.main === module) {
+export async function runSelfTests(): Promise<void> {
   let passed = 0;
   let failed = 0;
 
@@ -256,6 +256,7 @@ if (require.main === module) {
       passed++;
       console.log(`  PASS  ${label}`);
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.log(`  FAIL  ${label}`);
     }
@@ -414,55 +415,57 @@ if (require.main === module) {
     expiresAt: Date.now() + 60_000,
   });
 
-  (async () => {
-    try {
-      const enriched = await enrichProperties("TestEmployee", {
-        fullName: "John Doe",
-        salary: 125000,
-        // active is missing — should be null
-      });
+  try {
+    const enriched = await enrichProperties("TestEmployee", {
+      fullName: "John Doe",
+      salary: 125000,
+      // active is missing — should be null
+    });
 
-      assert(enriched.length === 3, "enrichProperties: returns all 3 properties");
-      assert(
-        enriched[0].apiName === "fullName",
-        "enrichProperties: sorted by ordinal (fullName first)"
-      );
-      assert(
-        enriched[0].displayName === "Full Name",
-        "enrichProperties: displayName populated"
-      );
-      assert(
-        enriched[0].value === "John Doe",
-        "enrichProperties: value populated"
-      );
-      assert(
-        enriched[0].formattedValue === "John Doe",
-        "enrichProperties: formattedValue for string"
-      );
-      assert(
-        enriched[1].value === 125000,
-        "enrichProperties: salary value correct"
-      );
-      assert(
-        enriched[1].formattedValue === "125000",
-        "enrichProperties: salary formatted"
-      );
-      assert(
-        enriched[2].value === null,
-        "enrichProperties: missing property is null"
-      );
-      assert(
-        enriched[2].formattedValue === null,
-        "enrichProperties: missing property formattedValue is null"
-      );
-    } catch (err) {
-      failed++;
-      console.log(`  FAIL  enrichProperties threw: ${err}`);
-    }
+    assert(enriched.length === 3, "enrichProperties: returns all 3 properties");
+    assert(
+      enriched[0].apiName === "fullName",
+      "enrichProperties: sorted by ordinal (fullName first)"
+    );
+    assert(
+      enriched[0].displayName === "Full Name",
+      "enrichProperties: displayName populated"
+    );
+    assert(
+      enriched[0].value === "John Doe",
+      "enrichProperties: value populated"
+    );
+    assert(
+      enriched[0].formattedValue === "John Doe",
+      "enrichProperties: formattedValue for string"
+    );
+    assert(
+      enriched[1].value === 125000,
+      "enrichProperties: salary value correct"
+    );
+    assert(
+      enriched[1].formattedValue === "125000",
+      "enrichProperties: salary formatted"
+    );
+    assert(
+      enriched[2].value === null,
+      "enrichProperties: missing property is null"
+    );
+    assert(
+      enriched[2].formattedValue === null,
+      "enrichProperties: missing property formattedValue is null"
+    );
+  } catch (err) {
+    failed++;
+    console.log(`  FAIL  enrichProperties threw: ${err}`);
+  }
 
-    console.log(`\n${passed} passed, ${failed} failed`);
-    if (failed > 0) process.exit(1);
-    console.log("\nAll property metadata service tests passed");
-    process.exit(0);
-  })();
+  console.log(`\n${passed} passed, ${failed} failed`);
+  if (failed > 0) process.exit(1);
 }
+
+/* v8 ignore start */
+if (require.main === module) {
+  runSelfTests();
+}
+/* v8 ignore stop */

@@ -279,8 +279,7 @@ export async function buildSortClause(
 // Self-test
 // ---------------------------------------------------------------------------
 
-if (require.main === module) {
-  (async () => {
+export async function runSelfTests(): Promise<void> {
     let passed = 0;
     let failed = 0;
 
@@ -412,6 +411,11 @@ if (require.main === module) {
     assert("__pk" in sorts[0], "Default sort is __pk");
 
     console.log(`\n${passed} passed, ${failed} failed`);
-    process.exit(failed > 0 ? 1 : 0);
-  })();
+    if (failed > 0) process.exit(1);
 }
+
+/* v8 ignore start */
+if (require.main === module) {
+  runSelfTests();
+}
+/* v8 ignore stop */

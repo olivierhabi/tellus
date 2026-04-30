@@ -25,6 +25,7 @@ npm-debug.log*
 
 # Test artifacts
 coverage/
+tests/**/tmp/
 
 # Data files (user-specific)
 data/

@@ -22,8 +22,11 @@ import { appError } from "../utils/appError";
 // Types
 // ---------------------------------------------------------------------------
 
+export type EditStrategy = "user_edit_wins" | "latest_wins";
+
 export interface OntologyEditRow {
   edit_id: string;
+  ontology_id: string | null;
   object_type_api_name: string;
   primary_key: string;
   operation: "create" | "update" | "delete";
@@ -36,10 +39,14 @@ export interface OntologyEditRow {
   executed_at: string;
   indexed: boolean;
   indexed_at: string | null;
+  applied_to_merged_at: string | null;
+  applied_to_index_at: string | null;
+  edit_strategy: EditStrategy;
   branch_id: string | null;
 }
 
 export interface CreateEditInput {
+  ontology_id?: string | null;
   object_type_api_name: string;
   primary_key: string;
   operation: "create" | "update" | "delete";
@@ -49,6 +56,7 @@ export interface CreateEditInput {
   execution_id?: string | null;
   action_parameters?: Record<string, unknown>;
   executed_by?: string;
+  edit_strategy?: EditStrategy;
   branch_id?: string | null;
 }
 
@@ -79,12 +87,13 @@ async function createEdit(edit: CreateEditInput): Promise<OntologyEditRow> {
 
   const result = await query(
     `INSERT INTO ontology_edit
-       (object_type_api_name, primary_key, operation, property_values,
+       (ontology_id, object_type_api_name, primary_key, operation, property_values,
         link_edits, action_type_api_name, execution_id, action_parameters,
-        executed_by, branch_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        executed_by, edit_strategy, branch_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [
+      edit.ontology_id ?? null,
       edit.object_type_api_name,
       edit.primary_key,
       edit.operation,
@@ -96,6 +105,7 @@ async function createEdit(edit: CreateEditInput): Promise<OntologyEditRow> {
       edit.execution_id ?? null,
       JSON.stringify(edit.action_parameters ?? {}),
       edit.executed_by ?? "system",
+      edit.edit_strategy ?? "user_edit_wins",
       edit.branch_id ?? null,
     ]
   );
@@ -150,12 +160,13 @@ async function createEdits(edits: CreateEditInput[]): Promise<OntologyEditRow[]>
 
       const result = await client.query(
         `INSERT INTO ontology_edit
-           (object_type_api_name, primary_key, operation, property_values,
+           (ontology_id, object_type_api_name, primary_key, operation, property_values,
             link_edits, action_type_api_name, execution_id, action_parameters,
-            executed_by, branch_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            executed_by, edit_strategy, branch_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING *`,
         [
+          edit.ontology_id ?? null,
           edit.object_type_api_name,
           edit.primary_key,
           edit.operation,
@@ -167,6 +178,7 @@ async function createEdits(edits: CreateEditInput[]): Promise<OntologyEditRow[]>
           edit.execution_id ?? null,
           JSON.stringify(edit.action_parameters ?? {}),
           edit.executed_by ?? "system",
+          edit.edit_strategy ?? "user_edit_wins",
           edit.branch_id ?? null,
         ]
       );
@@ -381,6 +393,75 @@ async function getAllEditsByObjectType(
 }
 
 // ---------------------------------------------------------------------------
+// 9. getPendingMergeEdits / markEditsAppliedToMerge — B1 + B5
+// ---------------------------------------------------------------------------
+
+/**
+ * Edits the Merge stage should consume on its next run: those that have
+ * not yet been reflected in `object_instances`. Ordered by executed_at so
+ * that user_edit_wins preserves intent.
+ */
+async function getPendingMergeEdits(
+  objectTypeApiName: string
+): Promise<OntologyEditRow[]> {
+  const result = await query(
+    `SELECT * FROM ontology_edit
+      WHERE object_type_api_name = $1 AND applied_to_merged_at IS NULL
+      ORDER BY executed_at ASC`,
+    [objectTypeApiName]
+  );
+  return result.rows as OntologyEditRow[];
+}
+
+/**
+ * Stamp applied_to_merged_at on the supplied edit_ids. Called by the Merge
+ * activity only AFTER the merged snapshot commits — if the activity
+ * crashes between the snapshot commit and this call, Temporal retries
+ * and the next attempt skips already-committed PKs via PG UPSERT.
+ */
+async function markEditsAppliedToMerge(editIds: string[]): Promise<number> {
+  if (editIds.length === 0) return 0;
+  const result = await query(
+    `UPDATE ontology_edit
+        SET applied_to_merged_at = now()
+      WHERE edit_id = ANY($1) AND applied_to_merged_at IS NULL`,
+    [editIds]
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Edits the Index stage should consume on its next run. Distinct from
+ * merge-pending edits because the index reads the *merged* state but
+ * still needs to know which specific edits it has covered — this lets
+ * us retry indexing without re-running Merge.
+ */
+async function getPendingIndexEdits(
+  objectTypeApiName: string
+): Promise<OntologyEditRow[]> {
+  const result = await query(
+    `SELECT * FROM ontology_edit
+      WHERE object_type_api_name = $1 AND applied_to_index_at IS NULL
+      ORDER BY executed_at ASC`,
+    [objectTypeApiName]
+  );
+  return result.rows as OntologyEditRow[];
+}
+
+async function markEditsAppliedToIndex(editIds: string[]): Promise<number> {
+  if (editIds.length === 0) return 0;
+  const result = await query(
+    `UPDATE ontology_edit
+        SET applied_to_index_at = now(),
+            indexed              = true,
+            indexed_at           = COALESCE(indexed_at, now())
+      WHERE edit_id = ANY($1) AND applied_to_index_at IS NULL`,
+    [editIds]
+  );
+  return result.rowCount ?? 0;
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -393,6 +474,10 @@ export default {
   getEditsByExecution,
   getLatestEditsForObject,
   getAllEditsByObjectType,
+  getPendingMergeEdits,
+  markEditsAppliedToMerge,
+  getPendingIndexEdits,
+  markEditsAppliedToIndex,
 };
 
 export {
@@ -404,4 +489,8 @@ export {
   getEditsByExecution,
   getLatestEditsForObject,
   getAllEditsByObjectType,
+  getPendingMergeEdits,
+  markEditsAppliedToMerge,
+  getPendingIndexEdits,
+  markEditsAppliedToIndex,
 };

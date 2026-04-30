@@ -3,7 +3,7 @@
 # Tuesday (Day 2) End-to-End Test Suite
 #
 # Tests the ENTIRE Tuesday API surface including:
-#   - System health / status endpoint (GET /api/v2/status)
+#   - System health / status endpoint (GET /api/v1/status)
 #   - Full indexing pipeline (POST trigger, GET status, DELETE index)
 #   - Indexing validation (missing datasource, bad ontology, concurrent run)
 #   - Link type CRUD (create, list, get, delete, duplicate rejection)
@@ -55,9 +55,9 @@ done
 # ===========================================================================
 # 1. SYSTEM STATUS ENDPOINT
 # ===========================================================================
-section "1. System Status (GET /api/v2/status)"
+section "1. System Status (GET /api/v1/status)"
 
-do_request GET /api/v2/status
+do_request GET /api/v1/status
 assert_status "$HTTP_STATUS" "200" "Status endpoint returns 200"
 assert_contains "$HTTP_BODY" '"status"' "Top-level status field present"
 assert_contains "$HTTP_BODY" '"timestamp"' "Timestamp present"
@@ -95,13 +95,13 @@ fi
 section "2. Setup: Ontology, Object Types, Datasources"
 
 # --- Create ontology ---
-do_request POST /api/v2/ontologies '{"displayName":"E2E Tuesday Ontology","description":"Tuesday E2E testing"}'
+do_request POST /api/v1/ontology '{"displayName":"E2E Tuesday Ontology","description":"Tuesday E2E testing"}'
 assert_status "$HTTP_STATUS" "201" "Create E2E Tuesday ontology"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "ontologyId returned"
 
 # --- Create Company object type (target for links) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/batch" '{
   "apiName":"Company",
   "displayName":"Company",
   "description":"Company object type for link testing",
@@ -115,13 +115,13 @@ do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
 }'
 assert_status "$HTTP_STATUS" "201" "Create Company object type"
 
-# --- Create Employee object type (source for links) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
-  "apiName":"Employee",
-  "displayName":"Employee",
-  "description":"Employee object type for indexing + link testing",
+# --- Create E2EEmployee object type (source for links) ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/batch" '{
+  "apiName":"E2EEmployee",
+  "displayName":"E2EEmployee",
+  "description":"E2EEmployee object type for indexing + link testing",
   "properties":[
-    {"apiName":"employeeId","displayName":"Employee ID","baseType":"string","isRequired":true},
+    {"apiName":"employeeId","displayName":"E2EEmployee ID","baseType":"string","isRequired":true},
     {"apiName":"fullName","displayName":"Full Name","baseType":"string","isRequired":true},
     {"apiName":"salary","displayName":"Salary","baseType":"double"},
     {"apiName":"department","displayName":"Department","baseType":"string"},
@@ -131,7 +131,7 @@ do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
   "primaryKeyProperty":"employeeId",
   "titleProperty":"fullName"
 }'
-assert_status "$HTTP_STATUS" "201" "Create Employee object type"
+assert_status "$HTTP_STATUS" "201" "Create E2EEmployee object type"
 
 # --- Write CSV test data files ---
 DATA_DIR="${DATA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)/data}"
@@ -158,7 +158,7 @@ CSVEOF
 pass "Test CSV files created"
 
 # --- Register Company datasource ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company/datasource" "{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company/datasource" "{
   \"datasetName\":\"E2E Company Dataset\",
   \"filePath\":\"${COMPANY_CSV}\",
   \"fileFormat\":\"csv\",
@@ -172,9 +172,9 @@ assert_status "$HTTP_STATUS" "201" "Register Company CSV datasource"
 ROW_COUNT=$(json_field_raw "$HTTP_BODY" "rowCount")
 assert_eq "$ROW_COUNT" "3" "Company rowCount = 3"
 
-# --- Register Employee datasource ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/datasource" "{
-  \"datasetName\":\"E2E Employee Dataset\",
+# --- Register E2EEmployee datasource ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/datasource" "{
+  \"datasetName\":\"E2E E2EEmployee Dataset\",
   \"filePath\":\"${EMPLOYEE_CSV}\",
   \"fileFormat\":\"csv\",
   \"columnMapping\":{
@@ -186,9 +186,9 @@ do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/datasour
     \"isActive\":\"is_active\"
   }
 }"
-assert_status "$HTTP_STATUS" "201" "Register Employee CSV datasource"
+assert_status "$HTTP_STATUS" "201" "Register E2EEmployee CSV datasource"
 ROW_COUNT=$(json_field_raw "$HTTP_BODY" "rowCount")
-assert_eq "$ROW_COUNT" "5" "Employee rowCount = 5"
+assert_eq "$ROW_COUNT" "5" "E2EEmployee rowCount = 5"
 
 # ===========================================================================
 # 3. INDEXING VALIDATION ERRORS
@@ -197,19 +197,19 @@ section "3. Indexing Validation Errors"
 
 # --- Bad ontology ID ---
 FAKE_UUID="00000000-0000-0000-0000-000000000099"
-do_request POST "/api/v2/ontologies/${FAKE_UUID}/objectTypes/Employee/index" '{}'
+do_request POST "/api/v1/ontology/${FAKE_UUID}/objectTypes/E2EEmployee/index" '{}'
 assert_status "$HTTP_STATUS" "404" "Index with bad ontologyId returns 404"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_eq "$ERR_CODE" "ONTOLOGY_NOT_FOUND" "Error code ONTOLOGY_NOT_FOUND"
 
 # --- Bad object type ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/NonExistent/index" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/NonExistent/index" '{}'
 assert_status "$HTTP_STATUS" "404" "Index with bad objectType returns 404"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_eq "$ERR_CODE" "OBJECT_TYPE_NOT_FOUND" "Error code OBJECT_TYPE_NOT_FOUND"
 
 # --- Object type with no datasource ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/batch" '{
   "apiName":"NoDatasource",
   "displayName":"No Datasource",
   "properties":[{"apiName":"nid","displayName":"ID","baseType":"string","isRequired":true}],
@@ -217,29 +217,29 @@ do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/batch" '{
 }'
 assert_status "$HTTP_STATUS" "201" "Create NoDatasource OT"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/NoDatasource/index" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/NoDatasource/index" '{}'
 assert_status "$HTTP_STATUS" "400" "Index without datasource returns 400"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_eq "$ERR_CODE" "NO_BACKING_DATASOURCE" "Error code NO_BACKING_DATASOURCE"
 
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/NoDatasource"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/NoDatasource"
 assert_status "$HTTP_STATUS" "204" "Cleanup NoDatasource OT"
 
 # --- Index status for non-existent ontology ---
-do_request GET "/api/v2/ontologies/${FAKE_UUID}/objectTypes/Employee/index/status"
+do_request GET "/api/v1/ontology/${FAKE_UUID}/objectTypes/E2EEmployee/index/status"
 assert_status "$HTTP_STATUS" "404" "Index status bad ontologyId returns 404"
 
 # --- Index status for non-existent object type ---
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/NonExistent/index/status"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/NonExistent/index/status"
 assert_status "$HTTP_STATUS" "404" "Index status bad objectType returns 404"
 
 # ===========================================================================
-# 4. TRIGGER INDEXING (Company + Employee)
+# 4. TRIGGER INDEXING (Company + E2EEmployee)
 # ===========================================================================
 section "4. Trigger Indexing Pipeline"
 
 # --- Index Company first ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company/index" '{"forceRecreateIndex":true}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company/index" '{"forceRecreateIndex":true}'
 assert_status "$HTTP_STATUS" "200" "Trigger Company indexing"
 assert_contains "$HTTP_BODY" '"success"' "Company indexing status = success"
 COMPANY_INDEXED=$(json_field_raw "$HTTP_BODY" "objectsIndexed")
@@ -250,12 +250,12 @@ assert_contains "$HTTP_BODY" '"totalDurationMs"' "totalDurationMs present"
 # Brief pause for OpenSearch to settle
 sleep 2
 
-# --- Index Employee ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index" '{"forceRecreateIndex":true}'
-assert_status "$HTTP_STATUS" "200" "Trigger Employee indexing"
-assert_contains "$HTTP_BODY" '"success"' "Employee indexing status = success"
+# --- Index E2EEmployee ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index" '{"forceRecreateIndex":true}'
+assert_status "$HTTP_STATUS" "200" "Trigger E2EEmployee indexing"
+assert_contains "$HTTP_BODY" '"success"' "E2EEmployee indexing status = success"
 EMPLOYEE_INDEXED=$(json_field_raw "$HTTP_BODY" "objectsIndexed")
-assert_eq "$EMPLOYEE_INDEXED" "5" "Employee objectsIndexed = 5"
+assert_eq "$EMPLOYEE_INDEXED" "5" "E2EEmployee objectsIndexed = 5"
 
 # Brief pause for OpenSearch to settle
 sleep 2
@@ -265,8 +265,8 @@ sleep 2
 # ===========================================================================
 section "5. Indexing Status (GET)"
 
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index/status"
-assert_status "$HTTP_STATUS" "200" "Get Employee index status"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index/status"
+assert_status "$HTTP_STATUS" "200" "Get E2EEmployee index status"
 assert_contains "$HTTP_BODY" '"objectTypeApiName"' "objectTypeApiName in status"
 assert_contains "$HTTP_BODY" '"indexName"' "indexName in status"
 assert_contains "$HTTP_BODY" '"pipeline"' "pipeline block present"
@@ -286,7 +286,7 @@ assert_contains "$HTTP_BODY" '"storeSizeBytes"' "storeSizeBytes present"
 assert_contains "$HTTP_BODY" '"registered"' "datasource.registered present"
 
 # Company index status too
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company/index/status"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company/index/status"
 assert_status "$HTTP_STATUS" "200" "Get Company index status"
 
 # ===========================================================================
@@ -294,13 +294,13 @@ assert_status "$HTTP_STATUS" "200" "Get Company index status"
 # ===========================================================================
 section "6. Link Type CRUD"
 
-# --- Create link type: Employee -> Company (MANY_TO_ONE) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+# --- Create link type: E2EEmployee -> Company (MANY_TO_ONE) ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"employeeBelongsToCompany",
-  "displayName":"Employee Belongs To Company",
+  "displayName":"E2EEmployee Belongs To Company",
   "description":"Links employees to their company",
   "cardinality":"MANY_TO_ONE",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"Company",
   "sourcePropertyApiName":"companyId"
 }'
@@ -314,11 +314,11 @@ LINK_TYPE_ID=$(json_field "$HTTP_BODY" "linkTypeId")
 assert_not_empty "$LINK_TYPE_ID" "linkTypeId not empty"
 
 # --- Duplicate rejection ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"employeeBelongsToCompany",
   "displayName":"Dup",
   "cardinality":"MANY_TO_ONE",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"Company"
 }'
 assert_status "$HTTP_STATUS" "409" "Duplicate link type returns 409"
@@ -326,39 +326,39 @@ ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_eq "$ERR_CODE" "ALREADY_EXISTS" "Error code ALREADY_EXISTS"
 
 # --- List link types ---
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes"
 assert_status "$HTTP_STATUS" "200" "List link types"
 assert_contains "$HTTP_BODY" '"data"' "data array present"
 assert_contains "$HTTP_BODY" '"employeeBelongsToCompany"' "Link type in list"
 
 # --- Get single link type ---
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany"
 assert_status "$HTTP_STATUS" "200" "Get single link type"
 assert_contains "$HTTP_BODY" '"employeeBelongsToCompany"' "apiName matches"
 assert_contains "$HTTP_BODY" '"MANY_TO_ONE"' "cardinality matches"
 
 # --- Get non-existent link type ---
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/nonExistentLink"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/nonExistentLink"
 assert_status "$HTTP_STATUS" "404" "Non-existent link type returns 404"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_eq "$ERR_CODE" "LINK_TYPE_NOT_FOUND" "Error code LINK_TYPE_NOT_FOUND"
 
 # --- Create a second link type for delete test ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"tempLink",
   "displayName":"Temp Link",
   "cardinality":"ONE_TO_ONE",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"Company"
 }'
 assert_status "$HTTP_STATUS" "201" "Create temp link type"
 
 # --- Delete link type ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/tempLink"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/tempLink"
 assert_status "$HTTP_STATUS" "200" "Delete link type returns 200"
 
 # --- Delete non-existent link type ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/tempLink"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/tempLink"
 assert_status "$HTTP_STATUS" "404" "Delete non-existent link type returns 404"
 
 # ===========================================================================
@@ -367,49 +367,49 @@ assert_status "$HTTP_STATUS" "404" "Delete non-existent link type returns 404"
 section "7. Link Type Validation"
 
 # --- Missing required fields ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{}'
 assert_status "$HTTP_STATUS" "400" "Empty body returns 400"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_eq "$ERR_CODE" "VALIDATION_FAILED" "Error code VALIDATION_FAILED"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"testLink",
   "displayName":"Test"
 }'
 assert_status "$HTTP_STATUS" "400" "Missing cardinality + objectTypes returns 400"
 
 # --- Invalid cardinality ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"badCard",
   "displayName":"Bad",
   "cardinality":"INVALID_CARD",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"Company"
 }'
 assert_status "$HTTP_STATUS" "400" "Invalid cardinality rejected"
 
 # --- Invalid api name (PascalCase instead of camelCase) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"BadName",
   "displayName":"Bad",
   "cardinality":"ONE_TO_ONE",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"Company"
 }'
 assert_status "$HTTP_STATUS" "400" "PascalCase link type name rejected"
 
 # --- Reserved __ prefix ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"__reserved",
   "displayName":"Reserved",
   "cardinality":"ONE_TO_ONE",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"Company"
 }'
 assert_status "$HTTP_STATUS" "400" "__ prefix link type name rejected"
 
 # --- Non-existent source object type ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"badSource",
   "displayName":"Bad Source",
   "cardinality":"ONE_TO_ONE",
@@ -419,21 +419,21 @@ do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
 assert_status "$HTTP_STATUS" "404" "Non-existent source OT returns 404"
 
 # --- Non-existent target object type ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"badTarget",
   "displayName":"Bad Target",
   "cardinality":"ONE_TO_ONE",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"NonExistent"
 }'
 assert_status "$HTTP_STATUS" "404" "Non-existent target OT returns 404"
 
 # --- Non-existent source property ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes" '{
   "apiName":"badProp",
   "displayName":"Bad Prop",
   "cardinality":"MANY_TO_ONE",
-  "sourceObjectTypeApiName":"Employee",
+  "sourceObjectTypeApiName":"E2EEmployee",
   "targetObjectTypeApiName":"Company",
   "sourcePropertyApiName":"doesNotExist"
 }'
@@ -445,51 +445,51 @@ assert_status "$HTTP_STATUS" "404" "Non-existent source property returns 404"
 section "8. Link Resolution"
 
 # --- Resolve validation ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" '{}'
 assert_status "$HTTP_STATUS" "400" "Resolve with empty body returns 400"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
   '{"objectPK":"E001"}'
 assert_status "$HTTP_STATUS" "400" "Resolve without direction returns 400"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
   '{"objectPK":"E001","direction":"sideways"}'
 assert_status "$HTTP_STATUS" "400" "Resolve with invalid direction returns 400"
 
 # --- Resolve with non-existent link type ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/nonExistent/resolve" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/nonExistent/resolve" \
   '{"objectPK":"E001","direction":"forward"}'
 assert_status "$HTTP_STATUS" "404" "Resolve non-existent link type returns 404"
 
-# --- Forward resolve: Employee E001 -> Company (MANY_TO_ONE forward = lookup FK) ---
+# --- Forward resolve: E2EEmployee E001 -> Company (MANY_TO_ONE forward = lookup FK) ---
 # E001 has companyId=C001, so forward should return Acme Corp (Company C001)
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
   '{"objectPK":"E001","direction":"forward"}'
-assert_status "$HTTP_STATUS" "200" "Forward resolve Employee->Company"
+assert_status "$HTTP_STATUS" "200" "Forward resolve E2EEmployee->Company"
 # MANY_TO_ONE forward returns { linkedObject: ... } (singular — at most one target)
 assert_contains "$HTTP_BODY" '"linkedObject"' "linkedObject in response"
 assert_contains "$HTTP_BODY" '"C001"' "Forward resolve found Company C001"
 assert_contains "$HTTP_BODY" '"Acme Corp"' "Forward resolve found Acme Corp"
 
-# --- Forward resolve: Employee E003 -> Company C002 ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
+# --- Forward resolve: E2EEmployee E003 -> Company C002 ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
   '{"objectPK":"E003","direction":"forward"}'
 assert_status "$HTTP_STATUS" "200" "Forward resolve E003->Company"
 assert_contains "$HTTP_BODY" '"C002"' "E003 belongs to C002"
 assert_contains "$HTTP_BODY" '"Globex Inc"' "E003 belongs to Globex Inc"
 
-# --- Reverse resolve: Company C001 -> all Employees with companyId=C001 ---
-# MANY_TO_ONE reverse: search source (Employee) where sourceFK (companyId) = targetPK (C001)
+# --- Reverse resolve: Company C001 -> all E2EEmployees with companyId=C001 ---
+# MANY_TO_ONE reverse: search source (E2EEmployee) where sourceFK (companyId) = targetPK (C001)
 # Should find E001 (Alice) and E002 (Bob)
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
   '{"objectPK":"C001","direction":"reverse"}'
-assert_status "$HTTP_STATUS" "200" "Reverse resolve Company->Employees"
+assert_status "$HTTP_STATUS" "200" "Reverse resolve Company->E2EEmployees"
 assert_contains "$HTTP_BODY" '"linkedObjects"' "linkedObjects in reverse response"
 assert_contains "$HTTP_BODY" '"Alice Smith"' "Reverse found Alice Smith"
 assert_contains "$HTTP_BODY" '"Bob Jones"' "Reverse found Bob Jones"
 
 # --- Reverse resolve with no matches ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/resolve" \
   '{"objectPK":"C999","direction":"reverse"}'
 assert_status "$HTTP_STATUS" "200" "Reverse resolve non-existent PK returns 200"
 TOTAL_COUNT=$(json_field_raw "$HTTP_BODY" "totalCount")
@@ -501,52 +501,52 @@ assert_eq "$TOTAL_COUNT" "0" "No linked objects for non-existent PK"
 section "9. Link Count + Bulk Count"
 
 # --- Count validation ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" '{}'
 assert_status "$HTTP_STATUS" "400" "Count with empty body returns 400"
 
 # --- Count non-existent link type ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/nonExistent/count" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/nonExistent/count" \
   '{"objectPK":"C001","direction":"reverse"}'
 assert_status "$HTTP_STATUS" "404" "Count non-existent link type returns 404"
 
-# --- Count reverse: Company C001 -> Employees (should be 2: Alice, Bob) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
+# --- Count reverse: Company C001 -> E2EEmployees (should be 2: Alice, Bob) ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
   '{"objectPK":"C001","direction":"reverse"}'
 assert_status "$HTTP_STATUS" "200" "Count reverse C001"
 assert_contains "$HTTP_BODY" '"count"' "count field present"
 COUNT_VAL=$(json_field_raw "$HTTP_BODY" "count")
 assert_eq "$COUNT_VAL" "2" "C001 has 2 employees"
 
-# --- Count reverse: Company C002 -> Employees (should be 2: Carol, Dave) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
+# --- Count reverse: Company C002 -> E2EEmployees (should be 2: Carol, Dave) ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
   '{"objectPK":"C002","direction":"reverse"}'
 assert_status "$HTTP_STATUS" "200" "Count reverse C002"
 COUNT_VAL=$(json_field_raw "$HTTP_BODY" "count")
 assert_eq "$COUNT_VAL" "2" "C002 has 2 employees"
 
-# --- Count reverse: Company C003 -> Employees (should be 1: Eve) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
+# --- Count reverse: Company C003 -> E2EEmployees (should be 1: Eve) ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
   '{"objectPK":"C003","direction":"reverse"}'
 assert_status "$HTTP_STATUS" "200" "Count reverse C003"
 COUNT_VAL=$(json_field_raw "$HTTP_BODY" "count")
 assert_eq "$COUNT_VAL" "1" "C003 has 1 employee"
 
-# --- Count forward: Employee E001 -> Company (should be 1) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
+# --- Count forward: E2EEmployee E001 -> Company (should be 1) ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/count" \
   '{"objectPK":"E001","direction":"forward"}'
 assert_status "$HTTP_STATUS" "200" "Count forward E001"
 COUNT_VAL=$(json_field_raw "$HTTP_BODY" "count")
 assert_eq "$COUNT_VAL" "1" "E001 belongs to 1 company"
 
 # --- Bulk count validation ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/bulkCount" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/bulkCount" '{}'
 assert_status "$HTTP_STATUS" "400" "Bulk count empty body returns 400"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/bulkCount" '{"requests":[]}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/bulkCount" '{"requests":[]}'
 assert_status "$HTTP_STATUS" "400" "Bulk count empty array returns 400"
 
 # --- Bulk count: multiple requests ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/bulkCount" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/bulkCount" '{
   "requests":[
     {"linkTypeApiName":"employeeBelongsToCompany","objectPK":"C001","direction":"reverse"},
     {"linkTypeApiName":"employeeBelongsToCompany","objectPK":"C002","direction":"reverse"},
@@ -557,7 +557,7 @@ assert_status "$HTTP_STATUS" "200" "Bulk count returns 200"
 assert_contains "$HTTP_BODY" '"results"' "results array present"
 
 # --- Bulk count with non-existent link type (should be inline error, not 500) ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/bulkCount" '{
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/bulkCount" '{
   "requests":[
     {"linkTypeApiName":"nonExistentLink","objectPK":"C001","direction":"reverse"},
     {"linkTypeApiName":"employeeBelongsToCompany","objectPK":"C001","direction":"reverse"}
@@ -572,15 +572,15 @@ assert_contains "$HTTP_BODY" '"results"' "results present for mixed requests"
 section "10. Search Around"
 
 # --- Validation ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" '{}'
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" '{}'
 assert_status "$HTTP_STATUS" "400" "Search around without direction returns 400"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/nonExistent/searchAround" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/nonExistent/searchAround" \
   '{"direction":"forward"}'
 assert_status "$HTTP_STATUS" "404" "Search around non-existent link returns 404"
 
-# --- Search around forward: all Employees -> their Companies ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" \
+# --- Search around forward: all E2EEmployees -> their Companies ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" \
   '{"direction":"forward"}'
 assert_status "$HTTP_STATUS" "200" "Search around forward all employees"
 assert_contains "$HTTP_BODY" '"linkedObjects"' "linkedObjects present"
@@ -590,8 +590,8 @@ assert_contains "$HTTP_BODY" '"Acme Corp"' "Search around found Acme Corp"
 assert_contains "$HTTP_BODY" '"Globex Inc"' "Search around found Globex Inc"
 assert_contains "$HTTP_BODY" '"Initech"' "Search around found Initech"
 
-# --- Search around reverse: all Companies -> their Employees ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" \
+# --- Search around reverse: all Companies -> their E2EEmployees ---
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" \
   '{"direction":"reverse"}'
 assert_status "$HTTP_STATUS" "200" "Search around reverse all companies"
 assert_contains "$HTTP_BODY" '"linkedObjects"' "linkedObjects present"
@@ -600,7 +600,7 @@ TOTAL_COUNT=$(json_field_raw "$HTTP_BODY" "totalCount")
 assert_eq "$TOTAL_COUNT" "5" "Search around reverse found 5 employees"
 
 # --- Search around with sourceFilter ---
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" \
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany/searchAround" \
   '{"direction":"forward","sourceFilter":{"department":"Engineering"}}'
 assert_status "$HTTP_STATUS" "200" "Search around with sourceFilter"
 # Engineering employees: E001(C001), E002(C001), E004(C002) -> Companies C001, C002
@@ -612,32 +612,32 @@ assert_contains "$HTTP_BODY" '"Globex Inc"' "Filtered search found Globex Inc"
 # ===========================================================================
 section "11. Index Delete + Post-Deletion Status"
 
-# --- Delete Employee index ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index"
-assert_status "$HTTP_STATUS" "200" "Delete Employee index"
+# --- Delete E2EEmployee index ---
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index"
+assert_status "$HTTP_STATUS" "200" "Delete E2EEmployee index"
 assert_contains "$HTTP_BODY" '"success"' "Delete status = success"
 assert_contains "$HTTP_BODY" 'has been deleted' "Message mentions has been deleted"
 
 # --- Delete non-existent index (idempotent) ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index"
 assert_status "$HTTP_STATUS" "200" "Delete non-existent index returns 200 (idempotent)"
 assert_contains "$HTTP_BODY" 'does not exist' "Message says index does not exist"
 
 # --- Status after deletion ---
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index/status"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index/status"
 assert_status "$HTTP_STATUS" "200" "Index status after deletion"
 PIPELINE_STATUS=$(json_field "$HTTP_BODY" "status")
 assert_eq "$PIPELINE_STATUS" "idle" "Pipeline status = idle after delete"
 
 # --- Delete validation errors ---
-do_request DELETE "/api/v2/ontologies/${FAKE_UUID}/objectTypes/Employee/index"
+do_request DELETE "/api/v1/ontology/${FAKE_UUID}/objectTypes/E2EEmployee/index"
 assert_status "$HTTP_STATUS" "404" "Delete index bad ontologyId returns 404"
 
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/NonExistent/index"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/NonExistent/index"
 assert_status "$HTTP_STATUS" "404" "Delete index bad objectType returns 404"
 
 # --- Delete Company index too for clean state ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company/index"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company/index"
 assert_status "$HTTP_STATUS" "200" "Delete Company index"
 
 # ===========================================================================
@@ -645,16 +645,16 @@ assert_status "$HTTP_STATUS" "200" "Delete Company index"
 # ===========================================================================
 section "12. Re-Index After Delete"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index" '{"forceRecreateIndex":true}'
-assert_status "$HTTP_STATUS" "200" "Re-index Employee after delete"
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index" '{"forceRecreateIndex":true}'
+assert_status "$HTTP_STATUS" "200" "Re-index E2EEmployee after delete"
 assert_contains "$HTTP_BODY" '"success"' "Re-index status = success"
 REINDEX_COUNT=$(json_field_raw "$HTTP_BODY" "objectsIndexed")
-assert_eq "$REINDEX_COUNT" "5" "Re-indexed 5 Employee objects"
+assert_eq "$REINDEX_COUNT" "5" "Re-indexed 5 E2EEmployee objects"
 
 sleep 2
 
 # Verify status after re-index
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index/status"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index/status"
 assert_status "$HTTP_STATUS" "200" "Status after re-index"
 PIPELINE_STATUS=$(json_field "$HTTP_BODY" "status")
 assert_eq "$PIPELINE_STATUS" "success" "Pipeline status = success after re-index"
@@ -664,12 +664,12 @@ assert_eq "$PIPELINE_STATUS" "success" "Pipeline status = success after re-index
 # ===========================================================================
 section "13. Datasource Scan"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/datasource/scan"
-assert_status "$HTTP_STATUS" "200" "Scan Employee datasource"
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/datasource/scan"
+assert_status "$HTTP_STATUS" "200" "Scan E2EEmployee datasource"
 assert_contains "$HTTP_BODY" '"schemaChanged"' "schemaChanged in scan response"
 assert_contains "$HTTP_BODY" '"datasource"' "datasource in scan response"
 
-do_request POST "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company/datasource/scan"
+do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company/datasource/scan"
 assert_status "$HTTP_STATUS" "200" "Scan Company datasource"
 
 # ===========================================================================
@@ -677,12 +677,12 @@ assert_status "$HTTP_STATUS" "200" "Scan Company datasource"
 # ===========================================================================
 section "14. System Status After Indexing"
 
-do_request GET /api/v2/status
+do_request GET /api/v1/status
 assert_status "$HTTP_STATUS" "200" "Status after indexing"
 # Should show objectTypes with counts
 assert_contains "$HTTP_BODY" '"objectTypes"' "objectTypes in status"
-# The Employee index should show 5 objects
-assert_contains "$HTTP_BODY" '"Employee"' "Employee appears in status objectTypes"
+# The E2EEmployee index should show 5 objects
+assert_contains "$HTTP_BODY" '"E2EEmployee"' "E2EEmployee appears in status objectTypes"
 
 # ===========================================================================
 # 15. FULL CLEANUP
@@ -690,35 +690,35 @@ assert_contains "$HTTP_BODY" '"Employee"' "Employee appears in status objectType
 section "15. Full Cleanup"
 
 # --- Delete indices ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee/index"
-pass "Delete Employee index for cleanup"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee/index"
+pass "Delete E2EEmployee index for cleanup"
 
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company/index"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company/index"
 pass "Delete Company index for cleanup"
 
 # --- Delete link types ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeBelongsToCompany"
 assert_status "$HTTP_STATUS" "200" "Delete link type"
 
 # --- Delete object types (cascade deletes properties + datasource) ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee"
-assert_status "$HTTP_STATUS" "204" "Delete Employee OT"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee"
+assert_status "$HTTP_STATUS" "204" "Delete E2EEmployee OT"
 
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company"
 assert_status "$HTTP_STATUS" "204" "Delete Company OT"
 
 # --- Verify OTs gone ---
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Employee"
-assert_status "$HTTP_STATUS" "404" "Employee OT gone after delete"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/E2EEmployee"
+assert_status "$HTTP_STATUS" "404" "E2EEmployee OT gone after delete"
 
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}/objectTypes/Company"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company"
 assert_status "$HTTP_STATUS" "404" "Company OT gone after delete"
 
 # --- Delete ontology ---
-do_request DELETE "/api/v2/ontologies/${ONTOLOGY_ID}"
+do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
 assert_status "$HTTP_STATUS" "204" "Delete ontology"
 
-do_request GET "/api/v2/ontologies/${ONTOLOGY_ID}"
+do_request GET "/api/v1/ontology/${ONTOLOGY_ID}"
 assert_status "$HTTP_STATUS" "404" "Ontology gone after delete"
 
 # --- Cleanup test data files ---

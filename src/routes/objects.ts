@@ -2,11 +2,11 @@
 // Object Query Routes — Express Router
 //
 // Implements the Object Set Service query API:
-//   GET    /api/v2/objects/:objectType               — List objects
-//   GET    /api/v2/objects/:objectType/:primaryKey    — Get single object
-//   POST   /api/v2/objects/:objectType/search         — Search with filters
-//   POST   /api/v2/objects/:objectType/searchFullText — Full-text search
-//   POST   /api/v2/objects/:objectType/aggregate      — Aggregations
+//   GET    /api/v1/objects/:objectType               — List objects
+//   GET    /api/v1/objects/:objectType/:primaryKey    — Get single object
+//   POST   /api/v1/objects/:objectType/search         — Search with filters
+//   POST   /api/v1/objects/:objectType/searchFullText — Full-text search
+//   POST   /api/v1/objects/:objectType/aggregate      — Aggregations
 //
 // Tasks 9-15, 16-20 combined.
 // ---------------------------------------------------------------------------
@@ -28,12 +28,98 @@ import { resolveLinks, countLinks, searchAround, validateForeignKeys } from "../
 import linkTypeModel from "../models/linkType";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { appError } from "../utils/appError";
+import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { incCounter } from "../services/funnel/metrics";
+import {
+  applyOverlayToResults,
+  mergeOverlayIntoSearch,
+} from "../services/overlay/writebackOverlay";
+import { getOverlayStore } from "../services/overlay/getOverlayStore";
+import { overlayKey } from "../services/overlay/overlayStore";
+import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 
 const router = Router();
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Overlay merge helper — B7. Every search result goes through this so
+ * user edits that landed in the overlay cache but haven't been indexed
+ * yet become visible within the 1-second SLO. The Quickwit/OpenSearch
+ * result is authoritative for everything NOT edited; for edited PKs the
+ * overlay wins.
+ *
+ * Silently falls through to the original results if the overlay store
+ * is unreachable or empty — the overlay is an optimisation, not a
+ * requirement.
+ */
+async function mergeWithOverlay<R extends { data: unknown[] }>(
+  objectType: string,
+  result: R,
+  whereClause?: unknown
+): Promise<R> {
+  try {
+    const store = await getOverlayStore();
+    const filter = buildOverlayFilter(whereClause);
+    const merged = await mergeOverlayIntoSearch({
+      objectType,
+      hits: result.data as Array<Record<string, unknown>>,
+      filter,
+      store,
+    });
+    return { ...result, data: merged } as R;
+  } catch {
+    // Overlay is an optimisation — on any failure we fall back to the
+    // underlying result so queries never fail due to overlay issues.
+    try {
+      const store = await getOverlayStore();
+      const replaced = await applyOverlayToResults(
+        objectType,
+        result.data as Array<Record<string, unknown>>,
+        store
+      );
+      return { ...result, data: replaced } as R;
+    } catch {
+      return result;
+    }
+  }
+}
+
+/**
+ * B7 SCAN discovery: build a minimal filter predicate from the search
+ * `where` clause so `collectFilterMatchingOverlays` can include
+ * overlay-only hits (rows edited within the last overlay TTL that the
+ * index hasn't absorbed yet).
+ *
+ * Deliberately small: we only support equality on top-level properties
+ * which is what the dominant Query API path produces. Unknown or
+ * nested filters fall back to matching everything, which is still
+ * correct — dedup by PK in mergeOverlayIntoSearch keeps the Quickwit
+ * hit authoritative if it exists.
+ */
+function buildOverlayFilter(where: unknown): ((doc: Record<string, unknown>) => boolean) | undefined {
+  if (!where || typeof where !== "object") return undefined;
+  const w = where as Record<string, unknown>;
+  if (w.type === "eq" && typeof w.field === "string") {
+    const field = w.field;
+    const value = w.value;
+    return (doc) => {
+      const dv = doc[field];
+      return dv === value || String(dv) === String(value);
+    };
+  }
+  if (w.type === "and" && Array.isArray(w.filters)) {
+    const sub = w.filters
+      .map(buildOverlayFilter)
+      .filter((f): f is (doc: Record<string, unknown>) => boolean => typeof f === "function");
+    if (sub.length === 0) return undefined;
+    return (doc) => sub.every((f) => f(doc));
+  }
+  return undefined;
+}
 
 const KNOWN_CODES = new Set([
   "QUERY_VALIDATION_ERROR",
@@ -76,29 +162,86 @@ function handleError(err: any, res: Response, next: NextFunction) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/search (MUST come before /:primaryKey)
+// POST /api/v1/objects/:objectType/search (MUST come before /:primaryKey)
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/search",
+  "/api/v1/objects/:objectType/search",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
       const { objectType } = req.params;
       await ensureObjectTypeExists(objectType);
 
-      const validated = await validateSearchQuery(req.body || {}, objectType);
-      const result = await executeSearch(objectType, {
+      // Spec §Task 23: the filter model is `{filter: [{property, operator,
+      // value}, ...]}`. Translate into the historical `{where: {type,
+      // field, value}}` shape (or a `{type:"and",filters:[...]}` tree for
+      // multiple filters) before validation.
+      const body = req.body || {};
+      if (Array.isArray(body.filter) && !body.where) {
+        const OP_MAP: Record<string, string> = {
+          eq: "eq", ne: "eq",  // ne handled via not-wrapper below
+          gt: "gt", gte: "gte", lt: "lt", lte: "lte",
+          in: "in", contains: "contains", startsWith: "startsWith",
+          exists: "isNotNull", notExists: "isNull",
+        };
+        const leaves = body.filter
+          .filter((f: any) => f && f.property && f.operator)
+          .map((f: any) => {
+            const type = OP_MAP[f.operator as string] || "eq";
+            const node: Record<string, unknown> = { type, field: f.property };
+            if (type !== "isNull" && type !== "isNotNull") {
+              node.value = f.value ?? f.values;
+            }
+            if (f.operator === "ne") {
+              return { type: "not", filter: node };
+            }
+            return node;
+          });
+        if (leaves.length === 1) {
+          body.where = leaves[0];
+        } else if (leaves.length > 1) {
+          body.where = { type: "and", filters: leaves };
+        }
+        delete body.filter;
+      }
+      // Accept the spec-style `pageSize` / `pageToken` field names.
+      if (body.pageSize !== undefined && body.$pageSize === undefined) {
+        body.$pageSize = body.pageSize;
+        delete body.pageSize;
+      }
+      if (body.pageToken !== undefined && body.$pageToken === undefined) {
+        body.$pageToken = body.pageToken;
+        delete body.pageToken;
+      }
+
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.search",
+        scoped: String(branchId !== null),
+      });
+      const validated = await validateSearchQuery(body, objectType);
+      const rawResult = await executeSearch(objectType, {
         where: validated.where,
         $orderBy: validated.$orderBy,
         $pageSize: validated.$pageSize,
         $pageToken: validated.$pageToken,
         $select: validated.$select,
-      });
+      }, secFilter, branchId);
+
+      // B7: merge the writeback overlay so recent edits are visible
+      // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
+      // the index document for matching PKs; misses pass through.
+      const result = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where);
+
+      // B9: shadow-diff during soak. Fire-and-forget — hurts neither
+      // latency nor correctness if Quickwit is unreachable.
+      recordShadowDiff(objectType, body, result.data as Array<Record<string, unknown>>);
 
       const elapsed = Date.now() - start;
       console.log(
-        `[SEARCH] POST /api/v2/objects/${objectType}/search → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
+        `[SEARCH] POST /api/v1/objects/${objectType}/search → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -109,11 +252,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/searchFullText
+// POST /api/v1/objects/:objectType/searchFullText
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/searchFullText",
+  "/api/v1/objects/:objectType/searchFullText",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -137,17 +280,25 @@ router.post(
         );
       }
 
-      const result = await executeFullTextSearch(objectType, searchQuery.trim(), {
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.searchFullText",
+        scoped: String(branchId !== null),
+      });
+      const rawResult = await executeFullTextSearch(objectType, searchQuery.trim(), {
         where,
         $orderBy,
         $pageSize: $pageSize ?? 100,
         $pageToken,
         $select,
-      });
+      }, secFilter, branchId);
+      // B7: overlay merge for immediate edit visibility.
+      const result = await mergeWithOverlay(objectType, rawResult);
 
       const elapsed = Date.now() - start;
       console.log(
-        `[FULLTEXT] POST /api/v2/objects/${objectType}/searchFullText → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
+        `[FULLTEXT] POST /api/v1/objects/${objectType}/searchFullText → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -158,26 +309,32 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/aggregate
+// POST /api/v1/objects/:objectType/aggregate
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/aggregate",
+  "/api/v1/objects/:objectType/aggregate",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
       const { objectType } = req.params;
       await ensureObjectTypeExists(objectType);
 
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.aggregate",
+        scoped: String(branchId !== null),
+      });
       const validated = await validateAggregateQuery(req.body || {}, objectType);
       const result = await executeAggregate(objectType, {
         where: validated.where,
         aggregations: validated.aggregations,
-      });
+      }, secFilter, branchId);
 
       const elapsed = Date.now() - start;
       console.log(
-        `[AGGREGATE] POST /api/v2/objects/${objectType}/aggregate → 200 (${elapsed}ms)`
+        `[AGGREGATE] POST /api/v1/objects/${objectType}/aggregate → 200 (${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -188,11 +345,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType (List Objects)
+// GET /api/v1/objects/:objectType (List Objects)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType",
+  "/api/v1/objects/:objectType",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -204,16 +361,24 @@ router.get(
         objectType
       );
 
-      const result = await executeSearch(objectType, {
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.list",
+        scoped: String(branchId !== null),
+      });
+      const rawResult = await executeSearch(objectType, {
         $orderBy: validated.orderBy.length > 0 ? validated.orderBy : undefined,
         $pageSize: validated.pageSize,
         $pageToken: validated.pageToken,
         $select: validated.select,
-      });
+      }, secFilter, branchId);
+      // B7: overlay merge — recent edits visible within 1s.
+      const result = await mergeWithOverlay(objectType, rawResult);
 
       const elapsed = Date.now() - start;
       console.log(
-        `[LIST] GET /api/v2/objects/${objectType} → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
+        `[LIST] GET /api/v1/objects/${objectType} → 200 (${result.data.length}/${result.totalCount} objects, ${elapsed}ms)`
       );
 
       return sendSuccess(res, result);
@@ -224,11 +389,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/searchAround (Task 13-14)
+// POST /api/v1/objects/:objectType/searchAround (Task 13-14)
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/searchAround",
+  "/api/v1/objects/:objectType/searchAround",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType } = req.params;
@@ -259,9 +424,15 @@ router.post(
       }
 
       const effectiveDirection = (direction || $direction) as "forward" | "reverse";
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.searchAround",
+        scoped: String(branchId !== null),
+      });
       const result = await searchAround(linkType, effectiveDirection, {
         sourceFilter, targetFilter, pageSize, pageToken,
-      });
+      }, secFilter, branchId);
 
       return sendSuccess(res, result);
     } catch (err: any) {
@@ -271,11 +442,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/v2/objects/:objectType/validateForeignKeys (Task 20)
+// POST /api/v1/objects/:objectType/validateForeignKeys (Task 20)
 // ---------------------------------------------------------------------------
 
 router.post(
-  "/api/v2/objects/:objectType/validateForeignKeys",
+  "/api/v1/objects/:objectType/validateForeignKeys",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType } = req.params;
@@ -287,7 +458,13 @@ router.post(
       );
       const { object_type_id, ontology_id } = otResult.rows[0];
 
-      const result = await validateForeignKeys(object_type_id, req.body, ontology_id);
+      // F-P3-13: FK validation scoped to the caller's branch.
+      const branchId = readBranchHeader(req);
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.validateForeignKeys",
+        scoped: String(branchId !== null),
+      });
+      const result = await validateForeignKeys(object_type_id, req.body, ontology_id, buildSecurityFilter(req.security), branchId);
       return sendSuccess(res, result);
     } catch (err: any) {
       return handleError(err, res, next);
@@ -296,11 +473,11 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey/links/:linkType (Task 12)
+// GET /api/v1/objects/:objectType/:primaryKey/links/:linkType (Task 12)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey/links/:linkType",
+  "/api/v1/objects/:objectType/:primaryKey/links/:linkType",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType, primaryKey, linkType: linkTypeApiName } = req.params;
@@ -331,11 +508,17 @@ router.get(
         effectiveDirection = "reverse";
       }
 
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.linkResolve",
+        scoped: String(branchId !== null),
+      });
       const result = await resolveLinks(linkType, primaryKey, effectiveDirection, {
         pageSize: pageSize ? parseInt(pageSize as string, 10) : undefined,
         pageToken: pageToken as string,
         select: select ? (select as string).split(",") : undefined,
-      });
+      }, secFilter, branchId);
 
       // Format based on cardinality
       const isSingle = (
@@ -357,11 +540,11 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey/links/:linkType/count (Task 15)
+// GET /api/v1/objects/:objectType/:primaryKey/links/:linkType/count (Task 15)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey/links/:linkType/count",
+  "/api/v1/objects/:objectType/:primaryKey/links/:linkType/count",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { objectType, primaryKey, linkType: linkTypeApiName } = req.params;
@@ -387,7 +570,13 @@ router.get(
         effectiveDirection = "reverse";
       }
 
-      const count = await countLinks(linkType, primaryKey, effectiveDirection);
+      // F-P3-13: link count scoped to the caller's branch.
+      const branchId = readBranchHeader(req);
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.linkCount",
+        scoped: String(branchId !== null),
+      });
+      const count = await countLinks(linkType, primaryKey, effectiveDirection, buildSecurityFilter(req.security), branchId);
       return sendSuccess(res, { linkTypeApiName, direction: effectiveDirection, count });
     } catch (err: any) {
       return handleError(err, res, next);
@@ -396,7 +585,7 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey/editHistory (Task 17)
+// GET /api/v1/objects/:objectType/:primaryKey/editHistory (Task 17)
 //
 // Returns the complete edit history for a single object in reverse
 // chronological order (most recent first). Each entry shows what operation
@@ -412,7 +601,7 @@ router.get(
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey/editHistory",
+  "/api/v1/objects/:objectType/:primaryKey/editHistory",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
@@ -594,7 +783,7 @@ router.get(
 
       const elapsed = Date.now() - start;
       console.log(
-        `[EDIT_HISTORY] GET /api/v2/objects/${objectType}/${primaryKey}/editHistory → 200 (${data.length}/${totalCount} edits, ${elapsed}ms)`
+        `[EDIT_HISTORY] GET /api/v1/objects/${objectType}/${primaryKey}/editHistory → 200 (${data.length}/${totalCount} edits, ${elapsed}ms)`
       );
 
       return sendSuccess(res, {
@@ -611,28 +800,110 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// GET /api/v2/objects/:objectType/:primaryKey (Single Object)
+// GET /api/v1/objects/:objectType/:primaryKey (Single Object)
 // ---------------------------------------------------------------------------
 
 router.get(
-  "/api/v2/objects/:objectType/:primaryKey",
+  "/api/v1/objects/:objectType/:primaryKey",
   async (req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     try {
       const { objectType, primaryKey } = req.params;
       await ensureObjectTypeExists(objectType);
 
-      const obj = await executeGetObject(objectType, primaryKey);
-      if (!obj) {
+      const branchId = readBranchHeader(req); // F-P3-13
+      incCounter("tellus_read_branch_filtered_total", {
+        route: "objects.get",
+        scoped: String(branchId !== null),
+      });
+      let obj = await executeGetObject(objectType, primaryKey, buildSecurityFilter(req.security), branchId);
+
+      // B7: overlay read — if a recent edit is in the overlay but the
+      // index hasn't absorbed it yet, the overlay is authoritative for
+      // this PK.
+      //
+      // Two paths, kept distinct to avoid the "synthetic-stub" bug:
+      //   1. Index HIT  → merge any overlay entry onto the real doc.
+      //   2. Index MISS → do an explicit overlay lookup. Only
+      //      materialise an object when the overlay ACTUALLY has a
+      //      record for this PK. Do NOT pass a `{__pk}` placeholder
+      //      through `applyOverlayToResults` — when the overlay is
+      //      empty it returns the placeholder unchanged, the caller
+      //      treats it as a hit, and every GET of a missing PK
+      //      returns 200 with a stub document (fails the spec §Task 28
+      //      IDOR guard and the GET-single 404 test).
+      try {
+        const store = await getOverlayStore();
+        if (obj) {
+          const overlayed = await applyOverlayToResults(
+            objectType,
+            [obj as Record<string, unknown>],
+            store
+          );
+          // `applyOverlayToResults` returns an EMPTY array when the
+          // overlay says the row is deleted → drop obj so the 404
+          // branch below fires.
+          obj = (overlayed[0] as typeof obj) ?? null;
+        } else {
+          const [record] = await store.mget([overlayKey(objectType, primaryKey)]);
+          if (record && !record.deleted) {
+            // `obj`'s static type is whatever `executeGetObject` returns;
+            // cast via `unknown` because the overlay record's shape is a
+            // plain property map — structurally compatible at runtime,
+            // but TS can't prove it.
+            obj = ({
+              ...record.doc,
+              __pk: record.primaryKey,
+              __version: record.version,
+              __overlay_source: "writeback",
+            } as unknown) as typeof obj;
+          }
+        }
+      } catch {
+        /* overlay optional */
+      }
+
+      if (!obj || (obj as { __deleted?: boolean }).__deleted) {
+        // Spec §Task 28: return 404 (not 403) for unauthorised/missing
+        // lookups to prevent IDOR information leakage.
         throw appError(
           "OBJECT_NOT_FOUND",
           `Object with primary key '${primaryKey}' not found in object type '${objectType}'.`
         );
       }
 
+      // Spec §Task 28 column-level stripping: remove any property the
+      // caller lacks a matching marking for. Property markings are read
+      // from the `property.marking_required` column — a null value means
+      // the property is public.
+      try {
+        const propResult = await query(
+          `SELECT api_name, marking_required FROM property
+             WHERE object_type_id = (SELECT object_type_id FROM object_type WHERE api_name = $1)
+               AND marking_required IS NOT NULL`,
+          [objectType]
+        );
+        if (propResult.rows.length > 0) {
+          const userMarkings = new Set(
+            ((req as any).security?.markings as string[]) || []
+          );
+          const properties = (obj as { properties?: Record<string, unknown> }).properties;
+          if (properties) {
+            for (const row of propResult.rows) {
+              const required = row.marking_required as string;
+              if (!userMarkings.has(required)) {
+                delete properties[row.api_name as string];
+              }
+            }
+          }
+        }
+      } catch {
+        // property.marking_required may not exist on every schema — skip.
+      }
+
       const elapsed = Date.now() - start;
       console.log(
-        `[GET] GET /api/v2/objects/${objectType}/${primaryKey} → 200 (${elapsed}ms)`
+        `[GET] GET /api/v1/objects/${objectType}/${primaryKey} → 200 (${elapsed}ms)`
       );
 
       return sendSuccess(res, obj);

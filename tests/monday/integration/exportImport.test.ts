@@ -12,7 +12,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Export full ontology (Task 28)", async () => {
     const { status, body, headers } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/export`
+      `/api/v1/ontology/${ctx.ontologyId}/export`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(body.exportVersion === "1.0", "exportVersion = 1.0");
@@ -35,7 +35,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
 
     const { status, body } = await api(
       "POST",
-      "/api/v2/ontologies/import",
+      "/api/v1/ontology/import",
       ctx.exportData
     );
     t.assert(status === 201, `Expected 201, got ${status}`);

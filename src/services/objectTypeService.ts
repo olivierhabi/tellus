@@ -31,8 +31,15 @@ interface ListInput {
 }
 
 interface UpdateInput {
+  apiName?: string;
   displayName?: string;
+  pluralName?: string | null;
   description?: string | null;
+  aliases?: string[];
+  pointOfContact?: string | null;
+  contributors?: string[];
+  visibility?: "prominent" | "normal" | "hidden";
+  editsViaActionsOnly?: boolean;
   icon?: string;
   iconColor?: string;
   status?: string;
@@ -127,9 +134,28 @@ async function getByApiName(ontologyId: string, apiName: string) {
     [objectType.object_type_id]
   );
 
-  // 3. Backing datasource
+  // 3. Backing datasource (enriched with project/folder location)
   const dsResult = await query(
-    "SELECT * FROM backing_datasource WHERE object_type_id = $1",
+    `SELECT bd.*,
+            fd.original_filename AS _original_filename,
+            o.display_name AS _ontology_name,
+            p.name         AS _project_name,
+            f.name         AS _folder_name,
+            f.path::text   AS _folder_path
+     FROM backing_datasource bd
+     LEFT JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+     LEFT JOIN ontology    o  ON o.ontology_id = ot.ontology_id
+     LEFT JOIN LATERAL (
+       SELECT id, project_id, folder_id, original_filename
+       FROM foundry_datasets
+       WHERE id::text = (
+         SELECT (regexp_matches(bd.file_path, '#foundry-dataset:([0-9a-f-]{36})', 'i'))[1]
+       )
+       LIMIT 1
+     ) fd ON true
+     LEFT JOIN projects p ON p.id = fd.project_id
+     LEFT JOIN folders  f ON f.id = fd.folder_id
+     WHERE bd.object_type_id = $1`,
     [objectType.object_type_id]
   );
 
@@ -244,13 +270,56 @@ async function listByOntology(ontologyId: string, input: ListInput = {}) {
   );
   const totalCount: number = countResult.rows[0].count;
 
-  // Page query with summary data
+  // Page query with summary data.
+  //
+  // In addition to the property/datasource/index summary columns, this
+  // query computes two Foundry-parity aggregates that power the object
+  // type cards in the ontology manager:
+  //
+  //   object_count     — number of object instances currently indexed
+  //                      for this type, read from funnel_state. Matches
+  //                      Foundry's "N objects" cardinality readout on
+  //                      the Object Type summary card.
+  //
+  //   dependent_count  — count of ontology resources that reference this
+  //                      object type, mirroring Foundry's "Dependents"
+  //                      panel in the Object Type editor:
+  //                        • link_type rows where this type is either
+  //                          the source or the target
+  //                        • action_type rows whose `rules[].objectType`
+  //                          or `parameters[].objectType` JSONB keys
+  //                          match this type's api_name
+  //                      (Foundry also counts functions/pipelines; those
+  //                      can be added here later as those tables gain
+  //                      proper object-type FK references.)
   const result = await query(
     `SELECT ot.*,
             COUNT(p.property_id)::int AS property_count,
             ds.dataset_name AS datasource_name,
             fs.status AS index_status,
-            fs.objects_indexed
+            COALESCE(fs.objects_indexed, 0)::int AS object_count,
+            (
+              (
+                SELECT COUNT(*)::int FROM link_type lt
+                WHERE lt.source_object_type = ot.object_type_id
+                   OR lt.target_object_type = ot.object_type_id
+              )
+              +
+              (
+                SELECT COUNT(*)::int FROM action_type at
+                WHERE at.ontology_id = ot.ontology_id
+                  AND (
+                    EXISTS (
+                      SELECT 1 FROM jsonb_array_elements(at.rules) r
+                      WHERE r->>'objectType' = ot.api_name
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM jsonb_array_elements(at.parameters) pp
+                      WHERE pp->>'objectType' = ot.api_name
+                    )
+                  )
+              )
+            )::int AS dependent_count
      FROM object_type ot
      LEFT JOIN property p ON ot.object_type_id = p.object_type_id
      LEFT JOIN backing_datasource ds ON ot.object_type_id = ds.object_type_id
@@ -283,31 +352,50 @@ async function update(ontologyId: string, apiName: string, data: UpdateInput) {
   const values: unknown[] = [];
   let paramIndex = 1;
 
-  if (data.displayName !== undefined) {
-    setClauses.push(`display_name = $${paramIndex++}`);
-    values.push(data.displayName);
+  const pushClause = (col: string, value: unknown) => {
+    setClauses.push(`${col} = $${paramIndex++}`);
+    values.push(value);
+  };
+
+  if (data.apiName !== undefined) {
+    const nameValidation = validateObjectTypeName(data.apiName);
+    if (!nameValidation.valid) {
+      throw appError("INVALID_API_NAME", nameValidation.error!);
+    }
+    pushClause("api_name", data.apiName);
+    // Any successful apiName change resolves a pending conflict
+    // marker — the "requested" name the user originally typed is
+    // no longer in a mismatched state with the live `api_name`.
+    // Clearing it unconditionally keeps the UI state simple: the
+    // red "Invalid" badge disappears the moment the rename lands.
+    pushClause("requested_api_name", null);
   }
-  if (data.description !== undefined) {
-    setClauses.push(`description = $${paramIndex++}`);
-    values.push(data.description);
+  if (data.displayName !== undefined) pushClause("display_name", data.displayName);
+  if (data.pluralName !== undefined) pushClause("plural_name", data.pluralName);
+  if (data.description !== undefined) pushClause("description", data.description);
+  if (data.aliases !== undefined) pushClause("aliases", data.aliases);
+  if (data.pointOfContact !== undefined)
+    pushClause("point_of_contact", data.pointOfContact);
+  if (data.contributors !== undefined) pushClause("contributors", data.contributors);
+  if (data.visibility !== undefined) {
+    if (!["prominent", "normal", "hidden"].includes(data.visibility)) {
+      throw appError(
+        "VALIDATION_FAILED",
+        `Invalid visibility '${data.visibility}'. Must be one of: prominent, normal, hidden.`,
+      );
+    }
+    pushClause("visibility", data.visibility);
   }
-  if (data.icon !== undefined) {
-    setClauses.push(`icon = $${paramIndex++}`);
-    values.push(data.icon);
-  }
-  if (data.iconColor !== undefined) {
-    setClauses.push(`icon_color = $${paramIndex++}`);
-    values.push(data.iconColor);
-  }
-  if (data.status !== undefined) {
-    setClauses.push(`status = $${paramIndex++}`);
-    values.push(data.status);
-  }
+  if (data.editsViaActionsOnly !== undefined)
+    pushClause("edits_via_actions_only", data.editsViaActionsOnly);
+  if (data.icon !== undefined) pushClause("icon", data.icon);
+  if (data.iconColor !== undefined) pushClause("icon_color", data.iconColor);
+  if (data.status !== undefined) pushClause("status", data.status);
 
   if (setClauses.length === 0) {
     throw appError(
       "INVALID_PARAMETER",
-      "At least one field must be provided for update."
+      "At least one field must be provided for update.",
     );
   }
 
@@ -328,25 +416,29 @@ async function update(ontologyId: string, apiName: string, data: UpdateInput) {
     if (result.rows.length === 0) {
       throw appError(
         "OBJECT_TYPE_NOT_FOUND",
-        `Object type '${apiName}' not found in ontology '${ontologyId}'.`
+        `Object type '${apiName}' not found in ontology '${ontologyId}'.`,
       );
     }
 
     const row = result.rows[0];
 
-    // Warn if status changed to deprecated
     if (data.status === "deprecated") {
       console.warn(
-        `Object type ${apiName} set to deprecated — dependent applications may break.`
+        `Object type ${apiName} set to deprecated — dependent applications may break.`,
       );
     }
 
     return row;
   } catch (err: any) {
+    // 23505 = Postgres unique_violation. The `object_type_ontology_id_api_name_key`
+    // constraint fires here whenever a rename (or batch-create) collides
+    // with an existing apiName in the same ontology. Surface it as a
+    // distinct error code so the frontend can render a dedicated
+    // "Invalid" badge instead of a generic 500.
     if (err.code === "23505") {
       throw appError(
-        "OBJECT_TYPE_ALREADY_EXISTS",
-        `Object type with that name already exists in this ontology.`
+        "DUPLICATE_API_NAME",
+        `Object type with apiName '${data.apiName ?? apiName}' already exists in this ontology.`,
       );
     }
     throw err;
@@ -881,9 +973,28 @@ async function getStatistics(ontologyId: string, apiName: string) {
   );
   const arrayPropertyCount: number = arrayResult.rows[0].count;
 
-  // 3. Backing datasource (may be null)
+  // 3. Backing datasource (enriched with project/folder location)
   const dsResult = await query(
-    "SELECT * FROM backing_datasource WHERE object_type_id = $1",
+    `SELECT bd.*,
+            fd.original_filename AS _original_filename,
+            o.display_name AS _ontology_name,
+            p.name         AS _project_name,
+            f.name         AS _folder_name,
+            f.path::text   AS _folder_path
+     FROM backing_datasource bd
+     LEFT JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+     LEFT JOIN ontology    o  ON o.ontology_id = ot.ontology_id
+     LEFT JOIN LATERAL (
+       SELECT id, project_id, folder_id, original_filename
+       FROM foundry_datasets
+       WHERE id::text = (
+         SELECT (regexp_matches(bd.file_path, '#foundry-dataset:([0-9a-f-]{36})', 'i'))[1]
+       )
+       LIMIT 1
+     ) fd ON true
+     LEFT JOIN projects p ON p.id = fd.project_id
+     LEFT JOIN folders  f ON f.id = fd.folder_id
+     WHERE bd.object_type_id = $1`,
     [objectTypeId]
   );
   const dsRow = dsResult.rows[0] || null;
@@ -962,6 +1073,26 @@ interface BatchCreateInput {
   description?: string | null;
   icon?: string;
   iconColor?: string;
+  /**
+   * Lifecycle status the object type is born with. Defaults to
+   * `experimental` — new object types created through the wizard are
+   * still taking shape, and flagging them as experimental keeps them
+   * visually distinct from `active` production types on every list
+   * view until the curator promotes them.
+   */
+  status?: "active" | "experimental" | "deprecated";
+  /**
+   * What to do when `apiName` collides with an existing object type in
+   * the same ontology. Default `"fail"` returns the hard 409 the
+   * `UNIQUE(ontology_id, api_name)` constraint produces. `"rename"`
+   * suffixes the caller's apiName with `_2`, `_3`, … until a free
+   * value is found, stores the ORIGINAL requested name in
+   * `requested_api_name`, and succeeds. The frontend wizard uses
+   * `"rename"` so the user doesn't lose work they typed in a
+   * multi-step dialog — the overview card then surfaces the
+   * conflict as a red "Invalid" badge the user can resolve inline.
+   */
+  onConflict?: "fail" | "rename";
   properties: Array<{
     apiName: string;
     displayName: string;
@@ -986,10 +1117,27 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
     description = null,
     icon = "cube",
     iconColor = "#1565C0",
+    status = "experimental",
+    onConflict = "fail",
     properties,
     primaryKeyProperty,
     titleProperty = null,
   } = data;
+
+  // Guard: surface an explicit error instead of a CHECK-constraint
+  // violation if a caller sends an unknown status value.
+  if (!["active", "experimental", "deprecated"].includes(status)) {
+    throw appError(
+      "VALIDATION_FAILED",
+      `Invalid status '${status}'. Must be one of: active, experimental, deprecated.`,
+    );
+  }
+  if (!["fail", "rename"].includes(onConflict)) {
+    throw appError(
+      "VALIDATION_FAILED",
+      `Invalid onConflict '${onConflict}'. Must be 'fail' or 'rename'.`,
+    );
+  }
 
   // 1. Validate apiName
   const nameValidation = validateObjectTypeName(apiName);
@@ -1024,29 +1172,73 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
   }
 
   // 5. Use a transaction for atomicity
+  //
+  // `finalApiName` is declared at function scope (not inside the try
+  // block) so step 6's `getByApiName(ontologyId, finalApiName)` can
+  // read whichever variant the rename-on-conflict loop settled on —
+  // otherwise a collision-then-rename would 404 on the re-fetch.
+  let finalApiName = apiName;
   const client = await getClient();
   try {
     await client.query("BEGIN");
 
-    // 5a. Create object type
+    // 5a. Create object type.
+    //
+    // When `onConflict === "rename"`, loop until we find a free
+    // variant of the requested apiName by suffixing `_2`, `_3`, …
+    // up to a safety cap of 1000 tries. The ORIGINAL requested name
+    // is stored in `requested_api_name` so the overview card can
+    // surface it as a conflict the user can resolve inline. When
+    // `onConflict === "fail"` (the default), we preserve the
+    // historical behaviour and throw `OBJECT_TYPE_ALREADY_EXISTS`
+    // on the first 23505.
     let otRow: any;
-    try {
-      const otResult = await client.query(
-        `INSERT INTO object_type
-           (ontology_id, api_name, display_name, description, icon, icon_color, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'active')
-         RETURNING *`,
-        [ontologyId, apiName, displayName, description, icon, iconColor]
-      );
-      otRow = otResult.rows[0];
-    } catch (err: any) {
-      if (err.code === "23505") {
-        throw appError(
-          "OBJECT_TYPE_ALREADY_EXISTS",
-          `Object type '${apiName}' already exists in this ontology.`
+    let requestedApiName: string | null = null;
+    const MAX_RENAME_ATTEMPTS = 1000;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const otResult = await client.query(
+          `INSERT INTO object_type
+             (ontology_id, api_name, display_name, description, icon, icon_color, status, requested_api_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING *`,
+          [
+            ontologyId,
+            finalApiName,
+            displayName,
+            description,
+            icon,
+            iconColor,
+            status,
+            requestedApiName,
+          ],
         );
+        otRow = otResult.rows[0];
+        break;
+      } catch (err: any) {
+        if (err.code !== "23505") throw err;
+        if (onConflict !== "rename") {
+          throw appError(
+            "OBJECT_TYPE_ALREADY_EXISTS",
+            `Object type '${apiName}' already exists in this ontology.`,
+          );
+        }
+        // Rename-on-conflict path: the transaction has aborted on
+        // the unique-violation, so we ROLLBACK and start a fresh
+        // one. Suffix `_${attempt + 1}` on the requested name and
+        // try again. We cap at MAX_RENAME_ATTEMPTS to avoid an
+        // infinite loop in pathological "every name is taken" setups.
+        if (attempt >= MAX_RENAME_ATTEMPTS) {
+          throw appError(
+            "OBJECT_TYPE_ALREADY_EXISTS",
+            `Could not find a free apiName variant for '${apiName}' after ${MAX_RENAME_ATTEMPTS} attempts.`,
+          );
+        }
+        if (requestedApiName === null) requestedApiName = apiName;
+        finalApiName = `${apiName}_${attempt + 1}`;
+        await client.query("ROLLBACK");
+        await client.query("BEGIN");
       }
-      throw err;
     }
 
     // 5b. Create funnel_state record
@@ -1102,8 +1294,45 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
     client.release();
   }
 
-  // 6. Return the full object type (same shape as getByApiName)
-  return getByApiName(ontologyId, apiName);
+  // 6. Return the full object type (same shape as getByApiName).
+  // `finalApiName` reflects any rename-on-conflict mutation that
+  // happened inside the transaction — re-reading by the original
+  // `apiName` would 404 if the rename path fired.
+  return getByApiName(ontologyId, finalApiName);
+}
+
+/**
+ * UUID v4 format matcher, strict enough to reject accidental collisions
+ * with valid apiName strings (apiNames are CamelCase and never contain
+ * dashes, so a matching UUID unambiguously identifies a UUID caller).
+ */
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Get an object type by its UUID (object_type_id), including properties,
+ * datasource, and funnel state. Delegates to `getByApiName` after the
+ * initial UUID → apiName resolution so the response shape is identical
+ * to the existing endpoint.
+ */
+async function getById(ontologyId: string, objectTypeId: string) {
+  if (!UUID_REGEX.test(objectTypeId)) {
+    throw appError(
+      "INVALID_PARAMETER",
+      `'${objectTypeId}' is not a valid object type UUID.`
+    );
+  }
+  const otResult = await query(
+    "SELECT api_name FROM object_type WHERE ontology_id = $1 AND object_type_id = $2",
+    [ontologyId, objectTypeId]
+  );
+  if (otResult.rows.length === 0) {
+    throw appError(
+      "OBJECT_TYPE_NOT_FOUND",
+      `Object type '${objectTypeId}' not found in ontology '${ontologyId}'.`
+    );
+  }
+  return getByApiName(ontologyId, otResult.rows[0].api_name as string);
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1342,7 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
 const objectTypeService = {
   create,
   getByApiName,
+  getById,
   listByOntology,
   update,
   delete: remove,

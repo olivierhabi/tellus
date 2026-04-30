@@ -12,7 +12,7 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Get statistics (Task 25)", async () => {
     const { status, body } = await api(
       "GET",
-      `/api/v2/ontologies/${ctx.ontologyId}/objectTypes/Employee/statistics`
+      `/api/v1/ontology/${ctx.ontologyId}/objectTypes/Employee/statistics`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
     const stats = body.statistics;

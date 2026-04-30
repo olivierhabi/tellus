@@ -9,6 +9,8 @@ const searchService = new SearchService(foundryDb);
 const searchController = new SearchController(searchService);
 
 router.get('/', authenticate, searchController.search);
+router.get('/picker', authenticate, searchController.picker);
 router.get('/suggest', authenticate, searchController.suggest);
+router.get('/typeahead', authenticate, searchController.typeahead);
 
 export default router;

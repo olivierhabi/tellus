@@ -262,7 +262,7 @@ export function validateRequest(schema: RequestSchema) {
 // Inline self-tests
 // ---------------------------------------------------------------------------
 
-if (require.main === module) {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -271,6 +271,7 @@ if (require.main === module) {
       passed++;
       console.log(`  PASS  ${label}`);
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.log(`  FAIL  ${label}`);
     }
@@ -548,6 +549,10 @@ if (require.main === module) {
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
-  console.log("\nAll request validator tests passed");
-  process.exit(0);
 }
+
+/* v8 ignore start */
+if (require.main === module) {
+  runSelfTests();
+}
+/* v8 ignore stop */

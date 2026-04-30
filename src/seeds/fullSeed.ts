@@ -18,6 +18,7 @@ import "dotenv/config";
 import fs from "fs";
 import path from "path";
 import { query, pool, getClient } from "../db";
+import { ensureMainBranchId } from "../services/branchContext";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -887,6 +888,13 @@ async function fullSeed(): Promise<void> {
   );
   const ontologyId = ontResult.rows[0].ontology_id;
   console.log(`Created ontology: ${ONTOLOGY_NAME} (${ontologyId})`);
+
+  // Ensure the synthetic `main` branch exists for this fresh ontology.
+  // Every branch-scoped write (link_edit, ontology_edit) requires a
+  // non-null branch_id since migration 040; the lazy-create path in
+  // branchContext keeps the invariant for ontologies created outside
+  // migration 040's backfill window (i.e. anything seeded after boot).
+  await ensureMainBranchId(ontologyId);
 
   // -----------------------------------------------------------------------
   // Step 2: Create data directory

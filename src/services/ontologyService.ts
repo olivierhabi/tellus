@@ -9,6 +9,7 @@
 import { query } from "../db";
 import { decodePageToken, encodePageToken } from "../utils/responseFormatter";
 import objectTypeService from "./objectTypeService";
+import { ensureMainBranchId } from "./branchContext";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,6 +67,13 @@ async function create(input: CreateInput) {
      RETURNING *`,
     [displayName, description, createdBy]
   );
+
+  // Every ontology must have a synthetic `main` branch so branch-scoped
+  // writes (link_edit, ontology_edit — both NOT NULL on branch_id since
+  // migration 040) can resolve a default. Migration 040 only backfills
+  // ontologies that existed at migration time; freshly-created ones
+  // need this eager insert to keep the invariant.
+  await ensureMainBranchId(result.rows[0].ontology_id);
 
   return result.rows[0];
 }

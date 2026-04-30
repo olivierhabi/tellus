@@ -105,18 +105,28 @@ const STATIC_MAPPINGS: Record<string, OpenSearchFieldMapping> = {
     type: "float",
   },
 
-  // Date: multiple accepted formats for flexibility
+  // Date: accepts any ISO 8601 date/time literal that Java's
+  // strict_date_optional_time parser can digest (including trailing
+  // `Z` for UTC), and also plain epoch millis.
+  //
+  // Historical note: the old custom format
+  // `yyyy-MM-dd'T'HH:mm:ss.SSSZ||...` failed on `2023-07-29T22:00:00.000Z`
+  // because the trailing `Z` in a Java pattern means "timezone
+  // offset" (`+0000`), NOT the literal character `Z`. The canonical
+  // fix is to use OpenSearch's built-in `strict_date_optional_time`
+  // parser, which handles every ISO 8601 variant the CSV scanner
+  // and `typeConverter.ts` emit.
   date: {
     type: "date",
-    format:
-      "yyyy-MM-dd||yyyy-MM-dd'T'HH:mm:ss||yyyy-MM-dd'T'HH:mm:ssZ||epoch_millis",
+    format: "strict_date_optional_time||epoch_millis",
   },
 
-  // Timestamp: always includes time component, supports millisecond precision
+  // Timestamp: same parser — `strict_date_optional_time` covers the
+  // full ISO 8601 grammar including fractional seconds and all
+  // timezone forms (`Z`, `+00:00`, `+0000`).
   timestamp: {
     type: "date",
-    format:
-      "yyyy-MM-dd'T'HH:mm:ss.SSSZ||yyyy-MM-dd'T'HH:mm:ssZ||yyyy-MM-dd'T'HH:mm:ss||epoch_millis",
+    format: "strict_date_optional_time||epoch_millis",
   },
 
   // Byte: 8-bit signed (-128 to 127)
@@ -163,11 +173,10 @@ const STATIC_MAPPINGS: Record<string, OpenSearchFieldMapping> = {
     type: "boolean",
   },
 
-  // Timestamp array: same format as timestamp
+  // Timestamp array: same parser as timestamp.
   timestamp_array: {
     type: "date",
-    format:
-      "yyyy-MM-dd'T'HH:mm:ss.SSSZ||yyyy-MM-dd'T'HH:mm:ssZ||yyyy-MM-dd'T'HH:mm:ss||epoch_millis",
+    format: "strict_date_optional_time||epoch_millis",
   },
 };
 
@@ -308,7 +317,7 @@ export function getOpenSearchTypeForBaseType(baseType: string): string {
 // Inline self-tests (run when executed directly: tsx src/services/mapping/typeMapper.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -316,6 +325,7 @@ function runSelfTests(): void {
     if (condition) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -331,6 +341,7 @@ function runSelfTests(): void {
     if (a === e) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
       console.error(`    expected: ${e}`);
@@ -341,6 +352,7 @@ function runSelfTests(): void {
   function assertThrows(fn: () => void, expectedSubstring: string, label: string): void {
     try {
       fn();
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL (expected throw): ${label}`);
     } catch (err: unknown) {
@@ -436,10 +448,9 @@ function runSelfTests(): void {
     mapPropertyToOpenSearch(prop("date")),
     {
       type: "date",
-      format:
-        "yyyy-MM-dd||yyyy-MM-dd'T'HH:mm:ss||yyyy-MM-dd'T'HH:mm:ssZ||epoch_millis",
+      format: "strict_date_optional_time||epoch_millis",
     },
-    "date -> date with multi-format"
+    "date -> strict_date_optional_time"
   );
 
   // -----------------------------------------------------------------------
@@ -449,10 +460,9 @@ function runSelfTests(): void {
     mapPropertyToOpenSearch(prop("timestamp")),
     {
       type: "date",
-      format:
-        "yyyy-MM-dd'T'HH:mm:ss.SSSZ||yyyy-MM-dd'T'HH:mm:ssZ||yyyy-MM-dd'T'HH:mm:ss||epoch_millis",
+      format: "strict_date_optional_time||epoch_millis",
     },
-    "timestamp -> date with millisecond-precision format"
+    "timestamp -> strict_date_optional_time"
   );
 
   // -----------------------------------------------------------------------
@@ -543,10 +553,9 @@ function runSelfTests(): void {
     mapPropertyToOpenSearch(prop("timestamp_array")),
     {
       type: "date",
-      format:
-        "yyyy-MM-dd'T'HH:mm:ss.SSSZ||yyyy-MM-dd'T'HH:mm:ssZ||yyyy-MM-dd'T'HH:mm:ss||epoch_millis",
+      format: "strict_date_optional_time||epoch_millis",
     },
-    "timestamp_array -> date with timestamp format"
+    "timestamp_array -> strict_date_optional_time"
   );
 
   // -----------------------------------------------------------------------
@@ -711,10 +720,13 @@ function runSelfTests(): void {
   if (failed === 0) {
     console.log("\nAll typeMapper tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

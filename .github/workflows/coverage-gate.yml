@@ -1,0 +1,129 @@
+name: coverage-gate
+on:
+  pull_request:
+  push: { branches: [main] }
+env:
+  # Force JavaScript actions still bundled for Node 20 to run under Node 24
+  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: tellus123, POSTGRES_USER: tellus, POSTGRES_DB: tellus_db }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tellus -d tellus_db"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGDATABASE: tellus_db
+      REDIS_URL: redis://localhost:6379
+      KEYCLOAK_URL: http://localhost:8086
+      KEYCLOAK_REALM: tellus
+      KEYCLOAK_CLIENT_ID: tellus-api
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_ENDPOINT: http://localhost:9000
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24.12.0, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - name: Unit coverage (critical path)
+        run: pnpm vitest run --config vitest.unit.config.ts --coverage --coverage.reporter=json-summary --coverage.reporter=text --coverage.reportsDirectory=coverage
+      - name: Enforce branch coverage on critical-path modules
+        run: |
+          node -e '
+            const fs = require("fs");
+            const candidates = [
+              "./coverage/coverage-summary.json",
+              "./coverage/unit/coverage-summary.json",
+            ];
+            const summaryPath = candidates.find(p => fs.existsSync(p));
+            if (!summaryPath) {
+              console.error("coverage gate FAIL: no coverage-summary.json in " + candidates.join(" or "));
+              process.exit(1);
+            }
+            const s = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+            //
+            // Two-tier branch-coverage gate.
+            //
+            // Tier 1 (strict 80%): pure-logic invariant modules — small
+            //   surface, no DB/Redis/OpenSearch dependencies, so 80%
+            //   branch coverage is reachable with targeted unit tests.
+            //
+            // Tier 2 (ratchet): orchestration modules that sit on top of
+            //   PG + OpenSearch + Kafka + Redis. Exhaustive branch
+            //   coverage in pure unit tests requires extensive mocking
+            //   and will be raised incrementally. Current thresholds
+            //   match the present unit-only coverage and ratchet upward
+            //   per commit — NEVER downward. Each entry carries a TODO
+            //   referencing the follow-up to push toward the 80% goal.
+            //
+            const STRICT = {
+              "src/services/audit/canonicalJson.ts":       80,
+              "src/services/audit/hashChain.ts":            80,
+              "src/services/security/cbacPolicy.ts":        80,
+              "src/services/rateLimit/redisRateLimiter.ts": 80,
+              "src/utils/requireEnv.ts":                    80,
+            };
+            // TODO(coverage-ratchet): raise each of these toward 80%
+            // via dedicated unit-test PRs — mock pg / opensearch /
+            // circuitBreaker at the boundary. Do NOT relax these
+            // numbers; any PR that reduces coverage must restore it
+            // before merge.
+            const RATCHET = {
+              "src/actions/actionExecutor.ts":               0,   // TODO: raise to 80
+              "src/actions/editApplicator.ts":               0,   // TODO: raise to 80
+              "src/services/queryExecutor.ts":               0,   // TODO: raise to 80
+              "src/services/linkResolverService.ts":        15,   // TODO: raise to 80
+              "src/services/linkViolationEnforcer.ts":      50,   // TODO: raise to 80
+              "src/services/branchMergeService.ts":          2,   // TODO: raise to 80
+            };
+            const CRIT = { ...STRICT, ...RATCHET };
+            const fails = [];
+            const seen = new Set();
+            for (const [p, m] of Object.entries(s)) {
+              const match = Object.keys(CRIT).find(c => p.endsWith(c));
+              if (!match) continue;
+              seen.add(match);
+              const br = m.branches?.pct ?? 0;
+              const threshold = CRIT[match];
+              if (br < threshold) {
+                fails.push(`${p}: ${br}% branch (threshold ${threshold}%)`);
+              }
+            }
+            for (const c of Object.keys(CRIT)) {
+              if (!seen.has(c)) {
+                fails.push(`${c}: module absent from coverage report (no test imports it?)`);
+              }
+            }
+            if (fails.length) {
+              console.error("coverage gate FAIL:\n" + fails.join("\n"));
+              process.exit(1);
+            }
+            console.log("coverage gate OK");
+          '
+      - uses: actions/upload-artifact@v4
+        with: { name: coverage-report, path: coverage/ }
+  ghost-pass-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Scan for ghost-pass patterns
+        run: |
+          if grep -rnE "if \(!(HAS_DATA|serverAvailable|serverReachable|hasData)\) return|Server not reachable — skipping" tests/ ; then
+            echo "ghost-pass pattern found — fail" ; exit 1
+          fi
+          echo "ghost-pass gate OK"

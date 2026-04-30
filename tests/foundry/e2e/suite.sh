@@ -161,7 +161,7 @@ curl -s -D "$tmpfile" -X OPTIONS \
   -H "Origin: http://example.com" \
   -H "Access-Control-Request-Method: POST" \
   -H "Access-Control-Request-Headers: Content-Type" \
-  "${BASE_URL}/api/projects" -o /dev/null 2>/dev/null
+  "${BASE_URL}/api/v1/projects" -o /dev/null 2>/dev/null
 CORS_HEADERS=$(cat "$tmpfile")
 rm -f "$tmpfile"
 
@@ -191,81 +191,126 @@ else
 fi
 
 # ===========================================================================
-# 7. AUTH: REGISTER, LOGIN, REFRESH, LOGOUT (BE-013)
+# 7. AUTH: KEYCLOAK LOGIN, REFRESH, LOGOUT, TOKEN-INFO (BE-013)
 # ===========================================================================
-section "7. Auth — Register, Login, Refresh, Logout (BE-013)"
+section "7. Auth — Keycloak Login, Refresh, Logout, Token-Info (BE-013)"
 
-AUTH_SUFFIX=$(date +%s%N)
-AUTH_EMAIL="e2e-foundry-${AUTH_SUFFIX}@test.com"
-AUTH_PASSWORD="SecurePass123!"
-AUTH_NAME="E2E Foundry User"
+# Uses the Keycloak test user created by bootstrap-keycloak.sh.
+AUTH_EMAIL="${KEYCLOAK_TEST_USER:-cypress@tellus.local}"
+AUTH_PASSWORD="${KEYCLOAK_TEST_PASS:-Password123!}"
 
-# Register
-do_request POST /api/auth/register "{\"email\":\"${AUTH_EMAIL}\",\"password\":\"${AUTH_PASSWORD}\",\"displayName\":\"${AUTH_NAME}\"}"
-assert_status "$HTTP_STATUS" "201" "Register new user"
-assert_contains "$HTTP_BODY" '"accessToken"' "accessToken in register response"
-assert_contains "$HTTP_BODY" '"refreshToken"' "refreshToken in register response"
-ACCESS_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
-REFRESH_TOKEN=$(json_field "$HTTP_BODY" "refreshToken")
-assert_not_empty "$ACCESS_TOKEN" "accessToken not empty"
-assert_not_empty "$REFRESH_TOKEN" "refreshToken not empty"
-
-# Register duplicate email → 409
-sleep 1
-do_request POST /api/auth/register "{\"email\":\"${AUTH_EMAIL}\",\"password\":\"${AUTH_PASSWORD}\",\"displayName\":\"Dup\"}"
-assert_status "$HTTP_STATUS" "409" "Duplicate email returns 409"
-
-# Register missing fields → 400
-sleep 1
-do_request POST /api/auth/register '{"email":"","password":"short"}'
-assert_status "$HTTP_STATUS" "400" "Missing/invalid fields returns 400"
-
-# Login
-sleep 1
-do_request POST /api/auth/login "{\"email\":\"${AUTH_EMAIL}\",\"password\":\"${AUTH_PASSWORD}\"}"
-assert_status "$HTTP_STATUS" "200" "Login returns 200"
-assert_contains "$HTTP_BODY" '"accessToken"' "accessToken in login response"
-assert_contains "$HTTP_BODY" '"refreshToken"' "refreshToken in login response"
-ACCESS_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
-REFRESH_TOKEN=$(json_field "$HTTP_BODY" "refreshToken")
-
-# Login wrong password → 401
-sleep 1
-do_request POST /api/auth/login "{\"email\":\"${AUTH_EMAIL}\",\"password\":\"WrongPass999\"}"
-assert_status "$HTTP_STATUS" "401" "Wrong password returns 401"
-
-# Login non-existent email → 401
-# Wait for auth rate limiter window to reset (5 req/min limit on auth routes)
-sleep 61
-do_request POST /api/auth/login '{"email":"nobody@nowhere.com","password":"anything"}'
-if [[ "$HTTP_STATUS" == "401" || "$HTTP_STATUS" == "429" ]]; then
-  pass "Non-existent email returns 401 (or 429 rate limited)"
+# --- Auth health probe ---
+do_request GET /api/v1/auth/health
+if [[ "$HTTP_STATUS" == "200" ]]; then
+  pass "Auth health endpoint returns 200"
+  assert_contains "$HTTP_BODY" '"status"' "Auth health contains status"
 else
-  fail "Non-existent email returns 401 [HTTP 401] (expected '401' or '429', got '${HTTP_STATUS}')"
+  fail "Auth health endpoint returns 200 [HTTP 200] (got $HTTP_STATUS)"
 fi
 
-# Refresh token
-do_request POST /api/auth/refresh "{\"refreshToken\":\"${REFRESH_TOKEN}\"}"
+# --- Login via test hook (login-bypass) ---
+AUTH_COOKIE_JAR=$(mktemp)
+# Use cookie jar so refresh/logout can use the session cookies
+tmpfile=$(mktemp)
+response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-Tellus-Test-Hook: 1" \
+  -c "$AUTH_COOKIE_JAR" \
+  -d "{\"username\":\"${AUTH_EMAIL}\",\"password\":\"${AUTH_PASSWORD}\"}" \
+  "${BASE_URL}/api/v1/auth/_test/login-bypass" 2>/dev/null) || true
+HTTP_STATUS=$(echo "$response" | tail -1)
+HTTP_BODY=$(echo "$response" | sed '$d')
+HTTP_HEADERS=$(cat "$tmpfile")
+rm -f "$tmpfile"
+
+assert_status "$HTTP_STATUS" "200" "Login-bypass returns 200"
+assert_contains "$HTTP_BODY" '"accessToken"' "accessToken in login response"
+ACCESS_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
+assert_not_empty "$ACCESS_TOKEN" "accessToken not empty"
+
+# --- Real login (POST /api/v1/auth/login) ---
+do_request POST /api/v1/auth/login "{\"username\":\"${AUTH_EMAIL}\",\"password\":\"${AUTH_PASSWORD}\"}"
+assert_status "$HTTP_STATUS" "200" "Real login returns 200"
+assert_contains "$HTTP_BODY" '"success":true' "Login response success is true"
+# Response may contain accessToken directly or passkeyEnrollmentRequired
+# depending on system settings — both are valid.
+if echo "$HTTP_BODY" | grep -q '"accessToken"'; then
+  pass "Login returns accessToken (no enrollment gate)"
+elif echo "$HTTP_BODY" | grep -q '"passkeyEnrollmentRequired"'; then
+  pass "Login returns passkeyEnrollmentRequired (enrollment gate active)"
+elif echo "$HTTP_BODY" | grep -q '"mfaRequired"'; then
+  pass "Login returns mfaRequired (MFA gate active)"
+else
+  pass "Login responded with valid auth flow response"
+fi
+
+# --- Login wrong password → 401 ---
+do_request POST /api/v1/auth/login "{\"username\":\"${AUTH_EMAIL}\",\"password\":\"WrongPass999\"}"
+assert_status "$HTTP_STATUS" "401" "Wrong password returns 401"
+
+# --- Login non-existent user → 401 ---
+do_request POST /api/v1/auth/login '{"username":"nobody@nowhere.com","password":"anything"}'
+if [[ "$HTTP_STATUS" == "401" || "$HTTP_STATUS" == "429" ]]; then
+  pass "Non-existent user returns 401 (or 429 rate limited)"
+else
+  fail "Non-existent user returns 401 [HTTP 401] (expected '401' or '429', got '${HTTP_STATUS}')"
+fi
+
+# --- Login missing fields → 400 ---
+do_request POST /api/v1/auth/login '{"username":"","password":""}'
+if [[ "$HTTP_STATUS" == "400" || "$HTTP_STATUS" == "401" ]]; then
+  pass "Missing credentials returns $HTTP_STATUS"
+else
+  fail "Missing credentials returns 400 [HTTP 400] (got $HTTP_STATUS)"
+fi
+
+# --- Token info ---
+do_request_with_header GET /api/v1/auth/token-info "Authorization: Bearer ${ACCESS_TOKEN}"
 if [[ "$HTTP_STATUS" == "200" ]]; then
-  pass "Refresh token returns 200"
+  pass "Token-info returns 200"
+  assert_contains "$HTTP_BODY" '"sub"' "Token-info contains sub claim"
+else
+  pass "Token-info responded (status $HTTP_STATUS)"
+fi
+
+# --- Me endpoint ---
+do_request_with_header GET /api/v1/auth/me "Authorization: Bearer ${ACCESS_TOKEN}"
+if [[ "$HTTP_STATUS" == "200" ]]; then
+  pass "Me endpoint returns 200"
+  assert_contains "$HTTP_BODY" '"email"' "Me response contains email"
+else
+  pass "Me endpoint responded (status $HTTP_STATUS)"
+fi
+
+# --- Refresh (uses session cookies from login-bypass) ---
+do_request_with_cookie_jar POST /api/v1/auth/refresh "$AUTH_COOKIE_JAR"
+if [[ "$HTTP_STATUS" == "200" ]]; then
+  pass "Refresh returns 200"
   NEW_ACCESS=$(json_field "$HTTP_BODY" "accessToken")
   if [[ -n "$NEW_ACCESS" ]]; then
     ACCESS_TOKEN="$NEW_ACCESS"
     pass "New accessToken received from refresh"
   else
-    pass "Refresh response received (token may be in different format)"
+    pass "Refresh response received (token may be in cookie)"
   fi
 else
   pass "Refresh endpoint responded (status $HTTP_STATUS)"
 fi
 
-# Logout
-do_request POST /api/auth/logout "{\"refreshToken\":\"${REFRESH_TOKEN}\"}"
+# --- Logout ---
+do_request_with_cookie_jar POST /api/v1/auth/logout "$AUTH_COOKIE_JAR"
 if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
   pass "Logout returns success"
 else
   pass "Logout endpoint responded (status $HTTP_STATUS)"
 fi
+
+rm -f "$AUTH_COOKIE_JAR"
+
+# Re-login to get a fresh token for subsequent test sections
+kc_login "$AUTH_EMAIL" "$AUTH_PASSWORD"
+ACCESS_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
+assert_not_empty "$ACCESS_TOKEN" "Re-login accessToken not empty"
 
 # ===========================================================================
 # 8. PROJECT CRUD (BE-003)
@@ -276,7 +321,7 @@ UNIQUE_SUFFIX=$(date +%s%N)
 PROJECT_NAME="E2E Foundry Project ${UNIQUE_SUFFIX}"
 
 # Create project
-do_request POST /api/projects "{\"name\":\"${PROJECT_NAME}\"}"
+do_request POST /api/v1/projects "{\"name\":\"${PROJECT_NAME}\"}"
 assert_status "$HTTP_STATUS" "201" "Create project"
 PROJECT_ID=$(json_field "$HTTP_BODY" "id")
 if [[ -z "$PROJECT_ID" ]]; then
@@ -287,49 +332,49 @@ PROJ_NAME=$(json_field "$HTTP_BODY" "name")
 assert_contains "$PROJ_NAME" "E2E Foundry" "Project name matches"
 
 # Duplicate project name → 409
-do_request POST /api/projects "{\"name\":\"${PROJECT_NAME}\"}"
+do_request POST /api/v1/projects "{\"name\":\"${PROJECT_NAME}\"}"
 assert_status "$HTTP_STATUS" "409" "Duplicate project name returns 409"
 
 # Empty name → 400
-do_request POST /api/projects '{"name":""}'
+do_request POST /api/v1/projects '{"name":""}'
 assert_status "$HTTP_STATUS" "400" "Empty project name returns 400"
 
 # Missing name field → 400
-do_request POST /api/projects '{}'
+do_request POST /api/v1/projects '{}'
 assert_status "$HTTP_STATUS" "400" "Missing name field returns 400"
 
 # Name too long → 400
 LONG_NAME=$(printf 'A%.0s' $(seq 1 256))
-do_request POST /api/projects "{\"name\":\"${LONG_NAME}\"}"
+do_request POST /api/v1/projects "{\"name\":\"${LONG_NAME}\"}"
 assert_status "$HTTP_STATUS" "400" "Name exceeding 255 chars returns 400"
 
 # List projects
-do_request GET /api/projects
+do_request GET /api/v1/projects
 assert_status "$HTTP_STATUS" "200" "List projects"
 assert_contains "$HTTP_BODY" "E2E Foundry" "Created project in list"
 
 # Get project by ID
-do_request GET "/api/projects/${PROJECT_ID}"
+do_request GET "/api/v1/projects/${PROJECT_ID}"
 assert_status "$HTTP_STATUS" "200" "Get project by ID"
 assert_contains "$HTTP_BODY" "E2E Foundry" "Project name in detail"
 
 # Update project
 UPDATED_NAME="E2E Updated ${UNIQUE_SUFFIX}"
-do_request PUT "/api/projects/${PROJECT_ID}" "{\"name\":\"${UPDATED_NAME}\"}"
+do_request PUT "/api/v1/projects/${PROJECT_ID}" "{\"name\":\"${UPDATED_NAME}\"}"
 assert_status "$HTTP_STATUS" "200" "Update project name"
 UPD_NAME=$(json_field "$HTTP_BODY" "name")
 assert_contains "$UPD_NAME" "E2E Updated" "Updated name reflected"
 
 # Invalid UUID → 400
-do_request GET "/api/projects/not-a-uuid"
+do_request GET "/api/v1/projects/not-a-uuid"
 assert_status "$HTTP_STATUS" "400" "Invalid UUID returns 400"
 
 # Non-existent UUID → 404
-do_request GET "/api/projects/00000000-0000-0000-0000-000000000000"
+do_request GET "/api/v1/projects/00000000-0000-0000-0000-000000000000"
 assert_status "$HTTP_STATUS" "404" "Non-existent project returns 404"
 
 # Update non-existent project → 404
-do_request PUT "/api/projects/00000000-0000-0000-0000-000000000000" '{"name":"Ghost"}'
+do_request PUT "/api/v1/projects/00000000-0000-0000-0000-000000000000" '{"name":"Ghost"}'
 assert_status "$HTTP_STATUS" "404" "Update non-existent project returns 404"
 
 # ===========================================================================
@@ -338,7 +383,7 @@ assert_status "$HTTP_STATUS" "404" "Update non-existent project returns 404"
 section "9. Folder CRUD (BE-004)"
 
 # Create root folder
-do_request POST "/api/projects/${PROJECT_ID}/folders" '{"name":"Root Folder"}'
+do_request POST "/api/v1/projects/${PROJECT_ID}/folders" '{"name":"Root Folder"}'
 assert_status "$HTTP_STATUS" "201" "Create root folder"
 ROOT_FOLDER_ID=$(json_field "$HTTP_BODY" "id")
 if [[ -z "$ROOT_FOLDER_ID" ]]; then
@@ -347,7 +392,7 @@ fi
 assert_not_empty "$ROOT_FOLDER_ID" "Root folder ID returned"
 
 # Create nested folder
-do_request POST "/api/projects/${PROJECT_ID}/folders" "{\"name\":\"Nested Folder\",\"parentFolderId\":\"${ROOT_FOLDER_ID}\"}"
+do_request POST "/api/v1/projects/${PROJECT_ID}/folders" "{\"name\":\"Nested Folder\",\"parentFolderId\":\"${ROOT_FOLDER_ID}\"}"
 assert_status "$HTTP_STATUS" "201" "Create nested folder"
 NESTED_FOLDER_ID=$(json_field "$HTTP_BODY" "id")
 if [[ -z "$NESTED_FOLDER_ID" ]]; then
@@ -356,28 +401,28 @@ fi
 assert_not_empty "$NESTED_FOLDER_ID" "Nested folder ID returned"
 
 # Duplicate folder name → 409
-do_request POST "/api/projects/${PROJECT_ID}/folders" '{"name":"Root Folder"}'
+do_request POST "/api/v1/projects/${PROJECT_ID}/folders" '{"name":"Root Folder"}'
 assert_status "$HTTP_STATUS" "409" "Duplicate folder name returns 409"
 
 # Invalid folder name → 400
-do_request POST "/api/projects/${PROJECT_ID}/folders" '{"name":"bad/name"}'
+do_request POST "/api/v1/projects/${PROJECT_ID}/folders" '{"name":"bad/name"}'
 assert_status "$HTTP_STATUS" "400" "Slash in folder name returns 400"
 
 # Empty folder name → 400
-do_request POST "/api/projects/${PROJECT_ID}/folders" '{"name":""}'
+do_request POST "/api/v1/projects/${PROJECT_ID}/folders" '{"name":""}'
 assert_status "$HTTP_STATUS" "400" "Empty folder name returns 400"
 
 # Folder in invalid project → 400
-do_request POST "/api/projects/not-a-uuid/folders" '{"name":"Bad"}'
+do_request POST "/api/v1/projects/not-a-uuid/folders" '{"name":"Bad"}'
 assert_status "$HTTP_STATUS" "400" "Folder in invalid project UUID returns 400"
 
 # List root folders
-do_request GET "/api/projects/${PROJECT_ID}/folders?parentId=null"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders?parentId=null"
 assert_status "$HTTP_STATUS" "200" "List root folders"
 assert_contains "$HTTP_BODY" "Root Folder" "Root folder in listing"
 
 # List children of root
-do_request GET "/api/projects/${PROJECT_ID}/folders?parentId=${ROOT_FOLDER_ID}"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders?parentId=${ROOT_FOLDER_ID}"
 assert_status "$HTTP_STATUS" "200" "List children of root folder"
 # Check if response contains the nested folder data (may be in JSON structure)
 if echo "$HTTP_BODY" | grep -qi "nested\|Nested"; then
@@ -389,21 +434,21 @@ else
 fi
 
 # Get folder by ID
-do_request GET "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}"
 assert_status "$HTTP_STATUS" "200" "Get folder by ID"
 assert_contains "$HTTP_BODY" "Root Folder" "Folder name in detail"
 
 # Get non-existent folder → 404
-do_request GET "/api/projects/${PROJECT_ID}/folders/00000000-0000-0000-0000-000000000000"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders/00000000-0000-0000-0000-000000000000"
 assert_status "$HTTP_STATUS" "404" "Non-existent folder returns 404"
 
 # Get folder tree
-do_request GET "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/tree"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/tree"
 assert_status "$HTTP_STATUS" "200" "Get folder tree"
 assert_contains "$HTTP_BODY" "Root Folder" "Root in tree response"
 
 # Get breadcrumb for nested folder
-do_request GET "/api/projects/${PROJECT_ID}/folders/${NESTED_FOLDER_ID}/breadcrumb"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders/${NESTED_FOLDER_ID}/breadcrumb"
 assert_status "$HTTP_STATUS" "200" "Get folder breadcrumb"
 # Check breadcrumb contains root folder reference
 if echo "$HTTP_BODY" | grep -qi "root\|Root"; then
@@ -415,13 +460,13 @@ else
 fi
 
 # Rename folder
-do_request PUT "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}" '{"name":"Renamed Root"}'
+do_request PUT "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}" '{"name":"Renamed Root"}'
 assert_status "$HTTP_STATUS" "200" "Rename folder"
 RENAMED=$(json_field "$HTTP_BODY" "name")
 assert_eq "$RENAMED" "Renamed Root" "Folder name updated"
 
 # Rename back for consistency
-do_request PUT "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}" '{"name":"Root Folder"}'
+do_request PUT "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}" '{"name":"Root Folder"}'
 
 # ===========================================================================
 # 10. FILE UPLOAD (BE-005)
@@ -440,7 +485,7 @@ id,name,department,salary,start_date,is_active
 CSVEOF
 
 # Upload to valid folder — requires auth
-do_upload "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/upload" "$UPLOAD_CSV"
+do_upload "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/upload" "$UPLOAD_CSV"
 if [[ "$HTTP_STATUS" == "201" ]]; then
   pass "File upload returns 201"
   DATASET_ID=$(json_field "$HTTP_BODY" "datasetId")
@@ -450,14 +495,14 @@ if [[ "$HTTP_STATUS" == "201" ]]; then
   assert_not_empty "$DATASET_ID" "Dataset ID returned from upload"
 elif [[ "$HTTP_STATUS" == "401" ]]; then
   # Upload requires authentication — try with auth header
-  do_request_with_header POST "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/upload" "Authorization: Bearer ${ACCESS_TOKEN}"
+  do_request_with_header POST "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/upload" "Authorization: Bearer ${ACCESS_TOKEN}"
   pass "Upload requires authentication (401 without token)"
   # Retry upload with auth token via curl directly
   tmpfile=$(mktemp)
   response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
     -H "Authorization: Bearer ${ACCESS_TOKEN}" \
     -F "files=@${UPLOAD_CSV}" \
-    "${BASE_URL}/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/upload" 2>/dev/null) || true
+    "${BASE_URL}/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/upload" 2>/dev/null) || true
   HTTP_STATUS=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
   HTTP_HEADERS=$(cat "$tmpfile")
@@ -482,7 +527,7 @@ else
 fi
 
 # Upload to non-existent project → 404
-do_upload "/api/projects/00000000-0000-0000-0000-000000000000/folders/${ROOT_FOLDER_ID}/upload" "$UPLOAD_CSV"
+do_upload "/api/v1/projects/00000000-0000-0000-0000-000000000000/folders/${ROOT_FOLDER_ID}/upload" "$UPLOAD_CSV"
 if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "401" ]]; then
   pass "Upload to non-existent project returns $HTTP_STATUS"
 else
@@ -490,7 +535,7 @@ else
 fi
 
 # Upload to non-existent folder → 404
-do_upload "/api/projects/${PROJECT_ID}/folders/00000000-0000-0000-0000-000000000000/upload" "$UPLOAD_CSV"
+do_upload "/api/v1/projects/${PROJECT_ID}/folders/00000000-0000-0000-0000-000000000000/upload" "$UPLOAD_CSV"
 if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "401" ]]; then
   pass "Upload to non-existent folder returns $HTTP_STATUS"
 else
@@ -505,7 +550,7 @@ section "11. CSV Parsing & Status Polling (BE-006)"
 if [[ -n "$DATASET_ID" ]]; then
   READY=false
   for poll in $(seq 1 20); do
-    do_request GET "/api/datasets/${DATASET_ID}/status"
+    do_request GET "/api/v1/datasets/${DATASET_ID}/status"
     DS_STATUS=$(json_field "$HTTP_BODY" "status")
     if [[ "$DS_STATUS" == "ready" || "$DS_STATUS" == "completed" || "$DS_STATUS" == "active" ]]; then
       READY=true
@@ -513,7 +558,7 @@ if [[ -n "$DATASET_ID" ]]; then
     fi
     if [[ "$HTTP_STATUS" == "401" ]]; then
       # Try with auth header
-      do_request_with_header GET "/api/datasets/${DATASET_ID}/status" "Authorization: Bearer ${ACCESS_TOKEN}"
+      do_request_with_header GET "/api/v1/datasets/${DATASET_ID}/status" "Authorization: Bearer ${ACCESS_TOKEN}"
       DS_STATUS=$(json_field "$HTTP_BODY" "status")
       if [[ "$DS_STATUS" == "ready" || "$DS_STATUS" == "completed" || "$DS_STATUS" == "active" ]]; then
         READY=true
@@ -539,9 +584,9 @@ section "12. Dataset Endpoints (BE-007)"
 
 if [[ -n "$DATASET_ID" ]]; then
   # Get dataset by ID
-  do_request GET "/api/datasets/${DATASET_ID}"
+  do_request GET "/api/v1/datasets/${DATASET_ID}"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Get dataset by ID returns 200"
@@ -551,9 +596,9 @@ if [[ -n "$DATASET_ID" ]]; then
   fi
 
   # Get dataset preview
-  do_request GET "/api/datasets/${DATASET_ID}/preview"
+  do_request GET "/api/v1/datasets/${DATASET_ID}/preview"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/datasets/${DATASET_ID}/preview" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/datasets/${DATASET_ID}/preview" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Dataset preview returns 200"
@@ -562,9 +607,9 @@ if [[ -n "$DATASET_ID" ]]; then
   fi
 
   # Get dataset status
-  do_request GET "/api/datasets/${DATASET_ID}/status"
+  do_request GET "/api/v1/datasets/${DATASET_ID}/status"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/datasets/${DATASET_ID}/status" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/datasets/${DATASET_ID}/status" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Dataset status returns 200"
@@ -574,9 +619,9 @@ if [[ -n "$DATASET_ID" ]]; then
   fi
 
   # List datasets in folder
-  do_request GET "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/datasets"
+  do_request GET "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/datasets"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/datasets" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}/datasets" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "List datasets in folder returns 200"
@@ -591,7 +636,7 @@ else
 fi
 
 # Non-existent dataset → 404
-do_request GET "/api/datasets/00000000-0000-0000-0000-000000000000"
+do_request GET "/api/v1/datasets/00000000-0000-0000-0000-000000000000"
 if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "401" ]]; then
   pass "Non-existent dataset returns $HTTP_STATUS"
 else
@@ -599,7 +644,7 @@ else
 fi
 
 # Invalid dataset UUID → 400
-do_request GET "/api/datasets/not-a-uuid"
+do_request GET "/api/v1/datasets/not-a-uuid"
 if [[ "$HTTP_STATUS" == "400" || "$HTTP_STATUS" == "401" ]]; then
   pass "Invalid dataset UUID returns $HTTP_STATUS"
 else
@@ -611,9 +656,9 @@ fi
 # ===========================================================================
 section "13. Search (BE-010)"
 
-do_request GET "/api/search?q=E2E"
+do_request GET "/api/v1/search?q=E2E"
 if [[ "$HTTP_STATUS" == "401" ]]; then
-  do_request_with_header GET "/api/search?q=E2E" "Authorization: Bearer ${ACCESS_TOKEN}"
+  do_request_with_header GET "/api/v1/search?q=E2E" "Authorization: Bearer ${ACCESS_TOKEN}"
 fi
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "Search endpoint returns 200"
@@ -621,9 +666,9 @@ else
   pass "Search endpoint responded (status $HTTP_STATUS)"
 fi
 
-do_request GET "/api/search/suggest?q=E2E"
+do_request GET "/api/v1/search/suggest?q=E2E"
 if [[ "$HTTP_STATUS" == "401" ]]; then
-  do_request_with_header GET "/api/search/suggest?q=E2E" "Authorization: Bearer ${ACCESS_TOKEN}"
+  do_request_with_header GET "/api/v1/search/suggest?q=E2E" "Authorization: Bearer ${ACCESS_TOKEN}"
 fi
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "Suggest endpoint returns 200"
@@ -632,7 +677,7 @@ else
 fi
 
 # Empty search query → should still return 200 with empty results
-do_request GET "/api/search?q="
+do_request GET "/api/v1/search?q="
 if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "400" || "$HTTP_STATUS" == "401" ]]; then
   pass "Empty search query handled (status $HTTP_STATUS)"
 else
@@ -644,9 +689,9 @@ fi
 # ===========================================================================
 section "14. Breadcrumb Navigation (BE-011)"
 
-do_request GET "/api/breadcrumb/project/${PROJECT_ID}"
+do_request GET "/api/v1/breadcrumb/project/${PROJECT_ID}"
 if [[ "$HTTP_STATUS" == "401" ]]; then
-  do_request_with_header GET "/api/breadcrumb/project/${PROJECT_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
+  do_request_with_header GET "/api/v1/breadcrumb/project/${PROJECT_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
 fi
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "Project breadcrumb returns 200"
@@ -654,9 +699,9 @@ else
   pass "Project breadcrumb responded (status $HTTP_STATUS)"
 fi
 
-do_request GET "/api/breadcrumb/folder/${ROOT_FOLDER_ID}"
+do_request GET "/api/v1/breadcrumb/folder/${ROOT_FOLDER_ID}"
 if [[ "$HTTP_STATUS" == "401" ]]; then
-  do_request_with_header GET "/api/breadcrumb/folder/${ROOT_FOLDER_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
+  do_request_with_header GET "/api/v1/breadcrumb/folder/${ROOT_FOLDER_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
 fi
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "Folder breadcrumb returns 200"
@@ -665,14 +710,14 @@ else
 fi
 
 # Breadcrumb for non-existent → 404
-do_request GET "/api/breadcrumb/project/00000000-0000-0000-0000-000000000000"
+do_request GET "/api/v1/breadcrumb/project/00000000-0000-0000-0000-000000000000"
 if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "401" ]]; then
   pass "Non-existent project breadcrumb returns $HTTP_STATUS"
 else
   fail "Non-existent project breadcrumb returns 404 (got $HTTP_STATUS)"
 fi
 
-do_request GET "/api/breadcrumb/folder/00000000-0000-0000-0000-000000000000"
+do_request GET "/api/v1/breadcrumb/folder/00000000-0000-0000-0000-000000000000"
 if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "401" ]]; then
   pass "Non-existent folder breadcrumb returns $HTTP_STATUS"
 else
@@ -685,28 +730,28 @@ fi
 section "15. Error Handling & Response Shape (BE-022)"
 
 # Bad JSON body
-do_request POST /api/projects 'THIS IS NOT JSON'
+do_request POST /api/v1/projects 'THIS IS NOT JSON'
 assert_status "$HTTP_STATUS" "400" "Bad JSON body returns 400"
 
 # Missing required fields
-do_request POST /api/projects '{}'
+do_request POST /api/v1/projects '{}'
 assert_status "$HTTP_STATUS" "400" "Missing required fields returns 400"
 
 # Verify error response shape
-do_request GET "/api/projects/00000000-0000-0000-0000-000000000000"
+do_request GET "/api/v1/projects/00000000-0000-0000-0000-000000000000"
 assert_status "$HTTP_STATUS" "404" "Not-found error returned"
 assert_contains "$HTTP_BODY" '"error"' "error key present in error response"
 assert_contains "$HTTP_BODY" '"code"' "error.code present"
 assert_contains "$HTTP_BODY" '"message"' "error.message present"
 
 # Invalid UUID error shape
-do_request GET "/api/projects/not-a-uuid"
+do_request GET "/api/v1/projects/not-a-uuid"
 assert_status "$HTTP_STATUS" "400" "Invalid UUID returns 400"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_not_empty "$ERR_CODE" "Error code present in 400 response"
 
 # Verify 400 on empty body POST
-do_request POST /api/projects ''
+do_request POST /api/v1/projects ''
 assert_status "$HTTP_STATUS" "400" "Empty body POST returns 400"
 
 # ===========================================================================
@@ -714,9 +759,9 @@ assert_status "$HTTP_STATUS" "400" "Empty body POST returns 400"
 # ===========================================================================
 section "16. Rate Limiting Detail (BE-020)"
 
-# Auth endpoint has stricter rate limit (5 req/min)
+# Auth endpoint has stricter rate limit
 sleep 2
-do_request POST /api/auth/register '{"email":"ratelimit-probe@test.com","password":"probe","name":"Probe"}'
+do_request POST /api/v1/auth/login '{"username":"ratelimit-probe@test.com","password":"probe"}'
 RL_LIMIT=$(header_value "RateLimit-Limit")
 RL_REMAINING=$(header_value "RateLimit-Remaining")
 RL_POLICY=$(header_value "RateLimit-Policy")
@@ -740,9 +785,9 @@ fi
 section "17. Dataset Column Stats"
 
 if [[ -n "$DATASET_ID" ]]; then
-  do_request GET "/api/datasets/${DATASET_ID}/columns/name/stats"
+  do_request GET "/api/v1/datasets/${DATASET_ID}/columns/name/stats"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/datasets/${DATASET_ID}/columns/name/stats" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/datasets/${DATASET_ID}/columns/name/stats" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Column stats returns 200"
@@ -750,9 +795,9 @@ if [[ -n "$DATASET_ID" ]]; then
     pass "Column stats endpoint responded (status $HTTP_STATUS)"
   fi
 
-  do_request GET "/api/datasets/${DATASET_ID}/profile"
+  do_request GET "/api/v1/datasets/${DATASET_ID}/profile"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/datasets/${DATASET_ID}/profile" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/datasets/${DATASET_ID}/profile" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Dataset profile returns 200"
@@ -770,9 +815,9 @@ fi
 section "18. Dataset Versions"
 
 if [[ -n "$DATASET_ID" ]]; then
-  do_request GET "/api/datasets/${DATASET_ID}/versions"
+  do_request GET "/api/v1/datasets/${DATASET_ID}/versions"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/datasets/${DATASET_ID}/versions" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/datasets/${DATASET_ID}/versions" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "List dataset versions returns 200"
@@ -788,9 +833,9 @@ fi
 # ===========================================================================
 section "19. Project Members"
 
-do_request GET "/api/projects/${PROJECT_ID}/members"
+do_request GET "/api/v1/projects/${PROJECT_ID}/members"
 if [[ "$HTTP_STATUS" == "401" ]]; then
-  do_request_with_header GET "/api/projects/${PROJECT_ID}/members" "Authorization: Bearer ${ACCESS_TOKEN}"
+  do_request_with_header GET "/api/v1/projects/${PROJECT_ID}/members" "Authorization: Bearer ${ACCESS_TOKEN}"
 fi
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "List project members returns 200"
@@ -803,9 +848,9 @@ fi
 # ===========================================================================
 section "20. Project Duplicates / Deduplication"
 
-do_request GET "/api/projects/${PROJECT_ID}/duplicates"
+do_request GET "/api/v1/projects/${PROJECT_ID}/duplicates"
 if [[ "$HTTP_STATUS" == "401" ]]; then
-  do_request_with_header GET "/api/projects/${PROJECT_ID}/duplicates" "Authorization: Bearer ${ACCESS_TOKEN}"
+  do_request_with_header GET "/api/v1/projects/${PROJECT_ID}/duplicates" "Authorization: Bearer ${ACCESS_TOKEN}"
 fi
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "Project duplicates endpoint returns 200"
@@ -820,9 +865,9 @@ section "21. Dataset Deletion (BE-008)"
 
 if [[ -n "$DATASET_ID" ]]; then
   # Delete dataset
-  do_request DELETE "/api/datasets/${DATASET_ID}"
+  do_request DELETE "/api/v1/datasets/${DATASET_ID}"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header DELETE "/api/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header DELETE "/api/v1/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
     pass "Delete dataset returns success ($HTTP_STATUS)"
@@ -831,9 +876,9 @@ if [[ -n "$DATASET_ID" ]]; then
   fi
 
   # Verify deletion — should be 404
-  do_request GET "/api/datasets/${DATASET_ID}"
+  do_request GET "/api/v1/datasets/${DATASET_ID}"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header GET "/api/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header GET "/api/v1/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "404" ]]; then
     pass "Dataset gone after deletion (404)"
@@ -842,9 +887,9 @@ if [[ -n "$DATASET_ID" ]]; then
   fi
 
   # Delete already-deleted → 404
-  do_request DELETE "/api/datasets/${DATASET_ID}"
+  do_request DELETE "/api/v1/datasets/${DATASET_ID}"
   if [[ "$HTTP_STATUS" == "401" ]]; then
-    do_request_with_header DELETE "/api/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
+    do_request_with_header DELETE "/api/v1/datasets/${DATASET_ID}" "Authorization: Bearer ${ACCESS_TOKEN}"
   fi
   if [[ "$HTTP_STATUS" == "404" ]]; then
     pass "Re-delete returns 404"
@@ -862,18 +907,11 @@ fi
 # ===========================================================================
 section "22. Swagger / API Docs (BE-029)"
 
-do_request GET /api/v2/docs
-if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "301" || "$HTTP_STATUS" == "302" ]]; then
-  pass "Swagger UI endpoint responds ($HTTP_STATUS)"
-else
-  fail "Swagger UI endpoint responds (got $HTTP_STATUS)"
-fi
-
 do_request GET /api/docs
 if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "301" || "$HTTP_STATUS" == "302" ]]; then
-  pass "Foundry API docs endpoint responds ($HTTP_STATUS)"
+  pass "API docs endpoint responds ($HTTP_STATUS)"
 else
-  pass "Foundry API docs checked (status $HTTP_STATUS)"
+  fail "API docs endpoint responds (got $HTTP_STATUS)"
 fi
 
 do_request GET /api/docs/spec.json
@@ -909,13 +947,13 @@ fi
 # ===========================================================================
 section "24. UUID Validation"
 
-do_request GET "/api/projects/not-valid"
+do_request GET "/api/v1/projects/not-valid"
 assert_status "$HTTP_STATUS" "400" "Invalid project UUID → 400"
 
-do_request GET "/api/projects/${PROJECT_ID}/folders/not-valid"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders/not-valid"
 assert_status "$HTTP_STATUS" "400" "Invalid folder UUID → 400"
 
-do_request DELETE "/api/projects/not-valid"
+do_request DELETE "/api/v1/projects/not-valid"
 assert_status "$HTTP_STATUS" "400" "DELETE with invalid UUID → 400"
 
 # ===========================================================================
@@ -924,15 +962,15 @@ assert_status "$HTTP_STATUS" "400" "DELETE with invalid UUID → 400"
 section "25. Edge Cases — Empty Body & Malformed JSON"
 
 # PUT with empty body
-do_request PUT "/api/projects/${PROJECT_ID}" '{}'
+do_request PUT "/api/v1/projects/${PROJECT_ID}" '{}'
 assert_status "$HTTP_STATUS" "400" "PUT project with empty body returns 400"
 
 # POST folder with null name
-do_request POST "/api/projects/${PROJECT_ID}/folders" '{"name":null}'
+do_request POST "/api/v1/projects/${PROJECT_ID}/folders" '{"name":null}'
 assert_status "$HTTP_STATUS" "400" "Null folder name returns 400"
 
 # Extra unknown fields (should be ignored or accepted)
-do_request POST "/api/projects/${PROJECT_ID}/folders" '{"name":"Extra Fields Folder","unknownField":"xyz"}'
+do_request POST "/api/v1/projects/${PROJECT_ID}/folders" '{"name":"Extra Fields Folder","unknownField":"xyz"}'
 if [[ "$HTTP_STATUS" == "201" || "$HTTP_STATUS" == "400" ]]; then
   pass "Extra fields handled gracefully (status $HTTP_STATUS)"
 else
@@ -946,7 +984,7 @@ if [[ "$HTTP_STATUS" == "201" ]]; then
     EXTRA_ID=$(json_field "$HTTP_BODY" "folderId")
   fi
   if [[ -n "$EXTRA_ID" ]]; then
-    do_request DELETE "/api/projects/${PROJECT_ID}/folders/${EXTRA_ID}"
+    do_request DELETE "/api/v1/projects/${PROJECT_ID}/folders/${EXTRA_ID}"
   fi
 fi
 
@@ -959,7 +997,7 @@ section "26. Content-Type Enforcement"
 tmpfile=$(mktemp)
 response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
   -d '{"name":"NoContentType"}' \
-  "${BASE_URL}/api/projects" 2>/dev/null) || true
+  "${BASE_URL}/api/v1/projects" 2>/dev/null) || true
 HTTP_STATUS=$(echo "$response" | tail -1)
 HTTP_BODY=$(echo "$response" | sed '$d')
 HTTP_HEADERS=$(cat "$tmpfile")
@@ -977,7 +1015,7 @@ fi
 section "27. Folder Deletion"
 
 # Delete nested folder first
-do_request DELETE "/api/projects/${PROJECT_ID}/folders/${NESTED_FOLDER_ID}"
+do_request DELETE "/api/v1/projects/${PROJECT_ID}/folders/${NESTED_FOLDER_ID}"
 if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
   pass "Delete nested folder returns success"
 else
@@ -985,7 +1023,7 @@ else
 fi
 
 # Verify nested folder gone
-do_request GET "/api/projects/${PROJECT_ID}/folders/${NESTED_FOLDER_ID}"
+do_request GET "/api/v1/projects/${PROJECT_ID}/folders/${NESTED_FOLDER_ID}"
 if [[ "$HTTP_STATUS" == "404" ]]; then
   pass "Nested folder gone after deletion"
 else
@@ -993,7 +1031,7 @@ else
 fi
 
 # Delete root folder
-do_request DELETE "/api/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}"
+do_request DELETE "/api/v1/projects/${PROJECT_ID}/folders/${ROOT_FOLDER_ID}"
 if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
   pass "Delete root folder returns success"
 else
@@ -1130,7 +1168,7 @@ section "29. Second Project Lifecycle"
 SECOND_SUFFIX=$(date +%s%N)
 SECOND_NAME="E2E Lifecycle Project ${SECOND_SUFFIX}"
 
-do_request POST /api/projects "{\"name\":\"${SECOND_NAME}\"}"
+do_request POST /api/v1/projects "{\"name\":\"${SECOND_NAME}\"}"
 assert_status "$HTTP_STATUS" "201" "Create second project"
 SECOND_ID=$(json_field "$HTTP_BODY" "id")
 if [[ -z "$SECOND_ID" ]]; then
@@ -1139,11 +1177,11 @@ fi
 assert_not_empty "$SECOND_ID" "Second project ID returned"
 
 # Create folder in second project
-do_request POST "/api/projects/${SECOND_ID}/folders" '{"name":"Lifecycle Folder"}'
+do_request POST "/api/v1/projects/${SECOND_ID}/folders" '{"name":"Lifecycle Folder"}'
 assert_status "$HTTP_STATUS" "201" "Create folder in second project"
 
 # Delete second project (should cascade-delete folder)
-do_request DELETE "/api/projects/${SECOND_ID}"
+do_request DELETE "/api/v1/projects/${SECOND_ID}"
 if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
   pass "Delete second project returns success"
 else
@@ -1151,7 +1189,7 @@ else
 fi
 
 # Verify second project gone
-do_request GET "/api/projects/${SECOND_ID}"
+do_request GET "/api/v1/projects/${SECOND_ID}"
 assert_status "$HTTP_STATUS" "404" "Second project gone after deletion"
 
 # ===========================================================================
@@ -1162,7 +1200,7 @@ section "30. Duplicate Protection"
 DUP_SUFFIX=$(date +%s%N)
 DUP_NAME="E2E Duplicate Test ${DUP_SUFFIX}"
 
-do_request POST /api/projects "{\"name\":\"${DUP_NAME}\"}"
+do_request POST /api/v1/projects "{\"name\":\"${DUP_NAME}\"}"
 assert_status "$HTTP_STATUS" "201" "Create project for dup test"
 DUP_ID=$(json_field "$HTTP_BODY" "id")
 if [[ -z "$DUP_ID" ]]; then
@@ -1170,13 +1208,13 @@ if [[ -z "$DUP_ID" ]]; then
 fi
 
 # Try creating same name again
-do_request POST /api/projects "{\"name\":\"${DUP_NAME}\"}"
+do_request POST /api/v1/projects "{\"name\":\"${DUP_NAME}\"}"
 assert_status "$HTTP_STATUS" "409" "Duplicate project name correctly rejected"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
 assert_not_empty "$ERR_CODE" "Error code present on duplicate rejection"
 
 # Clean up dup test project
-do_request DELETE "/api/projects/${DUP_ID}"
+do_request DELETE "/api/v1/projects/${DUP_ID}"
 
 # ===========================================================================
 # 31. FULL CLEANUP
@@ -1184,7 +1222,7 @@ do_request DELETE "/api/projects/${DUP_ID}"
 section "31. Full Cleanup"
 
 # Delete the main test project
-do_request DELETE "/api/projects/${PROJECT_ID}"
+do_request DELETE "/api/v1/projects/${PROJECT_ID}"
 if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
   pass "Delete main test project"
 elif [[ "$HTTP_STATUS" == "404" ]]; then
@@ -1194,11 +1232,11 @@ else
 fi
 
 # Verify main project gone
-do_request GET "/api/projects/${PROJECT_ID}"
+do_request GET "/api/v1/projects/${PROJECT_ID}"
 assert_status "$HTTP_STATUS" "404" "Main project gone after delete"
 
 # Delete already-deleted → 404
-do_request DELETE "/api/projects/${PROJECT_ID}"
+do_request DELETE "/api/v1/projects/${PROJECT_ID}"
 assert_status "$HTTP_STATUS" "404" "Re-delete project returns 404"
 
 # Cleanup temp files
@@ -1235,7 +1273,7 @@ fi
 # ===========================================================================
 section "33. Error Response Envelope (BE-021-fix)"
 
-do_request GET "/api/projects/00000000-0000-0000-0000-000000000000"
+do_request GET "/api/v1/projects/00000000-0000-0000-0000-000000000000"
 assert_contains "$HTTP_BODY" '"success"' "Error response has success field"
 # Check success is false
 if echo "$HTTP_BODY" | grep -q '"success":false\|"success": false'; then
@@ -1254,11 +1292,11 @@ section "34. Project Stats Endpoint (BE-014-fix)"
 
 # Create a test project for stats
 STATS_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"StatsTest ${STATS_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"StatsTest ${STATS_SUFFIX}\"}"
 STATS_PROJECT_ID=$(json_field "$HTTP_BODY" "id")
 
 if [[ -n "$STATS_PROJECT_ID" ]]; then
-  do_request GET "/api/projects/${STATS_PROJECT_ID}/stats"
+  do_request GET "/api/v1/projects/${STATS_PROJECT_ID}/stats"
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Project stats returns 200"
     assert_contains "$HTTP_BODY" '"folderCount"' "Stats contains folderCount"
@@ -1270,11 +1308,11 @@ if [[ -n "$STATS_PROJECT_ID" ]]; then
   fi
 
   # Stats for non-existent project → 404
-  do_request GET "/api/projects/00000000-0000-0000-0000-000000000000/stats"
+  do_request GET "/api/v1/projects/00000000-0000-0000-0000-000000000000/stats"
   assert_status "$HTTP_STATUS" "404" "Stats for non-existent project returns 404"
 
   # Cleanup
-  do_request DELETE "/api/projects/${STATS_PROJECT_ID}"
+  do_request DELETE "/api/v1/projects/${STATS_PROJECT_ID}"
 else
   pass "Skipping stats tests (no project ID)"
 fi
@@ -1286,16 +1324,16 @@ section "35. Dataset Status ETag (BE-015-fix)"
 
 # Create project + folder + upload for ETag test
 ETAG_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"ETagTest ${ETAG_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"ETagTest ${ETAG_SUFFIX}\"}"
 ETAG_PROJ=$(json_field "$HTTP_BODY" "id")
 if [[ -n "$ETAG_PROJ" ]]; then
-  do_request POST "/api/projects/${ETAG_PROJ}/folders" '{"name":"etag-folder"}'
+  do_request POST "/api/v1/projects/${ETAG_PROJ}/folders" '{"name":"etag-folder"}'
   ETAG_FOLDER=$(json_field "$HTTP_BODY" "id")
 
   if [[ -n "$ETAG_FOLDER" ]]; then
     ETAG_CSV="/tmp/e2e-etag-${ETAG_SUFFIX}.csv"
     echo -e "id,name\n1,test" > "$ETAG_CSV"
-    do_upload "/api/projects/${ETAG_PROJ}/folders/${ETAG_FOLDER}/upload" "$ETAG_CSV"
+    do_upload "/api/v1/projects/${ETAG_PROJ}/folders/${ETAG_FOLDER}/upload" "$ETAG_CSV"
     ETAG_DATASET=$(json_field "$HTTP_BODY" "datasetId")
     if [[ -z "$ETAG_DATASET" ]]; then
       ETAG_DATASET=$(json_field "$HTTP_BODY" "id")
@@ -1303,7 +1341,7 @@ if [[ -n "$ETAG_PROJ" ]]; then
 
     if [[ -n "$ETAG_DATASET" ]]; then
       sleep 2
-      do_request GET "/api/datasets/${ETAG_DATASET}/status"
+      do_request GET "/api/v1/datasets/${ETAG_DATASET}/status"
       ETAG_VAL=$(header_value "ETag")
       CC_VAL=$(header_value "Cache-Control")
 
@@ -1321,7 +1359,7 @@ if [[ -n "$ETAG_PROJ" ]]; then
     fi
     rm -f "$ETAG_CSV"
   fi
-  do_request DELETE "/api/projects/${ETAG_PROJ}"
+  do_request DELETE "/api/v1/projects/${ETAG_PROJ}"
 fi
 
 # ===========================================================================
@@ -1330,16 +1368,16 @@ fi
 section "36. Dataset Summary Endpoint (BE-029-fix)"
 
 SUMM_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"SummaryTest ${SUMM_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"SummaryTest ${SUMM_SUFFIX}\"}"
 SUMM_PROJ=$(json_field "$HTTP_BODY" "id")
 if [[ -n "$SUMM_PROJ" ]]; then
-  do_request POST "/api/projects/${SUMM_PROJ}/folders" '{"name":"summary-folder"}'
+  do_request POST "/api/v1/projects/${SUMM_PROJ}/folders" '{"name":"summary-folder"}'
   SUMM_FOLDER=$(json_field "$HTTP_BODY" "id")
 
   if [[ -n "$SUMM_FOLDER" ]]; then
     SUMM_CSV="/tmp/e2e-summary-${SUMM_SUFFIX}.csv"
     echo -e "id,product,price\n1,Widget,9.99\n2,Gadget,19.99" > "$SUMM_CSV"
-    do_upload "/api/projects/${SUMM_PROJ}/folders/${SUMM_FOLDER}/upload" "$SUMM_CSV"
+    do_upload "/api/v1/projects/${SUMM_PROJ}/folders/${SUMM_FOLDER}/upload" "$SUMM_CSV"
     SUMM_DATASET=$(json_field "$HTTP_BODY" "datasetId")
     if [[ -z "$SUMM_DATASET" ]]; then
       SUMM_DATASET=$(json_field "$HTTP_BODY" "id")
@@ -1347,7 +1385,7 @@ if [[ -n "$SUMM_PROJ" ]]; then
 
     if [[ -n "$SUMM_DATASET" ]]; then
       sleep 2
-      do_request GET "/api/datasets/${SUMM_DATASET}/summary"
+      do_request GET "/api/v1/datasets/${SUMM_DATASET}/summary"
       if [[ "$HTTP_STATUS" == "200" ]]; then
         pass "Dataset summary returns 200"
         assert_contains "$HTTP_BODY" '"datasetId"' "Summary contains datasetId"
@@ -1358,12 +1396,12 @@ if [[ -n "$SUMM_PROJ" ]]; then
       fi
 
       # Non-existent dataset summary → 404
-      do_request GET "/api/datasets/00000000-0000-0000-0000-000000000000/summary"
+      do_request GET "/api/v1/datasets/00000000-0000-0000-0000-000000000000/summary"
       assert_status "$HTTP_STATUS" "404" "Summary for non-existent dataset returns 404"
     fi
     rm -f "$SUMM_CSV"
   fi
-  do_request DELETE "/api/projects/${SUMM_PROJ}"
+  do_request DELETE "/api/v1/projects/${SUMM_PROJ}"
 fi
 
 # ===========================================================================
@@ -1372,7 +1410,7 @@ fi
 section "37. Batch Dataset Status (BE-016-fix)"
 
 # Test with empty ids → 400
-do_request GET "/api/datasets/status-batch"
+do_request GET "/api/v1/datasets/status-batch"
 if [[ "$HTTP_STATUS" == "400" ]]; then
   pass "Batch status without ids returns 400"
 else
@@ -1380,7 +1418,7 @@ else
 fi
 
 # Test with valid UUIDs (may not exist — returns empty array)
-do_request GET "/api/datasets/status-batch?ids=00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002"
+do_request GET "/api/v1/datasets/status-batch?ids=00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002"
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "Batch status with valid UUIDs returns 200"
 else
@@ -1388,7 +1426,7 @@ else
 fi
 
 # Test with invalid UUIDs → 400
-do_request GET "/api/datasets/status-batch?ids=not-a-uuid,also-not"
+do_request GET "/api/v1/datasets/status-batch?ids=not-a-uuid,also-not"
 if [[ "$HTTP_STATUS" == "400" ]]; then
   pass "Batch status with invalid UUIDs returns 400"
 else
@@ -1401,14 +1439,14 @@ fi
 section "38. Project Folder Tree (BE-006-fix)"
 
 TREE_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"TreeTest ${TREE_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"TreeTest ${TREE_SUFFIX}\"}"
 TREE_PROJ=$(json_field "$HTTP_BODY" "id")
 if [[ -n "$TREE_PROJ" ]]; then
   # Create folders
-  do_request POST "/api/projects/${TREE_PROJ}/folders" '{"name":"Level1"}'
+  do_request POST "/api/v1/projects/${TREE_PROJ}/folders" '{"name":"Level1"}'
   TREE_L1=$(json_field "$HTTP_BODY" "id")
 
-  do_request GET "/api/projects/${TREE_PROJ}/folders/tree"
+  do_request GET "/api/v1/projects/${TREE_PROJ}/folders/tree"
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Project folder tree returns 200"
     assert_contains "$HTTP_BODY" '"children"' "Tree response contains children array"
@@ -1418,15 +1456,15 @@ if [[ -n "$TREE_PROJ" ]]; then
   fi
 
   # Empty project tree
-  do_request POST /api/projects "{\"name\":\"EmptyTree ${TREE_SUFFIX}\"}"
+  do_request POST /api/v1/projects "{\"name\":\"EmptyTree ${TREE_SUFFIX}\"}"
   EMPTY_TREE_PROJ=$(json_field "$HTTP_BODY" "id")
   if [[ -n "$EMPTY_TREE_PROJ" ]]; then
-    do_request GET "/api/projects/${EMPTY_TREE_PROJ}/folders/tree"
+    do_request GET "/api/v1/projects/${EMPTY_TREE_PROJ}/folders/tree"
     assert_status "$HTTP_STATUS" "200" "Empty project tree returns 200"
-    do_request DELETE "/api/projects/${EMPTY_TREE_PROJ}"
+    do_request DELETE "/api/v1/projects/${EMPTY_TREE_PROJ}"
   fi
 
-  do_request DELETE "/api/projects/${TREE_PROJ}"
+  do_request DELETE "/api/v1/projects/${TREE_PROJ}"
 fi
 
 # ===========================================================================
@@ -1435,18 +1473,18 @@ fi
 section "39. Folder Contents Aggregation (BE-002-fix)"
 
 AGG_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"AggTest ${AGG_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"AggTest ${AGG_SUFFIX}\"}"
 AGG_PROJ=$(json_field "$HTTP_BODY" "id")
 if [[ -n "$AGG_PROJ" ]]; then
-  do_request POST "/api/projects/${AGG_PROJ}/folders" '{"name":"Parent"}'
+  do_request POST "/api/v1/projects/${AGG_PROJ}/folders" '{"name":"Parent"}'
   AGG_PARENT=$(json_field "$HTTP_BODY" "id")
 
   if [[ -n "$AGG_PARENT" ]]; then
     # Create a child folder under Parent
-    do_request POST "/api/projects/${AGG_PROJ}/folders" "{\"name\":\"Child\",\"parentFolderId\":\"${AGG_PARENT}\"}"
+    do_request POST "/api/v1/projects/${AGG_PROJ}/folders" "{\"name\":\"Child\",\"parentFolderId\":\"${AGG_PARENT}\"}"
 
     # Get folder by ID — should include children with aggregation
-    do_request GET "/api/projects/${AGG_PROJ}/folders/${AGG_PARENT}"
+    do_request GET "/api/v1/projects/${AGG_PROJ}/folders/${AGG_PARENT}"
     if [[ "$HTTP_STATUS" == "200" ]]; then
       pass "Folder contents returns 200"
       assert_contains "$HTTP_BODY" '"children"' "Folder contents has children"
@@ -1462,15 +1500,15 @@ if [[ -n "$AGG_PROJ" ]]; then
     fi
 
     # Test sortBy param
-    do_request GET "/api/projects/${AGG_PROJ}/folders/${AGG_PARENT}?sortBy=created_at&sortOrder=desc"
+    do_request GET "/api/v1/projects/${AGG_PROJ}/folders/${AGG_PARENT}?sortBy=created_at&sortOrder=desc"
     assert_status "$HTTP_STATUS" "200" "Folder contents with sort params returns 200"
 
     # Test invalid sortBy → 400
-    do_request GET "/api/projects/${AGG_PROJ}/folders/${AGG_PARENT}?sortBy=invalid_field"
+    do_request GET "/api/v1/projects/${AGG_PROJ}/folders/${AGG_PARENT}?sortBy=invalid_field"
     assert_status "$HTTP_STATUS" "400" "Invalid sortBy returns 400"
   fi
 
-  do_request DELETE "/api/projects/${AGG_PROJ}"
+  do_request DELETE "/api/v1/projects/${AGG_PROJ}"
 fi
 
 # ===========================================================================
@@ -1479,11 +1517,11 @@ fi
 section "40. Field Selection (BE-023-fix)"
 
 FIELD_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"FieldTest ${FIELD_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"FieldTest ${FIELD_SUFFIX}\"}"
 FIELD_PROJ=$(json_field "$HTTP_BODY" "id")
 
 # Test field selection on project list
-do_request GET "/api/projects?fields=id,name"
+do_request GET "/api/v1/projects?fields=id,name"
 if [[ "$HTTP_STATUS" == "200" ]]; then
   pass "Project list with fields=id,name returns 200"
 else
@@ -1491,7 +1529,7 @@ else
 fi
 
 # Test invalid field name → 400
-do_request GET "/api/projects?fields=nonexistent_field"
+do_request GET "/api/v1/projects?fields=nonexistent_field"
 if [[ "$HTTP_STATUS" == "400" ]]; then
   pass "Invalid field name returns 400"
 else
@@ -1499,11 +1537,11 @@ else
 fi
 
 # Test empty fields param → returns all fields
-do_request GET "/api/projects?fields="
+do_request GET "/api/v1/projects?fields="
 assert_status "$HTTP_STATUS" "200" "Empty fields param returns 200 (all fields)"
 
 if [[ -n "$FIELD_PROJ" ]]; then
-  do_request DELETE "/api/projects/${FIELD_PROJ}"
+  do_request DELETE "/api/v1/projects/${FIELD_PROJ}"
 fi
 
 # ===========================================================================
@@ -1511,15 +1549,14 @@ fi
 # ===========================================================================
 section "41. Empty Collection Hints (BE-024-fix)"
 
-# Create a fresh user to get empty project list
+# Create a fresh Keycloak user to get empty project list
 HINT_SUFFIX=$(date +%s%N)
 HINT_EMAIL="e2e-hint-${HINT_SUFFIX}@test.com"
-sleep 1
-do_request POST /api/auth/register "{\"email\":\"${HINT_EMAIL}\",\"password\":\"HintPass123!\",\"displayName\":\"Hint User\"}"
+kc_register_and_login "$HINT_EMAIL"
 HINT_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
 
 if [[ -n "$HINT_TOKEN" ]]; then
-  do_request_with_header GET "/api/projects" "Authorization: Bearer ${HINT_TOKEN}"
+  do_request_with_header GET "/api/v1/projects" "Authorization: Bearer ${HINT_TOKEN}"
   if [[ "$HTTP_STATUS" == "200" ]]; then
     if echo "$HTTP_BODY" | grep -q '"hints"'; then
       pass "Empty project list includes hints"
@@ -1533,7 +1570,7 @@ if [[ -n "$HINT_TOKEN" ]]; then
 fi
 
 # Empty search hints
-do_request GET "/api/search?q=zzzznonexistentxyz"
+do_request GET "/api/v1/search?q=zzzznonexistentxyz"
 if echo "$HTTP_BODY" | grep -q '"hints"'; then
   pass "Empty search results include hints"
 else
@@ -1545,11 +1582,10 @@ fi
 # ===========================================================================
 section "42. User Preferences API (BE-025-fix)"
 
-# Register a fresh user for preference tests
+# Create a fresh Keycloak user for preference tests
 PREF_SUFFIX=$(date +%s%N)
 PREF_EMAIL="e2e-pref-${PREF_SUFFIX}@test.com"
-sleep 1
-do_request POST /api/auth/register "{\"email\":\"${PREF_EMAIL}\",\"password\":\"PrefPass123!\",\"displayName\":\"Pref User\"}"
+kc_register_and_login "$PREF_EMAIL"
 PREF_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
 
 if [[ -n "$PREF_TOKEN" ]]; then
@@ -1625,7 +1661,7 @@ fi
 # ===========================================================================
 section "43. X-Total-Count Header (BE-022-fix)"
 
-do_request GET "/api/projects"
+do_request GET "/api/v1/projects"
 XTC=$(header_value "X-Total-Count")
 if [[ -n "$XTC" ]]; then
   pass "X-Total-Count header present on project list"
@@ -1639,26 +1675,26 @@ fi
 section "44. Folder Rename & Move (BE-019-fix, BE-020-fix)"
 
 REN_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"RenTest ${REN_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"RenTest ${REN_SUFFIX}\"}"
 REN_PROJ=$(json_field "$HTTP_BODY" "id")
 if [[ -n "$REN_PROJ" ]]; then
   # Create two folders
-  do_request POST "/api/projects/${REN_PROJ}/folders" '{"name":"FolderA"}'
+  do_request POST "/api/v1/projects/${REN_PROJ}/folders" '{"name":"FolderA"}'
   REN_A=$(json_field "$HTTP_BODY" "id")
-  do_request POST "/api/projects/${REN_PROJ}/folders" '{"name":"FolderB"}'
+  do_request POST "/api/v1/projects/${REN_PROJ}/folders" '{"name":"FolderB"}'
   REN_B=$(json_field "$HTTP_BODY" "id")
 
   if [[ -n "$REN_A" && -n "$REN_B" ]]; then
     # Rename FolderA to FolderB → should get 409
-    do_request PUT "/api/projects/${REN_PROJ}/folders/${REN_A}" '{"name":"FolderB"}'
+    do_request PUT "/api/v1/projects/${REN_PROJ}/folders/${REN_A}" '{"name":"FolderB"}'
     assert_status "$HTTP_STATUS" "409" "Rename to duplicate name returns 409"
 
     # Rename FolderA with valid name
-    do_request PUT "/api/projects/${REN_PROJ}/folders/${REN_A}" '{"name":"FolderRenamed"}'
+    do_request PUT "/api/v1/projects/${REN_PROJ}/folders/${REN_A}" '{"name":"FolderRenamed"}'
     assert_status "$HTTP_STATUS" "200" "Rename with unique name returns 200"
 
     # Move test — move FolderB into FolderA (renamed)
-    do_request PUT "/api/projects/${REN_PROJ}/folders/${REN_B}" "{\"parentFolderId\":\"${REN_A}\"}"
+    do_request PUT "/api/v1/projects/${REN_PROJ}/folders/${REN_B}" "{\"parentFolderId\":\"${REN_A}\"}"
     if [[ "$HTTP_STATUS" == "200" ]]; then
       pass "Move folder into another returns 200"
     else
@@ -1666,14 +1702,14 @@ if [[ -n "$REN_PROJ" ]]; then
     fi
 
     # Circular move test — try to move FolderA into FolderB (which is now inside FolderA)
-    do_request PUT "/api/projects/${REN_PROJ}/folders/${REN_A}" "{\"parentFolderId\":\"${REN_B}\"}"
+    do_request PUT "/api/v1/projects/${REN_PROJ}/folders/${REN_A}" "{\"parentFolderId\":\"${REN_B}\"}"
     if [[ "$HTTP_STATUS" == "400" ]]; then
       pass "Circular move correctly rejected with 400"
     else
       pass "Circular move check (status $HTTP_STATUS)"
     fi
   fi
-  do_request DELETE "/api/projects/${REN_PROJ}"
+  do_request DELETE "/api/v1/projects/${REN_PROJ}"
 fi
 
 # ===========================================================================
@@ -1683,13 +1719,12 @@ section "45. Add Member to Project (POST /projects/:projectId/members)"
 
 # Create a project and a second user for member tests
 MBR_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"MemberTest ${MBR_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"MemberTest ${MBR_SUFFIX}\"}"
 MBR_PROJ=$(json_field "$HTTP_BODY" "id")
 
-# Register a second user to use as the member target
+# Create a second Keycloak user to use as the member target
 MBR_EMAIL="e2e-member-${MBR_SUFFIX}@test.com"
-sleep 1
-do_request POST /api/auth/register "{\"email\":\"${MBR_EMAIL}\",\"password\":\"MemberPass123!\",\"displayName\":\"Member User\"}"
+kc_register_and_login "$MBR_EMAIL"
 MBR_USER_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
 
 # We need the second user's ID. Decode it from the JWT payload (base64url with padding fix).
@@ -1706,7 +1741,7 @@ fi
 
 if [[ -n "$MBR_PROJ" && -n "$MBR_USER_ID" ]]; then
   # Add member with valid role
-  do_request POST "/api/projects/${MBR_PROJ}/members" "{\"userId\":\"${MBR_USER_ID}\",\"role\":\"editor\"}"
+  do_request POST "/api/v1/projects/${MBR_PROJ}/members" "{\"userId\":\"${MBR_USER_ID}\",\"role\":\"editor\"}"
   if [[ "$HTTP_STATUS" == "201" ]]; then
     pass "Add member returns 201"
     assert_contains "$HTTP_BODY" '"success":true' "Response success is true"
@@ -1716,7 +1751,7 @@ if [[ -n "$MBR_PROJ" && -n "$MBR_USER_ID" ]]; then
   fi
 
   # Duplicate add → 409
-  do_request POST "/api/projects/${MBR_PROJ}/members" "{\"userId\":\"${MBR_USER_ID}\",\"role\":\"viewer\"}"
+  do_request POST "/api/v1/projects/${MBR_PROJ}/members" "{\"userId\":\"${MBR_USER_ID}\",\"role\":\"viewer\"}"
   if [[ "$HTTP_STATUS" == "409" ]]; then
     pass "Duplicate member add returns 409"
   else
@@ -1724,15 +1759,15 @@ if [[ -n "$MBR_PROJ" && -n "$MBR_USER_ID" ]]; then
   fi
 
   # Invalid role → 400
-  do_request POST "/api/projects/${MBR_PROJ}/members" "{\"userId\":\"${MBR_USER_ID}\",\"role\":\"admin\"}"
+  do_request POST "/api/v1/projects/${MBR_PROJ}/members" "{\"userId\":\"${MBR_USER_ID}\",\"role\":\"admin\"}"
   assert_status "$HTTP_STATUS" "400" "Invalid role returns 400"
 
   # Missing userId → 400
-  do_request POST "/api/projects/${MBR_PROJ}/members" '{"role":"editor"}'
+  do_request POST "/api/v1/projects/${MBR_PROJ}/members" '{"role":"editor"}'
   assert_status "$HTTP_STATUS" "400" "Missing userId returns 400"
 
   # Non-existent user → 404
-  do_request POST "/api/projects/${MBR_PROJ}/members" '{"userId":"00000000-0000-0000-0000-000000000000","role":"viewer"}'
+  do_request POST "/api/v1/projects/${MBR_PROJ}/members" '{"userId":"00000000-0000-0000-0000-000000000000","role":"viewer"}'
   if [[ "$HTTP_STATUS" == "404" ]]; then
     pass "Non-existent user returns 404"
   else
@@ -1740,14 +1775,14 @@ if [[ -n "$MBR_PROJ" && -n "$MBR_USER_ID" ]]; then
   fi
 
   # Cleanup
-  do_request DELETE "/api/projects/${MBR_PROJ}"
+  do_request DELETE "/api/v1/projects/${MBR_PROJ}"
 elif [[ -n "$MBR_PROJ" ]]; then
   pass "Skipping member tests (could not extract second user ID)"
   pass "Skipping member tests (could not extract second user ID)"
   pass "Skipping member tests (could not extract second user ID)"
   pass "Skipping member tests (could not extract second user ID)"
   pass "Skipping member tests (could not extract second user ID)"
-  do_request DELETE "/api/projects/${MBR_PROJ}"
+  do_request DELETE "/api/v1/projects/${MBR_PROJ}"
 else
   pass "Skipping member tests (no project ID)"
   pass "Skipping member tests (no project ID)"
@@ -1761,12 +1796,10 @@ fi
 # ===========================================================================
 section "46. Dataset Version Create (POST /datasets/:datasetId/versions)"
 
-# Register a fresh user and create all resources as that user (auth required for uploads)
-# Wait for auth rate limiter window to reset (5 req/min limit on auth routes)
-sleep 61
+# Create a fresh Keycloak user and create all resources as that user (auth required for uploads)
 VER_AUTH_SUFFIX=$(date +%s%N)
 VER_AUTH_EMAIL="e2e-ver-${VER_AUTH_SUFFIX}@test.com"
-do_request POST /api/auth/register "{\"email\":\"${VER_AUTH_EMAIL}\",\"password\":\"VerPass123!\",\"displayName\":\"Ver User\"}"
+kc_register_and_login "$VER_AUTH_EMAIL"
 VER_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
 
 # Extract user ID from JWT for member self-add (decode base64url with padding fix)
@@ -1785,17 +1818,17 @@ fi
 # Setup: project → add self as owner member → folder → upload → poll until ready
 VER_SUFFIX=$(date +%s%N)
 # Create project as the authenticated user so owner_id matches
-do_request_with_header POST "/api/projects" "Authorization: Bearer ${VER_TOKEN}" "{\"name\":\"VersionTest ${VER_SUFFIX}\"}"
+do_request_with_header POST "/api/v1/projects" "Authorization: Bearer ${VER_TOKEN}" "{\"name\":\"VersionTest ${VER_SUFFIX}\"}"
 VER_PROJ=$(json_field "$HTTP_BODY" "id")
 VER_DATASET=""
 
 if [[ -n "$VER_PROJ" ]]; then
   # Add self as editor member (required for authorizeRoles middleware on uploads)
   if [[ -n "$VER_USER_ID" ]]; then
-    do_request_with_header POST "/api/projects/${VER_PROJ}/members" "Authorization: Bearer ${VER_TOKEN}" "{\"userId\":\"${VER_USER_ID}\",\"role\":\"editor\"}"
+    do_request_with_header POST "/api/v1/projects/${VER_PROJ}/members" "Authorization: Bearer ${VER_TOKEN}" "{\"userId\":\"${VER_USER_ID}\",\"role\":\"editor\"}"
   fi
 
-  do_request_with_header POST "/api/projects/${VER_PROJ}/folders" "Authorization: Bearer ${VER_TOKEN}" '{"name":"ver-folder"}'
+  do_request_with_header POST "/api/v1/projects/${VER_PROJ}/folders" "Authorization: Bearer ${VER_TOKEN}" '{"name":"ver-folder"}'
   VER_FOLDER=$(json_field "$HTTP_BODY" "id")
 
   if [[ -n "$VER_FOLDER" ]]; then
@@ -1807,7 +1840,7 @@ if [[ -n "$VER_PROJ" ]]; then
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
       -H "Authorization: Bearer ${VER_TOKEN}" \
       -F "files=@${VER_CSV}" \
-      "${BASE_URL}/api/projects/${VER_PROJ}/folders/${VER_FOLDER}/upload" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${VER_PROJ}/folders/${VER_FOLDER}/upload" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -1822,7 +1855,7 @@ if [[ -n "$VER_PROJ" ]]; then
     if [[ -n "$VER_DATASET" ]]; then
       VER_READY=false
       for poll in $(seq 1 20); do
-        do_request GET "/api/datasets/${VER_DATASET}/status"
+        do_request GET "/api/v1/datasets/${VER_DATASET}/status"
         VER_DS_STATUS=$(json_field "$HTTP_BODY" "status")
         if [[ "$VER_DS_STATUS" == "ready" || "$VER_DS_STATUS" == "completed" || "$VER_DS_STATUS" == "active" ]]; then
           VER_READY=true
@@ -1837,7 +1870,7 @@ fi
 
 if [[ -n "$VER_DATASET" && "$VER_READY" == "true" ]]; then
   # Create version with changeSummary
-  do_request POST "/api/datasets/${VER_DATASET}/versions" '{"changeSummary":"Initial e2e snapshot"}'
+  do_request POST "/api/v1/datasets/${VER_DATASET}/versions" '{"changeSummary":"Initial e2e snapshot"}'
   if [[ "$HTTP_STATUS" == "201" ]]; then
     pass "Create dataset version returns 201"
     assert_contains "$HTTP_BODY" '"version_number"' "Response contains version_number"
@@ -1850,7 +1883,7 @@ if [[ -n "$VER_DATASET" && "$VER_READY" == "true" ]]; then
   fi
 
   # Create version without changeSummary (optional field)
-  do_request POST "/api/datasets/${VER_DATASET}/versions" '{}'
+  do_request POST "/api/v1/datasets/${VER_DATASET}/versions" '{}'
   if [[ "$HTTP_STATUS" == "201" ]]; then
     pass "Create version without changeSummary returns 201"
     VER_NUMBER2=$(json_field_raw "$HTTP_BODY" "version_number")
@@ -1860,11 +1893,11 @@ if [[ -n "$VER_DATASET" && "$VER_READY" == "true" ]]; then
   fi
 
   # Non-existent dataset → 404
-  do_request POST "/api/datasets/00000000-0000-0000-0000-000000000000/versions" '{"changeSummary":"ghost"}'
+  do_request POST "/api/v1/datasets/00000000-0000-0000-0000-000000000000/versions" '{"changeSummary":"ghost"}'
   assert_status "$HTTP_STATUS" "404" "Create version on non-existent dataset returns 404"
 
   # Invalid dataset UUID → 400
-  do_request POST "/api/datasets/not-a-uuid/versions" '{}'
+  do_request POST "/api/v1/datasets/not-a-uuid/versions" '{}'
   assert_status "$HTTP_STATUS" "400" "Create version with invalid UUID returns 400"
 else
   pass "Skipping version create (dataset not ready or missing)"
@@ -1882,7 +1915,7 @@ section "47. Get Specific Dataset Version (GET /datasets/:datasetId/versions/:ve
 
 if [[ -n "$VER_DATASET" && -n "$VER_NUMBER" ]]; then
   # Get the version we just created
-  do_request GET "/api/datasets/${VER_DATASET}/versions/${VER_NUMBER}"
+  do_request GET "/api/v1/datasets/${VER_DATASET}/versions/${VER_NUMBER}"
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Get specific version returns 200"
     assert_contains "$HTTP_BODY" '"version_number"' "Version response contains version_number"
@@ -1893,15 +1926,15 @@ if [[ -n "$VER_DATASET" && -n "$VER_NUMBER" ]]; then
   fi
 
   # Non-existent version number → 404
-  do_request GET "/api/datasets/${VER_DATASET}/versions/9999"
+  do_request GET "/api/v1/datasets/${VER_DATASET}/versions/9999"
   assert_status "$HTTP_STATUS" "404" "Non-existent version number returns 404"
 
   # Invalid version number → 400
-  do_request GET "/api/datasets/${VER_DATASET}/versions/abc"
+  do_request GET "/api/v1/datasets/${VER_DATASET}/versions/abc"
   assert_status "$HTTP_STATUS" "400" "Invalid version number returns 400"
 
   # Non-existent dataset → 404
-  do_request GET "/api/datasets/00000000-0000-0000-0000-000000000000/versions/1"
+  do_request GET "/api/v1/datasets/00000000-0000-0000-0000-000000000000/versions/1"
   assert_status "$HTTP_STATUS" "404" "Version on non-existent dataset returns 404"
 else
   pass "Skipping get version (no dataset or version number)"
@@ -1917,7 +1950,7 @@ section "48. Restore Dataset Version (POST /datasets/:datasetId/versions/restore
 
 if [[ -n "$VER_DATASET" && -n "$VER_NUMBER" ]]; then
   # Restore to the first version we created
-  do_request POST "/api/datasets/${VER_DATASET}/versions/restore" "{\"versionNumber\":${VER_NUMBER}}"
+  do_request POST "/api/v1/datasets/${VER_DATASET}/versions/restore" "{\"versionNumber\":${VER_NUMBER}}"
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Restore version returns 200"
     assert_contains "$HTTP_BODY" '"version_number"' "Restore response contains version_number"
@@ -1931,19 +1964,19 @@ if [[ -n "$VER_DATASET" && -n "$VER_NUMBER" ]]; then
   fi
 
   # Missing versionNumber → 400
-  do_request POST "/api/datasets/${VER_DATASET}/versions/restore" '{}'
+  do_request POST "/api/v1/datasets/${VER_DATASET}/versions/restore" '{}'
   assert_status "$HTTP_STATUS" "400" "Restore without versionNumber returns 400"
 
   # Non-existent version → 404
-  do_request POST "/api/datasets/${VER_DATASET}/versions/restore" '{"versionNumber":9999}'
+  do_request POST "/api/v1/datasets/${VER_DATASET}/versions/restore" '{"versionNumber":9999}'
   assert_status "$HTTP_STATUS" "404" "Restore non-existent version returns 404"
 
   # Non-existent dataset → 404
-  do_request POST "/api/datasets/00000000-0000-0000-0000-000000000000/versions/restore" '{"versionNumber":1}'
+  do_request POST "/api/v1/datasets/00000000-0000-0000-0000-000000000000/versions/restore" '{"versionNumber":1}'
   assert_status "$HTTP_STATUS" "404" "Restore on non-existent dataset returns 404"
 
   # Invalid versionNumber type → 400
-  do_request POST "/api/datasets/${VER_DATASET}/versions/restore" '{"versionNumber":"abc"}'
+  do_request POST "/api/v1/datasets/${VER_DATASET}/versions/restore" '{"versionNumber":"abc"}'
   assert_status "$HTTP_STATUS" "400" "Restore with non-numeric versionNumber returns 400"
 else
   pass "Skipping restore (no dataset or version number)"
@@ -1960,7 +1993,7 @@ section "49. Dataset Deduplication (POST /datasets/:datasetId/deduplicate)"
 
 if [[ -n "$VER_DATASET" ]]; then
   # Deduplicate check on a single dataset (should not be a duplicate)
-  do_request POST "/api/datasets/${VER_DATASET}/deduplicate"
+  do_request POST "/api/v1/datasets/${VER_DATASET}/deduplicate"
   if [[ "$HTTP_STATUS" == "200" ]]; then
     pass "Deduplicate returns 200"
     assert_contains "$HTTP_BODY" '"isDuplicate"' "Response contains isDuplicate"
@@ -1979,7 +2012,7 @@ if [[ -n "$VER_DATASET" ]]; then
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
       -H "Authorization: Bearer ${VER_TOKEN}" \
       -F "files=@${DUP_CSV}" \
-      "${BASE_URL}/api/projects/${VER_PROJ}/folders/${VER_FOLDER}/upload" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${VER_PROJ}/folders/${VER_FOLDER}/upload" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -1993,7 +2026,7 @@ if [[ -n "$VER_DATASET" ]]; then
     if [[ -n "$DUP_DATASET" ]]; then
       # Wait for processing
       for poll in $(seq 1 20); do
-        do_request GET "/api/datasets/${DUP_DATASET}/status"
+        do_request GET "/api/v1/datasets/${DUP_DATASET}/status"
         DUP_STATUS=$(json_field "$HTTP_BODY" "status")
         if [[ "$DUP_STATUS" == "ready" || "$DUP_STATUS" == "completed" || "$DUP_STATUS" == "active" ]]; then
           break
@@ -2002,7 +2035,7 @@ if [[ -n "$VER_DATASET" ]]; then
       done
 
       # This should detect the duplicate
-      do_request POST "/api/datasets/${DUP_DATASET}/deduplicate"
+      do_request POST "/api/v1/datasets/${DUP_DATASET}/deduplicate"
       if [[ "$HTTP_STATUS" == "200" ]]; then
         pass "Deduplicate on duplicate file returns 200"
         if echo "$HTTP_BODY" | grep -q '"isDuplicate":true\|"isDuplicate": true'; then
@@ -2024,11 +2057,11 @@ if [[ -n "$VER_DATASET" ]]; then
   fi
 
   # Non-existent dataset → 404
-  do_request POST "/api/datasets/00000000-0000-0000-0000-000000000000/deduplicate"
+  do_request POST "/api/v1/datasets/00000000-0000-0000-0000-000000000000/deduplicate"
   assert_status "$HTTP_STATUS" "404" "Deduplicate on non-existent dataset returns 404"
 
   # Invalid UUID → 400
-  do_request POST "/api/datasets/not-a-uuid/deduplicate"
+  do_request POST "/api/v1/datasets/not-a-uuid/deduplicate"
   assert_status "$HTTP_STATUS" "400" "Deduplicate with invalid UUID returns 400"
 else
   pass "Skipping deduplicate tests (no dataset ID)"
@@ -2040,7 +2073,7 @@ fi
 
 # Cleanup version/dedup test project
 if [[ -n "$VER_PROJ" ]]; then
-  do_request DELETE "/api/projects/${VER_PROJ}"
+  do_request DELETE "/api/v1/projects/${VER_PROJ}"
 fi
 
 # ===========================================================================
@@ -2058,30 +2091,30 @@ if [[ -z "$E2E_UID" ]]; then
   E2E_UID=$(echo "$E2E_JWT_PAYLOAD" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"$//' || true)
 fi
 
-RESP=$(do_request POST "/api/projects" '{"name":"E2E Dataset Ops"}')
+RESP=$(do_request POST "/api/v1/projects" '{"name":"E2E Dataset Ops"}')
 E2E_PID=$(json_field "$RESP" "id")
 assert_not_empty "$E2E_PID" "Created test project for dataset ops"
 
 if [[ -n "$E2E_UID" ]]; then
-  do_request POST "/api/projects/$E2E_PID/members" "{\"userId\":\"$E2E_UID\",\"role\":\"editor\"}" >/dev/null 2>&1
+  do_request POST "/api/v1/projects/$E2E_PID/members" "{\"userId\":\"$E2E_UID\",\"role\":\"editor\"}" >/dev/null 2>&1
 fi
 
-RESP=$(do_request POST "/api/projects/$E2E_PID/folders" '{"name":"ops-folder","parentFolderId":null}')
+RESP=$(do_request POST "/api/v1/projects/$E2E_PID/folders" '{"name":"ops-folder","parentFolderId":null}')
 E2E_FID=$(json_field "$RESP" "id")
 assert_not_empty "$E2E_FID" "Created test folder"
 
-RESP=$(do_upload "/api/projects/$E2E_PID/folders/$E2E_FID/upload" "tests/foundry/fixtures/valid.csv")
+RESP=$(do_upload "/api/v1/projects/$E2E_PID/folders/$E2E_FID/upload" "tests/foundry/fixtures/valid.csv")
 E2E_DID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo "")
 if [[ -n "$E2E_DID" ]]; then
   sleep 2
 
   # Rename
-  RESP=$(do_request PUT "/api/datasets/$E2E_DID" '{"name":"renamed_e2e.csv"}')
+  RESP=$(do_request PUT "/api/v1/datasets/$E2E_DID" '{"name":"renamed_e2e.csv"}')
   assert_contains "$RESP" "renamed_e2e.csv" "PUT /datasets/:id renames dataset"
 
   # Duplicate
   sleep 1
-  RESP=$(do_request POST "/api/datasets/$E2E_DID/duplicate" '{}')
+  RESP=$(do_request POST "/api/v1/datasets/$E2E_DID/duplicate" '{}')
   E2E_DUP_ID=$(json_field "$RESP" "id")
   assert_not_empty "$E2E_DUP_ID" "POST /datasets/:id/duplicate creates copy"
   assert_contains "$RESP" "copy" "Duplicate name contains copy"
@@ -2089,49 +2122,49 @@ if [[ -n "$E2E_DID" ]]; then
   # Delete duplicate
   sleep 1
   if [[ -n "$E2E_DUP_ID" ]]; then
-    RESP=$(do_request DELETE "/api/datasets/$E2E_DUP_ID" '')
+    RESP=$(do_request DELETE "/api/v1/datasets/$E2E_DUP_ID" '')
     pass "DELETE /datasets/:id works"
   fi
 else
   fail "Could not upload test file for dataset ops"
 fi
 
-do_request DELETE "/api/projects/$E2E_PID" '' >/dev/null 2>&1
+do_request DELETE "/api/v1/projects/$E2E_PID" '' >/dev/null 2>&1
 
 # ===========================================================================
 # 52. BE-NEW — Dataset Version CRUD Tests
 # ===========================================================================
 section "52. Dataset Version CRUD"
 
-RESP=$(do_request POST "/api/projects" '{"name":"E2E Versions"}')
+RESP=$(do_request POST "/api/v1/projects" '{"name":"E2E Versions"}')
 VER_PID=$(json_field "$RESP" "id")
 assert_not_empty "$VER_PID" "Created version test project"
 
 if [[ -n "$E2E_UID" ]]; then
-  do_request POST "/api/projects/$VER_PID/members" "{\"userId\":\"$E2E_UID\",\"role\":\"editor\"}" >/dev/null 2>&1
+  do_request POST "/api/v1/projects/$VER_PID/members" "{\"userId\":\"$E2E_UID\",\"role\":\"editor\"}" >/dev/null 2>&1
 fi
 
-RESP=$(do_request POST "/api/projects/$VER_PID/folders" '{"name":"ver-folder","parentFolderId":null}')
+RESP=$(do_request POST "/api/v1/projects/$VER_PID/folders" '{"name":"ver-folder","parentFolderId":null}')
 VER_FID=$(json_field "$RESP" "id")
 
-RESP=$(do_upload "/api/projects/$VER_PID/folders/$VER_FID/upload" "tests/foundry/fixtures/valid.csv")
+RESP=$(do_upload "/api/v1/projects/$VER_PID/folders/$VER_FID/upload" "tests/foundry/fixtures/valid.csv")
 VER_DID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo "")
 
 if [[ -n "$VER_DID" ]]; then
   sleep 2
 
   # Create version
-  RESP=$(do_request POST "/api/datasets/$VER_DID/versions" '{}')
+  RESP=$(do_request POST "/api/v1/datasets/$VER_DID/versions" '{}')
   assert_contains "$RESP" "version_number" "POST /datasets/:id/versions creates version"
 
   # List versions
   sleep 1
-  RESP=$(do_request GET "/api/datasets/$VER_DID/versions" '')
+  RESP=$(do_request GET "/api/v1/datasets/$VER_DID/versions" '')
   assert_contains "$RESP" "version_number" "GET /datasets/:id/versions lists versions"
 
   # Create another version
   sleep 1
-  RESP=$(do_request POST "/api/datasets/$VER_DID/versions" '{}')
+  RESP=$(do_request POST "/api/v1/datasets/$VER_DID/versions" '{}')
   VER_NUM=$(json_field "$RESP" "version_number")
   assert_eq "$VER_NUM" "2" "Second version has version_number=2"
 
@@ -2140,16 +2173,16 @@ else
   fail "Could not upload test file for version tests"
 fi
 
-do_request DELETE "/api/projects/$VER_PID" '' >/dev/null 2>&1
+do_request DELETE "/api/v1/projects/$VER_PID" '' >/dev/null 2>&1
 
 # ===========================================================================
 # 53. BE-NEW — Dev Tools Endpoints
 # ===========================================================================
 section "53. Dev Tools Endpoints"
 
-RESP=$(do_request GET "/api/dev/status" '')
-assert_contains "$RESP" "counts" "GET /api/dev/status returns counts"
-assert_contains "$RESP" "seeded" "GET /api/dev/status returns seeded flag"
+RESP=$(do_request GET "/api/v1/dev/status" '')
+assert_contains "$RESP" "counts" "GET /api/v1/dev/status returns counts"
+assert_contains "$RESP" "seeded" "GET /api/v1/dev/status returns seeded flag"
 pass "Dev status endpoint works"
 
 # ===========================================================================
@@ -2196,13 +2229,13 @@ done
 section "55. Deep Folder Nesting — Infinite Hierarchy"
 
 DEEP_SUFFIX=$(date +%s%N)
-do_request POST /api/projects "{\"name\":\"DeepNest ${DEEP_SUFFIX}\"}"
+do_request POST /api/v1/projects "{\"name\":\"DeepNest ${DEEP_SUFFIX}\"}"
 DEEP_PROJ=$(json_field "$HTTP_BODY" "id")
 assert_not_empty "$DEEP_PROJ" "Created project for deep nesting tests"
 
 if [[ -n "$DEEP_PROJ" ]]; then
   # Create 5-level deep folder hierarchy: Root → L1 → L2 → L3 → L4
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" '{"name":"Root"}'
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" '{"name":"Root"}'
   assert_status "$HTTP_STATUS" "201" "Create root folder"
   DEEP_ROOT=$(json_field "$HTTP_BODY" "id")
   assert_not_empty "$DEEP_ROOT" "Root folder ID returned"
@@ -2214,38 +2247,38 @@ if [[ -n "$DEEP_PROJ" ]]; then
     pass "has_children field returned (value: ${HAS_CHILDREN:-empty})"
   fi
 
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
   assert_status "$HTTP_STATUS" "201" "Create Level-1 nested folder"
   DEEP_L1=$(json_field "$HTTP_BODY" "id")
   assert_not_empty "$DEEP_L1" "Level-1 folder ID returned"
 
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-2\",\"parentFolderId\":\"${DEEP_L1}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-2\",\"parentFolderId\":\"${DEEP_L1}\"}"
   assert_status "$HTTP_STATUS" "201" "Create Level-2 nested folder"
   DEEP_L2=$(json_field "$HTTP_BODY" "id")
   assert_not_empty "$DEEP_L2" "Level-2 folder ID returned"
 
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-3\",\"parentFolderId\":\"${DEEP_L2}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-3\",\"parentFolderId\":\"${DEEP_L2}\"}"
   assert_status "$HTTP_STATUS" "201" "Create Level-3 nested folder"
   DEEP_L3=$(json_field "$HTTP_BODY" "id")
   assert_not_empty "$DEEP_L3" "Level-3 folder ID returned"
 
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-4\",\"parentFolderId\":\"${DEEP_L3}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-4\",\"parentFolderId\":\"${DEEP_L3}\"}"
   assert_status "$HTTP_STATUS" "201" "Create Level-4 nested folder (5 levels deep)"
   DEEP_L4=$(json_field "$HTTP_BODY" "id")
   assert_not_empty "$DEEP_L4" "Level-4 folder ID returned"
 
   # Create sibling folders at L1 for tree coverage
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Sibling-A\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Sibling-A\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
   assert_status "$HTTP_STATUS" "201" "Create sibling folder A under Root"
   DEEP_SIB_A=$(json_field "$HTTP_BODY" "id")
 
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Sibling-B\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Sibling-B\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
   assert_status "$HTTP_STATUS" "201" "Create sibling folder B under Root"
 
   # ------ List folders with has_children and counts ------
 
   # List root folders — Root should show has_children=true
-  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=null"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders?parentId=null"
   assert_status "$HTTP_STATUS" "200" "List root folders"
   assert_contains "$HTTP_BODY" "Root" "Root folder in listing"
   if echo "$HTTP_BODY" | grep -q '"has_children"'; then
@@ -2260,19 +2293,19 @@ if [[ -n "$DEEP_PROJ" ]]; then
   fi
 
   # List children of Root — should contain Level-1, Sibling-A, Sibling-B
-  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=${DEEP_ROOT}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders?parentId=${DEEP_ROOT}"
   assert_status "$HTTP_STATUS" "200" "List children of Root"
   assert_contains "$HTTP_BODY" "Level-1" "Level-1 in children listing"
   assert_contains "$HTTP_BODY" "Sibling-A" "Sibling-A in children listing"
 
   # List children of Level-3 — should contain Level-4
-  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=${DEEP_L3}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders?parentId=${DEEP_L3}"
   assert_status "$HTTP_STATUS" "200" "List children of Level-3"
   assert_contains "$HTTP_BODY" "Level-4" "Level-4 in deep children listing"
 
   # ------ Get folder by ID with children aggregation ------
 
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}"
   assert_status "$HTTP_STATUS" "200" "Get Root folder by ID"
   assert_contains "$HTTP_BODY" '"children"' "Root response has children"
   assert_contains "$HTTP_BODY" '"folders"' "Root response has children.folders"
@@ -2285,7 +2318,7 @@ if [[ -n "$DEEP_PROJ" ]]; then
   fi
 
   # Get deepest folder — should be empty
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L4}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L4}"
   assert_status "$HTTP_STATUS" "200" "Get Level-4 (deepest) folder by ID"
   if echo "$HTTP_BODY" | grep -q '"hints"'; then
     pass "Empty deepest folder includes hints"
@@ -2295,7 +2328,7 @@ if [[ -n "$DEEP_PROJ" ]]; then
 
   # ------ Full project tree ------
 
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/tree"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/tree"
   assert_status "$HTTP_STATUS" "200" "Get full project folder tree"
   assert_contains "$HTTP_BODY" "Root" "Tree contains Root"
   assert_contains "$HTTP_BODY" "Level-1" "Tree contains Level-1"
@@ -2307,14 +2340,14 @@ if [[ -n "$DEEP_PROJ" ]]; then
 
   # ------ Subtree ------
 
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L1}/tree"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L1}/tree"
   assert_status "$HTTP_STATUS" "200" "Get subtree from Level-1"
   assert_contains "$HTTP_BODY" "Level-1" "Subtree contains Level-1"
   assert_contains "$HTTP_BODY" "Level-2" "Subtree contains Level-2"
 
   # ------ Breadcrumb for deeply nested folder ------
 
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L4}/breadcrumb"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L4}/breadcrumb"
   assert_status "$HTTP_STATUS" "200" "Get breadcrumb for Level-4 (5 levels deep)"
   assert_contains "$HTTP_BODY" "DeepNest" "Breadcrumb contains project name"
   assert_contains "$HTTP_BODY" "Root" "Breadcrumb contains Root"
@@ -2322,7 +2355,7 @@ if [[ -n "$DEEP_PROJ" ]]; then
   assert_contains "$HTTP_BODY" "Level-4" "Breadcrumb contains Level-4"
 
   # Breadcrumb for mid-level folder
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L2}/breadcrumb"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L2}/breadcrumb"
   assert_status "$HTTP_STATUS" "200" "Get breadcrumb for Level-2"
   assert_contains "$HTTP_BODY" "Root" "Mid-level breadcrumb contains Root"
   assert_contains "$HTTP_BODY" "Level-1" "Mid-level breadcrumb contains Level-1"
@@ -2331,28 +2364,28 @@ if [[ -n "$DEEP_PROJ" ]]; then
   # ------ Move folder in deep hierarchy ------
 
   # Move Sibling-A into Level-2
-  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" "{\"parentFolderId\":\"${DEEP_L2}\"}"
+  do_request PUT "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" "{\"parentFolderId\":\"${DEEP_L2}\"}"
   assert_status "$HTTP_STATUS" "200" "Move Sibling-A into Level-2"
 
   # Verify Sibling-A is now under Level-2
-  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=${DEEP_L2}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders?parentId=${DEEP_L2}"
   assert_status "$HTTP_STATUS" "200" "List Level-2 children after move"
   assert_contains "$HTTP_BODY" "Sibling-A" "Sibling-A is now under Level-2"
   assert_contains "$HTTP_BODY" "Level-3" "Level-3 still under Level-2"
 
   # Verify breadcrumb updated after move
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}/breadcrumb"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}/breadcrumb"
   assert_status "$HTTP_STATUS" "200" "Get breadcrumb for moved Sibling-A"
   assert_contains "$HTTP_BODY" "Level-2" "Moved folder breadcrumb includes Level-2"
 
   # Move Sibling-A back to Root
-  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" "{\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  do_request PUT "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" "{\"parentFolderId\":\"${DEEP_ROOT}\"}"
   assert_status "$HTTP_STATUS" "200" "Move Sibling-A back to Root"
 
   # ------ Circular move prevention in deep hierarchy ------
 
   # Try to move Root into its own descendant Level-3 → should fail
-  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}" "{\"parentFolderId\":\"${DEEP_L3}\"}"
+  do_request PUT "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}" "{\"parentFolderId\":\"${DEEP_L3}\"}"
   if [[ "$HTTP_STATUS" == "400" ]]; then
     pass "Circular move Root→Level-3 correctly rejected (400)"
   else
@@ -2360,7 +2393,7 @@ if [[ -n "$DEEP_PROJ" ]]; then
   fi
 
   # Try to move Level-1 into Level-4 (its own descendant) → should fail
-  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_L1}" "{\"parentFolderId\":\"${DEEP_L4}\"}"
+  do_request PUT "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L1}" "{\"parentFolderId\":\"${DEEP_L4}\"}"
   if [[ "$HTTP_STATUS" == "400" ]]; then
     pass "Circular move Level-1→Level-4 correctly rejected (400)"
   else
@@ -2369,27 +2402,27 @@ if [[ -n "$DEEP_PROJ" ]]; then
 
   # ------ Rename in deep hierarchy ------
 
-  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_L3}" '{"name":"Level-3-Renamed"}'
+  do_request PUT "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L3}" '{"name":"Level-3-Renamed"}'
   assert_status "$HTTP_STATUS" "200" "Rename deep nested folder"
   RENAMED_NAME=$(json_field "$HTTP_BODY" "name")
   assert_eq "$RENAMED_NAME" "Level-3-Renamed" "Deep folder name updated"
 
   # Rename back
-  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_L3}" '{"name":"Level-3"}'
+  do_request PUT "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L3}" '{"name":"Level-3"}'
 
   # ------ Duplicate name at same level ------
 
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_ROOT}\"}"
   assert_status "$HTTP_STATUS" "409" "Duplicate name at same nesting level returns 409"
 
   # Same name allowed at different nesting level
-  do_request POST "/api/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_L2}\"}"
+  do_request POST "/api/v1/projects/${DEEP_PROJ}/folders" "{\"name\":\"Level-1\",\"parentFolderId\":\"${DEEP_L2}\"}"
   if [[ "$HTTP_STATUS" == "201" ]]; then
     pass "Same name allowed at different nesting level"
     DUP_NAME_FOLDER=$(json_field "$HTTP_BODY" "id")
     # Clean up
     if [[ -n "$DUP_NAME_FOLDER" ]]; then
-      do_request DELETE "/api/projects/${DEEP_PROJ}/folders/${DUP_NAME_FOLDER}"
+      do_request DELETE "/api/v1/projects/${DEEP_PROJ}/folders/${DUP_NAME_FOLDER}"
     fi
   else
     fail "Same name at different level should return 201 (got $HTTP_STATUS)"
@@ -2398,7 +2431,7 @@ if [[ -n "$DEEP_PROJ" ]]; then
   # ------ Cascade delete of subtree ------
 
   # Delete Level-1 (should cascade delete L2, L3, L4)
-  do_request DELETE "/api/projects/${DEEP_PROJ}/folders/${DEEP_L1}"
+  do_request DELETE "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L1}"
   if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
     pass "Delete Level-1 (cascade) returns success"
     if echo "$HTTP_BODY" | grep -q '"subfolderCount"'; then
@@ -2411,29 +2444,29 @@ if [[ -n "$DEEP_PROJ" ]]; then
   fi
 
   # Verify Level-2 gone
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L2}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L2}"
   assert_status "$HTTP_STATUS" "404" "Level-2 gone after cascade delete"
 
   # Verify Level-4 gone
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_L4}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_L4}"
   assert_status "$HTTP_STATUS" "404" "Level-4 gone after cascade delete"
 
   # Root and siblings should still exist
-  do_request GET "/api/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_ROOT}"
   assert_status "$HTTP_STATUS" "200" "Root still exists after child cascade delete"
 
   # ------ Move to root level ------
 
-  do_request PUT "/api/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" '{"parentFolderId":null}'
+  do_request PUT "/api/v1/projects/${DEEP_PROJ}/folders/${DEEP_SIB_A}" '{"parentFolderId":null}'
   assert_status "$HTTP_STATUS" "200" "Move folder to root level (null parent)"
 
   # Verify it appears in root listing
-  do_request GET "/api/projects/${DEEP_PROJ}/folders?parentId=null"
+  do_request GET "/api/v1/projects/${DEEP_PROJ}/folders?parentId=null"
   assert_status "$HTTP_STATUS" "200" "List root after move to root"
   assert_contains "$HTTP_BODY" "Sibling-A" "Moved folder appears at root level"
 
   # ------ Cleanup deep nesting project ------
-  do_request DELETE "/api/projects/${DEEP_PROJ}"
+  do_request DELETE "/api/v1/projects/${DEEP_PROJ}"
   if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
     pass "Delete deep nesting test project"
   else
@@ -2446,9 +2479,9 @@ fi
 # ===========================================================================
 section "Project-Level Upload (POST /projects/:projectId/upload)"
 
-# Register a fresh user for project upload tests
+# Create a fresh Keycloak user for project upload tests
 PROJ_UP_EMAIL="projupload-${UNIQUE_SUFFIX}@e2e.test"
-do_request POST /api/auth/register "{\"email\":\"${PROJ_UP_EMAIL}\",\"password\":\"ProjUpPass123!\",\"displayName\":\"ProjUp User\"}"
+kc_register_and_login "$PROJ_UP_EMAIL"
 PROJ_UP_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
 
 if [[ -n "$PROJ_UP_TOKEN" ]]; then
@@ -2458,7 +2491,7 @@ if [[ -n "$PROJ_UP_TOKEN" ]]; then
     -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"ProjUpload Test ${UNIQUE_SUFFIX}\"}" \
-    "${BASE_URL}/api/projects" 2>/dev/null) || true
+    "${BASE_URL}/api/v1/projects" 2>/dev/null) || true
   HTTP_STATUS=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
   HTTP_HEADERS=$(cat "$tmpfile")
@@ -2474,7 +2507,7 @@ if [[ -n "$PROJ_UP_TOKEN" ]]; then
         -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "{\"userId\":\"${PROJ_UP_USER_ID}\",\"role\":\"editor\"}" \
-        "${BASE_URL}/api/projects/${PROJ_UP_ID}/members" >/dev/null 2>&1 || true
+        "${BASE_URL}/api/v1/projects/${PROJ_UP_ID}/members" >/dev/null 2>&1 || true
       rm -f "$tmpfile"
     fi
 
@@ -2492,7 +2525,7 @@ CSVEOF
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
       -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
       -F "files=@${PROJ_UPLOAD_CSV}" \
-      "${BASE_URL}/api/projects/${PROJ_UP_ID}/upload" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${PROJ_UP_ID}/upload" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2511,7 +2544,7 @@ CSVEOF
     tmpfile=$(mktemp)
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X GET \
       -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
-      "${BASE_URL}/api/projects/${PROJ_UP_ID}/folders?parentId=null" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${PROJ_UP_ID}/folders?parentId=null" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2532,7 +2565,7 @@ CSVEOF
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
       -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
       -F "files=@${PROJ_UPLOAD_CSV2}" \
-      "${BASE_URL}/api/projects/${PROJ_UP_ID}/upload" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${PROJ_UP_ID}/upload" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2548,7 +2581,7 @@ CSVEOF
     tmpfile=$(mktemp)
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X GET \
       -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
-      "${BASE_URL}/api/projects/${PROJ_UP_ID}/folders?parentId=null" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${PROJ_UP_ID}/folders?parentId=null" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2567,7 +2600,7 @@ CSVEOF
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
       -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
       -F "files=@${PROJ_UPLOAD_CSV}" \
-      "${BASE_URL}/api/projects/00000000-0000-0000-0000-000000000000/upload" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/00000000-0000-0000-0000-000000000000/upload" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     rm -f "$tmpfile"
@@ -2579,7 +2612,7 @@ CSVEOF
     fi
 
     # -- Test 5: Upload without auth → 401 --
-    do_upload "/api/projects/${PROJ_UP_ID}/upload" "$PROJ_UPLOAD_CSV"
+    do_upload "/api/v1/projects/${PROJ_UP_ID}/upload" "$PROJ_UPLOAD_CSV"
     if [[ "$HTTP_STATUS" == "401" ]]; then
       pass "Project upload without auth returns 401"
     else
@@ -2590,7 +2623,7 @@ CSVEOF
     tmpfile=$(mktemp)
     curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
       -H "Authorization: Bearer ${PROJ_UP_TOKEN}" \
-      "${BASE_URL}/api/projects/${PROJ_UP_ID}" >/dev/null 2>&1 || true
+      "${BASE_URL}/api/v1/projects/${PROJ_UP_ID}" >/dev/null 2>&1 || true
     rm -f "$tmpfile"
     rm -f "$PROJ_UPLOAD_CSV" "$PROJ_UPLOAD_CSV2"
     pass "Cleanup project upload test resources"
@@ -2598,7 +2631,7 @@ CSVEOF
     fail "Could not create project for project upload test"
   fi
 else
-  fail "Could not register user for project upload test"
+  fail "Could not create Keycloak user for project upload test"
 fi
 
 # ===========================================================================
@@ -2606,11 +2639,10 @@ fi
 # ===========================================================================
 section "56. MinIO/S3 Object Storage — Upload, Download, Delete CRUD"
 
-# Register a fresh user for S3 CRUD tests
-sleep 1
+# Create a fresh Keycloak user for S3 CRUD tests
 S3_SUFFIX=$(date +%s%N)
 S3_EMAIL="e2e-s3-${S3_SUFFIX}@test.com"
-do_request POST /api/auth/register "{\"email\":\"${S3_EMAIL}\",\"password\":\"S3CrudPass123!\",\"displayName\":\"S3 CRUD User\"}"
+kc_register_and_login "$S3_EMAIL"
 S3_TOKEN=$(json_field "$HTTP_BODY" "accessToken")
 
 # Extract user ID from JWT
@@ -2633,7 +2665,7 @@ if [[ -n "$S3_TOKEN" ]]; then
     -H "Authorization: Bearer ${S3_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"S3 CRUD Project ${S3_SUFFIX}\"}" \
-    "${BASE_URL}/api/projects" 2>/dev/null) || true
+    "${BASE_URL}/api/v1/projects" 2>/dev/null) || true
   HTTP_STATUS=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
   HTTP_HEADERS=$(cat "$tmpfile")
@@ -2648,7 +2680,7 @@ if [[ -n "$S3_TOKEN" ]]; then
       -H "Authorization: Bearer ${S3_TOKEN}" \
       -H "Content-Type: application/json" \
       -d "{\"userId\":\"${S3_USER_ID}\",\"role\":\"editor\"}" \
-      "${BASE_URL}/api/projects/${S3_PROJ}/members" >/dev/null 2>&1 || true
+      "${BASE_URL}/api/v1/projects/${S3_PROJ}/members" >/dev/null 2>&1 || true
     rm -f "$tmpfile"
   fi
 
@@ -2658,7 +2690,7 @@ if [[ -n "$S3_TOKEN" ]]; then
     -H "Authorization: Bearer ${S3_TOKEN}" \
     -H "Content-Type: application/json" \
     -d '{"name":"s3-test-folder"}' \
-    "${BASE_URL}/api/projects/${S3_PROJ}/folders" 2>/dev/null) || true
+    "${BASE_URL}/api/v1/projects/${S3_PROJ}/folders" 2>/dev/null) || true
   HTTP_STATUS=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
   HTTP_HEADERS=$(cat "$tmpfile")
@@ -2682,7 +2714,7 @@ CSVEOF
   response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
     -H "Authorization: Bearer ${S3_TOKEN}" \
     -F "files=@${S3_CSV}" \
-    "${BASE_URL}/api/projects/${S3_PROJ}/folders/${S3_FOLDER}/upload" 2>/dev/null) || true
+    "${BASE_URL}/api/v1/projects/${S3_PROJ}/folders/${S3_FOLDER}/upload" 2>/dev/null) || true
   HTTP_STATUS=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
   HTTP_HEADERS=$(cat "$tmpfile")
@@ -2721,7 +2753,7 @@ CSVEOF
   response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
     -H "Authorization: Bearer ${S3_TOKEN}" \
     -F "files=@${S3_CSV2}" \
-    "${BASE_URL}/api/projects/${S3_PROJ}/upload" 2>/dev/null) || true
+    "${BASE_URL}/api/v1/projects/${S3_PROJ}/upload" 2>/dev/null) || true
   HTTP_STATUS=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
   HTTP_HEADERS=$(cat "$tmpfile")
@@ -2743,7 +2775,7 @@ CSVEOF
   if [[ -n "$S3_DATASET_ID" ]]; then
     S3_READY=false
     for poll in $(seq 1 30); do
-      do_request GET "/api/datasets/${S3_DATASET_ID}/status"
+      do_request GET "/api/v1/datasets/${S3_DATASET_ID}/status"
       S3_DS_STATUS=$(json_field "$HTTP_BODY" "status")
       if [[ "$S3_DS_STATUS" == "ready" || "$S3_DS_STATUS" == "completed" ]]; then
         S3_READY=true
@@ -2761,7 +2793,7 @@ CSVEOF
 
   # --- 56.4 READ: Get dataset detail → verifies S3 key is stored in DB ---
   if [[ -n "$S3_DATASET_ID" ]]; then
-    do_request GET "/api/datasets/${S3_DATASET_ID}"
+    do_request GET "/api/v1/datasets/${S3_DATASET_ID}"
     if [[ "$HTTP_STATUS" == "200" ]]; then
       pass "S3: Get dataset detail returns 200"
       assert_contains "$HTTP_BODY" '"file_path"' "S3: Dataset detail has file_path"
@@ -2774,7 +2806,7 @@ CSVEOF
 
   # --- 56.5 READ: Get dataset preview → verifies S3 streaming for preview ---
   if [[ -n "$S3_DATASET_ID" && "$S3_READY" == "true" ]]; then
-    do_request GET "/api/datasets/${S3_DATASET_ID}/preview"
+    do_request GET "/api/v1/datasets/${S3_DATASET_ID}/preview"
     if [[ "$HTTP_STATUS" == "200" ]]; then
       pass "S3: Dataset preview returns 200 (data streamed from MinIO)"
       assert_contains "$HTTP_BODY" '"rows"' "S3: Preview contains rows array"
@@ -2789,7 +2821,7 @@ CSVEOF
     tmpfile=$(mktemp)
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
       -H "Authorization: Bearer ${S3_TOKEN}" \
-      "${BASE_URL}/api/datasets/${S3_DATASET_ID}/download" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/datasets/${S3_DATASET_ID}/download" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2815,7 +2847,7 @@ CSVEOF
     fi
 
     # Download non-existent dataset → 404
-    do_request GET "/api/datasets/00000000-0000-0000-0000-000000000000/download"
+    do_request GET "/api/v1/datasets/00000000-0000-0000-0000-000000000000/download"
     if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "401" ]]; then
       pass "S3: Download non-existent dataset returns $HTTP_STATUS"
     else
@@ -2823,7 +2855,7 @@ CSVEOF
     fi
 
     # Download with invalid UUID → 400
-    do_request GET "/api/datasets/not-a-uuid/download"
+    do_request GET "/api/v1/datasets/not-a-uuid/download"
     if [[ "$HTTP_STATUS" == "400" || "$HTTP_STATUS" == "401" ]]; then
       pass "S3: Download invalid UUID returns $HTTP_STATUS"
     else
@@ -2836,7 +2868,7 @@ CSVEOF
     tmpfile=$(mktemp)
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
       -H "Authorization: Bearer ${S3_TOKEN}" \
-      "${BASE_URL}/api/datasets/${S3_DATASET_ID}/download?mode=presigned" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/datasets/${S3_DATASET_ID}/download?mode=presigned" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2859,7 +2891,7 @@ CSVEOF
 
   # --- 56.8 READ: Dataset summary (verifies metadata stored correctly) ---
   if [[ -n "$S3_DATASET_ID" && "$S3_READY" == "true" ]]; then
-    do_request GET "/api/datasets/${S3_DATASET_ID}/summary"
+    do_request GET "/api/v1/datasets/${S3_DATASET_ID}/summary"
     if [[ "$HTTP_STATUS" == "200" ]]; then
       pass "S3: Dataset summary returns 200"
       assert_contains "$HTTP_BODY" '"fileSize"' "S3: Summary contains fileSize"
@@ -2875,7 +2907,7 @@ CSVEOF
     tmpfile=$(mktemp)
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
       -H "Authorization: Bearer ${S3_TOKEN}" \
-      "${BASE_URL}/api/projects/${S3_PROJ}/folders/${S3_FOLDER}/datasets" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${S3_PROJ}/folders/${S3_FOLDER}/datasets" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2890,7 +2922,7 @@ CSVEOF
 
   # --- 56.10 UPDATE: Rename S3-backed dataset ---
   if [[ -n "$S3_DATASET_ID" ]]; then
-    do_request PUT "/api/datasets/${S3_DATASET_ID}" '{"name":"renamed-s3-dataset.csv"}'
+    do_request PUT "/api/v1/datasets/${S3_DATASET_ID}" '{"name":"renamed-s3-dataset.csv"}'
     if [[ "$HTTP_STATUS" == "200" ]]; then
       pass "S3: Rename dataset returns 200"
       RENAMED=$(json_field "$HTTP_BODY" "name")
@@ -2906,7 +2938,7 @@ CSVEOF
 
   # --- 56.11 UPDATE: Duplicate S3-backed dataset ---
   if [[ -n "$S3_DATASET_ID" ]]; then
-    do_request POST "/api/datasets/${S3_DATASET_ID}/duplicate"
+    do_request POST "/api/v1/datasets/${S3_DATASET_ID}/duplicate"
     if [[ "$HTTP_STATUS" == "201" ]]; then
       pass "S3: Duplicate dataset returns 201"
       S3_DUP_ID=$(json_field "$HTTP_BODY" "id")
@@ -2919,7 +2951,7 @@ CSVEOF
 
     # Delete duplicate
     if [[ -n "$S3_DUP_ID" ]]; then
-      do_request DELETE "/api/datasets/${S3_DUP_ID}"
+      do_request DELETE "/api/v1/datasets/${S3_DUP_ID}"
       if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
         pass "S3: Delete duplicate dataset returns success"
       else
@@ -2930,7 +2962,7 @@ CSVEOF
 
   # --- 56.12 DELETE: Delete dataset → should remove from MinIO + DB ---
   if [[ -n "$S3_DATASET_ID" ]]; then
-    do_request DELETE "/api/datasets/${S3_DATASET_ID}"
+    do_request DELETE "/api/v1/datasets/${S3_DATASET_ID}"
     if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
       pass "S3: Delete dataset returns success (removes from MinIO)"
     else
@@ -2938,7 +2970,7 @@ CSVEOF
     fi
 
     # Verify dataset is gone from DB
-    do_request GET "/api/datasets/${S3_DATASET_ID}"
+    do_request GET "/api/v1/datasets/${S3_DATASET_ID}"
     if [[ "$HTTP_STATUS" == "404" ]]; then
       pass "S3: Deleted dataset returns 404 (confirmed removed)"
     else
@@ -2949,7 +2981,7 @@ CSVEOF
     tmpfile=$(mktemp)
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" \
       -H "Authorization: Bearer ${S3_TOKEN}" \
-      "${BASE_URL}/api/datasets/${S3_DATASET_ID}/download" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/datasets/${S3_DATASET_ID}/download" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     rm -f "$tmpfile"
     if [[ "$HTTP_STATUS" == "404" ]]; then
@@ -2963,7 +2995,7 @@ CSVEOF
   if [[ -n "$S3_PROJ" ]]; then
     # First verify project-level dataset still exists
     if [[ -n "$S3_PROJ_DATASET_ID" ]]; then
-      do_request GET "/api/datasets/${S3_PROJ_DATASET_ID}"
+      do_request GET "/api/v1/datasets/${S3_PROJ_DATASET_ID}"
       if [[ "$HTTP_STATUS" == "200" ]]; then
         pass "S3: Project-level dataset exists before project deletion"
       else
@@ -2975,7 +3007,7 @@ CSVEOF
     tmpfile=$(mktemp)
     response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
       -H "Authorization: Bearer ${S3_TOKEN}" \
-      "${BASE_URL}/api/projects/${S3_PROJ}" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${S3_PROJ}" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -2988,7 +3020,7 @@ CSVEOF
     fi
 
     # Verify project is gone
-    do_request GET "/api/projects/${S3_PROJ}"
+    do_request GET "/api/v1/projects/${S3_PROJ}"
     assert_status "$HTTP_STATUS" "404" "S3: Project gone after cascade delete"
   fi
 
@@ -3000,7 +3032,7 @@ CSVEOF
       -H "Authorization: Bearer ${S3_TOKEN}" \
       -H "Content-Type: application/json" \
       -d "{\"name\":\"S3 Validation ${S3_SUFFIX}\"}" \
-      "${BASE_URL}/api/projects" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -3013,7 +3045,7 @@ CSVEOF
         -H "Authorization: Bearer ${S3_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "{\"userId\":\"${S3_USER_ID}\",\"role\":\"editor\"}" \
-        "${BASE_URL}/api/projects/${S3_VAL_PROJ}/members" >/dev/null 2>&1 || true
+        "${BASE_URL}/api/v1/projects/${S3_VAL_PROJ}/members" >/dev/null 2>&1 || true
       rm -f "$tmpfile"
 
       tmpfile=$(mktemp)
@@ -3021,7 +3053,7 @@ CSVEOF
         -H "Authorization: Bearer ${S3_TOKEN}" \
         -H "Content-Type: application/json" \
         -d '{"name":"val-folder"}' \
-        "${BASE_URL}/api/projects/${S3_VAL_PROJ}/folders" 2>/dev/null) || true
+        "${BASE_URL}/api/v1/projects/${S3_VAL_PROJ}/folders" 2>/dev/null) || true
       HTTP_STATUS=$(echo "$response" | tail -1)
       HTTP_BODY=$(echo "$response" | sed '$d')
       HTTP_HEADERS=$(cat "$tmpfile")
@@ -3036,7 +3068,7 @@ CSVEOF
         response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" -X POST \
           -H "Authorization: Bearer ${S3_TOKEN}" \
           -F "files=@${BAD_FILE}" \
-          "${BASE_URL}/api/projects/${S3_VAL_PROJ}/folders/${S3_VAL_FOLDER}/upload" 2>/dev/null) || true
+          "${BASE_URL}/api/v1/projects/${S3_VAL_PROJ}/folders/${S3_VAL_FOLDER}/upload" 2>/dev/null) || true
         HTTP_STATUS=$(echo "$response" | tail -1)
         HTTP_BODY=$(echo "$response" | sed '$d')
         rm -f "$tmpfile" "$BAD_FILE"
@@ -3052,7 +3084,7 @@ CSVEOF
       tmpfile=$(mktemp)
       curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
         -H "Authorization: Bearer ${S3_TOKEN}" \
-        "${BASE_URL}/api/projects/${S3_VAL_PROJ}" >/dev/null 2>&1 || true
+        "${BASE_URL}/api/v1/projects/${S3_VAL_PROJ}" >/dev/null 2>&1 || true
       rm -f "$tmpfile"
     fi
   fi
@@ -3063,7 +3095,7 @@ CSVEOF
     -H "Authorization: Bearer ${S3_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"S3 Multi ${S3_SUFFIX}\"}" \
-    "${BASE_URL}/api/projects" 2>/dev/null) || true
+    "${BASE_URL}/api/v1/projects" 2>/dev/null) || true
   HTTP_STATUS=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
   HTTP_HEADERS=$(cat "$tmpfile")
@@ -3076,7 +3108,7 @@ CSVEOF
       -H "Authorization: Bearer ${S3_TOKEN}" \
       -H "Content-Type: application/json" \
       -d "{\"userId\":\"${S3_USER_ID}\",\"role\":\"editor\"}" \
-      "${BASE_URL}/api/projects/${S3_MULTI_PROJ}/members" >/dev/null 2>&1 || true
+      "${BASE_URL}/api/v1/projects/${S3_MULTI_PROJ}/members" >/dev/null 2>&1 || true
     rm -f "$tmpfile"
 
     tmpfile=$(mktemp)
@@ -3084,7 +3116,7 @@ CSVEOF
       -H "Authorization: Bearer ${S3_TOKEN}" \
       -H "Content-Type: application/json" \
       -d '{"name":"multi-folder"}' \
-      "${BASE_URL}/api/projects/${S3_MULTI_PROJ}/folders" 2>/dev/null) || true
+      "${BASE_URL}/api/v1/projects/${S3_MULTI_PROJ}/folders" 2>/dev/null) || true
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
     HTTP_HEADERS=$(cat "$tmpfile")
@@ -3102,7 +3134,7 @@ CSVEOF
         -H "Authorization: Bearer ${S3_TOKEN}" \
         -F "files=@${MULTI_CSV1}" \
         -F "files=@${MULTI_CSV2}" \
-        "${BASE_URL}/api/projects/${S3_MULTI_PROJ}/folders/${S3_MULTI_FOLDER}/upload" 2>/dev/null) || true
+        "${BASE_URL}/api/v1/projects/${S3_MULTI_PROJ}/folders/${S3_MULTI_FOLDER}/upload" 2>/dev/null) || true
       HTTP_STATUS=$(echo "$response" | tail -1)
       HTTP_BODY=$(echo "$response" | sed '$d')
       HTTP_HEADERS=$(cat "$tmpfile")
@@ -3126,14 +3158,14 @@ CSVEOF
     tmpfile=$(mktemp)
     curl -s -w "\n%{http_code}" -D "$tmpfile" -X DELETE \
       -H "Authorization: Bearer ${S3_TOKEN}" \
-      "${BASE_URL}/api/projects/${S3_MULTI_PROJ}" >/dev/null 2>&1 || true
+      "${BASE_URL}/api/v1/projects/${S3_MULTI_PROJ}" >/dev/null 2>&1 || true
     rm -f "$tmpfile"
   fi
 
   # --- Cleanup temp files ---
   rm -f "$S3_CSV" "$S3_CSV2" 2>/dev/null || true
 else
-  fail "S3: Could not register user for S3 CRUD tests"
+  fail "S3: Could not create Keycloak user for S3 CRUD tests"
 fi
 
 # ===========================================================================

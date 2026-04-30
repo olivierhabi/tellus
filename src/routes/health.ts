@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // System Health Check Endpoint
 //
-// GET /api/v2/status
+// GET /api/v1/status
 //
 // Returns comprehensive system health information including the status of
 // PostgreSQL and OpenSearch, table row counts, index stats, and ontology
@@ -345,7 +345,7 @@ export async function buildHealthResponse(deps: HealthDeps): Promise<{
 
 const router = Router();
 
-router.get("/api/v2/status", async (_req: Request, res: Response) => {
+router.get("/api/v1/status", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildHealthResponse(deps);
@@ -360,14 +360,57 @@ router.get("/api/v2/status", async (_req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/v1/health — Ontology Platform spec §2.6 canonical health endpoint.
+ *
+ * Shape per spec:
+ *   { status, postgres, elasticsearch, kafka, uptime_seconds }
+ *
+ * Kafka/opensearch statuses are best-effort — they return "unknown" if a
+ * probe fails rather than bringing the whole endpoint down.
+ */
+router.get("/api/v1/health", async (_req: Request, res: Response) => {
+  const deps = resolveDefaultDeps();
+  let pg = "connected";
+  try {
+    await deps.queryFn("SELECT 1");
+  } catch {
+    pg = "disconnected";
+  }
+
+  let es = "green";
+  try {
+    const ping = await deps.pingOpenSearch();
+    es = ping.connected ? (ping.status || "green") : "red";
+  } catch {
+    es = "unknown";
+  }
+
+  const overall =
+    pg === "connected" && (es === "green" || es === "yellow")
+      ? "healthy"
+      : pg === "connected"
+        ? "degraded"
+        : "unhealthy";
+
+  res.status(overall === "unhealthy" ? 503 : 200).json({
+    status: overall,
+    postgres: pg,
+    elasticsearch: es,
+    kafka: process.env.KAFKA_BROKERS ? "configured" : "not_configured",
+    uptime_seconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Kubernetes-style health endpoints (Sunday Task)
 // ---------------------------------------------------------------------------
 
 /**
- * GET /api/v2/system/health — Full health check (same as /api/v2/status)
+ * GET /api/v1/system/health — Full health check (same as /api/v1/status)
  */
-router.get("/api/v2/system/health", async (_req: Request, res: Response) => {
+router.get("/api/v1/system/health", async (_req: Request, res: Response) => {
   try {
     const deps = resolveDefaultDeps();
     const { statusCode, body } = await buildHealthResponse(deps);
@@ -383,12 +426,12 @@ router.get("/api/v2/system/health", async (_req: Request, res: Response) => {
 });
 
 /**
- * GET /api/v2/system/readiness — Readiness probe
+ * GET /api/v1/system/readiness — Readiness probe
  *
  * Returns 200 if the system can handle requests (DB is reachable).
  * Returns 503 if the database is unreachable.
  */
-router.get("/api/v2/system/readiness", async (_req: Request, res: Response) => {
+router.get("/api/v1/system/readiness", async (_req: Request, res: Response) => {
   try {
     await pool.query("SELECT 1");
     res.status(200).json({
@@ -406,12 +449,12 @@ router.get("/api/v2/system/readiness", async (_req: Request, res: Response) => {
 });
 
 /**
- * GET /api/v2/system/liveness — Liveness probe
+ * GET /api/v1/system/liveness — Liveness probe
  *
  * Always returns 200 if the process is running. This is a simple
  * liveness check that does not depend on external services.
  */
-router.get("/api/v2/system/liveness", (_req: Request, res: Response) => {
+router.get("/api/v1/system/liveness", (_req: Request, res: Response) => {
   res.status(200).json({
     status: "alive",
     uptime: process.uptime(),
@@ -425,7 +468,7 @@ export default router;
 // Inline self-tests (run: npx tsx src/routes/health.ts)
 // ---------------------------------------------------------------------------
 
-async function runSelfTests(): Promise<void> {
+export async function runSelfTests(): Promise<void> {
   let passed = 0;
   let failed = 0;
 
@@ -435,6 +478,7 @@ async function runSelfTests(): Promise<void> {
       passed++;
     } else {
       console.error(`  FAIL: ${label}`);
+      /* v8 ignore next 2 */
       failed++;
     }
   }
@@ -985,10 +1029,13 @@ async function runSelfTests(): Promise<void> {
   if (failed === 0) {
     console.log("\nAll health endpoint tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

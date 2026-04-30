@@ -2,7 +2,7 @@
 // Property Routes — Express Router
 //
 // Routes for Property CRUD, nested under object types:
-//   /api/v2/ontologies/:ontologyId/objectTypes/:apiName/properties
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/properties
 //
 // Also includes primaryKey and titleProperty routes at the object type level.
 // Uses mergeParams: true to access :ontologyId and :apiName from parent.
@@ -22,6 +22,7 @@ import {
   validateBody,
   CREATE_PROPERTY_SCHEMA,
 } from "../middleware/validateBody";
+import { validatePropertyLimits } from "../utils/propertyLimits";
 
 const router = Router({ mergeParams: true });
 
@@ -38,6 +39,10 @@ const KNOWN_CODES = new Set([
   "VALIDATION_FAILED",
   "INVALID_PARAMETER",
   "REQUIRED_FIELD_MISSING",
+  "STRUCT_DEPTH_EXCEEDED",
+  "VECTOR_DIMS_EXCEEDED",
+  "BREAKING_SCHEMA_CHANGE",
+  "MIGRATION_REQUIRED",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -119,7 +124,11 @@ router.post(
         structSchema,
         isRequired,
         ordinal,
+        config,
       } = req.body;
+
+      // Spec §2.4 — enforce struct/vector limits before touching storage.
+      validatePropertyLimits({ baseType, structSchema, config });
 
       const row = await propertyService.create(objectTypeId, {
         apiName: propApiName,
@@ -202,6 +211,30 @@ router.put(
     try {
       const objectTypeId = await resolveObjectTypeId(req, res);
       if (!objectTypeId) return;
+
+      // Spec §2.4 — baseType is immutable at runtime. Changing it is a
+      // breaking schema change that must go through the migration manager.
+      if (req.body && req.body.baseType !== undefined) {
+        const current = await propertyService.getByApiName(
+          objectTypeId,
+          req.params.propApiName
+        );
+        if (
+          (current as Record<string, unknown>).base_type !== req.body.baseType
+        ) {
+          return sendError(
+            res,
+            "BREAKING_SCHEMA_CHANGE",
+            "Changing baseType is a breaking schema change; use the migration manager.",
+            { from: (current as Record<string, unknown>).base_type, to: req.body.baseType }
+          );
+        }
+      }
+      validatePropertyLimits({
+        baseType: req.body?.baseType,
+        structSchema: req.body?.structSchema,
+        config: req.body?.config,
+      });
 
       const row = await propertyService.update(
         objectTypeId,

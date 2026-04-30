@@ -94,13 +94,13 @@ async function cleanup() {
   console.log("\n--- Cleanup ---");
   try {
     if (ontologyId) {
-      await api("DELETE", `/api/v2/ontologies/${ontologyId}`);
+      await api("DELETE", `/api/v1/ontology/${ontologyId}`);
       console.log("  Deleted ontology");
     }
   } catch { /* best effort */ }
   try {
     if (datasetId) {
-      await api("DELETE", `/api/v2/datasets/${datasetId}?force=true`);
+      await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`);
       console.log("  Deleted dataset");
     }
   } catch { /* best effort */ }
@@ -124,7 +124,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("5.1  Setup ontology + Employee type + upload 50 employees");
 
-  const ontRes = await api("POST", "/api/v2/ontologies", {
+  const ontRes = await api("POST", "/api/v1/ontology", {
     displayName: "Test05 Bulk Actions Ontology",
   });
   assert(ontRes.status === 201, "Ontology created");
@@ -133,7 +133,7 @@ async function main() {
   // Create Employee object type with properties via batch
   const otRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee",
@@ -150,10 +150,12 @@ async function main() {
 
   // Generate and upload CSV
   const csvContent = generateEmployeeCsv(50);
-  tmpCsvPath = path.join(process.cwd(), `test05_employees_${Date.now()}.csv`);
+  const tmpDir = path.join(__dirname, "tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  tmpCsvPath = path.join(tmpDir, `test05_employees_${Date.now()}.csv`);
   fs.writeFileSync(tmpCsvPath, csvContent);
 
-  const uploadRes = await uploadFile(`${API}/api/v2/datasets/upload`, tmpCsvPath, {
+  const uploadRes = await uploadFile(`${API}/api/v1/datasets/upload`, tmpCsvPath, {
     name: "test05_employees",
   });
   assert(uploadRes.status === 201, "Dataset uploaded");
@@ -162,7 +164,7 @@ async function main() {
   // Register datasource
   const dsRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/Employee/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`,
     {
       datasetId,
       columnMapping: {
@@ -178,7 +180,7 @@ async function main() {
   // Reindex
   const reindexRes = await api(
     "POST",
-    `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`
   );
   assert(reindexRes.status === 200, "Reindex completed");
 
@@ -189,7 +191,7 @@ async function main() {
 
   const atRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actionTypes`,
+    `/api/v1/ontology/${ontologyId}/actionTypes`,
     {
       apiName: "reassignDepartment",
       displayName: "Reassign Department",
@@ -243,7 +245,7 @@ async function main() {
 
   const bulkRes = await api(
     "POST",
-    `/api/v2/actions/reassignDepartment/applyBulk`,
+    `/api/v1/actions/reassignDepartment/applyBulk`,
     {
       requests: [...validRequests, ...invalidRequests],
       stopOnError: false,
@@ -265,9 +267,9 @@ async function main() {
   console.log("\n5.4  Verify employees have new department");
 
   // Reindex to reflect changes in search
-  await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+  await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
 
-  const searchRes = await api("POST", "/api/v2/objects/Employee/search", {
+  const searchRes = await api("POST", "/api/v1/objects/Employee/search", {
     where: { department: { eq: "Sales" } },
     $pageSize: 50,
   });
@@ -280,7 +282,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n5.5  Verify audit log has entries");
 
-  const auditRes = await api("GET", "/api/v2/audit/log?pageSize=50");
+  const auditRes = await api("GET", "/api/v1/audit/log?pageSize=50");
   assert(auditRes.status === 200, "Audit log returned 200");
   const auditEntries = auditRes.body?.data ?? [];
   // We should have at least 13 entries from our bulk action (10 success + 3 failed)
@@ -299,7 +301,7 @@ async function main() {
 
   const stopBulkRes = await api(
     "POST",
-    `/api/v2/actions/reassignDepartment/applyBulk`,
+    `/api/v1/actions/reassignDepartment/applyBulk`,
     {
       requests: [
         { parameters: { employeeRef: "EMP0020", newDepartment: "Marketing" } },
@@ -331,9 +333,9 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n5.7  Verify 3rd action target was NOT changed");
 
-  await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+  await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
 
-  const emp30Res = await api("GET", "/api/v2/objects/Employee/EMP0030");
+  const emp30Res = await api("GET", "/api/v1/objects/Employee/EMP0030");
   assert(emp30Res.status === 200, "Fetched EMP0030");
   const emp30Dept = emp30Res.body?.data?.department;
   assert(

@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { client } from "./client";
+import { ensureDocumentSecurity } from "../security/documentSecurity";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -166,12 +167,21 @@ export async function bulkIndex(
     const batch = batches[batchIdx];
     const batchStart = Date.now();
 
-    // Build bulk request body: alternating action + document lines
+    // Build bulk request body: alternating action + document lines.
+    // Phase A4 (F-03) — every indexed document MUST carry `_security.markings`
+    // or it becomes invisible to marking-constrained users after the
+    // public-leak branch in buildSecurityFilter was removed. The caller
+    // (CSV-backed indexing, reindex, seed tools) usually does not know
+    // or care about classification, so we default to PUBLIC via
+    // `ensureDocumentSecurity`. Callers that DO care (e.g. a pipeline
+    // that classifies rows based on a marking column) should set
+    // `_security.markings` on the document before passing it in — the
+    // helper is idempotent and will not overwrite an explicit marking.
     const bulkBody: Array<Record<string, unknown>> = [];
     for (const doc of batch) {
       const pk = String(doc.__pk);
       bulkBody.push({ index: { _index: indexName, _id: pk } });
-      bulkBody.push(doc);
+      bulkBody.push(ensureDocumentSecurity(doc));
     }
 
     try {

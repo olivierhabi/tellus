@@ -98,13 +98,13 @@ async function cleanup() {
   console.log("\n--- Cleanup ---");
   try {
     if (ontologyId) {
-      await api("DELETE", `/api/v2/ontologies/${ontologyId}`);
+      await api("DELETE", `/api/v1/ontology/${ontologyId}`);
       console.log("  Deleted ontology");
     }
   } catch { /* best effort */ }
   try {
     if (datasetId) {
-      await api("DELETE", `/api/v2/datasets/${datasetId}?force=true`);
+      await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`);
       console.log("  Deleted dataset");
     }
   } catch { /* best effort */ }
@@ -119,7 +119,9 @@ async function cleanup() {
 }
 
 function writeTmpFile(name: string, content: string | Buffer, ext = ".csv"): string {
-  const p = path.join(process.cwd(), `${name}_${Date.now()}${ext}`);
+  const tmpDir = path.join(__dirname, "tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const p = path.join(tmpDir, `${name}_${Date.now()}${ext}`);
   fs.writeFileSync(p, content);
   tmpFiles.push(p);
   return p;
@@ -137,14 +139,14 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("Setup: ontology + Employee type + dataset\n");
 
-  const ontRes = await api("POST", "/api/v2/ontologies", {
+  const ontRes = await api("POST", "/api/v1/ontology", {
     displayName: "Test08 Error Handling",
   });
   ontologyId = ontRes.body?.data?.ontologyId;
 
   const otRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee",
@@ -165,7 +167,7 @@ async function main() {
     "E002,Bob Jones,Sales,82000\n";
   const csvPath = writeTmpFile("test08_employees", csv);
 
-  const uploadRes = await uploadFile(`${API}/api/v2/datasets/upload`, csvPath, {
+  const uploadRes = await uploadFile(`${API}/api/v1/datasets/upload`, csvPath, {
     name: "test08_employees",
   });
   assert(uploadRes.status === 201, "Setup: dataset uploaded");
@@ -174,7 +176,7 @@ async function main() {
   // Register datasource
   await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/Employee/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/Employee/datasource`,
     {
       datasetId,
       columnMapping: {
@@ -187,10 +189,10 @@ async function main() {
   );
 
   // Reindex
-  await api("POST", `/api/v2/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
+  await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/Employee/reindex?force=true`);
 
   // Create an action type for later tests
-  await api("POST", `/api/v2/ontologies/${ontologyId}/actionTypes`, {
+  await api("POST", `/api/v1/ontology/${ontologyId}/actionTypes`, {
     apiName: "updateDepartment",
     displayName: "Update Department",
     parameters: [
@@ -226,7 +228,7 @@ async function main() {
 
   const dupRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/batch`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/batch`,
     {
       apiName: "Employee",
       displayName: "Employee Duplicate",
@@ -252,7 +254,7 @@ async function main() {
   console.log("\n8.2  Register datasource with non-existent datasetId");
 
   // Create a second object type to register against
-  await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/batch`, {
+  await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
     apiName: "TempType",
     displayName: "Temp Type",
     primaryKeyProperty: "id",
@@ -264,7 +266,7 @@ async function main() {
   const fakeDatasetId = "00000000-0000-0000-0000-000000000000";
   const noDatasetRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/TempType/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/TempType/datasource`,
     {
       datasetId: fakeDatasetId,
       columnMapping: { id: "id" },
@@ -286,7 +288,7 @@ async function main() {
   console.log("\n8.3  Register datasource with misspelled column");
 
   // Create another object type
-  await api("POST", `/api/v2/ontologies/${ontologyId}/objectTypes/batch`, {
+  await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {
     apiName: "BadMapping",
     displayName: "Bad Mapping",
     primaryKeyProperty: "myId",
@@ -298,7 +300,7 @@ async function main() {
 
   const badColRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/BadMapping/datasource`,
+    `/api/v1/ontology/${ontologyId}/objectTypes/BadMapping/datasource`,
     {
       datasetId,
       columnMapping: {
@@ -322,7 +324,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n8.4  Delete dataset in use");
 
-  const delInUseRes = await api("DELETE", `/api/v2/datasets/${datasetId}`);
+  const delInUseRes = await api("DELETE", `/api/v1/datasets/${datasetId}`);
   assert(
     delInUseRes.status === 409 || delInUseRes.status === 400,
     `Delete in-use dataset returns 409 or 400 (got ${delInUseRes.status})`
@@ -341,7 +343,7 @@ async function main() {
   const binaryData = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0xfd]);
   const binaryPath = writeTmpFile("test08_binary", binaryData, ".csv");
 
-  const binaryRes = await uploadFile(`${API}/api/v2/datasets/upload`, binaryPath, {
+  const binaryRes = await uploadFile(`${API}/api/v1/datasets/upload`, binaryPath, {
     name: "test08_binary_data",
   });
   assert(
@@ -358,7 +360,7 @@ async function main() {
   const jsonPath = writeTmpFile("test08_wrong_format", jsonContent, ".json");
 
   const formatRes = await uploadFile(
-    `${API}/api/v2/datasets/${datasetId}/transactions`,
+    `${API}/api/v1/datasets/${datasetId}/transactions`,
     jsonPath,
     { type: "APPEND" }
   );
@@ -377,7 +379,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n8.7  Query non-existent object type");
 
-  const noOtRes = await api("GET", "/api/v2/objects/NonExistentType99");
+  const noOtRes = await api("GET", "/api/v1/objects/NonExistentType99");
   assert(
     noOtRes.status === 404,
     `Non-existent object type returns 404 (got ${noOtRes.status})`
@@ -395,7 +397,7 @@ async function main() {
 
   const missingParamRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actions/updateDepartment/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/updateDepartment/apply`,
     {
       parameters: {
         // missing employeeRef and newDepartment
@@ -414,7 +416,7 @@ async function main() {
 
   const noObjRes = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actions/updateDepartment/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/updateDepartment/apply`,
     {
       parameters: {
         employeeRef: "NONEXISTENT_XYZ",

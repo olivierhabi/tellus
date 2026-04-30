@@ -100,7 +100,7 @@ export class ZipUploadService {
           });
 
           const [dataset] = await this.knex('foundry_datasets')
-            .insert({ name: entry.name, folder_id: parentFolderId, file_path: objectKey, original_filename: entry.name, mime_type: mimeType, file_size_bytes: fileBuffer.length, status: 'pending' })
+            .insert({ name: entry.name, folder_id: parentFolderId, file_path: objectKey, original_filename: entry.name, mime_type: mimeType, file_size_bytes: fileBuffer.length, status: 'pending', created_by: ownerId, updated_by: ownerId })
             .returning('*');
           result.created.push(entry.name);
           scheduleParseJob(dataset.id as string);

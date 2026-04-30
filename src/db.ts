@@ -1,4 +1,31 @@
 import { Pool, types, QueryResult, PoolClient } from "pg";
+import { withBreaker } from "./resilience/circuitBreaker";
+
+// F-P4-11: every Pool call site is funneled through a single "pg"
+// circuit breaker. Classifying transient-connection errors and the
+// admin-shutdown SQLSTATEs as failures (but NOT shutdown-race errors
+// from `pool.end()` during tests/boot) keeps the breaker from tripping
+// during normal process teardown.
+const PG_BREAKER_LABEL = "pg";
+const PG_TRANSIENT_SQLSTATES = new Set(["57P01", "57P03", "53300", "08006", "08001", "08004"]);
+function isPgFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return true;
+  const msg = err.message;
+  // Shutdown-race errors during pool.end() are normal teardown — never
+  // let them trip the breaker.
+  if (/pool after calling end on the pool|Pool is ending|cannot use a pool/i.test(msg)) {
+    return false;
+  }
+  const code = (err as { code?: string }).code;
+  if (code && PG_TRANSIENT_SQLSTATES.has(code)) return true;
+  if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "ETIMEDOUT") return true;
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|connection terminated|Connection terminated/.test(msg)) {
+    return true;
+  }
+  // Semantic / SQL errors (`23505`, `42P01`, etc.) are the caller's bug,
+  // not a dependency failure — the breaker must not trip on them.
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Timestamp handling: PostgreSQL returns TIMESTAMPTZ (OID 1184) as JS Date
@@ -20,17 +47,23 @@ const pool = new Pool({
   user: process.env.PGUSER,
   password: process.env.PGPASSWORD,
 
-  // Maximum number of clients in the pool. Our Express server can handle
-  // dozens of concurrent requests and each request may need its own
-  // database connection.
-  max: 20,
+  // Maximum number of clients in the pool. Configurable via PG_POOL_MAX
+  // env var. Default 20 is adequate for moderate load; production
+  // deployments should tune based on expected concurrency and PG
+  // max_connections (pool across all replicas must not exceed it).
+  max: parseInt(process.env.PG_POOL_MAX || "20", 10),
 
   // A connection sitting idle for 30 seconds is released back to PostgreSQL.
   idleTimeoutMillis: 30_000,
 
-  // If a new connection cannot be established within 5 seconds the query
-  // fails with a timeout error.
-  connectionTimeoutMillis: 5_000,
+  // If a new connection cannot be established within the timeout the query
+  // fails with a timeout error. Default 5s; bump via PG_CONNECT_TIMEOUT_MS
+  // for test/CI environments where parallel suites can briefly queue past
+  // the pool max under bursty action-batch load.
+  connectionTimeoutMillis: parseInt(
+    process.env.PG_CONNECT_TIMEOUT_MS || "5000",
+    10,
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -69,13 +102,27 @@ pool.on("connect", () => {
  */
 async function query(text: string, values?: unknown[]): Promise<QueryResult> {
   try {
-    return await pool.query(text, values);
+    return await withBreaker(
+      PG_BREAKER_LABEL,
+      () => pool.query(text, values),
+      {},
+      isPgFailure,
+    );
   } catch (err) {
-    console.error("PostgreSQL query error:", {
-      sql: text,
-      params: values,
-      error: err instanceof Error ? err.message : err,
-    });
+    const msg = err instanceof Error ? err.message : String(err);
+    // Shutdown race: a fire-and-forget boot task (ClickHouse bootstrap,
+    // Lakekeeper, …) hit pool.end() mid-query. The caller already
+    // swallows this as a clean no-op — don't pollute the log with the
+    // full SQL stack dump that makes it look like a real failure.
+    const isShutdownRace =
+      /pool after calling end on the pool|Pool is ending|cannot use a pool/i.test(msg);
+    if (!isShutdownRace) {
+      console.error("PostgreSQL query error:", {
+        sql: text,
+        params: values,
+        error: msg,
+      });
+    }
     throw err;
   }
 }
@@ -128,17 +175,66 @@ async function getClient(): Promise<PoolClient> {
 async function withTransaction<T>(
   callback: (client: PoolClient) => Promise<T>
 ): Promise<T> {
+  // F-P4-11: route the pool.connect() through the "pg" breaker so a
+  // wedged Postgres trips the same global breaker as `query()` /
+  // `queryWithRetry()`. Callback failures are NOT the breaker's
+  // business — isPgFailure filters them out — but connection-acquire
+  // failures here count as dependency failures.
+  return withBreaker(
+    PG_BREAKER_LABEL,
+    () => runTransaction(callback),
+    {},
+    isPgFailure,
+  );
+}
+
+async function runTransaction<T>(
+  callback: (client: PoolClient) => Promise<T>
+): Promise<T> {
   const client = await pool.connect();
+  // F-P3-07: ROLLBACK-failure pool poisoning. If the callback throws AND
+  // the subsequent ROLLBACK throws (network drop between pgbouncer and
+  // Postgres, backend crash mid-tx, etc.), node-pg's default behaviour
+  // is to put the client back in the pool with an open transaction
+  // still on the server. The next borrower inherits the stale tx and
+  // either sees phantom reads or — worse — commits the prior mutation
+  // when it issues its own COMMIT. Track the abandonment state in
+  // `poisoned`; pass a truthy error to `release()` so node-pg discards
+  // the connection instead of recycling it.
+  let poisoned: Error | null = null;
   try {
     await client.query("BEGIN");
     const result = await callback(client);
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackErr) {
+      poisoned =
+        rollbackErr instanceof Error
+          ? rollbackErr
+          : new Error(String(rollbackErr));
+      console.error(
+        JSON.stringify({
+          type: "pg_rollback_failed",
+          error: poisoned.message,
+          // Best-effort tag the original cause so operators can correlate.
+          cause: err instanceof Error ? err.message : String(err),
+        })
+      );
+    }
     throw err;
   } finally {
-    client.release();
+    // Passing a truthy argument to release() signals node-pg to destroy
+    // the underlying connection rather than recycling it to the pool.
+    // We only do this on ROLLBACK failure — the successful-commit and
+    // clean-rollback paths still recycle the connection normally.
+    if (poisoned) {
+      client.release(poisoned);
+    } else {
+      client.release();
+    }
   }
 }
 
@@ -146,22 +242,65 @@ async function withTransaction<T>(
 // queryWithRetry helper (Task 23)
 // ---------------------------------------------------------------------------
 
+// F-P4-10: SQL-aware retry predicate. A write that the server committed
+// can drop its ack over a dying socket — retrying an INSERT/UPDATE/DELETE
+// would double-apply the mutation. The original helper retried every
+// statement, which silently violated at-most-once semantics on mutate
+// paths. We now:
+//   * Retry only SQL verbs that are side-effect-free OR explicitly
+//     idempotent (SELECT / SHOW / EXPLAIN / SET / WITH … SELECT; and
+//     INSERT … ON CONFLICT DO NOTHING which is naturally idempotent on
+//     the primary key).
+//   * Retry any statement when the caller opts in via
+//     `{ idempotent: true }` — used by the audit verifier job which
+//     already guards against double-apply.
+//   * For every other verb, fail fast and let the caller either wrap in
+//     a transaction + idempotency helper (`src/actions/idempotency.ts`)
+//     or surface the error to the user.
+const READ_ONLY_VERB = /^\s*(?:--[^\n]*\n|\/\*[\s\S]*?\*\/|\s)*(?:with\s+[\s\S]+?\))?\s*(select|show|explain|set\s+local|set\s+session|values)\b/i;
+const IDEMPOTENT_INSERT =
+  /^\s*insert[\s\S]+?on\s+conflict[\s\S]*?do\s+nothing\s*;?\s*$/i;
+
+function isIdempotentSql(text: string): boolean {
+  if (READ_ONLY_VERB.test(text)) return true;
+  if (IDEMPOTENT_INSERT.test(text)) return true;
+  return false;
+}
+
+export interface QueryWithRetryOptions {
+  /** Override SQL-verb auto-detection. Caller asserts the statement is safe to replay. */
+  idempotent?: boolean;
+}
+
 /**
  * Execute a parameterized SQL query with automatic retry on transient
  * connection errors (ECONNREFUSED, ECONNRESET, admin_shutdown, etc.).
+ *
+ * SQL-aware (F-P4-10): retry is only attempted when the statement is
+ * proven idempotent — either a read-only verb or an explicit
+ * `ON CONFLICT DO NOTHING` insert. Mutate statements fail fast on the
+ * first transient error; their callers are responsible for transactional
+ * replay via `withTransaction` + `src/actions/idempotency.ts`.
  */
 async function queryWithRetry(
   text: string,
   values?: unknown[],
-  maxRetries: number = 2
+  maxRetries: number = 2,
+  options: QueryWithRetryOptions = {},
 ): Promise<QueryResult> {
   const TRANSIENT_CODES = new Set([
     "ECONNREFUSED", "ECONNRESET", "57P01", "57P03",
   ]);
+  const retryable = options.idempotent ?? isIdempotentSql(text);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await pool.query(text, values);
+      return await withBreaker(
+        PG_BREAKER_LABEL,
+        () => pool.query(text, values),
+        {},
+        isPgFailure,
+      );
     } catch (err: any) {
       const isConnectionError = TRANSIENT_CODES.has(err.code) ||
         (err.message && (
@@ -170,16 +309,25 @@ async function queryWithRetry(
           err.message.includes("connection terminated")
         ));
 
-      if (isConnectionError && attempt < maxRetries) {
+      if (isConnectionError && attempt < maxRetries && retryable) {
         console.warn(JSON.stringify({
           type: "pg_query_retry",
           attempt: attempt + 1,
           maxRetries,
           error: err.message,
           sql: text.substring(0, 100),
+          idempotent: retryable,
         }));
         await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
         continue;
+      }
+
+      if (isConnectionError && !retryable) {
+        console.warn(JSON.stringify({
+          type: "pg_query_retry_skipped_non_idempotent",
+          error: err.message,
+          sql: text.substring(0, 100),
+        }));
       }
 
       // Log and re-throw
@@ -234,5 +382,5 @@ async function checkPostgresHealth(): Promise<Record<string, unknown>> {
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
-export { pool, query, getClient, withTransaction, queryWithRetry, checkPostgresHealth };
+export { pool, query, getClient, withTransaction, queryWithRetry, checkPostgresHealth, isIdempotentSql };
 export default pool;

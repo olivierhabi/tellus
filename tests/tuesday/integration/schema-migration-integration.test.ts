@@ -63,7 +63,7 @@ async function request(
 // ---------------------------------------------------------------------------
 
 function actionTypesPath(suffix = "") {
-  return `/api/v2/ontologies/${ontologyId}/actionTypes${suffix}`;
+  return `/api/v1/ontology/${ontologyId}/actionTypes${suffix}`;
 }
 
 async function ensureActionType(def: Record<string, unknown>): Promise<void> {
@@ -103,9 +103,9 @@ beforeAll(async () => {
     return;
   }
 
-  const ont = await request("GET", "/api/v2/ontologies");
+  const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
-    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology") || ont.body.data[0];
+    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;
   } else {
     console.warn("No ontologies found — skipping schema migration tests");
@@ -435,7 +435,7 @@ describe("Schema Migration Validator (Task 26)", () => {
     const tin = `SMMAX-${RUN_ID}`;
     const execRes = await request(
       "POST",
-      `/api/v2/ontologies/${ontologyId}/actions/${MAX_REDUCE_ACTION}/apply`,
+      `/api/v1/ontology/${ontologyId}/actions/${MAX_REDUCE_ACTION}/apply`,
       { parameters: { tin, fullName: "Max Test" } }
     );
     // Execution may or may not succeed, but audit log entry is always written

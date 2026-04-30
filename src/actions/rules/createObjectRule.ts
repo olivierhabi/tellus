@@ -45,6 +45,17 @@ export interface CreateObjectRuleDef {
 export interface RuleContext {
   executedBy: string;
   ontologyId: string;
+  /**
+   * F-P3-12: branch UUID this rule-compilation pass is scoped to.
+   * Optional on the interface so read-only callers (actionValidator
+   * preview, legacy tests) don't have to resolve a branch; when
+   * `undefined` the write-layer readers (`getLinkNetState`,
+   * `checkManyToManyLinks`) scan cross-branch with a justification
+   * comment at the call site. The write path
+   * (`actionExecutor` -> `applyEdits`) always resolves this to a
+   * real UUID before invoking the enforcer or the INSERT.
+   */
+  branchId?: string;
   schemaCache?: Map<string, ObjectTypeSchema>;
 }
 

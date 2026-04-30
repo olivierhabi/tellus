@@ -1,0 +1,17 @@
+{
+  "title": "Tellus SLO Dashboard",
+  "uid": "tellus-slo",
+  "schemaVersion": 38,
+  "panels": [
+    { "title": "Read p99 vs 250ms SLO", "type": "timeseries", "targets": [{ "expr": "histogram_quantile(0.99, sum(rate(tellus_http_request_duration_seconds_bucket{route=~\"/api/v1/ontology/.+\"}[5m])) by (le))" }] },
+    { "title": "Action p99 vs 800ms SLO", "type": "timeseries", "targets": [{ "expr": "histogram_quantile(0.99, sum(rate(tellus_http_request_duration_seconds_bucket{route=~\"/api/v1/actionTypes/.+/apply\"}[5m])) by (le))" }] },
+    { "title": "Error rate", "type": "timeseries", "targets": [{ "expr": "sum(rate(tellus_http_requests_total{status=~\"5..\"}[5m])) / sum(rate(tellus_http_requests_total[5m]))" }] },
+    { "title": "Audit chain breaks", "type": "stat", "targets": [{ "expr": "sum(increase(tellus_audit_chain_breaks_total[24h]))" }] },
+    { "title": "Audit chain verified lag", "type": "stat", "targets": [{ "expr": "time() - tellus_audit_chain_verified_at" }] },
+    { "title": "PG pool waiting", "type": "timeseries", "targets": [{ "expr": "tellus_pg_pool_connections_waiting" }] },
+    { "title": "Event loop lag", "type": "timeseries", "targets": [{ "expr": "tellus_event_loop_lag_ms" }] },
+    { "title": "Circuit breaker state", "type": "timeseries", "targets": [{ "expr": "tellus_circuit_breaker_state" }] },
+    { "title": "Rate limit rejections", "type": "timeseries", "targets": [{ "expr": "sum(rate(tellus_rate_limit_exceeded_total[5m])) by (scope)" }] },
+    { "title": "CBAC denies", "type": "timeseries", "targets": [{ "expr": "sum(rate(tellus_cbac_deny_total[5m])) by (reason)" }] }
+  ]
+}

@@ -225,18 +225,23 @@ function buildErrorResponse(
   message: string,
   instanceId: string,
   parameters: Record<string, unknown> = {},
-  stack?: string
+  stack?: string,
+  statusCode: number = 500,
+  requestId?: string
 ): Record<string, unknown> {
+  // Spec §2.1: {errorCode, errorName, message, statusCode, requestId, parameters}
   const response: Record<string, unknown> = {
     errorCode,
     errorName,
-    errorInstanceId: instanceId,
-    parameters,
     message,
+    statusCode,
+    requestId: requestId || instanceId,
+    parameters,
+    // Legacy fields retained for backward compat with older clients:
+    errorInstanceId: instanceId,
     timestamp: new Date().toISOString(),
   };
 
-  // Only include stack traces in non-production environments
   if (!IS_PRODUCTION && stack) {
     response.stack = stack;
   }
@@ -286,15 +291,24 @@ export default function errorHandler(
         err.message,
         instanceId,
         err.details || {},
-        err.stack
+        err.stack,
+        err.statusCode,
+        requestId
       )
     );
   }
 
   // -----------------------------------------------------------------
   // 2b. Foundry data ingestion layer AppError (duck-type detection)
-  //     These have statusCode (number), code (string), isOperational (boolean)
-  //     Check error name to avoid catching third-party errors
+  //     These have statusCode (number), code (string), isOperational (boolean).
+  //
+  //     Hardening pass: we now emit the SPEC envelope here — the same
+  //     shape produced by tellusAuthV1.ts's local sendError() — so a
+  //     handler that routes an auth error through next() vs the local
+  //     helper produces an identical response to the caller. A
+  //     back-compat `success:false` + `error:{code,message}` shim is
+  //     mirrored alongside it for one release so older clients still
+  //     parse it, but new callers should read the top-level envelope.
   // -----------------------------------------------------------------
   if (
     typeof err === "object" && err !== null &&
@@ -307,8 +321,15 @@ export default function errorHandler(
     const instanceId = crypto.randomUUID();
     console.error(`[${fErr.code}] ${fErr.message} (${instanceId}) [requestId=${requestId}]`);
 
-    // Foundry endpoints return { success: false, error: { code, message } } format
     return void res.status(fErr.statusCode).json({
+      errorCode: fErr.code,
+      errorName: "AuthenticationError",
+      message: fErr.message,
+      statusCode: fErr.statusCode,
+      requestId,
+      errorInstanceId: instanceId,
+      timestamp: new Date().toISOString(),
+      // Legacy shim — remove after all clients migrate to the top-level envelope.
       success: false,
       error: {
         code: fErr.code,
@@ -320,13 +341,22 @@ export default function errorHandler(
 
   // -----------------------------------------------------------------
   // 2c. JSON parse error (malformed request body from express.json())
+  //     Same unification as 2b — spec envelope first, legacy shim for compat.
   // -----------------------------------------------------------------
   if (
     err instanceof SyntaxError &&
     "type" in err &&
     (err as any).type === "entity.parse.failed"
   ) {
+    const instanceId = crypto.randomUUID();
     return void res.status(400).json({
+      errorCode: "VALIDATION_ERROR",
+      errorName: "ValidationError",
+      message: "Malformed JSON in request body.",
+      statusCode: 400,
+      requestId,
+      errorInstanceId: instanceId,
+      timestamp: new Date().toISOString(),
       success: false,
       error: {
         code: "VALIDATION_ERROR",
@@ -353,7 +383,9 @@ export default function errorHandler(
         err.message,
         instanceId,
         err.details || {},
-        err.stack
+        err.stack,
+        httpStatus,
+        requestId
       )
     );
   }
@@ -548,7 +580,9 @@ export default function errorHandler(
         : err.message || "An internal error occurred.",
       instanceId,
       {},
-      IS_PRODUCTION ? undefined : err.stack
+      IS_PRODUCTION ? undefined : err.stack,
+      500,
+      requestId
     )
   );
 }

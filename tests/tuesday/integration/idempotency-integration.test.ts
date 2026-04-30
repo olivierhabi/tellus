@@ -68,7 +68,7 @@ async function ensureActionType(def: Record<string, unknown>): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await request(
       "POST",
-      `/api/v2/ontologies/${ontologyId}/actionTypes`,
+      `/api/v1/ontology/${ontologyId}/actionTypes`,
       def
     );
     if (res.status === 201 || res.status === 409) return;
@@ -97,7 +97,7 @@ async function executeAction(
   }
   return request(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/actions/${actionTypeApiName}/apply`,
+    `/api/v1/ontology/${ontologyId}/actions/${actionTypeApiName}/apply`,
     { parameters },
     extraHeaders
   );
@@ -121,9 +121,9 @@ beforeAll(async () => {
   }
 
   // Discover the first ontology (seed ontology)
-  const ont = await request("GET", "/api/v2/ontologies");
+  const ont = await request("GET", "/api/v1/ontology");
   if (ont.status === 200 && ont.body?.data?.length > 0) {
-    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology") || ont.body.data[0];
+    const seedOnt = ont.body.data.find((o: any) => o.displayName === "RRA Tax Ontology" || o.displayName === "Rwanda Revenue Authority") || ont.body.data[0];
     ontologyId = seedOnt.ontologyId;
   } else {
     console.warn("No ontologies found — skipping idempotency tests");
@@ -202,7 +202,7 @@ describe("Action Idempotency Protection (Task 21)", () => {
         {
           type: "modifyObject",
           objectType: "Taxpayer",
-          primaryKey: { source: "parameter", param: "tin" },
+          objectReference: { source: "parameter", param: "tin" },
           properties: {
             fullName: { source: "parameter", param: "fullName" },
           },
@@ -358,7 +358,7 @@ describe("Action Idempotency Protection (Task 21)", () => {
     // Verify the object exists via the objects API
     const obj = await request(
       "GET",
-      `/api/v2/objects/Taxpayer/${encodeURIComponent(tin)}`
+      `/api/v1/objects/Taxpayer/${encodeURIComponent(tin)}`
     );
     expect(obj.status).toBe(200);
     expect(obj.body.fullName).toBe("Only Once");
@@ -450,5 +450,82 @@ describe("Action Idempotency Protection (Task 21)", () => {
     expect(retry.body.errorCode).toBe(firstErrorCode);
     expect(retry.body.errorInstanceId).toBe(firstErrorInstanceId);
     expect(retry.headers.get("X-Idempotency-Cached")).toBe("true");
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 9 (Phase A5, F-04): concurrent requests with the same idempotency
+  // key result in exactly 1 execution.
+  //
+  // Pre-remediation behavior (F-04 open):
+  //   `checkIdempotencyKey` and `storeIdempotencyKey` were not atomic, so
+  //   two requests arriving in the same ~1ms window both missed the cache,
+  //   both executed, and both stored. The source file documented the race.
+  //
+  // Post-remediation expectation (`withIdempotencyLock`):
+  //   Exactly one executionId appears across all 50 responses. Exactly
+  //   one Taxpayer is created. All non-winners return the cached winner's
+  //   body with the `X-Idempotency-Cached: true` header.
+  //
+  // This test is the contract for F-04. Deleting or weakening it
+  // reopens the finding.
+  // -------------------------------------------------------------------------
+  it("F-04: concurrent apply() with the same idempotency key executes exactly once", async () => {
+    if (skip()) return;
+
+    const key = `test-key-concurrent-${RUN_ID}`;
+    const tin = `IDMP-CONC-${RUN_ID}`;
+    const N = 50;
+
+    // Fire N parallel applies with identical body + same key. Without the
+    // advisory lock, some of these bypass the cache and re-execute.
+    const responses = await Promise.all(
+      Array.from({ length: N }, () =>
+        executeAction(
+          CREATE_ACTION,
+          { tin, fullName: "Concurrent race test" },
+          key,
+        ),
+      ),
+    );
+
+    // All responses must succeed — we accept either the HTTP 200 from the
+    // winner or the cached-200 replay from the losers. Anything else
+    // (409, 500, or a duplicate 201) indicates double execution.
+    const statusCodes = responses.map((r) => r.status).sort();
+    expect(statusCodes[0]).toBe(200);
+    expect(statusCodes[statusCodes.length - 1]).toBe(200);
+
+    // All responses share a single executionId — proof of single execution.
+    const executionIds = new Set(
+      responses.map((r) => r.body?.executionId as string),
+    );
+    expect(
+      executionIds.size,
+      `all ${N} concurrent requests must share one executionId, got ${executionIds.size}: ${JSON.stringify([...executionIds])}`,
+    ).toBe(1);
+
+    // Exactly one of the responses is the winner (no cached header); the
+    // remaining N-1 are cache hits. If two or more requests report no
+    // cached header, two or more requests executed — F-04 regressed.
+    const cached = responses.filter(
+      (r) => r.headers.get("X-Idempotency-Cached") === "true",
+    );
+    const live = responses.filter(
+      (r) => r.headers.get("X-Idempotency-Cached") !== "true",
+    );
+    expect(live.length, "exactly 1 request must report no cached header").toBe(
+      1,
+    );
+    expect(cached.length).toBe(N - 1);
+
+    // Verify the Taxpayer was created exactly once by fetching it and
+    // asserting version=1. A second execution would have bumped version
+    // or produced a duplicate-PK error that the winner cached.
+    const read = await request(
+      "GET",
+      `/api/v1/objects/Taxpayer/${encodeURIComponent(tin)}`,
+    );
+    expect(read.status).toBe(200);
+    expect(read.body?.__version).toBe(1);
   });
 });

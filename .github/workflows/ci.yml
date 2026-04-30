@@ -11,6 +11,7 @@
 # Services:
 #   - PostgreSQL 16 (port 5432)
 #   - OpenSearch 2.11 (port 9200)
+#   - Keycloak 25 (port 8086) — SSO / OAuth 2.0 identity provider
 #   - MinIO (port 9000) — S3-compatible object storage for file uploads
 # =============================================================================
 
@@ -23,13 +24,14 @@ on:
     branches: [main, master, develop]
 
 env:
-  # PostgreSQL connection
+  # PostgreSQL connection — F-14: use GitHub Actions secrets.
+  # For local testing these fall back to CI-only defaults below.
   PGHOST: localhost
   PGPORT: 5432
   PGDATABASE: tellus_db
-  PGUSER: tellus
-  PGPASSWORD: tellus123
-  POSTGRES_URL: postgresql://tellus:tellus123@localhost:5432/tellus_db
+  PGUSER: ${{ secrets.CI_PGUSER || 'tellus' }}
+  PGPASSWORD: ${{ secrets.CI_PGPASSWORD || 'tellus123' }}
+  POSTGRES_URL: postgresql://${{ secrets.CI_PGUSER || 'tellus' }}:${{ secrets.CI_PGPASSWORD || 'tellus123' }}@localhost:5432/tellus_db
 
   # OpenSearch connection
   OPENSEARCH_URL: http://localhost:9200
@@ -37,13 +39,23 @@ env:
   # Test data directory (used by seed scripts)
   DATA_DIR: /tmp/ontology-testdata
 
-  # MinIO / S3 object storage
+  # MinIO / S3 object storage — F-14: credentials via secrets with fallback.
   S3_ENDPOINT: http://localhost:9000
   S3_REGION: us-east-1
   S3_BUCKET: tellus-uploads
-  S3_ACCESS_KEY_ID: minioadmin
-  S3_SECRET_ACCESS_KEY: minioadmin
+  S3_ACCESS_KEY_ID: ${{ secrets.CI_S3_ACCESS_KEY_ID || 'minioadmin' }}
+  S3_SECRET_ACCESS_KEY: ${{ secrets.CI_S3_SECRET_ACCESS_KEY || 'minioadmin' }}
   S3_FORCE_PATH_STYLE: "true"
+
+  # Keycloak (SSO / OAuth 2.0) — F-14: secret via GitHub secrets with fallback.
+  KEYCLOAK_URL: http://localhost:8086
+  KEYCLOAK_REALM: tellus
+  KEYCLOAK_CLIENT_ID: tellus-api
+  KEYCLOAK_FRONTEND_CLIENT_ID: tellus-frontend
+  KEYCLOAK_CONFIDENTIAL_CLIENT_ID: tellus-confidential
+  KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET: ${{ secrets.CI_KEYCLOAK_SECRET || 'tellus-confidential-secret-change-me' }}
+  KEYCLOAK_TEST_USER: cypress@tellus.local
+  KEYCLOAK_TEST_PASS: ${{ secrets.CI_KEYCLOAK_TEST_PASS || 'Password123!' }}
 
   # Elevated rate limits for CI (prevents test interference)
   RATE_LIMIT_MAX: 10000
@@ -51,6 +63,10 @@ env:
   USER_RATE_LIMIT_MAX: 50000
   GLOBAL_ACTION_RATE_LIMIT_MAX: 100000
   BATCH_RATE_LIMIT_MAX: 1000
+
+  # Force JavaScript actions still bundled for Node 20 to run under Node 24
+  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   # ===========================================================================
@@ -63,17 +79,18 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+        uses: actions/checkout@v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -81,16 +98,27 @@ jobs:
       - name: TypeScript compile check
         run: pnpm run build
 
-      - name: Run unit tests
+      - name: Run unit tests with coverage
         run: pnpm run test:unit
+        env:
+          COVERAGE: "1"
+
+      - name: Upload coverage reports to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unit
+          fail_ci_if_error: false
 
   # ===========================================================================
-  # Job 2: Integration Tests (PostgreSQL + OpenSearch required)
+  # Job 2: Integration Tests (PostgreSQL + OpenSearch + Keycloak required)
   # ===========================================================================
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -121,25 +149,59 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+        uses: actions/checkout@v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
+
       - name: Run database migrations
-        run: pnpm run migrate
+        run: |
+          pnpm run migrate
+          pnpm run migrate:foundry
+          pnpm run migrate:auth
 
       - name: Seed database
         run: |
@@ -149,13 +211,21 @@ jobs:
       - name: Run integration tests
         run: pnpm run test:integration
 
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-server-log
+          path: /tmp/tellus-integration-server.log
+          retention-days: 7
+
   # ===========================================================================
-  # Job 3: E2E Tests (PostgreSQL + OpenSearch + MinIO required)
+  # Job 3: E2E Tests (PostgreSQL + OpenSearch + Keycloak + MinIO required)
   # ===========================================================================
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -186,22 +256,53 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+        uses: actions/checkout@v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -231,8 +332,16 @@ jobs:
       - name: Run E2E tests
         run: pnpm run test:e2e
 
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-server-log
+          path: /tmp/tellus-e2e-server.log
+          retention-days: 7
+
   # ===========================================================================
-  # Job 4: Performance Benchmarks (PostgreSQL + OpenSearch + MinIO required)
+  # Job 4: Performance Benchmarks (PostgreSQL + OpenSearch + Keycloak + MinIO required)
   # ===========================================================================
   perf:
     name: Performance Benchmarks
@@ -268,22 +377,53 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+        uses: actions/checkout@v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -308,7 +448,10 @@ jobs:
           mc mb --ignore-existing ci/tellus-uploads
 
       - name: Run database migrations
-        run: pnpm run migrate
+        run: |
+          pnpm run migrate
+          pnpm run migrate:foundry
+          pnpm run migrate:auth
 
       - name: Seed database
         run: |
@@ -386,22 +529,53 @@ jobs:
           --health-timeout=10s
           --health-retries=20
 
+      # Keycloak is started as a docker run step (not a service) because
+      # the image requires "start-dev" as a command argument, which GitHub
+      # Actions service containers do not support.
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+        uses: actions/checkout@v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Keycloak and bootstrap realm
+        run: |
+          docker run -d --name keycloak \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -e KC_DB=dev-file \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8086 \
+            -e KC_HOSTNAME_STRICT=false \
+            -p 8086:8086 \
+            quay.io/keycloak/keycloak:25.0 start-dev
+
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+              echo "Keycloak ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Keycloak failed to start"; docker logs keycloak; exit 1
+            fi
+            sleep 2
+          done
+
+          bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -429,7 +603,10 @@ jobs:
         run: mkdir -p /tmp/ontology-testdata
 
       - name: Run database migrations
-        run: pnpm run migrate
+        run: |
+          pnpm run migrate
+          pnpm run migrate:foundry
+          pnpm run migrate:auth
 
       - name: Seed database
         run: |
@@ -455,7 +632,9 @@ jobs:
           done
 
       - name: Run full test suite
-        run: pnpm run test:all
+        run: |
+          set -o pipefail
+          pnpm run test:all 2>&1 | tee /tmp/test-all.log
 
       - name: Stop server
         if: always()
@@ -467,4 +646,12 @@ jobs:
         with:
           name: test-all-server-log
           path: /tmp/tellus-server.log
+          retention-days: 7
+
+      - name: Upload test:all console log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-all-console-log
+          path: /tmp/test-all.log
           retention-days: 7

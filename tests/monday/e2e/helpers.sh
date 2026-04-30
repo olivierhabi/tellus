@@ -120,6 +120,13 @@ do_request() {
 
     local curl_args=(-s -w "\n%{http_code}" -D "$tmpfile" -X "$method")
     curl_args+=(-H "Content-Type: application/json")
+    # F-01: attach JWT so globalAuth() does not 401 data-plane routes.
+    # `AUTH_TOKEN` is exported by tests/e2e/run-all.sh via a Keycloak
+    # direct-grant. If unset, the call goes unauthenticated (useful for
+    # the allowlisted health/CORS probes and the 401-regression tests).
+    if [[ -n "${AUTH_TOKEN:-}" ]]; then
+      curl_args+=(-H "Authorization: Bearer ${AUTH_TOKEN}")
+    fi
 
     if [[ -n "$data" ]]; then
       curl_args+=(-d "$data")
@@ -149,6 +156,13 @@ do_request_with_header() {
 
   local curl_args=(-s -w "\n%{http_code}" -D "$tmpfile" -X "$method")
   curl_args+=(-H "Content-Type: application/json")
+  # F-01: only attach the default AUTH_TOKEN if the caller did not
+  # already supply an `Authorization:` header themselves. This lets
+  # tests pass a scoped token (e.g. viewer-only) to assert 403 without
+  # it being overridden.
+  if [[ -n "${AUTH_TOKEN:-}" && "$extra_header" != Authorization:* && "$extra_header" != authorization:* ]]; then
+    curl_args+=(-H "Authorization: Bearer ${AUTH_TOKEN}")
+  fi
   curl_args+=(-H "$extra_header")
 
   if [[ -n "$data" ]]; then

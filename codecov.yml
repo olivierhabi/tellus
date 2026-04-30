@@ -1,0 +1,57 @@
+codecov:
+  require_ci_to_pass: true
+  notify:
+    wait_for_ci: true
+
+coverage:
+  precision: 2
+  round: down
+  range: "70...90"
+
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        base: auto
+        informational: true
+        if_ci_failed: error
+        only_pulls: false
+    patch:
+      default:
+        target: 80%
+        threshold: 1%
+        informational: true
+        if_ci_failed: error
+
+comment:
+  layout: "reach, diff, flags, components, files, footer"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+  hide_project_coverage: false
+
+github_checks:
+  annotations: false
+
+flags:
+  unit:
+    paths:
+      - src/
+    carryforward: true
+
+ignore:
+  - "tests/**/*"
+  - "dist/**/*"
+  - "scripts/**/*"
+  - "coverage/**/*"
+  - "**/*.d.ts"
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "src/migrations/**/*"
+  - "src/seeds/**/*"
+  - "src/migrate.ts"
+  - "src/migrateAuth.ts"
+  - "src/foundryMigrate.ts"
+  - "src/seed.ts"

@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Quickwit node config — single-node combo mode (all roles in one process)
+# ---------------------------------------------------------------------------
+# Reference: https://quickwit.io/docs/configuration/node-config
+# Used by:   docker-compose-files/quickwit.docker-compose.yml
+#
+# In production each role (metastore / indexer / searcher / control-plane /
+# janitor) runs on its own StatefulSet per B8; for dev the combo is fine.
+# ---------------------------------------------------------------------------
+
+version: 0.8
+
+cluster_id: tellus-funnel
+node_id: quickwit-1
+
+listen_address: 0.0.0.0
+rest:
+  listen_port: 7280
+gossip_listen_port: 7282
+
+# Metastore lives on S3 (MinIO) so it's durable across container restarts
+# and survives `docker compose down -v` on quickwit_data alone.
+metastore_uri: s3://quickwit-indexes/metastore
+
+default_index_root_uri: s3://quickwit-indexes
+
+storage:
+  s3:
+    # MinIO in the compose network. Overridable via QW_S3_ENDPOINT env.
+    endpoint: http://minio:9000
+    force_path_style_access: true
+
+# Combo mode — enable every role.
+enabled_services:
+  - control_plane
+  - indexer
+  - searcher
+  - metastore
+  - janitor
+
+indexer:
+  split_store_max_num_bytes: "25GB"
+  split_store_max_num_splits: 1000
+
+searcher:
+  # B8 targets 180 GB per searcher on NVMe; dev defaults are lighter.
+  fast_field_cache_capacity: "1G"
+  split_footer_cache_capacity: "500M"
+  partial_request_cache_capacity: "64M"
+  split_cache:
+    max_num_bytes: "5GB"
+    max_num_splits: 1000
+    num_concurrent_downloads: 4

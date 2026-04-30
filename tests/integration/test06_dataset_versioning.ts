@@ -99,7 +99,7 @@ async function cleanup() {
   console.log("\n--- Cleanup ---");
   try {
     if (datasetId) {
-      await api("DELETE", `/api/v2/datasets/${datasetId}?force=true`);
+      await api("DELETE", `/api/v1/datasets/${datasetId}?force=true`);
       console.log("  Deleted dataset");
     }
   } catch { /* best effort */ }
@@ -114,7 +114,9 @@ async function cleanup() {
 }
 
 function writeTmpCsv(name: string, content: string): string {
-  const p = path.join(process.cwd(), `${name}_${Date.now()}.csv`);
+  const tmpDir = path.join(__dirname, "tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const p = path.join(tmpDir, `${name}_${Date.now()}.csv`);
   fs.writeFileSync(p, content);
   tmpFiles.push(p);
   return p;
@@ -135,7 +137,7 @@ async function main() {
   const csv50 = generateProductCsv(50);
   const csv50Path = writeTmpCsv("test06_products_initial", csv50);
 
-  const uploadRes = await uploadFile(`${API}/api/v2/datasets/upload`, csv50Path, {
+  const uploadRes = await uploadFile(`${API}/api/v1/datasets/upload`, csv50Path, {
     name: "test06_products",
   });
   assert(uploadRes.status === 201, "Initial upload succeeded");
@@ -147,7 +149,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n6.2  Verify dataset detail shows 1 transaction");
 
-  const detailRes = await api("GET", `/api/v2/datasets/${datasetId}`);
+  const detailRes = await api("GET", `/api/v1/datasets/${datasetId}`);
   assert(detailRes.status === 200, "Dataset detail returned 200");
   const transactions = detailRes.body?.data?.transactions ?? [];
   assert(transactions.length === 1, `1 transaction (got ${transactions.length})`);
@@ -155,11 +157,11 @@ async function main() {
   assert(initialTotalRows === 50, `totalRows === 50 (got ${initialTotalRows})`);
 
   // -----------------------------------------------------------------------
-  // 6.3 Preview initial data (GET /api/v2/datasets/:id/preview?rows=5)
+  // 6.3 Preview initial data (GET /api/v1/datasets/:id/preview?rows=5)
   // -----------------------------------------------------------------------
   console.log("\n6.3  Preview initial data");
 
-  const previewRes = await api("GET", `/api/v2/datasets/${datasetId}/preview?rows=5`);
+  const previewRes = await api("GET", `/api/v1/datasets/${datasetId}/preview?rows=5`);
   assert(previewRes.status === 200, "Preview returned 200");
   const previewData = previewRes.body?.data;
   assert(
@@ -184,7 +186,7 @@ async function main() {
   const csv20Path = writeTmpCsv("test06_products_append", csv20);
 
   const appendRes = await uploadFile(
-    `${API}/api/v2/datasets/${datasetId}/transactions`,
+    `${API}/api/v1/datasets/${datasetId}/transactions`,
     csv20Path,
     { type: "APPEND" }
   );
@@ -197,7 +199,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n6.5  Verify dataset has 2 transactions");
 
-  const detail2Res = await api("GET", `/api/v2/datasets/${datasetId}`);
+  const detail2Res = await api("GET", `/api/v1/datasets/${datasetId}`);
   assert(detail2Res.status === 200, "Dataset detail returned 200");
   const txns2 = detail2Res.body?.data?.transactions ?? [];
   assert(txns2.length === 2, `2 transactions (got ${txns2.length})`);
@@ -207,7 +209,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n6.6  Preview merged view shows 70 rows");
 
-  const preview70Res = await api("GET", `/api/v2/datasets/${datasetId}/preview?rows=500`);
+  const preview70Res = await api("GET", `/api/v1/datasets/${datasetId}/preview?rows=500`);
   assert(preview70Res.status === 200, "Preview returned 200");
   const totalRowsMerged = preview70Res.body?.data?.totalRows;
   // Note: preview may read from latest transaction only; totalRows in dataset should be 70
@@ -223,14 +225,14 @@ async function main() {
   const csvOverlapPath = writeTmpCsv("test06_products_overlap", csvOverlap);
 
   const overlapRes = await uploadFile(
-    `${API}/api/v2/datasets/${datasetId}/transactions`,
+    `${API}/api/v1/datasets/${datasetId}/transactions`,
     csvOverlapPath,
     { type: "APPEND" }
   );
   assert(overlapRes.status === 201, `Overlap append succeeded (status ${overlapRes.status})`);
 
   // Verify the overlapping rows made it into the dataset
-  const detail3Res = await api("GET", `/api/v2/datasets/${datasetId}`);
+  const detail3Res = await api("GET", `/api/v1/datasets/${datasetId}`);
   const txns3 = detail3Res.body?.data?.transactions ?? [];
   assert(txns3.length === 3, `3 transactions (got ${txns3.length})`);
   const detail3Total = detail3Res.body?.data?.dataset?.totalRows;
@@ -245,7 +247,7 @@ async function main() {
   const csv25Path = writeTmpCsv("test06_products_snapshot", csv25);
 
   const snapshotRes = await uploadFile(
-    `${API}/api/v2/datasets/${datasetId}/transactions`,
+    `${API}/api/v1/datasets/${datasetId}/transactions`,
     csv25Path,
     { type: "SNAPSHOT" }
   );
@@ -256,7 +258,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n6.9  Verify dataset rowCount = 25");
 
-  const detail4Res = await api("GET", `/api/v2/datasets/${datasetId}`);
+  const detail4Res = await api("GET", `/api/v1/datasets/${datasetId}`);
   const finalTotalRows = detail4Res.body?.data?.dataset?.totalRows;
   assert(finalTotalRows === 25, `Dataset totalRows === 25 (got ${finalTotalRows})`);
 }

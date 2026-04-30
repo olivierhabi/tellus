@@ -15,8 +15,20 @@ import { Response } from "express";
 /** Generic database row shape (snake_case keys). */
 type DbRow = Record<string, unknown>;
 
-/** Formatted error response body. */
+/**
+ * Formatted error response body (Ontology Platform tasks.md §2.1).
+ *
+ * All endpoints MUST return this envelope on error paths so that clients
+ * (including the cypress e2e suite) can assert on `errorCode`/`requestId`.
+ */
 export interface FormattedError {
+  errorCode: string;
+  errorName: string;
+  message: string;
+  statusCode: number;
+  requestId: string;
+  parameters: Record<string, unknown>;
+  /** Deprecated legacy envelope. Kept so old clients don't crash. */
   error: {
     code: string;
     message: string;
@@ -92,6 +104,26 @@ export function formatOntology(
 }
 
 /**
+ * Project a PascalCase `apiName` onto a kebab-case slug for the human
+ * readable ID surfaced on the overview card. Splits on case + digit
+ * boundaries so `GenaAllOrders` → `gena-all-orders` and `OrderV2` →
+ * `order-v-2`. Purely presentational — the canonical identifier for
+ * every API call and audit log is still `object_type_id` (UUID).
+ */
+function apiNameToDisplayId(apiName: string): string {
+  return apiName
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([A-Za-z])(\d)/g, "$1 $2")
+    .replace(/(\d)([A-Za-z])/g, "$1 $2")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((s) => s.toLowerCase())
+    .join("-");
+}
+
+/**
  * Format a full object type DB row with properties, datasource, and funnel
  * state for the API response.
  */
@@ -125,11 +157,41 @@ export function formatObjectType(
     titleProperty = titleProp ? (titleProp.api_name as string) : null;
   }
 
+  // Palantir-style resource identifier. We don't persist RIDs —
+  // they're a deterministic projection of the ontology id + object
+  // type id so overview pages and deep links can show/copy a stable
+  // RID without an extra lookup.
+  const rid =
+    dbRow.ontology_id && dbRow.object_type_id
+      ? `ri.ontology.${dbRow.ontology_id}.object-type.${dbRow.object_type_id}`
+      : null;
+
+  // Human-scannable kebab-case projection of apiName — purely for
+  // presentation on the object type overview card ("gena-all-orders"
+  // instead of a raw UUID). Derived here so every client gets the
+  // same slug without having to reimplement the casing logic.
+  const displayId = dbRow.api_name
+    ? apiNameToDisplayId(dbRow.api_name as string)
+    : null;
+
   return {
     objectType: {
+      objectTypeId: dbRow.object_type_id,
+      displayId,
+      rid,
       apiName: dbRow.api_name,
+      // Original apiName the caller asked for when the wizard was
+      // in "rename-on-conflict" mode. When non-null and different
+      // from `apiName`, the frontend flags it as an API-name
+      // conflict on the overview card.
+      requestedApiName: (dbRow.requested_api_name as string | null) ?? null,
       displayName: dbRow.display_name,
+      pluralName: dbRow.plural_name ?? null,
       description: dbRow.description ?? null,
+      aliases: Array.isArray(dbRow.aliases) ? dbRow.aliases : [],
+      pointOfContact: dbRow.point_of_contact ?? null,
+      contributors: Array.isArray(dbRow.contributors) ? dbRow.contributors : [],
+      visibility: dbRow.visibility ?? "normal",
       icon: dbRow.icon,
       iconColor: dbRow.icon_color,
       status: dbRow.status,
@@ -154,13 +216,24 @@ export function formatObjectTypeSummary(
   dbRow: DbRow,
   propertyCount: number = 0,
   datasourceName: string | null = null,
-  indexStatus: string | null = null
+  indexStatus: string | null = null,
+  objectCount: number = 0,
+  dependentCount: number = 0
 ): Record<string, unknown> {
   return {
+    objectTypeId: dbRow.object_type_id,
     apiName: dbRow.api_name,
     displayName: dbRow.display_name,
+    icon: dbRow.icon,
+    iconColor: dbRow.icon_color,
     status: dbRow.status,
     propertyCount,
+    // Number of indexed object instances (Foundry "N objects" readout).
+    objectCount,
+    // Number of ontology resources that reference this type — link_type
+    // rows (source or target) plus action_type rules/parameters whose
+    // JSONB `objectType` key matches this type's api_name.
+    dependentCount,
     datasourceName,
     indexStatus,
     createdAt: dbRow.created_at,
@@ -188,7 +261,29 @@ export function formatProperty(dbRow: DbRow): Record<string, unknown> {
  * Format a backing_datasource DB row for the API response.
  */
 export function formatDatasource(dbRow: DbRow): Record<string, unknown> {
+  // Surface the backing foundry_datasets.id so clients can preview
+  // rows straight from the upload pipeline without having to parse
+  // the synthetic file_path tag themselves.
+  //
+  // Two sources, in priority order:
+  //   1. `backing_datasource.dataset_id` — set by the legacy
+  //      Ontology-dataset binding path (FK to `dataset` table).
+  //   2. `#foundry-dataset:<uuid>` tag embedded in `file_path` by
+  //      `registerWithFoundryDataset`, the bridge used when the
+  //      Step 1 picker selects a `foundry_datasets` row.
+  //
+  // `filePath` is left intact for backward compatibility and for
+  // legacy filesystem-backed rows that don't carry a synthetic tag.
+  let datasetId: string | null = null;
+  if (dbRow.dataset_id) {
+    datasetId = String(dbRow.dataset_id);
+  } else if (typeof dbRow.file_path === "string") {
+    const match = dbRow.file_path.match(/#foundry-dataset:([0-9a-f-]{36})/i);
+    if (match) datasetId = match[1];
+  }
+
   return {
+    datasetId,
     datasetName: dbRow.dataset_name,
     filePath: dbRow.file_path,
     fileFormat: dbRow.file_format,
@@ -199,6 +294,11 @@ export function formatDatasource(dbRow: DbRow): Record<string, unknown> {
     schemaHash: dbRow.schema_hash ?? null,
     lastScannedAt: dbRow.last_scanned_at ?? null,
     registeredAt: dbRow.registered_at,
+    originalFilename: dbRow._original_filename ?? null,
+    ontologyName: dbRow._ontology_name ?? null,
+    projectName: dbRow._project_name ?? null,
+    folderName: dbRow._folder_name ?? null,
+    folderPath: dbRow._folder_path ?? null,
   };
 }
 
@@ -229,6 +329,7 @@ export const ERROR_CODES: Record<string, number> = {
   DATASOURCE_NOT_FOUND: 404,
   ONTOLOGY_ALREADY_EXISTS: 409,
   OBJECT_TYPE_ALREADY_EXISTS: 409,
+  DUPLICATE_API_NAME: 409,
   PROPERTY_ALREADY_EXISTS: 409,
   DATASOURCE_ALREADY_REGISTERED: 409,
   ALREADY_EXISTS: 409,
@@ -291,6 +392,48 @@ export const ERROR_CODES: Record<string, number> = {
   FORBIDDEN: 403,
   UNSUPPORTED_FILE: 415,
   RATE_LIMITED: 429,
+  // Ontology Platform spec §2.1
+  CONCURRENT_EDIT_CONFLICT: 409,
+  PRECONDITION_REQUIRED: 428,
+  API_NAME_CONFLICT: 409,
+  BRANCH_MERGE_CONFLICT: 409,
+  BREAKING_SCHEMA_CHANGE: 422,
+  MIGRATION_REQUIRED: 422,
+  INSUFFICIENT_ROLE: 403,
+  MARKING_ACCESS_DENIED: 403,
+  ORG_ACCESS_DENIED: 403,
+  SEARCH_INDEX_UNAVAILABLE: 503,
+  PIPELINE_OVERLOADED: 503,
+  VECTOR_DIMS_EXCEEDED: 400,
+  VECTOR_DIMS_MISMATCH: 400,
+  STRUCT_DEPTH_EXCEEDED: 400,
+  COMPOSITE_PK_LIMIT: 400,
+  SCHEMA_VALIDATION_FAILED: 400,
+  SQL_WRITE_REJECTED: 400,
+  SQL_QUERY_TIMEOUT: 408,
+  JOIN_TABLE_REQUIRED: 400,
+  MAX_LINK_DEPTH_EXCEEDED: 400,
+  INCOMPATIBLE_PROPERTY_TYPE: 400,
+  INTERFACE_CYCLE_DETECTED: 400,
+  BRANCH_NOT_FOUND: 404,
+  PK_UNIQUENESS_VIOLATION: 409,
+  MISSING_REQUIRED_PARAMETER: 400,
+  FUNCTION_TIMEOUT: 504,
+  RULE_EXECUTION_FAILED: 500,
+  TIMESERIES_WINDOW_TOO_LARGE: 400,
+  QUERY_TIMEOUT: 504,
+  UNDO_WINDOW_EXPIRED: 410,
+  LINK_CYCLE_DETECTED: 400,
+  EXPORT_ROW_LIMIT_EXCEEDED: 400,
+  BULK_FAILURE_THRESHOLD_EXCEEDED: 422,
+  // LT-B1..B10
+  ONE_TO_ONE_VIOLATION: 409,
+  OFFSET_TOO_DEEP_USE_SEARCH_AFTER: 400,
+  INVALID_SEARCH_AFTER_TOKEN: 400,
+  PIT_EXPIRED: 410,
+  RESULT_SET_TOO_LARGE: 413,
+  REVERSE_ACTIONS_DISABLED: 403,
+  QUARANTINE_NOT_FOUND: 404,
 };
 
 // ---------------------------------------------------------------------------
@@ -298,14 +441,36 @@ export const ERROR_CODES: Record<string, number> = {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a formatted error response body.
+ * Convert a SCREAMING_SNAKE_CASE error code to PascalCase name.
+ * Example: "OBJECT_TYPE_NOT_FOUND" -> "ObjectTypeNotFound".
+ */
+function errorCodeToName(code: string): string {
+  return code
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+}
+
+/**
+ * Build a formatted error response body that complies with the Ontology
+ * Platform spec §2.1 envelope while remaining backward compatible with the
+ * legacy `error.{code,message,details,timestamp}` shape.
  */
 export function formatError(
   code: string,
   message: string,
-  details: Record<string, unknown> = {}
+  details: Record<string, unknown> = {},
+  requestId: string = ""
 ): FormattedError {
+  const statusCode = ERROR_CODES[code] || 500;
   return {
+    errorCode: code,
+    errorName: errorCodeToName(code),
+    message,
+    statusCode,
+    requestId,
+    parameters: details,
     error: {
       code,
       message,
@@ -317,6 +482,7 @@ export function formatError(
 
 /**
  * Send an error response. Looks up HTTP status from ERROR_CODES (default 500).
+ * Automatically pulls `requestId` from `res.req.correlationId` when present.
  */
 export function sendError(
   res: Response,
@@ -325,7 +491,11 @@ export function sendError(
   details: Record<string, unknown> = {}
 ): void {
   const httpStatus = ERROR_CODES[code] || 500;
-  res.status(httpStatus).json(formatError(code, message, details));
+  const requestId =
+    ((res.req as unknown as { correlationId?: string })?.correlationId) || "";
+  res
+    .status(httpStatus)
+    .json(formatError(code, message, details, requestId));
 }
 
 /**
@@ -393,7 +563,7 @@ export function decodePageToken(token: string | null | undefined): number {
 // Inline self-tests (run when executed directly: tsx src/utils/responseFormatter.ts)
 // ---------------------------------------------------------------------------
 
-function runSelfTests(): void {
+export function runSelfTests(): void {
   let passed = 0;
   let failed = 0;
 
@@ -401,6 +571,7 @@ function runSelfTests(): void {
     if (condition) {
       passed++;
     } else {
+      /* v8 ignore next 2 */
       failed++;
       console.error(`  FAIL: ${label}`);
     }
@@ -433,14 +604,23 @@ function runSelfTests(): void {
   const offset = decodePageToken(token);
   assert(offset === 20, "encodePageToken(20) decoded back to 20");
 
-  // 4. formatError has all 4 fields
-  const err = formatError("ONTOLOGY_NOT_FOUND", "test");
+  // 4. formatError produces spec §2.1 envelope + legacy fields
+  const err = formatError("ONTOLOGY_NOT_FOUND", "test", { apiName: "x" }, "req-abc");
+  assert(
+    err.errorCode === "ONTOLOGY_NOT_FOUND" &&
+      err.errorName === "OntologyNotFound" &&
+      err.message === "test" &&
+      err.statusCode === 404 &&
+      err.requestId === "req-abc" &&
+      (err.parameters as Record<string, unknown>).apiName === "x",
+    "formatError produces spec envelope"
+  );
   assert(
     err.error.code === "ONTOLOGY_NOT_FOUND" &&
       err.error.message === "test" &&
       typeof err.error.details === "object" &&
       typeof err.error.timestamp === "string",
-    "formatError has code, message, details, timestamp"
+    "formatError retains legacy envelope"
   );
 
   // Additional: ERROR_CODES has exactly 19 entries
@@ -572,10 +752,13 @@ function runSelfTests(): void {
   if (failed === 0) {
     console.log("\nAll formatter tests passed");
   } else {
+    /* v8 ignore next */
     process.exit(1);
   }
 }
 
+/* v8 ignore start */
 if (require.main === module) {
   runSelfTests();
 }
+/* v8 ignore stop */

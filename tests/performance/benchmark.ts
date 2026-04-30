@@ -99,7 +99,7 @@ async function benchmarkIndexing(): Promise<BenchmarkResult> {
   console.log("\n  Running indexing benchmark...");
 
   // Find an existing object type to reindex
-  const { body: statusBody } = await api("GET", "/api/v2/status");
+  const { body: statusBody } = await api("GET", "/api/v1/status");
   const objectTypes = statusBody?.ontology?.objectTypes ?? [];
 
   if (objectTypes.length === 0) {
@@ -117,7 +117,7 @@ async function benchmarkIndexing(): Promise<BenchmarkResult> {
   const ontologies = statusBody?.postgresql?.tables?.find((t: any) => t.name === "ontology");
 
   // Try to find the ontology ID
-  const { body: ontBody } = await api("GET", "/api/v2/ontologies?pageSize=1");
+  const { body: ontBody } = await api("GET", "/api/v1/ontology?pageSize=1");
   if (!ontBody?.data?.length) {
     return {
       name: "Indexing Throughput",
@@ -134,7 +134,7 @@ async function benchmarkIndexing(): Promise<BenchmarkResult> {
   const start = performance.now();
   const { status, body: indexResult } = await api(
     "POST",
-    `/api/v2/ontologies/${ontologyId}/objectTypes/${apiName}/index`
+    `/api/v1/ontology/${ontologyId}/objectTypes/${apiName}/index`
   );
   const durationMs = performance.now() - start;
 
@@ -162,7 +162,7 @@ async function benchmarkQueryLatency(): Promise<BenchmarkResult> {
   console.log("  Running query latency benchmark...");
 
   // Find an indexed object type
-  const { body: ontBody } = await api("GET", "/api/v2/ontologies?pageSize=1");
+  const { body: ontBody } = await api("GET", "/api/v1/ontology?pageSize=1");
   if (!ontBody?.data?.length) {
     return {
       name: "Query Latency",
@@ -174,7 +174,7 @@ async function benchmarkQueryLatency(): Promise<BenchmarkResult> {
   }
 
   const ontologyId = ontBody.data[0].ontologyId;
-  const { body: otBody } = await api("GET", `/api/v2/ontologies/${ontologyId}/objectTypes`);
+  const { body: otBody } = await api("GET", `/api/v1/ontology/${ontologyId}/objectTypes`);
   const objectTypes = otBody?.data ?? otBody ?? [];
 
   if (objectTypes.length === 0) {
@@ -193,14 +193,14 @@ async function benchmarkQueryLatency(): Promise<BenchmarkResult> {
 
   // Simple list queries
   for (let i = 0; i < 20; i++) {
-    const { durationMs } = await api("GET", `/api/v2/objects/${apiName}?$pageSize=10`);
+    const { durationMs } = await api("GET", `/api/v1/objects/${apiName}?$pageSize=10`);
     latencies.push(durationMs);
     queryTypes.push("list");
   }
 
   // Search queries
   for (let i = 0; i < 10; i++) {
-    const { durationMs } = await api("POST", `/api/v2/objects/${apiName}/search`, {
+    const { durationMs } = await api("POST", `/api/v1/objects/${apiName}/search`, {
       $pageSize: 10,
     });
     latencies.push(durationMs);
@@ -209,7 +209,7 @@ async function benchmarkQueryLatency(): Promise<BenchmarkResult> {
 
   // Full-text search
   for (let i = 0; i < 10; i++) {
-    const { durationMs } = await api("POST", `/api/v2/objects/${apiName}/searchFullText`, {
+    const { durationMs } = await api("POST", `/api/v1/objects/${apiName}/searchFullText`, {
       query: "test",
       $pageSize: 10,
     });
@@ -219,7 +219,7 @@ async function benchmarkQueryLatency(): Promise<BenchmarkResult> {
 
   // Aggregation
   for (let i = 0; i < 10; i++) {
-    const { durationMs } = await api("POST", `/api/v2/objects/${apiName}/aggregate`, {
+    const { durationMs } = await api("POST", `/api/v1/objects/${apiName}/aggregate`, {
       aggregations: [{ type: "count", name: "total" }],
     });
     latencies.push(durationMs);
@@ -256,7 +256,7 @@ async function benchmarkSearchAround(): Promise<BenchmarkResult> {
   console.log("  Running Search Around benchmark...");
 
   // Check if we have link types
-  const { body: ontBody } = await api("GET", "/api/v2/ontologies?pageSize=1");
+  const { body: ontBody } = await api("GET", "/api/v1/ontology?pageSize=1");
   if (!ontBody?.data?.length) {
     return {
       name: "Search Around Latency",
@@ -268,7 +268,7 @@ async function benchmarkSearchAround(): Promise<BenchmarkResult> {
   }
 
   const ontologyId = ontBody.data[0].ontologyId;
-  const { body: linkBody } = await api("GET", `/api/v2/ontologies/${ontologyId}/linkTypes`);
+  const { body: linkBody } = await api("GET", `/api/v1/ontology/${ontologyId}/linkTypes`);
   const linkTypes = linkBody?.data ?? linkBody ?? [];
 
   if (linkTypes.length === 0) {
@@ -298,7 +298,7 @@ async function benchmarkSearchAround(): Promise<BenchmarkResult> {
   const latencies: number[] = [];
 
   for (let i = 0; i < 50; i++) {
-    const { durationMs } = await api("POST", `/api/v2/objects/${sourceType}/searchAround`, {
+    const { durationMs } = await api("POST", `/api/v1/objects/${sourceType}/searchAround`, {
       linkType: linkApiName,
       direction: "forward",
       pageSize: 10,
@@ -331,7 +331,7 @@ async function benchmarkActionThroughput(): Promise<BenchmarkResult> {
   console.log("  Running action throughput benchmark...");
 
   // Find an action type
-  const { body: ontBody } = await api("GET", "/api/v2/ontologies?pageSize=1");
+  const { body: ontBody } = await api("GET", "/api/v1/ontology?pageSize=1");
   if (!ontBody?.data?.length) {
     return {
       name: "Action Throughput",
@@ -343,7 +343,7 @@ async function benchmarkActionThroughput(): Promise<BenchmarkResult> {
   }
 
   const ontologyId = ontBody.data[0].ontologyId;
-  const { body: actionBody } = await api("GET", `/api/v2/ontologies/${ontologyId}/actionTypes`);
+  const { body: actionBody } = await api("GET", `/api/v1/ontology/${ontologyId}/actionTypes`);
   const actionTypes = actionBody?.data ?? actionBody ?? [];
 
   if (actionTypes.length === 0) {
@@ -379,7 +379,7 @@ async function benchmarkActionThroughput(): Promise<BenchmarkResult> {
   for (let i = 0; i < 100; i++) {
     const { status, durationMs } = await api(
       "POST",
-      `/api/v2/ontologies/${ontologyId}/actions/${actionApiName}/validate`,
+      `/api/v1/ontology/${ontologyId}/actions/${actionApiName}/validate`,
       { parameters: {} }
     );
     latencies.push(durationMs);
@@ -414,7 +414,7 @@ async function benchmarkBulkActionThroughput(): Promise<BenchmarkResult> {
   console.log("  Running bulk action throughput benchmark...");
 
   // Find an action type
-  const { body: ontBody } = await api("GET", "/api/v2/ontologies?pageSize=1");
+  const { body: ontBody } = await api("GET", "/api/v1/ontology?pageSize=1");
   if (!ontBody?.data?.length) {
     return {
       name: "Bulk Action Throughput",
@@ -426,7 +426,7 @@ async function benchmarkBulkActionThroughput(): Promise<BenchmarkResult> {
   }
 
   const ontologyId = ontBody.data[0].ontologyId;
-  const { body: actionBody } = await api("GET", `/api/v2/ontologies/${ontologyId}/actionTypes`);
+  const { body: actionBody } = await api("GET", `/api/v1/ontology/${ontologyId}/actionTypes`);
   const actionTypes = actionBody?.data ?? actionBody ?? [];
 
   if (actionTypes.length === 0) {
@@ -463,7 +463,7 @@ async function benchmarkBulkActionThroughput(): Promise<BenchmarkResult> {
 
     const { status, durationMs, body: batchBody } = await api(
       "POST",
-      `/api/v2/ontologies/${ontologyId}/actions/${actionApiName}/applyBatch`,
+      `/api/v1/ontology/${ontologyId}/actions/${actionApiName}/applyBatch`,
       { requests }
     );
 

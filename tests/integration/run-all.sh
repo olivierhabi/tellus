@@ -50,7 +50,7 @@ start_server() {
   for i in $(seq 1 30); do
     if curl -sf "http://localhost:3000/health" >/dev/null 2>&1; then
       # Also verify DB connectivity by checking ontologies endpoint
-      if curl -sf "http://localhost:3000/api/v2/ontologies" | grep -q "ontologyId" 2>/dev/null; then
+      if curl -sf "http://localhost:3000/api/v1/ontology" | grep -q "ontologyId" 2>/dev/null; then
         echo " ready (PID ${SERVER_PID})."
         return 0
       fi
@@ -195,6 +195,29 @@ else
   echo -e "${RED}${BOLD}tuesday: FAIL (or partial)${NC}"
 fi
 echo ""
+
+# ---------------------------------------------------------------------------
+# Phase 3: Non-day-keyed funnel integration tests
+#
+# The Funnel work (tasks B1–B10) spans several days of the plan, so its
+# tests live under tests/funnel/ rather than a weekday folder. These
+# tests talk to Postgres directly via the shared `query` helper — the
+# already-running server isn't required for this subsuite, but starting
+# one first doesn't hurt either.
+# ---------------------------------------------------------------------------
+run_vitest "funnel" "${ROOT}/tests/funnel/integration"
+
+# ---------------------------------------------------------------------------
+# Phase 4: Pipeline Builder / Funnel Hardening / Link Types integration
+#
+# PB-B1..B10 + FNL-H + LT-B integration tests live under tests/foundry/
+# alongside the funnel unit tests. They talk to Lakekeeper + MinIO +
+# Temporal + the PyIceberg sidecar; the shared env is already up from
+# Phase 1's server restart, so vitest is run against the same pod.
+# Running after `funnel` keeps the two Iceberg-adjacent suites
+# sequential so they don't race for Lakekeeper warehouses.
+# ---------------------------------------------------------------------------
+run_vitest "foundry (pb-b + fnl-h + lt-b)" "${ROOT}/tests/foundry/integration"
 
 # ---------------------------------------------------------------------------
 # Final summary

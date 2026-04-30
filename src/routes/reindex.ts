@@ -2,7 +2,7 @@
 // Reindex Routes — Express Router
 //
 // Routes for triggering and monitoring the reindex pipeline. Mounted at:
-//   /api/v2/ontology/:ontologyId/objectTypes/:apiName/reindex
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex
 //
 // Provides endpoints:
 //   POST /          — Trigger a full reindex
@@ -104,7 +104,14 @@ async function getDatasource(
 router.post(
   "/",
   async (req: Request, res: Response, next: NextFunction) => {
-    const { ontologyId, apiName } = req.params;
+    const { ontologyId } = req.params;
+    // Prefer `req.params.apiName` (legacy `/objectTypes/:apiName/reindex`
+    // mount). Fall back to `res.locals.apiName` for the UUID mount
+    // (`/objectTypeId/:objectTypeId`), where the resolver middleware
+    // stashes the name there — `req.params` does not survive Express's
+    // layer-boundary reset between middleware and this router.
+    const apiName =
+      req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
     const force = req.query.force === "true" || req.body?.force === true;
 
     try {
@@ -139,7 +146,7 @@ router.post(
         return sendError(
           res,
           "NO_BACKING_DATASOURCE",
-          `Object type '${apiName}' has no registered backing datasource. Register one using POST /api/v2/ontology/${ontologyId}/objectTypes/${apiName}/datasource`
+          `Object type '${apiName}' has no registered backing datasource. Register one using POST /api/v1/ontology/${ontologyId}/objectTypes/${apiName}/datasource`
         );
       }
 
@@ -275,7 +282,10 @@ router.post(
 router.get(
   "/status",
   async (req: Request, res: Response, next: NextFunction) => {
-    const { ontologyId, apiName } = req.params;
+    const { ontologyId } = req.params;
+    // See POST / above for why we also accept `res.locals.apiName`.
+    const apiName =
+      req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
 
     try {
       // Validation
@@ -358,6 +368,11 @@ router.get(
         pipelineState: pipelineState
           ? {
               status: pipelineState.status,
+              // Live 4-stage funnel pipeline tracking (spec §1.7 item 47):
+              //   changelog → merge_changes → indexing → hydration
+              // Null means no stage is currently running.
+              currentStage: pipelineState.current_stage || null,
+              stageStartedAt: pipelineState.stage_started_at || null,
               objectsIndexed: pipelineState.objects_indexed || 0,
               lastIndexedAt: pipelineState.last_indexed_at || null,
               durationMs: pipelineState.duration_ms || null,
@@ -412,7 +427,10 @@ router.get(
 router.get(
   "/history",
   async (req: Request, res: Response, next: NextFunction) => {
-    const { ontologyId, apiName } = req.params;
+    const { ontologyId } = req.params;
+    // See POST / above for why we also accept `res.locals.apiName`.
+    const apiName =
+      req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
 
     try {
       // Validation
