@@ -243,6 +243,12 @@ export async function writeOverlayForEdit(
   // plain try/catch here wouldn't rescue it). Rolling back to the
   // savepoint preserves the outer txn exactly.
   let upsertedInstance = false;
+  // Default to caller-supplied version. Overwritten below from the
+  // UPSERT's RETURNING clause when the table exists — that is the
+  // monotonic value that downstream readers compare against the indexed
+  // `__version`. Falling through with a hard-coded `1` (the editApplicator
+  // default) would conflict on the next edit for the same PK.
+  let canonicalVersion = input.version;
   await client.query("SAVEPOINT b1_object_instances");
   try {
     // Migration 041 extended the object_instances PK to include branch_id
@@ -275,6 +281,18 @@ export async function writeOverlayForEdit(
       ],
     );
     upsertedInstance = (res.rowCount ?? 0) > 0;
+    // Capture the canonical monotonic version from the UPSERT — on INSERT
+    // it equals the inserted value, on UPDATE it equals existing+1. This
+    // is what we MUST stamp on the overlay record; using the caller's
+    // `input.version` produces same-version writes for distinct edits and
+    // trips OVERLAY_VERSION_CONFLICT for legitimate sequences (a single
+    // hard-coded `1` from editApplicator stamps every edit identically).
+    if (upsertedInstance && res.rows[0]?.version != null) {
+      const v = Number(res.rows[0].version);
+      if (Number.isFinite(v) && v > 0) {
+        canonicalVersion = v;
+      }
+    }
     await client.query("RELEASE SAVEPOINT b1_object_instances");
   } catch (err) {
     await client.query("ROLLBACK TO SAVEPOINT b1_object_instances");
@@ -294,7 +312,7 @@ export async function writeOverlayForEdit(
     primaryKey: input.primaryKey,
     doc: input.doc,
     deleted: input.deleted,
-    version: input.version,
+    version: canonicalVersion,
     createdAt: Date.now(),
     editId: input.editId,
     actorUserId: input.actorUserId ?? null,

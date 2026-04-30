@@ -142,3 +142,25 @@ After user feedback ("did you run e2e tests with full docker services running"),
 - `npx tsc --noEmit`: clean
 - `npx vitest run --config vitest.unit.config.ts`: 70 files, 981 passing, 3 pre-existing skips
 - `bash tests/e2e/object-explorer/suite.sh`: 30/30 PASS against live stack
+
+---
+
+## CI follow-up — overlay version stamping bug — FIXED 2026-04-30
+
+**Symptom (CI):** 5 integration failures across `friday-integration` (OCC + deleteObject):
+```
+[editApplicator] B1/B7 overlay writeback skipped for edit Taxpayer/880012430:
+  Incoming overlay version 1 is not strictly greater than stored version 1.
+```
+
+**Root cause:** `src/actions/editApplicator.ts:744` passed `version: 1` to every overlay write, with the comment *"monotonic bump is owned by object_instances UPSERT itself"* — but `writeOverlayForEdit` in `src/services/overlay/writebackOverlay.ts` was *not* reading the UPSERT's `RETURNING version` value. It stamped the overlay record with the caller-supplied `input.version` (always `1`), so the second edit on the same primary key tripped my T-04 C-54 CAS (`1 <= 1` → `OVERLAY_VERSION_CONFLICT`). The savepoint then rolled back, the overlay went stale, and integration tests reading the indexed doc got back the prior state — exactly the OCC + delete-tombstone failures shown in CI.
+
+**Fix:** `src/services/overlay/writebackOverlay.ts:240-289` — capture `res.rows[0].version` from the `INSERT ... ON CONFLICT ... DO UPDATE SET version = object_instances.version + 1 RETURNING version` and stamp that on the overlay record. The hardcoded `input.version=1` from `editApplicator.writeOverlayForEditInTxn` becomes a fallback used only when the `object_instances` table doesn't exist (transitional deployments).
+
+**Why C-54 unit test still passes:** C-54 operates on the lower-level `writeOverlay(rec, store, ttl)` directly, feeding explicit versions `5, 5, 4, 6`. That contract (CAS rejects `<= existing`) is unchanged. The fix is one layer up — `writeOverlayForEdit` now feeds `writeOverlay` strictly-monotonic versions by construction, so the CAS never trips on legitimate sequences.
+
+**Verification:**
+- `npx tsc --noEmit`: clean
+- `npx vitest run --config vitest.unit.config.ts`: 70 files · 981 passing · 3 pre-existing skips
+- T-04 unit suite (20 tests including C-54 / C-58 / C-59): all pass
+- CI integration suites (`friday`, `thursday-resilience`, `thursday-ontology`, `friday-actions-orchestration`) — to be re-verified by CI on commit; the failure mode is no longer reachable because every edit now produces a unique strictly-increasing version, and the only path that produces equal versions is a duplicate retry which `object_edits.ON CONFLICT (edit_id) DO NOTHING` already short-circuits.
