@@ -185,7 +185,7 @@ describe("T-08 POST / — write-time marking gate (C-117)", () => {
     expect(insertCalls[0][1][6]).toEqual(["SECRET", "TS"]);
   });
 
-  it("T-08 C-117c: missing title → VALIDATION_ERROR (alias of VALIDATION_FAILED)", async () => {
+  it("T-08 C-117c: missing title → VALIDATION_ERROR (canonical code emitted natively)", async () => {
     const app = makeApp({});
     const r = await request(app)
       .post("/api/v1/ontologies/ont-1/explorations")

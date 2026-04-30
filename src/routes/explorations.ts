@@ -47,7 +47,7 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
     const { ontologyId } = req.params;
     const { title, description, config, visibility } = req.body || {};
     if (!title) {
-      return sendError(res, "VALIDATION_FAILED", "title is required.");
+      return sendError(res, "VALIDATION_ERROR", "title is required.");
     }
     // Resolve marking requirement at write time so the read path is a
     // single-row marking-set lookup (no JSON walking on the hot path).

@@ -160,7 +160,7 @@ router.get(
         [req.params.jobId, currentUser(req)],
       );
       if (result.rowCount === 0) {
-        return sendError(res, "NOT_FOUND", "Export job not found.");
+        return sendError(res, "OBJECT_NOT_FOUND", "Export job not found.");
       }
       sendSuccess(res, result.rows[0]);
     } catch (err) {
@@ -181,7 +181,7 @@ router.get(
         [req.params.jobId, currentUser(req)],
       );
       if (result.rowCount === 0) {
-        return sendError(res, "NOT_FOUND", "Export job not found.");
+        return sendError(res, "OBJECT_NOT_FOUND", "Export job not found.");
       }
       const row = result.rows[0] as {
         status: string;

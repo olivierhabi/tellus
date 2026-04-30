@@ -164,3 +164,28 @@ After user feedback ("did you run e2e tests with full docker services running"),
 - `npx vitest run --config vitest.unit.config.ts`: 70 files · 981 passing · 3 pre-existing skips
 - T-04 unit suite (20 tests including C-54 / C-58 / C-59): all pass
 - CI integration suites (`friday`, `thursday-resilience`, `thursday-ontology`, `friday-actions-orchestration`) — to be re-verified by CI on commit; the failure mode is no longer reachable because every edit now produces a unique strictly-increasing version, and the only path that produces equal versions is a duplicate retry which `object_edits.ON CONFLICT (edit_id) DO NOTHING` already short-circuits.
+
+---
+
+## CI follow-up #2 — error-code wire regression — FIXED 2026-04-30
+
+**Symptom (CI e2e):** monday/tuesday/thursday e2e suites assert legacy error codes (`VALIDATION_FAILED`, `ALREADY_EXISTS`) on the wire; my T-07 alias map was rewriting them to canonical (`VALIDATION_ERROR`, `OBJECT_NOT_FOUND`). Pre-existing tests, weakened.
+
+**Root cause:** `src/utils/responseFormatter.ts:529-552` (T-07 commit) substituted `canonical = ALIAS[code] ?? code` into BOTH the status-code lookup AND the response body (`errorCode`, `error.code`, `parameters.subtype`). Status routing through the alias is correct (legacy codes lacked entries in `ERROR_CODES` and fell through to 500). Rewriting the response body is **not** correct: pre-existing e2e contracts and production dashboards key on the original code. DoD violation: pre-existing tests weakened.
+
+**Fix:**
+- `src/utils/responseFormatter.ts:523-554` — alias map consulted ONLY for status-code lookup. Response body preserves the caller-supplied `code` verbatim. No `subtype` injection.
+- `src/routes/explorations.ts:50` — emit canonical `VALIDATION_ERROR` natively (was `VALIDATION_FAILED`); this is *new* T-08 code, not legacy.
+- `src/routes/exports.ts:163,184` — emit canonical `OBJECT_NOT_FOUND` natively (was `NOT_FOUND`); this is *new* T-05 code, not legacy.
+
+**Tests updated to pin the stricter contract:**
+- `tests/unit/object-explorer/responseFormatter-T07-unit.test.ts` — C-101 now asserts `errorCode` is preserved verbatim AND status routes through the alias correctly. Adds C-101c regression-pin: `CHART_ERROR` → 400 (was the original 500-fallback bug). 9 sendError/formatError tests rewritten; all 19 pass.
+- `tests/unit/object-explorer/explorations-T08-route-unit.test.ts:188` — C-117c label updated to "canonical code emitted natively".
+
+**Open issue NOT introduced by this drive:**
+The CI tuesday + thursday suites both fail "Reject duplicate link type [HTTP 409] (expected '409', got '201')" — `src/routes/links.ts:102` claims `ALREADY_EXISTS` but actually returns 201 on the duplicate. Pre-existing bug (file untouched by this drive); surfaces as 5 cascade fails (link-type leak → OT cleanup blocked → 400 not 204). Logging here for visibility; out of scope.
+
+**Verification:**
+- `npx tsc --noEmit`: clean
+- `npx vitest run --config vitest.unit.config.ts`: 70 files · 982 passing · 3 pre-existing skips
+- DoD greps over `src/utils/responseFormatter.ts`, `src/routes/explorations.ts`, `src/routes/exports.ts`, `tests/unit/object-explorer/responseFormatter-T07-unit.test.ts`, `tests/unit/object-explorer/explorations-T08-route-unit.test.ts`: clean

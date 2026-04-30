@@ -526,29 +526,26 @@ export function formatError(
   details: Record<string, unknown> = {},
   requestId: string = ""
 ): FormattedError {
+  // T-07 — the alias map is consulted ONLY for HTTP-status routing. Legacy
+  // codes (e.g. CHART_ERROR, VALIDATION_FAILED) used to fall through the
+  // ERROR_CODES table to the 500 fallback; the alias hop fixes that
+  // without rewriting the wire body. The response itself preserves the
+  // caller-supplied code verbatim — pre-existing e2e contracts and
+  // production dashboards key on `errorCode` and `error.code` unchanged.
   const canonical = CANONICAL_ERROR_ALIAS[code] ?? code;
-  const statusCode = ERROR_CODES[canonical] ?? ERROR_CODES[code] ?? 500;
+  const statusCode = ERROR_CODES[code] ?? ERROR_CODES[canonical] ?? 500;
   const cleanMessage = sanitizeMessage(message);
-  // Preserve the legacy semantic as `parameters.subtype` when the caller
-  // emitted a deprecated code so downstream consumers that match on the
-  // legacy code can be migrated without losing information.
-  const enrichedParameters: Record<string, unknown> =
-    canonical !== code ? { ...details, subtype: code.toLowerCase() } : details;
   return {
-    errorCode: canonical,
-    errorName: errorCodeToName(canonical),
+    errorCode: code,
+    errorName: errorCodeToName(code),
     message: cleanMessage,
     statusCode,
     requestId,
-    parameters: enrichedParameters,
+    parameters: details,
     error: {
-      // Legacy compat field: keep emitting the *canonical* code so clients
-      // that read `error.code` (rather than the new `errorCode`) also get
-      // the unified vocabulary. Original code is preserved via
-      // `parameters.subtype` above.
-      code: canonical,
+      code,
       message: cleanMessage,
-      details: enrichedParameters,
+      details,
       timestamp: new Date().toISOString(),
     },
   };

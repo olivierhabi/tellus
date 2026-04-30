@@ -3,14 +3,19 @@
 //
 // Covers contracts:
 //   C-100 sanitizeMessage strips stack frames, paths, IPs, SQL fragments.
-//   C-101 formatError canonicalises legacy codes
-//          (CHART_ERROR, VALIDATION_FAILED, NOT_FOUND, SQL_ERROR,
-//           LINK_CYCLE_DETECTED) and preserves the original via
-//          parameters.subtype.
-//   C-102 sendError (a) hits the canonical HTTP status for the canonical
-//          code and (b) routes the message through sanitizeMessage.
+//   C-101 formatError routes legacy codes through CANONICAL_ERROR_ALIAS
+//          to the correct HTTP status (CHART_ERROR/VALIDATION_FAILED/
+//          LINK_CYCLE_DETECTED → 400, NOT_FOUND → 404, SQL_ERROR → 400)
+//          while preserving the caller-supplied code verbatim in the
+//          response body. This pins both halves of the contract: status
+//          routing canonicalised, wire body unchanged. Pre-existing e2e
+//          contracts and production dashboards key on the original code,
+//          so rewriting it on the fly would be a silent breaking change.
+//   C-102 sendError (a) hits the canonical HTTP status for legacy codes
+//          and (b) routes the message through sanitizeMessage; the
+//          response code stays as the caller passed it.
 //   C-103 the legacy `error.{code,message,details,timestamp}` compat shim
-//          is preserved.
+//          is preserved with the caller-supplied code.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi } from "vitest";
@@ -68,39 +73,49 @@ describe("T-07 sanitizeMessage (C-100)", () => {
   });
 });
 
-describe("T-07 formatError canonicalisation (C-101)", () => {
+describe("T-07 formatError code preservation + status routing (C-101)", () => {
   it.each([
-    ["CHART_ERROR", "VALIDATION_ERROR", 400, "chart_error"],
-    ["VALIDATION_FAILED", "VALIDATION_ERROR", 400, "validation_failed"],
-    ["NOT_FOUND", "OBJECT_NOT_FOUND", 404, "not_found"],
-    ["SQL_ERROR", "SQL_EXECUTION_ERROR", 400, "sql_error"],
-    ["LINK_CYCLE_DETECTED", "VALIDATION_ERROR", 400, "link_cycle_detected"],
+    ["CHART_ERROR", 400],
+    ["VALIDATION_FAILED", 400],
+    ["NOT_FOUND", 404],
+    ["SQL_ERROR", 400],
+    ["LINK_CYCLE_DETECTED", 400],
   ])(
-    "T-07 C-101: legacy '%s' → canonical '%s' with status %d and parameters.subtype='%s'",
-    (legacy, canonical, status, subtype) => {
+    "T-07 C-101: legacy '%s' → status %d, errorCode preserved verbatim, no subtype mutation",
+    (legacy, status) => {
       const env = formatError(legacy, "x", { hops: 5 }, "req-1");
-      expect(env.errorCode).toBe(canonical);
+      // Status canonicalises (the alias hop fixes 500-fallback regressions).
       expect(env.statusCode).toBe(status);
-      expect(env.parameters.subtype).toBe(subtype);
-      // Legacy compat field carries the canonical code, not the original
-      // (so consumers reading `error.code` get the unified vocabulary).
-      expect(env.error.code).toBe(canonical);
-      // Pre-existing parameters are preserved alongside the subtype tag.
-      expect(env.parameters.hops).toBe(5);
+      // Wire body is the *caller-supplied* code — not rewritten.
+      expect(env.errorCode).toBe(legacy);
+      expect(env.error.code).toBe(legacy);
+      // Caller parameters pass through unchanged — no `subtype` injection,
+      // no `parameters` rewriting.
+      expect(env.parameters).toEqual({ hops: 5 });
+      expect(env.parameters.subtype).toBeUndefined();
     },
   );
 
-  it("T-07 C-101a: canonical code (no alias) round-trips unchanged with no subtype", () => {
+  it("T-07 C-101a: canonical code (no alias) round-trips with status from ERROR_CODES", () => {
     const env = formatError("OBJECT_TYPE_NOT_FOUND", "missing", {}, "req-2");
     expect(env.errorCode).toBe("OBJECT_TYPE_NOT_FOUND");
     expect(env.parameters.subtype).toBeUndefined();
     expect(env.statusCode).toBe(404);
   });
 
-  it("T-07 C-101b: unknown code falls back to HTTP 500", () => {
+  it("T-07 C-101b: unknown code falls back to HTTP 500 with code preserved", () => {
     const env = formatError("DEFINITELY_NOT_A_CODE", "x", {}, "req-3");
     expect(env.statusCode).toBe(500);
     expect(env.errorCode).toBe("DEFINITELY_NOT_A_CODE");
+    expect(env.error.code).toBe("DEFINITELY_NOT_A_CODE");
+  });
+
+  it("T-07 C-101c: legacy CHART_ERROR no longer hits the 500 fallback (pre-T-07 regression)", () => {
+    // Before T-07, CHART_ERROR had no entry in ERROR_CODES and the
+    // status defaulted to 500. The alias map MUST cover that gap so
+    // legacy throw sites land on 400.
+    const env = formatError("CHART_ERROR", "boom", {}, "");
+    expect(env.statusCode).toBe(400);
   });
 });
 
@@ -134,7 +149,7 @@ describe("T-07 sendError (C-102)", () => {
     return { res, captured };
   }
 
-  it("T-07 C-102a: sendError(CHART_ERROR) emits 400 + canonical body + sanitized message", () => {
+  it("T-07 C-102a: sendError(CHART_ERROR) emits 400 + preserves errorCode + sanitized message", () => {
     const { res, captured } = mockRes();
     sendError(
       res,
@@ -142,24 +157,27 @@ describe("T-07 sendError (C-102)", () => {
       "boom at /Users/foo/bar.ts:1:1 with 192.168.0.1",
     );
     expect(captured.status).toBe(400);
-    expect(captured.body.errorCode).toBe("VALIDATION_ERROR");
-    expect(captured.body.parameters.subtype).toBe("chart_error");
+    expect(captured.body.errorCode).toBe("CHART_ERROR");
+    expect(captured.body.error.code).toBe("CHART_ERROR");
+    expect(captured.body.parameters.subtype).toBeUndefined();
     expect(captured.body.message).not.toContain("/Users/foo");
     expect(captured.body.message).not.toContain("192.168.0.1");
     expect(captured.body.requestId).toBe("req-T07");
   });
 
-  it("T-07 C-102b: sendError(VALIDATION_FAILED) emits 400 + canonical errorCode", () => {
+  it("T-07 C-102b: sendError(VALIDATION_FAILED) emits 400 + preserves errorCode", () => {
     const { res, captured } = mockRes();
     sendError(res, "VALIDATION_FAILED", "x");
     expect(captured.status).toBe(400);
-    expect(captured.body.errorCode).toBe("VALIDATION_ERROR");
+    expect(captured.body.errorCode).toBe("VALIDATION_FAILED");
+    expect(captured.body.error.code).toBe("VALIDATION_FAILED");
   });
 
-  it("T-07 C-102c: sendError preserves caller-supplied parameters alongside subtype", () => {
+  it("T-07 C-102c: sendError preserves caller-supplied parameters verbatim (no rewriting)", () => {
     const { res, captured } = mockRes();
     sendError(res, "LINK_CYCLE_DETECTED", "cycle", { hops: 7 });
-    expect(captured.body.parameters.subtype).toBe("link_cycle_detected");
-    expect(captured.body.parameters.hops).toBe(7);
+    expect(captured.body.errorCode).toBe("LINK_CYCLE_DETECTED");
+    expect(captured.body.parameters).toEqual({ hops: 7 });
+    expect(captured.body.parameters.subtype).toBeUndefined();
   });
 });
