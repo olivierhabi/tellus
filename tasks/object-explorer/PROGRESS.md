@@ -189,3 +189,34 @@ The CI tuesday + thursday suites both fail "Reject duplicate link type [HTTP 409
 - `npx tsc --noEmit`: clean
 - `npx vitest run --config vitest.unit.config.ts`: 70 files · 982 passing · 3 pre-existing skips
 - DoD greps over `src/utils/responseFormatter.ts`, `src/routes/explorations.ts`, `src/routes/exports.ts`, `tests/unit/object-explorer/responseFormatter-T07-unit.test.ts`, `tests/unit/object-explorer/explorations-T08-route-unit.test.ts`: clean
+
+---
+
+## CI follow-up #3 — duplicate link-type 201 vs 409 — FIXED 2026-04-30
+
+**Symptom (CI tuesday + thursday):**
+```
+FAIL  Reject duplicate link type [HTTP 409] (expected '409', got '201')
+FAIL  3 link types created (expected '3', got '4')
+FAIL  Duplicate link type creation returns 409 — Expected 409, got 201
+```
+
+**Root cause:** `src/models/linkType.ts:282-376` (pre-existing, untouched by the original drive — surfaced after the T-04 + T-07 fixes unblocked the integration suite). The `create()` function silently auto-disambiguated **every** UNIQUE collision by appending a numeric suffix and retrying — even when the caller had explicitly provided an `apiName`. That's a correctness bug: a caller asking for `apiName='Foo'` and getting `Foo2` back without an error is no longer an identity contract.
+
+**Fix:** distinguish two modes by inspecting whether the caller supplied `apiName`:
+- **mode (a) — derived**: `apiName` not provided, derived from `displayName`. Auto-disambiguate up to 50 attempts (existing FE create-form UX preserved).
+- **mode (b) — explicit**: caller provided `apiName`. Throw `ALREADY_EXISTS` on the first UNIQUE violation, no retry. Status code routes through the existing alias to 409.
+
+`src/models/linkType.ts:292-376` — `MAX_DISAMBIG_ATTEMPTS = callerProvidedApiName ? 0 : 50`. Saturation message reworded to describe both modes accurately.
+
+**Test:** `tests/unit/links/linkTypeCreate-collision-unit.test.ts` (3 tests, all pass) pins:
+- caller-provided apiName + UNIQUE collision → exactly one INSERT attempt, throws `ALREADY_EXISTS`
+- derived apiName + UNIQUE collision → retries with numeric suffix until success, two INSERT attempts visible
+- non-UNIQUE PG errors (e.g. `57P01` connection terminated) propagate verbatim — no spurious `ALREADY_EXISTS` rewrite
+
+**Verification:**
+- `npx tsc --noEmit`: clean
+- `npx vitest run --config vitest.unit.config.ts`: **71 files · 985 passing · 3 pre-existing skips**
+- DoD greps over `src/models/linkType.ts` and the new test: clean
+
+**Why this surfaced now:** the duplicate-link-type 201 was already failing before my drive — but it was masked behind earlier failures. The T-04 overlay-version fix unblocked the friday integration suite, the T-07 alias-rewrite revert unblocked the monday/wednesday e2e suites, and only then did the CI runner reach the tuesday/thursday assertions that pin this contract. Treating it as my fix to make: the CI is the contract, and the silent rename is a real production defect (audit trail confusion, broken bulk-import retries).

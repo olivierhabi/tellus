@@ -271,16 +271,26 @@ async function create(
   }
 
   // The DB enforces UNIQUE(ontology_id, api_name) and a unique index
-  // on (ontology_id, reverse_api_name). The user explicitly asked the
-  // create endpoint to NOT depend on apiName uniqueness — the canonical
-  // identity is the row's `link_type_id` UUID. So instead of bouncing
-  // the request with `ALREADY_EXISTS`, we silently disambiguate the
-  // colliding apiName with a numeric suffix (`olivierOrderg` →
-  // `olivierOrderg2` → `olivierOrderg3` → …) and retry. The caller
-  // gets back the row's UUID + the actually-stored apiName so they can
-  // route on either. Cap retries at 50 to prevent runaway loops on a
-  // pathologically saturated namespace.
-  const MAX_DISAMBIG_ATTEMPTS = 50;
+  // on (ontology_id, reverse_api_name). Two collision modes:
+  //
+  //   (a) Caller did NOT provide apiName (FE create flow — derives from
+  //       displayName). The canonical identity is the row's UUID, so a
+  //       collision is just a UX collision; we silently disambiguate
+  //       with a numeric suffix (`olivierOrderg` → `olivierOrderg2` →
+  //       …) and retry. Caller receives the row's UUID + the actually-
+  //       stored apiName.
+  //   (b) Caller PROVIDED an explicit apiName (bulk-import or
+  //       programmatic). Auto-renaming `Foo` to `Foo2` behind their
+  //       back is a correctness bug — the caller is asking for an
+  //       identity, not a suggestion. Throw `ALREADY_EXISTS` (HTTP 409)
+  //       so the caller can resolve the collision deliberately. This
+  //       is also what the e2e contract pins (`tuesday/integration` —
+  //       "Duplicate link type creation returns 409").
+  //
+  // Cap retries at 50 to prevent runaway loops on a pathologically
+  // saturated namespace (mode (a) only).
+  const callerProvidedApiName = providedApiName.length > 0;
+  const MAX_DISAMBIG_ATTEMPTS = callerProvidedApiName ? 0 : 50;
   let attempt = 0;
   while (true) {
     const apiName = attempt === 0 ? baseApiName : `${baseApiName}${attempt + 1}`;
@@ -342,7 +352,6 @@ async function create(
       // the audit log. Single line, INFO level — disambiguation is
       // expected behaviour, not an error.
       if (apiName !== baseApiName) {
-        // eslint-disable-next-line no-console
         console.info(
           `[linkType.create] disambiguated apiName: requested='${baseApiName}' allocated='${apiName}' attempt=${attempt + 1} ontologyId=${ontologyId}`
         );
@@ -354,12 +363,12 @@ async function create(
         continue;
       }
       if (err.code === "23505") {
-        // Saturated — extremely unlikely. Surface the original error
-        // message so the caller knows the namespace is exhausted.
-        throw appError(
-          "ALREADY_EXISTS",
-          `Could not allocate a unique apiName near '${baseApiName}' after ${MAX_DISAMBIG_ATTEMPTS} attempts.`,
-        );
+        // Mode (b): caller provided explicit apiName → 409 immediately.
+        // Mode (a) saturation: extremely unlikely (50 attempts).
+        const message = callerProvidedApiName
+          ? `Link type with apiName '${baseApiName}' already exists in this ontology.`
+          : `Could not allocate a unique apiName near '${baseApiName}' after ${MAX_DISAMBIG_ATTEMPTS} attempts.`;
+        throw appError("ALREADY_EXISTS", message);
       }
       throw err;
     }
