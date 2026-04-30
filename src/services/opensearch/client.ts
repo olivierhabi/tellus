@@ -16,6 +16,7 @@ import {
   OPENSEARCH_RETRY_INITIAL_DELAY_MS,
   OPENSEARCH_SLOW_QUERY_THRESHOLD_MS,
 } from "../../utils/constants";
+import { applyContextToBody } from "./applyContext";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -220,43 +221,31 @@ function logQuery(
  * every call site to make a conscious decision. Mirrors the write-side
  * discipline introduced by F-P3-12 on `ApplyExecutionContext.branchId`.
  */
+/**
+ * @deprecated T-01: prefer `applyContextToBody` from
+ * `./applyContext` directly. Retained as a thin delegate so non-route
+ * callers (`searchObjects`, etc.) keep their signatures unchanged.
+ *
+ * Behaviour is identical to `applyContextToBody`: when both
+ * `securityFilter` and `branchId` are nullish/empty, the body is
+ * returned unchanged; otherwise the `query` field is wrapped under
+ * `bool.must`. See `applyContext.ts` for the full contract.
+ */
 function injectSecurityFilter(
   body: Record<string, unknown>,
   securityFilter: Record<string, unknown> | null | undefined,
   branchId: string | null,
 ): Record<string, unknown> {
-  // Collect every must-clause we need to add beside the original query.
-  const clauses: Record<string, unknown>[] = [];
-  if (securityFilter) clauses.push(securityFilter);
-  if (typeof branchId === "string" && branchId.length > 0) {
-    // Match this branch exactly OR a legacy doc with no `__branch`
-    // field at all. The second disjunct lets reads succeed on data
-    // indexed before the mapping change; F-P3-15's reindex pass will
-    // eventually backfill every legacy doc and this OR can be tightened
-    // in a follow-up session.
-    clauses.push({
-      bool: {
-        should: [
-          { term: { __branch: branchId } },
-          { bool: { must_not: [{ exists: { field: "__branch" } }] } },
-        ],
-        minimum_should_match: 1,
-      },
-    });
+  // Pre-T-01 short-circuit semantics preserved: if neither clause is
+  // requested, return the body unchanged (don't even add a default
+  // `match_all` query — the caller may rely on body-shape parity).
+  if (
+    (securityFilter === null || securityFilter === undefined) &&
+    (typeof branchId !== "string" || branchId.length === 0)
+  ) {
+    return body;
   }
-  if (clauses.length === 0) return body;
-
-  const original = (body.query as Record<string, unknown> | undefined) || {
-    match_all: {},
-  };
-  return {
-    ...body,
-    query: {
-      bool: {
-        must: [original, ...clauses],
-      },
-    },
-  };
+  return applyContextToBody(body, securityFilter, branchId);
 }
 
 async function searchObjects(

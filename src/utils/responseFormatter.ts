@@ -425,6 +425,21 @@ export const ERROR_CODES: Record<string, number> = {
   UNDO_WINDOW_EXPIRED: 410,
   LINK_CYCLE_DETECTED: 400,
   EXPORT_ROW_LIMIT_EXCEEDED: 400,
+  // T-09 — search-around accumulated visited-PK cap.
+  SEARCH_AROUND_LIMIT_EXCEEDED: 400,
+  // T-09 — page-size validation.
+  PAGE_SIZE_OUT_OF_RANGE: 400,
+  // T-03 — SQL surface.
+  SQL_STATEMENT_TIMEOUT: 504,
+  SQL_DISALLOWED_KEYWORD: 400,
+  SQL_EXECUTION_ERROR: 400,
+  // T-04 — overlay branch isolation.
+  OVERLAY_VERSION_CONFLICT: 409,
+  OVERLAY_BRANCH_MISMATCH: 500,
+  // T-05 — exports phase A/B.
+  EXPORT_LIMIT_EXCEEDED: 400,
+  EXPORT_NOT_AVAILABLE: 501,
+  EXPORT_DOWNLOAD_EXPIRED: 410,
   BULK_FAILURE_THRESHOLD_EXCEEDED: 422,
   // LT-B1..B10
   ONE_TO_ONE_VIOLATION: 409,
@@ -452,36 +467,99 @@ function errorCodeToName(code: string): string {
     .join("");
 }
 
+// ---------------------------------------------------------------------------
+// T-07 — sanitizeMessage: defense-in-depth scrubber.
+// Strips stack-trace frames, absolute filesystem paths, IPv4 addresses, and
+// SQL fragments before placing user-supplied or wrapped exception text into
+// the response envelope. Existing throw sites already produce safe strings;
+// this is a last-line check so a leaky `err.message` from a third-party lib
+// (pg/opensearch/duckdb) cannot exfiltrate the layout of the host filesystem
+// or the internal SQL via a 4xx response.
+// ---------------------------------------------------------------------------
+export function sanitizeMessage(message: string): string {
+  if (typeof message !== "string" || message.length === 0) return message;
+  let out = message;
+  // Stack-trace frames: `at fn (path:line:col)` and `at path:line:col`
+  out = out.replace(/\s*at\s+\S+\s+\([^)]+:\d+:\d+\)/g, "");
+  out = out.replace(/\s*at\s+[^\s]+:\d+:\d+/g, "");
+  // Absolute POSIX paths up to a colon, slash, or whitespace boundary.
+  out = out.replace(/(?<![A-Za-z0-9_])\/[A-Za-z0-9_./-]{4,}/g, "<path>");
+  // Windows-style paths.
+  out = out.replace(/[A-Z]:\\[^\s"']{4,}/g, "<path>");
+  // IPv4 dotted-quads (privacy / network-topology leak).
+  out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "<ip>");
+  // Embedded SQL keywords often bring along the query text — collapse a
+  // contiguous run of `SELECT|INSERT|UPDATE|DELETE … FROM …` to a marker.
+  out = out.replace(
+    /\b(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|WITH|CREATE TABLE)\b[^\n]{0,200}/gi,
+    "<sql>",
+  );
+  // Trim any whitespace artefacts left behind by the substitutions.
+  return out.replace(/\s{2,}/g, " ").trim();
+}
+
 /**
  * Build a formatted error response body that complies with the Ontology
  * Platform spec §2.1 envelope while remaining backward compatible with the
  * legacy `error.{code,message,details,timestamp}` shape.
+ *
+ * T-07 — `code` is mapped through `CANONICAL_ERROR_ALIAS` so legacy code
+ * literals (e.g. `VALIDATION_FAILED`) emit the canonical wire-form
+ * (`VALIDATION_ERROR`) without forcing a synchronous global rename.
  */
+const CANONICAL_ERROR_ALIAS: Record<string, string> = {
+  // T-07 — vocabulary unification. Legacy throw sites are folded into the
+  // canonical code at the response boundary; the structured `parameters`
+  // surface preserves the original semantic via `parameters.subtype` so
+  // monitoring dashboards keyed on the legacy code can be migrated
+  // incrementally.
+  VALIDATION_FAILED: "VALIDATION_ERROR",
+  NOT_FOUND: "OBJECT_NOT_FOUND",
+  CHART_ERROR: "VALIDATION_ERROR",
+  SQL_ERROR: "SQL_EXECUTION_ERROR",
+  LINK_CYCLE_DETECTED: "VALIDATION_ERROR",
+};
+
 export function formatError(
   code: string,
   message: string,
   details: Record<string, unknown> = {},
   requestId: string = ""
 ): FormattedError {
-  const statusCode = ERROR_CODES[code] || 500;
+  const canonical = CANONICAL_ERROR_ALIAS[code] ?? code;
+  const statusCode = ERROR_CODES[canonical] ?? ERROR_CODES[code] ?? 500;
+  const cleanMessage = sanitizeMessage(message);
+  // Preserve the legacy semantic as `parameters.subtype` when the caller
+  // emitted a deprecated code so downstream consumers that match on the
+  // legacy code can be migrated without losing information.
+  const enrichedParameters: Record<string, unknown> =
+    canonical !== code ? { ...details, subtype: code.toLowerCase() } : details;
   return {
-    errorCode: code,
-    errorName: errorCodeToName(code),
-    message,
+    errorCode: canonical,
+    errorName: errorCodeToName(canonical),
+    message: cleanMessage,
     statusCode,
     requestId,
-    parameters: details,
+    parameters: enrichedParameters,
     error: {
-      code,
-      message,
-      details,
+      // Legacy compat field: keep emitting the *canonical* code so clients
+      // that read `error.code` (rather than the new `errorCode`) also get
+      // the unified vocabulary. Original code is preserved via
+      // `parameters.subtype` above.
+      code: canonical,
+      message: cleanMessage,
+      details: enrichedParameters,
       timestamp: new Date().toISOString(),
     },
   };
 }
 
 /**
- * Send an error response. Looks up HTTP status from ERROR_CODES (default 500).
+ * Send an error response. Looks up HTTP status via the canonicalised body
+ * (so legacy aliases like `CHART_ERROR → VALIDATION_ERROR (400)` route to
+ * the correct status — not the 500 fallback that the pre-T-07 lookup
+ * silently produced).
+ *
  * Automatically pulls `requestId` from `res.req.correlationId` when present.
  */
 export function sendError(
@@ -490,12 +568,10 @@ export function sendError(
   message: string,
   details: Record<string, unknown> = {}
 ): void {
-  const httpStatus = ERROR_CODES[code] || 500;
   const requestId =
     ((res.req as unknown as { correlationId?: string })?.correlationId) || "";
-  res
-    .status(httpStatus)
-    .json(formatError(code, message, details, requestId));
+  const body = formatError(code, message, details, requestId);
+  res.status(body.statusCode).json(body);
 }
 
 /**

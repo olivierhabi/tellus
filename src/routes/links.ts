@@ -59,7 +59,8 @@ import {
 } from "../services/linkPagination";
 import { migrateLinkStorage } from "../services/linkStorageMigrator";
 
-const router = Router({ mergeParams: true });
+// `router` is declared further below, alongside the `:apiName` param
+// resolver, so the resolver and the route handlers stay co-located.
 
 // Multer setup for CSV upload
 const upload = multer({
@@ -115,6 +116,65 @@ const KNOWN_CODES = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
+// :apiName param resolver — accept either UUID or apiName
+// ---------------------------------------------------------------------------
+//
+// The frontend has migrated to using a link type's UUID (`link_type_id`)
+// in URLs (e.g. `/ontology-manager/link-types/<uuid>`) so users can't
+// accidentally bookmark or share apiName-based URLs that break when an
+// admin renames the link type.
+//
+// Rather than fork every existing route handler — there are 30+ of them,
+// all already calling `linkTypeModel.getByApiName(ontologyId, apiName)` —
+// we plug in a single Express `router.param` middleware. It runs once
+// per request whenever the `:apiName` slot is matched and:
+//
+//   1. If the value is a UUID, look the row up by `link_type_id` and
+//      rewrite `req.params.apiName` to the canonical `api_name`.
+//   2. Otherwise (literal apiName, or one of the special pseudo-paths
+//      like "export" / "import" / "bulkCount" / "multiHop" / "_config"),
+//      leave the value untouched and let the next handler decide what
+//      to do. Those special paths are filtered case-by-case inside
+//      individual handlers — none of them matches the UUID regex so
+//      this middleware never disturbs them.
+//
+// We deliberately do NOT 404 here when the UUID lookup misses; the
+// downstream handler's existing `LINK_TYPE_NOT_FOUND` branch (which
+// fires when `getByApiName` returns null) already handles that case
+// with a richer, route-specific error message.
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const router = Router({ mergeParams: true });
+
+router.param("apiName", async (req, _res, next, value) => {
+  // Fast path: the param wasn't a UUID, so it must already be either an
+  // apiName or one of the reserved sub-paths. Either way, nothing to do.
+  if (typeof value !== "string" || !UUID_RE.test(value)) {
+    return next();
+  }
+  try {
+    const ontologyId = req.params.ontologyId;
+    if (!ontologyId) return next();
+    const row = await linkTypeModel.getById(ontologyId, value);
+    if (row?.api_name) {
+      // Rewrite the param so every downstream handler — which all call
+      // `getByApiName(ontologyId, apiName)` — works without changes.
+      // We also stash the original UUID on the request in case a future
+      // handler wants it for logging or audit.
+      (req as any).originalLinkTypeId = value;
+      req.params.apiName = row.api_name;
+    }
+    return next();
+  } catch (err) {
+    // Don't fail the whole request if the resolver throws — fall through
+    // and let the downstream handler's normal 404 path handle it.
+    return next();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST / — Create link type (Task 2)
 // ---------------------------------------------------------------------------
 
@@ -134,8 +194,13 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       storageBackend,
     } = req.body;
 
-    if (!apiName || !displayName || !cardinality || !sourceObjectTypeApiName || !targetObjectTypeApiName) {
-      return sendError(res, "VALIDATION_FAILED", "apiName, displayName, cardinality, sourceObjectTypeApiName, and targetObjectTypeApiName are required.");
+    // `apiName` is now optional on create — when omitted, the model
+    // (`linkTypeModel.create`) derives it from `displayName` server-
+    // side. This matches the FE create flow which no longer surfaces
+    // apiName as a user input. The remaining fields are still
+    // required because they have no sensible derivation.
+    if (!displayName || !cardinality || !sourceObjectTypeApiName || !targetObjectTypeApiName) {
+      return sendError(res, "VALIDATION_FAILED", "displayName, cardinality, sourceObjectTypeApiName, and targetObjectTypeApiName are required.");
     }
 
     if (!VALID_CARDINALITIES.includes(cardinality)) {

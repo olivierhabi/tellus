@@ -3,10 +3,16 @@
 // ---------------------------------------------------------------------------
 // CRUD endpoints for saved explorations:
 //   POST   /        — create
-//   GET    /        — list (scoped by owner + visibility)
-//   GET    /:id     — get one
-//   PUT    /:id     — update
+//   GET    /        — list (scoped by owner + visibility + markings)
+//   GET    /:id     — get one (visibility + markings + 404 IDOR-shape)
+//   PUT    /:id     — update (re-resolves required_markings on config change)
 //   DELETE /:id     — delete
+//
+// T-06 closed the `|| "system"` auth fallback (currentUser → UNAUTHORIZED).
+// T-08 closes H-11: the saved `config:jsonb` may reference SECRET-marked
+// properties; the read paths now filter on `required_markings <@ user_markings`
+// and the single-GET returns 404 (with parameters.kind = "saved_exploration")
+// rather than disclosing the existence of an out-of-marking exploration.
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";
@@ -17,24 +23,53 @@ import {
   sendError,
   sendNoContent,
 } from "../utils/responseFormatter";
+import { currentUser } from "../middleware/currentUser";
+import { resolveRequiredMarkings } from "../services/explorations/configMarkingResolver";
+import { incCounter } from "../services/funnel/metrics";
+import { routeMetric } from "../utils/routeInstrumentation";
 
 const router = Router({ mergeParams: true });
 
-function currentUser(req: Request): string {
-  return (req as any).user?.id || "system";
+/**
+ * Return the markings the caller holds. Empty array for unauthenticated
+ * principals (currentUser already throws UNAUTHORIZED upstream of this),
+ * empty array for users with no markings (the "dave" archetype) — both
+ * paths fail-closed against any exploration whose `required_markings`
+ * is non-empty.
+ */
+function callerMarkings(req: Request): string[] {
+  return req.security?.markings ?? [];
 }
 
 router.post("/", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "explorations.create", null);
     const { ontologyId } = req.params;
     const { title, description, config, visibility } = req.body || {};
     if (!title) {
       return sendError(res, "VALIDATION_FAILED", "title is required.");
     }
+    // Resolve marking requirement at write time so the read path is a
+    // single-row marking-set lookup (no JSON walking on the hot path).
+    const requiredMarkings = await resolveRequiredMarkings(config || {});
+    // The author MUST themselves hold every marking the config requires —
+    // otherwise the exploration would be invisible to its own creator,
+    // which is both confusing and a sign of an intentional or accidental
+    // privilege escalation attempt.
+    const userMarks = new Set(callerMarkings(req));
+    const missing = requiredMarkings.filter((m) => !userMarks.has(m));
+    if (missing.length > 0 && !req.security?.systemPrincipal) {
+      return sendError(
+        res,
+        "FORBIDDEN",
+        "Cannot save an exploration referencing markings the caller does not hold.",
+        { missingMarkings: missing },
+      );
+    }
     const result = await query(
       `INSERT INTO saved_exploration
-         (ontology_id, owner_id, title, description, config, visibility)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+         (ontology_id, owner_id, title, description, config, visibility, required_markings)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::text[])
        RETURNING *`,
       [
         ontologyId,
@@ -43,6 +78,7 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
         description || null,
         JSON.stringify(config || {}),
         visibility || "private",
+        requiredMarkings,
       ]
     );
     sendCreated(res, result.rows[0]);
@@ -53,13 +89,23 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
 
 router.get("/", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "explorations.list", null);
     const { ontologyId } = req.params;
+    const userMarks = callerMarkings(req);
+    // T-08 — extend the visibility filter with `required_markings <@ user_markings`.
+    // Containment semantics: the exploration is visible only when EVERY
+    // required marking is in the user's set. The DEFAULT '{}' from
+    // migration 045 means "no markings required" — visible to all.
+    // Pre-marking rows backfill to '{}' as a worst-case visibility match
+    // until the one-time backfill recomputes accurate values.
     const result = await query(
       `SELECT * FROM saved_exploration
         WHERE ontology_id = $1
           AND (visibility IN ('shared','public') OR owner_id = $2)
-        ORDER BY updated_at DESC`,
-      [ontologyId, currentUser(req)]
+          AND required_markings <@ $3::text[]
+        ORDER BY updated_at DESC
+        LIMIT 100`,
+      [ontologyId, currentUser(req), userMarks]
     );
     sendSuccess(res, { data: result.rows, totalCount: result.rowCount });
   } catch (err) {
@@ -69,12 +115,41 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
 
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "explorations.get", null);
+    const { ontologyId } = req.params;
+    const userMarks = callerMarkings(req);
     const result = await query(
-      "SELECT * FROM saved_exploration WHERE exploration_id = $1",
-      [req.params.id]
+      `SELECT * FROM saved_exploration
+        WHERE exploration_id = $1
+          AND ontology_id = $2
+          AND (visibility IN ('shared','public') OR owner_id = $3)
+          AND required_markings <@ $4::text[]`,
+      [req.params.id, ontologyId, currentUser(req), userMarks]
     );
     if (result.rowCount === 0) {
-      return sendError(res, "NOT_FOUND", "Exploration not found.");
+      // T-08 — IDOR-prevention: do NOT distinguish between "exploration
+      // does not exist", "owned by another user", and "user lacks
+      // markings". All three return the same OBJECT_NOT_FOUND so an
+      // attacker cannot enumerate exploration IDs via 403/404 timing.
+      // We do, however, increment a marking-miss counter when the row
+      // exists but is filtered solely by markings, for SOC dashboards.
+      const sniff = await query(
+        `SELECT 1 FROM saved_exploration
+          WHERE exploration_id = $1
+            AND ontology_id = $2
+            AND (visibility IN ('shared','public') OR owner_id = $3)
+            AND NOT (required_markings <@ $4::text[])`,
+        [req.params.id, ontologyId, currentUser(req), userMarks]
+      );
+      if ((sniff.rowCount ?? 0) > 0) {
+        incCounter("tellus_saved_exploration_marking_misses_total");
+      }
+      return sendError(
+        res,
+        "OBJECT_NOT_FOUND",
+        "Exploration not found.",
+        { kind: "saved_exploration" },
+      );
     }
     sendSuccess(res, result.rows[0]);
   } catch (err) {
@@ -84,13 +159,33 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
 
 router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "explorations.update", null);
     const { title, description, config, visibility } = req.body || {};
+    // Re-resolve markings only when `config` is being touched. A pure
+    // metadata edit (title/description/visibility) does not need to
+    // re-walk the config tree — but if the caller sends `config: null`
+    // or omits it, we leave the existing column value alone via COALESCE.
+    let nextRequiredMarkings: string[] | null = null;
+    if (config !== undefined && config !== null) {
+      nextRequiredMarkings = await resolveRequiredMarkings(config);
+      const userMarks = new Set(callerMarkings(req));
+      const missing = nextRequiredMarkings.filter((m) => !userMarks.has(m));
+      if (missing.length > 0 && !req.security?.systemPrincipal) {
+        return sendError(
+          res,
+          "FORBIDDEN",
+          "Cannot edit an exploration to reference markings the caller does not hold.",
+          { missingMarkings: missing },
+        );
+      }
+    }
     const result = await query(
       `UPDATE saved_exploration
           SET title = COALESCE($2, title),
               description = COALESCE($3, description),
               config = COALESCE($4::jsonb, config),
               visibility = COALESCE($5, visibility),
+              required_markings = COALESCE($7::text[], required_markings),
               updated_at = now()
         WHERE exploration_id = $1 AND owner_id = $6
         RETURNING *`,
@@ -101,10 +196,16 @@ router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
         config ? JSON.stringify(config) : null,
         visibility,
         currentUser(req),
+        nextRequiredMarkings,
       ]
     );
     if (result.rowCount === 0) {
-      return sendError(res, "NOT_FOUND", "Exploration not found or not owned by user.");
+      return sendError(
+        res,
+        "OBJECT_NOT_FOUND",
+        "Exploration not found.",
+        { kind: "saved_exploration" },
+      );
     }
     sendSuccess(res, result.rows[0]);
   } catch (err) {

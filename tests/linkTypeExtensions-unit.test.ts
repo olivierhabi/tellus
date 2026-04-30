@@ -30,6 +30,7 @@ import {
   OffsetTooDeepError,
 } from "../src/services/linkPagination";
 import { validateLinkCdcV2 } from "../src/services/searchAround/cdcLinkProducer";
+import { toCamelCaseApiName } from "../src/models/linkType";
 
 function mkLinkType(overrides: Partial<LinkTypeRow> = {}): LinkTypeRow {
   return {
@@ -334,5 +335,63 @@ describe("LT-B3 CDC v2 validator", () => {
     } else {
       throw new Error("expected validation to fail");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// linkType.toCamelCaseApiName — server-side apiName derivation from
+// displayName. Used by the create endpoint when the caller omits
+// `apiName` (the frontend create form no longer surfaces it; the
+// backend allocates one). Tested in isolation because the rule is
+// pure-functional and easy to regression-trap.
+// ---------------------------------------------------------------------------
+
+describe("toCamelCaseApiName — derive apiName from displayName", () => {
+  it("camelCases plain ASCII multi-word names", () => {
+    expect(toCamelCaseApiName("Customer")).toBe("customer");
+    expect(toCamelCaseApiName("Customer Order")).toBe("customerOrder");
+    expect(toCamelCaseApiName("place of birth")).toBe("placeOfBirth");
+  });
+
+  it("strips bracketed prefixes / punctuation that the link-types UI uses", () => {
+    // Real-world example from the FE form ("[Olivier] Order" is the
+    // displayName the team types when staging dev-only test data).
+    expect(toCamelCaseApiName("[Olivier] Order")).toBe("olivierOrder");
+    expect(toCamelCaseApiName("Customer / Vendor")).toBe("customerVendor");
+    expect(toCamelCaseApiName("a.b-c_d")).toBe("aBCD");
+  });
+
+  it("normalizes diacritics so the result passes the apiName regex", () => {
+    // Café → cafe (diacritic stripped via NFKD decomposition); the
+    // backend's `validateLinkTypeName` enforces ASCII-only camelCase,
+    // so we *must* normalize before returning.
+    expect(toCamelCaseApiName("Café")).toBe("cafe");
+    expect(toCamelCaseApiName("Über Driver")).toBe("uberDriver");
+  });
+
+  it("preserves digits but never lets them lead a word", () => {
+    // Digits aren't a word break by themselves; consecutive
+    // alphanumerics stay glued, but a non-alphanumeric run still
+    // triggers a word break.
+    expect(toCamelCaseApiName("Order 2024")).toBe("order2024");
+    expect(toCamelCaseApiName("v2 endpoint")).toBe("v2Endpoint");
+  });
+
+  it("returns an empty string for inputs that have no usable characters", () => {
+    // The caller (`linkType.create`) detects empty output and throws
+    // INVALID_API_NAME — this test pins the helper's contract so the
+    // caller can rely on it.
+    expect(toCamelCaseApiName("")).toBe("");
+    expect(toCamelCaseApiName("   ")).toBe("");
+    expect(toCamelCaseApiName("---")).toBe("");
+    expect(toCamelCaseApiName("🎉🎉🎉")).toBe("");
+  });
+
+  it("is idempotent on already-camelCase inputs", () => {
+    // Property the caller relies on when the user *did* provide an
+    // explicit apiName: feeding it back through derivation must be a
+    // no-op (no double-camelCasing).
+    expect(toCamelCaseApiName("customerOrder")).toBe("customerOrder");
+    expect(toCamelCaseApiName("orderId")).toBe("orderId");
   });
 });

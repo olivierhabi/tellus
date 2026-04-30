@@ -66,7 +66,12 @@ export interface LinkTypeRow {
 }
 
 export interface CreateLinkTypeInput {
-  apiName: string;
+  /**
+   * Optional. The frontend create flow no longer asks the user for an
+   * apiName — it is derived server-side from `displayName` when
+   * absent. Bulk-import / programmatic callers may still supply one.
+   */
+  apiName?: string;
   displayName: string;
   description?: string | null;
   cardinality: Cardinality;
@@ -170,11 +175,48 @@ export async function resolvePropertyApiName(propertyId: string): Promise<string
 // CRUD
 // ---------------------------------------------------------------------------
 
+/**
+ * Project a free-text display name into a camelCase apiName.
+ * Mirrors the rule the frontend used before apiName was removed
+ * from the create form: strip diacritics, collapse non-alphanumeric
+ * runs into word breaks, lowercase the first word, title-case the
+ * rest. Used as the server-side fallback when callers don't provide
+ * an explicit `apiName`.
+ */
+function toCamelCaseApiName(input: string): string {
+  return input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+    .map((w, i) =>
+      i === 0
+        ? w[0].toLowerCase() + w.slice(1)
+        : w[0].toUpperCase() + w.slice(1).toLowerCase()
+    )
+    .join("");
+}
+
 async function create(
   ontologyId: string,
   input: CreateLinkTypeInput
 ): Promise<LinkTypeRow> {
-  const nameValidation = validateLinkTypeName(input.apiName);
+  // Derive apiName from displayName when the caller didn't provide
+  // one. The FE create form no longer surfaces apiName as a user
+  // input; the canonical identity is the row's UUID. Bulk-import or
+  // programmatic callers may still pass an explicit apiName, in
+  // which case we honour it.
+  const providedApiName = (input.apiName ?? "").trim();
+  const derivedApiName = providedApiName || toCamelCaseApiName(input.displayName);
+  if (!derivedApiName) {
+    throw appError(
+      "INVALID_API_NAME",
+      "Could not derive a valid apiName — provide a non-empty displayName."
+    );
+  }
+  const nameValidation = validateLinkTypeName(derivedApiName);
   if (!nameValidation.valid) {
     throw appError("INVALID_API_NAME", nameValidation.error!);
   }
@@ -198,67 +240,129 @@ async function create(
     input.violationPolicy ??
     (input.cardinality === "ONE_TO_ONE" ? "reject" : "warn");
 
-  // LT-B6: when caller marks the link bidirectional without providing an
-  // explicit reverse api_name, populate reasonable defaults.
-  const reverseApiName = input.isBidirectional
-    ? (input.reverseApiName ?? `${input.apiName}_reverse`)
-    : (input.reverseApiName ?? null);
+  // LT-B6: populate sensible defaults for the reverse direction when
+  // the caller marks the link bidirectional. Order of preference for
+  // `reverseApiName` (most explicit → least):
+  //
+  //   1. Caller-provided `reverseApiName` (bulk-import / programmatic).
+  //   2. Derived from caller-provided `reverseDisplayName` (this is
+  //      what the FE create form ships now — it sends both sides'
+  //      displayNames and lets the server name them).
+  //   3. Fall back to `${forwardApiName}Reverse` so the link remains
+  //      addressable even when the caller omitted *both* reverse
+  //      fields. The fallback uses a `Reverse` suffix (no underscore)
+  //      so the result still passes the `^[a-z][a-zA-Z0-9]*$` apiName
+  //      regex.
   const reverseDisplayName = input.isBidirectional
     ? (input.reverseDisplayName ?? `${input.displayName} (reverse)`)
     : (input.reverseDisplayName ?? null);
 
-  try {
-    const result = await query(
-      `INSERT INTO link_type
-         (ontology_id, api_name, display_name, description, cardinality,
-          source_object_type, target_object_type, source_property_id, target_property_id,
-          join_table_file_path, join_table_source_column, join_table_target_column,
-          is_bidirectional,
-          storage_backend, violation_policy,
-          reverse_api_name, reverse_display_name, reverse_description,
-          reverse_visible, reverse_property_projection, reverse_actions_enabled,
-          bidirectional_migrated_at,
-          mandatory_control_property_id, mcp_propagation_mode, mcp_required_count)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-               $14, $15, $16, $17, $18, $19, $20, $21,
-               CASE WHEN $13::boolean THEN now() ELSE NULL END,
-               $22, $23, $24)
-       RETURNING *`,
-      [
-        ontologyId,
-        input.apiName,
-        input.displayName,
-        input.description ?? null,
-        input.cardinality,
-        sourceOtId,
-        targetOtId,
-        sourcePropId,
-        targetPropId,
-        input.joinTableFilePath ?? null,
-        input.joinTableSourceColumn ?? null,
-        input.joinTableTargetColumn ?? null,
-        input.isBidirectional ?? false,
-        input.storageBackend ?? "csv_legacy",
-        violationPolicy,
-        reverseApiName,
-        reverseDisplayName,
-        input.reverseDescription ?? null,
-        input.reverseVisible ?? true,
-        input.reversePropertyProjection
-          ? JSON.stringify(input.reversePropertyProjection)
-          : null,
-        input.reverseActionsEnabled ?? true,
-        input.mandatoryControlPropertyId ?? null,
-        input.mcpPropagationMode ?? "union",
-        input.mcpRequiredCount ?? 1,
-      ]
-    );
-    return result.rows[0] as LinkTypeRow;
-  } catch (err: any) {
-    if (err.code === "23505") {
-      throw appError("ALREADY_EXISTS", `Link type '${input.apiName}' already exists in this ontology.`);
+  const baseApiName = derivedApiName;
+  let baseReverseApiName: string | null;
+  if (input.reverseApiName) {
+    baseReverseApiName = input.reverseApiName;
+  } else if (input.isBidirectional) {
+    const fromReverseDisplay = input.reverseDisplayName
+      ? toCamelCaseApiName(input.reverseDisplayName)
+      : "";
+    baseReverseApiName = fromReverseDisplay || `${derivedApiName}Reverse`;
+  } else {
+    baseReverseApiName = null;
+  }
+
+  // The DB enforces UNIQUE(ontology_id, api_name) and a unique index
+  // on (ontology_id, reverse_api_name). The user explicitly asked the
+  // create endpoint to NOT depend on apiName uniqueness — the canonical
+  // identity is the row's `link_type_id` UUID. So instead of bouncing
+  // the request with `ALREADY_EXISTS`, we silently disambiguate the
+  // colliding apiName with a numeric suffix (`olivierOrderg` →
+  // `olivierOrderg2` → `olivierOrderg3` → …) and retry. The caller
+  // gets back the row's UUID + the actually-stored apiName so they can
+  // route on either. Cap retries at 50 to prevent runaway loops on a
+  // pathologically saturated namespace.
+  const MAX_DISAMBIG_ATTEMPTS = 50;
+  let attempt = 0;
+  while (true) {
+    const apiName = attempt === 0 ? baseApiName : `${baseApiName}${attempt + 1}`;
+    const reverseApiName =
+      baseReverseApiName === null
+        ? null
+        : attempt === 0
+          ? baseReverseApiName
+          : `${baseReverseApiName}${attempt + 1}`;
+    try {
+      const result = await query(
+        `INSERT INTO link_type
+           (ontology_id, api_name, display_name, description, cardinality,
+            source_object_type, target_object_type, source_property_id, target_property_id,
+            join_table_file_path, join_table_source_column, join_table_target_column,
+            is_bidirectional,
+            storage_backend, violation_policy,
+            reverse_api_name, reverse_display_name, reverse_description,
+            reverse_visible, reverse_property_projection, reverse_actions_enabled,
+            bidirectional_migrated_at,
+            mandatory_control_property_id, mcp_propagation_mode, mcp_required_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                 $14, $15, $16, $17, $18, $19, $20, $21,
+                 CASE WHEN $13::boolean THEN now() ELSE NULL END,
+                 $22, $23, $24)
+         RETURNING *`,
+        [
+          ontologyId,
+          apiName,
+          input.displayName,
+          input.description ?? null,
+          input.cardinality,
+          sourceOtId,
+          targetOtId,
+          sourcePropId,
+          targetPropId,
+          input.joinTableFilePath ?? null,
+          input.joinTableSourceColumn ?? null,
+          input.joinTableTargetColumn ?? null,
+          input.isBidirectional ?? false,
+          input.storageBackend ?? "csv_legacy",
+          violationPolicy,
+          reverseApiName,
+          reverseDisplayName,
+          input.reverseDescription ?? null,
+          input.reverseVisible ?? true,
+          input.reversePropertyProjection
+            ? JSON.stringify(input.reversePropertyProjection)
+            : null,
+          input.reverseActionsEnabled ?? true,
+          input.mandatoryControlPropertyId ?? null,
+          input.mcpPropagationMode ?? "union",
+          input.mcpRequiredCount ?? 1,
+        ]
+      );
+      // Observability: log when the disambiguator allocated a name
+      // different from what the caller asked for. Helps ops trace
+      // "why did my apiName turn into X2?" without needing to query
+      // the audit log. Single line, INFO level — disambiguation is
+      // expected behaviour, not an error.
+      if (apiName !== baseApiName) {
+        // eslint-disable-next-line no-console
+        console.info(
+          `[linkType.create] disambiguated apiName: requested='${baseApiName}' allocated='${apiName}' attempt=${attempt + 1} ontologyId=${ontologyId}`
+        );
+      }
+      return result.rows[0] as LinkTypeRow;
+    } catch (err: any) {
+      if (err.code === "23505" && attempt < MAX_DISAMBIG_ATTEMPTS) {
+        attempt += 1;
+        continue;
+      }
+      if (err.code === "23505") {
+        // Saturated — extremely unlikely. Surface the original error
+        // message so the caller knows the namespace is exhausted.
+        throw appError(
+          "ALREADY_EXISTS",
+          `Could not allocate a unique apiName near '${baseApiName}' after ${MAX_DISAMBIG_ATTEMPTS} attempts.`,
+        );
+      }
+      throw err;
     }
-    throw err;
   }
 }
 
@@ -388,6 +492,29 @@ async function getByApiName(
   return result.rows.length > 0 ? (result.rows[0] as LinkTypeRow) : null;
 }
 
+/**
+ * Look up a link type by its UUID `link_type_id` within an ontology.
+ *
+ * Companion to `getByApiName`. Used by the route-level `:apiName`
+ * resolver in `routes/links.ts` to support UUID-keyed URLs without
+ * having to fork every existing handler — when a request comes in
+ * at `/v1/ontology/:ontologyId/linkTypes/:apiName/...` and the
+ * `:apiName` slot looks like a UUID, the resolver loads the row by
+ * `link_type_id` here and rewrites `req.params.apiName` to the
+ * canonical `api_name` so all downstream handlers (which already
+ * use `getByApiName`) keep working unchanged.
+ */
+async function getById(
+  ontologyId: string,
+  linkTypeId: string
+): Promise<LinkTypeRow | null> {
+  const result = await query(
+    "SELECT * FROM link_type WHERE ontology_id = $1 AND link_type_id = $2",
+    [ontologyId, linkTypeId]
+  );
+  return result.rows.length > 0 ? (result.rows[0] as LinkTypeRow) : null;
+}
+
 async function listByOntology(
   ontologyId: string,
   filters?: { sourceObjectType?: string; targetObjectType?: string; cardinality?: string }
@@ -473,19 +600,24 @@ async function bulkInsert(ontologyId: string, linkTypes: CreateLinkTypeInput[]):
   const failed: Array<{ apiName: string; error: string }> = [];
 
   for (const input of linkTypes) {
+    // bulkInsert callers may omit apiName the same way the FE create
+    // form does; mirror `create`'s server-side fallback so the
+    // skipped/failed bookkeeping has something printable.
+    const effectiveApiName =
+      (input.apiName ?? "").trim() || toCamelCaseApiName(input.displayName);
     try {
-      const existing = await getByApiName(ontologyId, input.apiName);
+      const existing = await getByApiName(ontologyId, effectiveApiName);
       if (existing) {
-        skipped.push(input.apiName);
+        skipped.push(effectiveApiName);
         continue;
       }
       const row = await create(ontologyId, input);
       created.push(row);
     } catch (err: any) {
       if (err.code === "ALREADY_EXISTS") {
-        skipped.push(input.apiName);
+        skipped.push(effectiveApiName);
       } else {
-        failed.push({ apiName: input.apiName, error: err.message });
+        failed.push({ apiName: effectiveApiName, error: err.message });
       }
     }
   }
@@ -493,8 +625,8 @@ async function bulkInsert(ontologyId: string, linkTypes: CreateLinkTypeInput[]):
   return { created, skipped, failed };
 }
 
-export default { create, update, getByApiName, listByOntology, listByObjectType, remove, countByOntology, bulkInsert };
-export { create, update, getByApiName, listByOntology, listByObjectType, remove, countByOntology, bulkInsert, resolveObjectTypeId, resolvePropertyId };
+export default { create, update, getByApiName, getById, listByOntology, listByObjectType, remove, countByOntology, bulkInsert };
+export { create, update, getByApiName, getById, listByOntology, listByObjectType, remove, countByOntology, bulkInsert, resolveObjectTypeId, resolvePropertyId, toCamelCaseApiName };
 
 // ---------------------------------------------------------------------------
 // Inline self-tests

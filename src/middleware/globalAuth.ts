@@ -166,6 +166,11 @@ function authError(
   message: string,
   status: number,
 ): void {
+  // The jwt.verify callback below is async (JWKS fetch), so it can resolve
+  // *after* requestTimeoutMiddleware has already flushed a 504 envelope.
+  // Writing a second response throws ERR_HTTP_HEADERS_SENT which surfaces
+  // as an unhandled rejection. Bail out cleanly when the response is done.
+  if (res.headersSent || res.writableEnded) return;
   const requestId =
     (req.headers["x-request-id"] as string) ||
     (req as Request & { requestId?: string }).requestId ||

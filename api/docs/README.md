@@ -11,6 +11,7 @@ for the baseline API surface live in `/docs/API_REFERENCE.md`.
 | [`COMMIT_AND_INDEXING_API.md`](./COMMIT_AND_INDEXING_API.md) | UUID-keyed "Save to ontology" commit + reindex status/history | `/api/v1/ontology/:ontologyId/objectTypeId/:objectTypeId` |
 | [`OBJECT_DATA_STORE_API.md`](./OBJECT_DATA_STORE_API.md) | Single summary card used by the Datasources tab's "Object Storage V2" card | `/api/v1/ontology/:ontologyId/objectTypes/:apiName/dataStore` |
 | [`FUNNEL_API.md`](./FUNNEL_API.md) | Object Data Funnel — signals, runs, snapshots, overlay, Lakekeeper, ClickHouse links, Quickwit index replacement | `/api/v1/funnel` |
+| [`OBJECT_EXPLORER_API.md`](./OBJECT_EXPLORER_API.md) | Object Explorer production-readiness — every endpoint touched by T-01..T-10 (charts, sql, exports, summary, explorations, search/searchFullText/searchAround, observability) | `/api/v1/objects/*`, `/api/v1/sql`, `/api/v1/charts`, `/api/v1/ontology/:ontologyId/{summary,explorations,exports}` |
 
 ## Summary of what's new
 

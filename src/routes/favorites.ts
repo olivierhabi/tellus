@@ -17,17 +17,16 @@ import {
   sendError,
   sendNoContent,
 } from "../utils/responseFormatter";
+import { currentUser } from "../middleware/currentUser";
+import { routeMetric } from "../utils/routeInstrumentation";
 
 const router = Router();
 
 const MAX_RECENTS = 50;
 
-function currentUser(req: Request): string {
-  return (req as any).user?.id || "system";
-}
-
 router.post("/", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "favorites.toggle", null);
     const { resourceType, resourceId } = req.body || {};
     if (!resourceType || !resourceId) {
       return sendError(res, "VALIDATION_FAILED", "resourceType and resourceId required.");
@@ -47,6 +46,7 @@ router.delete(
   "/:resourceType/:resourceId",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      routeMetric(req, "favorites.toggle", null);
       await query(
         `DELETE FROM user_favorite
           WHERE user_id = $1 AND resource_type = $2 AND resource_id = $3`,
@@ -61,6 +61,7 @@ router.delete(
 
 router.get("/", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "favorites.list", null);
     const result = await query(
       "SELECT resource_type, resource_id, created_at FROM user_favorite WHERE user_id = $1 ORDER BY created_at DESC",
       [currentUser(req)]
@@ -73,6 +74,7 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
 
 router.post("/recent", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "favorites.recent.record", null);
     const { resourceType, resourceId } = req.body || {};
     if (!resourceType || !resourceId) {
       return sendError(res, "VALIDATION_FAILED", "resourceType and resourceId required.");
@@ -102,6 +104,7 @@ router.post("/recent", async (req: Request, res: Response, next: NextFunction) =
 
 router.get("/recent", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    routeMetric(req, "favorites.recent.list", null);
     const result = await query(
       `SELECT resource_type, resource_id, visited_at
          FROM user_recent_activity
