@@ -77,6 +77,13 @@ export default defineConfig({
       // tests can read it and calibrate request counts accordingly.
       // Kept in sync with tests/globalSetup.ts:BATCH_RATE_LIMIT_MAX.
       BATCH_RATE_LIMIT_MAX: "500",
+      // Code Repositories test-mode principal opt-in (G-C-11). Tests under
+      // tests/integration/code-repos/** drive Express routes by setting an
+      // X-Tellus-Test-Principal header; requireCodeReposAuth() ignores it
+      // unless this env var equals "1". Mirrors vitest.codeRepos.config.ts:46.
+      // Production code paths NEVER consult this header — the env var is the
+      // single gate, and it is only set in test configs.
+      CODE_REPOS_TEST_AUTH: "1",
     },
 
     // Coverage configuration — scoped to modules exercised by unit tests.
