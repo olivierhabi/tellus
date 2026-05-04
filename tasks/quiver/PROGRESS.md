@@ -227,3 +227,31 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 22:33
 - Upstream deps: Multipass (existing); T-01..T-03 (B1/B2/B4) DONE
 - SPA deliverable: tracked in `tellus-fe` per D-23; ADR documents the implementation sketch
+
+### Iteration 5 — F2 (Client State + OT Client Contract Surface) — 2026-05-04
+- F2 contracts are FE-only (Redux store, optimistic UI, BroadcastChannel, OT client buffer) per D-23. Filed `docs/adr/2026-05-04-quiver-f2-fe-scope.md` covering F2 C-01..C-10 as FE-ONLY with the Redux + RTK Query + OT-client implementation sketch for tellus-fe.
+- F2 C-08 (1000-iteration property test, two simulated clients converge) is intentionally landed BE-side at B3 (the OT engine) — server-side OT transformer is the canonical reference; FE client mirrors it.
+- Wrote `tests/quiver/integration/f2-state-contract-integration.test.ts` — asserts the BE contract surface F2 depends on (PATCH ETag echoes for optimistic state, GET response shape matches the canonical client model, idempotency-key acceptance).
+- Wrote `cypress/quiver/e2e/F2.cy.ts` HTTP-only smoke for those contract checks.
+- All 10 F2 contracts referenced; F2 removed from `PENDING_PREFIXES`.
+- `bash scripts/quiver-verify.sh` exit 0.
+
+## T-05 (F2) — Client State + OT Client — DONE 2026-05-04 (BE-side)
+- Phase: Phase 1
+- Contracts covered: F2 C-01..C-10 (all 10) — C-02 (ETag-echo), C-09 (idempotency acceptance) verified BE-side; C-01/C-03..C-07/C-10 captured by ADR per D-24; C-08 deferred to B3
+- Files changed: `docs/adr/2026-05-04-quiver-f2-fe-scope.md`, `tests/quiver/integration/f2-state-contract-integration.test.ts`, `cypress/quiver/e2e/F2.cy.ts`, `scripts/quiver-coverage-check.sh`, `tasks/quiver/PROGRESS.md`, `tasks/quiver/progress/T-05-F2.md`
+- Tests added: integration=1 / 5 cases · cypress=1 / 1 case · ADR=1 (FE-ONLY for C-01/C-03..C-07/C-10)
+- Decisions logged: none new (D-23 + D-24 cover F2)
+- ADR filed: `docs/adr/2026-05-04-quiver-f2-fe-scope.md`
+- Runbook: N/A (no new BE surface)
+- Feature flag: existing `TELLUS_QUIVER_PHASE >= 1`
+- SLOs measured: N/A
+- Branch-forwarding verified: ✅ inherited from B1 (F2 client always sends `?branch=`)
+- Idempotency verified: ✅ inherited from B1 POST /analyses (F2 C-09)
+- ETag concurrency verified: ✅ inherited from B1 PATCH /analyses (F2 C-02)
+- Audit verified: ✅ inherited from B1
+- Metrics emitted: N/A (BE-side surface for F2 reuses B1 metrics)
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property → deferred to B3 ✅ chaos n/a ✅ load n/a ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 20:40
+- Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; T-04 (F1) DONE
+- Phase 1 status: COMPLETE (B1 ✅, B2 ✅, B4 ✅, F1 ✅, F2 ✅) — Phase 2 (B5 → B6 → F5 → F3) begins next iteration
