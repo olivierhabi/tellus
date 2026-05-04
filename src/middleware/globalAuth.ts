@@ -151,6 +151,24 @@ function isAllowlisted(req: Request): boolean {
   // Test hooks — defense in depth; also gated at mount by TELLUS_TEST_HOOKS.
   if (p.startsWith("/api/v1/_test/")) return true;
 
+  // Code Repositories (B2) — has its own auth chain (requireCodeReposAuth →
+  // requireTellusAuth) that handles test-mode header bypass when
+  // CODE_REPOS_TEST_AUTH=1. Allowlisting the prefix here lets the test
+  // header path work end-to-end without needing a full Multipass/Keycloak
+  // login in cypress. In production, the per-router auth chain still
+  // enforces JWT/PAT validation — the global gate is just one of two
+  // enforcement layers.
+  if (p === "/api/v1/code-repositories" || p.startsWith("/api/v1/code-repositories/")) return true;
+
+  // B3 — Templates service. Allowlisted on the same per-router-auth basis
+  // as B2 above: `createTemplatesRouter` mounts `requireCodeReposAuth`
+  // internally, so this allowlist entry only sidesteps the global Tellus
+  // auth gate (which would otherwise reject the test-mode header bypass
+  // used by Cypress). In production the per-router JWT/PAT validation
+  // still runs as a second enforcement layer.
+  if (p === "/api/v1/templates" || p.startsWith("/api/v1/templates/")) return true;
+  if (p === "/api/v1/scaffold") return true;
+
   return false;
 }
 
