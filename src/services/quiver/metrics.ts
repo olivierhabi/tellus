@@ -236,3 +236,36 @@ export const computeCircuitState =
     help: "Per-backend circuit breaker state (0=closed, 1=half_open, 2=open)",
     labelNames: ["backend"] as const,
   });
+
+// === B6 — OSS Object-Set Backend (C-13) ====================================
+export const ossQuerySeconds =
+  existing<Histogram<"operation">>("tellus_quiver_oss_query_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_oss_query_seconds",
+    help: "OSS port call latency by operation",
+    labelNames: ["operation"] as const,
+    buckets: seconds,
+  });
+
+export const ossQueryErrorsTotal =
+  existing<Counter<"errorCode">>("tellus_quiver_oss_query_errors_total") ??
+  new Counter({
+    name: "tellus_quiver_oss_query_errors_total",
+    help: "OSS port call errors by errorCode",
+    labelNames: ["errorCode"] as const,
+  });
+
+export const ossTemporarySetCreationTotal =
+  existing<Counter<never>>("tellus_quiver_oss_temporary_set_creation_total") ??
+  new Counter({
+    name: "tellus_quiver_oss_temporary_set_creation_total",
+    help: "Temporary OSS sets created (24h TTL)",
+  });
+
+export const ossActionApplyTotal =
+  existing<Counter<"outcome">>("tellus_quiver_oss_action_apply_total") ??
+  new Counter({
+    name: "tellus_quiver_oss_action_apply_total",
+    help: "Action applies dispatched via OssBackend by outcome",
+    labelNames: ["outcome"] as const,
+  });

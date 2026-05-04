@@ -22,6 +22,12 @@ import {
 } from "../../services/quiver/compute/planner";
 import { NoBackendForCardTypeError } from "../../services/quiver/compute/backendRouter";
 import {
+  ActionApplyForbiddenError,
+  OssLimitExceededError,
+  OssQueryTimeoutError,
+  OssUnavailableError,
+} from "../../services/quiver/compute/oss/ossPort";
+import {
   computeSeconds,
   computeErrorsTotal,
   computeDeadlineExceededTotal,
@@ -121,6 +127,51 @@ function sendError(res: Response, e: unknown, cardType?: string): void {
     });
     return;
   }
+  if (e instanceof OssLimitExceededError) {
+    if (cardType) computeErrorsTotal.inc({ cardType, errorCode: "Tellus:Quiver:ObjectSetLimitExceeded" });
+    res.status(400).json({
+      errorCode: "OBJECT_SET_LIMIT_EXCEEDED",
+      errorName: "Tellus:Quiver:ObjectSetLimitExceeded",
+      errorInstanceId: cryptoRandom(),
+      parameters: {
+        kind: e.kind,
+        limit: e.limit,
+        ...(e.observed !== undefined ? { observed: e.observed } : {}),
+        ...(e.depth !== undefined ? { depth: e.depth } : {}),
+      },
+    });
+    return;
+  }
+  if (e instanceof ActionApplyForbiddenError) {
+    if (cardType) computeErrorsTotal.inc({ cardType, errorCode: "Tellus:Quiver:ActionApplyForbidden" });
+    res.status(403).json({
+      errorCode: "ACTION_APPLY_FORBIDDEN",
+      errorName: "Tellus:Quiver:ActionApplyForbidden",
+      errorInstanceId: cryptoRandom(),
+      parameters: { actionApiName: e.actionApiName, userSubject: e.userSubject },
+    });
+    return;
+  }
+  if (e instanceof OssUnavailableError) {
+    if (cardType) computeErrorsTotal.inc({ cardType, errorCode: "Tellus:Quiver:OssUnavailable" });
+    res.status(500).json({
+      errorCode: "OSS_UNAVAILABLE",
+      errorName: "Tellus:Quiver:OssUnavailable",
+      errorInstanceId: cryptoRandom(),
+      parameters: { reason: e.message },
+    });
+    return;
+  }
+  if (e instanceof OssQueryTimeoutError) {
+    if (cardType) computeErrorsTotal.inc({ cardType, errorCode: "Tellus:Quiver:OssQueryTimeout" });
+    res.status(504).json({
+      errorCode: "OSS_QUERY_TIMEOUT",
+      errorName: "Tellus:Quiver:OssQueryTimeout",
+      errorInstanceId: cryptoRandom(),
+      parameters: { reason: e.message },
+    });
+    return;
+  }
   // Defensive (G-02): never leak internal exception messages.
   res.status(500).json({
     errorCode: "INTERNAL",
@@ -179,7 +230,8 @@ computeRouter.post("/compute/cards", async (req: Request, res: Response) => {
         branch,
         cacheBehavior: reqBody.cacheBehavior as CacheBehavior,
         deadlineMs: reqBody.deadlineMs,
-      },
+        userSubject: actor.userSubject,
+      } as any,
       {
         deadlineHeader: req.header("x-deadline") ?? undefined,
         deadlineMs: reqBody.deadlineMs,

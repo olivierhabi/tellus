@@ -11,8 +11,21 @@ import { BackendRouter } from "./backendRouter";
 import { CacheRepository } from "./cache";
 import { ComputeExecutor } from "./executor";
 import { buildAllStubBackends } from "./stubBackends";
+import { buildOssBackends } from "./oss/ossBackend";
+import { InProcessOssAdapter } from "./oss/inProcessOss";
+import { instrumentOssPort } from "./oss/instrumentedOss";
+import type { OssPort } from "./oss/ossPort";
 import type { CardBackend } from "./types";
 import type { AnalysisDocument } from "../types";
+
+const OSS_BOUND_CARD_TYPES = new Set([
+  "OBJECT_SET",
+  "FILTER_OBJECT_SET",
+  "SEARCH_AROUND",
+  "AGGREGATION",
+  "PROPERTY_VALUE_SELECT",
+  "ACTION_BUTTON",
+]);
 
 export interface ComputeContext {
   router: BackendRouter;
@@ -35,10 +48,21 @@ function defaultParameterDeps(_cardId: string, _doc: AnalysisDocument): string[]
   return [];
 }
 
+let injectedOssPort: OssPort | undefined;
+
+function buildBackendsWithOss(rawPort: OssPort): CardBackend[] {
+  // Take stub backends, then replace OSS-bound ones with real OssBackend instances
+  // wrapped through the metrics-instrumentation proxy.
+  const ossPort = instrumentOssPort(rawPort);
+  const all = buildAllStubBackends().filter((b) => !OSS_BOUND_CARD_TYPES.has(b.cardType));
+  return [...all, ...buildOssBackends(ossPort)];
+}
+
 export function getComputeContext(): ComputeContext {
   if (cached) return cached;
   const router = new BackendRouter();
-  for (const b of buildAllStubBackends()) router.register(b);
+  const ossPort = injectedOssPort ?? new InProcessOssAdapter();
+  for (const b of buildBackendsWithOss(ossPort)) router.register(b);
   const cache = new CacheRepository(pool);
   const executor = new ComputeExecutor({
     router,
@@ -50,6 +74,11 @@ export function getComputeContext(): ComputeContext {
   return cached;
 }
 
+export function setOssPortForTests(port: OssPort | undefined): void {
+  injectedOssPort = port;
+  cached = undefined;
+}
+
 /**
  * Test override — injects a custom backend list and/or resolver.
  * Returns a teardown closure that resets the cache to defaults.
@@ -58,10 +87,12 @@ export function setComputeContextForTests(opts: {
   backends?: CardBackend[];
   ontologyVersionResolver?: (analysisRid: string, branch: string) => Promise<string>;
   parameterDependencies?: (cardId: string, doc: AnalysisDocument) => string[];
+  ossPort?: OssPort;
   now?: () => number;
 }): () => void {
   const router = new BackendRouter();
-  const backends = opts.backends ?? buildAllStubBackends();
+  const backends = opts.backends
+    ?? buildBackendsWithOss(opts.ossPort ?? new InProcessOssAdapter());
   for (const b of backends) router.register(b);
   const cache = new CacheRepository(pool);
   const executor = new ComputeExecutor({

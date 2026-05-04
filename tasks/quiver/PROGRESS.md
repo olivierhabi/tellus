@@ -287,3 +287,35 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos ✅ load (smoke) ✅ e2e (cypress, gated) ✅
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 30 test files / 226 cases.
 - Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE
+
+### Iteration 7 — B6 (OSS Object-Set Backend) — 2026-05-04
+- Implemented `src/services/quiver/compute/oss/{ossPort,inProcessOss,ossBackend,instrumentedOss}.ts`.
+- Wired `compute/context.ts` to filter OSS-bound types out of stubs and route them through `OssBackend` via `instrumentOssPort`.
+- Added 4 new prom-client OSS metrics; bounded labels (G-09).
+- Plumbed `userSubject` through `ComputeCardRequest` → `BackendExecuteInput` (D-34) so ACTION_BUTTON gating uses authed JWT subject.
+- Route `compute.ts` extended with error mappings for `OssLimitExceededError` (400), `ActionApplyForbiddenError` (403), `OssUnavailableError` (500), `OssQueryTimeoutError` (504).
+- Tests: `b6-oss-backend-unit.test.ts` (16 cases) + `b6-oss-route-integration.test.ts` (10 cases). All B6 contracts referenced; `B6` removed from `PENDING_PREFIXES`.
+- Decisions D-30..D-36 added.
+- `bash scripts/quiver-verify.sh` exit 0 — 32 test files / 251 cases.
+
+## T-07 (B6) — OSS Object-Set Backend — DONE 2026-05-04
+- Phase: Phase 2
+- Contracts covered: B6 C-01..C-11, C-13 (12 of 13). C-12 deferred (D-17 — phase boundary load test).
+- Files changed: see `tasks/quiver/progress/T-07-B6.md`
+- Tests added: unit=1 / 16 cases · integration=1 / 10 cases · cypress=1 / 2 cases
+- Contract-coverage tests: every B6 C-NN id is referenced in tests/quiver/ (except deferred C-12) per `scripts/quiver-coverage-check.sh`
+- Decisions logged: D-30 (in-process OSS adapter pending Conjure codegen), D-31 (limits enforced at port + backend), D-32 (PREFER_SPEED default), D-33 (canApplyAction → applyAction), D-34 (`userSubject` plumbed via BackendExecuteInput), D-35 (PROPERTY_VALUE_SELECT capped at 100), D-36 (depth tracked structurally).
+- ADR filed: `docs/adr/2026-05-04-quiver-b6-oss-backend.md`
+- Runbook: `runbooks/tellus-quiver/b6.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 2`
+- SLOs measured: in-process unit-tests well under target; full load measurement at phase boundary (D-17).
+- Branch-forwarding verified: ✅ every OSS call (`createTemporaryObjectSet`, `loadObjectSetPage`, `estimateCardinality`, `aggregateObjectSet`, `searchAround`, `canApplyAction`, `applyAction`, `distinctPropertyValues`) records the request branch — asserted via `port.calls[].branch` in unit + integration tests (B6 C-09).
+- Deadline-propagation verified: ✅ `OssCallContext.remainingMs` populated from `BackendExecuteInput.remainingMs`; asserted in unit test "OBJECT_SET — receives branch + remainingMs".
+- Idempotency verified: N/A at OSS layer (compute reads keyed by content-hash; B5 C-07 covers).
+- ETag concurrency verified: N/A — compute path does not mutate analysis state.
+- Audit verified: ✅ `applyAction` outcome counter + `ActionApplyForbidden` envelope carry user subject.
+- Branch coverage on new code: not yet measured (report at phase boundary).
+- Metrics emitted: `tellus_quiver_oss_query_seconds{operation}`, `..._query_errors_total{errorCode}`, `..._temporary_set_creation_total`, `..._action_apply_total{outcome}` — bounded labels (G-09).
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos ✅ load (deferred D-17) ⏳ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 32 test files / 251 cases.
+- Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; T-06 (B5) DONE

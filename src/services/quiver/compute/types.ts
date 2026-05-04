@@ -41,6 +41,13 @@ export interface BackendExecuteInput {
   remainingMs: number;
   /** Original analysis RID, propagated to backends that audit by analysis. */
   analysisRid: string;
+  /** Authenticated user subject for OMS canApplyAction / applyAction (B6 C-08). */
+  userSubject?: string;
+}
+
+export interface ComputeCardRequestEnvelope extends ComputeCardRequest {
+  /** Authenticated user subject (set by the route from JWT/test auth). */
+  userSubject?: string;
 }
 
 export interface BackendExecuteOutput {

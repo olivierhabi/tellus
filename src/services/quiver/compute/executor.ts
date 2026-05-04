@@ -136,6 +136,7 @@ export class ComputeExecutor {
         parameterOverrides: req.parameterOverrides,
         remainingMs: remaining,
         analysisRid: req.analysisRid,
+        userSubject: (req as any).userSubject,
       };
 
       let out;
