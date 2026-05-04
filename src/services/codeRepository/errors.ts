@@ -150,7 +150,11 @@ export function isCodeReposErrorName(s: string): s is CodeReposErrorName {
 }
 
 /**
- * The complete enumerated error name list (8 spec-mandated + 4 cross-cutting).
+ * The complete enumerated error name list:
+ *   - 6 spec-mandated B2-C-30..35
+ *   - 4 cross-cutting (G-C-08/09/13)
+ *   - 6 read-path B2-C-10/11 (InvalidPath, InvalidDepth, BranchNotFound,
+ *     FileNotFound, InvalidPathType, RateLimited)
  * Useful for `it.each(...)` test patterns.
  */
 export const CODE_REPOS_ERROR_NAMES: readonly CodeReposErrorName[] =
