@@ -1,0 +1,59 @@
+# Quiver verification stack.
+#
+# Used by `scripts/quiver-verify.sh` when the existing `tellus-postgres-1` /
+# `tellus-redis` containers are NOT running. In normal-dev mode we re-use
+# the running tellus stack to avoid container churn and port conflicts
+# (decision D-13). In CI / clean-machine mode this compose file boots an
+# isolated stack on +1 ports so it never collides.
+#
+# Ports:  5433 → postgres   6380 → redis   8026 → mailhog   7311 → api
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: quiver-postgres
+    restart: "no"
+    environment:
+      POSTGRES_DB: tellus_db
+      POSTGRES_USER: tellus
+      POSTGRES_PASSWORD: tellus123
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - quiver_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tellus -d tellus_db"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: quiver-redis
+    restart: "no"
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: quiver-mailhog
+    restart: "no"
+    ports:
+      - "127.0.0.1:1026:1025"
+      - "127.0.0.1:8026:8025"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8025"]
+      interval: 5s
+      timeout: 2s
+      retries: 6
+
+volumes:
+  quiver_pg: {}
