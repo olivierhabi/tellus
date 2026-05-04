@@ -106,3 +106,36 @@ export const idempotencyConflictTotal =
     help: "Idempotency-Key reuse with different body",
     labelNames: ["endpoint"] as const,
   });
+
+// === B2 — DAG Validator (C-18) =============================================
+export const dagValidateSeconds =
+  existing<Histogram<"result">>("tellus_quiver_dag_validate_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_dag_validate_seconds",
+    help: "Latency of DagValidator.validate() (CPU only)",
+    labelNames: ["result"] as const,
+    buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  });
+
+export const dagValidateFailureTotal =
+  existing<Counter<"error_name">>("tellus_quiver_dag_validate_failure_total") ??
+  new Counter({
+    name: "tellus_quiver_dag_validate_failure_total",
+    help: "DagValidator failures grouped by errorName",
+    labelNames: ["error_name"] as const,
+  });
+
+export const dagValidateCardCount =
+  existing<Histogram<never>>("tellus_quiver_dag_validate_card_count") ??
+  new Histogram({
+    name: "tellus_quiver_dag_validate_card_count",
+    help: "Card count per validated document",
+    buckets: [1, 5, 10, 25, 50, 100, 200, 500],
+  });
+
+export const cardsPerDag =
+  existing<Gauge<never>>("tellus_quiver_cards_per_dag") ??
+  new Gauge({
+    name: "tellus_quiver_cards_per_dag",
+    help: "Last observed card count per validate call (gauge for dashboard ease)",
+  });

@@ -16,6 +16,7 @@ import {
   listAnalysesInFolder,
   updateAnalysisMetadata,
 } from "../../services/quiver/analysisService";
+import { validate as validateDag } from "../../services/quiver/dag";
 import { readBranch } from "../../services/quiver/branchHeader";
 import {
   invalidAnalysisRequest,
@@ -249,6 +250,37 @@ analysesRouter.get(
     analysisListSeconds
       .labels({ result: "success" })
       .observe(Number(process.hrtime.bigint() - t0) / 1e9);
+  }),
+);
+
+// === POST /analyses/:rid/_validate (B2 C-13) ===============================
+// Public validator endpoint. Loads the current persisted document and runs
+// the same validate() function that B3 will run in-process on every
+// instruction-apply. Rejection envelope is byte-identical between the two
+// surfaces (B2 C-13).
+analysesRouter.post(
+  "/analyses/:rid/_validate",
+  handle(async (req, res) => {
+    const actor = actorFromReq(req);
+    const { document } = await getAnalysis(actor, req.params.rid);
+    const result = validateDag(document);
+    if (result.valid) {
+      res.status(200).json({
+        valid: true,
+        topologicalOrder: result.topologicalOrder,
+        warnings: result.warnings,
+      });
+      if (result.warnings.length > 0) {
+        res.setHeader("X-Tellus-Quiver-Warn", result.warnings.join("; "));
+      }
+      return;
+    }
+    res.status(400).json({
+      errorCode: result.errorCode,
+      errorName: result.errorName,
+      errorInstanceId: cryptoRandom(),
+      parameters: result.parameters,
+    });
   }),
 );
 

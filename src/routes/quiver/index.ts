@@ -5,6 +5,7 @@
 
 import { Router } from "express";
 import { analysesRouter } from "./analyses";
+import { assertRegistryIntegrity } from "../../services/quiver/dag";
 
 export interface QuiverPhaseFlags {
   phase: number;
@@ -17,6 +18,8 @@ export function readPhaseFlags(): QuiverPhaseFlags {
 }
 
 export function buildQuiverRouter(flags: QuiverPhaseFlags = readPhaseFlags()): Router {
+  // Boot-time invariant: 26 card types in registry (B2 C-02). Throws on drift.
+  assertRegistryIntegrity();
   const r = Router();
   if (flags.phase >= 1) {
     r.use(analysesRouter);

@@ -138,3 +138,34 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 ```
 
 (Subsequent iterations append `## T-XX — … — DONE …` blocks below.)
+
+### Iteration 2 — B2 (Card DAG Model + Type System + DagValidator) — 2026-05-04
+- Implemented `src/services/quiver/dag/{cardTypeRegistry,topo,validator,index}.ts` plus 4 new B2 metrics in `src/services/quiver/metrics.ts`.
+- Added `POST /quiver/api/v1/analyses/:rid/_validate` route (B2 C-13).
+- Wired boot-time `assertRegistryIntegrity()` into `buildQuiverRouter`.
+- 8 new unit-test files (registry, topo, validator, property, prune, golden, slo, metrics) + 1 integration file + 1 cypress spec — 79 cases / 5 cases / 2 cases.
+- Removed `B2` from `PENDING_PREFIXES` in `scripts/quiver-coverage-check.sh`; all 18 B2 contracts referenced.
+- 3 fix iterations on the property test fixture (D-13: validator stays strict; tests use EXPRESSION).
+- `bash scripts/quiver-verify.sh` exit 0 — 17 test files, 133 tests passing.
+
+## T-02 (B2) — Card DAG Model + Type System + DagValidator — DONE 2026-05-04
+- Phase: Phase 1
+- Contracts covered: B2 C-01..C-18 (all 18); plus G-01, G-02, G-09 from the global block
+- Files changed: see `tasks/quiver/progress/T-02-B2.md`
+- Tests added: unit=8 files / 79 cases · integration=1 file / 5 cases · property=1 (50 random valid DAGs + mutation tests) · contract=0 (Phase 1 has no Conjure consumer yet) · chaos=0 (B2 has no concurrency surface) · load=1 (CPU SLO unit test, B2 C-14) · e2e=1 cypress spec / 2 cases
+- Contract-coverage tests: every B2 C-NN id is referenced by at least one `it()` per `scripts/quiver-coverage-check.sh`
+- Decisions logged: D-13 (validator stays strict; tests use EXPRESSION for ARRAY/RID slots), D-14 (SLO is CPU-only unit test), D-15 (`EXPRESSION` output ANY at registry layer; per-card declared output deferred to B5)
+- ADR filed: `docs/adr/2026-05-04-quiver-b2-dag-validator.md`
+- Runbook: `runbooks/tellus-quiver/b2.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 1`
+- SLOs measured: validator p50/p95/p99 well within 25/80/250 ms targets at 250-card workload (typically <5 ms p99 on this workstation); asserted in `dag-slo-unit.test.ts`
+- Branch-forwarding verified: N/A for B2 (no downstream calls)
+- Deadline-propagation verified: N/A for B2 (CPU-pure)
+- Idempotency verified: N/A for B2 (validate is read-only; idempotent by construction)
+- ETag concurrency verified: N/A for B2 (validate does not mutate)
+- Audit verified: N/A for B2 (read-only validation surface; B3's instruction-apply path will emit audit)
+- Branch coverage on new code: not yet measured (report at phase boundary)
+- Metrics emitted: `tellus_quiver_dag_validate_seconds{result}`, `tellus_quiver_dag_validate_failure_total{error_name}`, `tellus_quiver_dag_validate_card_count`, `tellus_quiver_cards_per_dag` — all bounded-cardinality (G-09)
+- Suite status: lint ⏳ typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos n/a ✅ load (CPU unit) ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 17 files / 133 tests
+- Upstream deps: T-01 (B1) DONE
