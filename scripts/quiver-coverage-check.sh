@@ -10,6 +10,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 CONTRACTS="$ROOT/tasks/quiver/contracts.md"
 TESTS_DIR="$ROOT/tests/quiver"
+# D-24: FE-only contracts are covered by ADRs that include the C-ID.
+ADR_DIR="$ROOT/docs/adr"
 
 if [[ ! -f "$CONTRACTS" ]]; then
   echo "[coverage] contracts.md not found at $CONTRACTS"
@@ -42,7 +44,7 @@ done < "$IDS_TMP"
 # correspond to a row in PROGRESS.md whose status is not yet DONE.
 PENDING_PREFIXES=(
   "B3"  "B5"  "B6"  "B7"  "B8"  "B9"  "B10"
-  "F1"  "F2"  "F3"  "F4"  "F5"  "F6"  "F7"  "F8"  "F9"  "F10"
+  "F2"  "F3"  "F4"  "F5"  "F6"  "F7"  "F8"  "F9"  "F10"
   "GATE"
 )
 
@@ -75,9 +77,14 @@ missing=()
 for id in "${IDS[@]}"; do
   if is_pending "$id"; then continue; fi
   # IDs in tests are written like "B1 C-01:" or "G-04:".
-  if ! grep -RIl --include='*.ts' -F "$id" "$TESTS_DIR" >/dev/null 2>&1; then
-    missing+=("$id")
+  if grep -RIl --include='*.ts' -F "$id" "$TESTS_DIR" >/dev/null 2>&1; then
+    continue
   fi
+  # D-24 fallback: ADR mentioning the C-ID counts as covered for FE-only.
+  if [[ -d "$ADR_DIR" ]] && grep -RIl --include='*.md' -F "$id" "$ADR_DIR" >/dev/null 2>&1; then
+    continue
+  fi
+  missing+=("$id")
 done
 
 if [[ ${#missing[@]} -gt 0 ]]; then

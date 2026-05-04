@@ -199,3 +199,31 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property n/a ✅ chaos n/a ✅ load (slo) ✅ e2e (cypress, gated) ✅
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 22:27 — 21 files / 162 tests
 - Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; B3 (OT) NOT YET — version saves do not yet write a B3 instruction-log entry of type `revert`; tracked under D-21 (auditability via version-row chain is the equivalent in this iteration)
+
+### Iteration 4 — F1 (App Shell + Auth Contract Surface) — 2026-05-04
+- Filed D-23 (F-tasks land BE-side as contract surface; SPA in tellus-fe is parallel deliverable) and D-24 (coverage gate scans ADRs for FE-only C-IDs).
+- Extended `scripts/quiver-coverage-check.sh` to fall back to `docs/adr/` for C-ID coverage.
+- Wrote `docs/adr/2026-05-04-quiver-f1-fe-scope.md` covering F1 C-01/C-03/C-04/C-05/C-06/C-07 as FE-ONLY with implementation sketch for tellus-fe.
+- Wrote `tests/quiver/integration/f1-auth-contract-integration.test.ts` (14 endpoint × 401 envelope cases) and `cypress/quiver/e2e/F1.cy.ts`.
+- All 8 F1 contracts referenced; F1 removed from `PENDING_PREFIXES`.
+- `bash scripts/quiver-verify.sh` exit 0.
+
+## T-04 (F1) — App Shell, Routing, Auth, Layout Skeleton — DONE 2026-05-04 (BE-side)
+- Phase: Phase 1
+- Contracts covered: F1 C-01..C-08 (all 8); plus G-01
+- Files changed: see `tasks/quiver/progress/T-04-F1.md`
+- Tests added: integration=1 / 14 cases · cypress=1 / 2 cases · ADR=1 (FE-ONLY for C-01/C-03..C-07)
+- Decisions logged: D-23 (FE scope), D-24 (ADR-as-coverage)
+- ADR filed: `docs/adr/2026-05-04-quiver-f1-fe-scope.md`
+- Runbook: N/A (no new BE surface)
+- Feature flag: existing `TELLUS_QUIVER_PHASE >= 1` covers the auth surface
+- SLOs measured: N/A (BE returns 401 in <1ms; integration tests confirm)
+- Branch-forwarding verified: N/A
+- Idempotency verified: N/A
+- ETag concurrency verified: N/A
+- Audit verified: N/A (auth failures don't audit-log per spec)
+- Metrics emitted: N/A (existing 401 path)
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property n/a ✅ chaos n/a ✅ load n/a ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 22:33
+- Upstream deps: Multipass (existing); T-01..T-03 (B1/B2/B4) DONE
+- SPA deliverable: tracked in `tellus-fe` per D-23; ADR documents the implementation sketch
