@@ -5,6 +5,7 @@
 
 import { Router } from "express";
 import { analysesRouter } from "./analyses";
+import { versionsRouter } from "./versions";
 import { assertRegistryIntegrity } from "../../services/quiver/dag";
 
 export interface QuiverPhaseFlags {
@@ -23,6 +24,7 @@ export function buildQuiverRouter(flags: QuiverPhaseFlags = readPhaseFlags()): R
   const r = Router();
   if (flags.phase >= 1) {
     r.use(analysesRouter);
+    r.use(versionsRouter);
   }
   return r;
 }

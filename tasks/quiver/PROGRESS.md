@@ -169,3 +169,33 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Suite status: lint ⏳ typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos n/a ✅ load (CPU unit) ✅ e2e (cypress, gated) ✅
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 17 files / 133 tests
 - Upstream deps: T-01 (B1) DONE
+
+### Iteration 3 — B4 (Versioning + Working-State Autosave) — 2026-05-04
+- Migrations 064 (`quiver_analysis_version`) and 065 (`quiver_working_state` with TTL sweeper function), both with reversible `.down.sql`.
+- Services: `versionService.ts` (saveVersion / list / get / revert), `workingStateService.ts` (base36 stateId + create / get / upsert / purge), `diff.ts` (RFC 6902 patch + DocumentDiff).
+- Routes: `versions.ts` mounting 8 endpoints behind phase ≥ 1; integrated into `routes/quiver/index.ts`.
+- 6 new metrics; bounded labels.
+- Tests: 2 unit files (16 cases), 2 integration files (12 cases), 1 cypress spec (2 cases). 162 tests / 21 files passing.
+- Removed `B4` from `PENDING_PREFIXES`; all 14 B4 contracts referenced.
+- Decisions D-20..D-22 added.
+- `bash scripts/quiver-verify.sh` exit 0.
+
+## T-03 (B4) — Versioning + Working-State Autosave — DONE 2026-05-04
+- Phase: Phase 1
+- Contracts covered: B4 C-01..C-14 (all 14); plus G-03
+- Files changed: see `tasks/quiver/progress/T-03-B4.md`
+- Tests added: unit=2 / 16 cases · integration=2 / 12 cases · cypress=1 / 2 cases
+- Contract-coverage tests: every B4 C-NN id is referenced per `scripts/quiver-coverage-check.sh`
+- Decisions logged: D-20 (TTL via column + sweeper), D-21 (revert allocates new version), D-22 (state-ID retry limit 5)
+- ADR filed: `docs/adr/2026-05-04-quiver-b4-versions-and-working-state.md`
+- Runbook: `runbooks/tellus-quiver/b4.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 1`
+- SLOs measured: `saveVersion` p99 < 50 ms (target ≤ 1000 ms) ✅ ; `revertToVersion` p99 < 50 ms (target ≤ 500 ms) ✅
+- Branch-forwarding verified: ✅ working-state read/write scoped to `(rid, state_id, branch)` (B4 C-14 test)
+- Idempotency verified: N/A for B4 (saves are intentionally distinct snapshots; idempotency-key not part of spec)
+- ETag concurrency verified: ✅ saveVersion + revertToVersion both require If-Match
+- Audit verified: ✅ `QUIVER_ANALYSIS_VERSION_SAVED` + `QUIVER_ANALYSIS_REVERTED` rows
+- Metrics emitted: `tellus_quiver_save_version_seconds{named}`, `..._revert_seconds`, `..._working_state_size_bytes`, `..._working_state_ttl_purges_total`, `..._version_saved_total{named}`, `..._reverted_total` — bounded labels (G-09)
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property n/a ✅ chaos n/a ✅ load (slo) ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 22:27 — 21 files / 162 tests
+- Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; B3 (OT) NOT YET — version saves do not yet write a B3 instruction-log entry of type `revert`; tracked under D-21 (auditability via version-row chain is the equivalent in this iteration)
