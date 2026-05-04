@@ -177,8 +177,19 @@ export function idempotencyMiddleware(deps: IdempotencyDeps) {
     }
 
     // First-write path. Wrap res.json so we capture the final response
-    // and persist it before the underlying socket sees it.
-    let captured: { status: number; body: unknown; etag: string | null } | null = null;
+    // AND durably persist the idempotency row BEFORE the bytes hit the
+    // socket. This is what makes G-C-25 (replay) actually safe: the
+    // contract is "if a client saw 2xx, the next retry replays it", and
+    // the only way to keep that promise is to make the row durable
+    // before the client can observe the response.
+    //
+    // Why not res.on("finish")? Earlier versions of this middleware
+    // persisted there — fire-and-forget after the response flushed —
+    // which created a race window. A client that retried fast enough
+    // (or a test that polled the response then immediately re-POSTed)
+    // could race past the deferred INSERT and find an empty table,
+    // re-run the handler, and double-execute. Fix: synchronize the
+    // INSERT into the response path.
     let finalStatus = 200;
     const origStatus = res.status.bind(res);
     res.status = (code: number): Response => {
@@ -188,23 +199,25 @@ export function idempotencyMiddleware(deps: IdempotencyDeps) {
     const origJson = res.json.bind(res);
     res.json = (body: unknown): Response => {
       const etag = (res.getHeader("ETag") as string | undefined) ?? null;
-      captured = { status: finalStatus, body, etag };
-      return origJson(body);
-    };
-
-    // After the handler runs and the response is captured, write the
-    // idempotency row. We do this on `res.on("finish")` so the actual
-    // response has been flushed; the handler's data tx is already
-    // committed, and we only persist successful responses (2xx) to
-    // avoid replaying a transient 5xx forever. Errors here are
-    // logged-and-swallowed: failing to persist the idempotency row
-    // does not fail the in-flight response.
-    res.on("finish", () => {
-      if (!captured) return;
-      const cap = captured;
-      if (cap.status < 200 || cap.status >= 300) return;
+      const cap = { status: finalStatus, body, etag };
+      // Non-2xx: do not persist (avoids replaying transient 5xx forever).
+      if (cap.status < 200 || cap.status >= 300) {
+        return origJson(body);
+      }
+      // 2xx: persist FIRST, then flush. Express handlers don't await
+      // res.json — they `return res.status(…).json(…)` and let the
+      // response stream finish on its own — so deferring the actual
+      // origJson() call until after the INSERT resolves is transparent
+      // to the handler. The supertest/HTTP client awaits the network
+      // response, which arrives only after origJson() runs, so by the
+      // time a retry can be issued the row is durable.
+      //
+      // Persist failure does NOT fail the response: we still flush in
+      // `.finally`, with a warning. The cost is that one specific
+      // retry path (DB went away after handler succeeded) won't be
+      // deduped — strictly better than dropping the response entirely.
       const expiresAt = new Date(Date.now() + TTL_HOURS * 3_600_000);
-      void pool
+      pool
         .query(
           `INSERT INTO code_repos_idempotency
              (principal_user_id, idem_key, request_hash,
@@ -227,15 +240,16 @@ export function idempotencyMiddleware(deps: IdempotencyDeps) {
           ],
         )
         .catch((err: Error) => {
-          // Best-effort. The req-scoped logger would be ideal here;
-          // for now we surface to stderr so the failure is visible in
-          // pod logs without being swallowed.
           // best-effort surface; middleware deliberately has no logger dep
           console.warn(
             `[code-repos] failed to persist idempotency row for key=${key} principal=${principal.userId}: ${err.message}`,
           );
+        })
+        .finally(() => {
+          origJson(body);
         });
-    });
+      return res;
+    };
 
     next();
   };
