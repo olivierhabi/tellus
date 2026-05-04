@@ -255,3 +255,35 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 20:40
 - Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; T-04 (F1) DONE
 - Phase 1 status: COMPLETE (B1 ✅, B2 ✅, B4 ✅, F1 ✅, F2 ✅) — Phase 2 (B5 → B6 → F5 → F3) begins next iteration
+
+### Iteration 6 — B5 (Compute Coordinator: Planner + Cache + Deadlines) — 2026-05-04
+- Implemented the `src/services/quiver/compute/` module: cacheKey, deadline, planner, circuitBreaker, backendRouter, cache, stubBackends, executor, context, types.
+- 6 new B5 metrics on prom-client; bounded labels (G-09).
+- Migration 066 (`quiver_card_output_cache`) reversible.
+- Route `POST /quiver/api/v1/compute/cards` mounted behind phase ≥ 2.
+- 5 vitest files (4 unit + 3 integration including chaos): 22 unit + 12 integration cases. Chaos: 100-concurrent deadline storm; backend-unavailable circuit trip.
+- Decisions D-25..D-29 added.
+- Harness exit 0 — 30 test files / 226 cases passing.
+
+## T-06 (B5) — Compute Coordinator (Planner / BackendRouter / Cache / Deadlines) — DONE 2026-05-04
+- Phase: Phase 2
+- Contracts covered: B5 C-01..C-10, C-13, C-14, C-16, C-17 + G-06 (deadline propagation now first-class)
+- Deferred (with D-entries): B5 C-11 (idempotent POST /compute/cards — D-25), C-12 (load test — D-17), C-15 (OTel trace — D-26)
+- Files changed: see `tasks/quiver/progress/T-06-B5.md`
+- Tests added: unit=4 / 26 cases · integration=3 / 14 cases · chaos=1 / 2 cases · cypress=1 / 1 case
+- Contract-coverage tests: every B5 C-NN id is referenced in tests/quiver/ per `scripts/quiver-coverage-check.sh`
+- Decisions logged: D-25 (inline-only cache; reject > 64 KB), D-26 (OTel deferred), D-27 (`INLINE` bounded label), D-28 (stub backends ship with B5; B6/B7/B8/B9 swap), D-29 (`dispatch` raced against `withDeadline`)
+- ADR filed: `docs/adr/2026-05-04-quiver-b5-compute-coordinator.md`
+- Runbook: `runbooks/tellus-quiver/b5.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 2`
+- SLOs measured: cache-hit p99 well under 50 ms (in-process, single PG round-trip); deadline storm test confirms 100 concurrent calls settle within 2 s wall, > 50 % return DEADLINE_EXCEEDED at the boundary.
+- Branch-forwarding verified: ✅ `branch` carried into ontology version + cache key + downstream `BackendExecuteInput`. Per-branch cache isolation tested (B5 C-10).
+- Deadline-propagation verified: ✅ `X-Deadline` parsed; `withDeadline` races dispatch against `setTimeout`; boundary enforcement test asserts elapsed < 180 ms when budget = 100 ms vs backend-sleep = 200 ms.
+- Idempotency verified: cache-keying gives idempotent reads for cached results (B5 C-04). Idempotent POST (C-11) deferred D-25.
+- ETag concurrency verified: N/A — compute is read-only and does not mutate the analysis document.
+- Audit verified: deferred D-26 (OTel rollout phase).
+- Branch coverage on new code: not yet measured (report at phase boundary).
+- Metrics emitted: `tellus_quiver_compute_seconds{cardType,backend,cache}`, `..._errors_total{cardType,errorCode}`, `..._cache_hit_ratio`, `..._inflight{backend}`, `..._deadline_exceeded_total{cardType}`, `..._circuit_state{backend}` — bounded labels (G-09).
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos ✅ load (smoke) ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 30 test files / 226 cases.
+- Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE

@@ -187,3 +187,52 @@ export const revertedTotal =
     name: "tellus_quiver_reverted_total",
     help: "Successful reverts",
   });
+
+// === B5 — Compute Coordinator (C-13) =======================================
+export const computeSeconds =
+  existing<Histogram<"cardType" | "backend" | "cache">>("tellus_quiver_compute_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_compute_seconds",
+    help: "Latency of POST /quiver/compute/cards by cardType, backend, and cache outcome",
+    labelNames: ["cardType", "backend", "cache"] as const,
+    buckets: seconds,
+  });
+
+export const computeErrorsTotal =
+  existing<Counter<"cardType" | "errorCode">>("tellus_quiver_compute_errors_total") ??
+  new Counter({
+    name: "tellus_quiver_compute_errors_total",
+    help: "Compute errors by cardType and errorCode",
+    labelNames: ["cardType", "errorCode"] as const,
+  });
+
+export const computeCacheHitRatio =
+  existing<Gauge<never>>("tellus_quiver_compute_cache_hit_ratio") ??
+  new Gauge({
+    name: "tellus_quiver_compute_cache_hit_ratio",
+    help: "Rolling cache hit ratio (last sweep window)",
+  });
+
+export const computeInflight =
+  existing<Gauge<"backend">>("tellus_quiver_compute_inflight") ??
+  new Gauge({
+    name: "tellus_quiver_compute_inflight",
+    help: "In-flight compute calls per backend",
+    labelNames: ["backend"] as const,
+  });
+
+export const computeDeadlineExceededTotal =
+  existing<Counter<"cardType">>("tellus_quiver_compute_deadline_exceeded_total") ??
+  new Counter({
+    name: "tellus_quiver_compute_deadline_exceeded_total",
+    help: "Compute calls that returned DEADLINE_EXCEEDED at the boundary",
+    labelNames: ["cardType"] as const,
+  });
+
+export const computeCircuitState =
+  existing<Gauge<"backend">>("tellus_quiver_compute_circuit_state") ??
+  new Gauge({
+    name: "tellus_quiver_compute_circuit_state",
+    help: "Per-backend circuit breaker state (0=closed, 1=half_open, 2=open)",
+    labelNames: ["backend"] as const,
+  });
