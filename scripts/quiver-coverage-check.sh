@@ -43,7 +43,6 @@ done < "$IDS_TMP"
 # gate is not falsely red while the drive is in-progress. Each entry must
 # correspond to a row in PROGRESS.md whose status is not yet DONE.
 PENDING_PREFIXES=(
-  "F6"  "F9"  "F10"
   "GATE"
 )
 

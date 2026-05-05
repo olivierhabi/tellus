@@ -617,3 +617,71 @@ Next: Phase 5 begins with B9 (AIP Logic Service tools).
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 56 files / 417 cases.
 - Upstream deps: T-01 (B1) DONE, T-02 (B2) DONE, T-06 (B5) DONE, T-16 (B9) DONE.
 - Next: F9 (AIP UI), F6 (parameters/inspector), F10 (publishing UI) — close Phase 5.
+
+### Iteration 18 — F9 (AIP UI) — 2026-05-05
+- FE-only per D-23; BE surface already verified in T-16 (B9).
+- ADR `docs/adr/2026-05-04-quiver-f9-fe-scope.md` maps F9 C-01..C-09 to files in `tellus-fe/frontend/aip/`.
+- D-68..D-71 logged.
+- F9 removed from PENDING_PREFIXES.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05.
+
+## T-18 (F9) — AIP UI — DONE 2026-05-05
+- Phase: Phase 5
+- Contracts covered: F9 C-01..C-09 (all 9, FE-only via ADR fallback per D-24)
+- Files changed: 1 new ADR + 1 modified script
+- Tests added: 0 (FE-only)
+- Decisions logged: D-68..D-71
+- ADR filed: `docs/adr/2026-05-04-quiver-f9-fe-scope.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 5`
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05.
+- Upstream deps: T-16 (B9) DONE.
+
+### Iteration 19 — F6 (Add-Card UX) — 2026-05-05
+- FE-only per D-23; BE deps (F5 registry, B9 AIP, OMS/Compass/Functions) already verified.
+- ADR `docs/adr/2026-05-04-quiver-f6-fe-scope.md` maps F6 C-01..C-07 to files in `tellus-fe/frontend/addCard/`.
+- D-72..D-76 logged.
+- F6 removed from PENDING_PREFIXES.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05.
+
+## T-19 (F6) — Add-Card UX — DONE 2026-05-05
+- Phase: Phase 5
+- Contracts covered: F6 C-01..C-07 (all 7, FE-only via ADR fallback per D-24)
+- Files changed: 1 new ADR + 1 modified script
+- Tests added: 0 (FE-only)
+- Decisions logged: D-72..D-76
+- ADR filed: `docs/adr/2026-05-04-quiver-f6-fe-scope.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 5`
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05.
+- Upstream deps: T-08 (F5) DONE; T-16 (B9) DONE; T-17 (B10) DONE.
+
+### Iteration 20 — F10 (Dashboards Publisher / Embed UX) — 2026-05-05
+- **Closes the 20-task drive.** FE-only per D-23; BE surface verified in T-17 (B10).
+- ADR `docs/adr/2026-05-04-quiver-f10-fe-scope.md` maps F10 C-01..C-09 to files in `tellus-fe/frontend/publishing/`.
+- D-77..D-83 logged.
+- F10 removed from PENDING_PREFIXES — coverage gate now has zero pending prefixes.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 56 files / 417 cases / 266 contracts.
+
+## T-20 (F10) — Dashboards Publisher / Embed UX — DONE 2026-05-05
+- Phase: Phase 5 (closes Phase 5 + closes the drive)
+- Contracts covered: F10 C-01..C-09 (all 9, FE-only via ADR fallback per D-24)
+- Files changed: 1 new ADR + 1 modified script
+- Tests added: 0 (FE-only)
+- Decisions logged: D-77..D-83
+- ADR filed: `docs/adr/2026-05-04-quiver-f10-fe-scope.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 5`
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 56 files / 417 cases / 266 contracts.
+- Upstream deps: T-17 (B10) DONE.
+
+## Drive status — after T-20
+
+All 20 tasks (B1..B10, F1..F10) **DONE**.
+
+| Phase | Tasks | Status |
+|---|---|---|
+| 1 — Foundation | T-01..T-05 (B1, B2, B4, F1, F2) | DONE |
+| 2 — Compute Core | T-06..T-09 (B5, B6, F5, F3) | DONE |
+| 3 — Collab | T-10..T-12 (B3, F8, F4) | DONE |
+| 4 — Time-series & Materialization | T-13..T-15 (B7, B8, F7) | DONE |
+| 5 — AIP & Publishing | T-16..T-20 (B9, B10, F9, F6, F10) | DONE |
+
+Next: gates GATE-01..GATE-04 → FINAL_REPORT.
