@@ -269,3 +269,67 @@ export const ossActionApplyTotal =
     help: "Action applies dispatched via OssBackend by outcome",
     labelNames: ["outcome"] as const,
   });
+
+// === B3 — Operational Transform / Collab ===================================
+export const otInstructionApplySeconds =
+  existing<Histogram<"type">>("tellus_quiver_ot_instruction_apply_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_ot_instruction_apply_seconds",
+    help: "Latency of applying a single instruction by type",
+    labelNames: ["type"] as const,
+    buckets: seconds,
+  });
+
+export const otTransformSeconds =
+  existing<Histogram<never>>("tellus_quiver_ot_transform_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_ot_transform_seconds",
+    help: "Latency of pairwise OT transform per submitInstructions call",
+    buckets: seconds,
+  });
+
+export const otConflictsTotal =
+  existing<Counter<"resolution">>("tellus_quiver_ot_conflicts_total") ??
+  new Counter({
+    name: "tellus_quiver_ot_conflicts_total",
+    help: "Conflict resolutions by kind (lww | merge | tombstone | reorder | noop)",
+    labelNames: ["resolution"] as const,
+  });
+
+export const otCollabActiveSessions =
+  existing<Gauge<never>>("tellus_quiver_collab_active_sessions") ??
+  new Gauge({
+    name: "tellus_quiver_collab_active_sessions",
+    help: "Active collab sessions (no per-rid label per G-09)",
+  });
+
+export const otWsDisconnectsTotal =
+  existing<Counter<"reason">>("tellus_quiver_ws_disconnects_total") ??
+  new Counter({
+    name: "tellus_quiver_ws_disconnects_total",
+    help: "WebSocket disconnects by reason",
+    labelNames: ["reason"] as const,
+  });
+
+export const otInstructionLogSeqLag =
+  existing<Gauge<never>>("tellus_quiver_instruction_log_seq_lag") ??
+  new Gauge({
+    name: "tellus_quiver_instruction_log_seq_lag",
+    help: "Difference between latest seq and oldest unbroadcast seq (informational)",
+  });
+
+export const otDuplicateOpIdTotal =
+  existing<Counter<never>>("tellus_quiver_ot_duplicate_op_id_total") ??
+  new Counter({
+    name: "tellus_quiver_ot_duplicate_op_id_total",
+    help: "submitInstructions calls that hit a previously-seen client_op_id",
+  });
+
+export const otSubmitSeconds =
+  existing<Histogram<"result">>("tellus_quiver_ot_submit_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_ot_submit_seconds",
+    help: "Latency of POST /analyses/:rid/instructions",
+    labelNames: ["result"] as const,
+    buckets: seconds,
+  });
