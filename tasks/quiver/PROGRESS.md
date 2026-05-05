@@ -319,3 +319,31 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos ✅ load (deferred D-17) ⏳ e2e (cypress, gated) ✅
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 32 test files / 251 cases.
 - Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; T-06 (B5) DONE
+
+### Iteration 8 — F5 (Card Type Registry & Card Components) — 2026-05-05
+- F5 SPA implementation lives in `tellus-fe` per D-23. BE-side delivery is the contract surface only.
+- New endpoint `GET /quiver/api/v1/registry/cards` mounted at phase ≥ 1 (D-37). Public, cacheable, ETag-emitting; exposes the 26-entry registry verbatim.
+- 5 integration cases assert F5 C-02 and F5 C-08 against the live route.
+- ADR `docs/adr/2026-05-04-quiver-f5-fe-scope.md` covers F5 C-01/C-03/C-04/C-05/C-06/C-07 as FE-ONLY (D-24).
+- F5 removed from `PENDING_PREFIXES`.
+- `bash scripts/quiver-verify.sh` exit 0 — 33 files / 256 cases.
+
+## T-08 (F5) — Card Type Registry & Card Components — DONE 2026-05-05 (BE-side)
+- Phase: Phase 2
+- Contracts covered: F5 C-01..C-08 (all 8); plus G-09 inherited
+- Files changed: see `tasks/quiver/progress/T-08-F5.md`
+- Tests added: integration=1 / 5 cases · cypress=1 / 2 cases · ADR=1 (FE-ONLY for C-01/C-03..C-07)
+- Decisions logged: D-37 (registry endpoint at phase ≥ 1), D-38 (unauthenticated)
+- ADR filed: `docs/adr/2026-05-04-quiver-f5-fe-scope.md`
+- Runbook: N/A (read-only metadata endpoint; no operational alerts)
+- Feature flag: `TELLUS_QUIVER_PHASE >= 1`
+- SLOs measured: P99 < 5 ms (in-process; static registry list)
+- Branch-forwarding verified: N/A (registry is non-branched)
+- Idempotency verified: N/A (read-only)
+- ETag concurrency verified: N/A (read-only; weak ETag for cacheability only)
+- Audit verified: N/A (read of public metadata)
+- Metrics emitted: N/A (covered by Express request-counter; no per-route metric)
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property n/a ✅ chaos n/a ✅ load n/a ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 33 test files / 256 cases.
+- Upstream deps: T-02 (B2) DONE; T-05 (F2) DONE.
+- SPA deliverable: tracked in `tellus-fe` per D-23; ADR documents the implementation sketch
