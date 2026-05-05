@@ -367,3 +367,36 @@ export const matIcebergSnapshotAgeSeconds =
     help: "Drift between materialization read time and pinned Iceberg snapshot timestamp",
     buckets: [1, 10, 60, 600, 3600, 86_400],
   });
+
+// === B8 — Time-Series (Codex) Backend ======================================
+export const tsHydrationSeconds =
+  existing<Histogram<"state">>("tellus_quiver_ts_hydration_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_ts_hydration_seconds",
+    help: "Time-series hydration latency by state (warm|cold)",
+    labelNames: ["state"] as const,
+    buckets: seconds,
+  });
+
+export const tsBucketsReturned =
+  existing<Histogram<never>>("tellus_quiver_ts_buckets_returned") ??
+  new Histogram({
+    name: "tellus_quiver_ts_buckets_returned",
+    help: "Bucket count returned per series (capped at 1000)",
+    buckets: [10, 50, 100, 200, 500, 750, 1000],
+  });
+
+export const tsEventDetectionSeconds =
+  existing<Histogram<never>>("tellus_quiver_ts_event_detection_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_ts_event_detection_seconds",
+    help: "Event detection latency",
+    buckets: seconds,
+  });
+
+export const tsHydrationTimeoutsTotal =
+  existing<Counter<never>>("tellus_quiver_ts_hydration_timeouts_total") ??
+  new Counter({
+    name: "tellus_quiver_ts_hydration_timeouts_total",
+    help: "Cold-hydration timeouts (token TTL exceeded)",
+  });

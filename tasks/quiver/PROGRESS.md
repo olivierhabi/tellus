@@ -497,3 +497,35 @@ Next: Phase 4 begins with B7 (materialization tier selector + Polars/Spark adapt
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 — 44 files / 328 cases.
 - Upstream deps: T-06 (B5) DONE.
 - Next: B8 (Codex time-series backend) — Phase 4 continues.
+
+### Iteration 14 — B8 (Time-Series Backend / Codex) — 2026-05-05
+- 5-card backend (`TIME_SERIES_PLOT`, `TIME_SERIES_CHART`, `ROLLING_AGGREGATE`, `EVENT_SET`, `TIME_SERIES_FORMULA`) registered against B5's router.
+- Per-axis hydration: cache key extended with axis index → invalidating axis-1 leaves axis-2 untouched (B8 C-03 enforced by test).
+- Cold hydration: `hydrateRange` returns `{status:"pending", token, etaMs}`; route 202 + token; `GET /compute/timeseries/:token` polls; 60 s TTL → 410.
+- Display-time bucketing capped at 1000 buckets; 6 ops (avg/min/max/sum/last/first); LTTB-style defensive downsample above cap.
+- 4 new metrics: `tellus_quiver_ts_hydration_seconds{state}`, `..._buckets_returned`, `..._event_detection_seconds`, `..._hydration_timeouts_total`.
+- 25 unit + 6 integration + 1 cypress smoke = 32 new test cases.
+- B8 removed from PENDING_PREFIXES; B8 C-07 (load SLO) deferred via D-17.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 48 files / 353 cases.
+
+## T-14 (B8) — Time-Series Backend (Codex) — DONE 2026-05-05
+- Phase: Phase 4
+- Contracts covered: B8 C-01..C-06, C-08, C-09 (8 of 9; C-07 deferred per D-17)
+- Files changed: 7 new backend modules + 4 tests + 3 docs + 1 cypress smoke + 4 modified
+- Tests added: unit=25, integration=6, e2e (cypress)=1
+- Decisions logged: D-54..D-56
+- ADR filed: `docs/adr/2026-05-04-quiver-b8-timeseries-backend.md`
+- Runbook: `runbooks/tellus-quiver/b8.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 4`
+- SLOs measured: in-process unit-test scale (6 cases / 798 ms). Endpoint p95/p99 deferred to GATE-02.
+- Branch-forwarding verified: ✅ every `CodexPort.hydrateRange` records branch + remainingMs.
+- Deadline-propagation verified: ✅ `TsExecuteContext.remainingMs` plumbed via executor.
+- Idempotency verified: ✅ inherited from B5 cache-keying.
+- ETag concurrency verified: N/A (read-only cache).
+- Audit verified: ✅ via `tsHydrationTimeoutsTotal` counter + `tsHydrationSeconds{state}` histogram.
+- Branch coverage on new code: ≥ 85 %.
+- Metrics emitted: 4 metrics, all bounded-label per G-09.
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract ⏳ property ✅ chaos ⏳ load ⏳ e2e (cypress) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 48 files / 353 cases.
+- Upstream deps: T-06 (B5) DONE.
+- Next: F7 (time-series viewport) closes Phase 4 FE surface, then B9 opens Phase 5.

@@ -28,6 +28,12 @@ import {
   OssUnavailableError,
 } from "../../services/quiver/compute/oss/ossPort";
 import {
+  HydrationTokenExpiredError,
+  HydrationTokenUnknownError,
+  TsHydrationTimeoutError,
+} from "../../services/quiver/compute/ts/codexPort";
+import { getCurrentCodexPort } from "../../services/quiver/compute/context";
+import {
   computeSeconds,
   computeErrorsTotal,
   computeDeadlineExceededTotal,
@@ -172,6 +178,33 @@ function sendError(res: Response, e: unknown, cardType?: string): void {
     });
     return;
   }
+  if (e instanceof HydrationTokenExpiredError) {
+    res.status(410).json({
+      errorCode: "FAILED_PRECONDITION",
+      errorName: "Tellus:Quiver:HydrationTokenExpired",
+      errorInstanceId: cryptoRandom(),
+      parameters: { token: e.token },
+    });
+    return;
+  }
+  if (e instanceof HydrationTokenUnknownError) {
+    res.status(404).json({
+      errorCode: "NOT_FOUND",
+      errorName: "Tellus:Quiver:HydrationTokenUnknown",
+      errorInstanceId: cryptoRandom(),
+      parameters: { token: e.token },
+    });
+    return;
+  }
+  if (e instanceof TsHydrationTimeoutError) {
+    res.status(504).json({
+      errorCode: "DEADLINE_EXCEEDED",
+      errorName: "Tellus:Quiver:TsHydrationTimeout",
+      errorInstanceId: cryptoRandom(),
+      parameters: { token: e.token },
+    });
+    return;
+  }
   // Defensive (G-02): never leak internal exception messages.
   res.status(500).json({
     errorCode: "INTERNAL",
@@ -265,6 +298,29 @@ computeRouter.get("/compute/cache/stats", async (req: Request, res: Response) =>
     const ctx = getComputeContext();
     const ratio = await ctx.cache.hitRatio();
     res.status(200).json({ hitRatio: ratio });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// B8 — Cold-hydration polling endpoint (B8 C-05/C-09).
+// GET /quiver/api/v1/compute/timeseries/:hydrationToken
+// Returns 200 with { state: "ready", data } or { state: "pending" }.
+// Surfaces 404 HydrationTokenUnknown on garbage tokens, 410
+// HydrationTokenExpired on expired tokens (TTL 60 s).
+computeRouter.get("/compute/timeseries/:hydrationToken", async (req: Request, res: Response) => {
+  try {
+    const actor = actorFromReq(req);
+    const token = req.params.hydrationToken;
+    if (!token) {
+      throw invalidAnalysisRequest({ reason: "missing hydrationToken" });
+    }
+    const codex = getCurrentCodexPort();
+    const result = await codex.pollHydration(token, {
+      branch: actor.branch,
+      remainingMs: undefined,
+    });
+    res.status(200).json(result);
   } catch (e) {
     sendError(res, e);
   }
