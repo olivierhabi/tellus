@@ -685,3 +685,32 @@ All 20 tasks (B1..B10, F1..F10) **DONE**.
 | 5 — AIP & Publishing | T-16..T-20 (B9, B10, F9, F6, F10) | DONE |
 
 Next: gates GATE-01..GATE-04 → FINAL_REPORT.
+
+## Iteration FINAL — DONE 2026-05-05
+
+`bash scripts/quiver-verify.sh` exit 0 on three consecutive runs. Captured stdout tails (full logs at `logs/quiver-verify.20260505-082125.log`, `…082303.log`, `…082516.log`):
+
+```
+=== /tmp/verify-run-1.log tail ===
+ Test Files  58 passed (58)
+      Tests  407 passed (407)
+[coverage] OK — all in-flight contracts have test coverage
+[coverage] pending (deferred to upcoming tasks): 266 - 0 = 266 covered now
+[verify] PASS
+
+=== /tmp/verify-run-2.log tail ===
+ Test Files  58 passed (58)
+      Tests  407 passed (407)
+[coverage] OK — all in-flight contracts have test coverage
+[coverage] pending (deferred to upcoming tasks): 266 - 0 = 266 covered now
+[verify] PASS
+
+=== /tmp/verify-run-3.log tail ===
+ Test Files  58 passed (58)
+      Tests  407 passed (407)
+[coverage] OK — all in-flight contracts have test coverage
+[coverage] pending (deferred to upcoming tasks): 266 - 0 = 266 covered now
+[verify] PASS
+```
+
+20 of 20 tasks DONE (B1..B10 + F1..F10). FINAL_REPORT at `tasks/quiver/FINAL_REPORT.md`.

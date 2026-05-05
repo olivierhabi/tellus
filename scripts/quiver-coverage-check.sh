@@ -42,9 +42,7 @@ done < "$IDS_TMP"
 # Tasks for which implementation has not yet landed are listed here so the
 # gate is not falsely red while the drive is in-progress. Each entry must
 # correspond to a row in PROGRESS.md whose status is not yet DONE.
-PENDING_PREFIXES=(
-  "GATE"
-)
+PENDING_PREFIXES=()
 
 # Contracts deferred with a recorded D-entry. These remain fail-the-gate when
 # their implementing task is DONE. Each ID below has a D-entry covering it.
@@ -64,20 +62,25 @@ DEFERRED_IDS=(
   "F7 C-09"   # SLO load measurement — D-17 (load tests run at phase boundary)
   "B9 C-11"   # SLO load measurement — D-17 (load tests run at phase boundary)
   "B10 C-14"  # SLO load measurement — D-17 (load tests run at phase boundary)
+  "GATE-03"   # E2E Analysis Lifecycle Gate — D-2026-05-05 D-84 (FE-shell deliverable in tellus-fe)
 )
 
 is_pending() {
   local id="$1"
-  for p in "${PENDING_PREFIXES[@]}"; do
-    if [[ "$id" == "${p} "* || "$id" == "${p}-"* || "$id" == "${p}" ]]; then
-      return 0
-    fi
-  done
-  for d in "${DEFERRED_IDS[@]}"; do
-    if [[ "$id" == "$d" ]]; then
-      return 0
-    fi
-  done
+  if [[ ${#PENDING_PREFIXES[@]} -gt 0 ]]; then
+    for p in "${PENDING_PREFIXES[@]}"; do
+      if [[ "$id" == "${p} "* || "$id" == "${p}-"* || "$id" == "${p}" ]]; then
+        return 0
+      fi
+    done
+  fi
+  if [[ ${#DEFERRED_IDS[@]} -gt 0 ]]; then
+    for d in "${DEFERRED_IDS[@]}"; do
+      if [[ "$id" == "$d" ]]; then
+        return 0
+      fi
+    done
+  fi
   return 1
 }
 
