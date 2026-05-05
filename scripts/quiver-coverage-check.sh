@@ -43,7 +43,7 @@ done < "$IDS_TMP"
 # gate is not falsely red while the drive is in-progress. Each entry must
 # correspond to a row in PROGRESS.md whose status is not yet DONE.
 PENDING_PREFIXES=(
-  "B7"  "B8"  "B9"  "B10"
+  "B8"  "B9"  "B10"
   "F6"  "F7"  "F9"  "F10"
   "GATE"
 )
@@ -60,6 +60,8 @@ DEFERRED_IDS=(
   "B5 C-15"   # OTel trace event emission — D-2026-05-04 D-26 (deferred to OTel rollout phase)
   "B6 C-12"   # SLO load measurement — D-2026-05-04 D-17 (load tests run at phase boundary)
   "B3 C-15"   # SLO load measurement — D-2026-05-04 D-17 (load tests run at phase boundary)
+  "B7 C-09"   # SLO load measurement — D-17 (load tests run at phase boundary)
+  "B7 C-12"   # Polars sidecar UDS — D-50 (in-process MatAdapter substitutes; sidecar in production)
 )
 
 is_pending() {

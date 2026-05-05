@@ -463,3 +463,37 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Phase 3 status: **COMPLETE.**
 
 Next: Phase 4 begins with B7 (materialization tier selector + Polars/Spark adapters).
+
+### Iteration 13 — B7 (Materialization Backend) — 2026-05-05
+- Opens Phase 4 (Time-series & Materialization).
+- 5-card backend (`MATERIALIZATION`, `JOIN_MATERIALIZATION`, `EXPRESSION`, `PIVOT_TABLE`, `CATEGORICAL_CHART`) registered against B5's router.
+- Calcite-shaped plan model + canonicalisation + plan-equivalence golden between Polars/Spark tiers.
+- Tier selector: pure `selectTier({rows,cols,estMemoryBytes}, {cellThreshold, memoryBudgetBytes, force})`. Defaults 10 M cells, 2 GiB.
+- Iceberg snapshot pinning recorded in cache row `iceberg_snapshots` JSONB + GIN index (migration 068).
+- Inline-vs-blob result handling at 1 MiB threshold (synthetic Blobster URI for tests).
+- 4 new metrics: `tellus_quiver_mat_compute_seconds{tier,operation}`, `..._input_rows`, `..._tier_selection_total{tier,reason}`, `..._iceberg_snapshot_age_seconds`.
+- 22 unit + 7 integration + 1 cypress smoke = 30 new test cases.
+- B7 removed from PENDING_PREFIXES; B7 C-09 (load SLO) + C-12 (sidecar UDS) deferred via D-17 + D-50.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 44 files / 328 cases.
+
+## T-13 (B7) — Materialization & Transform Backend — DONE 2026-05-05
+- Phase: Phase 4 (opens Phase 4)
+- Contracts covered: B7 C-01..C-08, C-10, C-11 (10 of 12; C-09 + C-12 deferred per D-17 + D-50)
+- Files changed: 7 new backend modules + 4 tests + 2 docs + 1 cypress smoke + 3 modified
+- Tests added: unit=22, integration=7, e2e (cypress)=1, property=embedded (canonicalisation invariance)
+- Decisions logged: D-50 (in-process MatAdapter), D-51 (50K-row 500/envelope mapping deferred to B10), D-52 (synthetic Blobster URI), D-53 (resultTypeFor honours registry's ANY for EXPRESSION).
+- ADR filed: `docs/adr/2026-05-04-quiver-b7-materialization-backend.md`
+- Runbook: `runbooks/tellus-quiver/b7.md` (4 alerts + SOPs)
+- Feature flag: `TELLUS_QUIVER_PHASE >= 4`
+- SLOs measured: in-process unit-test scale; endpoint p95/p99 deferred to GATE-02.
+- Branch-forwarding verified: ✅ unit + integration both assert `branch` lands on every port call.
+- Deadline-propagation verified: ✅ inherited from B5's executor; `MatExecuteContext.remainingMs` plumbed.
+- Idempotency verified: ✅ inherited from B5's cache-key derivation.
+- ETag concurrency verified: N/A (read-only on cache rows).
+- Audit verified: ✅ tier-selection counter + iceberg snapshots recorded in cache row.
+- Branch coverage on new code: ≥ 85 %.
+- Metrics emitted: 4 metrics, all with bounded labels per G-09.
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract ⏳ property ✅ chaos ⏳ load ⏳ e2e ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 — 44 files / 328 cases.
+- Upstream deps: T-06 (B5) DONE.
+- Next: B8 (Codex time-series backend) — Phase 4 continues.

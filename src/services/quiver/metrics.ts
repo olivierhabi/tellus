@@ -333,3 +333,37 @@ export const otSubmitSeconds =
     labelNames: ["result"] as const,
     buckets: seconds,
   });
+
+// === B7 — Materialization (Polars/Spark/MMDP) Backend ======================
+export const matComputeSeconds =
+  existing<Histogram<"tier" | "operation">>("tellus_quiver_mat_compute_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_mat_compute_seconds",
+    help: "Materialization tier execute latency by (tier, operation)",
+    labelNames: ["tier", "operation"] as const,
+    buckets: seconds,
+  });
+
+export const matInputRows =
+  existing<Histogram<never>>("tellus_quiver_mat_input_rows") ??
+  new Histogram({
+    name: "tellus_quiver_mat_input_rows",
+    help: "Row counts observed by materialization backend (sampled)",
+    buckets: [10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000],
+  });
+
+export const matTierSelectionTotal =
+  existing<Counter<"tier" | "reason">>("tellus_quiver_mat_tier_selection_total") ??
+  new Counter({
+    name: "tellus_quiver_mat_tier_selection_total",
+    help: "Tier selection decisions by (tier, reason)",
+    labelNames: ["tier", "reason"] as const,
+  });
+
+export const matIcebergSnapshotAgeSeconds =
+  existing<Histogram<never>>("tellus_quiver_mat_iceberg_snapshot_age_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_mat_iceberg_snapshot_age_seconds",
+    help: "Drift between materialization read time and pinned Iceberg snapshot timestamp",
+    buckets: [1, 10, 60, 600, 3600, 86_400],
+  });

@@ -15,6 +15,10 @@ import { buildOssBackends } from "./oss/ossBackend";
 import { InProcessOssAdapter } from "./oss/inProcessOss";
 import { instrumentOssPort } from "./oss/instrumentedOss";
 import type { OssPort } from "./oss/ossPort";
+import { buildMatBackends, MAT_CARD_TYPES } from "./mat/matBackend";
+import { InProcessMatAdapter } from "./mat/inProcessMat";
+import { instrumentMatPort } from "./mat/instrumentedMat";
+import type { MatPort } from "./mat/matPort";
 import type { CardBackend } from "./types";
 import type { AnalysisDocument } from "../types";
 
@@ -26,6 +30,8 @@ const OSS_BOUND_CARD_TYPES = new Set([
   "PROPERTY_VALUE_SELECT",
   "ACTION_BUTTON",
 ]);
+
+const MAT_BOUND_CARD_TYPES = new Set<string>(MAT_CARD_TYPES);
 
 export interface ComputeContext {
   router: BackendRouter;
@@ -49,20 +55,23 @@ function defaultParameterDeps(_cardId: string, _doc: AnalysisDocument): string[]
 }
 
 let injectedOssPort: OssPort | undefined;
+let injectedMatPort: MatPort | undefined;
 
-function buildBackendsWithOss(rawPort: OssPort): CardBackend[] {
-  // Take stub backends, then replace OSS-bound ones with real OssBackend instances
-  // wrapped through the metrics-instrumentation proxy.
-  const ossPort = instrumentOssPort(rawPort);
-  const all = buildAllStubBackends().filter((b) => !OSS_BOUND_CARD_TYPES.has(b.cardType));
-  return [...all, ...buildOssBackends(ossPort)];
+function buildBackendsWithRealAdapters(rawOss: OssPort, rawMat: MatPort): CardBackend[] {
+  const ossPort = instrumentOssPort(rawOss);
+  const matPort = instrumentMatPort(rawMat);
+  const stubs = buildAllStubBackends().filter(
+    (b) => !OSS_BOUND_CARD_TYPES.has(b.cardType) && !MAT_BOUND_CARD_TYPES.has(b.cardType),
+  );
+  return [...stubs, ...buildOssBackends(ossPort), ...buildMatBackends(matPort)];
 }
 
 export function getComputeContext(): ComputeContext {
   if (cached) return cached;
   const router = new BackendRouter();
   const ossPort = injectedOssPort ?? new InProcessOssAdapter();
-  for (const b of buildBackendsWithOss(ossPort)) router.register(b);
+  const matPort = injectedMatPort ?? new InProcessMatAdapter();
+  for (const b of buildBackendsWithRealAdapters(ossPort, matPort)) router.register(b);
   const cache = new CacheRepository(pool);
   const executor = new ComputeExecutor({
     router,
@@ -79,6 +88,11 @@ export function setOssPortForTests(port: OssPort | undefined): void {
   cached = undefined;
 }
 
+export function setMatPortForTests(port: MatPort | undefined): void {
+  injectedMatPort = port;
+  cached = undefined;
+}
+
 /**
  * Test override — injects a custom backend list and/or resolver.
  * Returns a teardown closure that resets the cache to defaults.
@@ -88,11 +102,15 @@ export function setComputeContextForTests(opts: {
   ontologyVersionResolver?: (analysisRid: string, branch: string) => Promise<string>;
   parameterDependencies?: (cardId: string, doc: AnalysisDocument) => string[];
   ossPort?: OssPort;
+  matPort?: MatPort;
   now?: () => number;
 }): () => void {
   const router = new BackendRouter();
   const backends = opts.backends
-    ?? buildBackendsWithOss(opts.ossPort ?? new InProcessOssAdapter());
+    ?? buildBackendsWithRealAdapters(
+        opts.ossPort ?? new InProcessOssAdapter(),
+        opts.matPort ?? new InProcessMatAdapter(),
+      );
   for (const b of backends) router.register(b);
   const cache = new CacheRepository(pool);
   const executor = new ComputeExecutor({
