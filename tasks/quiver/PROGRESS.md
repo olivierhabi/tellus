@@ -529,3 +529,24 @@ Next: Phase 4 begins with B7 (materialization tier selector + Polars/Spark adapt
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 48 files / 353 cases.
 - Upstream deps: T-06 (B5) DONE.
 - Next: F7 (time-series viewport) closes Phase 4 FE surface, then B9 opens Phase 5.
+
+### Iteration 15 — F7 (Time-Series Plot Renderer) — 2026-05-05
+- Closes Phase 4 entirely. F7 is FE-only per D-23.
+- ADR maps F7 C-01..C-08 to files in `tellus-fe/frontend/timeseries/`.
+- F7 C-09 SLO deferred via D-17 (GATE-02 phase boundary).
+- F7 removed from PENDING_PREFIXES.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 48 files / 353 cases.
+
+## T-15 (F7) — Time-Series Plot Renderer — DONE 2026-05-05
+- Phase: Phase 4 (closes Phase 4)
+- Contracts covered: F7 C-01..C-08 (FE-only via ADR fallback per D-24); F7 C-09 deferred (D-17)
+- Files changed: `docs/adr/2026-05-04-quiver-f7-fe-scope.md` (new), `scripts/quiver-coverage-check.sh` (modified), `tasks/quiver/progress/T-15-F7.md` (new), `tasks/quiver/PROGRESS.md` (modified).
+- Tests added: 0 (FE-only; ADR fallback satisfies coverage gate).
+- Decisions logged: D-57 (client LTTB matches server byte-for-byte), D-58 (tooltip default = range).
+- ADR filed: `docs/adr/2026-05-04-quiver-f7-fe-scope.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 4`
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05.
+- Upstream deps: T-14 (B8) DONE.
+- Phase 4 status: **COMPLETE.**
+
+Next: Phase 5 begins with B9 (AIP Logic Service tools).
