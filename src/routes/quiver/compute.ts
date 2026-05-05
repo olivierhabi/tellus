@@ -206,6 +206,9 @@ function sendError(res: Response, e: unknown, cardType?: string): void {
     return;
   }
   // Defensive (G-02): never leak internal exception messages.
+  // Log internally for ops/debug; payload to client stays opaque.
+  // eslint-disable-next-line no-console
+  console.error("[quiver/compute] unexpected error:", e instanceof Error ? e.stack || e.message : e);
   res.status(500).json({
     errorCode: "INTERNAL",
     errorName: "Tellus:Quiver:Internal",
