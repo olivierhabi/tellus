@@ -400,3 +400,53 @@ export const tsHydrationTimeoutsTotal =
     name: "tellus_quiver_ts_hydration_timeouts_total",
     help: "Cold-hydration timeouts (token TTL exceeded)",
   });
+
+// === B9 — AIP Integration ===================================================
+export const aipFirstTokenSeconds =
+  existing<Histogram<"surface">>("tellus_quiver_aip_first_token_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_aip_first_token_seconds",
+    help: "AIP first-token latency by surface (generate|configure|assist)",
+    labelNames: ["surface"] as const,
+    buckets: seconds,
+  });
+
+export const aipToolInvocationTotal =
+  existing<Counter<"tool">>("tellus_quiver_aip_tool_invocation_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_tool_invocation_total",
+    help: "AIP tool invocations by tool name",
+    labelNames: ["tool"] as const,
+  });
+
+export const aipToolUnauthorizedTotal =
+  existing<Counter<"tool">>("tellus_quiver_aip_tool_unauthorized_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_tool_unauthorized_total",
+    help: "Denied tool invocations (filtered out of manifest or refused at boundary)",
+    labelNames: ["tool"] as const,
+  });
+
+export const aipTokensUsedTotal =
+  existing<Counter<"surface" | "model">>("tellus_quiver_aip_tokens_used_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_tokens_used_total",
+    help: "Total tokens consumed by surface + model",
+    labelNames: ["surface", "model"] as const,
+  });
+
+export const aipCostUsdMicrosTotal =
+  existing<Counter<"surface" | "model">>("tellus_quiver_aip_cost_usd_micros_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_cost_usd_micros_total",
+    help: "Total cost in USD micros by surface + model",
+    labelNames: ["surface", "model"] as const,
+  });
+
+export const aipPropertyHintSampleSize =
+  existing<Histogram<never>>("tellus_quiver_aip_property_hint_sample_size") ??
+  new Histogram({
+    name: "tellus_quiver_aip_property_hint_sample_size",
+    help: "Property-value hint sample size (capped per B9 C-08)",
+    buckets: [10, 50, 100, 500, 1000],
+  });

@@ -9,6 +9,7 @@ import { versionsRouter } from "./versions";
 import { computeRouter } from "./compute";
 import { registryRouter } from "./registry";
 import { instructionsRouter } from "./instructions";
+import { aipRouter } from "./aip";
 import { assertRegistryIntegrity } from "../../services/quiver/dag";
 
 export interface QuiverPhaseFlags {
@@ -35,6 +36,9 @@ export function buildQuiverRouter(flags: QuiverPhaseFlags = readPhaseFlags()): R
   }
   if (flags.phase >= 3) {
     r.use(instructionsRouter);
+  }
+  if (flags.phase >= 5) {
+    r.use(aipRouter);
   }
   return r;
 }
