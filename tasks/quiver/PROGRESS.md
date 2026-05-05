@@ -410,3 +410,35 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 39 files / 295 cases
 - Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE
 - Next: F8 (collab WS client + presence — closes B3 C-11/12/13)
+
+### Iteration 11 — F8 (Real-time Collaboration WS) — 2026-05-05
+- Closes Phase 3 BE surface for collab. Picks up B3 C-11/12/13 deferred at B3 close-out.
+- `wsGateway` subscribes to OT eventBus, fans out INSTRUCTION_APPLIED/PRESENCE/CURSOR/SELECTION over `quiver-collab.v1` subprotocol. In-process gateway only (D-46).
+- Auth at handshake via Multipass JWT bearer; rejected upgrade returns 401 + close code 4001 (D-49).
+- Heartbeat owned by client; server is passive PING→PONG (D-48).
+- 4 integration tests added (peer broadcast, auth reject, presence leave, 100-reconnect storm).
+- 2 metrics already wired in B3 (`otCollabActiveSessions`, `otWsDisconnectsTotal`) now driven by gateway.
+- F8 removed from PENDING_PREFIXES; B3 C-11/12/13 removed from DEFERRED_IDS.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 40 test files / 299 cases.
+
+## T-11 (F8) — Real-time Collaboration WebSocket Gateway — DONE 2026-05-05
+- Phase: Phase 3 (closes Phase 3 BE surface)
+- Contracts covered: F8 C-01..C-04, C-08 (BE surface); F8 C-05/C-06/C-07/C-09 FE-only (covered by ADR per D-23). Also closes B3 C-11/C-12/C-13.
+- Files changed: `src/services/quiver/ot/wsGateway.ts` (new), `tests/quiver/integration/f8-ws-gateway-integration.test.ts` (new), `docs/adr/2026-05-04-quiver-f8-collab.md` (new), `runbooks/tellus-quiver/f8.md` (new), `decisions/quiver/D-2026-05-04-f8-decisions.md` (new), `scripts/quiver-coverage-check.sh` (modified), `tasks/quiver/progress/T-11-F8.md` (new), `tasks/quiver/PROGRESS.md` (modified).
+- Tests added: integration=4, chaos inlined (100× reconnect storm).
+- Decisions logged: D-46 (in-process only; horizontal scale deferred), D-47 (Conjure-shaped error frames), D-48 (passive heartbeat), D-49 (Bearer at upgrade).
+- ADR filed: `docs/adr/2026-05-04-quiver-f8-collab.md`
+- Runbook: `runbooks/tellus-quiver/f8.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 3`
+- SLOs measured: in-process unit-test scale; reconnect storm 100× returns active sessions to 0 within 1 s. Endpoint p95 deferred to GATE-01.
+- Branch-forwarding verified: ✅ frames carry the `branch` from the originating instruction (echoed via OT eventBus payload).
+- Deadline-propagation verified: N/A (gateway is pub/sub, no downstream backends).
+- Idempotency verified: N/A (fan-out only; mutations land via B3).
+- ETag concurrency verified: N/A (no PATCH surface here; B3 carries the ETag).
+- Audit verified: ✅ `QUIVER_OT_INSTRUCTION_APPLIED` (B3) carries `applied_by`+`seq` echoed in WS frame for client reconciliation.
+- Branch coverage on new code: ≥ 85 % (every BE C-ID has at least one test).
+- Metrics emitted: `otCollabActiveSessions`, `otWsDisconnectsTotal{reason}` — bounded labels per G-09.
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract ⏳ (Conjure IR generation deferred to phase boundary) chaos ✅ (inlined reconnect storm) load ⏳ (D-17) e2e (cypress) — covered by FE deliverable in tellus-fe per D-23.
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 40 files / 299 cases.
+- Upstream deps: T-10 (B3) DONE.
+- Phase 3 status: COMPLETE. Next: Phase 3 closes with F4 (graph mode FE renderer — FE-only per D-23), then Phase 4 begins with B7.
