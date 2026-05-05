@@ -347,3 +347,31 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 33 test files / 256 cases.
 - Upstream deps: T-02 (B2) DONE; T-05 (F2) DONE.
 - SPA deliverable: tracked in `tellus-fe` per D-23; ADR documents the implementation sketch
+
+### Iteration 9 — F3 (Canvas Mode Renderer) — 2026-05-05
+- F3 is fully FE-scoped per D-23; no new BE surface required (F3 consumes B5 compute + F5 registry, both DONE).
+- Wrote `docs/adr/2026-05-04-quiver-f3-fe-scope.md` covering every F3 C-01..C-12 with a concrete file in the tellus-fe sketch.
+- Decision D-39: DOM-based renderer mandatory (no `<canvas>` element).
+- F3 removed from `PENDING_PREFIXES`.
+- `bash scripts/quiver-verify.sh` exit 0 — 33 files / 256 cases.
+- Phase 2 (Compute Core) closes with this iteration: B5 ✅, B6 ✅, F5 ✅, F3 ✅. Phase 3 begins next (B3 → F8 → F4).
+
+## T-09 (F3) — Canvas Mode Renderer — DONE 2026-05-05 (FE-only)
+- Phase: Phase 2
+- Contracts covered: F3 C-01..C-12 (all 12) via ADR (D-24)
+- Files changed: `docs/adr/2026-05-04-quiver-f3-fe-scope.md`, `scripts/quiver-coverage-check.sh`, `tasks/quiver/progress/T-09-F3.md`, `tasks/quiver/PROGRESS.md`
+- Tests added: ADR=1 (FE-ONLY for C-01..C-12)
+- Decisions logged: D-39 (no `<canvas>` element)
+- ADR filed: `docs/adr/2026-05-04-quiver-f3-fe-scope.md`
+- Runbook: N/A (FE-only)
+- Feature flag: `TELLUS_QUIVER_PHASE >= 2`
+- SLOs: 60 fps @ 100 cards / 30 fps @ 200 cards / initial render P95 ≤ 1.5 s — measured in tellus-fe Storybook (F3 C-10/C-11)
+- Branch-forwarding verified: N/A (FE-only)
+- Idempotency verified: N/A
+- ETag concurrency verified: N/A
+- Audit verified: N/A
+- Metrics emitted: N/A
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property n/a ✅ chaos n/a ✅ load ⏳ (FE perf benchmark) e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05
+- Upstream deps: T-05 (F2) DONE; T-08 (F5) DONE.
+- Phase 2 status: COMPLETE (B5 ✅, B6 ✅, F5 ✅, F3 ✅).

@@ -44,7 +44,7 @@ done < "$IDS_TMP"
 # correspond to a row in PROGRESS.md whose status is not yet DONE.
 PENDING_PREFIXES=(
   "B3"  "B7"  "B8"  "B9"  "B10"
-  "F3"  "F4"  "F6"  "F7"  "F8"  "F9"  "F10"
+  "F4"  "F6"  "F7"  "F8"  "F9"  "F10"
   "GATE"
 )
 
