@@ -113,6 +113,10 @@ export const llmToolUnauthorized = E("PERMISSION_DENIED", "LlmToolUnauthorized")
 export const llmTimeout = E("DEADLINE_EXCEEDED", "LlmTimeout");
 export const dashboardNotFound = E("NOT_FOUND", "DashboardNotFound");
 export const visualFunctionNotFound = E("NOT_FOUND", "VisualFunctionNotFound");
+export const exposedCanvasNotFound = E("INVALID_ARGUMENT", "ExposedCanvasNotFound");
+export const exposedParameterNotFound = E("INVALID_ARGUMENT", "ExposedParameterNotFound");
+export const visualFunctionRootNotFound = E("INVALID_ARGUMENT", "VisualFunctionRootNotFound");
+export const compassRegistrationFailed = E("INTERNAL", "CompassRegistrationFailed");
 
 // === Catch-all for unmapped failures =========================================
 export const internal = E("INTERNAL", "Internal");

@@ -450,3 +450,44 @@ export const aipPropertyHintSampleSize =
     help: "Property-value hint sample size (capped per B9 C-08)",
     buckets: [10, 50, 100, 500, 1000],
   });
+
+// === B10 - Publishing (Dashboards, Visual Functions, Templates) ===========
+export const dashboardPublishTotal =
+  existing<Counter<"result">>("tellus_quiver_dashboard_publish_total") ??
+  new Counter({
+    name: "tellus_quiver_dashboard_publish_total",
+    help: "Dashboard publish attempts by result (ok|conflict|compass_failed)",
+    labelNames: ["result"] as const,
+  });
+
+export const visualFunctionPublishTotal =
+  existing<Counter<"result">>("tellus_quiver_visual_function_publish_total") ??
+  new Counter({
+    name: "tellus_quiver_visual_function_publish_total",
+    help: "Visual Function publish attempts by result (ok|conflict|compass_failed)",
+    labelNames: ["result"] as const,
+  });
+
+export const dashboardEmbedTotal =
+  existing<Counter<"surface">>("tellus_quiver_dashboard_embed_total") ??
+  new Counter({
+    name: "tellus_quiver_dashboard_embed_total",
+    help: "Dashboard embed registrations by surface (OBJECT_VIEW|WORKSHOP)",
+    labelNames: ["surface"] as const,
+  });
+
+export const visualFunctionInlineTotal =
+  existing<Counter<never>>("tellus_quiver_visual_function_inline_total") ??
+  new Counter({
+    name: "tellus_quiver_visual_function_inline_total",
+    help: "Visual Function consumer inlines (count of executions resolved)",
+  });
+
+export const publishingDurationSeconds =
+  existing<Histogram<"surface">>("tellus_quiver_publishing_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_publishing_seconds",
+    help: "Publishing latency by surface (dashboard|visual_function)",
+    labelNames: ["surface"] as const,
+    buckets: seconds,
+  });

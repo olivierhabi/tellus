@@ -43,7 +43,6 @@ done < "$IDS_TMP"
 # gate is not falsely red while the drive is in-progress. Each entry must
 # correspond to a row in PROGRESS.md whose status is not yet DONE.
 PENDING_PREFIXES=(
-  "B10"
   "F6"  "F9"  "F10"
   "GATE"
 )
@@ -65,6 +64,7 @@ DEFERRED_IDS=(
   "B8 C-07"   # SLO load measurement — D-17 (load tests run at phase boundary)
   "F7 C-09"   # SLO load measurement — D-17 (load tests run at phase boundary)
   "B9 C-11"   # SLO load measurement — D-17 (load tests run at phase boundary)
+  "B10 C-14"  # SLO load measurement — D-17 (load tests run at phase boundary)
 )
 
 is_pending() {

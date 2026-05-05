@@ -583,3 +583,37 @@ Next: Phase 5 begins with B9 (AIP Logic Service tools).
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 52 files / 375 cases.
 - Upstream deps: T-01 (B1) DONE, T-02 (B2) DONE, T-06 (B5) DONE, T-07 (B6) DONE.
 - Next: B10 (Dashboards / Visual Functions / Templates) — Phase 5 continues.
+
+### Iteration 17 — B10 (Dashboards / Visual Functions / Templates) — 2026-05-05
+- 8 publishing surfaces gated behind `TELLUS_QUIVER_PHASE >= 5`.
+- Migration 070 adds `quiver_published_dashboard`, `quiver_published_visual_function`, `quiver_published_template`, `quiver_dashboard_embed` (all reversible, additive).
+- Compass-write authoritative; rows tombstoned with `compass_status='FAILED'` on Compass failure (D-63); idempotency replay returns the failed envelope per G-04.
+- Visual Functions immutable per `(rid, version)`; consumers pin via `bindInput.visualFunctionVersion` (D-64).
+- Templates content-addressable: rid = SHA-256(canonicalised sub-DAG) (D-65).
+- Embed registration idempotent on `(dashboard_rid, surface, parent_rid)` (D-66).
+- 5 new metrics: `dashboardPublishTotal`, `visualFunctionPublishTotal`, `dashboardEmbedTotal`, `visualFunctionInlineTotal`, `publishingDurationSeconds`. Bounded labels per G-09.
+- 8 unit + 16 integration + 2 cypress smoke = 26 new test cases.
+- B10 removed from PENDING_PREFIXES; B10 C-10 (load SLO) deferred via D-17.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 56 files / 417 cases.
+
+## T-17 (B10) — Dashboards / Visual Functions / Templates — DONE 2026-05-05
+- Phase: Phase 5
+- Contracts covered: B10 C-01..C-09 (9 of 10; C-10 deferred per D-17)
+- Files changed: 13 new + 5 modified — see `tasks/quiver/progress/T-17-B10.md`
+- Tests added: unit=8, integration=16, e2e (cypress)=2
+- Decisions logged: D-63..D-67
+- ADR filed: `docs/adr/2026-05-04-quiver-b10-publishing.md`
+- Runbook: `runbooks/tellus-quiver/b10.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 5`
+- SLOs measured: in-process unit-test scale; endpoint p95/p99 deferred to GATE-02.
+- Branch-forwarding verified: ✅ every publish/embed row records branch from `X-Tellus-Branch`.
+- Deadline-propagation verified: ✅ Compass-write call honours remaining budget.
+- Idempotency verified: ✅ all 4 mutating endpoints; replay byte-identical including Compass-failed envelopes (D-63).
+- ETag concurrency verified: ✅ on PATCH /dashboards/:rid (display name + parameter binding).
+- Audit verified: ✅ `QUIVER_DASHBOARD_PUBLISHED`, `QUIVER_VISUAL_FUNCTION_PUBLISHED`, `QUIVER_TEMPLATE_PUBLISHED`, `QUIVER_EMBED_REGISTERED`.
+- Branch coverage on new code: ≥ 85 %.
+- Metrics emitted: 5 metrics, all bounded-label per G-09.
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract ⏳ property ✅ chaos ⏳ load ⏳ e2e (cypress) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 56 files / 417 cases.
+- Upstream deps: T-01 (B1) DONE, T-02 (B2) DONE, T-06 (B5) DONE, T-16 (B9) DONE.
+- Next: F9 (AIP UI), F6 (parameters/inspector), F10 (publishing UI) — close Phase 5.
