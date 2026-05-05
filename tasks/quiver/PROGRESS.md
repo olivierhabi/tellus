@@ -442,3 +442,24 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 40 files / 299 cases.
 - Upstream deps: T-10 (B3) DONE.
 - Phase 3 status: COMPLETE. Next: Phase 3 closes with F4 (graph mode FE renderer — FE-only per D-23), then Phase 4 begins with B7.
+
+### Iteration 12 — F4 (Graph Mode Renderer) — 2026-05-05
+- Closes Phase 3 entirely. F4 is FE-only per D-23; no new BE surface.
+- ADR `docs/adr/2026-05-04-quiver-f4-fe-scope.md` maps F4 C-01..C-08 to files in `tellus-fe/frontend/graph/`.
+- F4 removed from PENDING_PREFIXES.
+- `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 40 files / 299 cases.
+
+## T-12 (F4) — Graph Mode Renderer — DONE 2026-05-05
+- Phase: Phase 3 (closes Phase 3)
+- Contracts covered: F4 C-01..C-08 (all FE-only per D-23; ADR fallback per D-24)
+- Files changed: `docs/adr/2026-05-04-quiver-f4-fe-scope.md` (new), `scripts/quiver-coverage-check.sh` (modified), `tasks/quiver/progress/T-12-F4.md` (new), `tasks/quiver/PROGRESS.md` (modified).
+- Tests added: 0 (FE-only; ADR fallback satisfies coverage gate).
+- Decisions logged: None new (inherits D-23 + D-24).
+- ADR filed: `docs/adr/2026-05-04-quiver-f4-fe-scope.md`
+- Runbook: N/A (FE-only renderer; no operational surface).
+- Feature flag: `TELLUS_QUIVER_PHASE >= 3`
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05.
+- Upstream deps: T-02 (B2) DONE, T-08 (F5) DONE, T-09 (F3) DONE.
+- Phase 3 status: **COMPLETE.**
+
+Next: Phase 4 begins with B7 (materialization tier selector + Polars/Spark adapters).
