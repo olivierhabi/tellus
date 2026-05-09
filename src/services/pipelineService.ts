@@ -34,6 +34,32 @@ export class PipelineService {
       throw new AppError('Project not found', 404, 'NOT_FOUND');
     }
 
+    // Defense in depth: refuse a `folderId` whose folder lives in a
+    // different project. The frontend already guards this, but a
+    // direct API caller (script, curl, third-party) could still
+    // submit a foreign-project folder and corrupt the cross-project
+    // graph if we trusted the input.
+    if (input.folderId) {
+      const folder = await this.knex('folders')
+        .where({ id: input.folderId })
+        .select('id', 'project_id')
+        .first();
+      if (!folder) {
+        throw new AppError(
+          'Destination folder not found',
+          404,
+          'FOLDER_NOT_FOUND',
+        );
+      }
+      if (folder.project_id !== projectId) {
+        throw new AppError(
+          'Destination folder belongs to a different project',
+          409,
+          'CROSS_PROJECT_FOLDER',
+        );
+      }
+    }
+
     // Check for duplicate name within the project
     const existing = await this.knex('pipelines')
       .where({ project_id: projectId, name: input.name })
