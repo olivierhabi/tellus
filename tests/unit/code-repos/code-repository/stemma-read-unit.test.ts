@@ -263,12 +263,23 @@ describe("InMemoryStemma.listTree", () => {
     expect(r.kind).toBe("branch-not-found");
   });
 
-  it("auto-seeds a tree on createRepository and lists root depth=1", async () => {
+  it("lists files seeded via seedBranch at root depth=1", async () => {
+    // Post-DEFAULT_SCAFFOLD removal: createRepository creates an EMPTY
+    // bare repo. The test seeds files explicitly via seedBranch, which
+    // is the unit-test analogue of what stemma.commitFiles does in the
+    // saga's step 3.
     const s = new InMemoryStemma();
     await s.createRepository({
       proposedRid: RID,
       defaultBranchName: "main",
       principalSub: "alice",
+    });
+    s.seedBranch(RID, "main", {
+      headCommitSha: "0000000000000000000000000000000000000001",
+      files: [
+        { path: "README.md", content: "# demo" },
+        { path: "src/index.ts", content: "export {}" },
+      ],
     });
     const r = await s.listTree({
       repositoryRid: RID,
@@ -384,6 +395,10 @@ describe("InMemoryStemma.readBlob", () => {
       defaultBranchName: "main",
       principalSub: "alice",
     });
+    s.seedBranch(RID, "main", {
+      headCommitSha: "0000000000000000000000000000000000000003",
+      files: [{ path: "README.md", content: "# tellus repository\n" }],
+    });
     const r = await s.readBlob({
       repositoryRid: RID,
       branch: "main",
@@ -404,6 +419,10 @@ describe("InMemoryStemma.readBlob", () => {
       proposedRid: RID,
       defaultBranchName: "main",
       principalSub: "alice",
+    });
+    s.seedBranch(RID, "main", {
+      headCommitSha: "0000000000000000000000000000000000000004",
+      files: [{ path: "src/index.ts", content: "export {}" }],
     });
     const r = await s.readBlob({
       repositoryRid: RID,

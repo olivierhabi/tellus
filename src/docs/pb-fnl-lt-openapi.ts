@@ -7,7 +7,6 @@
 // to the subsystem they care about:
 //
 //   * Observability           — /health/ready, /api/v1/pipelines/metrics
-//   * Lineage                 — /api/v2/datasets/:id/lineage
 //   * Pipeline Outputs        — output-format migration, Iceberg snapshots
 //   * Pipeline Streaming      — Flink restart / streaming-stats
 //   * Pipeline ACL            — role-based access control on pipelines
@@ -138,79 +137,6 @@ const observabilityPaths: OpenApiPaths = {
             },
           },
         },
-      },
-    },
-  },
-};
-
-// ---------------------------------------------------------------------------
-// PB-B8 — Dataset lineage.
-// ---------------------------------------------------------------------------
-const lineagePaths: OpenApiPaths = {
-  "/v2/datasets/{datasetId}/lineage": {
-    get: {
-      tags: ["Lineage"],
-      summary: "Dataset lineage graph (PB-B8)",
-      description:
-        "Walks the `dataset_lineage` graph starting at `datasetId`. " +
-        "`direction=upstream|downstream` picks traversal mode; `depth` is " +
-        "capped at 10 (default 3). Cycle detection is enforced at insert " +
-        "time, so the walk never loops.",
-      parameters: [
-        pathParam("datasetId", "uuid"),
-        queryParam(
-          "direction",
-          {
-            type: "string",
-            enum: ["upstream", "downstream"],
-            default: "downstream",
-          },
-          "Traversal direction. `downstream` = who depends on this dataset; " +
-            "`upstream` = what this dataset depends on.",
-        ),
-        queryParam(
-          "depth",
-          { type: "integer", minimum: 1, maximum: 10, default: 3 },
-          "Walk depth; values >10 are rejected with VALIDATION_ERROR.",
-        ),
-      ],
-      responses: {
-        "200": jsonResponse(
-          "Graph shape `{nodes, edges}`.",
-          envelope({
-            type: "object",
-            properties: {
-              nodes: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    id: { type: "string", format: "uuid" },
-                    name: { type: "string" },
-                    format: { type: "string" },
-                    project_id: { type: "string", format: "uuid" },
-                  },
-                },
-              },
-              edges: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    downstream_dataset_id: { type: "string", format: "uuid" },
-                    upstream_dataset_id: { type: "string", format: "uuid" },
-                    edge_type: {
-                      type: "string",
-                      enum: ["pipeline_output", "funnel_input", "virtual_table"],
-                    },
-                  },
-                },
-              },
-            },
-          }),
-        ),
-        "400": jsonResponse("`depth` out of bounds (VALIDATION_ERROR)."),
-        "404": jsonResponse("Dataset id unknown."),
       },
     },
   },
@@ -806,7 +732,6 @@ const linkMigrationPaths: OpenApiPaths = {
 // ---------------------------------------------------------------------------
 export const pbFnlLtPaths: OpenApiPaths = {
   ...observabilityPaths,
-  ...lineagePaths,
   ...pipelineOutputPaths,
   ...streamingPaths,
   ...pipelineAclPaths,
@@ -824,12 +749,6 @@ export const pbFnlLtTags: Array<{ name: string; description: string }> = [
     description:
       "Readiness probes, Prometheus metrics, and burn-rate indicators " +
       "(PB-B9).",
-  },
-  {
-    name: "Lineage",
-    description:
-      "Dataset → object-type lineage graph, cycle-detected on insert " +
-      "(PB-B8).",
   },
   {
     name: "Pipeline Outputs",

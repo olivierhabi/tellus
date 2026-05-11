@@ -110,12 +110,7 @@ import { startReplacementScheduler, stopReplacementScheduler } from "./services/
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
 import foundryProjectsRouter from "./routes/projects";
-import filesystemV2Router from "./routes/filesystemV2";
-import filesystemSearchV2Router from "./routes/filesystemSearchV2";
-import resourceGraphV2Router from "./routes/resourceGraphV2";
-import branchesV2Router from "./routes/branchesV2";
-import omsV2Router from "./routes/omsV2";
-import compassChildrenV2Router from "./routes/compassChildrenV2";
+import compassChildrenRouter from "./routes/compassChildren";
 import foundryFoldersRouter from "./routes/folders";
 import foundryUploadsRouter from "./routes/uploads";
 import foundryProjectUploadsRouter from "./routes/projectUploads";
@@ -575,11 +570,6 @@ app.use(
 app.use("/api/v1/datasets", datasetRouter);
 app.use("/api/v1/datasets", dataPreviewRouter);
 
-// PB-B8: v2 lineage surface (new semantics → v2 prefix per the
-// project's framing note).
-import lineageRouter from "./routes/lineage";
-app.use("/api/v2", lineageRouter);
-
 // Code Repositories (B2) — admin router mounted on the main server so
 // the FE can reach the saga + ledger + branches via the existing auth chain.
 //
@@ -603,6 +593,10 @@ void (async () => {
     const r = await rehydrateInMemoryStemma({
       pool,
       stemma: codeRepoMount.adapters.stemma,
+      // Wave 22: scaffold-on-rehydrate so existing repos come back with the
+      // v2 file tree, not as empty branches. Without this the file viewer
+      // renders blank for every repo created before the current process boot.
+      template: codeRepoMount.adapters.template,
       logger: (event, meta) =>
         console.log(JSON.stringify({ event, ...(meta ?? {}) })),
     });
@@ -783,23 +777,13 @@ app.use("/api/v1/projects/:projectId/members", foundryMembersRouter);
 app.use("/api/v1/projects/:projectId/pipelines", foundryPipelinesRouter);
 
 // ---------------------------------------------------------------------------
-// Files & Projects B3 — Filesystem v2 Public API (Conjure-compatible).
-// Spec:      tasks/files-projects/files-projects-tasks.md §B3.
-// Contracts: tasks/files-projects/contracts.md (B3-C-01..71).
+// Compass Children Gateway — single fan-out endpoint that powers the
+// project / folder workspace pages. Replaces the per-service list calls
+// the FE used to make against /v1/projects/:id/{folders,datasets,...}.
+//
+//   GET /api/v1/compass/folders/:folderRid/children
 // ---------------------------------------------------------------------------
-app.use("/api/v2/filesystem", filesystemSearchV2Router);
-app.use("/api/v2/filesystem", filesystemV2Router);
-// B6.07 — resource graph + project references endpoints
-app.use("/api/v2/graph", resourceGraphV2Router);
-app.use("/api/v2/compass", branchesV2Router);
-// Unified Compass Gateway: GET /api/v1/compass/folders/:folderRid/children
-// — single fan-out endpoint replacing the 5 per-service /v1 list calls
-// the project workspace used to make. Promoted to the v1 namespace
-// because the project workspace consumes it as a stable production
-// surface (the v2 prefix above remains for branches/proposals which are
-// still beta).
-app.use("/api/v1/compass", compassChildrenV2Router);
-app.use("/api/v2/oms", omsV2Router);
+app.use("/api/v1/compass", compassChildrenRouter);
 
 // ---------------------------------------------------------------------------
 // API Specification & Documentation

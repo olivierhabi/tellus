@@ -60,11 +60,12 @@ describe("B2 — error catalog completeness", () => {
     expect(CODE_REPOS_ERROR_STATUS["CodeRepos:Internal"]?.status).toBe(500);
   });
 
-  it("CODE_REPOS_ERROR_NAMES enumerates exactly 16 names", () => {
+  it("CODE_REPOS_ERROR_NAMES enumerates exactly 19 names", () => {
     // 6 spec-mandated (B2-C-30..35) + 4 cross-cutting (G-C-08/09/13)
     // + 6 read-path (B2-C-10/11: InvalidPath, InvalidDepth, BranchNotFound,
     // FileNotFound, InvalidPathType, RateLimited)
-    expect(CODE_REPOS_ERROR_NAMES.length).toBe(16);
+    // + 3 commit-path (F4 deferral: StaleRefHead, EmptyChangeSet, CommitFailed)
+    expect(CODE_REPOS_ERROR_NAMES.length).toBe(19);
   });
 
   it("every error name matches the §1.6 ERROR_NAME_REGEX", () => {

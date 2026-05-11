@@ -83,12 +83,6 @@ const RULES: ScopeRule[] = [
 
   // --- Administrative --------------------------------------------
   { prefix: '/api/v1/auth/admin/applications', scope: 'api:write' },
-
-  // --- Files & Projects B3 — Filesystem v2 Public API -------------
-  // Read endpoints (GET) require api:read; mutations require api:write.
-  // Contracts: tasks/files-projects/contracts.md (B3-X-02).
-  { method: 'GET', prefix: '/api/v2/filesystem', scope: 'api:read' },
-  { prefix: '/api/v2/filesystem', scope: 'api:write' },
 ];
 
 /**

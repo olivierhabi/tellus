@@ -29,6 +29,30 @@ export interface TemplateManifest {
   readonly deprecated: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// TS_FUNCTIONS_2_4_0 — Foundry-faithful v2 TypeScript Functions scaffold.
+//
+// Identity invariant: the language subproject lives at `typescript-functions/`
+// (this directory name is the v2 discriminator; v1 used `functions-typescript/`
+// and the function-discovery walker keys off this prefix). The outer
+// scaffold is the generic Gradle multi-project wrapper that all Foundry
+// repos share even when the language subproject is pure Node.
+//
+// The ≈22-file Foundry scaffold ships three binary artifacts that this
+// manifest deliberately omits for the in-process catalog:
+//   - `gradle/wrapper/gradle-wrapper.jar` (binary)
+//   - `gradlew`, `gradlew.bat` (executable mode)
+// They are bundled into the production template-repo (B3 reads from a
+// system Stemma repo per the v2 spec) but the in-memory catalog stays
+// pure-text so its file list is human-reviewable in source.
+//
+// File-discovery contract for B8 Functions Registry (per the v2 spec the
+// scaffold targets):
+//   - `typescript-functions/src/functions/<name>.ts`
+//   - `export default` (default export = "publish")
+//   - File path == function ID; the AST walker reads filenames, not
+//     metadata.
+// ---------------------------------------------------------------------------
 const TS_FUNCTIONS_2_4_0: TemplateManifest = {
   templateId: "typescript-functions",
   version: "2.4.0",
@@ -46,86 +70,131 @@ const TS_FUNCTIONS_2_4_0: TemplateManifest = {
   ],
   deprecated: false,
   files: [
+    // -----------------------------------------------------------------------
+    // Root-level files (Gradle wrapper, CI, repo-level metadata).
+    // -----------------------------------------------------------------------
     {
-      path: "package.json",
+      path: "templateConfig.json",
       mode: "100644",
       isBinary: false,
       content: `{
-  "name": "{{packageName}}",
-  "version": "0.1.0",
-  "private": true,
-  "main": "dist/index.js",
-  "scripts": {
-    "build": "tsc",
-    "test": "vitest run"
-  },
-  "dependencies": {
-    "@osdk/client": "^2.0.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
-  }
+  "parentTemplateId": "typescript-functions",
+  "parentTemplateVersion": "2.4.0"
 }
 `,
     },
-    {
-      path: "tsconfig.json",
-      mode: "100644",
-      isBinary: false,
-      content: `{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "outDir": "dist",
-    "declaration": true
-  },
-  "include": ["src/**/*"]
-}
-`,
-    },
-    {
-      path: "src/index.ts",
-      mode: "100644",
-      isBinary: false,
-      content: `import { Function } from "@osdk/client";
-
-/**
- * Example function. Replace with your own.
- *
- * @Function decorators are detected by Jemma at build time and become
- * callable functions on the platform.
- */
-export class Example {
-  @Function()
-  static hello(name: string): string {
-    return \`Hello, \${name}\`;
-  }
-}
-`,
-    },
+    // README.md intentionally omitted — Tellus surfaces template intent
+    // through the Code Repositories landing + per-template manifest pages,
+    // not a per-repo markdown file. Foundry repos don't ship a generic
+    // README either; metadata lives in templateConfig.json.
     {
       path: ".gitignore",
       mode: "100644",
       isBinary: false,
-      content: "node_modules/\ndist/\n.osdk-generated/\n*.log\n",
+      content: `# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Foundry-internal codegen output (regenerated from resources.json)
+**/.osdk-generated/
+
+# Gradle
+.gradle/
+build/
+
+# Logs / scratch
+*.log
+.DS_Store
+`,
     },
     {
-      path: "README.md",
+      path: ".gitattributes",
       mode: "100644",
       isBinary: false,
-      content: "# {{packageName}}\n\nGenerated from typescript-functions@2.4.0.\n",
+      content: `* text=auto eol=lf
+*.jar binary
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+`,
     },
     {
-      path: "osdk.config.json",
+      path: "ci.yml",
       mode: "100644",
       isBinary: false,
-      content: `{
-  "outputDir": ".osdk-generated",
-  "imports": []
+      content: `# Stemma/Jemma CI pipeline for typescript-functions@2.4.0.
+# Stages run in order; later stages depend on the artifacts of earlier
+# ones via the Gradle build cache.
+version: 1
+stages:
+  - id: install
+    command: ./gradlew :typescript-functions:npmInstall
+  - id: type-check
+    command: ./gradlew :typescript-functions:typeCheck
+    needs: [install]
+  - id: lint
+    command: ./gradlew :typescript-functions:lint
+    needs: [install]
+  - id: build
+    command: ./gradlew :typescript-functions:build
+    needs: [type-check, lint]
+  - id: test
+    command: ./gradlew :typescript-functions:test
+    needs: [build]
+  - id: publish
+    command: ./gradlew :typescript-functions:publishFunctions
+    needs: [test]
+    only:
+      tags: 'v*'
+`,
+    },
+    {
+      path: "build.gradle",
+      mode: "100644",
+      isBinary: false,
+      content: `// Root multi-project build. All language work happens in subprojects.
+allprojects {
+    group = '{{packageName}}'
+    version = project.findProperty('repoVersion') ?: '0.0.0'
 }
+`,
+    },
+    {
+      path: "settings.gradle",
+      mode: "100644",
+      isBinary: false,
+      content: `rootProject.name = '{{packageName}}'
+include ':typescript-functions'
+`,
+    },
+    {
+      path: "gradle.properties",
+      mode: "100644",
+      isBinary: false,
+      content: `# Foundry template metadata — read by the upgrade system.
+templateId=typescript-functions
+templateVersion=2.4.0
+
+# Toolchain pins (mirror the Foundry v2 runtime).
+nodeVersion=20.11.1
+typescriptVersion=5.4.0
+
+# Build flags.
+org.gradle.parallel=true
+org.gradle.caching=true
+`,
+    },
+    {
+      path: "gradle/wrapper/gradle-wrapper.properties",
+      mode: "100644",
+      isBinary: false,
+      content: `distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\\://services.gradle.org/distributions/gradle-8.6-bin.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
 `,
     },
     {
@@ -141,9 +210,160 @@ export class Example {
       "requiredApprovers": 1,
       "requiredStatusChecks": ["jemma:build", "jemma:test"]
     }
-  ]
+  ],
+  "tagNameValidation": {
+    "regex": "^v?(0|[1-9]\\\\d*)\\\\.(0|[1-9]\\\\d*)\\\\.(0|[1-9]\\\\d*)(-[0-9A-Za-z.-]+)?$",
+    "description": "Semver 2.0.0 (with optional leading v)."
+  }
 }
 `,
+    },
+    // -----------------------------------------------------------------------
+    // typescript-functions/ subproject (the V2 discriminator).
+    // -----------------------------------------------------------------------
+    {
+      path: "typescript-functions/build.gradle",
+      mode: "100644",
+      isBinary: false,
+      content: `// TypeScript Functions subproject.
+// Wraps npm/tsc/vitest as Gradle tasks so Jemma's CI driver can invoke
+// them uniformly across language subprojects.
+
+task npmInstall(type: Exec) {
+    commandLine 'npm', 'ci'
+}
+
+task typeCheck(type: Exec) {
+    dependsOn npmInstall
+    commandLine 'npx', 'tsc', '--noEmit'
+}
+
+task lint(type: Exec) {
+    dependsOn npmInstall
+    commandLine 'npx', 'eslint', 'src', '--max-warnings', '0'
+    ignoreExitValue = false
+}
+
+task build(type: Exec) {
+    dependsOn typeCheck
+    commandLine 'npx', 'tsc'
+}
+
+task test(type: Exec) {
+    dependsOn build
+    commandLine 'npx', 'vitest', 'run'
+}
+
+task publishFunctions(type: Exec) {
+    dependsOn test
+    commandLine 'npx', '@osdk/functions', 'publish'
+}
+
+defaultTasks 'build'
+`,
+    },
+    {
+      path: "typescript-functions/package.json",
+      mode: "100644",
+      isBinary: false,
+      content: `{
+  "name": "{{packageName}}",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "eslint src --max-warnings 0"
+  },
+  "dependencies": {
+    "@osdk/client": "^2.0.0",
+    "@osdk/functions": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0",
+    "eslint": "^8.57.0"
+  }
+}
+`,
+    },
+    {
+      path: "typescript-functions/tsconfig.json",
+      mode: "100644",
+      isBinary: false,
+      content: `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "outDir": "dist",
+    "declaration": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*"]
+}
+`,
+    },
+    {
+      path: "typescript-functions/functions.json",
+      mode: "100644",
+      isBinary: false,
+      content: `{
+  "enableExternalSystems": false,
+  "enableModelFunctions": false,
+  "enableOntologyEditFunctions": true,
+  "enableQueryFunctions": true
+}
+`,
+    },
+    {
+      path: "typescript-functions/resources.json",
+      mode: "100644",
+      isBinary: false,
+      content: `{
+  "imports": []
+}
+`,
+    },
+    {
+      path: "typescript-functions/.npmrc",
+      mode: "100644",
+      isBinary: false,
+      content: `# Resolve @osdk/* from the Foundry-internal artifactory mirror.
+# Replace with your registry URL in non-Foundry environments.
+@osdk:registry=https://artifactory.foundry.local/artifactory/api/npm/npm-virtual/
+registry=https://registry.npmjs.org/
+save-exact=true
+`,
+    },
+    {
+      path: "typescript-functions/src/functions/helloWorld.ts",
+      mode: "100644",
+      isBinary: false,
+      content: `// One function per file. The basename of this file (\`helloWorld\`) is
+// the function's identity in the Functions Registry; renaming the file
+// renames the function. The \`export default\` is what makes Jemma's
+// AST walker pick this up at build time.
+
+export default function helloWorld(name: string): string {
+  return \`Hello, \${name}\`;
+}
+`,
+    },
+    {
+      path: "typescript-functions/test/.gitkeep",
+      mode: "100644",
+      isBinary: false,
+      content: "",
     },
   ],
 };

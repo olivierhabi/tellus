@@ -2,7 +2,7 @@ import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { AppError } from '../utils/foundryAppError';
 import { convertValue } from '../utils/typeConverter';
-import { getObjectStream } from './storageService';
+import { getObjectStream, toDuckDbReadUri } from './storageService';
 import {
   chainHashFromNodeConfig,
   fingerprintSchema,
@@ -1298,9 +1298,19 @@ export class TransformService {
         const { executeTransformChain } = await import(
           './pipelines/duckdbTransformEngine'
         );
+        // `dataset.file_path` is the bare S3 object key produced by
+        // `buildObjectKey()` (e.g. `projects/<id>/folders/<id>/file.csv`).
+        // DuckDB cannot read that directly — without an `s3://<bucket>/`
+        // prefix it falls through to the local filesystem and fails with
+        // `IO Error: No files found that match the pattern ...`.
+        // `toDuckDbReadUri` prepends the configured bucket so the engine's
+        // httpfs path can resolve the object via the same MinIO/S3
+        // endpoint that the legacy `getObjectStream()` reader uses. The
+        // engine itself also asserts the URI is qualified (defense in depth).
+        const inputUri = toDuckDbReadUri(dataset.file_path);
         const out = await executeTransformChain(
           existingTransforms as Parameters<typeof executeTransformChain>[0],
-          { inputPath: dataset.file_path, limit: 10_000 },
+          { inputPath: inputUri, limit: 10_000 },
         );
         return {
           columns: out.columns,
@@ -1310,11 +1320,35 @@ export class TransformService {
           engine: 'duckdb' as const,
         };
       } catch (err) {
-        // If the native binding is missing OR compilation rejects the
-        // chain (cross-join, malformed config), surface the typed error
-        // to the caller rather than silently degrading. The controller
-        // turns AppError into a 4xx response; anything else bubbles as 500.
+        // Already-typed errors (compile rejection, cross-join, native
+        // binding missing, our boundary validation) flow through as-is.
         if (err instanceof AppError) throw err;
+        // Map DuckDB IO failures to a typed 404 so clients can
+        // distinguish "the dataset's underlying file is gone" from a
+        // genuine 500. The DuckDB binding surfaces these as plain
+        // `Error` with messages like:
+        //   `IO Error: No files found that match the pattern "..."`
+        //   `HTTP Error: HTTP GET error on '...' (HTTP 403)`
+        //   `HTTP Error: HTTP GET error on '...' (HTTP 404)`
+        // We sanitise the message so the SQL line marker DuckDB appends
+        // does not leak into the API contract.
+        const message = err instanceof Error ? err.message : String(err);
+        if (
+          /^IO Error: No files found that match the pattern/i.test(message) ||
+          /HTTP\s+(?:404|403)/i.test(message) ||
+          /HTTPException.*(?:NoSuchKey|AccessDenied)/i.test(message)
+        ) {
+          throw new AppError(
+            `Dataset file is not readable from object storage. ` +
+              `It may have been deleted, moved, or the storage credentials ` +
+              `may have changed. Re-upload the source file or contact an ` +
+              `administrator.`,
+            404,
+            'DATASET_FILE_NOT_FOUND',
+          );
+        }
+        // Anything else bubbles as 500 — let the global error handler
+        // log it with the request id for follow-up.
         throw err;
       }
     }

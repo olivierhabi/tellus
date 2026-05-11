@@ -270,12 +270,23 @@ async function runStep3(
   if (!current.stemmaRepositoryRid) {
     throw new Error("invariant: STEMMA_CREATED but stemma_repository_rid is null");
   }
+  // Derive a package name from the display name. The B3 manifest's
+  // `packageName` parameter regex requires a hyphen-delimited token starting
+  // with a lowercase letter (`^[a-z][a-z0-9-]{0,63}$`). The frontend wizard
+  // does not collect this separately, so we slugify the user-visible
+  // displayName here. Manifests whose parameters provide a `default` survive
+  // the empty-string fall-through inside the template adapter; manifests
+  // whose `packageName` is required (typescript-functions, python-functions)
+  // get a deterministic value derived from displayName.
+  const parameters: Record<string, string> = {
+    packageName: deriveDefaultPackageName(current.displayName),
+  };
   const outcome = await deps.template.scaffoldAndPush({
     templateId: current.templateId,
     templateVersion: current.templateVersion,
     repositoryRid: current.stemmaRepositoryRid,
     principalSub: current.principalSub,
-    parameters: {},
+    parameters,
     targetBranch: current.defaultBranch,
   });
 
@@ -485,6 +496,39 @@ function resultFromLedgerRow(
       >),
     replayed,
   };
+}
+
+/**
+ * Slugify a user-visible display name into a package-name-safe token.
+ *
+ * Output contract (matches the typescript-functions / python-functions
+ * `packageName` parameter regex `^[a-z][a-z0-9-]{0,63}$`):
+ *   - lowercase
+ *   - leading char is a-z
+ *   - body is a-z, 0-9, hyphen
+ *   - 1..64 chars long
+ *   - never empty (falls back to "repo")
+ *
+ * This is deterministic by displayName so re-running the saga on the same
+ * input produces the same scaffold (G-C-22 idempotency contract).
+ */
+export function deriveDefaultPackageName(displayName: string): string {
+  let s = displayName
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  // Manifest regex requires the leading char to be alphabetic. If the input
+  // produced a leading digit (or empty after stripping), prepend "repo-" and
+  // re-trim to 64 chars; if still empty, use a stable fallback.
+  if (!/^[a-z]/.test(s)) {
+    s = ("repo-" + s).replace(/-+$/g, "").slice(0, 64);
+  }
+  if (s === "" || !/^[a-z]/.test(s)) {
+    s = "repo";
+  }
+  return s;
 }
 
 async function withTx<T>(

@@ -832,6 +832,210 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
   });
 
   // -------------------------------------------------------------------------
+  // POST /:rid/branches/:branch/commits     (B2-C-12, F4 spec line 953-957)
+  //
+  // Compose a single commit on `branch` from a list of file changes. The
+  // canonical source of HEAD is the StemmaAdapter; the branch_cache table
+  // is updated as a secondary effect so reads stay cheap.
+  //
+  // Contract:
+  //   Headers
+  //     Idempotency-Key   UUID v4 (G-C-20). Replays return the original
+  //                       response with X-Idempotent-Replay: true.
+  //     If-Match          The parent commit SHA (40 hex). Wrap in `"..."`
+  //                       per RFC 7232; weak `W/"..."` is also accepted.
+  //                       Mismatch with current HEAD → 412 StaleRefHead
+  //                       with both expected and current SHAs in
+  //                       parameters so the IDE can offer the F4 rebase
+  //                       prompt without an extra GET.
+  //   Body { message, fileChanges: [{ path, op, contentBase64?, mode? }] }
+  //     op ∈ "add" | "modify" | "delete". add/modify require
+  //     contentBase64. delete forbids it. mode ∈ "100644" | "100755",
+  //     defaults to "100644".
+  //
+  // Outcomes:
+  //   201 + { commitSha, parentSha, fileCount, totalBytes, … } + ETag
+  //   400 EmptyChangeSet                — fileChanges is empty
+  //   400 InvalidSettings               — body shape / encoding errors
+  //   404 RepositoryNotFound            — rid unknown or TRASHED (IDOR-as-404)
+  //   404 BranchNotFound                — branch not on this repo
+  //   412 RepositoryArchived            — repo is ARCHIVED
+  //   412 StaleRefHead                  — If-Match ≠ current HEAD
+  //   502 CommitFailed                  — adapter transient failure
+  //
+  // Side effects (one Postgres tx):
+  //   * UPSERT code_repository_branch_cache (head_sha, last_commit_at,
+  //     last_commit_author, updated_at)
+  //   * INSERT code_repos_audit_events row with action="commit",
+  //     beforeHash=parentSha, afterHash=commitSha (the chain captures the
+  //     commit-DAG advance for after-the-fact reconstruction).
+  // -------------------------------------------------------------------------
+  router.post(
+    "/:rid/branches/:branch/commits",
+    auth,
+    idempotencyMiddleware({ pool }),
+    async (req, res, next) => {
+      try {
+        const principal = req.codeReposPrincipal;
+        if (!principal) {
+          return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+        }
+
+        const rid = req.params.rid;
+        const branch = req.params.branch;
+        if (!isRid(rid)) {
+          return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+        }
+        if (!isLegalBranchName(branch)) {
+          return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+        }
+
+        const ifMatch = req.header("If-Match");
+        if (!ifMatch) {
+          return sendError(res, codeReposError("CodeRepos:InvalidSettings", { field: "If-Match" }));
+        }
+        const parentSha = parseShaIfMatch(ifMatch);
+        if (parentSha === null) {
+          return sendError(
+            res,
+            codeReposError("CodeRepos:InvalidSettings", {
+              field: "If-Match",
+              reason: 'must be a 40-char hex SHA wrapped in "..." (or W/"...")',
+            }),
+          );
+        }
+
+        const validation = validateCommitBody(req.body);
+        if (validation.kind === "invalid") {
+          return sendError(res, codeReposError(validation.errorName, validation.parameters));
+        }
+
+        const repoRow = await pool.query<{ state: string }>(
+          `SELECT state FROM code_repository
+            WHERE rid = $1 AND state IN ('ACTIVE','ARCHIVED')`,
+          [rid],
+        );
+        if (repoRow.rowCount === 0) {
+          return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+        }
+        if (repoRow.rows[0].state === "ARCHIVED") {
+          return sendError(res, codeReposError("CodeRepos:RepositoryArchived", { rid }));
+        }
+
+        const principalSub = isUuidV4(principal.userId)
+          ? principal.userId
+          : derivePrincipalSubUuid(principal.userId);
+
+        const outcome = await deps.stemma.commitFiles({
+          repositoryRid: rid,
+          branch,
+          files: validation.files,
+          deletePaths: validation.deletePaths,
+          parentSha,
+          message: validation.message,
+          principalSub,
+        });
+
+        if (outcome.kind === "branch-not-found") {
+          return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+        }
+        if (outcome.kind === "stale-ref") {
+          return sendError(
+            res,
+            codeReposError("CodeRepos:StaleRefHead", {
+              rid,
+              branch,
+              expectedSha: outcome.expectedSha,
+              currentHead: outcome.currentHead,
+            }),
+          );
+        }
+        if (outcome.kind === "transient") {
+          return sendError(
+            res,
+            codeReposError("CodeRepos:CommitFailed", {
+              rid,
+              branch,
+              reason: outcome.reason,
+            }),
+          );
+        }
+
+        const committedAt = new Date();
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `INSERT INTO code_repository_branch_cache
+                (repository_rid, branch_name, head_sha,
+                 last_commit_at, last_commit_author, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $4)
+              ON CONFLICT (repository_rid, branch_name) DO UPDATE
+                 SET head_sha = EXCLUDED.head_sha,
+                     last_commit_at = EXCLUDED.last_commit_at,
+                     last_commit_author = EXCLUDED.last_commit_author,
+                     updated_at = EXCLUDED.updated_at`,
+            [rid, branch, outcome.commitSha, committedAt, principalSub],
+          );
+          await insertCodeReposAuditEvent(client, {
+            category: "code_repository",
+            action: "commit",
+            principalUserId: principal.userId,
+            principalSource: principal.source === "test" ? "system" : principal.source,
+            requestId: req.header("X-Request-Id") ?? outcome.commitSha,
+            targetType: "Branch",
+            targetRid: `${rid}@${branch}`,
+            parameters: {
+              commitSha: outcome.commitSha,
+              parentSha,
+              fileCount: outcome.fileCount,
+              totalBytes: outcome.totalBytes,
+              message: validation.message,
+              addedOrModified: validation.files.length,
+              deleted: validation.deletePaths.length,
+            },
+            // before_hash/after_hash on the audit chain are sha256 (64 hex)
+            // by DDL contract — they are NOT the git SHAs (40 hex). The
+            // commit-DAG advance is captured in `parameters` instead. We
+            // pass null/null here to mirror the readFile audit pattern.
+            beforeHash: null,
+            afterHash: null,
+            sourceIp: principal.sourceIp,
+            userAgent: principal.userAgent,
+          });
+          await client.query("COMMIT");
+        } catch (e) {
+          try {
+            await client.query("ROLLBACK");
+          } catch {
+            /* swallow */
+          }
+          throw e;
+        } finally {
+          client.release();
+        }
+
+        // Strong ETag = the new HEAD SHA. Clients pass this back as
+        // If-Match on the next commit so the chain stays linear.
+        res.setHeader("ETag", `"${outcome.commitSha}"`);
+        res.status(201).json({
+          repositoryRid: rid,
+          branch,
+          commitSha: outcome.commitSha,
+          parentSha,
+          fileCount: outcome.fileCount,
+          totalBytes: outcome.totalBytes,
+          addedOrModified: validation.files.length,
+          deleted: validation.deletePaths.length,
+          committedAt: committedAt.toISOString(),
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // -------------------------------------------------------------------------
   // GET /:rid/settings
   // -------------------------------------------------------------------------
   router.get("/:rid/settings", auth, async (req, res, next) => {
@@ -1004,6 +1208,257 @@ interface ValidatedCreateBody {
   templateId: string;
   templateVersion: string;
   defaultBranch: string;
+}
+
+// ---------------------------------------------------------------------------
+// Commit-route helpers (B2-C-12).
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse an `If-Match` header value as a 40-char SHA-1. Accepts strong
+ * (`"abcdef..."`) or weak (`W/"abcdef..."`) form per RFC 7232. Anything
+ * else (digits, integer ETags from PATCH /:rid, malformed quotes, wrong
+ * length) returns `null`.
+ *
+ * Kept separate from `parseEtag` (which parses the integer-shaped
+ * resource-version ETag used by the metadata routes) because conflating
+ * the two would let a client sneak a `W/"7"` past the commit-route fence
+ * and into the adapter, where `7 !== <40-char head>` would 412 — but
+ * with a less-helpful "not a SHA" reason. Failing fast at the route is
+ * clearer and cheaper.
+ */
+function parseShaIfMatch(s: string): string | null {
+  const m = s.match(/^(?:W\/)?"([0-9a-f]{40})"$/i);
+  if (!m) return null;
+  return m[1].toLowerCase();
+}
+
+/** Per F4 spec: max 1 MiB total commit payload to keep tx latency bounded. */
+const COMMIT_MAX_TOTAL_BYTES = 1 * 1024 * 1024;
+/** Cap commit size by file count so a pathological client can't OOM us. */
+const COMMIT_MAX_FILE_CHANGES = 500;
+/** Cap commit message length (longer messages signal abuse, not user intent). */
+const COMMIT_MAX_MESSAGE_BYTES = 4 * 1024;
+
+interface ValidatedCommitBody {
+  message: string;
+  /** Upserts (add + modify), translated to StemmaCommitFile shape. */
+  files: ReadonlyArray<{
+    path: string;
+    content: Uint8Array;
+    mode: "100644" | "100755";
+  }>;
+  deletePaths: ReadonlyArray<string>;
+}
+
+/**
+ * Validate the POST /commits body. Returns either a normalized payload
+ * ready to hand to the adapter, or a structured error envelope reason.
+ *
+ * Tight validation here means the adapter never sees malformed paths,
+ * negative-length contents, or duplicate fileChange entries — failure
+ * modes downstream get strictly easier to reason about.
+ */
+function validateCommitBody(
+  body: unknown,
+):
+  | { kind: "ok" } & ValidatedCommitBody
+  | {
+      kind: "invalid";
+      errorName:
+        | "CodeRepos:InvalidSettings"
+        | "CodeRepos:EmptyChangeSet"
+        | "CodeRepos:InvalidPath";
+      parameters: Record<string, unknown>;
+    } {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return {
+      kind: "invalid",
+      errorName: "CodeRepos:InvalidSettings",
+      parameters: { reason: "body must be a JSON object" },
+    };
+  }
+  const b = body as Record<string, unknown>;
+
+  const message = typeof b.message === "string" ? b.message : "";
+  if (message.length === 0) {
+    return {
+      kind: "invalid",
+      errorName: "CodeRepos:InvalidSettings",
+      parameters: { field: "message", reason: "required" },
+    };
+  }
+  if (Buffer.byteLength(message, "utf8") > COMMIT_MAX_MESSAGE_BYTES) {
+    return {
+      kind: "invalid",
+      errorName: "CodeRepos:InvalidSettings",
+      parameters: { field: "message", reason: "too long", maxBytes: COMMIT_MAX_MESSAGE_BYTES },
+    };
+  }
+
+  const fileChanges = b.fileChanges;
+  if (!Array.isArray(fileChanges)) {
+    return {
+      kind: "invalid",
+      errorName: "CodeRepos:InvalidSettings",
+      parameters: { field: "fileChanges", reason: "must be an array" },
+    };
+  }
+  if (fileChanges.length === 0) {
+    return {
+      kind: "invalid",
+      errorName: "CodeRepos:EmptyChangeSet",
+      parameters: { reason: "fileChanges is empty" },
+    };
+  }
+  if (fileChanges.length > COMMIT_MAX_FILE_CHANGES) {
+    return {
+      kind: "invalid",
+      errorName: "CodeRepos:InvalidSettings",
+      parameters: { field: "fileChanges", reason: "too many", max: COMMIT_MAX_FILE_CHANGES },
+    };
+  }
+
+  const seenPaths = new Set<string>();
+  const upserts: Array<{ path: string; content: Uint8Array; mode: "100644" | "100755" }> = [];
+  const deletes: string[] = [];
+  let totalBytes = 0;
+
+  for (let i = 0; i < fileChanges.length; i++) {
+    const c = fileChanges[i];
+    if (typeof c !== "object" || c === null || Array.isArray(c)) {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidSettings",
+        parameters: { field: `fileChanges[${i}]`, reason: "must be an object" },
+      };
+    }
+    const cc = c as Record<string, unknown>;
+    const path = typeof cc.path === "string" ? cc.path : "";
+    const op = typeof cc.op === "string" ? cc.op : "";
+
+    const pathV = validateRelativePath(path);
+    if (!pathV.ok) {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidPath",
+        parameters: { index: i, path, reason: pathV.reason },
+      };
+    }
+    const normalizedPath = pathV.value.normalized;
+    if (normalizedPath === "") {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidPath",
+        parameters: { index: i, reason: "empty after normalization" },
+      };
+    }
+    if (seenPaths.has(normalizedPath)) {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidSettings",
+        parameters: {
+          field: `fileChanges[${i}].path`,
+          reason: "duplicate path in same commit",
+          path: normalizedPath,
+        },
+      };
+    }
+    seenPaths.add(normalizedPath);
+
+    if (op !== "add" && op !== "modify" && op !== "delete") {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidSettings",
+        parameters: {
+          field: `fileChanges[${i}].op`,
+          reason: 'must be "add" | "modify" | "delete"',
+          got: op,
+        },
+      };
+    }
+
+    if (op === "delete") {
+      if (cc.contentBase64 !== undefined) {
+        return {
+          kind: "invalid",
+          errorName: "CodeRepos:InvalidSettings",
+          parameters: {
+            field: `fileChanges[${i}].contentBase64`,
+            reason: "must be omitted when op=delete",
+          },
+        };
+      }
+      deletes.push(normalizedPath);
+      continue;
+    }
+
+    // op === "add" | "modify" — contentBase64 required.
+    if (typeof cc.contentBase64 !== "string") {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidSettings",
+        parameters: {
+          field: `fileChanges[${i}].contentBase64`,
+          reason: "required for add/modify",
+        },
+      };
+    }
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(cc.contentBase64, "base64");
+      // Buffer.from with mode "base64" silently drops invalid chars; round-trip
+      // and compare lengths to detect malformed input. (`Buffer.from(x, 'base64')
+      // .toString('base64')` re-canonicalizes; we check decoded length instead
+      // to catch over-padded inputs.)
+      const reencoded = buf.toString("base64").replace(/=+$/, "");
+      const supplied = cc.contentBase64.replace(/=+$/, "").replace(/\s+/g, "");
+      if (reencoded !== supplied) {
+        return {
+          kind: "invalid",
+          errorName: "CodeRepos:InvalidSettings",
+          parameters: {
+            field: `fileChanges[${i}].contentBase64`,
+            reason: "not valid base64",
+          },
+        };
+      }
+    } catch {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidSettings",
+        parameters: {
+          field: `fileChanges[${i}].contentBase64`,
+          reason: "not valid base64",
+        },
+      };
+    }
+    const mode = cc.mode === "100755" ? "100755" : "100644";
+    totalBytes += buf.byteLength;
+    if (totalBytes > COMMIT_MAX_TOTAL_BYTES) {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidSettings",
+        parameters: {
+          field: "fileChanges",
+          reason: "total payload exceeds limit",
+          maxBytes: COMMIT_MAX_TOTAL_BYTES,
+        },
+      };
+    }
+    upserts.push({
+      path: normalizedPath,
+      content: new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+      mode,
+    });
+  }
+
+  return {
+    kind: "ok",
+    message,
+    files: upserts,
+    deletePaths: deletes,
+  };
 }
 
 function validateCreateBody(

@@ -106,6 +106,37 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 429,
     errorCode: ERROR_CODES.RESOURCE_EXHAUSTED,
   },
+  // -------------------------------------------------------------------------
+  // F4 commit-route error names (B2-C-12 commit endpoint).
+  //
+  // StaleRefHead — the client's `If-Match: <parentSha>` does not equal the
+  // branch's current HEAD (per F4 spec line 957: "parentSha must equal
+  // current HEAD"). 412 mirrors the rest of the optimistic-concurrency
+  // family. The errorName is distinguishable so the IDE can route to F4's
+  // "rebase prompt" UX rather than the generic settings-mismatch flow.
+  //
+  // EmptyChangeSet — POST /commits with `fileChanges: []`. 400 because the
+  // request is shape-valid but semantically meaningless; we refuse rather
+  // than silently fast-forward an empty commit (which would just rotate
+  // the SHA without changing tree state — confusing for both users and
+  // downstream branch-cache consumers).
+  //
+  // CommitFailed — Stemma adapter returned `transient`. 502 because the
+  // failure is upstream of the route; bucketing it apart from 500 lets
+  // dashboards distinguish adapter-induced failures from in-process bugs.
+  // -------------------------------------------------------------------------
+  "CodeRepos:StaleRefHead": {
+    status: 412,
+    errorCode: ERROR_CODES.FAILED_PRECONDITION,
+  },
+  "CodeRepos:EmptyChangeSet": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  "CodeRepos:CommitFailed": {
+    status: 502,
+    errorCode: ERROR_CODES.INTERNAL,
+  },
 });
 
 export type CodeReposErrorName = keyof typeof CODE_REPOS_ERROR_STATUS;
@@ -155,6 +186,7 @@ export function isCodeReposErrorName(s: string): s is CodeReposErrorName {
  *   - 4 cross-cutting (G-C-08/09/13)
  *   - 6 read-path B2-C-10/11 (InvalidPath, InvalidDepth, BranchNotFound,
  *     FileNotFound, InvalidPathType, RateLimited)
+ *   - 3 commit-route B2-C-12 (StaleRefHead, EmptyChangeSet, CommitFailed)
  * Useful for `it.each(...)` test patterns.
  */
 export const CODE_REPOS_ERROR_NAMES: readonly CodeReposErrorName[] =

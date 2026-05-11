@@ -86,10 +86,21 @@ describe("B3 Templates — GET /templates/:id/versions/:v", () => {
     expect(r.body.templateId).toBe("typescript-functions");
     expect(r.body.version).toBe("2.4.0");
     expect(Array.isArray(r.body.files)).toBe(true);
-    expect(r.body.files.length).toBe(7);
+    // v2 typescript-functions@2.4.0 scaffold: 17 non-binary files. The
+    // ≈22-file Foundry shape additionally ships `gradle-wrapper.jar` and
+    // the two `gradlew*` shell scripts (binary by mode-bit) which are
+    // omitted from the in-process catalog per manifest.ts comment.
+    // README.md was also dropped (Wave 22, 2026-05-10) — user-facing
+    // repos don't ship a stub README.
+    expect(r.body.files.length).toBe(17);
     const paths = r.body.files.map((f: { path: string }) => f.path);
-    expect(paths).toContain("package.json");
-    expect(paths).toContain("src/index.ts");
+    // v2 puts language sources under the `typescript-functions/` subproject
+    // (the V2 discriminator) rather than at root.
+    expect(paths).toContain("typescript-functions/package.json");
+    expect(paths).toContain("typescript-functions/src/functions/helloWorld.ts");
+    expect(paths).toContain("templateConfig.json");
+    expect(paths).not.toContain("package.json");
+    expect(paths).not.toContain("src/index.ts");
   });
 
   it("404 Templates:NotFound on unknown templateId", async () => {
@@ -116,7 +127,8 @@ describe("B3 Templates — POST /scaffold (B3 acceptance §1)", () => {
     const r1 = await authed(app).post("/scaffold").set("Idempotency-Key", "00000000-0000-4000-8000-000000000001").send(body);
     expect(r1.status).toBe(201);
     expect(r1.body.commitSha).toMatch(/^[0-9a-f]{40}$/);
-    expect(r1.body.fileCount).toBe(7);
+    // v2 scaffold file count — see comment on the manifest assertion above.
+    expect(r1.body.fileCount).toBe(17);
     const r2 = await authed(app).post("/scaffold").set("Idempotency-Key", "00000000-0000-4000-8000-000000000002").send(body);
     expect(r2.status).toBe(201);
     expect(r2.body.commitSha).toBe(r1.body.commitSha);
