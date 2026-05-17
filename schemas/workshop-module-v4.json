@@ -43,6 +43,16 @@
       "type": "array",
       "items": { "$ref": "#/$defs/section" }
     },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Module-level page header. Rendered as the strip at the top of the canvas; configured via the editor's HeaderInspector. Distinct from `layout.header` (the header-widget slot pointer) and `sections[*].header` (section-strip titles).",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "icon": { "type": ["string", "null"], "maxLength": 100 },
+        "color": { "type": ["string", "null"], "maxLength": 100 }
+      }
+    },
     "layout": {
       "type": "object",
       "additionalProperties": false,

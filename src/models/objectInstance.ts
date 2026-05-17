@@ -109,15 +109,23 @@ export async function bulkUpsertInstances(
     if (ownClient) await pg.query("BEGIN");
     for (let i = 0; i < rows.length; i += BULK_UPSERT_CHUNK_SIZE) {
       const chunk = rows.slice(i, i + BULK_UPSERT_CHUNK_SIZE);
+      // PG unnest($x::text[][]) FLATTENS a 2D array into rows of text — it
+      // does NOT yield text[] per row, which broke the prior implementation
+      // (Postgres error: "column 'markings' is of type text[] but expression
+      // is of type text"). We pass `markings` as a JSONB array per row and
+      // decode it back into text[] inside the SELECT. This preserves the
+      // single-round-trip bulk-insert path used by the Merge activity while
+      // sidestepping unnest's array-flattening semantics.
       await pg.query(
         `INSERT INTO object_instances
            (ontology_id, branch_id, object_type_api_name, primary_key, properties, markings,
             source_datasource_id, source_transaction_id, last_modified_at, version)
          SELECT
-           ontology_id, branch_id, object_type_api_name, primary_key, properties::jsonb, markings,
+           ontology_id, branch_id, object_type_api_name, primary_key, properties::jsonb,
+           COALESCE(ARRAY(SELECT jsonb_array_elements_text(markings)), '{}'::text[]),
            source_datasource_id, source_transaction_id, now(), 1
          FROM unnest(
-           $1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[][],
+           $1::uuid[], $2::text[], $3::text[], $4::text[], $5::jsonb[],
            $6::uuid[], $7::uuid[], $8::uuid[]
          ) AS t(
            ontology_id, object_type_api_name, primary_key, properties, markings,
@@ -136,7 +144,7 @@ export async function bulkUpsertInstances(
           chunk.map((r) => r.object_type_api_name),
           chunk.map((r) => r.primary_key),
           chunk.map((r) => JSON.stringify(r.properties)),
-          chunk.map((r) => r.markings ?? []),
+          chunk.map((r) => JSON.stringify(r.markings ?? [])),
           chunk.map((r) => r.source_datasource_id ?? null),
           chunk.map((r) => r.source_transaction_id ?? null),
           chunk.map((r) => deriveMainBranchId(r.ontology_id)),

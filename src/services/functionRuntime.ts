@@ -41,9 +41,13 @@ function compile(source: string): (input: unknown) => unknown {
     .replace(/^\s*export\s+default\s+/m, "module.exports = ")
     .replace(/^\s*import[^;]*;?/gm, ""); // strip imports — sandbox is pure
 
+  // Initialize `module.exports = exports = {}` so transpiled ESM code
+  // (which emits `Object.defineProperty(exports, "__esModule", ...)`)
+  // doesn't crash on a non-object `exports`.
+  const moduleObj: { exports: unknown } = { exports: {} };
   const context: Record<string, unknown> = {
-    module: { exports: undefined as unknown },
-    exports: undefined as unknown,
+    module: moduleObj,
+    exports: moduleObj.exports,
     console: undefined as unknown,
   };
   vm.createContext(context);

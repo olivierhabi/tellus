@@ -12,6 +12,24 @@ export const ONTOLOGY_RID_REGEX = /^ri\.ontology\.main\.ontology\.[0-9a-fA-F-]{3
 export const FOLDER_RID_REGEX = /^ri\.compass\.main\.folder\.[0-9a-fA-F-]{36}$/;
 export const BRANCH_RID_REGEX = /^ri\.[a-zA-Z0-9-]+\.main\.branch\.[0-9a-fA-F-]{36}$/;
 
+// Module-level page header. Distinct from `layout.header` (which is the
+// header-WIDGET slot pointer inside the layout graph). This is the
+// visible page-header strip at the top of the canvas — the editor's
+// HeaderInspector writes to it via PUT and the viewer renders it on
+// hydration. The FE has carried this shape since F02; the schema was
+// missing the slot which caused a round-trip data-loss bug for every
+// title edit (saves were rejected with Tellus:Workshop:InvalidModuleSchema
+// `unrecognized_keys: ["header"]`). All fields optional + .strict() so
+// future header attributes are explicit additions, not silent passthroughs.
+const moduleHeaderSchema = z
+  .object({
+    title: z.string().max(200).optional(),
+    icon: z.string().max(100).nullable().optional(),
+    color: z.string().max(100).nullable().optional(),
+  })
+  .strict()
+  .optional();
+
 export const moduleDefinitionSchema = z
   .object({
     schemaVersion: z.literal(4),
@@ -22,6 +40,7 @@ export const moduleDefinitionSchema = z
     variables: z.array(z.unknown()).default([]),
     widgets: z.array(z.unknown()).default([]),
     sections: z.array(z.unknown()).optional(),
+    header: moduleHeaderSchema,
     layout: z
       .object({
         rootSection: z.string(),

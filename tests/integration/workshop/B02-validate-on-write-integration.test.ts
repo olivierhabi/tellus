@@ -433,4 +433,95 @@ describe("B02 — validateModule on the write path", () => {
       expect(res.body.rid).toMatch(/^ri\.workshop\.main\.module\./);
     },
   );
+
+  // -------------------------------------------------------------------------
+  // Regression guard — F02 module-page-header round-trip.
+  //
+  // The FE (HeaderInspector + WorkshopDraftStore.setHeader) writes the
+  // visible page-header strip title into `definition.header.title`. Both
+  // the Zod request schema and the Ajv document schema MUST accept that
+  // shape; the autosave hook in `tellus-fe/hooks/useWorkshopAutosave.ts`
+  // PUTs it on every keystroke quiescence. Before this guard, the
+  // `.strict()` Zod schema and the `additionalProperties: false` Ajv
+  // schema both rejected `header` as an unrecognized key, which silently
+  // converted every title edit into a 400 InvalidModuleSchema response —
+  // visible to the user as "title doesn't survive reload".
+  //
+  // This test pins the contract end-to-end: a POST accepts the header
+  // slot, a follow-up PUT updates it, GET reads it back unchanged.
+  // -------------------------------------------------------------------------
+  itp(
+    "F02 regression: definition.header.{title,icon,color} round-trips POST → PUT → GET",
+    async () => {
+      const initialDefinition = {
+        schemaVersion: 4,
+        variables: [],
+        widgets: [],
+        sections: [
+          { id: "s_root", layout: "rows", children: [] },
+        ],
+        layout: { rootSection: "s_root" },
+        header: { title: "Initial title", icon: "shop", color: "cerulean" },
+      };
+
+      const post = await request(app)
+        .post("/api/v1/workshop/modules")
+        .send(bodyWith(initialDefinition, "header-roundtrip"));
+      expect(post.status).toBe(201);
+      const rid = post.body.rid as string;
+      const etag1 = post.headers.etag as string;
+      expect(post.body.definition.header).toEqual({
+        title: "Initial title",
+        icon: "shop",
+        color: "cerulean",
+      });
+
+      const put = await request(app)
+        .put(`/api/v1/workshop/modules/${encodeURIComponent(rid)}`)
+        .set("If-Match", etag1)
+        .send({
+          displayName: "header-roundtrip",
+          definition: {
+            ...initialDefinition,
+            header: { title: "Renamed via PUT", icon: null, color: null },
+          },
+        });
+      expect(put.status).toBe(200);
+      expect(put.body.definition.header).toEqual({
+        title: "Renamed via PUT",
+        icon: null,
+        color: null,
+      });
+      expect(put.headers.etag).not.toBe(etag1);
+
+      const get = await request(app).get(
+        `/api/v1/workshop/modules/${encodeURIComponent(rid)}`,
+      );
+      expect(get.status).toBe(200);
+      expect(get.body.definition.header.title).toBe("Renamed via PUT");
+    },
+  );
+
+  itp(
+    "F02 regression: unknown keys under definition.header are STILL rejected (strict)",
+    async () => {
+      const res = await request(app)
+        .post("/api/v1/workshop/modules")
+        .send(
+          bodyWith({
+            schemaVersion: 4,
+            variables: [],
+            widgets: [],
+            layout: { rootSection: "s_root" },
+            sections: [{ id: "s_root", layout: "rows", children: [] }],
+            // `subtitle` is not part of the header contract — the
+            // strict schema must reject it so silent typos surface
+            // immediately instead of being persisted and forgotten.
+            header: { title: "ok", subtitle: "not allowed" },
+          }),
+        );
+      expect(res.status).toBe(400);
+      expect(res.body.errorName).toBe("Tellus:Workshop:InvalidModuleSchema");
+    },
+  );
 });

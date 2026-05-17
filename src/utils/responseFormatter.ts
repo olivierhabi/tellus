@@ -82,6 +82,50 @@ export function snakeToCamel(obj: unknown): unknown {
 }
 
 // ---------------------------------------------------------------------------
+// RID emitters — canonical Foundry resource-identifier form.
+//
+// CONTRACT-FOLLOWUP: backend RID shape migrated; coordinate with audit, search,
+// OSDK, deep-link consumers. The legacy shape carried the ontology UUID in the
+// second segment; the canonical form across every other tellus service
+// (stemma, workshop, tellus-audit, ontology top-level) uses the literal
+// `main` realm. We migrate the user-facing surface here and add helpers that
+// every downstream call site MUST use so a future regression can't reintroduce
+// the legacy shape silently.
+// ---------------------------------------------------------------------------
+
+/** Reject empty / whitespace-only identifiers — these would produce malformed RIDs. */
+function assertNonEmptyId(id: string, kind: string): void {
+  if (typeof id !== "string" || id.trim().length === 0) {
+    throw new Error(
+      `responseFormatter: ${kind} RID requires a non-empty id (got ${JSON.stringify(id)})`,
+    );
+  }
+}
+
+/**
+ * Build the canonical RID for an object type. Form:
+ *   ri.ontology.main.object-type.<objectTypeId>
+ *
+ * Throws on empty / whitespace id. Returns a frozen string the caller may
+ * surface to the UI, audit log, deep link, or OSDK lookup.
+ */
+export function formatObjectTypeRid(objectTypeId: string): string {
+  assertNonEmptyId(objectTypeId, "object-type");
+  return `ri.ontology.main.object-type.${objectTypeId}`;
+}
+
+/**
+ * Build the canonical RID for a link type. Form:
+ *   ri.ontology.main.link-type.<linkTypeId>
+ *
+ * Throws on empty / whitespace id.
+ */
+export function formatLinkTypeRid(linkTypeId: string): string {
+  assertNonEmptyId(linkTypeId, "link-type");
+  return `ri.ontology.main.link-type.${linkTypeId}`;
+}
+
+// ---------------------------------------------------------------------------
 // Entity formatters
 // ---------------------------------------------------------------------------
 
@@ -158,13 +202,13 @@ export function formatObjectType(
   }
 
   // Palantir-style resource identifier. We don't persist RIDs —
-  // they're a deterministic projection of the ontology id + object
-  // type id so overview pages and deep links can show/copy a stable
-  // RID without an extra lookup.
-  const rid =
-    dbRow.ontology_id && dbRow.object_type_id
-      ? `ri.ontology.${dbRow.ontology_id}.object-type.${dbRow.object_type_id}`
-      : null;
+  // they're a deterministic projection of object_type_id so overview
+  // pages and deep links can show/copy a stable RID without an extra
+  // lookup. The canonical form is `ri.ontology.main.object-type.<id>`
+  // (see formatObjectTypeRid + CONTRACT-FOLLOWUP at top of file).
+  const rid = dbRow.object_type_id
+    ? formatObjectTypeRid(String(dbRow.object_type_id))
+    : null;
 
   // Human-scannable kebab-case projection of apiName — purely for
   // presentation on the object type overview card ("gena-all-orders"

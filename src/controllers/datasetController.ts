@@ -188,6 +188,48 @@ export class DatasetController {
   };
 
   /**
+   * Re-parse a dataset's source file, rebuilding its `dataset_columns`
+   * rows and `column_count`. Used to recover datasets ingested before
+   * the CSV-header sanitizer was deployed, whose schemas were silently
+   * truncated by duplicate or blank header cells.
+   *
+   * The endpoint is intentionally narrow:
+   *   - Same auth as other dataset routes (the dataset owner can
+   *     trigger re-parse on their own data).
+   *   - Idempotent — backed by `runParseJob` which deletes and rewrites
+   *     `dataset_columns` inside a single transaction.
+   *   - Synchronous — the caller observes the terminal state on the
+   *     same request so an operator running this from a runbook gets
+   *     immediate confirmation. The work is bounded by the existing
+   *     CSV-parse memory cap (`MAX_SAMPLE_ROWS` = 10k for type infer)
+   *     so it is safe to run in-band.
+   */
+  reparse = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const datasetId = req.params.datasetId as string;
+      if (!UuidParam.safeParse(datasetId).success) {
+        throw new AppError('Invalid dataset ID format', 400, 'VALIDATION_ERROR');
+      }
+
+      // Defer the import so the dataset controller doesn't pull the
+      // parse pipeline into the cold-start path. Re-parse is a rare,
+      // operator-driven action.
+      const { runParseJob } = await import('../jobs/parseDatasetJob');
+      await runParseJob(datasetId);
+
+      const dataset = await this.datasetService.getDatasetById(datasetId);
+      return sendSuccess(res, {
+        datasetId,
+        status: dataset?.status ?? 'unknown',
+        columnCount: dataset?.columnCount ?? null,
+        rowCount: dataset?.row_count ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  /**
    * Duplicate a dataset.
    */
   duplicate = async (req: Request, res: Response, next: NextFunction) => {

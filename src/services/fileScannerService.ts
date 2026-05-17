@@ -14,6 +14,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { parse as parseSync } from "csv-parse/sync";
 import { parse as parseStream } from "csv-parse";
+import { sanitizeCsvHeader } from "../utils/csvHeader";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -131,7 +132,9 @@ function scanCsvSync(filePath: string): ScanResult {
   }
 
   const records: Record<string, string>[] = parseSync(content, {
-    columns: true,
+    // See `src/utils/csvHeader.ts` — prevents silent column drop when
+    // the file has duplicate or blank header cells.
+    columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
     skip_empty_lines: true,
     relax_column_count: true,
   });
@@ -185,7 +188,9 @@ function scanCsvStream(filePath: string): Promise<ScanResult> {
     let rowCount = 0;
 
     const parser = parseStream({
-      columns: true,
+      // See `src/utils/csvHeader.ts` — prevents silent column drop when
+      // the file has duplicate or blank header cells.
+      columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
       skip_empty_lines: true,
       relax_column_count: true,
     });
