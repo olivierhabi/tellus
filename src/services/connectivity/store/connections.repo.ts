@@ -353,7 +353,6 @@ export async function findByRidAnyTenant(rid: string): Promise<Connection | null
   );
   return result.rows[0] ? toContract(result.rows[0]) : null;
 }
-
 export async function findByNameInFolder(
   tenant: string,
   folderRid: string,

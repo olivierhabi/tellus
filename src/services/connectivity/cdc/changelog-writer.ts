@@ -89,7 +89,6 @@ export class ChangelogWriter {
   }
 
   private async doFlush(): Promise<void> {
-    if (!this.kafka || this.buffer.length === 0) return;
     const batch = this.buffer;
     this.buffer = [];
     await this.kafka.produce(batch);

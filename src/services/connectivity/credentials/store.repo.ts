@@ -87,7 +87,6 @@ export async function findTenantByConnectionRid(
   );
   return result.rows[0]?.tenant ?? null;
 }
-
 export async function insertNewVersion(params: {
   connectionRid: string;
   tenant: string;
