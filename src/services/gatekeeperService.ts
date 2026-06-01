@@ -181,15 +181,12 @@ export class GatekeeperService {
     let depth = 0;
     while (cursor && depth < 50) {
       visited.push(cursor);
-      const r = await this.pool.query<{
-        parent_folder_rid: string | null;
-        blocks: boolean;
-      }>(
+      const r = (await this.pool.query(
         `SELECT parent_folder_rid,
                 COALESCE(metadata->>'disable_inherited_permissions','false') = 'true' AS blocks
          FROM resources WHERE rid = $1 LIMIT 1`,
         [cursor],
-      );
+      )) as { rows: Array<{ parent_folder_rid: string | null; blocks: boolean }> };
       if (r.rows.length === 0) break;
       // First node never blocks; otherwise stop walking once we've added
       // a node that itself blocks inheritance.

@@ -212,6 +212,66 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 422,
     errorCode: ERROR_CODES.INVALID_ARGUMENT,
   },
+  // -------------------------------------------------------------------------
+  // Optimistic-concurrency on metadata mutations (PATCH/DELETE/PUT settings).
+  //
+  // PreconditionFailed — the client's `If-Match: W/"<resource_version>"` did
+  // not equal the row's current resource_version (someone else mutated the
+  // repo first). 412 per RFC 7232 §3.1 — distinct from InvalidSettings (400)
+  // so a client can tell "your input was bad" apart from "you raced and lost"
+  // and re-GET to obtain the fresh ETag. (Fixes parity defect CR-11b.)
+  // -------------------------------------------------------------------------
+  "CodeRepos:PreconditionFailed": {
+    status: 412,
+    errorCode: ERROR_CODES.FAILED_PRECONDITION,
+  },
+  // -------------------------------------------------------------------------
+  // Tag & Release (repo → functions registry publish).
+  //
+  // NoFunctionsToPublish — the release tree has no discoverable functions
+  // under src/functions/. 400 — releasing nothing is a client error.
+  //
+  // BackwardIncompatible — the new version drops a function that the prior
+  // version exported (a breaking change) without a major-version bump. 409,
+  // mirroring Foundry's pre-publish backward-compatibility check.
+  //
+  // VersionConflict — the (repo, branch, semver) already exists with a
+  // different artifact (immutability). 409.
+  //
+  // ReleaseCompileError — a function file failed to transpile during the
+  // build. 422 — the source is well-formed JSON-wise but not buildable.
+  // -------------------------------------------------------------------------
+  "CodeRepos:NoFunctionsToPublish": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  "CodeRepos:BackwardIncompatible": {
+    status: 409,
+    errorCode: ERROR_CODES.CONFLICT,
+  },
+  "CodeRepos:VersionConflict": {
+    status: 409,
+    errorCode: ERROR_CODES.CONFLICT,
+  },
+  "CodeRepos:ReleaseCompileError": {
+    status: 422,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  // -------------------------------------------------------------------------
+  // Branch lifecycle (create/delete).
+  //
+  // BranchExists — POST /:rid/branches with a name that already exists. 409.
+  // CannotModifyDefaultBranch — DELETE of the repo's default branch. 412 —
+  //   the default branch is structurally required and cannot be removed.
+  // -------------------------------------------------------------------------
+  "CodeRepos:BranchExists": {
+    status: 409,
+    errorCode: ERROR_CODES.CONFLICT,
+  },
+  "CodeRepos:CannotModifyDefaultBranch": {
+    status: 412,
+    errorCode: ERROR_CODES.FAILED_PRECONDITION,
+  },
 });
 
 export type CodeReposErrorName = keyof typeof CODE_REPOS_ERROR_STATUS;

@@ -1,0 +1,15 @@
+# Tellus Agent target allowlist (spec §B6 line 311).
+#
+# Install at /etc/tellus/agent/allowlist.yml with:
+#   chown root:root /etc/tellus/agent/allowlist.yml
+#   chmod 0644 /etc/tellus/agent/allowlist.yml
+#
+# The agent refuses to start if mode != 0644 or ownership != root.
+
+targets:
+  - host: pg-prod.internal.rra
+    port: 5432
+  - host: pg-replica.internal.rra
+    port: 5432
+
+updated_at: '2025-01-01T00:00:00Z'

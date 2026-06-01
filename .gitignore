@@ -32,3 +32,6 @@ data/
 
 # Legacy local uploads (now stored in MinIO/S3)
 uploads/
+
+# Local DB backups (never commit dumps)
+backups/
