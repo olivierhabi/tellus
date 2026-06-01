@@ -63,6 +63,14 @@ import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
 import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
+// Tellus PostgreSQL Connectivity v2 (B1) — Connections CRUD + Compass binding.
+// Spec: tasks/postgres-connection/postgres-connection-tasks.md §B1.
+// Mounted under /api/v2/connectivity to keep the spec's namespaced surface
+// versioned independently of the existing /api/v1 ontology APIs.
+import connectivityRouter, {
+  initConnectivity,
+} from "./routes/connectivity.routes";
+
 // Modern Palantir-stack additions: DuckDB SQL, Polars charts, Kafka producer,
 // pipeline status. Each module is documented inline.
 import sqlRouter from "./routes/sql";
@@ -580,8 +588,35 @@ app.use("/api/v1/datasets", dataPreviewRouter);
 // existing repository RIDs unreadable until the row is re-created.
 import { mountCodeRepository } from "./services/codeRepository/mount";
 import { rehydrateInMemoryStemma } from "./services/codeRepository/rehydrate";
-const codeRepoMount = mountCodeRepository({ pool });
+import { PostgresStemma } from "./services/codeRepository/adapters/postgres";
+// DURABLE Stemma (migration 086): persist branches/blobs/HEADs to Postgres so
+// committed code survives restarts. Previously the in-memory adapter lost all
+// git content on every reload, leaving repos showing only the template scaffold
+// and drifting branch_cache (→ 412 on commit). The template adapter scaffolds
+// through this same instance, so new repos materialise into Postgres too.
+const codeRepoMount = mountCodeRepository({ pool, stemma: new PostgresStemma({ pool }) });
 app.use("/api/v1/code-repositories", codeRepoMount.router);
+
+// Functions Registry (B8) — the platform-wide store of published, immutable,
+// SemVer-versioned TypeScript Functions v2. Produced by Tag & Release
+// (POST /api/v1/code-repositories/:rid/tags) and consumed by Workshop/Actions
+// via resolve. Mounted here so /api/v1/functions/* is live in the running
+// product (previously the router existed but was never wired up).
+import { createFunctionsRouter } from "./services/functionsRegistry/admin/routes";
+// The registry router declares its routes as `/functions/:rid/...` (it was
+// authored to mount at the root of a standalone app). Re-base it under
+// `/api/v1/functions` by prepending `/functions` to the post-mount URL — this
+// keeps the router's own auth/idempotency middleware scoped to this prefix
+// (mounting it at `/api/v1` would apply those globally).
+const functionsRegistryRouter = createFunctionsRouter({ pool });
+app.use(
+  "/api/v1/functions",
+  (req: Request, _res: Response, next: NextFunction) => {
+    req.url = "/functions" + (req.url === "/" ? "" : req.url);
+    next();
+  },
+  functionsRegistryRouter,
+);
 
 // Boot-time rehydrator. No-op against a real Stemma client (production); a
 // best-effort re-seed against the in-memory adapter (dev / e2e). Awaited
@@ -738,6 +773,14 @@ app.use("/api/v1/users/me/favorites", favoritesRouter);
 app.use("/api/v1", sqlRouter);
 app.use("/api/v1", chartsRouter);
 app.use("/api/v1", pipelinesStatusRouter);
+
+// Tellus Connectivity v2 — B1 wave.
+// Routes: POST/GET/PUT/DELETE /api/v2/connectivity/connections + /:rid/{configuration,status}
+// The Compass outbox poller starts via initConnectivity() below; gated by
+// TELLUS_DISABLE_CONNECTIVITY_POLLER=1 for unit-test workers that should
+// not dispatch.
+app.use("/api/v2/connectivity", connectivityRouter);
+initConnectivity();
 app.use("/api/v1/funnel", funnelRouter);
 
 // ---------------------------------------------------------------------------

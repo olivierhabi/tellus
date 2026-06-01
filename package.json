@@ -43,6 +43,10 @@
     "seed:full": "tsx src/seeds/fullSeed.ts",
     "seed:customer": "tsx src/seeds/customerSeed.ts",
     "generate:api-docs": "tsx src/utils/generateApiDocs.ts",
+    "generate:openapi:connectivity": "tsx scripts/generate-openapi-connectivity.ts",
+    "test:connectivity": "vitest run tests/connectivity",
+    "test:connectivity:unit": "vitest run tests/connectivity/unit",
+    "test:connectivity:integration": "vitest run tests/connectivity/integration",
     "auth:bootstrap": "bash scripts/bootstrap-keycloak.sh",
     "auth:verify": "bash scripts/verify-auth-all.sh",
     "auth:verify:realm": "bash scripts/verify-auth-realm.sh",
@@ -57,6 +61,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@asteasolutions/zod-to-openapi": "^7.3.0",
     "@aws-sdk/client-s3": "^3.1010.0",
     "@aws-sdk/lib-storage": "^3.1010.0",
     "@aws-sdk/s3-request-presigner": "^3.1010.0",
@@ -101,6 +106,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "^10.13.0",
     "@types/adm-zip": "^0.5.7",
     "@types/bcrypt": "^6.0.0",
     "@types/compression": "^1.8.1",

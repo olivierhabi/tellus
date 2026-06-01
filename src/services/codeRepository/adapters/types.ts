@@ -53,6 +53,31 @@ export type StemmaCreateOutcome =
   | { kind: "ok"; repositoryRid: string }
   | { kind: "transient"; reason: string };
 
+export interface StemmaCreateBranchArgs {
+  readonly repositoryRid: string;
+  readonly newBranch: string;
+  readonly fromBranch: string;
+}
+export type StemmaCreateBranchOutcome =
+  | { kind: "ok"; head: string }
+  | { kind: "branch-exists" }
+  | { kind: "source-not-found" }
+  | { kind: "transient"; reason: string };
+
+export interface StemmaDeleteBranchArgs {
+  readonly repositoryRid: string;
+  readonly branch: string;
+}
+export type StemmaDeleteBranchOutcome =
+  | { kind: "ok" }
+  | { kind: "not-found" }
+  | { kind: "transient"; reason: string };
+
+export type StemmaListBranchesOutcome =
+  | { kind: "ok"; branches: ReadonlyArray<{ name: string; head: string }> }
+  | { kind: "not-found" }
+  | { kind: "transient"; reason: string };
+
 export interface StemmaAdapter {
   createRepository(args: StemmaCreateArgs): Promise<StemmaCreateOutcome>;
   /** Tombstone (soft-delete). MUST be idempotent. */
@@ -83,6 +108,16 @@ export interface StemmaAdapter {
   // Stemma deployments enforce the standard CAS contract via ref updates.
   // -----------------------------------------------------------------------
   commitFiles(args: StemmaCommitFilesArgs): Promise<StemmaCommitFilesOutcome>;
+  // -----------------------------------------------------------------------
+  // Branch lifecycle. createBranch forks an existing branch's full file set
+  // and HEAD into a new ref (git `branch <new> <from>`); deleteBranch removes
+  // a branch and its blobs. Both are total; callers enforce policy (e.g. a
+  // repo's default branch cannot be deleted) at the route layer.
+  // -----------------------------------------------------------------------
+  createBranch(args: StemmaCreateBranchArgs): Promise<StemmaCreateBranchOutcome>;
+  deleteBranch(args: StemmaDeleteBranchArgs): Promise<StemmaDeleteBranchOutcome>;
+  /** Authoritative list of a repository's branches with their current HEADs. */
+  listBranches(args: { repositoryRid: string }): Promise<StemmaListBranchesOutcome>;
 }
 
 /** A file to commit. `content` carries raw bytes — binary-safe. */

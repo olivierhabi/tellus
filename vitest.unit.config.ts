@@ -41,6 +41,10 @@ export default defineConfig({
       "tests/quiver/unit/**/*-unit.test.ts",
       // T-10: AST-level route contract guard (no I/O beyond fs reads).
       "tests/contract/**/*.test.ts",
+      // postgres-connection program: pure-unit tests for the connectivity
+      // service tier (Zod contracts, error envelope, ETag helpers, FK
+      // detector, type mapping, vault primitives, pg-types config).
+      "tests/connectivity/unit/**/*-unit.test.ts",
     ],
     exclude: ["node_modules", "dist", "tests/**/*-integration.test.ts", "tests/**/*-e2e.test.ts"],
     sequence: { concurrent: false },

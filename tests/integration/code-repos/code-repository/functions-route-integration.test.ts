@@ -309,10 +309,14 @@ describe("B2-C-13 — GET /api/v1/code-repositories/:rid/functions (integration)
     expect(previewRow?.isPreview).toBe(true);
   });
 
-  it("published row wins over working-tree row with the same apiName", async () => {
-    // After CI publishes helloWorld at v1.0.0, the working-tree row must
-    // not double-up — the published row replaces the discovery row.
-    const rid = await createRepo("publish-wins");
+  it("surfaces BOTH the published and working-tree rows for the same apiName", async () => {
+    // Published and working-tree are distinct surfaces: the Published tab runs
+    // the released artifact (v1.0.0); the Live Preview tab runs the current
+    // in-tree file (which may differ from what was released). Masking the
+    // working-tree row behind the published one leaves Live Preview empty even
+    // though the file exists — the bug users hit after Tag & Release. The
+    // discovery endpoint therefore returns one row per (apiName, source).
+    const rid = await createRepo("publish-and-working-tree");
     await seedPublish({
       rid,
       apiName: "helloWorld",
@@ -322,9 +326,12 @@ describe("B2-C-13 — GET /api/v1/code-repositories/:rid/functions (integration)
     });
     const res = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}/functions`));
     const helloRows = res.body.data.filter((r: FunctionRow) => r.apiName === "helloWorld");
-    expect(helloRows).toHaveLength(1);
-    expect(helloRows[0].source).toBe("published");
-    expect(helloRows[0].semver).toBe("1.0.0");
+    expect(helloRows).toHaveLength(2);
+    const bySource = new Map(helloRows.map((r: FunctionRow) => [r.source, r]));
+    expect(bySource.has("published")).toBe(true);
+    expect(bySource.has("working_tree")).toBe(true);
+    expect((bySource.get("published") as FunctionRow).semver).toBe("1.0.0");
+    expect((bySource.get("working_tree") as FunctionRow).semver).toBeNull();
   });
 
   it("returns 404 RepositoryNotFound for an unknown rid", async () => {

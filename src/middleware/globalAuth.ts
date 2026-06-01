@@ -160,6 +160,13 @@ function isAllowlisted(req: Request): boolean {
   // enforcement layers.
   if (p === "/api/v1/code-repositories" || p.startsWith("/api/v1/code-repositories/")) return true;
 
+  // Functions Registry (B8) — same two-layer pattern as code-repositories.
+  // `createFunctionsRouter` mounts `requireCodeReposAuth` internally (which
+  // honours the CODE_REPOS_TEST_AUTH=1 header bypass), so this allowlist entry
+  // only sidesteps the global gate; per-router JWT/PAT validation still runs
+  // in production.
+  if (p === "/api/v1/functions" || p.startsWith("/api/v1/functions/")) return true;
+
   // B3 — Templates service. Allowlisted on the same per-router-auth basis
   // as B2 above: `createTemplatesRouter` mounts `requireCodeReposAuth`
   // internally, so this allowlist entry only sidesteps the global Tellus

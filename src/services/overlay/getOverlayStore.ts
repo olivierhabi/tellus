@@ -41,17 +41,30 @@ export async function getOverlayStore(): Promise<OverlayStore> {
       }
       // F-P4-05: Redis client with bounded connect + socket timeouts.
       // Default node-redis@4 connectTimeout is 5000 ms; set it explicitly
-      // so the contract is visible. Reconnect strategy caps at 30 s so a
-      // Redis outage cannot burn event-loop slots forever.
+      // so the contract is visible. The reconnect strategy gives up after a
+      // few attempts (returning false) so a Redis outage cannot keep a
+      // background reconnect loop — and its 'error' event spam — alive for
+      // the life of the process. Per the module contract, once we fall back
+      // to the in-memory store it stays; a process restart re-tries Redis.
+      const MAX_RECONNECT_ATTEMPTS = 3;
       const client = mod.createClient({
         url,
         socket: {
           connectTimeout: 5_000,
-          reconnectStrategy: (retries: number) => Math.min(retries * 500, 30_000),
+          reconnectStrategy: (retries: number) =>
+            retries >= MAX_RECONNECT_ATTEMPTS
+              ? false
+              : Math.min((retries + 1) * 500, 2_000),
         },
       });
+      // node-redis emits 'error' on every failed (re)connect attempt. Log
+      // only the first so a transient outage doesn't flood the log; the
+      // connect() rejection below carries the failure into the fallback path.
+      let loggedError = false;
       client.on("error", (err: Error) => {
-        console.warn(`[overlay] Redis error: ${err.message}`);
+        if (loggedError) return;
+        loggedError = true;
+        console.warn(`[overlay] Redis error: ${describeRedisError(err)}`);
       });
       await client.connect();
       const adapter: MinimalRedisClient = {
@@ -72,7 +85,7 @@ export async function getOverlayStore(): Promise<OverlayStore> {
       return store;
     } catch (err) {
       console.warn(
-        `[overlay] Redis connect failed (${(err as Error).message}) — falling back to in-memory store`
+        `[overlay] Redis connect failed (${describeRedisError(err)}) — falling back to in-memory store`
       );
       store = new MemoryOverlayStore();
       return store;
@@ -88,7 +101,7 @@ interface RedisClientOptions {
   url: string;
   socket?: {
     connectTimeout?: number;
-    reconnectStrategy?: (retries: number) => number | Error;
+    reconnectStrategy?: (retries: number) => number | false | Error;
   };
 }
 
@@ -113,6 +126,20 @@ async function tryLoadRedis(): Promise<RedisLikeClientFactory | null> {
   } catch {
     return null;
   }
+}
+
+// node-redis surfaces connection failures (e.g. ECONNREFUSED) as an
+// AggregateError whose own `.message` is empty — the real cause lives in
+// `.errors[]`. Unwrap it so the log carries something actionable instead of
+// a bare "Redis error:".
+function describeRedisError(err: unknown): string {
+  const agg = err as { errors?: Array<{ message?: string; code?: string }> } | null;
+  if (agg && Array.isArray(agg.errors) && agg.errors.length > 0) {
+    const inner = agg.errors[0];
+    return inner?.message || inner?.code || "connection failed";
+  }
+  const e = err as { message?: string; code?: string } | null;
+  return e?.message || e?.code || String(err);
 }
 
 export function setOverlayStoreForTesting(s: OverlayStore | null): void {
