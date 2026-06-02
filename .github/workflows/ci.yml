@@ -151,7 +151,12 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # Pull Postgres from the AWS ECR Public mirror of the official image
+        # instead of Docker Hub. registry-1.docker.io has been intermittently
+        # unreachable from the runners (connection timeouts on `docker pull`),
+        # failing jobs before any test runs. ECR Public mirrors the same
+        # official image, needs no auth, and is not Docker-Hub-rate-limited.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_DB: tellus_db
           POSTGRES_USER: tellus
@@ -258,7 +263,12 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # Pull Postgres from the AWS ECR Public mirror of the official image
+        # instead of Docker Hub. registry-1.docker.io has been intermittently
+        # unreachable from the runners (connection timeouts on `docker pull`),
+        # failing jobs before any test runs. ECR Public mirrors the same
+        # official image, needs no auth, and is not Docker-Hub-rate-limited.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_DB: tellus_db
           POSTGRES_USER: tellus
@@ -379,7 +389,12 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # Pull Postgres from the AWS ECR Public mirror of the official image
+        # instead of Docker Hub. registry-1.docker.io has been intermittently
+        # unreachable from the runners (connection timeouts on `docker pull`),
+        # failing jobs before any test runs. ECR Public mirrors the same
+        # official image, needs no auth, and is not Docker-Hub-rate-limited.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_DB: tellus_db
           POSTGRES_USER: tellus
@@ -531,7 +546,12 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # Pull Postgres from the AWS ECR Public mirror of the official image
+        # instead of Docker Hub. registry-1.docker.io has been intermittently
+        # unreachable from the runners (connection timeouts on `docker pull`),
+        # failing jobs before any test runs. ECR Public mirrors the same
+        # official image, needs no auth, and is not Docker-Hub-rate-limited.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_DB: tellus_db
           POSTGRES_USER: tellus
