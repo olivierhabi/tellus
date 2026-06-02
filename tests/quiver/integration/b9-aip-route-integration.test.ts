@@ -14,6 +14,11 @@ const app = quiverApp();
 const audit = captureAudit();
 
 beforeAll(async () => {
+  // Enable the quiver test-auth bypass so the `x-test-user` header is honoured
+  // (testAuth.ts requires QUIVER_ALLOW_TEST_AUTH=1 + NODE_ENV!=production).
+  // Every sibling quiver integration suite sets this; without it the per-route
+  // auth rejects the test principal and every request 401s.
+  process.env.QUIVER_ALLOW_TEST_AUTH = "1";
   await applyQuiverMigrations();
 });
 
