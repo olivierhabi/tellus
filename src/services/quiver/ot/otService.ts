@@ -80,9 +80,40 @@ interface RawAnalysisDoc {
   etag: string;
 }
 
+// Placements have two shapes: the persisted/wire form is an array of
+// { cardId, x, y, w, h } (AnalysisDocument schema, types.ts), while the OT
+// apply layer (apply.ts) works with a record keyed by cardId of
+// { position: {x,y}, size: {w,h} }. We normalize to the record form on load
+// and back to the array form on save so both layers stay consistent and the
+// post-apply GET round-trips through AnalysisDocument.parse without throwing.
+function placementsArrayToRecord(p: any): Record<string, any> {
+  if (Array.isArray(p)) {
+    const out: Record<string, any> = {};
+    for (const x of p) {
+      out[x.cardId] = { position: { x: x.x, y: x.y }, size: { width: x.w, height: x.h } };
+    }
+    return out;
+  }
+  return p && typeof p === "object" ? p : {};
+}
+
+function placementsRecordToArray(p: any): any[] {
+  if (Array.isArray(p)) return p;
+  if (!p || typeof p !== "object") return [];
+  return Object.entries(p).map(([cardId, v]: [string, any]) => ({
+    cardId,
+    x: v?.position?.x ?? 0,
+    y: v?.position?.y ?? 0,
+    w: v?.size?.width ?? v?.size?.w ?? 320,
+    h: v?.size?.height ?? v?.size?.h ?? 200,
+  }));
+}
+
 function canvasArrayToRecord(arr: any[]): Record<string, any> {
   const out: Record<string, any> = {};
-  for (const c of arr ?? []) out[c.id] = c;
+  for (const c of arr ?? []) {
+    out[c.id] = { ...c, placements: placementsArrayToRecord(c.placements) };
+  }
   return out;
 }
 
@@ -90,17 +121,18 @@ function canvasRecordToArray(rec: Record<string, any>, keyOrder: string[]): any[
   // Preserve insertion order by walking keyOrder first; append any new ids
   // in the order they were added (Object.keys preserves insertion order).
   const seen = new Set<string>();
-  const out: any[] = [];
+  const ordered: any[] = [];
   for (const k of keyOrder) {
     if (rec[k] !== undefined) {
-      out.push(rec[k]);
+      ordered.push(rec[k]);
       seen.add(k);
     }
   }
   for (const k of Object.keys(rec)) {
-    if (!seen.has(k)) out.push(rec[k]);
+    if (!seen.has(k)) ordered.push(rec[k]);
   }
-  return out;
+  // Convert each canvas's placements back to the array wire form.
+  return ordered.map((c) => ({ ...c, placements: placementsRecordToArray(c.placements) }));
 }
 
 export async function submitInstructions(
@@ -226,7 +258,22 @@ export async function submitInstructions(
       droppedInstructionType: string;
     };
     const rebases: RebaseEntry[] = [];
-    let nextSeq = serverVersion;
+    // Allocate new seqs from the *authoritative* log high-water mark, not from
+    // `serverVersion` alone. The instruction log PK is (rid, seq); if a row's
+    // `current_version` ever drifts below MAX(seq) in the log (e.g. a version
+    // revert / save that didn't truncate the log, or a partial seed), starting
+    // at `serverVersion` would re-issue an existing seq → PK 23505 → the whole
+    // transaction aborts → the next INSERT fails with 25P02 and surfaces as a
+    // generic INTERNAL 500. Taking MAX(serverVersion, MAX(seq)) keeps seq
+    // allocation collision-free and self-heals current_version on the next
+    // accepted instruction. For a healthy analysis the two are equal, so this
+    // is a no-op.
+    const maxSeqRes = await client.query<{ max_seq: string | number | null }>(
+      `SELECT COALESCE(MAX(seq), 0) AS max_seq FROM quiver_instruction_log WHERE rid = $1`,
+      [rid],
+    );
+    const logMaxSeq = Number(maxSeqRes.rows[0]?.max_seq ?? 0);
+    let nextSeq = Math.max(serverVersion, logMaxSeq);
     for (const entry of t.results) {
       const orig = local[entry.originalIndex];
       const opId = body.clientOpIds[entry.originalIndex];

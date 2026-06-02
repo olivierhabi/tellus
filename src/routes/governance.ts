@@ -25,8 +25,15 @@ import { searchObjects } from "../services/opensearch/client";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
 import { incCounter } from "../services/funnel/metrics";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization: triggering a PII scan / refreshing usage are
+// privileged writes (ontology-editor). Lineage/usage GETs stay open and keep
+// their own marking-aware security filter (PATs scope-gated upstream,
+// superadmin passes).
+router.use(dataPlaneGuard({ post: "write" }));
 
 const PII_SCAN_BATCH_SIZE = 1000;
 

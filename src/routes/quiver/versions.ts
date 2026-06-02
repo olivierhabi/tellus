@@ -16,6 +16,7 @@ import {
 } from "../../services/quiver/workingStateService";
 import { ActorContext } from "../../services/quiver/analysisService";
 import { readBranch } from "../../services/quiver/branchHeader";
+import { isQuiverTestAuthAllowed } from "./testAuth";
 import {
   invalidAnalysisRequest,
   isQuiverError,
@@ -24,7 +25,7 @@ import {
 } from "../../services/quiver/errors";
 
 function actorFromReq(req: Request): ActorContext {
-  const allowTest = process.env.QUIVER_ALLOW_TEST_AUTH === "1";
+  const allowTest = isQuiverTestAuthAllowed();
   const ctx = (req as Request & {
     securityContext?: { userSubject?: string; orgRid?: string };
   }).securityContext;

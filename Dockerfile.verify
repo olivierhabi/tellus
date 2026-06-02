@@ -2,7 +2,7 @@
 #
 # This is a debian-slim variant of the production Dockerfile, used ONLY by
 # docker-compose.verify.yml. It exists because the production Dockerfile
-# bases the runtime stage on node:20-alpine (musl libc), but the project's
+# bases the runtime stage on node:24-alpine (musl libc), but the project's
 # transitive dependency @temporalio/core-bridge ships only glibc-linked
 # native binaries for arm64 — on Apple Silicon hosts the relocator fails
 # at boot:
@@ -17,23 +17,26 @@
 #
 # The two stages mirror the production layout exactly so the resulting
 # /app/dist/server.js is a faithful representation of what production
-# runs — only libc differs.
+# runs — only libc differs. Like production, it installs via pnpm with a
+# frozen lockfile so the scanned tree equals the shipped tree.
 
-FROM node:20-slim AS builder
+FROM node:24-slim AS builder
 WORKDIR /app
-COPY package.json package-lock.json tsconfig.json ./
-RUN npm ci --ignore-scripts
+RUN corepack enable && corepack prepare pnpm@latest-10 --activate
+COPY package.json pnpm-lock.yaml tsconfig.json ./
+RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY src/ src/
-RUN npx tsc
+RUN pnpm exec tsc
 
-FROM node:20-slim
+FROM node:24-slim
 WORKDIR /app
 ENV NODE_ENV=production
+RUN corepack enable && corepack prepare pnpm@latest-10 --activate
 RUN groupadd --system appgroup && useradd --system -g appgroup appuser
-# node:20-slim is minimal and ships neither wget nor curl. The healthcheck
+# node:24-slim is minimal and ships neither wget nor curl. The healthcheck
 # uses node's own http module (which is always present) instead.
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prod --ignore-scripts && pnpm store prune
 COPY --from=builder /app/dist/ dist/
 COPY src/migrations/ src/migrations/
 RUN mkdir -p /app/data && chown appuser:appgroup /app/data

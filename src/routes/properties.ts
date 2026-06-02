@@ -23,8 +23,14 @@ import {
   CREATE_PROPERTY_SCHEMA,
 } from "../middleware/validateBody";
 import { validatePropertyLimits } from "../utils/propertyLimits";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization: property create/update require
+// ontology-editor, delete requires ontology-admin (PATs scope-gated upstream,
+// superadmin passes, reads open). All POSTs here are mutations.
+router.use(dataPlaneGuard({ post: "write" }));
 
 // ---------------------------------------------------------------------------
 // Known error codes handled in catch blocks

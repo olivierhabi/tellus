@@ -36,6 +36,7 @@ interface ConnectionRow {
   agent_group_rid: string | null;
   config: Connection["config"];
   egress_policy: Connection["egressPolicy"];
+  egress_policy_rid: string | null;
   compass_folder_rid: string;
   status: Connection["status"];
   settings: Connection["settings"] | null;
@@ -65,6 +66,8 @@ function toContract(row: ConnectionRow): Connection {
     agentGroupRid: (row.agent_group_rid ?? undefined) as Connection["agentGroupRid"],
     config: row.config,
     egressPolicy: row.egress_policy,
+    egressPolicyRid: (row.egress_policy_rid ??
+      undefined) as Connection["egressPolicyRid"],
     compassFolderRid: row.compass_folder_rid as CompassFolderRid,
     status: row.status,
     settings: row.settings ?? DEFAULT_CONNECTION_SETTINGS,
@@ -88,14 +91,16 @@ export async function insert(
   const result = await client.query<ConnectionRow>(
     `INSERT INTO connectivity_connections (
        rid, tenant, name, description, connector_type, worker_type,
-       agent_group_rid, config, egress_policy, compass_folder_rid,
+       agent_group_rid, config, egress_policy, egress_policy_rid,
+       compass_folder_rid,
        status, version, created_by, updated_by, settings
      )
      VALUES (
        $1, $2, $3, $4, $5, $6,
        $7, $8::jsonb, $9::jsonb, $10,
+       $11,
        '{"state":"UNKNOWN","lastCheckedAt":null,"details":{}}'::jsonb,
-       1, $11, $11, $12::jsonb
+       1, $12, $12, $13::jsonb
      )
      RETURNING *`,
     [
@@ -108,6 +113,7 @@ export async function insert(
       params.request.agentGroupRid ?? null,
       JSON.stringify(params.request.config),
       JSON.stringify(params.request.egressPolicy),
+      params.request.egressPolicyRid ?? null,
       params.request.compassFolderRid,
       params.actor,
       JSON.stringify(params.request.settings ?? DEFAULT_CONNECTION_SETTINGS),
@@ -168,6 +174,10 @@ export async function list(
                 LIMIT $${params.length}`;
   const result = await pool.query<ConnectionRow>(sql, params);
   const hasMore = result.rows.length > pageSize;
+  // NOTE: createdByName / updatedByName are NOT resolved here. created_by /
+  // updated_by hold Keycloak subject IDs (not local `users` rows), so display
+  // names are resolved in the list handler via the Keycloak admin service
+  // (see principalNames.ts). The repo stays a pure SQL boundary.
   const data = result.rows.slice(0, pageSize).map(toContract);
   const nextPageToken =
     hasMore && data.length > 0
@@ -227,6 +237,7 @@ export async function update(
     description?: string;
     config?: unknown;
     egressPolicy?: unknown;
+    egressPolicyRid?: string | null;
     agentGroupRid?: string | null;
     settings?: unknown;
   },
@@ -253,6 +264,11 @@ export async function update(
   if (patch.egressPolicy !== undefined) {
     values.push(JSON.stringify(patch.egressPolicy));
     setClauses.push(`egress_policy = $${values.length}::jsonb`);
+  }
+  if (patch.egressPolicyRid !== undefined) {
+    // null clears the reference (back to inline allowlist).
+    values.push(patch.egressPolicyRid);
+    setClauses.push(`egress_policy_rid = $${values.length}`);
   }
   if (patch.agentGroupRid !== undefined) {
     values.push(patch.agentGroupRid);

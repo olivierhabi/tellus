@@ -18,8 +18,15 @@ import {
   validateBody,
   CREATE_ONTOLOGY_SCHEMA,
 } from "../middleware/validateBody";
+import { requireOntologyWrite, requireOntologyAdmin } from "../middleware/requireRole";
 
 const router = Router();
+
+// NOTE: this router is mounted at ROOT (`app.use(ontologyRouter)`) and its
+// routes carry FULL paths (`/api/v1/ontology...`). A router-level
+// `router.use(dataPlaneGuard())` here would therefore run on EVERY request in
+// the chain (e.g. POST /api/v1/auth/login) and wrongly reject it. So we gate
+// each mutating route INDIVIDUALLY below instead of router-wide.
 
 // ---------------------------------------------------------------------------
 // UUID format validation regex
@@ -33,6 +40,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 router.post(
   "/api/v1/ontology",
+  requireOntologyWrite,
   validateBody(CREATE_ONTOLOGY_SCHEMA),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -93,6 +101,7 @@ router.get(
 
 router.post(
   "/api/v1/ontology/import",
+  requireOntologyWrite,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const result = await ontologyService.importOntology(req.body);
@@ -195,6 +204,7 @@ router.get(
 
 router.put(
   "/api/v1/ontology/:ontologyId",
+  requireOntologyWrite,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;
@@ -242,6 +252,7 @@ router.put(
 
 router.delete(
   "/api/v1/ontology/:ontologyId",
+  requireOntologyAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;

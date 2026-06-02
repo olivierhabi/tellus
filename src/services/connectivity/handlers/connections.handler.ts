@@ -2,13 +2,13 @@
 // Connections handlers (B1, spec §62-70).
 //
 // 7 endpoints:
-//   POST   /api/v2/connectivity/connections
-//   GET    /api/v2/connectivity/connections/{rid}
-//   GET    /api/v2/connectivity/connections
-//   PUT    /api/v2/connectivity/connections/{rid}                  (If-Match)
-//   DELETE /api/v2/connectivity/connections/{rid}                  (If-Match, soft delete)
-//   GET    /api/v2/connectivity/connections/{rid}/configuration
-//   GET    /api/v2/connectivity/connections/{rid}/status
+//   POST   /api/v1/connectivity/connections
+//   GET    /api/v1/connectivity/connections/{rid}
+//   GET    /api/v1/connectivity/connections
+//   PUT    /api/v1/connectivity/connections/{rid}                  (If-Match)
+//   DELETE /api/v1/connectivity/connections/{rid}                  (If-Match, soft delete)
+//   GET    /api/v1/connectivity/connections/{rid}/configuration
+//   GET    /api/v1/connectivity/connections/{rid}/status
 //
 // Cross-cutting (verified per agent prompt §9):
 //   - Conjure envelope on all 4xx/5xx via TellusError.send / sendEnvelope.
@@ -55,6 +55,8 @@ import {
 } from "../contracts";
 import * as repo from "../store/connections.repo";
 import * as outbox from "../store/outbox";
+import { resolvePrincipalNames } from "../principalNames";
+import { evict as evictPgPool } from "../connectors/postgresql/pool";
 
 // --- Prometheus metrics -----------------------------------------------------
 
@@ -279,7 +281,7 @@ function mintConnectionRid(): string {
 
 // --- handlers ---------------------------------------------------------------
 
-export const postConnection = instrument("/api/v2/connectivity/connections", "POST")(
+export const postConnection = instrument("/api/v1/connectivity/connections", "POST")(
   async (req, res) => {
     const user = extractUser(req);
     requireScope(user, "connectivity:write");
@@ -374,13 +376,13 @@ export const postConnection = instrument("/api/v2/connectivity/connections", "PO
     });
 
     setConnectivityEtag(res, created.version);
-    res.setHeader("Location", `/api/v2/connectivity/connections/${rid}`);
+    res.setHeader("Location", `/api/v1/connectivity/connections/${rid}`);
     res.status(201).json(created);
   },
 );
 
 export const getConnection = instrument(
-  "/api/v2/connectivity/connections/:rid",
+  "/api/v1/connectivity/connections/:rid",
   "GET",
 )(async (req, res) => {
   const user = extractUser(req);
@@ -391,7 +393,7 @@ export const getConnection = instrument(
 });
 
 export const listConnections = instrument(
-  "/api/v2/connectivity/connections",
+  "/api/v1/connectivity/connections",
   "GET",
 )(async (req, res) => {
   const user = extractUser(req);
@@ -410,11 +412,23 @@ export const listConnections = instrument(
     pageSize,
     pageToken: (req.query.pageToken as string | undefined) ?? null,
   });
-  res.status(200).json(result);
+  // Enrich each row with creator / last-editor display names. created_by and
+  // updated_by are Keycloak subject IDs; resolvePrincipalNames batches the
+  // distinct ids through the cached Keycloak admin lookup. Best-effort: a
+  // missing/unreachable principal stays null and the FE falls back to the id.
+  const names = await resolvePrincipalNames(
+    result.data.flatMap((c) => [c.createdBy, c.updatedBy]),
+  );
+  const data = result.data.map((c) => ({
+    ...c,
+    createdByName: names.get(c.createdBy) ?? null,
+    updatedByName: names.get(c.updatedBy) ?? null,
+  }));
+  res.status(200).json({ data, nextPageToken: result.nextPageToken });
 });
 
 export const putConnection = instrument(
-  "/api/v2/connectivity/connections/:rid",
+  "/api/v1/connectivity/connections/:rid",
   "PUT",
 )(async (req, res) => {
   const user = extractUser(req);
@@ -471,6 +485,7 @@ export const putConnection = instrument(
         description: patch.description,
         config: patch.config,
         egressPolicy: patch.egressPolicy,
+        egressPolicyRid: patch.egressPolicyRid,
         agentGroupRid: patch.agentGroupRid,
         settings: patch.settings,
       },
@@ -487,12 +502,27 @@ export const putConnection = instrument(
     return next;
   });
 
+  // Invalidate any cached pg.Pool when the update changes how the pool connects
+  // (endpoint, TLS, or egress policy). The pool cache is keyed by credential
+  // version, so without this an edited host/port/tlsMode would keep serving the
+  // stale pool — connecting to the OLD destination — until the 10-min idle
+  // sweep. Credential/client-key rotations are already covered by their version
+  // keys, so they don't need an explicit evict here.
+  const poolAffected =
+    patch.config !== undefined ||
+    patch.egressPolicy !== undefined ||
+    patch.egressPolicyRid !== undefined ||
+    patch.agentGroupRid !== undefined;
+  if (poolAffected) {
+    await evictPgPool(req.params.rid);
+  }
+
   setConnectivityEtag(res, updated.version);
   res.status(200).json(updated);
 });
 
 export const deleteConnection = instrument(
-  "/api/v2/connectivity/connections/:rid",
+  "/api/v1/connectivity/connections/:rid",
   "DELETE",
 )(async (req, res) => {
   const user = extractUser(req);
@@ -521,11 +551,15 @@ export const deleteConnection = instrument(
     });
   });
 
+  // Drain the cached pool so a deleted connection holds no open sockets to the
+  // (now-removed) source until the idle sweep.
+  await evictPgPool(req.params.rid);
+
   res.status(204).send();
 });
 
 export const getConfiguration = instrument(
-  "/api/v2/connectivity/connections/:rid/configuration",
+  "/api/v1/connectivity/connections/:rid/configuration",
   "GET",
 )(async (req, res) => {
   const user = extractUser(req);
@@ -543,7 +577,7 @@ export const getConfiguration = instrument(
 });
 
 export const getStatus = instrument(
-  "/api/v2/connectivity/connections/:rid/status",
+  "/api/v1/connectivity/connections/:rid/status",
   "GET",
 )(async (req, res) => {
   const user = extractUser(req);
@@ -558,7 +592,7 @@ export const getStatus = instrument(
   });
 });
 
-// --- centralized "not found" / 404 envelope when no route matches under /api/v2/connectivity/...
+// --- centralized "not found" / 404 envelope when no route matches under /api/v1/connectivity/...
 export function notFoundHandler(req: Request, res: Response): void {
   if (req.params.rid) {
     sendEnvelope(res, ConnectionNotFound, { rid: req.params.rid });

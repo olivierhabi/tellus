@@ -297,4 +297,62 @@ describe("B3 — GET /analyses/:rid/instructions (replay endpoint)", () => {
     expect(r.body.instructions[0].kind).toBe("addCard");
     expect(r.body.instructions[1].kind).toBe("addCard");
   });
+
+  it("regression: current_version drifted below MAX(seq) → batch still succeeds (no INTERNAL) and re-syncs", async () => {
+    const app = quiverApp();
+    const { rid } = await createAnalysis();
+
+    // Seed an instruction log so MAX(seq) climbs to 3.
+    await request(app)
+      .post(`/quiver/api/v1/analyses/${rid}/instructions`)
+      .set(authed())
+      .send({
+        baseVersion: 0,
+        clientOpIds: [randomUUID(), randomUUID(), randomUUID()],
+        instructions: [
+          { kind: "addCard", card: { id: "seed1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "seed2", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCanvas", canvas: { id: "cv1", name: "C", ordering: [], placements: {} } },
+        ],
+      })
+      .expect(200);
+
+    const before = await pool.query(
+      "SELECT current_version, (SELECT COALESCE(MAX(seq),0) FROM quiver_instruction_log WHERE rid = $1) AS max_seq FROM quiver_analysis WHERE rid = $1",
+      [rid],
+    );
+    expect(Number(before.rows[0].max_seq)).toBe(3);
+
+    // Corrupt the invariant: drive current_version *below* the log's MAX(seq),
+    // exactly the demo-seed state that produced the PK(rid,seq) collision →
+    // aborted-transaction cascade → Tellus:Quiver:Internal 500.
+    await pool.query("UPDATE quiver_analysis SET current_version = 1 WHERE rid = $1", [rid]);
+
+    // The user's failing flow: addCard + placeCardOnCanvas in one batch, with
+    // baseVersion = the (stale) current_version.
+    const r = await request(app)
+      .post(`/quiver/api/v1/analyses/${rid}/instructions`)
+      .set(authed())
+      .send({
+        baseVersion: 1,
+        clientOpIds: [randomUUID(), randomUUID()],
+        instructions: [
+          { kind: "addCard", card: { id: "obj", type: "OBJECT_SET", config: { apiName: "OlivierOrderJune" }, inputs: {}, hidden: false } },
+          { kind: "placeCardOnCanvas", cardId: "obj", canvasId: "cv1", position: { x: 40, y: 40 }, size: { width: 480, height: 360 } },
+        ],
+      });
+
+    // Before the fix this returned 500 INTERNAL.
+    expect(r.status).toBe(200);
+    expect(r.body.transformedInstructions).toHaveLength(2);
+
+    // seq allocation jumped past the log high-water mark (4, 5) — no collision —
+    // and current_version is back in sync with MAX(seq).
+    const after = await pool.query(
+      "SELECT current_version, (SELECT MAX(seq) FROM quiver_instruction_log WHERE rid = $1) AS max_seq FROM quiver_analysis WHERE rid = $1",
+      [rid],
+    );
+    expect(Number(after.rows[0].max_seq)).toBe(5);
+    expect(Number(after.rows[0].current_version)).toBe(5);
+  });
 });

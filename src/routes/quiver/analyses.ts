@@ -18,6 +18,7 @@ import {
 } from "../../services/quiver/analysisService";
 import { validate as validateDag } from "../../services/quiver/dag";
 import { readBranch } from "../../services/quiver/branchHeader";
+import { isQuiverTestAuthAllowed } from "./testAuth";
 import {
   invalidAnalysisRequest,
   isQuiverError,
@@ -44,7 +45,7 @@ const ROUTE_LIST = "GET /quiver/api/v1/folders/:folderRid/analyses";
 function actorFromReq(req: Request): ActorContext {
   // The securityContext middleware sets these in production.
   // In tests with QUIVER_ALLOW_TEST_AUTH=1, accept x-test-user header.
-  const allowTest = process.env.QUIVER_ALLOW_TEST_AUTH === "1";
+  const allowTest = isQuiverTestAuthAllowed();
   const fromCtx = (req as Request & {
     securityContext?: {
       userSubject?: string;

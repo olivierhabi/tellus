@@ -32,6 +32,36 @@ import {
   otCollabActiveSessions,
   otWsDisconnectsTotal,
 } from "../metrics";
+import type { TellusAuthService } from "../../tellusAuthService";
+import { isQuiverTestAuthAllowed } from "../../../routes/quiver/testAuth";
+
+// Largest inbound frame we will parse (presenceUpdate messages are tiny);
+// caps memory a hostile client can force us to buffer per frame.
+const MAX_WS_PAYLOAD_BYTES = 64 * 1024;
+
+// Lazy singleton. We DYNAMICALLY import the auth service / db so that merely
+// importing this transport module never triggers `foundryDb`'s import-time
+// `requireSecret('PGPASSWORD')` side effect — the heavy deps load on first WS
+// authentication at runtime, not at module load (keeps the module importable
+// in unit tests without a full env).
+let authService: TellusAuthService | null = null;
+async function authSvc(): Promise<TellusAuthService> {
+  if (!authService) {
+    const [{ TellusAuthService: Svc }, { getKeycloakRealm }, foundryDbMod] =
+      await Promise.all([
+        import("../../tellusAuthService"),
+        import("../../../auth/keycloakConfig"),
+        import("../../../config/foundryDb"),
+      ]);
+    authService = new Svc(foundryDbMod.default as never, {
+      kcUrl: process.env.KEYCLOAK_URL || "http://localhost:8086",
+      kcRealm: getKeycloakRealm(),
+      kcFrontendClientId:
+        process.env.KEYCLOAK_FRONTEND_CLIENT_ID || "tellus-frontend",
+    });
+  }
+  return authService;
+}
 
 const PATH_REGEX =
   /^\/quiver\/api\/v1\/analyses\/(ri\.tellus-quiver\.main\.analysis\.[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/stream$/u;
@@ -55,7 +85,10 @@ export function attachQuiverWs(
   http: HttpServer,
   opts: QuiverWsOptions = {},
 ): AttachedQuiverWs {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_WS_PAYLOAD_BYTES,
+  });
   const resolveUser = opts.resolveUser ?? defaultResolveUser;
 
   const upgradeHandler = async (
@@ -156,17 +189,30 @@ function bindClient(ws: WebSocket, ctx: ClientCtx): void {
 }
 
 
-function defaultResolveUser(req: IncomingMessage): string | null {
-  if (process.env.QUIVER_ALLOW_TEST_AUTH === "1") {
+async function defaultResolveUser(
+  req: IncomingMessage,
+): Promise<string | null> {
+  // Test-only header bypass, hard-gated to non-production (see testAuth.ts).
+  if (isQuiverTestAuthAllowed()) {
     const u = req.headers["x-test-user"];
     if (typeof u === "string") return u;
     if (Array.isArray(u) && u.length > 0) return u[0];
   }
-  // Production: parse `Sec-WebSocket-Protocol: bearer <jwt>` header.
+  // Parse `Sec-WebSocket-Protocol: bearer <jwt>` and VERIFY the token
+  // (signature, issuer, expiry) against Keycloak before trusting any
+  // identity. Fail-closed: any verification failure resolves to null, which
+  // the upgrade handler turns into a 401 — we never mint a synthetic
+  // principal from an unverified token.
   const proto = req.headers["sec-websocket-protocol"];
-  if (typeof proto === "string") {
-    const m = proto.match(/bearer\s+([A-Za-z0-9._~+/=-]+)/);
-    if (m) return `jwt:${m[1].slice(0, 16)}`; // placeholder until real verification
+  const raw = Array.isArray(proto) ? proto.join(",") : proto;
+  if (typeof raw !== "string") return null;
+  const m = raw.match(/bearer\s+([A-Za-z0-9._~+/=-]+)/i);
+  if (!m) return null;
+  try {
+    const svc = await authSvc();
+    const claims = await svc.verifyAccessToken(m[1]);
+    return claims.sub ?? null;
+  } catch {
+    return null;
   }
-  return null;
 }

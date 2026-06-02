@@ -16,6 +16,7 @@
 //                     here — resolution-time SSRF is covered separately).
 // ---------------------------------------------------------------------------
 
+import { lookup } from "node:dns/promises";
 import { TellusError } from "../../../../lib/errors/envelope";
 import { EgressBlocked } from "../../../../lib/errors/connectivity.errors";
 
@@ -144,20 +145,85 @@ const BLOCKED_HOSTNAMES = new Set([
   "metadata.google.internal",
 ]);
 
+// ---------------------------------------------------------------------------
+// Explicit reserved-target allowance (env-gated, default-closed).
+//
+// The reserved-range guard is a hard zero-trust boundary in production. But a
+// LOCAL deployment legitimately needs to reach a loopback / RFC-1918 database
+// (e.g. a dev Postgres on localhost:5432). Rather than weaken the guard for
+// everyone — or branch on NODE_ENV, which is easy to misconfigure — operators
+// opt specific reserved destinations back in via:
+//
+//   CONNECTIVITY_EGRESS_ALLOW_RESERVED=localhost,127.0.0.1/8,::1
+//
+// Empty/unset (production default) ⇒ the guard behaves exactly as before.
+// Entries are: a hostname (exact, case-insensitive — also matches IPv6
+// literals like ::1), a literal IPv4 (treated as /32), or an IPv4 CIDR. The
+// list is parsed once and memoized on the raw env string so changing it (e.g.
+// in tests) re-parses, but steady-state calls don't re-split per connect.
+// ---------------------------------------------------------------------------
+
+interface AllowedReserved {
+  hosts: Set<string>;
+  cidrs: string[];
+}
+let allowedReservedCache: { raw: string; parsed: AllowedReserved } | null = null;
+
+function getAllowedReserved(): AllowedReserved {
+  const raw = process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED ?? "";
+  if (allowedReservedCache && allowedReservedCache.raw === raw) {
+    return allowedReservedCache.parsed;
+  }
+  const hosts = new Set<string>();
+  const cidrs: string[] = [];
+  for (const token of raw.split(",")) {
+    const entry = token.trim().toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+    if (!entry) continue;
+    if (entry.includes("/")) {
+      cidrs.push(entry);
+    } else if (ipv4ToInt(entry) !== null) {
+      cidrs.push(`${entry}/32`); // bare IPv4 ⇒ exact-host CIDR
+    } else {
+      hosts.add(entry); // hostname or IPv6 literal
+    }
+  }
+  const parsed: AllowedReserved = { hosts, cidrs };
+  allowedReservedCache = { raw, parsed };
+  return parsed;
+}
+
+/** True when `host` (normalized) / its unwrapped IPv4 is explicitly allowed. */
+function isExplicitlyAllowed(normalizedHost: string, v4: string | null): boolean {
+  const { hosts, cidrs } = getAllowedReserved();
+  if (hosts.has(normalizedHost)) return true;
+  if (v4 !== null && ipv4ToInt(v4) !== null) {
+    for (const cidr of cidrs) {
+      if (ipv4InCidr(v4, cidr)) return true;
+    }
+  }
+  return false;
+}
+
 /** True when host is a literal private/reserved address or internal hostname. */
 function isReservedTarget(host: string): boolean {
   const h = host.trim().toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d) — unwrap so the v4 rules apply to it.
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
+  const v4 = mapped ? mapped[1] : h;
+  const v4OrNull = ipv4ToInt(v4) !== null ? v4 : null;
+
+  // Operator-approved reserved destinations (dev loopback DB, etc.) override
+  // every block rule below. Default-closed: empty allowlist ⇒ no effect.
+  if (isExplicitlyAllowed(h, v4OrNull)) return false;
+
   if (BLOCKED_HOSTNAMES.has(h) || h.endsWith(".localhost")) return true;
   // IPv6 loopback / unspecified / unique-local / link-local literals.
   if (h === "::1" || h === "::") return true;
   if (/^f[cd][0-9a-f]{2}:/.test(h)) return true; // fc00::/7 ULA
   if (/^fe[89ab][0-9a-f]:/.test(h)) return true; // fe80::/10 link-local
-  // IPv4-mapped IPv6 (::ffff:a.b.c.d) — unwrap and fall through to the v4 check.
-  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-  const v4 = mapped ? mapped[1] : h;
-  if (ipv4ToInt(v4) !== null) {
+  if (v4OrNull !== null) {
     for (const cidr of BLOCKED_IPV4_CIDRS) {
-      if (ipv4InCidr(v4, cidr)) return true;
+      if (ipv4InCidr(v4OrNull, cidr)) return true;
     }
   }
   return false;
@@ -175,4 +241,76 @@ export function assertEgressForConfig(host: string, port: number): void {
       reason: "target resolves to a reserved or internal address range",
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// DNS-pinned egress validation (closes the resolution-time SSRF / DNS-rebinding
+// window left open by the string-only guards above).
+//
+// `isReservedTarget` only inspects the literal host string, so a public-looking
+// hostname that resolves to 169.254.169.254 (or any RFC-1918 / loopback target)
+// slips through. `assertEgressResolved` resolves the hostname, runs EVERY
+// returned address through `isReservedTarget`, throws if any is reserved, and
+// returns the single IP the caller must connect to. Pinning that resolved IP at
+// the socket layer (while keeping the original hostname for TLS `servername`)
+// removes the TOCTOU gap between validation and connect.
+// ---------------------------------------------------------------------------
+
+/** True when `host` is a literal IP address (no DNS resolution possible). */
+function isLiteralIp(host: string): boolean {
+  const h = host.trim().replace(/^\[/, "").replace(/\]$/, "");
+  return ipv4ToInt(h) !== null || h.includes(":");
+}
+
+/**
+ * Resolves `host`, validates every resolved address against the reserved-range
+ * guard, and returns the single IP the caller should connect to (the "pin").
+ * Throws Tellus:Connectivity:EgressBlocked (403) when the host is internal, when
+ * resolution fails, or when ANY resolved address is reserved. Literal IPs are
+ * validated directly and returned as-is.
+ */
+export async function assertEgressResolved(host: string, port: number): Promise<string> {
+  // Block obvious internal hostnames / literal reserved IPs up front.
+  if (isReservedTarget(host)) {
+    throw new TellusError(EgressBlocked, {
+      host,
+      port,
+      reason: "target resolves to a reserved or internal address range",
+    });
+  }
+
+  const literal = host.trim().replace(/^\[/, "").replace(/\]$/, "");
+  if (isLiteralIp(host)) {
+    // Already validated above; connect straight to the literal address.
+    return literal;
+  }
+
+  let resolved: { address: string; family: number }[];
+  try {
+    resolved = await lookup(host, { all: true });
+  } catch {
+    throw new TellusError(EgressBlocked, {
+      host,
+      port,
+      reason: "target hostname could not be resolved",
+    });
+  }
+  if (resolved.length === 0) {
+    throw new TellusError(EgressBlocked, {
+      host,
+      port,
+      reason: "target hostname resolved to no addresses",
+    });
+  }
+  for (const { address } of resolved) {
+    if (isReservedTarget(address)) {
+      throw new TellusError(EgressBlocked, {
+        host,
+        port,
+        reason: "target resolves to a reserved or internal address range",
+      });
+    }
+  }
+  // Pin the first validated address; the caller keeps `host` for TLS servername.
+  return resolved[0].address;
 }

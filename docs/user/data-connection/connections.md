@@ -1,6 +1,6 @@
 # Tellus Data Connection — Connections
 
-> **Status.** B1 implementation. CRUD against `/api/v2/connectivity/connections` is live.
+> **Status.** B1 implementation. CRUD against `/api/v1/connectivity/connections` is live.
 > Credential vault (B2), PostgreSQL connector (B3), syncs (B5), CDC (B7), virtual tables (B8)
 > ship in subsequent waves and are documented as they land.
 
@@ -19,7 +19,7 @@ the current `ETag`; a stale `If-Match` returns **HTTP 409**
 ## Creating a connection
 
 ```http
-POST /api/v2/connectivity/connections HTTP/1.1
+POST /api/v1/connectivity/connections HTTP/1.1
 Authorization: Bearer <multipass-jwt with connectivity:write>
 Idempotency-Key: 8a9c5fdf-7d2c-4f88-b9c2-2c25f5d3a3a1
 Content-Type: application/json
@@ -50,7 +50,7 @@ Content-Type: application/json
 ```http
 HTTP/1.1 201 Created
 ETag: W/"1"
-Location: /api/v2/connectivity/connections/ri.magritte.main.source.<uuid>
+Location: /api/v1/connectivity/connections/ri.magritte.main.source.<uuid>
 Content-Type: application/json
 
 { "rid": "ri.magritte.main.source.<uuid>", "version": 1, ... }
@@ -62,7 +62,7 @@ verbatim for 24 hours.
 ## Editing a connection
 
 ```http
-PUT /api/v2/connectivity/connections/{rid} HTTP/1.1
+PUT /api/v1/connectivity/connections/{rid} HTTP/1.1
 Authorization: Bearer ...
 If-Match: W/"3"
 Content-Type: application/json
@@ -77,7 +77,7 @@ Content-Type: application/json
 ## Deleting a connection
 
 ```http
-DELETE /api/v2/connectivity/connections/{rid} HTTP/1.1
+DELETE /api/v1/connectivity/connections/{rid} HTTP/1.1
 Authorization: Bearer <multipass-jwt with connectivity:write>
 If-Match: W/"5"
 ```
@@ -101,7 +101,7 @@ up. Inspect outbox health via Grafana → "Tellus Connectivity" → "Outbox back
 ## Status endpoint
 
 ```http
-GET /api/v2/connectivity/connections/{rid}/status HTTP/1.1
+GET /api/v1/connectivity/connections/{rid}/status HTTP/1.1
 ```
 
 Returns `{ rid, state, lastCheckedAt, details }` where `state` ∈

@@ -33,9 +33,19 @@ const BOOTSTRAP_SQL_PATH = resolve(
   REPO_ROOT,
   "tests/fixtures/connectivity-bootstrap.sql",
 );
+// Full connectivity migration set, applied in filename order to mirror the
+// production runner. The fixture previously stopped at 075, so any test that
+// touched credentials (076/087), the canonical folder FK (083), or named
+// egress policies + the connections.egress_policy_rid column (088) ran against
+// an incomplete schema and failed at insert time — that is the "dead test"
+// repair. Keep this list ordered and in sync as connectivity migrations land.
 const B1_MIGRATIONS = [
   "src/migrations/074_b1_connectivity_connections.sql",
   "src/migrations/075_b1_connectivity_outbox.sql",
+  "src/migrations/076_b2_connectivity_credentials.sql",
+  "src/migrations/083_b1_connectivity_folder_fk.sql",
+  "src/migrations/087_b2_credential_rotation_policy.sql",
+  "src/migrations/088_b1_connectivity_egress_policies.sql",
 ];
 
 function readSql(relPath: string): string {
@@ -124,6 +134,9 @@ export async function resetConnectivityTables(pool: Pool): Promise<void> {
   await pool.query(`TRUNCATE TABLE
     connectivity_connection_status_log,
     connectivity_outbox,
+    connectivity_credentials_audit,
+    connectivity_credentials,
+    connectivity_egress_policies,
     connectivity_connections,
     idempotency_keys
     RESTART IDENTITY CASCADE`);

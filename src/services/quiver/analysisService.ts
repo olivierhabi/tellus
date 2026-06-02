@@ -13,11 +13,13 @@
 
 import type { PoolClient } from "pg";
 import { pool, query, withTransaction } from "../../db";
+import { randomUUID } from "node:crypto";
 import {
   AnalysisDocument,
   CreateAnalysisRequest,
   UpdateAnalysisMetadataRequest,
   type AnalysesPage,
+  type Canvas,
 } from "./types";
 import { newQuiverRid } from "./rids";
 import {
@@ -165,10 +167,23 @@ function snapshotForEtag(row: {
   };
 }
 
+/** A fresh analysis ships with one empty canvas named "Canvas 1" so the editor
+ *  opens onto a usable surface — the FE auto-selects the first canvas — instead
+ *  of the "no canvas selected" empty state. Mirrors the FE `addCanvas` shape
+ *  (`cv-<id>` / `Canvas N`). */
+function defaultCanvas(): Canvas {
+  return {
+    id: `cv-${randomUUID().slice(0, 8)}`,
+    name: "Canvas 1",
+    placements: [],
+    ordering: [],
+  };
+}
+
 function defaultDocumentInline() {
   return {
     cards: {},
-    canvases: [],
+    canvases: [defaultCanvas()],
     parameters: {},
   };
 }
@@ -239,7 +254,7 @@ export async function createAnalysis(
       ) VALUES (
         $1, $2, $3, $4,
         '{"defaultLoad":"VISIBLE","cardIdCounter":0,"branchRid":null}'::jsonb,
-        '{}'::jsonb, '[]'::jsonb, '{}'::jsonb,
+        '{}'::jsonb, $11::jsonb, '{}'::jsonb,
         0, $5, $6, $7::jsonb, $8::text[],
         false, NULL,
         now(), $9, now(), $9, $10
@@ -257,6 +272,9 @@ export async function createAnalysis(
       req.markings ?? [],
       actor.userSubject,
       actor.branch,
+      // The default canvas ("Canvas 1") seeded into the document; kept in lockstep
+      // with `inline.canvases` so the persisted column and the etag snapshot agree.
+      JSON.stringify(inline.canvases),
     ]);
     const row = r.rows[0] as AnalysisRow;
 

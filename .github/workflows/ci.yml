@@ -70,6 +70,35 @@ env:
 
 jobs:
   # ===========================================================================
+  # Job 0: Lint + Static Security Analysis (no services needed) — F-07
+  # ===========================================================================
+  lint:
+    name: Lint & SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run ESLint (TypeScript + security)
+        run: pnpm run lint
+
+  # ===========================================================================
   # Job 1: Unit Tests (no services needed)
   # ===========================================================================
   unit:

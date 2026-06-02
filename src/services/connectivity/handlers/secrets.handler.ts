@@ -1,12 +1,12 @@
 // ---------------------------------------------------------------------------
 // B2 secrets handlers. Routes:
-//   POST   /api/v2/connectivity/connections/:rid/credentials
+//   POST   /api/v1/connectivity/connections/:rid/credentials
 //             body: { field, plaintext_base64 }  scope: connectivity:write
-//   GET    /api/v2/connectivity/connections/:rid/credentials
+//   GET    /api/v1/connectivity/connections/:rid/credentials
 //             scope: connectivity:read  → version metadata only
-//   DELETE /api/v2/connectivity/connections/:rid/credentials/:field
+//   DELETE /api/v1/connectivity/connections/:rid/credentials/:field
 //             scope: connectivity:write  → supersede ALL versions of field
-//   POST   /api/v2/connectivity/internal/unwrap
+//   POST   /api/v1/connectivity/internal/unwrap
 //             body: { connection_rid, field, workload_token }
 //             no scope; workload-token verified explicitly
 //
@@ -20,13 +20,16 @@ import type { NextFunction, Request, Response } from "express";
 import { z } from "zod";
 import {
   CredentialNotFound,
+  CredentialRotationFailed,
   ScopeRequired,
   InvalidConfiguration,
   IfMatchRequired as IfMatchErr,
 } from "../../../lib/errors/connectivity.errors";
 import { TellusError } from "../../../lib/errors/envelope";
+import { pool, withTransaction } from "../../../db";
 import * as vault from "../credentials/vault";
 import * as store from "../credentials/store.repo";
+import { evict as evictPool } from "../connectors/postgresql/pool";
 import { verifyWorkloadToken } from "../../multipass/tokens";
 import * as repo from "../store/connections.repo";
 import { extractUser, requireScope } from "./connections.handler";
@@ -234,6 +237,114 @@ export async function internalUnwrap(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Worker credential unwrap — POST /internal/credentials/unwrap
+//
+// Called by the foundry-worker child (src/workers/foundry-worker/
+// credential-fetch.ts) to obtain the full connect credentials for a build.
+// Auth is a short-lived workload JWT in the Authorization header, verified
+// HERE (the route is allowlisted in globalAuth because the bearer is a
+// workload token, not a Keycloak user token; in production a NetworkPolicy
+// additionally restricts this /internal path).
+//
+// Returns the assembled credentials the pg client needs: the non-secret
+// `user` (from the connection config) plus the secret `password` (and, for
+// mTLS, the client key) unwrapped from the vault. The internalUnwrap endpoint
+// above returns a single field for callers that know which field they want;
+// this one returns the whole credential set the worker connects with.
+// ---------------------------------------------------------------------------
+const WorkerUnwrapBody = z.object({
+  connectionRid: z
+    .string()
+    .regex(/^ri\.magritte\.main\.source\.[0-9a-f-]{36}$/),
+  name: z.string().optional(),
+});
+
+function bearerToken(req: Request): string {
+  const authz = req.headers.authorization;
+  return authz && authz.startsWith("Bearer ")
+    ? authz.slice("Bearer ".length).trim()
+    : "";
+}
+
+export async function internalUnwrapWorker(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const parsed = WorkerUnwrapBody.safeParse(req.body);
+    if (!parsed.success) {
+      throw new TellusError(InvalidConfiguration, { issues: parsed.error.issues });
+    }
+    const connectionRid = parsed.data.connectionRid;
+
+    const verify = verifyWorkloadToken(bearerToken(req), {
+      connectionRid,
+      scope: "connectivity:credential-unwrap",
+    });
+    if (!verify.ok) {
+      throw new TellusError(ScopeRequired, {
+        reason: verify.reason ?? "verify_failed",
+      });
+    }
+    const claims = verify.claims!;
+
+    const row = await pool.query<{ config: Record<string, unknown>; tenant: string }>(
+      `SELECT config, tenant FROM connectivity_connections WHERE rid=$1 AND deleted_at IS NULL`,
+      [connectionRid],
+    );
+    if (row.rowCount === 0) {
+      throw new TellusError(CredentialNotFound, { rid: connectionRid, field: "password" });
+    }
+    // Driver settings (incl. the non-secret `user`) nest under `postgres`.
+    const rawCfg = row.rows[0].config ?? {};
+    const cfg = (rawCfg.postgres ?? rawCfg) as Record<string, unknown>;
+    const tenant = claims.tenant ?? row.rows[0].tenant;
+    const auditCtx = {
+      requestId: req.headers["x-request-id"] as string | undefined,
+      clientIp: req.ip,
+      scopes: claims.scopes,
+    };
+
+    const pwBytes = await vault.unwrap(connectionRid, tenant, "password", claims.sub, auditCtx);
+    if (pwBytes.length === 0) {
+      throw new TellusError(CredentialNotFound, { rid: connectionRid, field: "password" });
+    }
+    const password = Buffer.from(pwBytes).toString("utf8");
+    pwBytes.fill(0);
+
+    // Optional mTLS client key — absent for tlsMode=disable/require. `unwrap`
+    // returns an empty buffer (not a throw) when the field has no version.
+    let clientKeyPem: string | undefined;
+    const keyBytes = await vault
+      .unwrap(connectionRid, tenant, "client_key", claims.sub, auditCtx)
+      .catch(() => new Uint8Array());
+    if (keyBytes.length > 0) {
+      clientKeyPem = Buffer.from(keyBytes).toString("utf8");
+      keyBytes.fill(0);
+    }
+
+    res.status(200).json({
+      version: 1,
+      fields: {
+        user: typeof cfg.user === "string" ? cfg.user : "",
+        password,
+        serverCaPem: typeof cfg.serverCaPem === "string" ? cfg.serverCaPem : undefined,
+        clientCertPem:
+          typeof cfg.clientCertPem === "string" ? cfg.clientCertPem : undefined,
+        clientKeyPem,
+      },
+    });
+  } catch (e) {
+    if (e instanceof TellusError) {
+      e.send(res);
+      return;
+    }
+    next(e);
+  }
+}
+
 // Re-export to make IfMatchErr referenced and registry-reachable.
 void IfMatchErr;
 
@@ -314,6 +425,66 @@ export async function rotateSecret(
       connectionRid: conn.rid,
       field: field.data,
       version,
+    });
+  } catch (e) {
+    if (e instanceof TellusError) {
+      e.send(res);
+      return;
+    }
+    next(e);
+  }
+}
+
+/**
+ * POST /connections/:rid/secrets/:name/rotate-managed — server-side managed
+ * rotation. Unlike rotateSecret (which takes caller-supplied plaintext), this
+ * generates fresh material in-process via the vault rewrap primitive — the same
+ * operation the background rotation worker performs on a schedule — and evicts
+ * the connection's pool so the next request rebuilds with the new version.
+ *
+ * Surfaces Tellus:Connectivity:CredentialRotationFailed (500) when the rewrap
+ * write fails; the previous credential version stays live in that case.
+ */
+export async function rotateManagedSecret(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const user = extractUser(req);
+    requireScope(user, "secrets:rotate");
+    const conn = await fetchConnectionOr404(req.params.rid, user.tenant);
+    requireConnectivityIfMatch(req, conn.version);
+    const field = FieldEnum.safeParse(
+      (req.params as { name?: string }).name ?? req.body?.field,
+    );
+    if (!field.success) {
+      throw new TellusError(InvalidConfiguration, {
+        path: "name",
+        message: "unknown field",
+      });
+    }
+    let version: number;
+    try {
+      const result = await withTransaction((client) =>
+        vault.rewrap(client, conn.rid, field.data),
+      );
+      version = result.version;
+    } catch (e) {
+      throw new TellusError(CredentialRotationFailed, {
+        rid: conn.rid,
+        field: field.data,
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+    // New credential version is live — drop any cached pool so the next
+    // connection rebuilds with the rotated material.
+    await evictPool(conn.rid).catch(() => undefined);
+    res.status(200).json({
+      connectionRid: conn.rid,
+      field: field.data,
+      version,
+      rotated: true,
     });
   } catch (e) {
     if (e instanceof TellusError) {

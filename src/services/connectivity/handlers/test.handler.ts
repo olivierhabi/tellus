@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // B3 — testConnection handler (spec §B3 line 141, acceptance criterion 1).
 //
-// POST /api/v2/connectivity/connections/:rid/test
+// POST /api/v1/connectivity/connections/:rid/test
 // Auth: scope `connectivity:read`.
 // Behaviour: opens a pooled connection, runs `SELECT version()`, returns
 //   { ok: true, serverVersion, latencyMs } in <2s on a healthy PG 16.
@@ -19,7 +19,7 @@ import { Pool } from "pg";
 import { z } from "zod";
 import { getPool, evict } from "../connectors/postgresql/pool";
 import { assemblePgPoolOptions } from "../connectors/postgresql/config";
-import { assertEgressForConfig } from "../connectors/postgresql/egress";
+import { assertEgressResolved } from "../connectors/postgresql/egress";
 import { PostgresConfig, TlsMode } from "../contracts";
 import {
   TellusError,
@@ -51,13 +51,31 @@ export function testRateLimit(
   res: Response,
   next: NextFunction,
 ): void {
-  let principal = "anonymous";
+  // Authenticated principals are EXEMPT from the connection-test rate limit.
+  // These endpoints already sit behind globalAuth + the connectivity:test/read
+  // scope, and the reserved-range SSRF guard (assertEgressForConfig /
+  // assertEgressResolved) is what actually bounds where a probe may be aimed —
+  // the token bucket here is only a secondary velocity cap. Throttling
+  // legitimate authenticated users (who routinely re-test while configuring a
+  // source) produced 429 EgressRateLimited friction for no real security gain.
+  // The bucket is retained for the unauthenticated fallback as defense in depth
+  // (globalAuth normally makes that path unreachable). Set
+  // CONNECTIVITY_TEST_RATE_LIMIT_ALL=1 to throttle authenticated callers too.
+  let principalId: string | null = null;
   try {
-    principal = extractUser(req).id;
+    principalId = extractUser(req).id;
   } catch {
-    principal =
-      (req.ip ?? (req.socket && req.socket.remoteAddress) ?? "anonymous") as string;
+    principalId = null;
   }
+
+  if (principalId && process.env.CONNECTIVITY_TEST_RATE_LIMIT_ALL !== "1") {
+    next();
+    return;
+  }
+
+  const principal =
+    principalId ??
+    ((req.ip ?? (req.socket && req.socket.remoteAddress) ?? "anonymous") as string);
   const key = `connectivity:test:${principal}`;
   const check = limiter.tryCheck(key, TEST_MAX_PER_WINDOW, TEST_WINDOW_MS);
   if (!check.allowed) {
@@ -148,7 +166,7 @@ export async function testConnection(
 // ---------------------------------------------------------------------------
 // testConfig — transient, NON-persisted connection probe.
 //
-// POST /api/v2/connectivity/connections/test-config
+// POST /api/v1/connectivity/connections/test-config
 // Auth: scope `connectivity:test`.
 //
 // Drives the "Test connection" button in the new-source wizard BEFORE the
@@ -192,7 +210,9 @@ export async function testConfig(
     // SSRF guard: this probe runs before a connection (and its egress
     // allowlist) exists, so deny reserved/internal targets (loopback,
     // link-local cloud metadata, RFC-1918) before any socket is opened.
-    assertEgressForConfig(body.host, body.port);
+    // Resolves the host and validates every resolved IP, returning a vetted
+    // address to pin the connection to (closes the DNS-rebinding TOCTOU window).
+    const pinnedHost = await assertEgressResolved(body.host, body.port);
 
     // Normalize through the canonical PostgresConfig so defaults/timeouts
     // (and the TLS assembly) match a real connection exactly.
@@ -207,8 +227,16 @@ export async function testConfig(
       user: body.user,
       password: body.password,
     });
+    // Connect to the validated, pinned IP rather than re-resolving the host
+    // (closes the DNS-rebinding TOCTOU window). Keep the original hostname as
+    // the TLS servername so verify-full certificate identity checks still
+    // validate against the real host, not the pinned address.
+    const pinnedOpts =
+      opts.ssl && typeof opts.ssl === "object"
+        ? { ...opts, host: pinnedHost, ssl: { ...opts.ssl, servername: body.host } }
+        : { ...opts, host: pinnedHost };
     // One connection is enough for a probe; cap the pool to avoid leaks.
-    pool = new Pool({ ...opts, max: 1 });
+    pool = new Pool({ ...pinnedOpts, max: 1 });
 
     const result = await withTimeout(
       pool.query<{ version: string }>("SELECT version() AS version"),

@@ -3,7 +3,7 @@
 // Phase feature flag: TELLUS_QUIVER_PHASE controls which sub-routers are
 // mounted. Cumulative — phase 3 implies 1+2.
 
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { analysesRouter } from "./analyses";
 import { versionsRouter } from "./versions";
 import { computeRouter } from "./compute";
@@ -27,6 +27,35 @@ export function buildQuiverRouter(flags: QuiverPhaseFlags = readPhaseFlags()): R
   // Boot-time invariant: 26 card types in registry (B2 C-02). Throws on drift.
   assertRegistryIntegrity();
   const r = Router();
+
+  // Bridge globalAuth's verified principal into the actor shape the Quiver
+  // routes read. globalAuth (middleware/globalAuth.ts) populates req.user /
+  // req.auth from the validated JWT (or TELLUS_TOKEN cookie); the per-route
+  // `actorFromReq` helpers, however, look for `req.securityContext.userSubject`
+  // — which nothing else in the stack ever sets, so real (non-test) auth would
+  // always 401. Derive it here once for every sub-router. In QUIVER_ALLOW_TEST_
+  // AUTH mode globalAuth short-circuits before setting req.user, so this no-ops
+  // and the existing x-test-user header path still applies.
+  r.use((req: Request, _res: Response, next: NextFunction) => {
+    const anyReq = req as Request & {
+      user?: { id?: string };
+      auth?: { sub?: string; orgs?: string[]; organizations?: string[]; orgRid?: string };
+      securityContext?: { userSubject?: string; orgRid?: string };
+    };
+    if (!anyReq.securityContext?.userSubject) {
+      const sub = anyReq.user?.id ?? anyReq.auth?.sub;
+      if (sub) {
+        const org =
+          anyReq.auth?.orgRid ??
+          anyReq.auth?.orgs?.[0] ??
+          anyReq.auth?.organizations?.[0] ??
+          "ri.multipass.main.org.default";
+        anyReq.securityContext = { userSubject: sub, orgRid: org };
+      }
+    }
+    next();
+  });
+
   if (flags.phase >= 1) {
     r.use(analysesRouter);
     r.use(versionsRouter);

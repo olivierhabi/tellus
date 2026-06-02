@@ -86,7 +86,7 @@ export async function postCdcStream(
     res
       .status(201)
       .set("ETag", `W/"1"`)
-      .set("Location", `/api/v2/connectivity/imports/${rid}`)
+      .set("Location", `/api/v1/connectivity/imports/${rid}`)
       .json({ rid, version: 1 });
   } catch (err) {
     if (err instanceof TellusError) {
