@@ -1233,6 +1233,51 @@ async function migrateFoundry(): Promise<void> {
     `);
     console.log("  [ok] B4 Step 17-19: organizations + seeds + backfills");
 
+    // === B4 Step 19b: auto-enroll triggers ==============================
+    // The Step-19 backfill only covers rows that exist at migration time.
+    // Users provisioned at runtime (ensureLocalUserForClaims shadow rows) and
+    // projects created via createProject would otherwise have NO org row —
+    // leaving the gatekeeper unable to grant them anything (the B4.04 "no
+    // orphans" invariant). Keep the invariant self-maintaining with AFTER
+    // INSERT triggers that enroll every new user/project into the default org.
+    // Both target tables only FK to organizations(id) (which exists) — the
+    // project trigger does not touch resources, so it is safe even though
+    // createProject inserts the projects row before the resources row.
+    await client.query(`
+      CREATE OR REPLACE FUNCTION enroll_user_default_org() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO user_organizations (user_id, org_id)
+        VALUES (NEW.id, '00000000-0000-0000-0000-000000000001'::uuid)
+        ON CONFLICT DO NOTHING;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await client.query(`DROP TRIGGER IF EXISTS trg_enroll_user_default_org ON users`);
+    await client.query(`
+      CREATE TRIGGER trg_enroll_user_default_org
+        AFTER INSERT ON users
+        FOR EACH ROW EXECUTE FUNCTION enroll_user_default_org()
+    `);
+    await client.query(`
+      CREATE OR REPLACE FUNCTION enroll_project_default_org() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO project_organizations (project_rid, org_id)
+        VALUES ('ri.compass.main.project.' || NEW.id::text,
+                '00000000-0000-0000-0000-000000000001'::uuid)
+        ON CONFLICT DO NOTHING;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await client.query(`DROP TRIGGER IF EXISTS trg_enroll_project_default_org ON projects`);
+    await client.query(`
+      CREATE TRIGGER trg_enroll_project_default_org
+        AFTER INSERT ON projects
+        FOR EACH ROW EXECUTE FUNCTION enroll_project_default_org()
+    `);
+    console.log("  [ok] B4 Step 19b: default-org auto-enroll triggers (users + projects)");
+
     // === B4 Step 20 (B4.10): NOTIFY triggers for cache invalidation =====
     await client.query(`
       CREATE OR REPLACE FUNCTION gatekeeper_notify_invalidate() RETURNS trigger AS $func$
