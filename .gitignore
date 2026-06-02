@@ -9,6 +9,11 @@ dist/
 .env.local
 .env.production
 
+# AI agents
+.claude
+.vix
+
+
 # OS files
 .DS_Store
 Thumbs.db
