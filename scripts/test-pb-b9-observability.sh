@@ -51,11 +51,14 @@ TRACE=$(grep -i '^X-Trace-Id:' "${HDRS}" | awk '{print $2}' | tr -d '\r\n')
 ok "(3) X-Trace-Id=${TRACE}"
 
 log "(4) X-Trace-Id present on error responses"
-TOKEN=$(curl -sSf \
+# Prefer the shared token from run-all.sh (AUTH_TOKEN); re-acquiring per script
+# trips Keycloak brute-force/quick-login throttling (HTTP 400). Fall back to a
+# direct grant for standalone local runs.
+TOKEN="${AUTH_TOKEN:-$(curl -sSf \
   -d "client_id=${KC_CLIENT}" -d "grant_type=password" \
   -d "username=${KC_USER}" -d "password=${KC_PASS}" \
   "${KC_URL}/realms/${KC_REALM}/protocol/openid-connect/token" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')}"
 curl -sS -D "${HDRS}" -o /dev/null \
   "${BASE_URL}/api/v1/projects/00000000-0000-4000-a000-000000000000/pipelines/00000000-0000-4000-a000-000000000000" \
   -H "Authorization: Bearer ${TOKEN}"
