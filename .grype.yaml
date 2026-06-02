@@ -1,0 +1,28 @@
+# grype configuration for the cve-scan workflow (.github/workflows/cve-scan.yml).
+# Auto-discovered by grype from the repo root. The `pnpm audit --prod` gate uses a
+# parallel suppression list in package.json (pnpm.auditConfig.ignoreGhsas); keep the
+# two in sync. Every entry below is a deliberately accepted finding with justification.
+ignore:
+  # --- @opensearch-project/opensearch — malware advisory (blanket, no fix) ---
+  # May 2026 npm account-takeover ("Mini Shai-Hulud"). The MALICIOUS releases were
+  # 3.5.3 / 3.6.2 / 3.7.0 / 3.8.0. We are pinned to the exact known-good 3.5.1, which
+  # predates the 12 May 2026 compromise window — the OpenSearch team's own recommended
+  # remediation (roll back to a known-good version). The advisory is a blanket malware
+  # flag (>=0, no patched version), so it cannot be cleared by upgrading. See SECURITY.md.
+  # Re-evaluate this entry before ever bumping @opensearch-project/opensearch.
+  - vulnerability: GHSA-298w-vvm4-ww55
+    package:
+      name: "@opensearch-project/opensearch"
+
+  # --- undici — dev/test-only, never shipped to production ---
+  # undici reaches the tree ONLY via @testcontainers/postgresql (a devDependency used
+  # for integration tests). The production image is built with `pnpm install --prod`
+  # (Dockerfile), so undici is not present in the deployed artifact. testcontainers 10.x
+  # pins undici 5.x, so a forced override would break the test harness. Not exploitable
+  # in production. Revisit when testcontainers is upgraded to a line that ships undici >=6.24.
+  - vulnerability: CVE-2026-2229
+    package:
+      name: undici
+  - vulnerability: CVE-2026-1526
+    package:
+      name: undici
