@@ -97,6 +97,35 @@ describe("Quiver B1 — POST /quiver/api/v1/analyses", () => {
     expect(r.body.currentVersion).toBe(0);
   });
 
+  it("seeds a default canvas named \"Canvas 1\" so the editor opens onto a surface", async () => {
+    const app = quiverApp();
+    const r = await request(app)
+      .post("/quiver/api/v1/analyses")
+      .set(authedHeaders({ "idempotency-key": randomUUID() }))
+      .send({
+        parentFolderRid: "ri.compass.main.folder.f1",
+        displayName: "Has a default canvas",
+      });
+    expect(r.status).toBe(201);
+    expect(Array.isArray(r.body.canvases)).toBe(true);
+    expect(r.body.canvases).toHaveLength(1);
+    const canvas = r.body.canvases[0];
+    expect(canvas.name).toBe("Canvas 1");
+    expect(typeof canvas.id).toBe("string");
+    expect(canvas.id.length).toBeGreaterThan(0);
+    expect(canvas.placements).toEqual([]);
+    expect(canvas.ordering).toEqual([]);
+
+    // The seeded canvas survives a round-trip through GET (it's persisted in the
+    // canvases column, not just the create response).
+    const got = await request(app)
+      .get(`/quiver/api/v1/analyses/${encodeURIComponent(r.body.rid)}`)
+      .set(authedHeaders());
+    expect(got.status).toBe(200);
+    expect(got.body.canvases).toHaveLength(1);
+    expect(got.body.canvases[0].name).toBe("Canvas 1");
+  });
+
   it("G-04: missing Idempotency-Key → 400 InvalidAnalysisRequest", async () => {
     const app = quiverApp();
     const r = await request(app)

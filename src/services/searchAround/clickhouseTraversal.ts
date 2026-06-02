@@ -141,6 +141,14 @@ export function buildTraversalSql(input: BuildTraversalSqlInput): string {
 
 function arrayStringLiteral(items: string[]): string {
   if (items.length === 0) return "[]";
-  const escaped = items.map((i) => `'${i.replace(/'/g, "''")}'`).join(",");
+  // ClickHouse string literals honor C-style backslash escapes (\', \\, \n …)
+  // in ADDITION to SQL-standard quote-doubling, so doubling `'` alone is not a
+  // correct escape for this engine: a value containing a backslash could
+  // desynchronize quoting. Escape the backslash FIRST, then the single quote,
+  // so every metacharacter is neutralized regardless of which escape syntax
+  // ClickHouse applies. (anchorPks/markings reaching here are user-derived.)
+  const escaped = items
+    .map((i) => `'${i.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`)
+    .join(",");
   return `[${escaped}]`;
 }

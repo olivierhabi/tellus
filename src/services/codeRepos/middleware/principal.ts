@@ -91,7 +91,10 @@ export function requireCodeReposAuth() {
     // upstream `requireTellusAuth` middleware has its own envelope shape
     // (errorName: "AuthenticationError") which would violate G-C-08's
     // requirement of `Stemma:Unauthenticated`.
-    if (process.env.CODE_REPOS_TEST_AUTH === "1") {
+    if (
+      process.env.CODE_REPOS_TEST_AUTH === "1" &&
+      process.env.NODE_ENV !== "production"
+    ) {
       const header = req.header("X-Tellus-Test-Principal");
       if (typeof header !== "string" || header.length === 0) {
         sendUnauthenticated(res, req, "Authentication required");

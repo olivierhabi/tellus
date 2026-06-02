@@ -6,7 +6,7 @@
 # Steps:
 #   1. Obtain auth token via test login bypass
 #   2. Insert a Compass folder resource into the DB (required FK parent)
-#   3. POST /api/v2/connectivity/connections to create the connection
+#   3. POST /api/v1/connectivity/connections to create the connection
 #   4. Verify the connection exists and is listable
 # ---------------------------------------------------------------------------
 
@@ -158,7 +158,7 @@ EOF
 # Generate idempotency key
 IDEM_KEY=$(python3 -c 'import uuid; print(uuid.uuid4())')
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/v2/connectivity/connections" \
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/v1/connectivity/connections" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Idempotency-Key: ${IDEM_KEY}" \
@@ -178,7 +178,7 @@ if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
   # --- Step 5: Verify --------------------------------------------------------
   echo "[5/5] Verifying connection..."
   
-  LIST_RESPONSE=$(curl -s -X GET "${BACKEND_URL}/api/v2/connectivity/connections" \
+  LIST_RESPONSE=$(curl -s -X GET "${BACKEND_URL}/api/v1/connectivity/connections" \
     -H "Authorization: Bearer ${TOKEN}")
   
   CONN_COUNT=$(echo "$LIST_RESPONSE" | python3 -c "import sys, json; print(len(json.load(sys.stdin).get('data', [])))" 2>/dev/null || echo "0")

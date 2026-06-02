@@ -2,7 +2,7 @@
 // Folder picker repository — queries the `resources` table for
 // PROJECT, COMPASS_FOLDER, and COMPASS_SPACE rows.
 //
-// Used by the GET /api/v2/connectivity/folders endpoint to power the
+// Used by the GET /api/v1/connectivity/folders endpoint to power the
 // folder-picker dialog in the connectivity UI.
 // ---------------------------------------------------------------------------
 

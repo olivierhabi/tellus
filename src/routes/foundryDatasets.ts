@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth';
+import { dataPlaneGuard } from '../middleware/requireRole';
 import { DatasetController } from '../controllers/datasetController';
 import { DatasetService } from '../services/datasetService';
 import foundryDb from '../config/foundryDb';
@@ -11,6 +12,12 @@ export const folderDatasetsRouter = Router({ mergeParams: true });
 folderDatasetsRouter.get('/', authenticate, datasetController.list);
 
 export const datasetRouter = Router();
+// Function-level authorization on the by-id dataset surface (the IDOR
+// vector): update (PUT) requires ontology-editor, delete requires
+// ontology-admin, and write-POSTs (duplicate/reparse) require editor. Reads
+// (get/preview/download/status/summary) stay open. PATs are scope-gated
+// upstream (datasets:* scopes); superadmin passes.
+datasetRouter.use(dataPlaneGuard({ post: 'write' }));
 datasetRouter.get('/status-batch', authenticate, datasetController.getStatusBatch);
 datasetRouter.get('/:datasetId', authenticate, datasetController.getById);
 datasetRouter.get('/:datasetId/preview', authenticate, datasetController.preview);

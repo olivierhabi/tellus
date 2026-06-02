@@ -14,6 +14,7 @@ import {
   unauthenticated,
 } from "../../services/quiver/errors";
 import { readBranch } from "../../services/quiver/branchHeader";
+import { isQuiverTestAuthAllowed } from "./testAuth";
 import {
   submitInstructions,
   readLogSlice,
@@ -22,7 +23,7 @@ import {
 } from "../../services/quiver/ot/otService";
 
 function actorFromReq(req: Request): SubmitInstructionsActor {
-  const allowTest = process.env.QUIVER_ALLOW_TEST_AUTH === "1";
+  const allowTest = isQuiverTestAuthAllowed();
   const fromCtx = (req as Request & {
     securityContext?: { userSubject?: string; orgRid?: string };
   }).securityContext;

@@ -310,8 +310,18 @@ export class TellusAuthService {
       if (!row) return false;
       if (new Date(row.expires_at) < new Date()) return false;
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      // Fail CLOSED: if we cannot confirm a token is NOT revoked, we must
+      // not accept it. The revocation table lives in the primary Postgres
+      // that every data path already depends on, so a failure here means
+      // the request would fail downstream regardless — rejecting it does
+      // not widen the outage, but it does close the window in which a token
+      // revoked on another replica (logout / compromise) would be honored.
+      console.error('isJtiRevoked: revocation check failed, denying token', {
+        jti,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return true;
     }
   }
 

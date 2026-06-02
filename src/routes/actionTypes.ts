@@ -37,12 +37,18 @@ import { appError } from "../utils/appError";
 import { OntologyError } from "../utils/queryErrors";
 import { validateSchemaMigration } from "../actions/schemaMigrationValidator";
 import type { CurrentSchema, ProposedSchema, RecentExecutionStats } from "../actions/schemaMigrationValidator";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization: action-type create/update/clone require
+// ontology-editor, delete requires ontology-admin (PATs scope-gated upstream,
+// superadmin passes, reads open).
+router.use(dataPlaneGuard({ post: "write" }));
 
 // ---------------------------------------------------------------------------
 // Constants

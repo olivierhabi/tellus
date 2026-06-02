@@ -327,6 +327,43 @@ export class KeycloakAdminService {
   }
 
   /**
+   * Resolve a single user by Keycloak `sub` — the stable id persisted in
+   * audit columns such as connectivity `created_by` / `updated_by`. Returns
+   * a typed name subset, or `null` on 404 so callers can degrade gracefully:
+   * a since-deleted principal must not error the surface that lists it.
+   */
+  async getUserById(id: string): Promise<{
+    id: string;
+    username: string;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  } | null> {
+    try {
+      const u = await this.call<{
+        id: string;
+        username: string;
+        email?: string;
+        firstName?: string;
+        lastName?: string;
+      }>('GET', `/users/${encodeURIComponent(id)}`, {
+        query: { briefRepresentation: 'true' },
+      });
+      if (!u?.id) return null;
+      return {
+        id: u.id,
+        username: u.username,
+        email: u.email ?? null,
+        firstName: u.firstName ?? null,
+        lastName: u.lastName ?? null,
+      };
+    } catch (err) {
+      if (err instanceof AppError && err.statusCode === 404) return null;
+      throw err;
+    }
+  }
+
+  /**
    * List users for the admin /users page. Returns a stable, typed
    * subset of the Keycloak representation — the full KC user record
    * is enormous and contains fields the FE has no use for. Supports
@@ -554,6 +591,22 @@ export class KeycloakAdminService {
     const role = await this.ensureRealmRole(roleName);
     await this.call('DELETE', `/users/${userId}/role-mappings/realm`, {
       body: [{ id: role.id, name: role.name }],
+      parseJson: false,
+    });
+  }
+
+  /**
+   * Set a user's password to a known value (permanent, non-temporary).
+   * Mirrors step 2 of `createUser` and is used by the superadmin bootstrap
+   * to reconcile an EXISTING account's password with
+   * `TELLUS_SUPERADMIN_PASSWORD` — Keycloak's create call sets the password
+   * once, but a later env rotation never reaches an already-created user, so
+   * the credential drifts and direct-grant login starts returning
+   * `invalid_grant`. A 4xx (e.g. password-policy violation) surfaces here.
+   */
+  async resetPassword(userId: string, password: string): Promise<void> {
+    await this.call('PUT', `/users/${userId}/reset-password`, {
+      body: { type: 'password', value: password, temporary: false },
       parseJson: false,
     });
   }

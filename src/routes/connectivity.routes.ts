@@ -8,7 +8,7 @@
 //
 // Mounted globally as:
 //   import connectivityRouter from './routes/connectivity.routes';
-//   app.use('/api/v2/connectivity', connectivityRouter);
+//   app.use('/api/v1/connectivity', connectivityRouter);
 // ---------------------------------------------------------------------------
 
 import {

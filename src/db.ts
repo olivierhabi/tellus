@@ -64,6 +64,26 @@ const pool = new Pool({
     process.env.PG_CONNECT_TIMEOUT_MS || "5000",
     10,
   ),
+
+  // Server-side deadline for any single statement. Without this a single
+  // pathological query (missing index, runaway recompute) holds its pooled
+  // connection indefinitely; a handful of them exhaust `max` and wedge the
+  // whole service. node-postgres forwards these as libpq connection
+  // parameters, so PostgreSQL itself cancels the statement — defence that
+  // does not depend on the client staying connected. Generous default (60s)
+  // tunable via env; set to 0 to disable for analytics-heavy deployments
+  // that drive long queries through this pool.
+  statement_timeout: parseInt(
+    process.env.PG_STATEMENT_TIMEOUT_MS || "60000",
+    10,
+  ),
+  // Releases a connection left holding an open transaction (a leaked
+  // BEGIN without COMMIT/ROLLBACK) so it cannot pin a slot forever. Paired
+  // with `withTransaction`'s poison-on-rollback guard below.
+  idle_in_transaction_session_timeout: parseInt(
+    process.env.PG_IDLE_TX_TIMEOUT_MS || "60000",
+    10,
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -132,7 +152,8 @@ async function query(text: string, values?: unknown[]): Promise<QueryResult> {
     if (!isShutdownRace && !isUniqueViolation) {
       console.error("PostgreSQL query error:", {
         sql: text,
-        params: values,
+        sqlState,
+        paramCount: Array.isArray(values) ? values.length : 0,
         error: msg,
       });
     }
@@ -352,7 +373,8 @@ async function queryWithRetry(
       if (!isUniqueViolation) {
         console.error("PostgreSQL query error:", {
           sql: text,
-          params: values,
+          sqlState: (err as { code?: unknown })?.code,
+          paramCount: Array.isArray(values) ? values.length : 0,
           error: err.message,
         });
       }

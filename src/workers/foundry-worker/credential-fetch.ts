@@ -4,7 +4,7 @@
 // Runs INSIDE the child_process sandbox. Uses the workload JWT injected in
 // env.TELLUS_WORKLOAD_JWT to call the orchestration server's internal
 // unwrap endpoint:
-//   POST /api/v2/connectivity/internal/credentials/unwrap
+//   POST /api/v1/connectivity/internal/credentials/unwrap
 //
 // Body: { connectionRid, name }
 // Returns: { version, fields }  (fields contain user/password/TLS pems)
@@ -42,7 +42,7 @@ export async function fetchCredential(
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(
-      `${URL_BASE}/api/v2/connectivity/internal/credentials/unwrap`,
+      `${URL_BASE}/api/v1/connectivity/internal/credentials/unwrap`,
       {
         method: "POST",
         headers: {

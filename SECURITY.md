@@ -43,6 +43,17 @@ An SBOM is generated on every release via `scripts/generate-sbom.sh` (CycloneDX 
 - Service accounts with minimal IAM.
 - Secrets via ExternalSecrets / CSI only — no Docker image embeds.
 
+## Secret rotation
+
+All runtime secrets are sourced from AWS Secrets Manager via External Secrets
+Operator — never from a baked `.env`. This includes the credential-vault master
+key (`TELLUS_LOCAL_KEK_B64`) and the bootstrap superadmin password, externalized
+via `k8s/external-secrets/kek-superadmin.yaml`. Rotation schedules, the rekey
+procedure for the KEK (which requires envelope re-encryption of all stored
+credentials, not a value swap), and the compromise runbook are defined in
+`docs/SECRETS.md`. Operators must rotate the KEK and superadmin password out of
+their initial bootstrap values before production launch.
+
 ## Audit trail
 
 Every security-relevant action is logged to the hash-chained audit log. See `docs/AUDIT_CONTRACT.md`.
