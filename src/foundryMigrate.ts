@@ -791,14 +791,33 @@ async function migrateFoundry(): Promise<void> {
     const ROOT_SPACE_RID =
       "ri.compass.main.space.00000000-0000-0000-0000-000000000000";
 
-    // Find a stable user to attribute the root space to. If `users` is empty
-    // (fresh install), defer the root-space insert: every later resources row
-    // requires space_rid, but on a fresh install there are no projects to
-    // backfill yet, so deferral is safe. The next migrate run, after the
-    // first user lands, will create the root.
-    const { rows: userRows } = await client.query<{ id: string }>(
+    // Find a stable user to attribute the root space to. The root space's
+    // `resources` row (and the parallel `spaces` row in B2 below) needs a
+    // `created_by`/`updated_by` FK into users(id). On a genuinely fresh
+    // database no user has authenticated yet. The original design deferred
+    // the root-space insert to "the next migrate run, after the first user
+    // lands" — but that run never happens for an ephemeral CI database (which
+    // migrates exactly once) or for a first deploy that creates a project
+    // before the second migrate. The result: every project-creating path
+    // fails its resources.space_rid FK, and the spaces-B2 invariant tests
+    // (which assert the migration materialised the root space) fail too.
+    //
+    // So instead of deferring, mint a stable system user when none exists and
+    // create the root space on this run. Idempotent: ON CONFLICT (email).
+    let { rows: userRows } = await client.query<{ id: string }>(
       `SELECT id FROM users ORDER BY created_at LIMIT 1`,
     );
+    if (userRows.length === 0) {
+      await client.query(
+        `INSERT INTO users (email, password_hash, display_name)
+         VALUES ('system@tellus.local', gen_random_uuid()::text, 'System')
+         ON CONFLICT (email) DO NOTHING`,
+      );
+      ({ rows: userRows } = await client.query<{ id: string }>(
+        `SELECT id FROM users ORDER BY created_at LIMIT 1`,
+      ));
+      console.log("  [ok] B1: minted system user to own the root space (fresh install)");
+    }
     if (userRows.length > 0) {
       const seedUserId = userRows[0].id;
       // Two-step insert: (a) create the root space resources row pointing at

@@ -28,11 +28,14 @@ psql_q() {
     psql -U tellus -d tellus_db -At -c "$1"
 }
 
-TOKEN=$(curl -sSf \
+# Prefer the shared token from run-all.sh (AUTH_TOKEN); re-acquiring per script
+# trips Keycloak brute-force/quick-login throttling (HTTP 400). Fall back to a
+# direct grant for standalone local runs.
+TOKEN="${AUTH_TOKEN:-$(curl -sSf \
   -d "client_id=${KC_CLIENT}" -d "grant_type=password" \
   -d "username=${KC_USER}" -d "password=${KC_PASS}" \
   "${KC_URL}/realms/${KC_REALM}/protocol/openid-connect/token" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')}"
 AUTH="Authorization: Bearer ${TOKEN}"
 JSON="Content-Type: application/json"
 
