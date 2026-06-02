@@ -69,6 +69,9 @@ importers:
       adm-zip:
         specifier: ^0.5.16
         version: 0.5.16
+      ajv:
+        specifier: 8.18.0
+        version: 8.18.0
       bcrypt:
         specifier: ^6.0.0
         version: 6.0.0
