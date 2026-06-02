@@ -29,6 +29,18 @@ An SBOM is generated on every release via `scripts/generate-sbom.sh` (CycloneDX 
 - `grype` or `trivy` image scan
 - Fail CI on Critical or High CVE.
 
+### Suppressed advisories (`pnpm.auditConfig.ignoreGhsas`)
+
+- **GHSA-298w-vvm4-ww55** — "Malware in `@opensearch-project/opensearch`"
+  (npm account takeover, May 2026 Mini Shai-Hulud campaign). The malicious
+  releases were **3.5.3, 3.6.2, 3.7.0, 3.8.0**, published in the 12 May 2026
+  compromise window. We are pinned to the exact **known-good 3.5.1** (predates
+  the compromise), which is the OpenSearch team's recommended remediation
+  (roll back to a known-good version). The advisory is a *blanket* malware flag
+  (`>=0`, no patched version — its only newer releases are the malicious ones),
+  so it cannot be cleared by upgrading and is suppressed here while the version
+  pin holds it at 3.5.1. Re-evaluate before bumping this dependency.
+
 ## Container hardening
 
 - Non-root UID 10001 via `USER` directive.
