@@ -1543,6 +1543,65 @@ async function migrateFoundry(): Promise<void> {
 
     await client.query("COMMIT");
     console.log("\nFoundry migration complete — all tables created successfully.");
+
+    // ------------------------------------------------------------------
+    // Forward SQL migration scan (deferred tail).
+    //
+    // src/migrate.ts runs BEFORE this file and applies the numbered SQL
+    // migrations, but it must DEFER any migration whose dependency tables
+    // are created here (resources, foundry_datasets, pipeline_nodes, …) —
+    // e.g. the connectivity batch (074+). Now that those tables exist, we
+    // apply every ledger-missing forward migration. Idempotent: the shared
+    // schema_migrations_applied ledger means already-applied files are
+    // skipped, and each file runs in its own transaction. A failure here is
+    // fatal (re-thrown) so a genuinely broken migration still surfaces.
+    // ------------------------------------------------------------------
+    const fsMod = await import("fs");
+    const pathMod = await import("path");
+    const migrationsDir = pathMod.join(__dirname, "migrations");
+    const ledgerExists = (
+      await client.query(
+        `SELECT to_regclass('public.schema_migrations_applied') IS NOT NULL AS exists`
+      )
+    ).rows[0].exists;
+
+    if (ledgerExists && fsMod.existsSync(migrationsDir)) {
+      const applied = await client.query<{ migration_name: string }>(
+        "SELECT migration_name FROM schema_migrations_applied"
+      );
+      const appliedSet = new Set(applied.rows.map((r) => r.migration_name));
+
+      const pending = fsMod
+        .readdirSync(migrationsDir)
+        .filter((f: string) => f.endsWith(".sql"))
+        .filter((f: string) => !f.endsWith(".down.sql"))
+        .filter((f: string) => {
+          const m = /^(\d{3})_/.exec(f);
+          if (!m) return false;
+          return parseInt(m[1], 10) >= 33;
+        })
+        .filter((f: string) => !appliedSet.has(f))
+        .sort();
+
+      for (const fname of pending) {
+        const fpath = pathMod.join(migrationsDir, fname);
+        const sql = fsMod.readFileSync(fpath, "utf-8");
+        try {
+          await client.query("BEGIN");
+          await client.query(sql);
+          await client.query(
+            "INSERT INTO schema_migrations_applied(migration_name, applied_at) VALUES ($1, now()) ON CONFLICT DO NOTHING",
+            [fname]
+          );
+          await client.query("COMMIT");
+          console.log(`Applied (deferred tail) ${fname}`);
+        } catch (migErr) {
+          await client.query("ROLLBACK").catch(() => {});
+          const msg = migErr instanceof Error ? migErr.message : String(migErr);
+          throw new Error(`${fname} failed: ${msg}`);
+        }
+      }
+    }
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Migration failed:", err);
