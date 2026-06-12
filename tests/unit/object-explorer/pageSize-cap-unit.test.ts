@@ -100,10 +100,15 @@ describe("T-09 validateSearchQuery — pageSize bounds (C-156, C-157)", () => {
     expect((caught as any)?.validationCode).toBe("PAGE_SIZE_OUT_OF_RANGE");
   });
 
-  it("T-09: $pageSize=0 → PAGE_SIZE_OUT_OF_RANGE (underflow)", async () => {
+  it("T-09: $pageSize=0 → accepted (count-only request)", async () => {
+    const out = await validateSearchQuery({ $pageSize: 0 }, NULL_TYPE);
+    expect(out.$pageSize).toBe(0);
+  });
+
+  it("T-09: $pageSize=-1 → PAGE_SIZE_OUT_OF_RANGE (underflow)", async () => {
     let caught: { code?: string; validationCode?: string } | null = null;
     try {
-      await validateSearchQuery({ $pageSize: 0 }, NULL_TYPE);
+      await validateSearchQuery({ $pageSize: -1 }, NULL_TYPE);
     } catch (e) {
       caught = e as { code?: string; validationCode?: string };
     }

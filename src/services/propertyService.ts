@@ -24,6 +24,8 @@ interface CreateInput {
   structSchema?: unknown;
   isRequired?: boolean;
   ordinal?: number;
+  /** Ordered conditional-formatting rules (FE ConditionalFormattingRule[]). */
+  conditionalFormatting?: unknown;
 }
 
 interface UpdateInput {
@@ -31,6 +33,8 @@ interface UpdateInput {
   description?: string | null;
   isRequired?: boolean;
   ordinal?: number;
+  /** Replace the property's conditional-formatting rules (null clears them). */
+  conditionalFormatting?: unknown;
   // Not updatable — checked and rejected:
   apiName?: string;
   baseType?: string;
@@ -52,6 +56,7 @@ async function create(objectTypeId: string, data: CreateInput) {
     structSchema = null,
     isRequired = false,
     ordinal = 0,
+    conditionalFormatting = null,
   } = data;
 
   // 1. Validate apiName
@@ -123,8 +128,8 @@ async function create(objectTypeId: string, data: CreateInput) {
     const result = await query(
       `INSERT INTO property
          (object_type_id, api_name, display_name, base_type, description,
-          struct_schema, is_required, is_array, ordinal)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          struct_schema, is_required, is_array, ordinal, conditional_formatting)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         objectTypeId,
@@ -136,6 +141,7 @@ async function create(objectTypeId: string, data: CreateInput) {
         isRequired,
         isArray,
         ordinal,
+        conditionalFormatting ? JSON.stringify(conditionalFormatting) : null,
       ]
     );
     return result.rows[0];
@@ -223,11 +229,19 @@ async function update(
     setClauses.push(`ordinal = $${paramIndex++}`);
     values.push(data.ordinal);
   }
+  if (data.conditionalFormatting !== undefined) {
+    setClauses.push(`conditional_formatting = $${paramIndex++}`);
+    values.push(
+      data.conditionalFormatting
+        ? JSON.stringify(data.conditionalFormatting)
+        : null
+    );
+  }
 
   if (setClauses.length === 0) {
     throw appError(
       "INVALID_PARAMETER",
-      "At least one updatable field (displayName, description, isRequired, ordinal) must be provided."
+      "At least one updatable field (displayName, description, isRequired, ordinal, conditionalFormatting) must be provided."
     );
   }
 
@@ -404,6 +418,7 @@ async function createWithClient(
     structSchema = null,
     isRequired = false,
     ordinal = 0,
+    conditionalFormatting = null,
   } = data;
 
   // 1. Validate apiName
@@ -472,8 +487,8 @@ async function createWithClient(
     const result = await client.query(
       `INSERT INTO property
          (object_type_id, api_name, display_name, base_type, description,
-          struct_schema, is_required, is_array, ordinal)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          struct_schema, is_required, is_array, ordinal, conditional_formatting)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         objectTypeId,
@@ -485,6 +500,7 @@ async function createWithClient(
         isRequired,
         isArray,
         ordinal,
+        conditionalFormatting ? JSON.stringify(conditionalFormatting) : null,
       ]
     );
     return result.rows[0];

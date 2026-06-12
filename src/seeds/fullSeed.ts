@@ -18,7 +18,7 @@ import "dotenv/config";
 import fs from "fs";
 import path from "path";
 import { query, pool, getClient } from "../db";
-import { ensureMainBranchId } from "../services/branchContext";
+import { resetEnterpriseOntologyForSeed } from "./seedOntology";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -847,54 +847,12 @@ async function fullSeed(): Promise<void> {
   console.log("=== Full Seed: Rwanda Revenue Authority ===\n");
 
   // -----------------------------------------------------------------------
-  // Step 0: Idempotency — delete existing ontology if present
+  // Step 0+1: "One Enterprise, One Ontology" — populate THE enterprise
+  // ontology. Ensure it exists, reset its content for idempotency, and reuse
+  // its id. The ontology row + `main` branch are preserved.
   // -----------------------------------------------------------------------
-  const existing = await query(
-    "SELECT ontology_id FROM ontology WHERE display_name = $1",
-    [ONTOLOGY_NAME]
-  );
-  if (existing.rows.length > 0) {
-    const oldId = existing.rows[0].ontology_id;
-    console.log(`Deleting existing "${ONTOLOGY_NAME}" (${oldId})...`);
-
-    // Delete interfaces first (they reference the ontology)
-    await query("DELETE FROM interface WHERE ontology_id = $1", [oldId]);
-
-    // Delete link types
-    await query("DELETE FROM link_type WHERE ontology_id = $1", [oldId]);
-
-    // Delete object types cascade
-    const ots = await query(
-      "SELECT object_type_id FROM object_type WHERE ontology_id = $1",
-      [oldId]
-    );
-    for (const ot of ots.rows) {
-      await query("DELETE FROM backing_datasource WHERE object_type_id = $1", [ot.object_type_id]);
-      await query("DELETE FROM property WHERE object_type_id = $1", [ot.object_type_id]);
-      await query("DELETE FROM object_type_interface WHERE object_type_id = $1", [ot.object_type_id]);
-    }
-    await query("DELETE FROM object_type WHERE ontology_id = $1", [oldId]);
-    await query("DELETE FROM ontology WHERE ontology_id = $1", [oldId]);
-    console.log("Deleted.\n");
-  }
-
-  // -----------------------------------------------------------------------
-  // Step 1: Create ontology
-  // -----------------------------------------------------------------------
-  const ontResult = await query(
-    `INSERT INTO ontology (display_name, description)
-     VALUES ($1, $2) RETURNING ontology_id`,
-    [ONTOLOGY_NAME, "Rwanda Revenue Authority tax administration ontology with employees, taxpayers, businesses, declarations, and properties."]
-  );
-  const ontologyId = ontResult.rows[0].ontology_id;
-  console.log(`Created ontology: ${ONTOLOGY_NAME} (${ontologyId})`);
-
-  // Ensure the synthetic `main` branch exists for this fresh ontology.
-  // Every branch-scoped write (link_edit, ontology_edit) requires a
-  // non-null branch_id since migration 040; the lazy-create path in
-  // branchContext keeps the invariant for ontologies created outside
-  // migration 040's backfill window (i.e. anything seeded after boot).
-  await ensureMainBranchId(ontologyId);
+  const ontologyId = await resetEnterpriseOntologyForSeed();
+  console.log(`Seeding "${ONTOLOGY_NAME}" content into enterprise ontology (${ontologyId})`);
 
   // -----------------------------------------------------------------------
   // Step 2: Create data directory

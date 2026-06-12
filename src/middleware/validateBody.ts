@@ -190,6 +190,8 @@ export const CREATE_PROPERTY_SCHEMA: ValidationSchema = {
   structSchema: { required: false, type: "object" },
   isRequired: { required: false, type: "boolean", default: false },
   ordinal: { required: false, type: "number", min: 0, max: 10000, default: 0 },
+  // Ordered conditional-formatting rules (array reports as typeof "object").
+  conditionalFormatting: { required: false, type: "object" },
 };
 
 export const REGISTER_DATASOURCE_SCHEMA: ValidationSchema = {

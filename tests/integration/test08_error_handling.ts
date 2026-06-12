@@ -139,9 +139,7 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("Setup: ontology + Employee type + dataset\n");
 
-  const ontRes = await api("POST", "/api/v1/ontology", {
-    displayName: "Test08 Error Handling",
-  });
+  const ontRes = await api("GET", "/api/v1/ontology/default");
   ontologyId = ontRes.body?.data?.ontologyId;
 
   const otRes = await api(

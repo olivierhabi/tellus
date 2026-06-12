@@ -102,10 +102,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 3.1 Setup: ontology + Product type
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontology", {
-      displayName: "Multi-Transaction Test",
-      description: "Test 03 — append and snapshot",
-    });
+    const ontRes = await api("GET", "/api/v1/ontology/default");
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
     const otRes = await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {

@@ -6,16 +6,17 @@
 // action execution pipeline. This is the main entry point — when someone
 // calls POST /api/v1/actions/:actionTypeApiName/apply, this runs.
 //
-// Palantir's action execution has 8 documented stages. In week 1, we
-// implement 6 of them (skipping submission criteria and side effects):
+// Palantir's action execution has 8 documented stages. All are implemented
+// (FOUNDRY-GAPS §5 closed Stage 3 + the webhook side-effects):
 //
 //   Stage 1: Load the action type definition
 //   Stage 2: Validate parameters
-//   Stage 3: Submission criteria (SKIP in week 1)
+//   Stage 3: Submission criteria (submissionCriteria.ts — gate on inputs/subject)
 //   Stage 4: Compile rules into edits
-//   Stage 5: Writeback webhooks (SKIP in week 1)
+//   Stage 5: (see Stage 7) — webhooks fire post-commit, not pre-commit, by design
 //   Stage 6: Apply edits to edit store + OpenSearch
-//   Stage 7: Side effect webhooks (SKIP in week 1)
+//   Stage 7: Side effects — object_set.changed events + outbound webhooks
+//            (actionWebhooks.ts, post-commit, best-effort, SSRF-guarded)
 //   Stage 8: Audit log (ALWAYS — even on failure)
 //
 // The orchestrator tracks timing for each stage, handles errors at every
@@ -29,6 +30,8 @@ import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import { applyEdits } from "./editApplicator";
+import { evaluateSubmissionCriteria } from "./submissionCriteria";
+import { fireActionWebhooks } from "./actionWebhooks";
 import {
   appendAuditRow,
   logStandaloneFailureAudit,
@@ -38,6 +41,7 @@ import {
   type AuditResult,
 } from "../models/actionAuditLog";
 import { incCounter } from "../services/funnel/metrics";
+import { eventBus } from "../websocket/eventBus";
 import { resolveBranchIdOrMain } from "../services/branchContext";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
@@ -55,6 +59,9 @@ export interface ExecutionContext {
   branchId?: string | null;
   /** Optimistic concurrency: expected __version of the target object (Task 22). */
   expectedVersion?: number;
+  /** Subject roles/groups for §5 submission-criteria evaluation (Stage 3). */
+  roles?: string[];
+  groups?: string[];
 }
 
 /** A single affected object in the result. */
@@ -290,8 +297,36 @@ export async function executeAction(
     const resolvedParameters = validation.resolvedParameters!;
 
     // -----------------------------------------------------------------
-    // STAGE 3: Submission criteria (SKIP in week 1 — allow all)
+    // STAGE 3: Submission criteria (FOUNDRY-GAPS §5)
+    //
+    // Conditions that must hold for the action to be submittable, evaluated
+    // against the resolved parameters and the subject's roles/groups. Runs
+    // after parameter validation, before any edits are produced. null/empty
+    // criteria ⇒ allow-all (backward compatible). CBAC (principals + required
+    // markings) is enforced separately; this gates on the inputs/preconditions.
     // -----------------------------------------------------------------
+    {
+      const submission = evaluateSubmissionCriteria(
+        actionType.submission_criteria,
+        resolvedParameters as Record<string, unknown>,
+        {
+          username: context.executedBy ?? undefined,
+          roles: context.roles ?? [],
+          groups: context.groups ?? [],
+        },
+      );
+      if (!submission.ok) {
+        result.failureType = "unclassified";
+        result.errorMessage = `Submission criteria not met: ${submission.failures.join("; ")}`;
+        pendingError = new OntologyError(
+          result.errorMessage,
+          "SUBMISSION_CRITERIA_NOT_MET",
+          undefined,
+          { failures: submission.failures, executionId },
+        );
+        return result;
+      }
+    }
 
     // -----------------------------------------------------------------
     // STAGE 4: Compile rules into edits
@@ -485,8 +520,69 @@ export async function executeAction(
     }));
 
     // -----------------------------------------------------------------
-    // STAGE 7: Side effect webhooks/notifications (SKIP in week 1)
+    // STAGE 7: real-time object notifications (FOUNDRY-GAPS §5 Object
+    // Storage V2). One `object_set.changed` event per affected object type,
+    // routed by objectTopic so only clients subscribed to that
+    // ontology/object type receive it (see websocket/server.ts).
+    // Best-effort: a broken event bus must never fail a committed action.
     // -----------------------------------------------------------------
+    if (application.success && application.appliedEdits.length > 0) {
+      try {
+        const byType = new Map<string, Array<string | number>>();
+        for (const e of application.appliedEdits) {
+          const pks = byType.get(e.objectType) ?? [];
+          pks.push(e.primaryKey);
+          byType.set(e.objectType, pks);
+        }
+        for (const [objectType, primaryKeys] of byType) {
+          eventBus.emit('ws:event', {
+            event: 'object_set.changed',
+            projectId: null,
+            objectTopic: `${ontologyId}:${objectType}`,
+            payload: {
+              ontologyId,
+              objectType,
+              primaryKeys,
+              actionTypeApiName,
+              executionId,
+              branchId: resolvedBranchId,
+              result: result.result,
+              changedAt: new Date().toISOString(),
+            },
+          });
+        }
+      } catch (emitErr) {
+        console.warn(
+          `[action:${actionTypeApiName}] object_set.changed emission failed (non-fatal): ${(emitErr as Error).message}`,
+        );
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // STAGE 5/7 (FOUNDRY-GAPS §5): side-effect webhooks. Fired POST-COMMIT
+    // (edits are durable) so a webhook failure can never roll back a
+    // committed action; delivery is best-effort with an SSRF egress guard.
+    // null/empty side_effects ⇒ no-op. Awaited so the audit/return reflect
+    // that delivery was attempted, but failures are swallowed inside.
+    // -----------------------------------------------------------------
+    if (application.success && actionType.side_effects != null) {
+      try {
+        await fireActionWebhooks(actionType.side_effects, {
+          executionId,
+          actionTypeApiName,
+          ontologyId,
+          branchId: resolvedBranchId,
+          result: result.result,
+          executedBy: context.executedBy || "system",
+          affectedObjects: result.affectedObjects,
+          firedAt: new Date().toISOString(),
+        });
+      } catch (whErr) {
+        console.warn(
+          `[action:${actionTypeApiName}] webhook dispatch error (non-fatal): ${(whErr as Error).message}`,
+        );
+      }
+    }
 
     return result;
   } catch (err: unknown) {

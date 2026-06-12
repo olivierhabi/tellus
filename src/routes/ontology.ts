@@ -10,14 +10,8 @@ import ontologyService from "../services/ontologyService";
 import {
   formatOntology,
   sendSuccess,
-  sendCreated,
-  sendNoContent,
   sendError,
 } from "../utils/responseFormatter";
-import {
-  validateBody,
-  CREATE_ONTOLOGY_SCHEMA,
-} from "../middleware/validateBody";
 import { requireOntologyWrite, requireOntologyAdmin } from "../middleware/requireRole";
 
 const router = Router();
@@ -35,31 +29,25 @@ const router = Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ---------------------------------------------------------------------------
-// Route 1: POST /api/v1/ontology — Create a new ontology
+// "One Enterprise, One Ontology" — the deployment has exactly one ontology,
+// bootstrapped by migration and protected by a DB singleton guard. The
+// lifecycle endpoints that would create or destroy an ontology are frozen and
+// return 409 ONTOLOGY_SINGLETON. Read + metadata-update endpoints stay live.
+// ---------------------------------------------------------------------------
+
+const SINGLETON_MESSAGE =
+  "This deployment uses a single enterprise ontology (One Enterprise, One Ontology). " +
+  "Ontologies cannot be created, imported, or deleted.";
+
+// ---------------------------------------------------------------------------
+// Route 1: POST /api/v1/ontology — FROZEN (no new ontologies)
 // ---------------------------------------------------------------------------
 
 router.post(
   "/api/v1/ontology",
   requireOntologyWrite,
-  validateBody(CREATE_ONTOLOGY_SCHEMA),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { displayName, description } = req.body;
-
-      const row = await ontologyService.create({
-        displayName: displayName.trim(),
-        description: description ?? null,
-        createdBy: (req as any).user?.id || "system",
-      });
-
-      const formatted = formatOntology(row, 0);
-      sendCreated(res, formatted);
-    } catch (err: any) {
-      if (err.code === "ONTOLOGY_ALREADY_EXISTS") {
-        return sendError(res, "ONTOLOGY_ALREADY_EXISTS", err.message);
-      }
-      next(err);
-    }
+  async (_req: Request, res: Response) => {
+    sendError(res, "ONTOLOGY_SINGLETON", SINGLETON_MESSAGE);
   }
 );
 
@@ -102,23 +90,8 @@ router.get(
 router.post(
   "/api/v1/ontology/import",
   requireOntologyWrite,
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const result = await ontologyService.importOntology(req.body);
-
-      const formatted = formatOntology(result, result.object_type_count);
-      sendCreated(res, formatted);
-    } catch (err: any) {
-      if (
-        err.code === "VALIDATION_FAILED" ||
-        err.code === "INVALID_API_NAME" ||
-        err.code === "INVALID_BASE_TYPE" ||
-        err.code === "OBJECT_TYPE_ALREADY_EXISTS"
-      ) {
-        return sendError(res, err.code, err.message);
-      }
-      next(err);
-    }
+  async (_req: Request, res: Response) => {
+    sendError(res, "ONTOLOGY_SINGLETON", SINGLETON_MESSAGE);
   }
 );
 
@@ -253,26 +226,9 @@ router.put(
 router.delete(
   "/api/v1/ontology/:ontologyId",
   requireOntologyAdmin,
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { ontologyId } = req.params;
-
-      if (!UUID_RE.test(ontologyId)) {
-        return sendError(
-          res,
-          "INVALID_PARAMETER",
-          "ontologyId must be a valid UUID."
-        );
-      }
-
-      await ontologyService.delete(ontologyId);
-      sendNoContent(res);
-    } catch (err: any) {
-      if (err.code === "ONTOLOGY_NOT_FOUND") {
-        return sendError(res, "ONTOLOGY_NOT_FOUND", err.message);
-      }
-      next(err);
-    }
+  async (_req: Request, res: Response) => {
+    // The single enterprise ontology cannot be deleted.
+    sendError(res, "ONTOLOGY_SINGLETON", SINGLETON_MESSAGE);
   }
 );
 

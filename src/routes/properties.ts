@@ -130,6 +130,7 @@ router.post(
         structSchema,
         isRequired,
         ordinal,
+        conditionalFormatting,
         config,
       } = req.body;
 
@@ -144,6 +145,7 @@ router.post(
         structSchema,
         isRequired,
         ordinal,
+        conditionalFormatting,
       });
 
       const formatted = formatProperty(row);

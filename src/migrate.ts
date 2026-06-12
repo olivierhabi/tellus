@@ -1463,6 +1463,14 @@ async function migrate(): Promise<void> {
       `ALTER TABLE property ADD COLUMN IF NOT EXISTS marking_required TEXT`
     );
 
+    // Property.conditional_formatting — ordered list of conditional-formatting
+    // rules (first match wins, "Always true" as fallback) authored in the
+    // Ontology Manager and consumed by Workshop's Object Table. JSONB blob of
+    // the FE `ConditionalFormattingRule[]` shape; null/empty means no rules.
+    await client.query(
+      `ALTER TABLE property ADD COLUMN IF NOT EXISTS conditional_formatting JSONB`
+    );
+
     console.log("Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)");
 
     // ------------------------------------------------------------------

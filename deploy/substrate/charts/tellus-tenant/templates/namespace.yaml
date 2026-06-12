@@ -1,0 +1,29 @@
+{{- if .Values.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "tellus-tenant.namespace" . }}
+  labels:
+    {{- include "tellus-tenant.labels" . | nindent 4 }}
+    # Pod Security Standards: restricted enforced (proven in verify-substrate.sh §3).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+{{- end }}
+{{- if and .Values.resourceQuota.enabled }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "tellus-tenant.fullname" . }}-quota
+  namespace: {{ include "tellus-tenant.namespace" . }}
+  labels:
+    {{- include "tellus-tenant.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ .Values.resourceQuota.requestsCpu | quote }}
+    requests.memory: {{ .Values.resourceQuota.requestsMemory | quote }}
+    limits.cpu: {{ .Values.resourceQuota.limitsCpu | quote }}
+    limits.memory: {{ .Values.resourceQuota.limitsMemory | quote }}
+    pods: {{ .Values.resourceQuota.pods | quote }}
+{{- end }}

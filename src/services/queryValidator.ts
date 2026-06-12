@@ -525,6 +525,71 @@ export async function validateAggregateQuery(
         );
       }
     }
+
+    // --- Optional nested metric (Pie Chart aggregation method) ---
+    // A bucketing aggregation may carry a metric sub-aggregation whose value
+    // is computed per bucket. Only `terms` supports it today.
+    if (agg.metric !== undefined && agg.metric !== null) {
+      if (agg.type !== "terms") {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': a nested 'metric' is only supported on 'terms' aggregations.`
+        );
+      }
+      const m = agg.metric;
+      const validMetricTypes = ["count", "sum", "avg", "min", "max", "cardinality"];
+      if (!m.type || typeof m.type !== "string" || !validMetricTypes.includes(m.type)) {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': metric.type must be one of ${validMetricTypes.join(", ")}.`
+        );
+      }
+      // Every metric except `count` aggregates over a field.
+      if (m.type !== "count") {
+        if (!m.field || typeof m.field !== "string") {
+          throw validationError(
+            "INVALID_AGGREGATION",
+            `Aggregation '${agg.name}': metric.type '${m.type}' requires a 'metric.field'.`
+          );
+        }
+        const mMeta = await resolveProperty(objectTypeApiName, m.field);
+        const mbt = mMeta.baseType.endsWith("_array")
+          ? mMeta.baseType.replace("_array", "")
+          : mMeta.baseType;
+        const NUMERIC = new Set(["integer", "long", "double", "float", "byte", "short", "decimal"]);
+        const DATE = new Set(["date", "timestamp"]);
+        if ((m.type === "sum" || m.type === "avg") && !NUMERIC.has(mbt)) {
+          throw validationError(
+            "INCOMPATIBLE_FILTER",
+            `Aggregation '${agg.name}': metric '${m.type}' requires a numeric field, but '${m.field}' is of type '${mMeta.baseType}'.`
+          );
+        }
+        if ((m.type === "min" || m.type === "max") && !NUMERIC.has(mbt) && !DATE.has(mbt)) {
+          throw validationError(
+            "INCOMPATIBLE_FILTER",
+            `Aggregation '${agg.name}': metric '${m.type}' requires a numeric or date field, but '${m.field}' is of type '${mMeta.baseType}'.`
+          );
+        }
+      }
+    }
+
+    // --- Optional secondary group-by ("segment by"/series, Chart XY) ---
+    if (agg.groupBy !== undefined && agg.groupBy !== null) {
+      if (agg.type !== "terms") {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': a nested 'groupBy' is only supported on 'terms' aggregations.`
+        );
+      }
+      if (!agg.groupBy.field || typeof agg.groupBy.field !== "string") {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': groupBy.field is required.`
+        );
+      }
+      // Resolve to confirm the property exists (throws if unknown).
+      await resolveProperty(objectTypeApiName, agg.groupBy.field);
+    }
   }
 
   return body;
@@ -541,14 +606,18 @@ function validatePageSize(value: unknown, largePage: boolean = false): number {
   }
   const ceiling = largePage ? MAX_EXPLORER_PAGE_SIZE_OPT_IN : MAX_EXPLORER_PAGE_SIZE;
   const num = Number(value);
-  if (!Number.isInteger(num) || num < 1 || num > ceiling) {
+  // `$pageSize: 0` is a valid "count-only" request — callers that only need
+  // `totalCount` (e.g. the object-type overview's live-count reconciliation)
+  // ask for zero rows. The executor still returns an accurate `totalCount`
+  // (track_total_hits) and an empty `data` array.
+  if (!Number.isInteger(num) || num < 0 || num > ceiling) {
     incCounter("tellus_pagination_rejected_total", {
-      reason: !Number.isInteger(num) ? "non_integer" : num < 1 ? "underflow" : "overflow",
+      reason: !Number.isInteger(num) ? "non_integer" : num < 0 ? "underflow" : "overflow",
       large_page: largePage ? "true" : "false",
     });
     throw validationError(
       "PAGE_SIZE_OUT_OF_RANGE",
-      `$pageSize must be an integer between 1 and ${ceiling}. Got: ${value}.`,
+      `$pageSize must be an integer between 0 and ${ceiling}. Got: ${value}.`,
       "$pageSize"
     );
   }
@@ -669,12 +738,7 @@ export async function runSelfTests(): Promise<void> {
     // 1. pageSize validation
     assert(validatePageSize(undefined) === 100, "Default pageSize is 100");
     assert(validatePageSize(50) === 50, "pageSize 50 accepted");
-
-    await expectThrow(
-      () => Promise.resolve(validatePageSize(0)),
-      "pageSize 0 rejected",
-      "$pageSize must be an integer"
-    );
+    assert(validatePageSize(0) === 0, "pageSize 0 accepted (count-only)");
 
     await expectThrow(
       () => Promise.resolve(validatePageSize(-1)),

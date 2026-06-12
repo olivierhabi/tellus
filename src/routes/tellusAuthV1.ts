@@ -59,10 +59,10 @@ import {
   type KnownSettingKey,
 } from '../services/systemSettingsService';
 import { getKeycloakRealm } from '../auth/keycloakConfig'; // F-P4-26
+import { SESSION_MAX_AGE_SECONDS, SESSION_IDLE_TIMEOUT_SECONDS } from '../config/sessionConfig';
 
 const TELLUS_COOKIE = 'TELLUS_TOKEN';
 const TELLUS_REFRESH_COOKIE = 'TELLUS_REFRESH';
-const TELLUS_COOKIE_MAX_AGE_SECONDS = 57600; // 16h, matching spec
 
 const router = Router();
 
@@ -119,11 +119,20 @@ const loginLimiter = rateLimit({
 
 function setSessionCookies(res: Response, accessToken: string, refreshToken?: string) {
   const isProd = process.env.NODE_ENV === 'production';
+  // Both cookies share the single configured session window
+  // (TELLUS_SESSION_MAX_AGE). The access cookie is the edge gate's
+  // liveness signal and the refresh cookie is what silentRefresh()
+  // rotates against — keeping their Max-Age identical (and matched to
+  // the FE marker via the `sessionMaxAgeSeconds` we echo back) means a
+  // tab opened any time inside the window always finds a cookie to act
+  // on, instead of the gate lapsing while the session is still
+  // refreshable. See src/config/sessionConfig.ts.
+  const maxAgeMs = SESSION_MAX_AGE_SECONDS * 1000;
   res.cookie(TELLUS_COOKIE, accessToken, {
     httpOnly: true,
     secure: isProd,
     sameSite: isProd ? 'strict' : 'lax',
-    maxAge: TELLUS_COOKIE_MAX_AGE_SECONDS * 1000,
+    maxAge: maxAgeMs,
     path: '/',
   });
   if (refreshToken) {
@@ -131,7 +140,7 @@ function setSessionCookies(res: Response, accessToken: string, refreshToken?: st
       httpOnly: true,
       secure: isProd,
       sameSite: isProd ? 'strict' : 'lax',
-      maxAge: 30 * 24 * 3600 * 1000,
+      maxAge: maxAgeMs,
       path: '/api/v1/auth',
     });
   }
@@ -295,6 +304,8 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
         accessToken: result.accessToken,
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
+        sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
         hasPasskey,
         requiresPasskeyEnrollment: !hasPasskey,
       },
@@ -455,6 +466,8 @@ router.post('/refresh', async (req: Request, res: Response) => {
         accessToken: result.accessToken,
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
+        sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
       },
     });
   } catch (err) {
@@ -644,6 +657,8 @@ router.post('/enroll/passkey/verify', loginLimiter, async (req: Request, res: Re
         tokenType: 'Bearer',
         accessToken: resolved.stashedAccessToken,
         tokenInfo: tellusAuthService.toTokenInfo(claims),
+        sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
         credential: {
           credentialId: registerResult.credentialId,
           userLabel: registerResult.userLabel,
@@ -682,6 +697,8 @@ async function completeMfaLogin(
       tokenType: 'Bearer',
       accessToken: challenge.accessToken,
       tokenInfo: tellusAuthService.toTokenInfo(claims),
+      sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+      idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
       hasPasskey,
       requiresPasskeyEnrollment: !hasPasskey,
     },

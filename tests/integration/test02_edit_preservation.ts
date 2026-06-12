@@ -91,10 +91,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 2.1 Setup: ontology + Employee type + upload + register + reindex
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontology", {
-      displayName: "Edit Preservation Test",
-      description: "Test 02 — edit preservation",
-    });
+    const ontRes = await api("GET", "/api/v1/ontology/default");
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
     await api("POST", `/api/v1/ontology/${ontologyId}/objectTypes/batch`, {

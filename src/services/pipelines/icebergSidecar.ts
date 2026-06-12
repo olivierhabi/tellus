@@ -58,6 +58,36 @@ export interface RollbackInput extends SidecarCommonConfig {
   targetSnapshotId: number | string;
 }
 
+// FOUNDRY-GAPS §6 — atomic multi-table (cross-dataset) commit. One catalog
+// transaction; every table advances to its new snapshot or none do.
+export interface MultiTableCommitTable {
+  namespace: string;
+  table: string;
+  parquetFiles: string[];
+}
+export interface MultiTableCommitConfig {
+  warehouse?: string;
+  lakekeeperUrl?: string;
+  s3Endpoint?: string;
+  s3Region?: string;
+  s3AccessKeyId?: string;
+  s3SecretAccessKey?: string;
+}
+export interface MultiTableCommitInput extends MultiTableCommitConfig {
+  tables: MultiTableCommitTable[];
+}
+export interface MultiTableCommitResult {
+  committed: boolean;
+  table_count: number;
+  tables: Array<{
+    namespace: string;
+    table: string;
+    prior_snapshot_id: string | null;
+    snapshot_id: string | null;
+    location: string;
+  }>;
+}
+
 export interface SnapshotsInput extends SidecarCommonConfig {}
 
 export interface ScanAsOfInput extends SidecarCommonConfig {
@@ -166,6 +196,65 @@ export async function icebergAppend(
   throw toAppError(lastError, "ICEBERG_OCC_EXHAUSTED");
 }
 
+/**
+ * FOUNDRY-GAPS §6 — atomically append to MULTIPLE Iceberg tables in ONE
+ * catalog transaction (Iceberg REST `transactions/commit`, which Lakekeeper
+ * implements). Either every table advances to its new snapshot or none do.
+ * Carries the same OCC-retry envelope as `icebergAppend`: a rejected batch
+ * (409 / requirement conflict) backs off and retries the whole set.
+ */
+export async function icebergMultiTableCommit(
+  input: MultiTableCommitInput,
+  options: AppendOptions = {},
+): Promise<MultiTableCommitResult & { attempts: number }> {
+  if (!input.tables || input.tables.length < 2) {
+    throw toAppError(
+      new Error("multi-table commit requires at least two tables (use icebergAppend for one)"),
+      "ICEBERG_MULTI_TABLE_TOO_FEW",
+    );
+  }
+  // The action reads `tables` + the catalog config; commonEnv needs a
+  // namespace/table pair only to shape the catalog env, so borrow the first.
+  const catalogEnv = commonEnv({
+    ...input,
+    namespace: input.tables[0].namespace,
+    table: input.tables[0].table,
+  });
+  const tables = input.tables.map((t) => ({
+    namespace: t.namespace,
+    table: t.table,
+    parquet_files: t.parquetFiles,
+  }));
+
+  const maxAttempts = options.maxAttempts ?? 5;
+  const base = options.baseDelayMs ?? 200;
+  let attempts = 0;
+  let lastError: Error | null = null;
+  while (attempts < maxAttempts) {
+    attempts++;
+    try {
+      const res = await invoke<MultiTableCommitResult>("multi_table_commit", {
+        ...catalogEnv,
+        tables,
+      });
+      return { ...res, attempts };
+    } catch (err) {
+      lastError = err as Error;
+      const msg = (lastError.message ?? "").toLowerCase();
+      const retriable =
+        msg.includes("commitfailed") ||
+        msg.includes("conflict") ||
+        msg.includes("409") ||
+        msg.includes("concurrent") ||
+        msg.includes("rejected");
+      if (!retriable) throw toAppError(err);
+      const delay = base * Math.pow(2, attempts - 1) + Math.floor(Math.random() * base);
+      await sleep(delay);
+    }
+  }
+  throw toAppError(lastError, "ICEBERG_OCC_EXHAUSTED");
+}
+
 export async function icebergRollback(
   input: RollbackInput,
 ): Promise<RollbackResult> {
@@ -267,6 +356,102 @@ export async function icebergUpdateSchema(
   return invoke("update_schema", {
     ...commonEnv(input),
     operations: input.operations,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// FOUNDRY-GAPS §6 — Iceberg branches & tags (Foundry "dataset branches"
+// analog). Refs are snapshot-ref entries in the Iceberg table metadata;
+// all mutations commit through PyIceberg's ManageSnapshots API.
+// ---------------------------------------------------------------------------
+
+export interface IcebergRefRow {
+  name: string;
+  type: "branch" | "tag" | null;
+  snapshot_id: string;
+  max_ref_age_ms: number | null;
+  max_snapshot_age_ms: number | null;
+  min_snapshots_to_keep: number | null;
+}
+
+export interface CreateRefInput extends SidecarCommonConfig {
+  refName: string;
+  /** Defaults to the table's current snapshot when omitted. */
+  snapshotId?: number | string;
+}
+
+export interface DropRefInput extends SidecarCommonConfig {
+  refName: string;
+}
+
+export interface FastForwardInput extends SidecarCommonConfig {
+  branchName: string;
+  toRef: string;
+}
+
+export interface CreateRefResult {
+  ref: string;
+  type: "branch" | "tag";
+  snapshotId: string;
+}
+
+export interface ListRefsResult {
+  refs: IcebergRefRow[];
+}
+
+export interface DropRefResult {
+  dropped: string;
+  type: "branch" | "tag" | null;
+}
+
+export interface FastForwardResult {
+  branch: string;
+  snapshotId: string;
+  fastForwarded: boolean;
+}
+
+export async function icebergCreateBranch(
+  input: CreateRefInput,
+): Promise<CreateRefResult> {
+  return invoke("create_branch", {
+    ...commonEnv(input),
+    branch_name: input.refName,
+    ...(input.snapshotId !== undefined ? { snapshot_id: input.snapshotId } : {}),
+  });
+}
+
+export async function icebergCreateTag(
+  input: CreateRefInput,
+): Promise<CreateRefResult> {
+  return invoke("create_tag", {
+    ...commonEnv(input),
+    tag_name: input.refName,
+    ...(input.snapshotId !== undefined ? { snapshot_id: input.snapshotId } : {}),
+  });
+}
+
+export async function icebergListRefs(
+  input: SnapshotsInput,
+): Promise<ListRefsResult> {
+  return invoke("list_refs", commonEnv(input));
+}
+
+export async function icebergDropRef(
+  input: DropRefInput,
+): Promise<DropRefResult> {
+  return invoke("drop_ref", {
+    ...commonEnv(input),
+    ref_name: input.refName,
+  });
+}
+
+export async function icebergFastForward(
+  input: FastForwardInput,
+): Promise<FastForwardResult> {
+  return invoke("fast_forward", {
+    ...commonEnv(input),
+    branch_name: input.branchName,
+    to_ref: input.toRef,
   });
 }
 

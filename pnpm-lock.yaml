@@ -55,16 +55,19 @@ importers:
         specifier: ^4.5.0
         version: 4.5.0
       '@temporalio/activity':
-        specifier: ^1.11.6
+        specifier: 1.16.0
         version: 1.16.0
       '@temporalio/client':
-        specifier: ^1.11.6
+        specifier: 1.16.0
+        version: 1.16.0
+      '@temporalio/common':
+        specifier: 1.16.0
         version: 1.16.0
       '@temporalio/worker':
-        specifier: ^1.11.6
+        specifier: 1.16.0
         version: 1.16.0(esbuild@0.27.3)(tslib@2.8.1)
       '@temporalio/workflow':
-        specifier: ^1.11.6
+        specifier: 1.16.0
         version: 1.16.0
       adm-zip:
         specifier: ^0.5.16
@@ -114,6 +117,9 @@ importers:
       knex:
         specifier: ^3.1.0
         version: 3.1.0(pg@8.20.0)
+      libpg-query:
+        specifier: ^17.7.3
+        version: 17.7.3
       lru-cache:
         specifier: ^11.2.7
         version: 11.2.7
@@ -1448,6 +1454,9 @@ packages:
   '@peculiar/x509@1.14.3':
     resolution: {integrity: sha512-C2Xj8FZ0uHWeCXXqX5B4/gVFQmtSkiuOolzAgutjTfseNOHT3pUjljDZsTSxXFGgio54bCzVFqmEOUrIVk8RDA==}
     engines: {node: '>=20.0.0'}
+
+  '@pgsql/types@17.6.2':
+    resolution: {integrity: sha512-1UtbELdbqNdyOShhrVfSz3a1gDi0s9XXiQemx+6QqtsrXe62a6zOGU+vjb2GRfG5jeEokI1zBBcfD42enRv0Rw==}
 
   '@pkgjs/parseargs@0.11.0':
     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
@@ -3752,6 +3761,9 @@ packages:
   levn@0.4.1:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
     engines: {node: '>= 0.8.0'}
+
+  libpg-query@17.7.3:
+    resolution: {integrity: sha512-lHKBvoWRsXt/9bJxpAeFxkLu0CA6tELusqy3o1z6/DwGXSETxhKJDaNlNdrNV8msvXDLBhpg/4RE/fKKs5rYFA==}
 
   lightningcss-android-arm64@1.32.0:
     resolution: {integrity: sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==}
@@ -7133,6 +7145,8 @@ snapshots:
       tslib: 2.8.1
       tsyringe: 4.10.0
 
+  '@pgsql/types@17.6.2': {}
+
   '@pkgjs/parseargs@0.11.0':
     optional: true
 
@@ -9758,6 +9772,10 @@ snapshots:
     dependencies:
       prelude-ls: 1.2.1
       type-check: 0.4.0
+
+  libpg-query@17.7.3:
+    dependencies:
+      '@pgsql/types': 17.6.2
 
   lightningcss-android-arm64@1.32.0:
     optional: true

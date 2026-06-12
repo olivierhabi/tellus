@@ -379,9 +379,15 @@ function checkWidgetOutputInvariant(
 
 const WIDGET_INPUT_TYPES = new Map<string, string>([
   ["objectTable:objectSet", "objectSet"],
+  // Object List renders an object set as cards; same binding contract as the
+  // Object Table (see widgets-object-list docs).
+  ["objectList:objectSet", "objectSet"],
   ["filterList:objectSet", "objectSet"],
   ["chartPie:objectSet", "objectSet"],
   ["chartXY:objectSet", "objectSet"],
+  // Vega Chart binds an object set as its chart data source (object rows or a
+  // group-by aggregation); see widgets-vega-chart docs.
+  ["vegaChart:objectSet", "objectSet"],
   ["objectSetTitle:object", "object"],
   ["objectSetTitle:objectSet", "objectSet"],
 ]);
@@ -389,9 +395,16 @@ const WIDGET_INPUT_TYPES = new Map<string, string>([
 const WIDGET_OUTPUT_TYPES = new Map<string, string>([
   ["objectTable:activeObject", "object"],
   ["objectTable:selectedObjects", "objectSet"],
+  // Object List emits the same selection outputs as the Object Table: a single
+  // active object and (with multi-select) the set of selected objects.
+  ["objectList:activeObject", "object"],
+  ["objectList:selectedObjects", "objectSet"],
   ["filterList:filter", "objectSetFilter"],
   ["chartPie:selectionFilter", "objectSetFilter"],
   ["chartXY:selectionFilter", "objectSetFilter"],
+  // Vega Chart forwards a Vega-Lite selection parameter as an object-set
+  // filter ("selection as filter"); see widgets-vega-chart docs.
+  ["vegaChart:selectionFilter", "objectSetFilter"],
 ]);
 
 function buildWidgetTree(def: ModuleDoc): CompiledWidgetTreeNode | null {

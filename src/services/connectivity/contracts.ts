@@ -212,6 +212,18 @@ export const CodeImportSettings = z.object({
 });
 export type CodeImportSettings = z.infer<typeof CodeImportSettings>;
 
+/** CDC defaults for this source — the transaction isolation level and any
+ *  advanced Debezium property overrides edited on the "CDC syncs" tab. */
+export const CdcSettings = z.object({
+  isolationLevel: z
+    .enum(["snapshot", "read_committed", "read_uncommitted", "repeatable_read", "serializable"])
+    .default("snapshot"),
+  debeziumProperties: z
+    .array(z.object({ key: z.string(), value: z.string() }))
+    .default([]),
+});
+export type CdcSettings = z.infer<typeof CdcSettings>;
+
 export const ConnectionSettings = z.object({
   export: ExportSettings.default({
     exportsEnabled: false,
@@ -235,6 +247,10 @@ export const ConnectionSettings = z.object({
     .regex(/^ri\.[a-z]/, "outputFolderRid must be a resource identifier (ri.…)")
     .nullable()
     .optional(),
+  /** Source-level CDC defaults edited on the "CDC syncs" tab. */
+  cdc: CdcSettings.optional(),
+  /** Free-form labels shown on the source Overview. */
+  tags: z.array(z.string()).optional(),
 });
 export type ConnectionSettings = z.infer<typeof ConnectionSettings>;
 

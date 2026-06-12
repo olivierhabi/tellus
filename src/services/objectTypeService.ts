@@ -486,9 +486,41 @@ async function remove(ontologyId: string, apiName: string): Promise<void> {
     objectTypeId,
   ]);
 
+  // 4. Best-effort downstream cleanup so deleting an object type doesn't leave
+  //    a zombie funnel workflow retrying against a missing type, or an orphaned
+  //    OpenSearch index serving stale rows. The row is already gone, so these
+  //    failures MUST NOT roll back or throw — log and continue.
+  await cleanupAfterDelete(apiName);
+
   console.log(
     `Deleted object type ${apiName} (${objectTypeId}) with all cascaded resources`
   );
+}
+
+/**
+ * Terminate the funnel workflow and drop the OpenSearch index for a deleted
+ * object type. Both are best-effort and isolated so one failure doesn't block
+ * the other or the delete.
+ */
+async function cleanupAfterDelete(apiName: string): Promise<void> {
+  try {
+    const { terminateTemporalWorkflow } = await import(
+      "./funnel/temporal/worker"
+    );
+    await terminateTemporalWorkflow(apiName, "object type deleted");
+  } catch (err) {
+    console.warn(
+      `[objectType.delete] funnel workflow terminate failed for ${apiName}: ${(err as Error).message}`
+    );
+  }
+  try {
+    const { deleteIndex } = await import("./opensearch/indexLifecycleManager");
+    await deleteIndex(apiName);
+  } catch (err) {
+    console.warn(
+      `[objectType.delete] OpenSearch index drop failed for ${apiName}: ${(err as Error).message}`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
