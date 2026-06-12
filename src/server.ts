@@ -39,6 +39,7 @@ import geoRouter from "./routes/geo";
 import comparisonsRouter from "./routes/comparisons";
 import migrationManagerRouter from "./routes/migrationManager";
 import governanceRouter from "./routes/governance";
+import purposesRouter from "./routes/purposes";
 import { securityContext } from "./middleware/securityContext";
 import { resolveOntologyAlias } from "./middleware/resolveOntologyAlias";
 import datasourceRouter, { suggestMappingRouter } from "./routes/datasources";
@@ -54,6 +55,7 @@ import editsRouter from "./routes/edits";
 import reindexStatusRouter from "./routes/reindexStatus";
 import dataPreviewRouter from "./routes/dataPreview";
 import datasetRouter from "./routes/datasets";
+import { foundryDatasetsV1Router } from "./routes/foundryDatasetsV1";
 import reindexRouter from "./routes/reindex";
 import {
   resolveObjectTypeIdToApiName,
@@ -93,6 +95,7 @@ import {
   stopIcebergMaintenance,
 } from "./services/pipelines/icebergMaintenance";
 import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
+import { stopHealthProber } from "./services/connectivity/health/prober";
 import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
 
 // Background boot tasks (Lakekeeper, ClickHouse, superadmin seed, …) are
@@ -547,21 +550,24 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
   );
 }
 
-// API routers — spec cypress tests hit `.../ontology/default/...`; rewrite
-// the URL path so every downstream router sees the real UUID. This is a
-// string substitution on `req.url` so Express re-parses params for us.
-const ALIAS_RE = /^(\/api\/v1\/ontology)\/(default|main|primary)(\/|$)/;
+// "One Enterprise, One Ontology" — collapse ANY ontology identifier in the
+// path (a real UUID, a symbolic alias like `default`/`main`/`primary`, or any
+// other value) onto the single canonical ontology, so every downstream router
+// operates on the one ontology. We rewrite `req.url` so Express re-parses the
+// param for us. `import` is excluded: it is a lifecycle sub-route of the
+// ontology router, not an ontology identifier.
 app.use(async (req, _res, next) => {
-  const m = req.url.match(ALIAS_RE);
-  if (!m) return next();
+  // Cheap pre-check: only ontology-scoped sub-paths can be collapsed. The bare
+  // `/api/v1/ontology` (list/create) has no trailing slash and is skipped.
+  if (!req.url.startsWith("/api/v1/ontology/")) return next();
   try {
-    const { query } = await import("./db");
-    const result = await query(
-      "SELECT ontology_id FROM ontology ORDER BY created_at ASC LIMIT 1"
+    const { getOntologyId, collapseOntologyUrl } = await import(
+      "./services/ontology/canonicalOntology"
     );
-    if (result.rowCount && result.rowCount > 0) {
-      const real = result.rows[0].ontology_id as string;
-      req.url = req.url.replace(ALIAS_RE, `$1/${real}$3`);
+    const canonical = await getOntologyId();
+    if (canonical) {
+      const rewritten = collapseOntologyUrl(req.url, canonical);
+      if (rewritten) req.url = rewritten;
     }
   } catch {
     // fall through — route will return its own error
@@ -626,6 +632,11 @@ app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/index",
   reindexStatusRouter
 );
+// Foundry-parity Datasets API (create + get + preview), keyed by dataset RID.
+// Mounted FIRST so its bare POST and its `ri.foundry.main.dataset.*` GET routes
+// win; non-RID (UUID) requests fall through (next()) to the legacy upload /
+// object-explorer datasets routers below, which keep working unchanged.
+app.use("/api/v1/datasets", foundryDatasetsV1Router);
 app.use("/api/v1/datasets", datasetRouter);
 app.use("/api/v1/datasets", dataPreviewRouter);
 
@@ -675,6 +686,9 @@ app.use(
 // branches it expects. Errors are logged + swallowed: a partial rehydrate
 // must not block the server from accepting traffic.
 void (async () => {
+  // Skip if a shutdown is already underway — rehydrate is a best-effort boot
+  // task; running it against a draining pool just logs a spurious fatal.
+  if (isShuttingDown) return;
   try {
     const r = await rehydrateInMemoryStemma({
       pool,
@@ -818,6 +832,10 @@ app.use("/api/v1/ontology/:ontologyId/geo", geoRouter);
 app.use("/api/v1/ontology/:ontologyId/comparisons", comparisonsRouter);
 app.use("/api/v1/ontology/:ontologyId/migrations", migrationManagerRouter);
 app.use("/api/v1/ontology/:ontologyId/governance", governanceRouter);
+// FOUNDRY-GAPS §8 — purpose-based access control: purpose catalogue + grants.
+// Enforcement on data-plane reads is via purposeGate middleware (env-gated
+// by TELLUS_PURPOSE_ENFORCEMENT=on; default off).
+app.use("/api/v1/ontology/:ontologyId/purposes", purposesRouter);
 app.use("/api/v1/users/me/favorites", favoritesRouter);
 
 // New Palantir-stack endpoints (Furnace SQL, Polars charts, Funnel pipeline status).
@@ -1450,12 +1468,17 @@ async function shutdown(signal: string): Promise<void> {
   // Destroy the action rate limiter to prevent dangling setInterval
   limiter.destroy();
 
+  // The auth-maintenance sweep queries the foundry pool on a 60s timer; clear
+  // it before the drain so it can't fire against an ended pool.
+  clearInterval(authMaintenanceSweeper);
+
   // Quiesce background workers / timers BEFORE draining the DB pools. Each of
   // these runs a self-scheduling loop (FOR UPDATE SKIP LOCKED claimers, sweep
   // ticks) that would otherwise keep issuing queries against a pool we are
   // about to `end()`, racing the drain and logging spurious errors. Stop them
   // first, tolerate individual failures, and keep going — shutdown must not
-  // hang on one misbehaving worker.
+  // hang on one misbehaving worker. The connectivity health prober is included
+  // because its recordStatus() writes to the foundry pool every tick.
   const workerStops: Array<[string, () => unknown]> = [
     ["funnelDispatcher", stopFunnelDispatcher],
     ["pipelineDispatcher", stopPipelineDispatcher],
@@ -1463,6 +1486,7 @@ async function shutdown(signal: string): Promise<void> {
     ["replacementScheduler", stopReplacementScheduler],
     ["icebergMaintenance", stopIcebergMaintenance],
     ["temporalWorker", stopTemporalWorker],
+    ["healthProber", stopHealthProber],
   ];
   for (const [name, stop] of workerStops) {
     try {

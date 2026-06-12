@@ -72,6 +72,57 @@ describe("B02 validateModule", () => {
     expect(result.compiled.widgetTree).not.toBeNull();
   });
 
+  it("B02: accepts layout.columnWidths (section column-width persistence)", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-box": { mode: "flex", pxWidth: 300, flexValue: 1 },
+        "section-page": { mode: "absolute", pxWidth: 333, flexValue: 1 },
+      },
+    };
+    expect(validateModule(m).valid).toBe(true);
+  });
+
+  it("B02: accepts a partial columnWidths (single column)", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-box": { mode: "absolute", pxWidth: 240, flexValue: 1 },
+      },
+    };
+    expect(validateModule(m).valid).toBe(true);
+  });
+
+  it("B02: rejects a columnWidths entry with an invalid mode", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-box": { mode: "bogus", pxWidth: 1, flexValue: 1 },
+      },
+    };
+    expectThrowsWith(
+      () => validateModule(m),
+      "Tellus:Workshop:InvalidModuleSchema",
+    );
+  });
+
+  it("B02: rejects an unknown key inside columnWidths", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-middle": { mode: "flex", pxWidth: 1, flexValue: 1 },
+      },
+    };
+    expectThrowsWith(
+      () => validateModule(m),
+      "Tellus:Workshop:InvalidModuleSchema",
+    );
+  });
+
   it("B02 C-01: malformed schema → InvalidModuleSchema", () => {
     const m = baseModule();
     delete (m as { schemaVersion?: unknown }).schemaVersion;

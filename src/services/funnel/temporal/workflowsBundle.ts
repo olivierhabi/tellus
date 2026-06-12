@@ -10,3 +10,5 @@
 
 export * from "./workflows";
 export * from "../../pipelines/temporal/workflows";
+// B5 — table-import sync workflow (driven by per-import Temporal Schedules).
+export * from "../../connectivity/imports/temporal/workflows";

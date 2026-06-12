@@ -342,8 +342,12 @@ async function migrateFoundry(): Promise<void> {
     await client.query(`
       ALTER TABLE foundry_datasets
         ADD CONSTRAINT foundry_datasets_format_check
-        CHECK (format IN ('csv','parquet','iceberg'))
+        CHECK (format IN ('csv','parquet','iceberg','stream'))
     `);
+    // 'stream' marks a Kafka-topic source for a streaming pipeline (§2 direct
+    // Kafka→pipeline path): file_path holds the topic name, dataset_columns the
+    // schema. Consumed by DeploymentService.resolveStreamingSources →
+    // compileStreamingJob (Flink Kafka source connector).
     await client.query(`ALTER TABLE foundry_datasets ADD COLUMN IF NOT EXISTS row_count_exact BIGINT`);
     await client.query(`ALTER TABLE dataset_columns ADD COLUMN IF NOT EXISTS logical_type TEXT`);
     console.log("  [ok] pipelines.output_format + dataset format tracking");
@@ -449,6 +453,25 @@ async function migrateFoundry(): Promise<void> {
          )
     `);
     console.log("  [ok] PB-B7 pipeline_acl + markings");
+
+    // FOUNDRY-GAPS §6 — per-dataset ACLs (owner/editor/viewer), mirroring
+    // pipeline_acl. Authorization for the by-id dataset surface resolves
+    // dataset_acl first, then falls back to the owning project's
+    // project_members role (via foundry_datasets.folder_id → folders.project_id),
+    // so pre-ACL deployments keep working and project roles act as a floor.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dataset_acl (
+        dataset_id     UUID NOT NULL REFERENCES foundry_datasets(id) ON DELETE CASCADE,
+        principal_id   UUID NOT NULL,
+        principal_type TEXT NOT NULL CHECK (principal_type IN ('user','group')),
+        role           TEXT NOT NULL CHECK (role IN ('owner','editor','viewer')),
+        granted_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+        granted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (dataset_id, principal_id, principal_type)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dataset_acl_principal ON dataset_acl (principal_id, principal_type)`);
+    console.log("  [ok] FOUNDRY-GAPS §6 dataset_acl");
 
     // PB-B8 — dataset lineage graph.
     await client.query(`

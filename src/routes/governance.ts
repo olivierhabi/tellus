@@ -20,6 +20,8 @@ import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { computeLineage, MAX_LINEAGE_DEPTH } from "../services/lineageService";
+import ProvenanceService from "../services/security/provenanceService";
+import CellMarkingService from "../services/security/cellMarkingService";
 import { scanObjectType } from "../services/piiScanner";
 import { searchObjects } from "../services/opensearch/client";
 import { buildSecurityFilter } from "../middleware/securityContext";
@@ -28,6 +30,12 @@ import { incCounter } from "../services/funnel/metrics";
 import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// FOUNDRY-GAPS §8 — unified who-touched-this-data provenance. One service
+// instance reused across requests (it holds no per-request state; the `query`
+// pool is shared).
+const provenanceService = new ProvenanceService();
+const cellMarkingService = new CellMarkingService();
 
 // Function-level authorization: triggering a PII scan / refreshing usage are
 // privileged writes (ontology-editor). Lineage/usage GETs stay open and keep
@@ -189,6 +197,122 @@ router.get(
       );
       const graph = await computeLineage(ontologyId, objectTypeApiName, depth);
       sendSuccess(res, graph);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// FOUNDRY-GAPS §8 — unified provenance ("who touched this data?").
+//
+// Joins the four separately-audited streams (dataset_lineage data-flow +
+// read audit + action/write audit + CBAC decisions + purpose grants) into one
+// record for a single object instance. Read-only; inherits the same auth chain
+// and marking-aware posture as the lineage/usage GETs above.
+//
+//   GET /provenance/:objectTypeApiName/:primaryKey
+//   GET /provenance/by-id/:objectTypeId/:primaryKey   (stable UUID key)
+// ---------------------------------------------------------------------------
+function parseProvenanceQuery(req: Request): { limit?: number; lineageDepth?: number } {
+  const limit = parseInt((req.query.limit as string) ?? "", 10);
+  const depth = parseInt((req.query.depth as string) ?? "", 10);
+  return {
+    limit: Number.isFinite(limit) ? limit : undefined,
+    lineageDepth: Number.isFinite(depth) ? depth : undefined,
+  };
+}
+
+router.get(
+  "/provenance/by-id/:objectTypeId/:primaryKey",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, objectTypeId, primaryKey } = req.params;
+      const resolved = await resolveApiNameById(ontologyId, objectTypeId);
+      if (!resolved.ok) {
+        return sendError(res, resolved.code, resolved.message);
+      }
+      const result = await provenanceService.getObjectProvenance({
+        ontologyId,
+        objectTypeApiName: resolved.apiName,
+        primaryKey,
+        ...parseProvenanceQuery(req),
+      });
+      sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  "/provenance/:objectTypeApiName/:primaryKey",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, objectTypeApiName, primaryKey } = req.params;
+      const result = await provenanceService.getObjectProvenance({
+        ontologyId,
+        objectTypeApiName,
+        primaryKey,
+        ...parseProvenanceQuery(req),
+      });
+      sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// FOUNDRY-GAPS §8 — cell-level security markings (migration 102).
+//
+//   GET  /cell-markings/:objectTypeApiName/:primaryKey            — list cells
+//   PUT  /cell-markings/:objectTypeApiName/:primaryKey/:property  — set markings
+//
+// Setting a cell marking is a privileged governance write (the router-level
+// dataPlaneGuard already gates POST→write; PUT is gated here explicitly). An
+// empty markings array tombstones the cell (visible to all) without losing the
+// "was once marked" history.
+// ---------------------------------------------------------------------------
+router.get(
+  "/cell-markings/:objectTypeApiName/:primaryKey",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectTypeApiName, primaryKey } = req.params;
+      const cells = await cellMarkingService.getForObject(objectTypeApiName, primaryKey);
+      sendSuccess(res, { objectTypeApiName, primaryKey, cells });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// The router-level dataPlaneGuard already routes PUT → requireOntologyWrite.
+router.put(
+  "/cell-markings/:objectTypeApiName/:primaryKey/:propertyApiName",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, objectTypeApiName, primaryKey, propertyApiName } = req.params;
+      const markings = Array.isArray(req.body?.markings)
+        ? (req.body.markings as unknown[]).filter((m): m is string => typeof m === "string")
+        : null;
+      if (markings === null) {
+        return sendError(res, "INVALID_PARAMETER", "Body must include a `markings` string array.");
+      }
+      const setBy =
+        ((req as unknown as { auth?: { preferred_username?: string; sub?: string } }).auth
+          ?.preferred_username) ||
+        ((req as unknown as { auth?: { sub?: string } }).auth?.sub) ||
+        "system";
+      await cellMarkingService.set({
+        objectTypeApiName,
+        primaryKey,
+        propertyApiName,
+        markings,
+        ontologyId: ontologyId ?? null,
+        setBy,
+      });
+      sendSuccess(res, { objectTypeApiName, primaryKey, propertyApiName, markings });
     } catch (err) {
       next(err);
     }

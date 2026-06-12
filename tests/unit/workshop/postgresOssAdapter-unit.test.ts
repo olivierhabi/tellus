@@ -39,21 +39,63 @@ afterEach(() => {
 });
 
 describe("PostgresOssAdapter — load", () => {
-  it("returns empty when objectTypeApiName is not seeded", async () => {
-    const recorded = fakeDb([]);
+  it("reads a non-demo type from object_instances (generic path)", async () => {
+    const recorded = fakeDb(
+      [
+        { primary_key: "ORD-1", properties: { id: "ORD-1", itemName: "Printer", quantity: 26 } },
+      ],
+      1,
+    );
     const a = new PostgresOssAdapter();
     const r = await a.load(
       {
-        ontologyRid: "ri.x",
-        objectTypeApiName: "unknown_thing",
+        ontologyRid: "ri.ontology.main.ontology.49aaa226-40f3-4516-bd0e-8c3010bd3edd",
+        objectTypeApiName: "OlivierOrderJune",
         predicate: { type: "matchAll" },
         pageSize: 10,
       },
       ctx,
     );
-    expect(r.objects).toEqual([]);
-    expect(r.totalEstimate).toBe(0);
-    expect(recorded).toEqual([]); // no SQL issued
+    // Hits object_instances scoped by ontology uuid + type, returns the
+    // JSONB properties bag verbatim (camelCase preserved).
+    expect(recorded[0]?.sql).toMatch(/FROM object_instances/);
+    expect(recorded[0]?.sql).toMatch(/object_type_api_name = \$2/);
+    expect(recorded[0]?.params?.[0]).toBe("49aaa226-40f3-4516-bd0e-8c3010bd3edd");
+    expect(recorded[0]?.params?.[1]).toBe("OlivierOrderJune");
+    expect(r.objects).toEqual([{ id: "ORD-1", itemName: "Printer", quantity: 26 }]);
+    expect(r.totalEstimate).toBe(1);
+  });
+
+  it("generic path falls back id → primary_key when properties lacks id", async () => {
+    fakeDb([{ primary_key: "PK-9", properties: { itemName: "Desk" } }], 1);
+    const a = new PostgresOssAdapter();
+    const r = await a.load(
+      {
+        ontologyRid: "ri.ontology.main.ontology.49aaa226-40f3-4516-bd0e-8c3010bd3edd",
+        objectTypeApiName: "OlivierOrderJune",
+        predicate: { type: "matchAll" },
+        pageSize: 10,
+      },
+      ctx,
+    );
+    expect(r.objects[0]).toEqual({ id: "PK-9", itemName: "Desk" });
+  });
+
+  it("generic path parameterizes JSONB field access (no injection surface)", async () => {
+    const recorded = fakeDb([], 0);
+    const a = new PostgresOssAdapter();
+    await a.load(
+      {
+        ontologyRid: "ri.ontology.main.ontology.49aaa226-40f3-4516-bd0e-8c3010bd3edd",
+        objectTypeApiName: "OlivierOrderJune",
+        predicate: { type: "term", field: "DROP TABLE x --", value: "v" },
+        pageSize: 5,
+      },
+      ctx,
+    );
+    // The malicious "field" is bound as a parameter, never interpolated.
+    expect(recorded[0]?.sql).toMatch(/properties ->> \$3/);
+    expect(recorded[0]?.params).toContain("DROP TABLE x --");
   });
 
   it("compiles matchAll → WHERE TRUE", async () => {

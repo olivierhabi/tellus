@@ -66,6 +66,15 @@ export interface BuildQueueHandle {
    * (the runtime can't emit for a job it never accepted). Returns unsubscribe.
    */
   onEvent(listener: (e: RuntimeEvent) => void): () => void;
+  /**
+   * Abort a build. If it is still PENDING (admitted but not dispatched) it is
+   * removed from its tenant queue and its coalescing lock released. If it is
+   * IN-FLIGHT the runtime is asked to cancel it (which emits a terminal
+   * `cancelled` event → slot + lock freed via the normal finalize path). No-op
+   * if the build is unknown / already finished. The authoritative DB status
+   * transition is owned by the cancel HTTP handler; this only stops the work.
+   */
+  cancel(buildRid: string): Promise<void>;
   pendingCount(): number;
   activeCount(): number;
 }
@@ -177,6 +186,24 @@ export function makeBuildQueue(
     onEvent(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    async cancel(buildRid: string): Promise<void> {
+      // Pending (admitted, not yet dispatched): drop it from its tenant queue
+      // and release the coalescing lock. No slot was held, so no finalize.
+      for (const q of tenants.values()) {
+        const idx = q.items.findIndex((it) => it.spec.buildRid === buildRid);
+        if (idx >= 0) {
+          const [removed] = q.items.splice(idx, 1);
+          void singleActive.release(removed.spec.importRid);
+          return;
+        }
+      }
+      // In-flight: ask the runtime to abort. The runtime emits a terminal
+      // `cancelled` event → runtime.onEvent above → finalize frees the slot +
+      // lock. Nothing to do for an unknown/finished build.
+      if (inflight.has(buildRid)) {
+        await runtime.cancel(buildRid);
+      }
     },
     pendingCount() {
       let n = 0;

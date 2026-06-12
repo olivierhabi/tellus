@@ -462,6 +462,28 @@ export class DatasetService {
       await trx('dataset_columns').where({ dataset_id: datasetId }).delete();
       await trx('dataset_versions').where({ dataset_id: datasetId }).delete();
       await trx('foundry_datasets').where({ id: datasetId }).delete();
+
+      // 3) Clear object-type backing datasources that point at this dataset.
+      // The reference lives either in the dedicated columns or embedded in the
+      // file_path (`#foundry-dataset:<id>#`). Without this, deleting a dataset
+      // leaves object types with a DANGLING source that 404s on preview/scan.
+      // ::text casts keep the comparison valid whatever the column types are.
+      const orphaned = await trx.raw(
+        `DELETE FROM backing_datasource
+          WHERE foundry_dataset_id::text = ?
+             OR dataset_id::text = ?
+             OR file_path LIKE ?
+          RETURNING object_type_id`,
+        [datasetId, datasetId, `%foundry-dataset:${datasetId}%`],
+      );
+      const clearedCount =
+        (orphaned?.rowCount as number | undefined) ??
+        (Array.isArray(orphaned?.rows) ? orphaned.rows.length : 0);
+      if (clearedCount > 0) {
+        console.log(
+          `[dataset.delete] cleared ${clearedCount} dangling backing_datasource link(s) for dataset ${datasetId}`,
+        );
+      }
     });
   }
 

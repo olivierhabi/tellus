@@ -63,6 +63,8 @@ router.get('/:pipelineId/viewport', authenticate, viewer, pipelineController.get
 // Pipeline node routes — node CRUD is PUT/POST/DELETE on pipeline state → editor.
 router.post('/:pipelineId/nodes', authenticate, editor, pipelineController.addNode);
 router.post('/:pipelineId/nodes/bulk', authenticate, editor, pipelineController.addNodesBulk);
+// §2 direct Kafka→pipeline: register a Kafka topic as a streaming source node.
+router.post('/:pipelineId/nodes/kafka-source', authenticate, editor, pipelineController.addKafkaStreamSource);
 router.get('/:pipelineId/nodes', authenticate, viewer, pipelineController.listNodes);
 router.put('/:pipelineId/nodes/:nodeId', authenticate, editor, pipelineController.updateNode);
 router.delete('/:pipelineId/nodes/:nodeId', authenticate, editor, pipelineController.deleteNode);
@@ -73,6 +75,10 @@ router.patch('/:pipelineId/nodes/positions', authenticate, editor, pipelineContr
 // node's transform chain (editor).
 router.post('/:pipelineId/nodes/:nodeId/transforms/cast/preview', authenticate, viewer, pipelineController.castPreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/cast/apply', authenticate, editor, pipelineController.castApply);
+
+// UDF — user-authored code transform, executed in the gVisor sandbox (§2).
+router.post('/:pipelineId/nodes/:nodeId/transforms/udf/preview', authenticate, viewer, pipelineController.udfPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/udf/apply', authenticate, editor, pipelineController.udfApply);
 
 router.post('/:pipelineId/nodes/:nodeId/transforms/filter/preview', authenticate, viewer, pipelineController.filterPreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/filter/apply', authenticate, editor, pipelineController.filterApply);

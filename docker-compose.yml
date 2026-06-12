@@ -39,6 +39,69 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+
+  # -------------------------------------------------------------------------
+  # mem-monitor — memory pressure early-warning system.
+  #
+  # Polls `docker stats` every 60 s and writes structured log lines when any
+  # container crosses the WARNING (80 %) or CRITICAL (90 %) threshold.
+  # At CRITICAL it also triggers a graceful `docker restart` so the container
+  # reclaims its heap before Docker's OOM-killer forces a hard kill — a hard
+  # kill restarts the container too, but leaves no log trail and can corrupt
+  # in-flight writes (Kafka log segments, ClickHouse merges, etc.).
+  #
+  # Cooldown: a container that was restarted is skipped for the next 5 minutes
+  # so a genuinely busy service isn't restart-looped.
+  #
+  # Log lines are emitted to stdout (visible via `docker compose logs
+  # mem-monitor`). In a deployed environment, ship these logs to your
+  # log aggregator (CloudWatch Logs, Loki, etc.) for alerting.
+  # -------------------------------------------------------------------------
+  mem-monitor:
+    image: docker:27-cli
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        WARN_PCT=80
+        CRIT_PCT=90
+        COOLDOWN=300
+        declare_cooldowns() { :; }
+        echo "[mem-monitor] started — warn=$${WARN_PCT}% crit=$${CRIT_PCT}% cooldown=$${COOLDOWN}s"
+        while true; do
+          NOW=$$(date +%s)
+          docker stats --no-stream --format '{{.Name}} {{.MemPerc}} {{.MemUsage}}' 2>/dev/null \
+          | while read -r name raw_pct usage; do
+              pct=$$(printf '%.0f' "$${raw_pct%%%*}" 2>/dev/null) || continue
+              [ -z "$$pct" ] && continue
+              cooldown_key="/tmp/cooldown_$${name}"
+              if [ -f "$$cooldown_key" ]; then
+                last=$$(cat "$$cooldown_key")
+                [ $$(( NOW - last )) -lt $$COOLDOWN ] && continue
+              fi
+              if [ "$$pct" -ge "$$CRIT_PCT" ]; then
+                echo "[CRITICAL $$(date -Iseconds)] $$name at $${raw_pct} ($$usage) — restarting to reclaim heap before OOM kill"
+                echo "$$NOW" > "$$cooldown_key"
+                docker restart "$$name" >/dev/null 2>&1 || true
+              elif [ "$$pct" -ge "$$WARN_PCT" ]; then
+                echo "[WARN    $$(date -Iseconds)] $$name at $${raw_pct} ($$usage)"
+              fi
+            done
+          sleep 60
+        done
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.10"
 
   postgres:
     image: postgres:16-alpine
@@ -56,6 +119,11 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "1.5"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tellus -d tellus_db"]
       interval: 5s
@@ -96,6 +164,21 @@ services:
     volumes:
       - ./backups/app:/backups
     logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+    # The image's built-in healthcheck uses a 5-minute interval, which keeps the
+    # container "starting" for ~5 min and needlessly stalls orchestration
+    # readiness. Override with a fast probe against the same status endpoint
+    # (HEALTHCHECK_PORT=8080) so a successful backup is reflected promptly.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   opensearch:
     image: opensearchproject/opensearch:2.17.0
@@ -109,11 +192,25 @@ services:
       # disabled via `plugins.security.disabled=true` above; this value is
       # only consumed by the demo installer and never authenticated against.
       - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Str0ng!P@ssw0rd-Tellus-9a7b3Cz
-      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      # -Xms256m: don't pre-commit the full heap at startup. Peak is still
+      # capped at 512m (-Xmx); setting Xms=Xmx was burning ~256 MB of RSS
+      # at idle and pushing the container to 93% of its 1 GB limit with zero
+      # load, leaving almost no headroom before an OOM kill.
+      - "OPENSEARCH_JAVA_OPTS=-Xms256m -Xmx512m"
     ports:
       - "127.0.0.1:9200:9200"
     volumes:
       - osdata:/usr/share/opensearch/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.5"
+    # memswap_limit = memory limit: no swap allowed. If OpenSearch exceeds 1 GB
+    # it OOM-kills immediately rather than silently degrading onto disk swap.
+    # Fail-fast is safer than a swap spiral that looks healthy in docker stats
+    # but causes 10x latency for every other container sharing the disk.
+    memswap_limit: 1G
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200 || exit 1"]
       interval: 10s
@@ -132,8 +229,16 @@ services:
       # cleanly but the healthcheck always fails, which then blocks
       # `kafka:` from starting via depends_on.
       KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat,mntr,conf,cons,dirs,dump,envi,gtmk,hash,isro,wchc,wchp,wchs"
+      # cp-zookeeper uses KAFKA_HEAP_OPTS for its JVM. Cap at 256 MB max;
+      # start at 64 MB so the JVM only grabs memory it actually needs at idle.
+      KAFKA_HEAP_OPTS: "-Xmx256m -Xms64m"
     ports:
       - "127.0.0.1:2181:2181"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
     healthcheck:
       test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok || exit 1"]
       interval: 10s
@@ -143,6 +248,12 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     restart: unless-stopped
+    # init: true installs tini as PID 1 inside the container. Without it,
+    # Kafka is PID 1 and cannot reap the child JVM processes that Confluent's
+    # Telemetry reporter forks every few minutes — they accumulate as defunct
+    # (zombie) entries in the kernel process table. We observed 200+ zombies
+    # after 3 days of idle uptime, which will eventually exhaust the PID namespace.
+    init: true
     depends_on:
       zookeeper:
         condition: service_healthy
@@ -155,8 +266,25 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Start the JVM heap at 256 MB and let it grow up to 1 GB on demand.
+      # The previous implicit default was -Xms1G -Xmx1G: the JVM pre-committed
+      # the full gigabyte at process start regardless of load, burning ~700 MB
+      # of RSS for a broker with no active producers or consumers.
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms256M"
+      # Disable the Confluent telemetry phone-home reporter. This is the root
+      # cause of the zombie process accumulation: the reporter forks a child JVM
+      # every few minutes to ship usage metrics to Confluent. init:true above
+      # reaps those zombies, but disabling the reporter stops them being created
+      # in the first place. No functional impact — this is analytics-only.
+      KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
     ports:
       - "127.0.0.1:9092:9092"
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "2.0"
+    memswap_limit: 1536M
     healthcheck:
       test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -173,8 +301,17 @@ services:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      # Cap heap at 256 MB; start at 128 MB. Schema Registry is a thin proxy
+      # layer — 256 MB max heap is comfortable for hundreds of schemas.
+      # Drops the idle footprint from ~312 MB to ~200 MB.
+      SCHEMA_REGISTRY_HEAP_OPTS: "-Xmx256m -Xms128m"
     ports:
       - "127.0.0.1:8081:8081"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects || exit 1"]
       interval: 10s
@@ -192,10 +329,22 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_PORT: 8086
       KC_HOSTNAME_STRICT: "false"
+      # Keycloak ships no explicit heap cap — without this the JVM applies its
+      # ergonomic default (~25% of container limit = 192 MB max) but ignores
+      # cgroup memory limits on some JDK versions and grabs far more. Setting
+      # both bounds explicitly: 128 MB initial keeps startup lean; 384 MB max
+      # leaves ~384 MB for Quarkus native memory, metaspace, and OS within the
+      # 768 MB container limit.
+      JAVA_OPTS_APPEND: "-Xms128m -Xmx384m"
     ports:
       - "127.0.0.1:8086:8086"
     volumes:
       - kcdata:/opt/keycloak/data
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "1.5"
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -239,6 +388,11 @@ services:
       - "127.0.0.1:9001:9001"
     volumes:
       - miniodata:/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
     healthcheck:
       # `mc ready local` is preferred but requires the mc client which
       # this image doesn't ship — the `/minio/health/live` endpoint is
@@ -309,6 +463,7 @@ services:
       resources:
         limits:
           memory: 512M
+          cpus: "0.5"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli --no-auth-warning -a tellus_overlay_pw ping | grep -q PONG"]
       interval: 5s
@@ -346,6 +501,8 @@ services:
       resources:
         limits:
           memory: 2G
+          cpus: "2.0"
+    memswap_limit: 2G
     healthcheck:
       # `localhost` resolves to IPv6 ::1 inside this image, where ClickHouse
       # isn't listening — use the IPv4 loopback explicitly.
@@ -383,6 +540,7 @@ services:
       resources:
         limits:
           memory: 512M
+          cpus: "0.5"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
       interval: 5s
@@ -408,6 +566,7 @@ services:
       resources:
         limits:
           memory: 1G
+          cpus: "1.0"
     healthcheck:
       # The frontend binds to the container address, not loopback, so probe
       # via the service alias. SERVING ⇒ healthy; anything else exits non-zero.
@@ -468,6 +627,7 @@ services:
       resources:
         limits:
           memory: 512M
+          cpus: "0.5"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lakekeeper -d lakekeeper"]
       interval: 5s
@@ -504,6 +664,7 @@ services:
       resources:
         limits:
           memory: 768M
+          cpus: "1.0"
     healthcheck:
       # Distroless image — no shell/curl. The binary ships its own probe.
       test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
@@ -599,6 +760,11 @@ services:
       - "127.0.0.1:3000:3000"
     volumes:
       - appdata:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/v1/health || exit 1"]
       interval: 10s

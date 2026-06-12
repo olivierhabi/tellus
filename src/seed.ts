@@ -14,7 +14,7 @@ import "dotenv/config";
 import fs from "fs";
 import path from "path";
 import { query, pool } from "./db";
-import ontologyService from "./services/ontologyService";
+import { resetEnterpriseOntologyForSeed } from "./seeds/seedOntology";
 import objectTypeService from "./services/objectTypeService";
 import propertyService from "./services/propertyService";
 import datasourceService from "./services/datasourceService";
@@ -591,25 +591,11 @@ const OBJECT_TYPES: ObjectTypeDef[] = [
 async function seed(): Promise<void> {
   console.log("Starting RRA seed...\n");
 
-  // Step 0: Idempotency — delete existing "RRA Tax Ontology" if present
-  const existing = await query(
-    "SELECT ontology_id FROM ontology WHERE display_name = $1",
-    ["RRA Tax Ontology"]
-  );
-  if (existing.rows.length > 0) {
-    const oldId = existing.rows[0].ontology_id;
-    console.log(`Deleting existing RRA Tax Ontology (${oldId})...`);
-    await ontologyService.delete(oldId);
-    console.log("Deleted.\n");
-  }
-
-  // Step 1: Create the ontology
-  const ontology = await ontologyService.create({
-    displayName: "RRA Tax Ontology",
-    description: "Rwanda Revenue Authority tax collection digital twin.",
-  });
-  const ontologyId = ontology.ontology_id;
-  console.log(`Created ontology: RRA Tax Ontology (${ontologyId})\n`);
+  // Step 0+1: "One Enterprise, One Ontology" — populate THE enterprise ontology.
+  // Ensure it exists and reset its content for idempotency (preserves the
+  // ontology row + main branch; clears object types/links/instances).
+  const ontologyId = await resetEnterpriseOntologyForSeed();
+  console.log(`Seeding into enterprise ontology (${ontologyId})\n`);
 
   // Step 2: Create CSV data directory
   fs.mkdirSync(DATA_DIR, { recursive: true });

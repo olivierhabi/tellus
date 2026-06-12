@@ -43,6 +43,14 @@ const FOLDER_RID_PREFIX = "ri.compass.main.folder.";
 const DATASET_RID_PREFIX = "ri.foundry.main.dataset.";
 const PIPELINE_RID_PREFIX = "ri.foundry.main.pipeline.";
 
+// All Compass folder/project RIDs are `ri.compass.main.<type>.<uuid>` — the
+// 5th dot-segment is the UUID. Data-connection sources store their parent as
+// EITHER `ri.compass.main.project.<uuid>` (root) or `ri.compass.main.folder.<uuid>`
+// (subfolder); Quiver analyses store the full folder RID. Matching by the
+// trailing UUID via `split_part(rid,'.',5)` is uniform across both forms and
+// is version-safe (positive index — no PG14+ negative-index dependency).
+const RID_UUID_SEGMENT = 5;
+
 export interface GetChildrenOpts {
   folderRid: string;
   pageSize?: number;
@@ -59,10 +67,13 @@ export type SourceName =
   | "datasets"
   | "pipelines"
   | "workshops"
-  | "code-repositories";
+  | "code-repositories"
+  | "data-connections"
+  | "quiver-analyses";
 
 const ALL_SOURCES: ReadonlySet<SourceName> = new Set([
   "folders", "datasets", "pipelines", "workshops", "code-repositories",
+  "data-connections", "quiver-analyses",
 ]);
 
 const KIND_TO_SOURCE: Record<string, SourceName> = {
@@ -71,6 +82,8 @@ const KIND_TO_SOURCE: Record<string, SourceName> = {
   "pipeline": "pipelines",
   "workshop-module": "workshops",
   "code-repository": "code-repositories",
+  "data-connection": "data-connections",
+  "quiver-analysis": "quiver-analyses",
 };
 
 /**
@@ -316,6 +329,80 @@ async function queryCodeRepos(a: QueryArgs): Promise<ResourceChild[]> {
   }));
 }
 
+async function queryDataConnections(a: QueryArgs): Promise<ResourceChild[]> {
+  // `connectivity_connections.compass_folder_rid` is the resource's parent —
+  // a project RID at root, a folder RID in a subfolder. Match on the trailing
+  // UUID so both forms resolve to the folder the caller asked for. Soft-deleted
+  // connections (`deleted_at`) are hidden — there is no archived/admin view
+  // for connections, so `includeArchived` does not widen this filter.
+  const matchUuid = a.folderId ?? a.projectId;
+  const params: unknown[] = [matchUuid];
+  let where = `split_part(cc.compass_folder_rid, '.', ${RID_UUID_SEGMENT}) = $1 AND cc.deleted_at IS NULL`;
+  if (a.search) {
+    params.push(`%${a.search}%`);
+    where += ` AND cc.name ILIKE $${params.length}`;
+  }
+  if (a.cursor) {
+    params.push(a.cursor.updatedAt, a.cursor.rid);
+    where += ` AND (cc.updated_at, cc.rid) < ($${params.length - 1}::timestamptz, $${params.length})`;
+  }
+  params.push(a.pageSize + 1);
+  const sql = `
+    SELECT cc.rid, cc.name, cc.connector_type, cc.created_at, cc.updated_at,
+           cc.status->>'kind' AS status_kind
+    FROM connectivity_connections cc
+    WHERE ${where}
+    ORDER BY cc.updated_at DESC, cc.rid DESC
+    LIMIT $${params.length}`;
+  const { rows } = await pool.query(sql, params);
+  return rows.map((r): ResourceChild => ({
+    kind: "data-connection",
+    rid: r.rid,
+    displayName: r.name,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+    parentFolderRid: a.folderRid,
+    legacyId: null,
+    connectorType: r.connector_type ?? "unknown",
+    status: r.status_kind ?? "active",
+  }));
+}
+
+async function queryQuiverAnalyses(a: QueryArgs): Promise<ResourceChild[]> {
+  // `quiver_analysis.parent_folder_rid` is the full Compass folder RID. Match
+  // on the trailing UUID (same rule as data-connections) so an analysis
+  // created in a real project/folder lands in the tree. Soft-deleted rows
+  // (`is_deleted`) are hidden.
+  const matchUuid = a.folderId ?? a.projectId;
+  const params: unknown[] = [matchUuid];
+  let where = `split_part(qa.parent_folder_rid, '.', ${RID_UUID_SEGMENT}) = $1 AND qa.is_deleted = false`;
+  if (a.search) {
+    params.push(`%${a.search}%`);
+    where += ` AND qa.display_name ILIKE $${params.length}`;
+  }
+  if (a.cursor) {
+    params.push(a.cursor.updatedAt, a.cursor.rid);
+    where += ` AND (qa.updated_at, qa.rid) < ($${params.length - 1}::timestamptz, $${params.length})`;
+  }
+  params.push(a.pageSize + 1);
+  const sql = `
+    SELECT qa.rid, qa.display_name, qa.created_at, qa.updated_at
+    FROM quiver_analysis qa
+    WHERE ${where}
+    ORDER BY qa.updated_at DESC, qa.rid DESC
+    LIMIT $${params.length}`;
+  const { rows } = await pool.query(sql, params);
+  return rows.map((r): ResourceChild => ({
+    kind: "quiver-analysis",
+    rid: r.rid,
+    displayName: r.display_name,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+    parentFolderRid: a.folderRid,
+    legacyId: null,
+  }));
+}
+
 // ---- public API ------------------------------------------------------------
 
 export async function getChildren(opts: GetChildrenOpts): Promise<ChildrenResponse> {
@@ -348,6 +435,8 @@ export async function getChildren(opts: GetChildrenOpts): Promise<ChildrenRespon
   if (requestedSources.has("pipelines"))         tasks.push(["pipelines", queryPipelines(args)]);
   if (requestedSources.has("workshops"))         tasks.push(["workshops", queryWorkshops(args)]);
   if (requestedSources.has("code-repositories")) tasks.push(["code-repositories", queryCodeRepos(args)]);
+  if (requestedSources.has("data-connections"))  tasks.push(["data-connections", queryDataConnections(args)]);
+  if (requestedSources.has("quiver-analyses"))   tasks.push(["quiver-analyses", queryQuiverAnalyses(args)]);
 
   const settled = await Promise.allSettled(tasks.map(([, p]) => p));
   const partialErrors: Array<{ source: SourceName; message: string }> = [];

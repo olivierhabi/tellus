@@ -40,6 +40,10 @@ import {
   stopRotationWorker,
 } from "./credentials/rotation.worker";
 import { startHealthProber, stopHealthProber } from "./health/prober";
+import {
+  startTableImportScheduler,
+  stopTableImportScheduler,
+} from "./imports/scheduler";
 import { drainAll as drainPgPools } from "./connectors/postgresql/pool";
 
 export function createConnectivityRouter(): Router {
@@ -202,7 +206,23 @@ export function createConnectivityRouter(): Router {
     idempotencyKeyMiddleware(pool, "connectivity.executeImport"),
     importsHandler.executeImport,
   );
+  // Multi-table run: enqueue ONE Build with N jobs (one per import) so a
+  // "Create sync for N tables" action is a single Build the job-tracker shows
+  // in full. Literal "execute-batch" segment — no collision with :importRid.
+  router.post(
+    "/imports/execute-batch",
+    idempotencyKeyMiddleware(pool, "connectivity.executeImportBatch"),
+    importsHandler.executeImportBatch,
+  );
   router.get("/imports/:importRid/builds", importsHandler.listBuilds);
+  // Single build — the job-tracker "build details" view (status, timings,
+  // counts, the resource it builds, and the append-only event log).
+  router.get("/builds/:buildRid", importsHandler.getBuild);
+  // Live build progress over Server-Sent Events (Redis pub/sub push + DB
+  // reconcile, resumable via Last-Event-ID).
+  router.get("/builds/:buildRid/events", importsHandler.streamBuildEvents);
+  // Cancel an in-flight or queued build.
+  router.post("/builds/:buildRid/cancel", importsHandler.cancelBuild);
 
   // B7: CDC preflight + stream creation.
   router.post(
@@ -252,6 +272,7 @@ export function createConnectivityRouter(): Router {
  *   - B1: Compass outbox poller.
  *   - B2: credential rotation worker.
  *   - B3: connection health prober.
+ *   - B5: table-import scheduler.
  * Safe to call multiple times.
  */
 export function initConnectivity(): void {
@@ -260,6 +281,7 @@ export function initConnectivity(): void {
   }
   startRotationWorker();
   startHealthProber();
+  startTableImportScheduler();
 }
 
 /** Stop background workers and drain PG pools for graceful shutdown. */
@@ -267,6 +289,7 @@ export async function shutdownConnectivity(): Promise<void> {
   outbox.stopPoller();
   stopRotationWorker();
   stopHealthProber();
+  stopTableImportScheduler();
   await drainPgPools().catch(() => undefined);
 }
 

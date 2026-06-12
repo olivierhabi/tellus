@@ -63,11 +63,30 @@
           "type": "object",
           "additionalProperties": false,
           "properties": { "widgetId": { "type": "string" } }
+        },
+        "columnWidths": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-section-column widths for the empty-shell editor's two fixed columns. Authored in the SectionInspector (Absolute px or Flex factor); persisted so a reloaded module keeps the user's resized layout.",
+          "properties": {
+            "section-box": { "$ref": "#/$defs/sectionWidthSpec" },
+            "section-page": { "$ref": "#/$defs/sectionWidthSpec" }
+          }
         }
       }
     }
   },
   "$defs": {
+    "sectionWidthSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "pxWidth", "flexValue"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["absolute", "flex"] },
+        "pxWidth": { "type": "number" },
+        "flexValue": { "type": "number" }
+      }
+    },
     "variableId": {
       "type": "string",
       "pattern": "^v_[a-zA-Z0-9_]{1,128}$"

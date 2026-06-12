@@ -131,10 +131,7 @@ async function run() {
     // -----------------------------------------------------------------------
     // 4.1 Setup: ontology + Employee type + Company type
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontology", {
-      displayName: "Link Traversal Test",
-      description: "Test 04 — link traversal after reindex",
-    });
+    const ontRes = await api("GET", "/api/v1/ontology/default");
     ontologyId = ontRes.body?.data?.ontologyId ?? null;
 
     // Create Employee type

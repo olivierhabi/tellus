@@ -13,6 +13,7 @@ import { query } from "../db";
 import { appError } from "../utils/appError";
 import type { LinkTypeRow, Cardinality } from "../models/linkType";
 import { incCounter, observeHistogram } from "./funnel/metrics";
+import { buildSortClause } from "./queryTranslator";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -48,6 +49,10 @@ export interface SearchAroundOptions {
   pageSize?: number;
   pageToken?: string;
   direction?: "forward" | "reverse";
+  /** Server-side ordering of the linked (target-side) objects. Mirrors
+   *  the regular `/search` route's `orderBy`; resolved against the
+   *  resolve-side object type via `buildSortClause`. */
+  orderBy?: Array<{ field: string; direction: string }>;
 }
 
 export interface LinkAnalysis {
@@ -159,6 +164,10 @@ async function searchIndex(
   const body: Record<string, unknown> = {
     from,
     size,
+    // Accurate totals beyond OpenSearch's default 10k cap, so the
+    // caller's `totalCount` (e.g. a link-group badge) is exact rather
+    // than clamped. Mirrors the regular `/search` executor.
+    track_total_hits: true,
     query: musts.length === 1 ? musts[0] : { bool: { must: musts } },
   };
   if (sort && sort.length > 0) {
@@ -716,6 +725,18 @@ export async function searchAround(
   const resolveOtApiName = direction === "forward" ? targetOtApiName : sourceOtApiName;
   const resolveIndexName = getIndexName(resolveOtApiName);
 
+  // Server-side ordering of the resolved (linked) objects. Resolved
+  // against the resolve-side object type; an invalid field is ignored
+  // (with a warning) rather than failing the whole traversal.
+  let sortClause: Array<Record<string, unknown>> | undefined;
+  if (options.orderBy && options.orderBy.length > 0) {
+    try {
+      sortClause = await buildSortClause(options.orderBy, resolveOtApiName);
+    } catch {
+      warnings.push("Ignored invalid orderBy field(s) for searchAround.");
+    }
+  }
+
   let fkField: string | null = null;
 
   // Determine the FK field for the bulk query
@@ -739,7 +760,7 @@ export async function searchAround(
       { terms: { [termField(fkField)]: sourcePKs } },
       ...targetFilterClauses,
     ];
-    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, undefined, securityFilter, branchId);
+    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, sortClause, securityFilter, branchId);
     const nextPageToken = from + pageSize < total ? encodeToken(from + pageSize) : null;
     return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
   }
@@ -762,7 +783,7 @@ export async function searchAround(
       { terms: { __pk: Array.from(allTargetPKs).slice(0, 100000) } },
       ...targetFilterClauses,
     ];
-    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, undefined, securityFilter, branchId);
+    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, sortClause, securityFilter, branchId);
     const nextPageToken = from + pageSize < total ? encodeToken(from + pageSize) : null;
     return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
   }

@@ -30,6 +30,31 @@ const moduleHeaderSchema = z
   .strict()
   .optional();
 
+// Per-section-column width. The empty-shell editor lays widgets out across two
+// fixed columns ("section-box" / "section-page"); each column's COLUMN WIDTH
+// (Absolute px or Flex factor) is authored in the SectionInspector and
+// persisted here so a reloaded module keeps the user's resized layout. The FE
+// carries a "fat record" (both px + flex values plus the active mode) so
+// toggling mode doesn't lose the other value — mirrored verbatim here. Without
+// this slot every section resize was rejected with
+// Tellus:Workshop:InvalidModuleSchema `unrecognized_keys: ["columnWidths"]`
+// (the same round-trip data-loss class the `header` slot above fixed).
+const sectionWidthSpecSchema = z
+  .object({
+    mode: z.enum(["absolute", "flex"]),
+    pxWidth: z.number(),
+    flexValue: z.number(),
+  })
+  .strict();
+
+const columnWidthsSchema = z
+  .object({
+    "section-box": sectionWidthSpecSchema.optional(),
+    "section-page": sectionWidthSpecSchema.optional(),
+  })
+  .strict()
+  .optional();
+
 export const moduleDefinitionSchema = z
   .object({
     schemaVersion: z.literal(4),
@@ -45,6 +70,7 @@ export const moduleDefinitionSchema = z
       .object({
         rootSection: z.string(),
         header: z.object({ widgetId: z.string() }).strict().optional(),
+        columnWidths: columnWidthsSchema,
       })
       .strict(),
   })

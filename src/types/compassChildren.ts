@@ -24,6 +24,12 @@ export const ChildKind = z.enum([
   "pipeline",
   "workshop-module",
   "code-repository",
+  // Data-connection sources (Magritte) and Quiver analyses are first-class
+  // Compass resources in Foundry — they live in a project/folder and must
+  // show up in the workspace tree just like datasets do. Backed by
+  // `connectivity_connections` and `quiver_analysis` respectively.
+  "data-connection",
+  "quiver-analysis",
 ]);
 export type ChildKind = z.infer<typeof ChildKind>;
 
@@ -79,8 +85,28 @@ const CodeRepoChild = BaseChild.extend({
   defaultBranch: z.string(),
 });
 
+// Data-connection source (Magritte). `legacyId` is null — call sites route
+// by the full `ri.magritte.main.source.<uuid>` RID, not a bare UUID.
+const DataConnectionChild = BaseChild.extend({
+  kind: z.literal("data-connection"),
+  // The connector implementation, e.g. "postgresql", "s3". Shown in the
+  // size column the way code repos show their default branch.
+  connectorType: z.string(),
+  // Derived from the connection's `status` jsonb (`status.kind`). Free-form
+  // string rather than an enum so a new connector status can't 500 the
+  // whole listing on out-validation; the UI renders it verbatim.
+  status: z.string(),
+});
+
+// Quiver analysis. No extra columns the tree needs beyond the base — name,
+// timestamps, and the RID for routing are enough for a row.
+const QuiverAnalysisChild = BaseChild.extend({
+  kind: z.literal("quiver-analysis"),
+});
+
 export const ResourceChild = z.discriminatedUnion("kind", [
   FolderChild, DatasetChild, PipelineChild, WorkshopChild, CodeRepoChild,
+  DataConnectionChild, QuiverAnalysisChild,
 ]);
 export type ResourceChild = z.infer<typeof ResourceChild>;
 export type FolderChildItem = z.infer<typeof FolderChild>;
@@ -88,6 +114,8 @@ export type DatasetChildItem = z.infer<typeof DatasetChild>;
 export type PipelineChildItem = z.infer<typeof PipelineChild>;
 export type WorkshopChildItem = z.infer<typeof WorkshopChild>;
 export type CodeRepoChildItem = z.infer<typeof CodeRepoChild>;
+export type DataConnectionChildItem = z.infer<typeof DataConnectionChild>;
+export type QuiverAnalysisChildItem = z.infer<typeof QuiverAnalysisChild>;
 
 // Request shape — query params accepted by the unified endpoint.
 export const ChildrenQuery = z.object({
@@ -109,7 +137,10 @@ export const ChildrenResponse = z.object({
   // Per-source partial errors. If a source failed, its rows are missing
   // but the rest of the page rendered. UI surfaces this as a banner.
   partialErrors: z.array(z.object({
-    source: z.enum(["folders", "datasets", "pipelines", "workshops", "code-repositories"]),
+    source: z.enum([
+      "folders", "datasets", "pipelines", "workshops", "code-repositories",
+      "data-connections", "quiver-analyses",
+    ]),
     message: z.string(),
   })),
 });

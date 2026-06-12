@@ -39,8 +39,13 @@ import {
 } from "../services/overlay/writebackOverlay";
 import { getOverlayStore } from "../services/overlay/getOverlayStore";
 import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
+import { CellMarkingService, redactCells } from "../services/security/cellMarkingService";
 
 const router = Router();
+
+// FOUNDRY-GAPS §8 — cell-level marking redaction at read time. Stateless over
+// the shared `query` pool, so one instance is reused across requests.
+const cellMarkingService = new CellMarkingService();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -455,6 +460,76 @@ router.post(
       }, secFilter, branchId);
 
       return sendSuccess(res, result);
+    } catch (err: any) {
+      return handleError(err, res, next);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/objects/:objectType/:primaryKey/searchAround/:linkApiName
+//
+// RESTful per-object link traversal — the shape the frontend's
+// `searchAround(fromApiName, pk, linkApiName, …)` client calls. It
+// resolves the link type from the URL, derives the traversal direction
+// from which side `:objectType` sits on, scopes the source to the single
+// object by primary key, and delegates to the same `searchAround`
+// service the body-style route uses. Request body mirrors the regular
+// `/search` route's `$`-prefixed fields: `$pageSize`, `$pageToken`,
+// `where` (target filter), `$orderBy`. Response is `{ data,
+// nextPageToken, totalCount }` to match the FE's link/search contract.
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/api/v1/objects/:objectType/:primaryKey/searchAround/:linkApiName",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectType, primaryKey, linkApiName } = req.params;
+      await ensureObjectTypeExists(objectType);
+
+      const otResult = await query(
+        "SELECT object_type_id, ontology_id FROM object_type WHERE api_name = $1",
+        [objectType]
+      );
+      if (otResult.rows.length === 0) {
+        throw appError("OBJECT_TYPE_NOT_FOUND", `Object type '${objectType}' not found.`);
+      }
+      const { object_type_id, ontology_id } = otResult.rows[0];
+
+      const linkType = await linkTypeModel.getByApiName(ontology_id, linkApiName);
+      if (!linkType) {
+        throw appError("LINK_TYPE_NOT_FOUND", `Link type '${linkApiName}' not found.`);
+      }
+
+      // Direction: forward when this object type is the link's source side,
+      // reverse when it's the target side.
+      const direction: "forward" | "reverse" =
+        linkType.source_object_type === object_type_id ? "forward" : "reverse";
+
+      const { $pageSize, $pageToken, where, $orderBy } = req.body ?? {};
+      const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req);
+      routeMetric(req, "objects.searchAround", branchId);
+
+      const result = await searchAround(
+        linkType,
+        direction,
+        {
+          sourceFilter: { __pk: primaryKey },
+          targetFilter: where,
+          pageSize: $pageSize,
+          pageToken: $pageToken,
+          orderBy: $orderBy,
+        },
+        secFilter,
+        branchId
+      );
+
+      return sendSuccess(res, {
+        data: result.linkedObjects,
+        nextPageToken: result.nextPageToken,
+        totalCount: result.totalCount,
+      });
     } catch (err: any) {
       return handleError(err, res, next);
     }
@@ -920,6 +995,31 @@ router.get(
         }
       } catch {
         // property.marking_required may not exist on every schema — skip.
+      }
+
+      // FOUNDRY-GAPS §8 cell-level marking redaction (migration 102). Runs
+      // AFTER column-level stripping: any property the column strip left in
+      // place may still carry a per-cell marking on THIS object. We redact the
+      // value to null when the caller doesn't hold a superset of the cell's
+      // markings. Guarded + best-effort: a markingBypass principal skips it,
+      // and a missing object_cell_marking table (pre-102 schema) is a no-op.
+      try {
+        const sec = (req as any).security;
+        const properties = (obj as { properties?: Record<string, unknown> }).properties;
+        if (properties && !sec?.markingBypass) {
+          const cellMarks = await cellMarkingService.getForObject(objectType, primaryKey);
+          if (Object.keys(cellMarks).length > 0) {
+            const redacted = redactCells(properties, cellMarks, {
+              userMarkings: (sec?.markings as string[]) || [],
+              markingBypass: Boolean(sec?.markingBypass),
+            });
+            if (redacted.length > 0) {
+              (obj as { __redactedCells?: string[] }).__redactedCells = redacted;
+            }
+          }
+        }
+      } catch {
+        // object_cell_marking may not exist yet — cell markings are optional.
       }
 
       const elapsed = Date.now() - start;

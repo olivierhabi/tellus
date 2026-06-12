@@ -46,6 +46,7 @@ const PASSTHROUGH_KEYS = new Set([
   "column_mapping",
   "struct_schema",
   "column_names",
+  "conditional_formatting",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -298,6 +299,7 @@ export function formatProperty(dbRow: DbRow): Record<string, unknown> {
     isRequired: dbRow.is_required,
     isArray: dbRow.is_array,
     ordinal: dbRow.ordinal,
+    conditionalFormatting: dbRow.conditional_formatting ?? null,
   };
 }
 
@@ -372,6 +374,9 @@ export const ERROR_CODES: Record<string, number> = {
   PROPERTY_NOT_FOUND: 404,
   DATASOURCE_NOT_FOUND: 404,
   ONTOLOGY_ALREADY_EXISTS: 409,
+  // "One Enterprise, One Ontology" — lifecycle operations that would create or
+  // remove an ontology are rejected: the single enterprise ontology is fixed.
+  ONTOLOGY_SINGLETON: 409,
   OBJECT_TYPE_ALREADY_EXISTS: 409,
   DUPLICATE_API_NAME: 409,
   PROPERTY_ALREADY_EXISTS: 409,
@@ -446,6 +451,12 @@ export const ERROR_CODES: Record<string, number> = {
   INSUFFICIENT_ROLE: 403,
   MARKING_ACCESS_DENIED: 403,
   ORG_ACCESS_DENIED: 403,
+  // FOUNDRY-GAPS §8 — purpose-based access control (purposeGate middleware).
+  PURPOSE_REQUIRED: 403,
+  PURPOSE_UNKNOWN: 403,
+  PURPOSE_NOT_GRANTED: 403,
+  PURPOSE_EXPIRED: 403,
+  PURPOSE_CATEGORY_DENIED: 403,
   SEARCH_INDEX_UNAVAILABLE: 503,
   PIPELINE_OVERLOADED: 503,
   VECTOR_DIMS_EXCEEDED: 400,

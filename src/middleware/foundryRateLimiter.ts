@@ -19,8 +19,16 @@ const IS_TEST_ENV =
 
 export const RATE_LIMIT_CATEGORIES: Record<string, RateLimitCategory> = {
   upload: { max: 10, windowMs: 60_000 },    // 10 requests per minute
-  read: { max: 100, windowMs: 60_000 },     // 100 requests per minute
-  write: { max: 30, windowMs: 60_000 },     // 30 requests per minute
+  // read/write are relaxed in dev/test for the same reason as auth below:
+  // multi-page cypress walks (e.g. ontology-manager.cy.ts visits ~25 pages,
+  // each issuing several XHRs) legitimately exceed 100 reads/min from one
+  // IP. Production limits are unchanged.
+  read: IS_TEST_ENV
+    ? { max: 2_000, windowMs: 60_000 }
+    : { max: 100, windowMs: 60_000 },       // 100 requests per minute (prod)
+  write: IS_TEST_ENV
+    ? { max: 500, windowMs: 60_000 }
+    : { max: 30, windowMs: 60_000 },        // 30 requests per minute (prod)
   // Relaxed in dev/test so cypress specs don't trip the 5/min cap on
   // their per-suite `cy.login()` calls.
   auth: IS_TEST_ENV

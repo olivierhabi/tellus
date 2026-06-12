@@ -1,0 +1,77 @@
+# Per-tenant Tellus stack values. Each enrolled tenant is one release:
+#   helm install tenant-acme deploy/substrate/charts/tellus-tenant \
+#     --set tenant=acme --set image.repository=ghcr.io/tellus/tellus --set image.tag=1.0.0
+
+# The tenant slug — drives the namespace name (enrollment = namespace) and labels.
+tenant: acme
+
+# Create the tenant namespace as part of the release (PSS-restricted enforced).
+createNamespace: true
+
+# Default-deny cross-namespace ingress so tenants are isolated east-west
+# (Cilium-enforced on the substrate; see verify-substrate.sh §2).
+networkIsolation: true
+
+# Per-tenant resource ceiling.
+resourceQuota:
+  enabled: true
+  requestsCpu: "4"
+  requestsMemory: 8Gi
+  limitsCpu: "8"
+  limitsMemory: 16Gi
+  pods: "50"
+
+# FOUNDRY-GAPS §3 — horizontal autoscaling. Local-testable on k3d with
+# metrics-server (proven in verify-substrate.sh). When enabled the Deployment
+# omits a static replica count and an HPA owns scaling between min/max on the
+# CPU/memory utilisation targets. (Node-level autoscaling — Karpenter / Cluster
+# API — is the genuinely cloud-bound piece and stays out of the local chart.)
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # Optional memory target; omitted from the HPA when null.
+  targetMemoryUtilizationPercentage: null
+  # Scale-down stabilization (seconds) to avoid flapping.
+  scaleDownStabilizationSeconds: 120
+
+replicaCount: 1
+
+image:
+  # The real chart points at the Tellus image; the substrate smoke test
+  # overrides this with a pullable image to prove scheduling end-to-end.
+  repository: ghcr.io/tellus/tellus
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+containerPort: 8080
+
+# Application env — non-secret config. Secrets come from a referenced Secret,
+# never inlined here.
+env:
+  NODE_ENV: production
+  TELLUS_TENANT: ""   # defaulted to .Values.tenant in the template
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Pod hardening (mirrors the gVisor worker posture; the app pod itself runs on
+# the default runtime unless runtimeClassName is set).
+podSecurity:
+  runAsNonRoot: true
+  runAsUser: 65532
+  readOnlyRootFilesystem: true
+runtimeClassName: ""   # set to "gvisor" for user-code-adjacent workloads
+
+# Liveness/readiness probe path on the container port.
+probePath: /

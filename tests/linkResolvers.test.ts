@@ -151,12 +151,9 @@ async function setup(t: Runner): Promise<void> {
 
   // 1. Create ontology
   await t.test("Create test ontology", async () => {
-    const { status, body } = await api("POST", "/api/v1/ontology", {
-      displayName: "Link Test Ontology",
-      description: "Ontology for link resolver tests",
-    });
-    t.assert(status === 201, `Expected 201, got ${status}`);
-    state.ontologyId = body.ontologyId;
+    const { status, body } = await api("GET", "/api/v1/ontology/default");
+    t.assert(status === 200, `Expected 200, got ${status}`);
+    state.ontologyId = body.ontologyId ?? body?.data?.ontologyId;
     t.assert(!!state.ontologyId, "ontologyId set");
   });
 

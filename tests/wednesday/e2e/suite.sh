@@ -61,8 +61,8 @@ if [[ -n "${OLD_ID:-}" ]]; then
   do_request DELETE "/api/v1/ontology/${OLD_ID}"
 fi
 
-do_request POST /api/v1/ontology '{"displayName":"E2E Wednesday Ontology","description":"Wednesday E2E testing"}'
-assert_status "$HTTP_STATUS" "201" "Create E2E Wednesday ontology"
+do_request GET /api/v1/ontology/default
+assert_status "$HTTP_STATUS" "200" "Resolve enterprise ontology"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "Ontology ID returned"
 

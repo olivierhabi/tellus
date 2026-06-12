@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import { query } from "../db";
+import { getOntologyId } from "../services/ontology/canonicalOntology";
 import { getActionType } from "../models/actionType";
 import type { ActionTypeRow } from "../models/actionType";
 import { validateParameters } from "./parameterValidator";
@@ -65,27 +66,12 @@ export type ValidationResult = ValidationSuccess | ValidationFailure;
 // ---------------------------------------------------------------------------
 
 /**
- * Get the default (first and only) ontology ID. In week 1, there is always
- * exactly one ontology (the RRA Tax Ontology seeded at startup). Returns
- * null if no ontology exists.
+ * Get the single enterprise ontology ID. "One Enterprise, One Ontology" — this
+ * delegates to the canonical resolver so every caller agrees on the same id.
+ * Returns null only when no ontology exists at all (pre-bootstrap).
  */
 export async function getDefaultOntologyId(): Promise<string | null> {
-  // Prefer the seed ontology by name, then the ontology with the most object
-  // types (most likely the real ontology, not a leftover test ontology), then
-  // fall back to the most recently created one.
-  const result = await query(`
-    SELECT o.ontology_id,
-           o.display_name,
-           (SELECT COUNT(*)::int FROM object_type ot WHERE ot.ontology_id = o.ontology_id) AS ot_count
-      FROM ontology o
-     ORDER BY
-       CASE WHEN o.display_name = 'RRA Tax Ontology' THEN 0 ELSE 1 END,
-       (SELECT COUNT(*) FROM object_type ot WHERE ot.ontology_id = o.ontology_id) DESC,
-       o.created_at DESC
-     LIMIT 1
-  `);
-  if (result.rows.length === 0) return null;
-  return result.rows[0].ontology_id;
+  return getOntologyId();
 }
 
 // ---------------------------------------------------------------------------

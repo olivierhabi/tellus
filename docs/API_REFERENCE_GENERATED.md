@@ -1,6 +1,6 @@
 # API Reference - Tellus Ontology Engine
 
-> Auto-generated on 2026-06-01
+> Auto-generated on 2026-06-11
 > Total endpoints: 85
 
 ## Table of Contents

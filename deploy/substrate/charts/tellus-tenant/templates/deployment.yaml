@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tellus-tenant.fullname" . }}
+  namespace: {{ include "tellus-tenant.namespace" . }}
+  labels:
+    {{- include "tellus-tenant.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "tellus-tenant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tellus-tenant.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.runtimeClassName }}
+      runtimeClassName: {{ .Values.runtimeClassName }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: {{ .Values.podSecurity.runAsNonRoot }}
+        runAsUser: {{ .Values.podSecurity.runAsUser }}
+        fsGroup: {{ .Values.podSecurity.runAsUser }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tellus
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: {{ .Values.podSecurity.readOnlyRootFilesystem }}
+            runAsNonRoot: {{ .Values.podSecurity.runAsNonRoot }}
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: TELLUS_TENANT
+              value: {{ .Values.tenant | quote }}
+            {{- range $k, $v := .Values.env }}
+            {{- if $v }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probePath }}
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          {{- if .Values.podSecurity.readOnlyRootFilesystem }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: varcache
+              mountPath: /var/cache/nginx
+            - name: varrun
+              mountPath: /var/run
+          {{- end }}
+      {{- if .Values.podSecurity.readOnlyRootFilesystem }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: varcache
+          emptyDir: {}
+        - name: varrun
+          emptyDir: {}
+      {{- end }}

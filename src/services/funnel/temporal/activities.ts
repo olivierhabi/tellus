@@ -793,6 +793,32 @@ export async function syncOpenSearchActivity(input: {
   rowsIndexed: number;
   durationMs: number;
 }> {
+  // The Object Type may have been deleted while its funnel workflow was still
+  // alive — durable `ObjectTypeFunnelWorkflow` instances outlive the type they
+  // index. Syncing a now-missing type throws "not found in metadata store"
+  // (indexMappingGenerator), which fails the activity on every retry and the
+  // whole workflow with it. Treat a deleted type as a no-op so the workflow
+  // completes cleanly instead of error-looping.
+  const exists = await query(
+    "SELECT 1 FROM object_type WHERE api_name = $1 LIMIT 1",
+    [input.objectTypeApiName]
+  );
+  if (exists.rows.length === 0) {
+    console.warn(
+      `[temporal/indexing] object type '${input.objectTypeApiName}' no longer exists — skipping OpenSearch sync (deleted)`
+    );
+    const { getIndexName } = await import(
+      "../../opensearch/indexMappingGenerator"
+    );
+    return {
+      indexName: getIndexName(input.objectTypeApiName),
+      indexCreated: false,
+      rowsRead: 0,
+      rowsIndexed: 0,
+      durationMs: 0,
+    };
+  }
+
   // Lazy import so the worker's bundle doesn't pull the opensearch
   // client during cold-start unless this activity actually runs.
   const { syncObjectInstancesToOpenSearch } = await import(

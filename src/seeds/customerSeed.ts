@@ -33,7 +33,7 @@ import fs from "fs";
 import path from "path";
 import seedrandom from "seedrandom";
 import { query, getClient } from "../db";
-import { ensureMainBranchId } from "../services/branchContext";
+import { resetEnterpriseOntologyForSeed } from "./seedOntology";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -696,88 +696,15 @@ async function customerSeed(): Promise<void> {
   console.log(`=== Customer Demo Seed ===\n`);
 
   // -----------------------------------------------------------------------
-  // Step 0: Idempotency — drop existing "Customer Demo" ontology if present.
-  //
-  // Cascading FKs handle property / interface / object_type_interface /
-  // backing_datasource cleanup, but link_type does not cascade through
-  // ontology in the live schema, so it gets an explicit DELETE first.
+  // Step 0+1: "One Enterprise, One Ontology" — populate THE enterprise
+  // ontology. Ensure it exists and reset its content for idempotency (this
+  // also drops any prior holder of the pinned Customer object_type UUID, since
+  // all content now lives under the one ontology). The ontology row + `main`
+  // branch are preserved.
   // -----------------------------------------------------------------------
-  const existing = await query(
-    "SELECT ontology_id FROM ontology WHERE display_name = $1",
-    [ONTOLOGY_NAME],
-  );
-  if (existing.rows.length > 0) {
-    const oldId = existing.rows[0].ontology_id;
-    console.log(`Deleting existing "${ONTOLOGY_NAME}" (${oldId})...`);
-
-    await query("DELETE FROM link_type WHERE ontology_id = $1", [oldId]);
-
-    const ots = await query(
-      "SELECT object_type_id FROM object_type WHERE ontology_id = $1",
-      [oldId],
-    );
-    for (const ot of ots.rows) {
-      await query(
-        "DELETE FROM backing_datasource WHERE object_type_id = $1",
-        [ot.object_type_id],
-      );
-      // property cascades via FK; explicit DELETE is defensive in case the
-      // FK was created without ON DELETE CASCADE in some environments.
-      await query("DELETE FROM property WHERE object_type_id = $1", [
-        ot.object_type_id,
-      ]);
-    }
-    await query("DELETE FROM object_type WHERE ontology_id = $1", [oldId]);
-    await query("DELETE FROM ontology WHERE ontology_id = $1", [oldId]);
-    console.log("Deleted.\n");
-  }
-
-  // -----------------------------------------------------------------------
-  // Step 0b: Orphan-UUID cleanup. The pinned Customer object_type UUID is
-  // reserved for this seed; any row currently holding it under a *different*
-  // ontology is stale (e.g. from a renamed/aborted earlier seed run that
-  // the display-name cleanup above didn't catch). Drop it so the INSERT
-  // below succeeds without violating object_type_pkey. Idempotent and
-  // safe — the only legitimate owner of this UUID is the Customer Demo
-  // ontology we're about to recreate.
-  // -----------------------------------------------------------------------
-  const orphan = await query(
-    "SELECT object_type_id, ontology_id FROM object_type WHERE object_type_id = $1",
-    [CUSTOMER_OBJECT_TYPE_ID],
-  );
-  if (orphan.rows.length > 0) {
-    console.log(
-      `Dropping orphan object_type ${CUSTOMER_OBJECT_TYPE_ID} (was under ontology ${orphan.rows[0].ontology_id})...`,
-    );
-    await query(
-      "DELETE FROM backing_datasource WHERE object_type_id = $1",
-      [CUSTOMER_OBJECT_TYPE_ID],
-    );
-    await query("DELETE FROM property WHERE object_type_id = $1", [
-      CUSTOMER_OBJECT_TYPE_ID,
-    ]);
-    await query("DELETE FROM object_type WHERE object_type_id = $1", [
-      CUSTOMER_OBJECT_TYPE_ID,
-    ]);
-    console.log("Orphan dropped.\n");
-  }
-
-  // -----------------------------------------------------------------------
-  // Step 1: Create ontology + main branch
-  // -----------------------------------------------------------------------
-  const ontResult = await query(
-    `INSERT INTO ontology (display_name, description, created_by)
-     VALUES ($1, $2, $3) RETURNING ontology_id`,
-    [
-      ONTOLOGY_NAME,
-      "Customer demo ontology — promoted from the FE ?demo=1 fixture so the live BE serves the Customer object type.",
-      OWNER_EMAIL,
-    ],
-  );
-  const ontologyId: string = ontResult.rows[0].ontology_id;
-  console.log(`Created ontology: ${ONTOLOGY_NAME} (${ontologyId})`);
+  const ontologyId: string = await resetEnterpriseOntologyForSeed();
+  console.log(`Seeding "${ONTOLOGY_NAME}" content into enterprise ontology (${ontologyId})`);
   console.log(`Owner:    ${OWNER_EMAIL}`);
-  await ensureMainBranchId(ontologyId);
 
   // -----------------------------------------------------------------------
   // Step 2: Ensure data directory exists for any CSVs we register

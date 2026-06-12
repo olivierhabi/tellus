@@ -9,27 +9,16 @@
 // ---------------------------------------------------------------------------
 
 import { Request, Response, NextFunction } from "express";
-import { query } from "../db";
+import { getOntologyId } from "../services/ontology/canonicalOntology";
 
 const ALIASES = new Set(["default", "main", "primary"]);
 
-let cachedId: { value: string; expires: number } | null = null;
-
+// "One Enterprise, One Ontology": every alias resolves through the single
+// canonical resolver. This used to run its own `ORDER BY created_at ASC` query,
+// which disagreed with the other two "default ontology" code paths — now there
+// is exactly one answer.
 async function resolveDefault(): Promise<string | null> {
-  if (cachedId && cachedId.expires > Date.now()) {
-    return cachedId.value;
-  }
-  try {
-    const result = await query(
-      "SELECT ontology_id FROM ontology ORDER BY created_at ASC LIMIT 1"
-    );
-    if (result.rowCount === 0) return null;
-    const id = result.rows[0].ontology_id as string;
-    cachedId = { value: id, expires: Date.now() + 60_000 };
-    return id;
-  } catch {
-    return null;
-  }
+  return getOntologyId();
 }
 
 /**
