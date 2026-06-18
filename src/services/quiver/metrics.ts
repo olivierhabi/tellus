@@ -139,3 +139,51 @@ export const cardsPerDag =
     name: "tellus_quiver_cards_per_dag",
     help: "Last observed card count per validate call (gauge for dashboard ease)",
   });
+
+// === B4 — Versioning + Working State (C-13) =================================
+export const saveVersionSeconds =
+  existing<Histogram<"named">>("tellus_quiver_save_version_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_save_version_seconds",
+    help: "Latency of POST /analyses/:rid/versions",
+    labelNames: ["named"] as const,
+    buckets: seconds,
+  });
+
+export const revertSeconds =
+  existing<Histogram<never>>("tellus_quiver_revert_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_revert_seconds",
+    help: "Latency of POST /analyses/:rid/versions/:version:revert",
+    buckets: seconds,
+  });
+
+export const workingStateSizeBytes =
+  existing<Histogram<never>>("tellus_quiver_working_state_size_bytes") ??
+  new Histogram({
+    name: "tellus_quiver_working_state_size_bytes",
+    help: "Working-state document size in bytes",
+    buckets: bytes,
+  });
+
+export const workingStateTtlPurgesTotal =
+  existing<Counter<never>>("tellus_quiver_working_state_ttl_purges_total") ??
+  new Counter({
+    name: "tellus_quiver_working_state_ttl_purges_total",
+    help: "Working-state rows purged by the TTL sweeper",
+  });
+
+export const versionSavedTotal =
+  existing<Counter<"named">>("tellus_quiver_version_saved_total") ??
+  new Counter({
+    name: "tellus_quiver_version_saved_total",
+    help: "Version saves by named/autosave",
+    labelNames: ["named"] as const,
+  });
+
+export const revertedTotal =
+  existing<Counter<never>>("tellus_quiver_reverted_total") ??
+  new Counter({
+    name: "tellus_quiver_reverted_total",
+    help: "Successful reverts",
+  });
