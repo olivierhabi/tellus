@@ -272,28 +272,31 @@ export async function createAnalysis(
       branch: actor.branch,
     });
 
+    // Emit audit event inside the transaction so it's either committed
+    // with the analysis or rolled back if the transaction fails.
+    await emitQuiverAudit({
+      actorSubject: actor.userSubject,
+      action: "QUIVER_ANALYSIS_CREATED",
+      rid,
+      result: "SUCCESS",
+      branch: actor.branch,
+      afterEtag: etag,
+      details: {
+        parentFolderRid: req.parentFolderRid,
+        displayName: req.displayName,
+        seed: req.seedFromObjectSet
+          ? "objectSet"
+          : req.seedFromTemplate
+            ? "template"
+            : "empty",
+      },
+    });
+
     return { row, etag };
   };
 
   const result = client ? await doCreate(client) : await withTransaction(doCreate);
 
-  await emitQuiverAudit({
-    actorSubject: actor.userSubject,
-    action: "QUIVER_ANALYSIS_CREATED",
-    rid,
-    result: "SUCCESS",
-    branch: actor.branch,
-    afterEtag: result.etag,
-    details: {
-      parentFolderRid: req.parentFolderRid,
-      displayName: req.displayName,
-      seed: req.seedFromObjectSet
-        ? "objectSet"
-        : req.seedFromTemplate
-          ? "template"
-          : "empty",
-    },
-  });
   analysisActiveTotal.labels({ org: actor.orgRid }).inc();
 
   return { document: rowToDocument(result.row), etag: result.etag };
