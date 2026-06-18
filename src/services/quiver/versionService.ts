@@ -295,6 +295,14 @@ export async function revertToVersion(
         notebookMetadata?: unknown;
       }) ?? {};
 
+    // Compute next version monotonically per (rid, branch) - same as saveVersion.
+    const maxQ = await client.query(
+      `SELECT COALESCE(MAX(version), 0)::bigint AS m FROM quiver_analysis_version
+        WHERE rid = $1 AND branch_rid = $2`,
+      [rid, actor.branch],
+    );
+    const newVersion = Number(maxQ.rows[0].m) + 1;
+
     const newSnap = {
       rid: a.rid,
       parentFolderRid: a.parent_folder_rid,
@@ -302,17 +310,13 @@ export async function revertToVersion(
       description: a.description,
       documentBlobUri: a.document_blob_uri,
       documentInline: restored,
-      currentVersion:
-        (typeof a.current_version === "string"
-          ? Number(a.current_version)
-          : a.current_version) + 1,
+      currentVersion: newVersion,
       isDeleted: false,
       deletedAt: null,
       updatedAt: new Date().toISOString(),
       markings: a.markings,
     };
     const newEtag = computeAnalysisEtag(newSnap);
-    const newVersion = newSnap.currentVersion;
 
     // Snapshot first — every revert produces a new immutable version row.
     await client.query(

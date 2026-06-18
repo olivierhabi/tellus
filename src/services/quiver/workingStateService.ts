@@ -81,12 +81,12 @@ export function generateStateId(): string {
   // re-encode. Crypto-strong randomness; collision rate is negligible at
   // any reasonable lifetime, but we still retry on PK conflict on insert.
   const buf = randomBytes(8);
-  // Convert to base36 — pad/truncate to STATE_ID_LENGTH chars.
+  // Convert to base36 with uniform distribution over [0, 36^10).
   let n = 0n;
   for (const b of buf) n = (n << 8n) | BigInt(b);
-  let s = n.toString(36);
-  if (s.length < STATE_ID_LENGTH) s = s.padStart(STATE_ID_LENGTH, "0");
-  if (s.length > STATE_ID_LENGTH) s = s.slice(0, STATE_ID_LENGTH);
+  const s = (n % (36n ** BigInt(STATE_ID_LENGTH)))
+    .toString(36)
+    .padStart(STATE_ID_LENGTH, "0");
   return s;
 }
 
@@ -220,8 +220,8 @@ export async function getWorkingState(
   if (!STATE_ID_RE.test(stateId)) throw workingStateNotFound({ rid, stateId });
   const r = await query(
     `SELECT * FROM quiver_working_state
-      WHERE rid = $1 AND state_id = $2 AND branch_rid = $3 AND expires_at > now() LIMIT 1`,
-    [rid, stateId, actor.branch],
+      WHERE rid = $1 AND state_id = $2 AND branch_rid = $3 AND user_subject = $4 AND expires_at > now() LIMIT 1`,
+    [rid, stateId, actor.branch, actor.userSubject],
   );
   if (r.rowCount === 0) throw workingStateNotFound({ rid, stateId });
   const row = r.rows[0] as WorkingStateRow;
