@@ -25,6 +25,7 @@ import {
   versionMismatch,
 } from "../../services/quiver/errors";
 import { makeContext, lookup, record } from "../../services/quiver/idempotency";
+import { withTransaction } from "../../db";
 import {
   analysisCreateSeconds,
   analysisDeleteSeconds,
@@ -145,29 +146,40 @@ analysesRouter.post(
       route: ROUTE_CREATE,
       body: req.body,
     });
-    try {
-      const cached = await lookup(ctx);
-      if (cached) {
-        idempotencyReplayTotal.labels({ endpoint: ROUTE_CREATE }).inc();
-        if (cached.etag) res.setHeader("ETag", cached.etag);
-        res.status(cached.status).json(cached.body);
-        return;
+    // Wrap idempotency lookup → create → record in a transaction to prevent
+    // TOCTOU race conditions where concurrent requests with the same key
+    // could both pass the lookup and create separate analyses.
+    const result = await withTransaction(async (client) => {
+      try {
+        const cached = await lookup(ctx, client);
+        if (cached) {
+          idempotencyReplayTotal.labels({ endpoint: ROUTE_CREATE }).inc();
+          return { cached, document: null as any, etag: null as any, status: 0 };
+        }
+      } catch (e) {
+        if (isQuiverError(e) && e.envelope.errorName.endsWith("IdempotencyKeyReplay")) {
+          idempotencyConflictTotal.labels({ endpoint: ROUTE_CREATE }).inc();
+        }
+        throw e;
       }
-    } catch (e) {
-      if (isQuiverError(e) && e.envelope.errorName.endsWith("IdempotencyKeyReplay")) {
-        idempotencyConflictTotal.labels({ endpoint: ROUTE_CREATE }).inc();
-      }
-      throw e;
+      const { document, etag } = await createAnalysis(actor, req.body, client);
+      const status = 201;
+      await record(ctx, status, document, etag, client);
+      return { cached: null, document, etag, status };
+    });
+
+    if (result.cached) {
+      if (result.cached.etag) res.setHeader("ETag", result.cached.etag);
+      res.status(result.cached.status).json(result.cached.body);
+      return;
     }
-    const { document, etag } = await createAnalysis(actor, req.body);
-    const status = 201;
-    await record(ctx, status, document, etag);
-    res.setHeader("ETag", etag);
+
+    res.setHeader("ETag", result.etag);
     res.setHeader(
       "Location",
-      `/quiver/api/v1/analyses/${encodeURIComponent(document.rid)}`,
+      `/quiver/api/v1/analyses/${encodeURIComponent(result.document.rid)}`,
     );
-    res.status(status).json(document);
+    res.status(result.status).json(result.document);
     analysisCreateSeconds
       .labels({ result: "success" })
       .observe(Number(process.hrtime.bigint() - t0) / 1e9);

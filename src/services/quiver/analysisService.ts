@@ -177,6 +177,7 @@ function defaultDocumentInline() {
 export async function createAnalysis(
   actor: ActorContext,
   raw: unknown,
+  client?: PoolClient,
 ): Promise<{ document: AnalysisDocument; etag: string }> {
   const parsed = CreateAnalysisRequest.safeParse(raw);
   if (!parsed.success) {
@@ -211,7 +212,9 @@ export async function createAnalysis(
   const inlineCol = useInline ? JSON.stringify(inline) : null;
   const blobUri = useInline ? null : "blob://placeholder"; // B1 C-05 path
 
-  const result = await withTransaction(async (client) => {
+  // Core analysis creation logic; if a client is provided, we assume we're
+  // already in a transaction (e.g., from the idempotency wrapper).
+  const doCreate = async (txnClient: PoolClient): Promise<{ row: AnalysisRow; etag: string }> => {
     // Pre-compute the etag on a row snapshot.
     const now = new Date().toISOString();
     const snap = snapshotForEtag({
@@ -246,7 +249,7 @@ export async function createAnalysis(
       )
       RETURNING *
     `;
-    const r = await client.query(sql, [
+    const r = await txnClient.query(sql, [
       rid,
       req.parentFolderRid,
       req.displayName,
@@ -270,7 +273,9 @@ export async function createAnalysis(
     });
 
     return { row, etag };
-  });
+  };
+
+  const result = client ? await doCreate(client) : await withTransaction(doCreate);
 
   await emitQuiverAudit({
     actorSubject: actor.userSubject,
