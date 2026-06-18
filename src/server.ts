@@ -680,6 +680,18 @@ app.use(
   functionsRegistryRouter,
 );
 
+// Code Repositories — Python @transform -> datasets (migration 103).
+// The transform build engine: discover @transform on a committed ref,
+// publish one job_spec per transform, execute in python3, materialize the
+// OUTPUT dataset, and record input->output lineage. Mounted at /api/v1 AFTER
+// the code-repositories router so `/code-repositories/:rid/builds` falls through
+// to it. The jobSpec router (B7) is also mounted here so transform builds
+// persist job_spec rows.
+import { createTransformsRouter } from "./services/codeRepository/transforms/routes";
+import { createJobSpecRouter } from "./services/jobSpec/admin/routes";
+app.use("/api/v1", createTransformsRouter({ stemma: new PostgresStemma({ pool }) }));
+app.use("/api/v1", createJobSpecRouter({ pool }));
+
 // Boot-time rehydrator. No-op against a real Stemma client (production); a
 // best-effort re-seed against the in-memory adapter (dev / e2e). Awaited
 // inline at module load so the FE's first request after boot finds the

@@ -1,6 +1,6 @@
 verdict|id|description
 PASS|CR-2|Unauthenticated request → 401 (auth required, like Stemma)
-PASS|CR-1|Create repo from TS-Functions template → 201, rid=ri.stemma.main.repository.191bdb95-4a5e-46c4-aec4-30200736e5a0
+PASS|CR-1|Create repo from TS-Functions template → 201, rid=ri.stemma.main.repository.63fcaec6-9296-49ad-8d57-b62f051c2ade
 PASS|CR-1b|New repo resource_version ETag = W/"1"
 PASS|CR-3|Idempotent create replay → same rid, X-Idempotent-Replay:true
 PASS|CR-4|Duplicate name in same folder → 409 conflict

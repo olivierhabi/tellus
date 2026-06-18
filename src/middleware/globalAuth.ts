@@ -125,6 +125,9 @@ function isAllowlisted(req: Request): boolean {
 
   const p = req.path;
   const url = req.originalUrl || req.url || p;
+  
+  // DEBUG: Log the path being checked (remove after debugging)
+  console.log(`[globalAuth] checking path: ${p}, url: ${url}`);
 
   // K8s liveness/readiness — /health, /health/ready, /health/detailed, etc.
   if (p === "/health" || p.startsWith("/health/")) return true;
@@ -138,7 +141,12 @@ function isAllowlisted(req: Request): boolean {
   if (p === "/api/v1/funnel/metrics") return true;
 
   // Authentication surface itself — /api/v1/auth/*
-  if (p === "/api/v1/auth" || p.startsWith("/api/v1/auth/")) return true;
+  const authMatch = p === "/api/v1/auth" || p.startsWith("/api/v1/auth/");
+  console.log(`[globalAuth] auth allowlist check: ${p} -> ${authMatch}`);
+  if (authMatch) {
+    console.log(`[globalAuth] ALLOWLISTED: ${p}`);
+    return true;
+  }
 
   // Swagger UI + OpenAPI JSON spec. Note the `url` check catches
   // /api/docs?foo=bar; `p` check catches bare /api/docs and subpaths.
@@ -175,6 +183,12 @@ function isAllowlisted(req: Request): boolean {
   // only sidesteps the global gate; per-router JWT/PAT validation still runs
   // in production.
   if (p === "/api/v1/functions" || p.startsWith("/api/v1/functions/")) return true;
+
+  // Transform builds + dataset lineage (migration 103) — same two-layer
+  // pattern as code-repositories: `createTransformsRouter` mounts
+  // `requireCodeReposAuth` internally (honours the CODE_REPOS_TEST_AUTH=1
+  // header bypass), so this allowlist entry only sidesteps the global gate.
+  if (p === "/api/v1/transforms" || p.startsWith("/api/v1/transforms/")) return true;
 
   // B3 — Templates service. Allowlisted on the same per-router-auth basis
   // as B2 above: `createTemplatesRouter` mounts `requireCodeReposAuth`

@@ -66,12 +66,8 @@
         },
         "columnWidths": {
           "type": "object",
-          "additionalProperties": false,
-          "description": "Per-section-column widths for the empty-shell editor's two fixed columns. Authored in the SectionInspector (Absolute px or Flex factor); persisted so a reloaded module keeps the user's resized layout.",
-          "properties": {
-            "section-box": { "$ref": "#/$defs/sectionWidthSpec" },
-            "section-page": { "$ref": "#/$defs/sectionWidthSpec" }
-          }
+          "description": "Per-section COLUMN WIDTH / RESIZABLE specs, keyed by section id. Covers the empty-shell editor's two fixed columns (\"section-box\"/\"section-page\") AND any section in the layout tree (split/added sections). Authored in the SectionInspector (Absolute px or Flex factor, optionally resizable); persisted so a reloaded module keeps the user's resized layout.",
+          "additionalProperties": { "$ref": "#/$defs/sectionWidthSpec" }
         }
       }
     }
@@ -84,7 +80,8 @@
       "properties": {
         "mode": { "type": "string", "enum": ["absolute", "flex"] },
         "pxWidth": { "type": "number" },
-        "flexValue": { "type": "number" }
+        "flexValue": { "type": "number" },
+        "resizable": { "type": "boolean" }
       }
     },
     "variableId": {
