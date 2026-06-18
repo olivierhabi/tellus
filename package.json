@@ -62,9 +62,9 @@
     "@aws-sdk/s3-request-presigner": "^3.1010.0",
     "@opensearch-project/opensearch": "^3.5.1",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/auto-instrumentations-node": "^0.73.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.215.0",
-    "@opentelemetry/sdk-node": "^0.215.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.76.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+    "@opentelemetry/sdk-node": "^0.218.0",
     "@simplewebauthn/server": "^13.3.0",
     "@smithy/node-http-handler": "^4.5.0",
     "@temporalio/activity": "^1.11.6",
@@ -87,7 +87,7 @@
     "kafkajs-snappy": "^1.1.0",
     "knex": "^3.1.0",
     "lru-cache": "^11.2.7",
-    "multer": "^2.0.2",
+    "multer": "^2.2.0",
     "nodejs-polars": "^0.24.1",
     "otplib": "^13.4.0",
     "pg": "^8.20.0",
@@ -97,7 +97,7 @@
     "seedrandom": "^3.0.5",
     "swagger-ui-express": "^5.0.1",
     "uuid": "^13.0.0",
-    "ws": "^8.19.0",
+    "ws": "^8.21.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -136,7 +136,12 @@
       "lodash@<4.18.0": "^4.18.0",
       "vite@<8.0.5": "^8.0.5",
       "picomatch@2": "^2.3.2",
-      "picomatch@4": "^4.0.4"
+      "picomatch@4": "^4.0.4",
+      "fast-uri@<3.1.2": "^3.1.2",
+      "protobufjs@<7.5.6": "^7.5.6",
+      "protobufjs@>=8.0.0 <8.0.2": "^8.0.2",
+      "@grpc/grpc-js@>=1.14.0 <1.14.4": "^1.14.4",
+      "fast-xml-builder@<1.1.7": "^1.1.7"
     }
   }
 }
