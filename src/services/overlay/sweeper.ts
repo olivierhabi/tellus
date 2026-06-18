@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import { query } from "../../db";
-import { OverlayStore, overlayKey } from "./overlayStore";
+import { OverlayStore, overlayKey, legacyOverlayKey } from "./overlayStore";
 import { getOverlayStore } from "./getOverlayStore";
 import { recordIndexApplied } from "./slis";
 
@@ -70,7 +70,15 @@ export async function sweepOnce(options: SweeperOptions = {}): Promise<SweeperRu
       correlated++;
       recordIndexApplied(rec.editId, appliedAt);
       if (appliedAt > rec.createdAt) {
+        // T-04: Dual-write cleanup — delete both the new-format key AND
+        // the legacy key. During phases 0–1, both keys are written when
+        // branchId is "_main". The sweeper must clean up both or legacy
+        // records persist and continue being served via fallback.
         await store.delete(overlayKey(rec.branchId, rec.objectType, rec.primaryKey));
+        // Legacy key uses the same objectType and primaryKey but without
+        // the branch slot. This is safe to call even if dual-write was
+        // not active — delete on missing key is a no-op.
+        await store.delete(legacyOverlayKey(rec.objectType, rec.primaryKey));
         deleted++;
       }
     }
