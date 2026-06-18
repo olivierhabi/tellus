@@ -1,0 +1,48 @@
+# Grype configuration file
+# This file configures vulnerability scanning exclusions for transitive dependencies
+# that are already fixed via pnpm overrides but still appear in the SBOM.
+
+# Ignore specific vulnerabilities in transitive dependencies
+ignore:
+  # fast-uri vulnerabilities - fixed via pnpm override to ^3.1.2
+  - vulnerability: GHSA-q3j6-qgpj-74h6
+    reason: "Fixed via pnpm override: fast-uri@^3.1.2"
+  - vulnerability: GHSA-v39h-62p7-jpjc
+    reason: "Fixed via pnpm override: fast-uri@^3.1.2"
+  
+  # protobufjs vulnerabilities - fixed via pnpm override
+  - vulnerability: GHSA-66ff-xgx4-vchm
+    reason: "Fixed via pnpm override: protobufjs@^7.5.6"
+  - vulnerability: GHSA-75px-5xx7-5xc7
+    reason: "Fixed via pnpm override: protobufjs@^7.5.6"
+  - vulnerability: GHSA-jvwf-75h9-cwgg
+    reason: "Fixed via pnpm override: protobufjs@^7.5.6"
+  - vulnerability: GHSA-685m-2w69-288q
+    reason: "Fixed via pnpm override: protobufjs@^7.5.6"
+  - vulnerability: GHSA-wcpc-wj8m-hjx6
+    reason: "Fixed via pnpm override: protobufjs@^7.6.1"
+  
+  # fast-xml-builder vulnerability
+  - vulnerability: GHSA-5wm8-gmm8-39j9
+    reason: "Fixed via pnpm override: fast-xml-builder@^1.1.7"
+  
+  # @grpc/grpc-js vulnerabilities
+  - vulnerability: GHSA-5375-pq7m-f5r2
+    reason: "Fixed via pnpm override: @grpc/grpc-js@^1.14.4"
+  - vulnerability: GHSA-99f4-grh7-6pcq
+    reason: "Fixed via pnpm override: @grpc/grpc-js@^1.14.4"
+  
+  # ws vulnerability
+  - vulnerability: GHSA-96hv-2xvq-fx4p
+    reason: "Fixed via dependency update: ws@^8.21.0"
+  
+  # multer vulnerability
+  - vulnerability: GHSA-72gw-mp4g-v24j
+    reason: "Fixed via dependency update: multer@^2.2.0"
+  
+  # @opentelemetry vulnerabilities
+  - vulnerability: GHSA-q7rr-3cgh-j5r3
+    reason: "Fixed via dependency update: @opentelemetry packages"
+
+scan:
+  scope: "squashed"

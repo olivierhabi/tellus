@@ -37,6 +37,8 @@ export default defineConfig({
       // no Redis/PG/Quickwit). Including the whole dir keeps the offline
       // lane aligned with the funnel test surface.
       "tests/funnel/unit/**/*-unit.test.ts",
+      // Quiver drive (B1..B10 + F1..F10): pure-unit tests under tests/quiver/unit/.
+      "tests/quiver/unit/**/*-unit.test.ts",
       // T-10: AST-level route contract guard (no I/O beyond fs reads).
       "tests/contract/**/*.test.ts",
     ],

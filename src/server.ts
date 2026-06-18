@@ -634,6 +634,12 @@ app.use("/api/v1/pipelines", pipelinesMetricsRouter);
 import workshopModulesRouter from "./routes/workshopModules";
 app.use("/api/v1/workshop", workshopModulesRouter);
 
+// Quiver B1 — analysis CRUD (Phase 1).
+// Spec: tasks/quiver/quiver-tasks.md §B1. Phase-flagged via TELLUS_QUIVER_PHASE.
+// Mounted at /quiver/api/v1 to mirror the spec's base-path verbatim.
+import { buildQuiverRouter } from "./routes/quiver";
+app.use("/quiver/api/v1", buildQuiverRouter());
+
 // Wire the production-default Workshop OSS adapter to read from the seeded
 // `workshop_demo_order` Postgres table (migration 061). Tests that exercise
 // the OSS path swap their own RecordingOssAdapter via setOss() in beforeAll
