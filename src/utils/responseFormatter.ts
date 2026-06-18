@@ -490,8 +490,12 @@ export function sanitizeMessage(message: string): string {
   out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "<ip>");
   // Embedded SQL keywords often bring along the query text — collapse a
   // contiguous run of `SELECT|INSERT|UPDATE|DELETE … FROM …` to a marker.
+  // Note: WITH is excluded from the generic SQL scrubber because it
+  // over-matches common English phrases (e.g., "Connection failed with
+  // timeout"). CTEs are rare in error messages; if needed, add a specific
+  // pattern like /\bWITH\s+\w+\s+AS\b/ to match only CTE syntax.
   out = out.replace(
-    /\b(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|WITH|CREATE TABLE)\b[^\n]{0,200}/gi,
+    /\b(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|CREATE TABLE)\b[^\n]{0,200}/gi,
     "<sql>",
   );
   // Trim any whitespace artefacts left behind by the substitutions.
