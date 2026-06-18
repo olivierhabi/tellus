@@ -354,6 +354,11 @@ export async function updateAnalysisMetadata(
     if (sel.rowCount === 0) throw analysisNotFound({ rid });
     const before = sel.rows[0] as AnalysisRow;
     if (before.is_deleted) throw analysisNotFound({ rid });
+    await compass.assertEditorOnFolder({
+      folderRid: before.parent_folder_rid,
+      userSubject: actor.userSubject,
+      branch: actor.branch,
+    });
     if (!etagsMatch(ifMatch, before.etag)) {
       etagMismatchTotal.labels({ endpoint: "PATCH /analyses/:rid" }).inc();
       throw versionMismatch({ currentEtag: before.etag });
@@ -449,6 +454,11 @@ export async function deleteAnalysis(
       // Idempotent on repeat per B1 C-14.
       return;
     }
+    await compass.assertEditorOnFolder({
+      folderRid: before.parent_folder_rid,
+      userSubject: actor.userSubject,
+      branch: actor.branch,
+    });
     if (!etagsMatch(ifMatch, before.etag)) {
       etagMismatchTotal.labels({ endpoint: "DELETE /analyses/:rid" }).inc();
       throw versionMismatch({ currentEtag: before.etag });

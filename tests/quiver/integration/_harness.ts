@@ -150,7 +150,6 @@ export function quiverPostgresAvailable(): boolean {
       process.env.PGHOST ||
       process.env.DATABASE_URL ||
       process.env.PG_DSN ||
-      process.env.PGPASSWORD ||
-      true,
+      process.env.PGPASSWORD,
   );
 }
