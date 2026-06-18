@@ -30,29 +30,32 @@ const moduleHeaderSchema = z
   .strict()
   .optional();
 
-// Per-section-column width. The empty-shell editor lays widgets out across two
-// fixed columns ("section-box" / "section-page"); each column's COLUMN WIDTH
-// (Absolute px or Flex factor) is authored in the SectionInspector and
-// persisted here so a reloaded module keeps the user's resized layout. The FE
-// carries a "fat record" (both px + flex values plus the active mode) so
-// toggling mode doesn't lose the other value — mirrored verbatim here. Without
-// this slot every section resize was rejected with
-// Tellus:Workshop:InvalidModuleSchema `unrecognized_keys: ["columnWidths"]`
-// (the same round-trip data-loss class the `header` slot above fixed).
+// Per-section COLUMN WIDTH. The empty-shell editor lays widgets out across two
+// fixed columns ("section-box" / "section-page"), AND any section in the layout
+// tree (split/added sections) can carry its own width. Each section's COLUMN
+// WIDTH (Absolute px or Flex factor) — optionally RESIZABLE — is authored in the
+// SectionInspector / dragged on the canvas and persisted here so a reloaded
+// module keeps the user's resized layout. The FE carries a "fat record" (both px
+// + flex values plus the active mode and a resizable flag) so toggling mode
+// doesn't lose the other value — mirrored verbatim here. Without this slot every
+// section resize was rejected with Tellus:Workshop:InvalidModuleSchema
+// `unrecognized_keys: ["columnWidths"]` (the same round-trip data-loss class the
+// `header` slot above fixed); keying by the two fixed columns ALONE likewise
+// rejected tree-section widths with `unrecognized_keys: ["<sectionId>"]`.
 const sectionWidthSpecSchema = z
   .object({
     mode: z.enum(["absolute", "flex"]),
     pxWidth: z.number(),
     flexValue: z.number(),
+    resizable: z.boolean().optional(),
   })
   .strict();
 
+// A map keyed by section id (the two fixed columns OR any tree section id) →
+// width spec. `z.record` accepts arbitrary keys while still strictly validating
+// each value, so the two-fixed-column behavior is preserved and generalized.
 const columnWidthsSchema = z
-  .object({
-    "section-box": sectionWidthSpecSchema.optional(),
-    "section-page": sectionWidthSpecSchema.optional(),
-  })
-  .strict()
+  .record(z.string(), sectionWidthSpecSchema)
   .optional();
 
 export const moduleDefinitionSchema = z

@@ -91,6 +91,14 @@ function validatePublishBody(body: unknown): { ok: true; body: ParsedPublishBody
 export function createJobSpecRouter(deps: JobSpecRouterDeps): Router {
   const router = express.Router();
   router.use(express.json({ limit: "10mb" }));
+  // Skip auth endpoints (mounted at /api/v1/auth) so they're not caught by
+  // requireCodeReposAuth. The auth router must handle its own auth logic.
+  router.use((req, res, next) => {
+    if (req.path.startsWith("/auth/")) {
+      return next("router"); // Exit this router, continue to app-level middleware
+    }
+    next();
+  });
   router.use(requireCodeReposAuth());
   router.use(idempotencyMiddleware({ pool: deps.pool }));
 

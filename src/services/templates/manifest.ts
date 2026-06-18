@@ -8,6 +8,7 @@ export interface TemplateParameter {
   readonly regex: string;
   readonly default?: string;
   readonly description?: string;
+  readonly required?: boolean;
 }
 
 export interface TemplateFile {
@@ -446,23 +447,99 @@ const TR_PYTHON_1_0_0: TemplateManifest = {
       name: "datasetRid",
       regex: "^ri\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-zA-Z0-9_-]{1,128}$",
       default: "ri.foundry.main.dataset.placeholder",
-      description: "Placeholder dataset RID for the example transform.",
+      description: "Output dataset RID for the example seed transform. Edit per repo.",
+      required: true,
     },
   ],
   deprecated: false,
   files: [
     {
+      // A self-contained source transform: no inputs, so a freshly-created
+      // repo builds GREEN immediately ("Build" -> materialized output dataset).
       path: "transforms/example.py",
       mode: "100644",
       isBinary: false,
-      content: `from transforms.api import transform, Output, Input
+      content: `from transforms.api import transform, Output, DataFrame
 
-@transform(
-    output=Output("{{datasetRid}}"),
-    source=Input("ri.foundry.main.dataset.source-placeholder"),
+# A source transform: it has no inputs and synthesizes a small seed dataset,
+# so a brand-new repo builds successfully out of the box. Replace the rows (or
+# add an Input(...)) with your real logic.
+#
+# To read an existing dataset instead, declare an input:
+#
+#     @transform(
+#         output=Output("{{datasetRid}}"),
+#         orders=Input("ri.foundry.main.dataset.<your-input>"),
+#     )
+#     def example_transform(output, orders):
+#         output.write_dataframe(orders.dataframe().filter(lambda r: r["amount"] > 0))
+
+
+@transform(output=Output("{{datasetRid}}"))
+def example_seed(output):
+    output.write_dataframe(
+        DataFrame(
+            [
+                {"id": 1, "category": "a", "value": 10},
+                {"id": 2, "category": "b", "value": 20},
+                {"id": 3, "category": "a", "value": 30},
+            ]
+        )
+    )
+`,
+    },
+    {
+      // A second transform that READS the seed output and writes an enriched
+      // dataset — demonstrates Input/Output dataset lineage + @transform_df.
+      path: "transforms/enrich.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import transform_df, Output, Input
+
+
+@transform_df(
+    Output("{{datasetRid}}-enriched"),
+    seed=Input("{{datasetRid}}"),
 )
-def example_transform(output, source):
-    output.write_dataframe(source.dataframe())
+def enrich(seed):
+    # @transform_df: return the output DataFrame (it is written automatically).
+    df = seed.dataframe()
+    return df.with_column("value_x2", lambda r: int(r["value"]) * 2)
+`,
+    },
+    {
+      // An @incremental example (snapshot vs append write semantics). Disabled
+      // by default (rename to .py / remove the leading underscore to enable).
+      path: "transforms/_incremental_example.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import transform, incremental, Output, Input
+
+
+# @incremental tells the build to APPEND (vs SNAPSHOT-replace) the output.
+@incremental()
+@transform(
+    output=Output("{{datasetRid}}-events"),
+    source=Input("{{datasetRid}}"),
+)
+def append_events(output, source):
+    output.write_dataframe(source.dataframe(), mode="modify")
+`,
+    },
+    {
+      path: "ci.yml",
+      mode: "100644",
+      isBinary: false,
+      content: `# Stemma/Jemma CI pipeline for transforms-python.
+stages:
+  - name: lint
+    command: python -m pyflakes transforms/
+  - name: discover
+    command: tellus transforms discover
+  - name: build
+    command: tellus transforms build
+  - name: test
+    command: python -m pytest -q
 `,
     },
     {
@@ -470,8 +547,11 @@ def example_transform(output, source):
       mode: "100644",
       isBinary: false,
       content: `{
-  "defaultBranch": "main",
-  "branchProtection": []
+  "defaultBranch": "master",
+  "tagNameValidation": "semver",
+  "branchProtection": [
+    { "branch": "master", "requiredStatusChecks": ["jemma:build"] }
+  ]
 }
 `,
     },
@@ -494,8 +574,22 @@ const TR_JAVA_1_0_0: TemplateManifest = {
       isBinary: false,
       content: `package com.example;
 
-public class ExampleTransform {
-  // Example. Replace with @Transform implementations.
+import com.palantir.transforms.lang.java.api.Compute;
+import com.palantir.transforms.lang.java.api.Input;
+import com.palantir.transforms.lang.java.api.Output;
+import com.palantir.transforms.lang.java.api.Transform;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+public final class ExampleTransform {
+
+  @Transform(
+      output = @Output("ri.foundry.main.dataset.placeholder"),
+      input = @Input("ri.foundry.main.dataset.source-placeholder"))
+  @Compute
+  public Dataset<Row> example(Dataset<Row> input) {
+    return input.filter("value > 0");
+  }
 }
 `,
     },
@@ -503,7 +597,18 @@ public class ExampleTransform {
       path: "build.gradle",
       mode: "100644",
       isBinary: false,
-      content: "plugins { id 'java' }\nrepositories { mavenCentral() }\n",
+      content: `plugins {
+  id 'java-library'
+  id 'com.palantir.transforms.lang.java'
+}
+
+repositories { mavenCentral() }
+
+dependencies {
+  implementation 'com.palantir.transforms:transforms-java-api'
+  implementation 'org.apache.spark:spark-sql_2.13'
+}
+`,
     },
     {
       path: "repoSettings.json",
@@ -532,7 +637,17 @@ const TR_SQL_1_0_0: TemplateManifest = {
       path: "transforms/example.sql",
       mode: "100644",
       isBinary: false,
-      content: "-- Example transform.\nSELECT 1 as placeholder;\n",
+      content: `-- transforms-sql: each file materializes one output dataset.
+-- The output dataset is declared with @output; inputs are referenced by RID.
+-- @output ri.foundry.main.dataset.placeholder
+CREATE TABLE output AS
+SELECT
+    id,
+    category,
+    value
+FROM "ri.foundry.main.dataset.source-placeholder"
+WHERE value > 0;
+`,
     },
     {
       path: "repoSettings.json",
