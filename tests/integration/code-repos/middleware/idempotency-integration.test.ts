@@ -191,15 +191,36 @@ describe("Code Repos idempotency middleware — replay + conflict + scope", () =
     const first = await postRepo(app, "ttl-user/OWNER", key, body);
     expect(first.status).toBe(201);
 
+    // The idempotency row is persisted by the middleware in a
+    // `res.on("finish")` handler — fire-and-forget after the HTTP
+    // response is flushed. On a slow runner, our manual UPDATE below
+    // can race the async INSERT and lose, after which the middleware's
+    // INSERT overwrites with a fresh expires_at=+24h row, breaking the
+    // "expired" precondition. Poll the table until the row exists so
+    // the UPDATE is deterministic.
+    for (let i = 0; i < 50; i += 1) {
+      const r = await ctx.query<{ idem_key: string }>(
+        `SELECT idem_key FROM code_repos_idempotency
+          WHERE principal_user_id = 'ttl-user' AND idem_key = $1`,
+        [key],
+      );
+      if (r.rowCount === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
     // Manually expire the row — production purge cron does this every
     // hour; we simulate by setting both created_at AND expires_at into
     // the past so the CHECK (expires_at > created_at) still holds.
-    await ctx.exec(
+    const upd = await ctx.query(
       `UPDATE code_repos_idempotency
           SET created_at = now() - interval '2 hour',
               expires_at = now() - interval '1 hour'
-        WHERE principal_user_id = 'ttl-user'`,
+        WHERE principal_user_id = 'ttl-user' AND idem_key = $1`,
+      [key],
     );
+    // Sanity: precondition for this test only holds if the UPDATE
+    // matched a row. Surfaces any future regression in the wait loop.
+    expect(upd.rowCount).toBe(1);
 
     // Replay with same key + same body — but expired. Behaviour: the
     // middleware ignores the expired row and the route runs again,
