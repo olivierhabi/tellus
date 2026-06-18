@@ -18,7 +18,8 @@ import { signalTemporalWorkflow, isTemporalConnected } from "../services/funnel/
 import { drainPendingSignals } from "../services/funnel/funnelDispatcher";
 import { getInstance } from "../models/objectInstance";
 import { getOverlayStore } from "../services/overlay/getOverlayStore";
-import { overlayKey } from "../services/overlay/overlayStore";
+import { readOverlay } from "../services/overlay/writebackOverlay";
+import { readBranchHeader } from "../middleware/branchHeader";
 import { getOverlaySloSnapshot, renderOverlaySliPrometheus } from "../services/overlay/slis";
 import { renderPrometheus as renderFunnelMetrics } from "../services/funnel/metrics";
 import { ensureLinkTablesForAllLinkTypes } from "../services/funnel/clickhouseBootstrap";
@@ -281,11 +282,13 @@ router.get("/instances/:objectType/:pk", async (req: Request, res: Response) => 
 
 router.get("/overlay/:objectType/:pk", async (req: Request, res: Response) => {
   const { objectType, pk } = req.params;
+  // T-04: branchId comes from the standard branch header (defaults to
+  // `_main` when absent). Reads route through `readOverlay` so the
+  // legacy-fallback gate and branch-mismatch counter are enforced.
+  const branchId = readBranchHeader(req) ?? null;
   try {
     const store = await getOverlayStore();
-    const key = overlayKey(objectType, pk);
-    const values = await store.mget([key]);
-    const hit = values[0] ?? null;
+    const hit = await readOverlay(branchId, objectType, pk, store);
     if (!hit) {
       res.status(404).json({ error: "NOT_FOUND", objectType, primary_key: pk });
       return;

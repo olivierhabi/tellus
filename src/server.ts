@@ -11,6 +11,10 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { pool, query } from "./db";
+import {
+  enforceMigrationGate,
+  MigrationDriftError,
+} from "./db/migrationGate";
 import requestLogger from "./middleware/requestLogger";
 import { inputSanitizer } from "./middleware/inputSanitizer";
 import { notFoundHandler } from "./middleware/notFoundHandler";
@@ -250,8 +254,27 @@ app.use(
     origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "X-Request-ID"],
-    exposedHeaders: ["X-Idempotency-Cached", "X-Total-Count", "Server-Timing", "Retry-After", "Content-Language", "X-Request-ID"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Idempotency-Key",
+      "If-Match",
+      "If-None-Match",
+      "X-Request-ID",
+      "X-Tellus-Test-Principal",
+      "X-Tellus-Test-Role",
+      "X-Tellus-Test-Roles",
+    ],
+    exposedHeaders: [
+      "X-Idempotency-Cached",
+      "X-Idempotent-Replay",
+      "X-Total-Count",
+      "Server-Timing",
+      "Retry-After",
+      "Content-Language",
+      "X-Request-ID",
+      "ETag",
+    ],
   })
 );
 
@@ -533,10 +556,91 @@ app.use("/api/v1/datasets", dataPreviewRouter);
 import lineageRouter from "./routes/lineage";
 app.use("/api/v2", lineageRouter);
 
+// Code Repositories (B2) — admin router mounted on the main server so
+// the FE can reach the saga + ledger + branches via the existing auth chain.
+//
+// We use `mountCodeRepository` (not the router-only helper) so we keep a
+// handle on the in-memory adapter instances. That lets the rehydrator below
+// re-seed every ACTIVE `code_repository` row into the same adapter the
+// router will use at request time — without it, a backend restart leaves
+// existing repository RIDs unreadable until the row is re-created.
+import { mountCodeRepository } from "./services/codeRepository/mount";
+import { rehydrateInMemoryStemma } from "./services/codeRepository/rehydrate";
+const codeRepoMount = mountCodeRepository({ pool });
+app.use("/api/v1/code-repositories", codeRepoMount.router);
+
+// Boot-time rehydrator. No-op against a real Stemma client (production); a
+// best-effort re-seed against the in-memory adapter (dev / e2e). Awaited
+// inline at module load so the FE's first request after boot finds the
+// branches it expects. Errors are logged + swallowed: a partial rehydrate
+// must not block the server from accepting traffic.
+void (async () => {
+  try {
+    const r = await rehydrateInMemoryStemma({
+      pool,
+      stemma: codeRepoMount.adapters.stemma,
+      logger: (event, meta) =>
+        console.log(JSON.stringify({ event, ...(meta ?? {}) })),
+    });
+    if (r.applied && (r.rehydrated > 0 || r.failed > 0)) {
+      console.log(
+        JSON.stringify({
+          event: "code-repos.rehydrate.summary",
+          rehydrated: r.rehydrated,
+          skipped: r.skipped,
+          failed: r.failed,
+          total: r.total,
+        }),
+      );
+    }
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        event: "code-repos.rehydrate.fatal",
+        message: (err as Error).message,
+      }),
+    );
+  }
+})();
+
+// Code Repositories — B3 Templates service.
+//
+// Per ADR-008 the B3 surface is split into two router factories, each
+// mounted at its own resource prefix. This makes the mount strictly
+// resource-scoped (no middleware leak across siblings) and lets every
+// router declare its auth/idempotency stack as router-internal without
+// risk of intercepting unrelated `/api/v1/*` traffic.
+//
+// History: this previously shipped as a single router whose router-level
+// `requireCodeReposAuth()` middleware leaked across `/api/v1/*` (including
+// `/api/v1/auth/login`) and 401-rejected sibling routes. ADR-008 codifies
+// the rule that prevents the regression.
+import {
+  createTemplatesRouter,
+  createScaffoldRouter,
+} from "./services/templates/admin/routes";
+app.use("/api/v1/templates", createTemplatesRouter({ pool }));
+app.use("/api/v1/scaffold", createScaffoldRouter({ pool }));
+
 // PB-B9: Prometheus scrape endpoint for the Pipeline Builder,
 // parallel to /api/v1/funnel/metrics.
 import pipelinesMetricsRouter from "./routes/pipelinesMetrics";
 app.use("/api/v1/pipelines", pipelinesMetricsRouter);
+
+// Workshop B01 — module CRUD with ETag/If-Match optimistic concurrency.
+// Spec: tasks/workshop/workshop-tasks.md §B01. Mounted under the spec's
+// `/api/v1/workshop` prefix (separate from `/api/v1` so the surface stays
+// versioned independently of the existing Foundry-shaped APIs).
+import workshopModulesRouter from "./routes/workshopModules";
+app.use("/api/v1/workshop", workshopModulesRouter);
+
+// Wire the production-default Workshop OSS adapter to read from the seeded
+// `workshop_demo_order` Postgres table (migration 061). Tests that exercise
+// the OSS path swap their own RecordingOssAdapter via setOss() in beforeAll
+// and restore it in afterAll, so this default does not affect the suite.
+import { setOss } from "./services/workshop/ossAdapter";
+import { PostgresOssAdapter } from "./services/workshop/postgresOssAdapter";
+setOss(new PostgresOssAdapter());
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex",
   reindexRouter
@@ -729,6 +833,50 @@ async function start(): Promise<void> {
   try {
     // Verify the database is reachable before accepting requests.
     await pool.query("SELECT NOW()");
+
+    // Migration gate — fail-fast on schema drift (production) or
+    // auto-apply pending migrations (dev).  Mode is selected by
+    // TELLUS_MIGRATION_GATE env var; defaults to `strict` when
+    // NODE_ENV=production, `auto` otherwise.  Gate runs BEFORE any
+    // service tries to write to a Postgres table — failure here
+    // exits the process so K8s/Apollo treats it as a deploy
+    // failure and stops the rollout.  See decisions/code-repository/
+    // D-2026-05-04-008-boot-migration-gate.md.
+    try {
+      const gateResult = await enforceMigrationGate({ pool });
+      console.log(
+        JSON.stringify({
+          type: "migration_gate.ok",
+          mode: gateResult.mode,
+          appliedDuringRun: gateResult.appliedDuringRun.length,
+          pendingBefore: gateResult.pending.length,
+          durationMs: gateResult.durationMs,
+        }),
+      );
+    } catch (gateErr) {
+      if (gateErr instanceof MigrationDriftError) {
+        console.error(
+          JSON.stringify({
+            type: "migration_gate.drift",
+            pending: gateErr.pending,
+            message: gateErr.message,
+          }),
+        );
+      } else {
+        console.error(
+          JSON.stringify({
+            type: "migration_gate.error",
+            error: gateErr instanceof Error ? gateErr.message : String(gateErr),
+          }),
+        );
+      }
+      // Refusing to start the server — drift / apply failure must
+      // be treated as a deploy bug, not a soft warning.
+      await pool.end().catch(() => {
+        /* ignored — already shutting down */
+      });
+      process.exit(1);
+    }
 
     // Ensure the OpenSearch index template is in place before any indexing
     // operations. This is a best-effort call — if OpenSearch is not yet

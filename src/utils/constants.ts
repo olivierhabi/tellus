@@ -9,6 +9,17 @@ export const DEFAULT_PAGE_SIZE = 100;
 export const MIN_PAGE_SIZE = 1;
 export const MAX_PAGE_SIZE = 10_000;
 
+// T-09 — explorer-specific page-size caps. The legacy MAX_PAGE_SIZE
+// remains 10_000 for non-explorer callers (datasets, edits, reindex
+// status — which all have their own cap regimes). The explorer surface
+// (`queryValidator.validatePageSize`) uses these tighter bounds:
+//   - MAX_EXPLORER_PAGE_SIZE       = 1000  — Foundry default per §7
+//   - MAX_EXPLORER_PAGE_SIZE_OPT_IN= 2000  — opt-in via header
+//                                     `x-tellus-large-page: true`
+// See decisions/object-explorer/D-2026-04-30-004-page-size-cap.md.
+export const MAX_EXPLORER_PAGE_SIZE = 1_000;
+export const MAX_EXPLORER_PAGE_SIZE_OPT_IN = 2_000;
+
 export const DEFAULT_SEARCH_AROUND_LIMIT = 100_000;
 export const MAX_AFFECTED_OBJECTS_PER_ACTION = 10_000;
 export const MAX_PROPERTIES_PER_OBJECT_TYPE = 2_000;

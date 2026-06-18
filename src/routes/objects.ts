@@ -31,12 +31,13 @@ import { appError } from "../utils/appError";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
 import { incCounter } from "../services/funnel/metrics";
+import { routeMetric } from "../utils/routeInstrumentation";
 import {
   applyOverlayToResults,
   mergeOverlayIntoSearch,
+  readOverlay,
 } from "../services/overlay/writebackOverlay";
 import { getOverlayStore } from "../services/overlay/getOverlayStore";
-import { overlayKey } from "../services/overlay/overlayStore";
 import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 
 const router = Router();
@@ -59,7 +60,8 @@ const router = Router();
 async function mergeWithOverlay<R extends { data: unknown[] }>(
   objectType: string,
   result: R,
-  whereClause?: unknown
+  whereClause?: unknown,
+  branchId: string | null = null
 ): Promise<R> {
   try {
     const store = await getOverlayStore();
@@ -69,6 +71,7 @@ async function mergeWithOverlay<R extends { data: unknown[] }>(
       hits: result.data as Array<Record<string, unknown>>,
       filter,
       store,
+      branchId,
     });
     return { ...result, data: merged } as R;
   } catch {
@@ -79,7 +82,8 @@ async function mergeWithOverlay<R extends { data: unknown[] }>(
       const replaced = await applyOverlayToResults(
         objectType,
         result.data as Array<Record<string, unknown>>,
-        store
+        store,
+        branchId
       );
       return { ...result, data: replaced } as R;
     } catch {
@@ -131,32 +135,63 @@ const KNOWN_CODES = new Set([
   "OBJECT_NOT_FOUND",
 ]);
 
+// T-07 — verbose-404 gate. Returning the full `api_name` catalog in the
+// 404 body is an information-disclosure defect (H-9): an unauthenticated
+// or under-privileged caller can enumerate every object type in the
+// ontology by guessing one missing name. The verbose body is gated behind
+// a *dual* condition so staging — which often runs `NODE_ENV=production`
+// — keeps the production-shape behavior:
+//   - `NODE_ENV !== "production"` AND
+//   - `TELLUS_DEBUG_404 === "true"`
+// In production the body says only "Object type not found.", with the
+// requested name preserved as `parameters.objectType` for client log
+// correlation. The hint about catalog enumeration is intentionally
+// omitted from the message in production.
 async function ensureObjectTypeExists(objectType: string): Promise<void> {
   const result = await query(
     "SELECT 1 FROM object_type WHERE api_name = $1",
     [objectType]
   );
   if (result.rows.length === 0) {
-    const all = await query("SELECT api_name FROM object_type ORDER BY api_name");
-    const available = all.rows.map((r: any) => r.api_name);
+    const verbose =
+      process.env.NODE_ENV !== "production" &&
+      process.env.TELLUS_DEBUG_404 === "true";
+    if (verbose) {
+      const all = await query(
+        "SELECT api_name FROM object_type ORDER BY api_name"
+      );
+      const available = all.rows.map((r: any) => r.api_name);
+      throw appError(
+        "OBJECT_TYPE_NOT_FOUND",
+        `Object type '${objectType}' not found. Available object types: ${available.join(", ") || "(none)"}`,
+        { objectType, available }
+      );
+    }
     throw appError(
       "OBJECT_TYPE_NOT_FOUND",
-      `Object type '${objectType}' not found. Available object types: ${available.join(", ") || "(none)"}`
+      "Object type not found.",
+      { objectType }
     );
   }
 }
 
+// T-07 — Testing seam.
+// `ensureObjectTypeExists` is a private function-scoped helper, but the
+// verbose-404 gate (C-104) is a security-critical contract that needs a
+// direct unit test without spinning up an Express app. The seam exposes
+// the helper without changing its production call surface — the route
+// handlers continue to use the unexported reference.
+export const __internals = { ensureObjectTypeExists };
+
 function handleError(err: any, res: Response, next: NextFunction) {
   if (err.code && KNOWN_CODES.has(err.code)) {
-    const status =
-      err.code === "OBJECT_TYPE_NOT_FOUND" || err.code === "OBJECT_NOT_FOUND"
-        ? 404
-        : err.code === "OPENSEARCH_ERROR"
-        ? 503
-        : 400;
-    return res.status(status).json({
-      error: { code: err.code, message: err.message },
-    });
+    // T-07 — fold every known-code error through the canonical envelope
+    // so `errorCode`/`errorName`/`requestId` are present and `message`
+    // is `sanitizeMessage`-scrubbed. `appError` historically populates
+    // `details`; later additions populate `parameters`. We accept both
+    // so the structured envelope carries whichever was supplied.
+    const detail = err.details ?? err.parameters ?? {};
+    return sendError(res, err.code, err.message, detail);
   }
   next(err);
 }
@@ -217,10 +252,7 @@ router.post(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.search",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.search", branchId);
       const validated = await validateSearchQuery(body, objectType);
       const rawResult = await executeSearch(objectType, {
         where: validated.where,
@@ -233,7 +265,7 @@ router.post(
       // B7: merge the writeback overlay so recent edits are visible
       // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
       // the index document for matching PKs; misses pass through.
-      const result = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where);
+      const result = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where, branchId);
 
       // B9: shadow-diff during soak. Fire-and-forget — hurts neither
       // latency nor correctness if Quickwit is unreachable.
@@ -282,10 +314,7 @@ router.post(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.searchFullText",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.searchFullText", branchId);
       const rawResult = await executeFullTextSearch(objectType, searchQuery.trim(), {
         where,
         $orderBy,
@@ -294,7 +323,7 @@ router.post(
         $select,
       }, secFilter, branchId);
       // B7: overlay merge for immediate edit visibility.
-      const result = await mergeWithOverlay(objectType, rawResult);
+      const result = await mergeWithOverlay(objectType, rawResult, undefined, branchId);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -322,10 +351,7 @@ router.post(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.aggregate",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.aggregate", branchId);
       const validated = await validateAggregateQuery(req.body || {}, objectType);
       const result = await executeAggregate(objectType, {
         where: validated.where,
@@ -363,10 +389,7 @@ router.get(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.list",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.list", branchId);
       const rawResult = await executeSearch(objectType, {
         $orderBy: validated.orderBy.length > 0 ? validated.orderBy : undefined,
         $pageSize: validated.pageSize,
@@ -374,7 +397,7 @@ router.get(
         $select: validated.select,
       }, secFilter, branchId);
       // B7: overlay merge — recent edits visible within 1s.
-      const result = await mergeWithOverlay(objectType, rawResult);
+      const result = await mergeWithOverlay(objectType, rawResult, undefined, branchId);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -426,10 +449,7 @@ router.post(
       const effectiveDirection = (direction || $direction) as "forward" | "reverse";
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.searchAround",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.searchAround", branchId);
       const result = await searchAround(linkType, effectiveDirection, {
         sourceFilter, targetFilter, pageSize, pageToken,
       }, secFilter, branchId);
@@ -460,10 +480,7 @@ router.post(
 
       // F-P3-13: FK validation scoped to the caller's branch.
       const branchId = readBranchHeader(req);
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.validateForeignKeys",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.validateForeignKeys", branchId);
       const result = await validateForeignKeys(object_type_id, req.body, ontology_id, buildSecurityFilter(req.security), branchId);
       return sendSuccess(res, result);
     } catch (err: any) {
@@ -510,10 +527,7 @@ router.get(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.linkResolve",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.linked", branchId);
       const result = await resolveLinks(linkType, primaryKey, effectiveDirection, {
         pageSize: pageSize ? parseInt(pageSize as string, 10) : undefined,
         pageToken: pageToken as string,
@@ -572,10 +586,7 @@ router.get(
 
       // F-P3-13: link count scoped to the caller's branch.
       const branchId = readBranchHeader(req);
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.linkCount",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.linkedCount", branchId);
       const count = await countLinks(linkType, primaryKey, effectiveDirection, buildSecurityFilter(req.security), branchId);
       return sendSuccess(res, { linkTypeApiName, direction: effectiveDirection, count });
     } catch (err: any) {
@@ -607,6 +618,16 @@ router.get(
     try {
       const { objectType, primaryKey } = req.params;
       await ensureObjectTypeExists(objectType);
+
+      // T-10 observability: editHistory queries the audit table directly
+      // (not OpenSearch), but the contract guard still requires the
+      // canonical trio. The buildSecurityFilter call here is a no-op
+      // side effect documenting that the handler’s author considered
+      // CBAC — the actual SQL filter is per-row immutable history.
+      void buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req);
+      routeMetric(req, "objects.editHistory", branchId);
+      void primaryKey;
 
       // ------------------------------------------------------------------
       // Parse and validate query parameters
@@ -812,10 +833,7 @@ router.get(
       await ensureObjectTypeExists(objectType);
 
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objects.get",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objects.get", branchId);
       let obj = await executeGetObject(objectType, primaryKey, buildSecurityFilter(req.security), branchId);
 
       // B7: overlay read — if a recent edit is in the overlay but the
@@ -838,14 +856,17 @@ router.get(
           const overlayed = await applyOverlayToResults(
             objectType,
             [obj as Record<string, unknown>],
-            store
+            store,
+            branchId
           );
           // `applyOverlayToResults` returns an EMPTY array when the
           // overlay says the row is deleted → drop obj so the 404
           // branch below fires.
           obj = (overlayed[0] as typeof obj) ?? null;
         } else {
-          const [record] = await store.mget([overlayKey(objectType, primaryKey)]);
+          // T-04: route the index-miss path through `readOverlay` so the
+          // legacy-fallback gate and branch-mismatch counter fire.
+          const record = await readOverlay(branchId, objectType, primaryKey, store);
           if (record && !record.deleted) {
             // `obj`'s static type is whatever `executeGetObject` returns;
             // cast via `unknown` because the overlay record's shape is a

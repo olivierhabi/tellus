@@ -1,15 +1,29 @@
 /**
- * /api/v1/charts — Polars-backed auto-chart aggregations.
+ * /api/v1/charts — OpenSearch-backed batch chart aggregations.
  *
- * Powers the Object Explorer "Auto-Generated Charts" feature (#73-78):
- * one listogram/histogram/date-histogram per prominent property.
+ * T-02: The four legacy PG-direct chart endpoints
+ * (`/charts/{listogram,histogram,dateHistogram,auto}`) and the
+ * `loadObjectRows` 5000-row PG sample helper they shared have been
+ * deleted. The PG-direct read path bypassed `injectSecurityFilter`
+ * (markings + branch context); fixing it in place would have required
+ * re-implementing the OpenSearch security filter against PG, which
+ * duplicates the read-path semantics. Delete is the cheaper and safer
+ * fix. All chart UI traffic flows through `/charts/batch` below.
+ *
+ * Frontend coordination is an operational concern (see
+ * decisions/object-explorer/D-2026-04-30-006-fe-coordination-deferred.md):
+ * a Phase-A FE migration must precede production deploy of this PR. The
+ * backend is engineering-complete; release gating is documented in
+ * tasks/object-explorer/PROGRESS.md.
  */
 
 import { Router, Request, Response } from 'express';
-import pool from '../db';
-import { autoChart, listogram, histogram, dateHistogram } from '../services/polarsAggregator';
 import { client as osClient } from '../services/opensearch/client';
+import { applyContextToQuery } from '../services/opensearch/applyContext';
 import { buildSecurityFilter } from '../middleware/securityContext';
+import { readBranchHeader } from '../middleware/branchHeader';
+import { sendError } from '../utils/responseFormatter';
+import { routeMetric } from '../utils/routeInstrumentation';
 
 const router = Router();
 
@@ -20,64 +34,6 @@ function autoBucketCount(docCount: number): number {
   if (docCount <= 1) return 1;
   return Math.min(Math.max(Math.round(1.5 * Math.sqrt(docCount)), 5), 50);
 }
-
-async function loadObjectRows(ontologyId: string, apiName: string): Promise<Record<string, unknown>[]> {
-  const result = await pool.query(
-    `SELECT properties_json FROM object_instances
-      WHERE object_type_id = (
-        SELECT object_type_id FROM object_type WHERE api_name = $1 AND ontology_id = $2
-      )
-      LIMIT 5000`,
-    [apiName, ontologyId],
-  ).catch(() => ({ rows: [] as any[] }));
-  return result.rows.map((r) => r.properties_json ?? {});
-}
-
-router.post('/charts/listogram', async (req: Request, res: Response) => {
-  try {
-    const { ontologyId, objectType, field, topN } = req.body ?? {};
-    const rows = await loadObjectRows(ontologyId, objectType);
-    res.json({ success: true, data: listogram(rows, field, topN ?? 10) });
-  } catch (err) {
-    res.status(400).json({ success: false, error: { code: 'CHART_ERROR', message: (err as Error).message } });
-  }
-});
-
-router.post('/charts/histogram', async (req: Request, res: Response) => {
-  try {
-    const { ontologyId, objectType, field, buckets } = req.body ?? {};
-    const rows = await loadObjectRows(ontologyId, objectType);
-    res.json({ success: true, data: histogram(rows, field, buckets ?? 10) });
-  } catch (err) {
-    res.status(400).json({ success: false, error: { code: 'CHART_ERROR', message: (err as Error).message } });
-  }
-});
-
-router.post('/charts/dateHistogram', async (req: Request, res: Response) => {
-  try {
-    const { ontologyId, objectType, field } = req.body ?? {};
-    const rows = await loadObjectRows(ontologyId, objectType);
-    res.json({ success: true, data: dateHistogram(rows, field) });
-  } catch (err) {
-    res.status(400).json({ success: false, error: { code: 'CHART_ERROR', message: (err as Error).message } });
-  }
-});
-
-router.post('/charts/auto', async (req: Request, res: Response) => {
-  try {
-    const { ontologyId, objectType, fields } = req.body ?? {};
-    if (!Array.isArray(fields)) {
-      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'fields[] required' } });
-    }
-    const rows = await loadObjectRows(ontologyId, objectType);
-    const charts = fields.map((f: { field: string; baseType: string }) =>
-      autoChart(rows, f.field, f.baseType),
-    );
-    res.json({ success: true, data: { charts, rowCount: rows.length, engine: 'Polars' } });
-  } catch (err) {
-    res.status(400).json({ success: false, error: { code: 'CHART_ERROR', message: (err as Error).message } });
-  }
-});
 
 /**
  * Batch chart endpoint — Spec §Task 21:
@@ -99,22 +55,29 @@ router.post('/charts/batch', async (req: Request, res: Response) => {
   try {
     const { objectType, specs = [] } = req.body ?? {};
     if (!objectType || !Array.isArray(specs) || specs.length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'objectType and specs[] required' } });
+      return sendError(res, 'VALIDATION_ERROR', 'objectType and specs[] required');
     }
 
     const index = `ontology-${String(objectType).toLowerCase()}`;
+    // T-01: every read-path query runs through the canonical
+    // `applyContextToQuery` helper. The local `withSecurity` lambda
+    // that previously lived here is intentionally deleted.
     const security = buildSecurityFilter((req as any).security);
-    const withSecurity = (q: Record<string, unknown>): Record<string, unknown> =>
-      security ? { bool: { must: [q, security] } } : q;
+    const branchId = readBranchHeader(req);
+    const applyCtx = (q: Record<string, unknown>): Record<string, unknown> =>
+      applyContextToQuery(q, security, branchId);
+
+    // Cardinality-bounded route metric. The route enum lives in
+    // src/utils/routeInstrumentation.ts so the AST contract guard can
+    // validate every handler at PR time (see T-10).
+    routeMetric(req, 'charts.batch', branchId);
 
     // First pass: get a single doc count so we can auto-bucket histograms.
     let docCount = 0;
     try {
       const countRes = await osClient.count({
         index,
-        body: { query: withSecurity({ match_all: {} }) as any },
+        body: { query: applyCtx({ match_all: {} }) as any },
       });
       docCount = Number((countRes.body as any)?.count ?? 0);
     } catch {
@@ -126,10 +89,12 @@ router.post('/charts/batch', async (req: Request, res: Response) => {
     const msearchBody: unknown[] = [];
     for (const spec of specs) {
       msearchBody.push({ index });
+      // The `aggs` block is NOT wrapped — only the per-sub-body
+      // `query` field.
       if (spec.type === 'terms') {
         msearchBody.push({
           size: 0,
-          query: withSecurity({ match_all: {} }),
+          query: applyCtx({ match_all: {} }),
           aggs: {
             chart: {
               terms: { field: spec.field, size: TERMS_AGG_SIZE },
@@ -139,7 +104,7 @@ router.post('/charts/batch', async (req: Request, res: Response) => {
       } else if (spec.type === 'histogram') {
         msearchBody.push({
           size: 0,
-          query: withSecurity({ match_all: {} }),
+          query: applyCtx({ match_all: {} }),
           aggs: {
             chart: {
               histogram: {
@@ -152,7 +117,7 @@ router.post('/charts/batch', async (req: Request, res: Response) => {
       } else if (spec.type === 'date_histogram') {
         msearchBody.push({
           size: 0,
-          query: withSecurity({ match_all: {} }),
+          query: applyCtx({ match_all: {} }),
           aggs: {
             chart: {
               date_histogram: {
@@ -163,7 +128,7 @@ router.post('/charts/batch', async (req: Request, res: Response) => {
           },
         });
       } else {
-        msearchBody.push({ size: 0, query: withSecurity({ match_all: {} }) });
+        msearchBody.push({ size: 0, query: applyCtx({ match_all: {} }) });
       }
     }
 
@@ -191,7 +156,7 @@ router.post('/charts/batch', async (req: Request, res: Response) => {
       },
     });
   } catch (err) {
-    res.status(400).json({ success: false, error: { code: 'CHART_ERROR', message: (err as Error).message } });
+    sendError(res, 'CHART_ERROR', (err as Error).message);
   }
 });
 

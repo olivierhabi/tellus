@@ -70,7 +70,7 @@ export async function sweepOnce(options: SweeperOptions = {}): Promise<SweeperRu
       correlated++;
       recordIndexApplied(rec.editId, appliedAt);
       if (appliedAt > rec.createdAt) {
-        await store.delete(overlayKey(rec.objectType, rec.primaryKey));
+        await store.delete(overlayKey(rec.branchId, rec.objectType, rec.primaryKey));
         deleted++;
       }
     }

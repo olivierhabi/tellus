@@ -1155,12 +1155,67 @@ const baseSpec = {
     '/v1/search/suggest': {
       get: {
         tags: ['Search'],
-        summary: 'Get search suggestions and autocomplete',
+        summary: 'Multi-token autocomplete across projects, folders, datasets, and pipelines',
+        description:
+          'Production-grade suggester used by the SelectDatasetDialog "JUMP TO" overlay in tellus-fe.\n\n' +
+          'Behavior:\n' +
+          '- Splits the query on whitespace + common name separators (`_`, `-`, `/`, `.`) and AND-s all tokens, so "customer da" matches `customer_data.csv` AND any file living under `/Project/customer/data/`.\n' +
+          '- Scopes results to projects the caller owns OR is a member of (`project_members`).\n' +
+          '- Walks the full nested folder hierarchy in-process so dataset/pipeline matches surface via the path (\"find by where it lives\").\n' +
+          '- Ranks results by exact / prefix / substring / path-token / recency heuristics with a stable type prior (dataset > folder > pipeline > project).\n' +
+          '- Returns the top 10 hits.\n\n' +
+          'Empty / whitespace-only `q` returns an empty array (no-op short-circuit).',
         parameters: [
-          { name: 'q', in: 'query' as const, required: false, schema: { type: 'string' as const }, description: 'Search query text' },
+          {
+            name: 'q',
+            in: 'query' as const,
+            required: false,
+            schema: { type: 'string' as const, maxLength: 1000 },
+            description: 'Free-text query. Tokenized on whitespace + `_-/.` separators.',
+          },
         ],
         responses: {
-          '200': { description: 'Search suggestions' },
+          '200': {
+            description: 'Up to 10 ranked suggestions across resource types',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object' as const,
+                  properties: {
+                    success: { type: 'boolean' as const, enum: [true] },
+                    data: {
+                      type: 'array' as const,
+                      maxItems: 10,
+                      items: {
+                        type: 'object' as const,
+                        required: ['id', 'name', 'type', 'path', 'projectId'],
+                        properties: {
+                          id: { type: 'string' as const, description: 'Resource UUID' },
+                          name: { type: 'string' as const, description: 'Display name (leaf segment of the path)' },
+                          type: {
+                            type: 'string' as const,
+                            enum: ['project', 'folder', 'dataset', 'pipeline'],
+                            description: 'Resource type the suggestion came from',
+                          },
+                          path: {
+                            type: 'string' as const,
+                            description: 'Full nested pretty-path, e.g. "/Acme/customer/data/orders.csv"',
+                          },
+                          projectId: {
+                            type: 'string' as const,
+                            nullable: true,
+                            description: 'Owning project (null is reserved for future ontology-global suggestions)',
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'QUERY_VALIDATION_ERROR — query exceeded length cap or used a forbidden `*term*` pattern' },
+          '401': { description: 'UNAUTHORIZED — bearer token / cookie required' },
         },
       },
     },
@@ -2578,20 +2633,15 @@ const baseSpec = {
     },
     // ---------------------------------------------------------------
     // Charts
+    //
+    // T-02: `/v1/charts/auto`, `/v1/charts/listogram`,
+    // `/v1/charts/histogram`, and `/v1/charts/dateHistogram` were deleted
+    // because they read directly from Postgres without going through
+    // `injectSecurityFilter` (markings + branch context). All chart
+    // traffic now flows through `/v1/charts/batch`. See
+    // tasks/object-explorer/object-explorer-tasks.md \u00a7T-02 and
+    // decisions/object-explorer/D-2026-04-30-006-fe-coordination-deferred.md.
     // ---------------------------------------------------------------
-    '/v1/charts/auto': {
-      post: {
-        tags: ['Charts'],
-        summary: 'Auto-select one chart per field in a given field list',
-        requestBody: {
-          required: true,
-          content: { 'application/json': { schema: { type: 'object' as const, properties: { ontologyId: { type: 'string' as const }, objectType: { type: 'string' as const }, fields: { type: 'array' as const, items: { type: 'object' as const, properties: { field: { type: 'string' as const }, baseType: { type: 'string' as const } } } } }, required: ['ontologyId', 'objectType', 'fields'] } } },
-        },
-        responses: {
-          '200': { description: 'Auto charts', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const } } } } } },
-        },
-      },
-    },
     // ---------------------------------------------------------------
     // Pipelines Status (Funnel / Streaming)
     // ---------------------------------------------------------------

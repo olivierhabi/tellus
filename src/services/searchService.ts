@@ -1,5 +1,107 @@
 import { Knex } from 'knex';
 
+// ---------------------------------------------------------------------------
+// Pure helpers — exported so they're independently unit-testable.
+//
+// These encapsulate the algorithmic core of `SearchService.suggest`.
+// Keeping them pure (no I/O, no mutable state, no `this`) means we can
+// pin the user-facing tokenization & ranking semantics without booting
+// Postgres. Live SQL behavior is exercised by the integration suite.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tokenize a free-text search query the same way `SearchService.suggest`
+ * does internally.
+ *
+ * Splits on whitespace AND common name separators (`_`, `-`, `/`, `.`)
+ * so that `customer_data`, `customer-data`, `customer/data`, and
+ * `customer data` all yield the same `['customer', 'data']`. This is the
+ * single most important semantic guarantee of the suggester — the FE
+ * autocomplete user types organically and may not know which separator
+ * the server-side filename uses.
+ *
+ * Tokens are lowercased and empty tokens (from collapsed whitespace
+ * runs) are dropped — empty tokens would otherwise produce a no-op
+ * `%%` ILIKE filter that matches every row in the database.
+ */
+export function tokenizeSearchQuery(q: string): string[] {
+  const trimmed = (q ?? '').trim();
+  if (!trimmed) return [];
+  return trimmed
+    .toLowerCase()
+    .split(/[\s_\-\/.]+/u)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+/**
+ * Escape SQL LIKE wildcards (`%`, `_`) and the escape char itself so
+ * user-supplied tokens can't widen a `%token%` match beyond what they
+ * literally typed. Pairs with the `ESCAPE '\\'` clause used by every
+ * `whereRaw` call inside the service.
+ *
+ * Example: `escapeLikePattern("100%_")` → `"100\\%\\_"` (so the SQL
+ * planner treats `%` and `_` as literals, not wildcards).
+ */
+export function escapeLikePattern(s: string): string {
+  return s.replace(/[\\%_]/g, '\\$&');
+}
+
+/**
+ * Score a candidate suggestion row against a query for relevance
+ * ranking. Higher = better. The shape mirrors what `suggest`'s ranker
+ * uses internally — this overload exists only so unit tests can pin
+ * the score classes without booting the service.
+ *
+ * Numbers are spaced wide enough that adding "+10 if X" later won't
+ * accidentally tip the existing ordering classes.
+ */
+export interface ScoreInput {
+  /** Resource name (the leaf, e.g. `customer_data.csv`). */
+  name: string;
+  /** Full nested pretty-path (e.g. `/Acme/customer/data/orders.csv`). */
+  path: string;
+  /** Resource type prior — dataset > folder > pipeline > project. */
+  type: 'project' | 'folder' | 'dataset' | 'pipeline';
+  /**
+   * ISO timestamp of the row's last update; used for the recency boost.
+   * Empty / unparseable strings contribute no boost (no penalty either).
+   */
+  updatedAt?: string;
+}
+
+export function scoreSuggestion(
+  row: ScoreInput,
+  query: string,
+  tokens: string[],
+  now: number = Date.now(),
+): number {
+  const TYPE_PRIOR: Record<ScoreInput['type'], number> = {
+    dataset: 4,
+    folder: 3,
+    pipeline: 2,
+    project: 1,
+  };
+  const RECENCY_MS = 7 * 24 * 60 * 60 * 1000;
+  const lowerName = row.name.toLowerCase();
+  const lowerPath = row.path.toLowerCase();
+  const lowerQuery = query.trim().toLowerCase();
+
+  let score = TYPE_PRIOR[row.type];
+  if (lowerName === lowerQuery) score += 1000;
+  if (lowerName.startsWith(lowerQuery)) score += 500;
+  if (tokens.length > 0 && tokens.every((t) => lowerName.includes(t)))
+    score += 200;
+  for (const t of tokens) {
+    if (lowerPath.includes(t)) score += 50;
+  }
+  if (row.updatedAt) {
+    const ts = Date.parse(row.updatedAt);
+    if (!Number.isNaN(ts) && now - ts < RECENCY_MS) score += 20;
+  }
+  return score;
+}
+
 export class SearchService {
   constructor(private knex: Knex) {}
 
@@ -449,26 +551,360 @@ export class SearchService {
     };
   }
 
-  async suggest(q: string, ownerId: string): Promise<{ name: string; type: string }[]> {
-    if (!q || q.trim().length === 0) return [];
-    // Escape LIKE special characters to prevent wildcard injection
-    const escapedPrefix = q.trim().replace(/[\\%_]/g, '\\$&');
-    const prefix = `${escapedPrefix}%`;
-    const suggestions: { name: string; type: string }[] = [];
+  /**
+   * Production-grade autocomplete suggester.
+   *
+   * Powers the "JUMP TO" overlay in `SelectDatasetDialog` (tellus-fe)
+   * and any other prefix/substring picker that needs sub-200ms hints
+   * across projects, folders, datasets, and pipelines.
+   *
+   * Design choices, in order of impact:
+   *
+   *   1. **Multi-token AND substring matching.** The query is split
+   *      on whitespace + common name separators (`_`, `-`, `/`, `.`)
+   *      and each token must appear as a substring in the row's
+   *      name or full nested path. So "customer da" matches a
+   *      dataset called `customer_data.csv` *and* a dataset called
+   *      `orders.csv` living under `/Acme/customer/data/`. The old
+   *      implementation was prefix-only (`name ILIKE 'customer da%'`)
+   *      and missed both — which is what the user reported.
+   *
+   *   2. **Access via owner OR project_members.** The previous
+   *      implementation only saw projects the user *owned*; shared
+   *      projects (`project_members`) were invisible. Mirrors the
+   *      access model already used by `searchPicker`.
+   *
+   *   3. **Nested folder paths walked in JS.** We pull the user's
+   *      whole accessible folder set once (≤ a few thousand rows in
+   *      practice), memoise the recursive `parent_folder_id` walk,
+   *      and reuse the resulting `Map<folderId, prettyPath>` for
+   *      both folder + dataset path matching. A single recursive
+   *      CTE per request would also work but the in-memory walk is
+   *      cheaper at this fan-out.
+   *
+   *   4. **Path-based dataset matching.** Datasets matched purely by
+   *      where they live (e.g. "customer da" matching every dataset
+   *      under `/Acme/customer/data/`) are surfaced in addition to
+   *      direct name matches. Critical UX for users who remember a
+   *      folder hierarchy but not the leaf filename.
+   *
+   *   5. **Relevance ranking.** Scored heuristically:
+   *        - exact name match  →  +1000
+   *        - name starts with full query  →  +500
+   *        - all tokens present in name  →  +200
+   *        - each token present in full path  →  +50
+   *        - updated within 7 days  →  +20 (recency boost)
+   *        - type prior (dataset > folder > pipeline > project)
+   *      Numbers spaced wide enough to add new heuristics later
+   *      without accidentally re-ordering existing classes.
+   *
+   *   6. **Bounded fan-out.** Per-type SQL is capped at 50 candidates
+   *      (200 total before ranking) and the response is the top-10.
+   *      All ILIKE bindings are parameterized — no wildcard injection.
+   *
+   * Response shape is a *strict superset* of the old `{name, type}[]`,
+   * so existing FE consumers continue to work; new ones can opt into
+   * `path` / `id` / `projectId` for richer rendering.
+   */
+  async suggest(
+    q: string,
+    ownerId: string,
+  ): Promise<
+    Array<{
+      id: string;
+      name: string;
+      type: 'project' | 'folder' | 'dataset' | 'pipeline';
+      path: string;
+      projectId: string | null;
+    }>
+  > {
+    const trimmed = (q ?? '').trim();
+    if (!trimmed) return [];
 
-    const projects = await this.knex('projects').where({ owner_id: ownerId }).whereRaw("name ILIKE ? ESCAPE '\\'", [prefix]).select('name').limit(10);
-    suggestions.push(...projects.map((p: Record<string, unknown>) => ({ name: p.name as string, type: 'project' })));
+    // Tokenization + LIKE-pattern escaping live as exported pure helpers
+    // at the top of this module so they can be unit-tested without
+    // booting Postgres. See `tokenizeSearchQuery` / `escapeLikePattern`.
+    const tokens = tokenizeSearchQuery(trimmed);
+    if (tokens.length === 0) return [];
+    const tokenPatterns = tokens.map((t) => `%${escapeLikePattern(t)}%`);
 
-    if (suggestions.length < 10) {
-      const folders = await this.knex('folders').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).whereRaw("folders.name ILIKE ? ESCAPE '\\'", [prefix]).select('folders.name').limit(10 - suggestions.length);
-      suggestions.push(...folders.map((f: Record<string, unknown>) => ({ name: f.name as string, type: 'folder' })));
+    // ---- Step 1: accessible project IDs (owned ∪ membership) -------
+    const owned = await this.knex('projects')
+      .select('id')
+      .where({ owner_id: ownerId });
+    const member = await this.knex('project_members')
+      .select('project_id as id')
+      .where({ user_id: ownerId });
+    const accessSet = new Set<string>();
+    owned.forEach((r: Record<string, unknown>) => accessSet.add(String(r.id)));
+    member.forEach((r: Record<string, unknown>) => accessSet.add(String(r.id)));
+    const accessibleProjectIds = Array.from(accessSet);
+    if (accessibleProjectIds.length === 0) return [];
+
+    // ---- Step 2: project + folder name maps for path computation ----
+    const projectsRows = await this.knex('projects')
+      .select('id', 'name')
+      .whereIn('id', accessibleProjectIds);
+    const projectNameById = new Map<string, string>();
+    projectsRows.forEach((p: Record<string, unknown>) =>
+      projectNameById.set(String(p.id), String(p.name)),
+    );
+
+    const folderRows = await this.knex('folders')
+      .select('id', 'name', 'parent_folder_id', 'project_id', 'updated_at')
+      .whereIn('project_id', accessibleProjectIds);
+    const folderById = new Map<string, Record<string, unknown>>();
+    folderRows.forEach((f: Record<string, unknown>) =>
+      folderById.set(String(f.id), f),
+    );
+
+    // Memoised recursive parent walk. Folders may be nested arbitrarily
+    // deep — production projects routinely run 5–10 levels. Cache so
+    // siblings share computed ancestor paths.
+    const folderPathCache = new Map<string, string>();
+    const computeFolderPath = (folderId: string): string => {
+      const cached = folderPathCache.get(folderId);
+      if (cached !== undefined) return cached;
+      const folder = folderById.get(folderId);
+      if (!folder) return '';
+      const projectName =
+        projectNameById.get(String(folder.project_id)) ?? '';
+      const parentPath =
+        folder.parent_folder_id != null
+          ? computeFolderPath(String(folder.parent_folder_id))
+          : '';
+      const path = parentPath
+        ? `${parentPath}/${folder.name}`
+        : `/${projectName}/${folder.name}`;
+      folderPathCache.set(folderId, path);
+      return path;
+    };
+    folderRows.forEach((f: Record<string, unknown>) =>
+      computeFolderPath(String(f.id)),
+    );
+
+    // ---- Step 3: per-resource candidate gathering ------------------
+    // Each candidate carries enough state for the ranker downstream:
+    // identity, name (for match scoring), folder/project for path
+    // resolution, and updated_at for recency tie-breaks.
+    type Row = {
+      id: string;
+      name: string;
+      type: 'project' | 'folder' | 'dataset' | 'pipeline';
+      folder_id: string | null;
+      project_id: string | null;
+      updated_at: string;
+    };
+    const PER_TYPE_LIMIT = 50;
+    const rows: Row[] = [];
+
+    // Helper that adds an ILIKE-AND filter for every token. Each
+    // token is bound separately, so the prepared statement remains
+    // free of injection risk regardless of token count.
+    type KnexBuilder = ReturnType<typeof this.knex>;
+    const applyTokenFilters = (qb: KnexBuilder, column: string): KnexBuilder => {
+      let q2 = qb;
+      for (const p of tokenPatterns) {
+        q2 = q2.whereRaw(`${column} ILIKE ? ESCAPE '\\'`, [p]);
+      }
+      return q2;
+    };
+
+    // ---- Projects ----
+    const projectMatches = await applyTokenFilters(
+      this.knex('projects')
+        .select('id', 'name', 'updated_at')
+        .whereIn('id', accessibleProjectIds),
+      'name',
+    ).limit(PER_TYPE_LIMIT);
+    projectMatches.forEach((r: Record<string, unknown>) =>
+      rows.push({
+        id: String(r.id),
+        name: String(r.name),
+        type: 'project',
+        folder_id: null,
+        project_id: String(r.id),
+        updated_at: String(r.updated_at ?? ''),
+      }),
+    );
+
+    // ---- Folders: name match ----
+    const folderNameMatches = await applyTokenFilters(
+      this.knex('folders')
+        .select('id', 'name', 'parent_folder_id', 'project_id', 'updated_at')
+        .whereIn('project_id', accessibleProjectIds),
+      'name',
+    ).limit(PER_TYPE_LIMIT);
+    const seenFolderIds = new Set<string>();
+    folderNameMatches.forEach((r: Record<string, unknown>) => {
+      const id = String(r.id);
+      seenFolderIds.add(id);
+      rows.push({
+        id,
+        name: String(r.name),
+        type: 'folder',
+        folder_id: r.parent_folder_id ? String(r.parent_folder_id) : null,
+        project_id: String(r.project_id),
+        updated_at: String(r.updated_at ?? ''),
+      });
+    });
+
+    // ---- Folders: pretty-path match (in-process) ----
+    // Folders whose computed nested path contains every token —
+    // surfaces results like "the folder living at /Acme/customer/data
+    // is what you meant" even when the leaf folder name itself
+    // doesn't include the tokens.
+    const candidateFolderIdsByPath: string[] = [];
+    for (const f of folderRows) {
+      const id = String(f.id);
+      const path = (folderPathCache.get(id) ?? '').toLowerCase();
+      if (!path) continue;
+      if (tokens.every((t) => path.includes(t))) {
+        candidateFolderIdsByPath.push(id);
+        if (seenFolderIds.has(id)) continue;
+        seenFolderIds.add(id);
+        rows.push({
+          id,
+          name: String(f.name),
+          type: 'folder',
+          folder_id: f.parent_folder_id ? String(f.parent_folder_id) : null,
+          project_id: String(f.project_id),
+          updated_at: String(f.updated_at ?? ''),
+        });
+      }
     }
 
-    if (suggestions.length < 10) {
-      const datasets = await this.knex('foundry_datasets').join('folders', 'foundry_datasets.folder_id', 'folders.id').join('projects', 'folders.project_id', 'projects.id').where('projects.owner_id', ownerId).whereRaw("foundry_datasets.name ILIKE ? ESCAPE '\\'", [prefix]).select('foundry_datasets.name').limit(10 - suggestions.length);
-      suggestions.push(...datasets.map((d: Record<string, unknown>) => ({ name: d.name as string, type: 'dataset' })));
+    // ---- Datasets: name match ----
+    const datasetNameMatches = await applyTokenFilters(
+      this.knex('foundry_datasets')
+        .select('id', 'name', 'folder_id', 'project_id', 'updated_at')
+        .whereIn('project_id', accessibleProjectIds),
+      'name',
+    ).limit(PER_TYPE_LIMIT);
+    const seenDatasetIds = new Set<string>();
+    datasetNameMatches.forEach((r: Record<string, unknown>) => {
+      const id = String(r.id);
+      seenDatasetIds.add(id);
+      rows.push({
+        id,
+        name: String(r.name),
+        type: 'dataset',
+        folder_id: r.folder_id ? String(r.folder_id) : null,
+        project_id: String(r.project_id),
+        updated_at: String(r.updated_at ?? ''),
+      });
+    });
+
+    // ---- Datasets: bounded path-based match ----
+    // Critical for "find a dataset by where it lives" queries. We
+    // restrict to datasets sitting inside the path-matched folders
+    // we already identified above, so this never degrades to an
+    // O(N) scan over the user's whole catalog.
+    if (candidateFolderIdsByPath.length > 0) {
+      const datasetPathMatches = await this.knex('foundry_datasets')
+        .select('id', 'name', 'folder_id', 'project_id', 'updated_at')
+        .whereIn('folder_id', candidateFolderIdsByPath)
+        .limit(PER_TYPE_LIMIT * 2);
+      datasetPathMatches.forEach((r: Record<string, unknown>) => {
+        const id = String(r.id);
+        if (seenDatasetIds.has(id)) return;
+        seenDatasetIds.add(id);
+        rows.push({
+          id,
+          name: String(r.name),
+          type: 'dataset',
+          folder_id: r.folder_id ? String(r.folder_id) : null,
+          project_id: String(r.project_id),
+          updated_at: String(r.updated_at ?? ''),
+        });
+      });
     }
 
-    return suggestions.slice(0, 10);
+    // ---- Pipelines: name match ----
+    const pipelineMatches = await applyTokenFilters(
+      this.knex('pipelines')
+        .select('id', 'name', 'folder_id', 'project_id', 'updated_at')
+        .whereIn('project_id', accessibleProjectIds),
+      'name',
+    ).limit(PER_TYPE_LIMIT);
+    pipelineMatches.forEach((r: Record<string, unknown>) =>
+      rows.push({
+        id: String(r.id),
+        name: String(r.name),
+        type: 'pipeline',
+        folder_id: r.folder_id ? String(r.folder_id) : null,
+        project_id: String(r.project_id),
+        updated_at: String(r.updated_at ?? ''),
+      }),
+    );
+
+    if (rows.length === 0) return [];
+
+    // ---- Step 4: relevance scoring + sort + truncate ---------------
+    const lowerQuery = trimmed.toLowerCase();
+    const now = Date.now();
+    const RECENCY_MS = 7 * 24 * 60 * 60 * 1000;
+    const TYPE_PRIOR: Record<Row['type'], number> = {
+      dataset: 4,
+      folder: 3,
+      pipeline: 2,
+      project: 1,
+    };
+
+    const computePath = (r: Row): string => {
+      if (r.type === 'project') return `/${r.name}`;
+      const projectName = r.project_id
+        ? projectNameById.get(r.project_id) ?? ''
+        : '';
+      const folderPath = r.folder_id
+        ? folderPathCache.get(r.folder_id) ?? ''
+        : '';
+      if (r.type === 'folder') {
+        // For folders we recompute their own path directly — the
+        // `folder_id` we stored above is the *parent's* id (used
+        // for ranking), but the displayed path should end in the
+        // folder itself.
+        const own = folderPathCache.get(r.id);
+        if (own) return own;
+        // Fall through if for some reason the folder wasn't cached
+        // (should never happen because we walked them all above).
+      }
+      const parent = folderPath || (projectName ? `/${projectName}` : '');
+      return parent ? `${parent}/${r.name}` : `/${r.name}`;
+    };
+
+    const scoreRow = (r: Row): number => {
+      const lowerName = r.name.toLowerCase();
+      const fullPath = computePath(r).toLowerCase();
+      let score = TYPE_PRIOR[r.type];
+      if (lowerName === lowerQuery) score += 1000;
+      if (lowerName.startsWith(lowerQuery)) score += 500;
+      if (tokens.every((t) => lowerName.includes(t))) score += 200;
+      for (const t of tokens) {
+        if (fullPath.includes(t)) score += 50;
+      }
+      if (r.updated_at) {
+        const ts = Date.parse(r.updated_at);
+        if (!Number.isNaN(ts) && now - ts < RECENCY_MS) score += 20;
+      }
+      return score;
+    };
+
+    const scored = rows.map((r) => ({ row: r, score: scoreRow(r) }));
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const ta = Date.parse(a.row.updated_at) || 0;
+      const tb = Date.parse(b.row.updated_at) || 0;
+      return tb - ta;
+    });
+
+    const TOP_N = 10;
+    return scored.slice(0, TOP_N).map(({ row }) => ({
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      path: computePath(row),
+      projectId: row.project_id,
+    }));
   }
 }

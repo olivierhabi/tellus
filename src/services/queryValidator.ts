@@ -17,7 +17,8 @@ import {
 } from "./propertyResolver";
 import { appError } from "../utils/appError";
 import {
-  MAX_PAGE_SIZE,
+  MAX_EXPLORER_PAGE_SIZE,
+  MAX_EXPLORER_PAGE_SIZE_OPT_IN,
   DEFAULT_PAGE_SIZE,
   MAX_ORDER_BY_FIELDS,
   MAX_IN_CLAUSE_VALUES,
@@ -25,6 +26,11 @@ import {
   MAX_FILTER_NESTING_DEPTH,
   SUPPORTED_FILTER_TYPES as FILTER_TYPES_ARRAY,
 } from "../utils/constants";
+import { incCounter, observeHistogram } from "./funnel/metrics";
+
+// Re-export under the legacy name so existing consumers don't break;
+// internally we use the new explorer-specific constant.
+export const MAX_PAGE_SIZE = MAX_EXPLORER_PAGE_SIZE;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -321,7 +327,8 @@ async function validateWhereClause(
 
 export async function validateSearchQuery(
   body: any,
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  largePage: boolean = false,
 ): Promise<any> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw validationError("INVALID_BODY", "Request body must be a JSON object.");
@@ -348,8 +355,11 @@ export async function validateSearchQuery(
     await validateOrderBy(body.$orderBy, objectTypeApiName);
   }
 
-  // Validate $pageSize
-  const pageSize = validatePageSize(body.$pageSize);
+  // Validate $pageSize (T-09: cap clamped via the explorer constants;
+  // opt-in path requires the `x-tellus-large-page: true` header to
+  // raise the ceiling from MAX_EXPLORER_PAGE_SIZE to
+  // MAX_EXPLORER_PAGE_SIZE_OPT_IN).
+  const pageSize = validatePageSize(body.$pageSize, largePage);
 
   // Validate $pageToken
   if (body.$pageToken !== undefined) {
@@ -377,7 +387,8 @@ export async function validateSearchQuery(
 
 export async function validateListQuery(
   queryParams: Record<string, any>,
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  largePage: boolean = false,
 ): Promise<{
   pageSize: number;
   pageToken: string | undefined;
@@ -387,7 +398,8 @@ export async function validateListQuery(
   const pageSize = validatePageSize(
     queryParams.$pageSize !== undefined
       ? Number(queryParams.$pageSize)
-      : undefined
+      : undefined,
+    largePage,
   );
 
   const pageToken =
@@ -522,17 +534,41 @@ export async function validateAggregateQuery(
 // Shared validation helpers
 // ---------------------------------------------------------------------------
 
-function validatePageSize(value: unknown): number {
-  if (value === undefined || value === null) return DEFAULT_PAGE_SIZE;
+function validatePageSize(value: unknown, largePage: boolean = false): number {
+  if (value === undefined || value === null) {
+    observeHistogram("tellus_pagination_size", DEFAULT_PAGE_SIZE);
+    return DEFAULT_PAGE_SIZE;
+  }
+  const ceiling = largePage ? MAX_EXPLORER_PAGE_SIZE_OPT_IN : MAX_EXPLORER_PAGE_SIZE;
   const num = Number(value);
-  if (!Number.isInteger(num) || num < 1 || num > MAX_PAGE_SIZE) {
+  if (!Number.isInteger(num) || num < 1 || num > ceiling) {
+    incCounter("tellus_pagination_rejected_total", {
+      reason: !Number.isInteger(num) ? "non_integer" : num < 1 ? "underflow" : "overflow",
+      large_page: largePage ? "true" : "false",
+    });
     throw validationError(
       "PAGE_SIZE_OUT_OF_RANGE",
-      `$pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}. Got: ${value}.`,
+      `$pageSize must be an integer between 1 and ${ceiling}. Got: ${value}.`,
       "$pageSize"
     );
   }
+  observeHistogram("tellus_pagination_size", num);
   return num;
+}
+
+/**
+ * Read the explorer's `x-tellus-large-page` opt-in header. Anything
+ * other than the literal lowercase string "true" is treated as false
+ * (no silent toggling on stray values).
+ */
+export function readLargePageHeader(
+  req: { get?: (n: string) => string | undefined; headers?: Record<string, unknown> } | undefined,
+): boolean {
+  if (!req) return false;
+  const fromGet = typeof req.get === "function" ? req.get("x-tellus-large-page") : undefined;
+  const fromHeaders = (req.headers as Record<string, unknown> | undefined)?.["x-tellus-large-page"];
+  const raw = (fromGet ?? (fromHeaders as string | undefined)) ?? "";
+  return String(raw).toLowerCase() === "true";
 }
 
 async function validateOrderBy(

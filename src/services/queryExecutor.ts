@@ -23,6 +23,7 @@ import {
   type FormattedListResponse,
 } from "./objectResponseFormatter";
 import { appError } from "../utils/appError";
+import { incCounter } from "./funnel/metrics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -301,32 +302,64 @@ export async function executeFullTextSearch(
     return { data: [], nextPageToken: null, totalCount: 0 };
   }
 
-  // Build multi_match query across all text fields.
-  // Use cross_fields for multi-term cross-field matching. Fuzziness is applied
-  // via a separate bool/should clause because cross_fields does not support
-  // fuzziness in OpenSearch. The primary clause uses cross_fields + operator:and
-  // for exact token matching; the secondary clause uses best_fields + fuzziness
-  // for typo tolerance.
+  // T-09 (C-153..C-155): Build multi_match query across all text fields,
+  // and additionally a `query_string` clause when the search text uses
+  // Lucene spec syntax (`~` fuzz, `*?` wildcards, `"phrase"`, `AND/OR/NOT`,
+  // parens). Without this branch the executor silently dropped operator
+  // semantics on the floor.
+  //
+  // Hard-set:
+  //   - allow_leading_wildcard: false  — leading `*foo` is O(n) on the
+  //     term dictionary (per Foundry §3 footnote); operator opt-in via
+  //     env if ever needed.
+  //   - lenient: true                  — tolerate field-type mismatch on
+  //     broad fielded queries; without this, a typo on a numeric field
+  //     would 400 the entire search.
+  //   - analyze_wildcard               — env-gated. Default off because
+  //     analyzed wildcards are an order of magnitude slower than
+  //     non-analyzed.
+  const SPEC_SYNTAX_RE = /[~*?"]|\b(?:AND|OR|NOT)\b|[()]/;
+  const ANALYZE_WILDCARD_ENABLED =
+    process.env.TELLUS_FT_ANALYZE_WILDCARD === "true";
+  const usesSpecSyntax = SPEC_SYNTAX_RE.test(searchText);
+  // Metric label is bounded ("true" | "false"), no user-supplied input.
+  incCounter("tellus_full_text_spec_syntax_total", {
+    syntax_used: usesSpecSyntax ? "true" : "false",
+  });
+
+  const fullTextShould: Record<string, unknown>[] = [
+    {
+      multi_match: {
+        query: searchText,
+        fields: textFields,
+        type: "cross_fields",
+        operator: "and",
+      },
+    },
+    {
+      multi_match: {
+        query: searchText,
+        fields: textFields,
+        type: "best_fields",
+        fuzziness: "AUTO",
+      },
+    },
+  ];
+  if (usesSpecSyntax) {
+    fullTextShould.push({
+      query_string: {
+        query: searchText,
+        fields: textFields,
+        default_operator: "AND",
+        analyze_wildcard: ANALYZE_WILDCARD_ENABLED,
+        allow_leading_wildcard: false,
+        lenient: true,
+      },
+    });
+  }
   const fullTextQuery: Record<string, unknown> = {
     bool: {
-      should: [
-        {
-          multi_match: {
-            query: searchText,
-            fields: textFields,
-            type: "cross_fields",
-            operator: "and",
-          },
-        },
-        {
-          multi_match: {
-            query: searchText,
-            fields: textFields,
-            type: "best_fields",
-            fuzziness: "AUTO",
-          },
-        },
-      ],
+      should: fullTextShould,
       minimum_should_match: 1,
     },
   };

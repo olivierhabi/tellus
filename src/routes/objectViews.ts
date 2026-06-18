@@ -27,6 +27,7 @@ import { countLinks, resolveLinks } from "../services/linkResolverService";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
 import { incCounter } from "../services/funnel/metrics";
+import { routeMetric } from "../utils/routeInstrumentation";
 import linkTypeModel from "../models/linkType";
 
 const router = Router({ mergeParams: true });
@@ -248,10 +249,7 @@ router.get(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objectViews.single",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objectViews.single", branchId);
       const view = await buildObjectView(
         ontologyId,
         objectTypeApiName,
@@ -322,10 +320,7 @@ router.get(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objectViews.linked",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objectViews.linked", branchId);
 
       // Resolve linked objects for each link type
       const linkGroups: Array<Record<string, unknown>> = [];
@@ -442,6 +437,9 @@ router.post(
       );
 
       const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req);
+      routeMetric(req, "objectViews.batch", branchId);
+      void branchId;
 
       // Build views for all primary keys in parallel
       const settled = await Promise.allSettled(
@@ -535,10 +533,7 @@ objectViewsByTypeRouter.get(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objectViews.byType.single",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objectViews.byType.single", branchId);
       const view = await buildObjectView(
         ontologyId,
         objectType,
@@ -601,10 +596,7 @@ objectViewsByTypeRouter.get(
 
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
-      incCounter("tellus_read_branch_filtered_total", {
-        route: "objectViews.byType.linked",
-        scoped: String(branchId !== null),
-      });
+      routeMetric(req, "objectViews.byType.linked", branchId);
       const linkGroups: Array<Record<string, unknown>> = [];
 
       for (const lt of relevantLinks) {
@@ -702,6 +694,9 @@ objectViewsByTypeRouter.post(
 
       const { ontologyId, objectTypeId } = await resolveObjectType(objectType);
       const secFilter = buildSecurityFilter(req.security);
+      const branchId = readBranchHeader(req);
+      routeMetric(req, "objectViews.batch", branchId);
+      void branchId;
 
       const settled = await Promise.allSettled(
         primaryKeys.map(async (pk: string) => {

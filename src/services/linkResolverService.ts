@@ -12,6 +12,7 @@ import { getIndexName } from "./opensearch/indexLifecycleManager";
 import { query } from "../db";
 import { appError } from "../utils/appError";
 import type { LinkTypeRow, Cardinality } from "../models/linkType";
+import { incCounter, observeHistogram } from "./funnel/metrics";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -802,6 +803,37 @@ export interface MultiHopStep {
   direction: "forward" | "reverse";
 }
 
+// T-09 — multi-hop tunables.
+//   * MULTI_HOP_CONCURRENCY — bounded concurrency for the per-hop fan-out.
+//     Pre-T-09 the code awaited each starting-PK sequentially; with N=1000
+//     starting PKs that was 1000 round-trips on a hot path. Chunking
+//     into Promise.all of 50 cuts that to 20 round-trips while keeping
+//     the OpenSearch shard concurrency reasonable.
+//   * MAX_INTERMEDIATE — accumulated visited-PK cap across ALL hops,
+//     not per-hop. Without an accumulated cap, a 5-hop traversal at the
+//     per-hop limit could explode to 500k PKs, OOM the executor, and
+//     return a partial result (silently truncated by the per-hop slice).
+//     Now exceeded → SEARCH_AROUND_LIMIT_EXCEEDED.
+const MULTI_HOP_CONCURRENCY = 50;
+const MULTI_HOP_MAX_INTERMEDIATE = 100_000;
+
+function chunked<T>(arr: T[], size: number): T[][] {
+  if (size <= 0) return [arr];
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// T-09 — Testing seam.
+// `resolveMultiHop` calls `resolveLinks` for every PK in the frontier.
+// ESM lexical scoping means `vi.spyOn(linkResolver, "resolveLinks")` from a
+// test cannot intercept the *internal* call site — only external imports.
+// To make the cycle/concurrency contracts (C-150, C-152) testable at the
+// unit level without a live OpenSearch instance, internal callers go
+// through this indirection object. Production code paths import
+// `resolveLinks` directly, so the prod call graph is unchanged.
+export const __internals = { resolveLinks };
+
 export async function resolveMultiHop(
   steps: MultiHopStep[],
   startingPKs: string[],
@@ -816,9 +848,16 @@ export async function resolveMultiHop(
     throw appError("VALIDATION_FAILED", "At least 1 hop is required.");
   }
 
-  const MAX_INTERMEDIATE = 100000;
-  let currentPKs = startingPKs;
   const { getByApiName } = await import("../models/linkType");
+
+  // Accumulated set of every PK we've ever visited. Pre-seeded with
+  // startingPKs so a cycle A → B → A cannot revisit A on a later hop
+  // (it stays in `visitedPKs` from the start).
+  const visitedPKs = new Set<string>(startingPKs);
+  // Frontier for the current hop: only the *new* PKs discovered last
+  // hop. Pre-T-09 this was every PK from last hop, which traversed
+  // duplicates and produced the H-12 N+1 + cycle bug.
+  let currentPKs: string[] = [...startingPKs];
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -828,23 +867,57 @@ export async function resolveMultiHop(
     }
 
     const isLastHop = i === steps.length - 1;
-    const nextPKs = new Set<string>();
+    const newlyDiscovered = new Set<string>();
 
-    for (const pk of currentPKs) {
-      const result = await resolveLinks(linkType, pk, step.direction, {
-        pageSize: isLastHop ? options.pageSize : 1000,
-        excludeSelf: true,
-      }, securityFilter, branchId);
-      for (const obj of result.linkedObjects) {
-        nextPKs.add(String(obj.__pk ?? ""));
+    // Bounded concurrency: chunk the frontier and Promise.all per chunk.
+    // The chunk size is the only place the explorer parallelises against
+    // OpenSearch; it is tuned to be high enough to amortise round-trip
+    // latency but low enough that one user can't saturate shard threads.
+    for (const chunk of chunked(currentPKs, MULTI_HOP_CONCURRENCY)) {
+      const results = await Promise.all(
+        chunk.map((pk) =>
+          __internals.resolveLinks(
+            linkType,
+            pk,
+            step.direction,
+            {
+              pageSize: isLastHop ? options.pageSize : 1000,
+              excludeSelf: true,
+            },
+            securityFilter,
+            branchId,
+          ),
+        ),
+      );
+      for (const result of results) {
+        for (const obj of result.linkedObjects) {
+          const pk = String(obj.__pk ?? "");
+          if (!pk) continue;
+          if (!visitedPKs.has(pk)) {
+            visitedPKs.add(pk);
+            newlyDiscovered.add(pk);
+          }
+        }
+      }
+      // Accumulated cap check — fail loudly the moment we cross the
+      // line. The pre-T-09 silent slice could lose results without
+      // any indication to the caller.
+      if (visitedPKs.size > MULTI_HOP_MAX_INTERMEDIATE) {
+        throw appError(
+          "SEARCH_AROUND_LIMIT_EXCEEDED",
+          `Accumulated visited PKs (${visitedPKs.size}) exceeded ${MULTI_HOP_MAX_INTERMEDIATE} during hop ${i + 1}/${steps.length}.`,
+          { visited: visitedPKs.size, limit: MULTI_HOP_MAX_INTERMEDIATE, hop: i + 1 },
+        );
       }
     }
 
     if (isLastHop) {
-      // For the last hop, return full objects with pagination
-      const allPKs = Array.from(nextPKs).slice(0, MAX_INTERMEDIATE);
+      observeHistogram("tellus_search_around_visited_pks", visitedPKs.size);
+      observeHistogram("tellus_search_around_hops", i + 1);
+      incCounter("tellus_search_around_total", { hops: String(i + 1) });
 
-      // Determine the target index for the last hop
+      const lastHopPKs = [...newlyDiscovered];
+
       const targetOtId = step.direction === "forward"
         ? linkType.target_object_type
         : linkType.source_object_type;
@@ -855,12 +928,12 @@ export async function resolveMultiHop(
       const from = decodeToken(options.pageToken);
       const filterClauses = buildFilterClauses(options.targetFilter);
 
-      if (allPKs.length === 0) {
+      if (lastHopPKs.length === 0) {
         return { linkedObjects: [], totalCount: 0, nextPageToken: null, hopsCompleted: i + 1 };
       }
 
       const musts: Array<Record<string, unknown>> = [
-        { terms: { __pk: allPKs } },
+        { terms: { __pk: lastHopPKs } },
         ...filterClauses,
       ];
       const { hits, total } = await searchIndex(targetIndex, musts, from, pageSize, undefined, securityFilter, branchId);
@@ -868,12 +941,17 @@ export async function resolveMultiHop(
       return { linkedObjects: hits, totalCount: total, nextPageToken, hopsCompleted: i + 1 };
     }
 
-    currentPKs = Array.from(nextPKs).slice(0, MAX_INTERMEDIATE);
+    // Frontier for next hop: only the newly-discovered PKs.
+    currentPKs = [...newlyDiscovered];
     if (currentPKs.length === 0) {
+      observeHistogram("tellus_search_around_visited_pks", visitedPKs.size);
+      observeHistogram("tellus_search_around_hops", i + 1);
       return { linkedObjects: [], totalCount: 0, nextPageToken: null, hopsCompleted: i + 1 };
     }
   }
 
+  observeHistogram("tellus_search_around_visited_pks", visitedPKs.size);
+  observeHistogram("tellus_search_around_hops", steps.length);
   return { linkedObjects: [], totalCount: 0, nextPageToken: null, hopsCompleted: steps.length };
 }
 
