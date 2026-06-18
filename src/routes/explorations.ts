@@ -197,6 +197,7 @@ router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
         );
       }
     }
+    const { ontologyId } = req.params;
     const result = await query(
       `UPDATE saved_exploration
           SET title = COALESCE($2, title),
@@ -205,7 +206,7 @@ router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
               visibility = COALESCE($5, visibility),
               required_markings = COALESCE($7::text[], required_markings),
               updated_at = now()
-        WHERE exploration_id = $1 AND owner_id = $6
+        WHERE exploration_id = $1 AND owner_id = $6 AND ontology_id = $8
         RETURNING *`,
       [
         req.params.id,
@@ -215,6 +216,7 @@ router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
         visibility,
         currentUser(req),
         nextRequiredMarkings,
+        ontologyId,
       ]
     );
     if (result.rowCount === 0) {
