@@ -102,7 +102,6 @@ const RESTORE_HANDLERS: Partial<Record<AutosaveSnapshotResourceKind, RestoreHand
 resourceScopedRouter.post(
   "/:rid/autosave-snapshots/:snapshotId/restore",
   authenticate,
-  authorizeRoles("editor", "owner"),
   async (req: AuthedRequest, res: Response, next: NextFunction) => {
     try {
       const { rid, snapshotId } = req.params;
@@ -132,7 +131,27 @@ resourceScopedRouter.post(
           error: { code: "NOT_FOUND", message: "snapshot not found" },
         });
       }
-      const snap = await getSnapshot(snapshotId, lookup[0].project_id);
+      const projectId = lookup[0].project_id;
+
+      // Inline authorization: verify caller is editor/owner of the project
+      const membership = await pool.query<{ role: string }>(
+        `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`,
+        [projectId, req.user?.id],
+      );
+      if (membership.rows.length === 0) {
+        return res.status(403).json({
+          success: false,
+          error: { code: "FORBIDDEN", message: "Access denied: not a member of this project" },
+        });
+      }
+      if (!["editor", "owner"].includes(membership.rows[0].role)) {
+        return res.status(403).json({
+          success: false,
+          error: { code: "FORBIDDEN", message: "Access denied: requires editor or owner role" },
+        });
+      }
+
+      const snap = await getSnapshot(snapshotId, projectId);
       if (!snap || snap.resourceRid !== rid) {
         return res.status(404).json({
           success: false,

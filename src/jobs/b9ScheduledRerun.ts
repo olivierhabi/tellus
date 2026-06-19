@@ -17,10 +17,17 @@ export class B9ScheduledRerun {
        WHERE last_run_at IS NULL OR last_run_at < now() - ($1 || ' hours')::interval`,
       [String(stale)],
     );
+    let triggered = 0;
     for (const r of rows) {
-      await triggerFn(r.object_type_rid, r.ontology_rid, r.branch_rid);
+      try {
+        await triggerFn(r.object_type_rid, r.ontology_rid, r.branch_rid);
+        triggered++;
+      } catch (err) {
+        // Log error but continue processing remaining rows
+        console.error(`Failed to trigger funnel for object_type_rid=${r.object_type_rid}:`, err);
+      }
     }
-    return { scanned: rows.length, triggered: rows.length };
+    return { scanned: rows.length, triggered };
   }
 }
 export const b9ScheduledRerun = new B9ScheduledRerun();
