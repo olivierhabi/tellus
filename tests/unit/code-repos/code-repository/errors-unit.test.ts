@@ -65,6 +65,10 @@ describe("B2 — error catalog completeness", () => {
     // + 6 read-path (B2-C-10/11: InvalidPath, InvalidDepth, BranchNotFound,
     // FileNotFound, InvalidPathType, RateLimited)
     // + 3 commit-path (F4 deferral: StaleRefHead, EmptyChangeSet, CommitFailed)
+    // + 2 imports-route B4-C-10/11 (InvalidImportsBody, StaleImportsState)
+    // + 6 function-invoke (FunctionNotFound, RuntimeNotSupported,
+    // FunctionCompileError, FunctionRuntimeError, FunctionTimeout, InvalidArgumentBody)
+    // = 27 total
     expect(CODE_REPOS_ERROR_NAMES.length).toBe(27);
   });
 
