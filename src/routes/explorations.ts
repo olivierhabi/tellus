@@ -98,16 +98,34 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
     // migration 045 means "no markings required" — visible to all.
     // Pre-marking rows backfill to '{}' as a worst-case visibility match
     // until the one-time backfill recomputes accurate values.
+    //
+    // Pagination: we fetch LIMIT+1 to detect if more results exist; the
+    // extra row (if present) is discarded from the response but signals
+    // hasMore=true. This avoids an expensive COUNT(*) while still giving
+    // callers truncation visibility.
+    const limit = 100;
     const result = await query(
       `SELECT * FROM saved_exploration
         WHERE ontology_id = $1
           AND (visibility IN ('shared','public') OR owner_id = $2)
           AND required_markings <@ $3::text[]
         ORDER BY updated_at DESC
-        LIMIT 100`,
-      [ontologyId, currentUser(req), userMarks]
+        LIMIT $4`,
+      [ontologyId, currentUser(req), userMarks, limit + 1]
     );
-    sendSuccess(res, { data: result.rows, totalCount: result.rowCount });
+    const rows = result.rows;
+    const hasMore = rows.length > limit;
+    const data = hasMore ? rows.slice(0, limit) : rows;
+    sendSuccess(res, {
+      data,
+      totalCount: data.length,
+      hasMore,
+      // Include a cursor for the next page (the last item's updated_at).
+      // Callers can pass this as `?cursor=<value>` to page past the cap.
+      nextCursor: hasMore && data.length > 0
+        ? data[data.length - 1].updated_at
+        : null,
+    });
   } catch (err) {
     next(err);
   }
@@ -179,6 +197,7 @@ router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
         );
       }
     }
+    const { ontologyId } = req.params;
     const result = await query(
       `UPDATE saved_exploration
           SET title = COALESCE($2, title),
@@ -187,7 +206,7 @@ router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
               visibility = COALESCE($5, visibility),
               required_markings = COALESCE($7::text[], required_markings),
               updated_at = now()
-        WHERE exploration_id = $1 AND owner_id = $6
+        WHERE exploration_id = $1 AND owner_id = $6 AND ontology_id = $8
         RETURNING *`,
       [
         req.params.id,
@@ -197,6 +216,7 @@ router.put("/:id", async (req: Request, res: Response, next: NextFunction) => {
         visibility,
         currentUser(req),
         nextRequiredMarkings,
+        ontologyId,
       ]
     );
     if (result.rowCount === 0) {

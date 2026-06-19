@@ -356,6 +356,19 @@ export async function hasActiveDependencies(rid: string): Promise<boolean> {
   return result.rows[0]?.exists ?? false;
 }
 
+/**
+ * Find a connection by RID without tenant filtering (for system callers
+ * that have already verified access control). Returns the connection
+ * including its tenant field so callers can use it for credential lookups.
+ */
+export async function findByRidAnyTenant(rid: string): Promise<Connection | null> {
+  const result = await pool.query<ConnectionRow>(
+    `SELECT * FROM connectivity_connections
+      WHERE rid = $1 AND deleted_at IS NULL`,
+    [rid],
+  );
+  return result.rows[0] ? toContract(result.rows[0]) : null;
+}
 export async function findByNameInFolder(
   tenant: string,
   folderRid: string,

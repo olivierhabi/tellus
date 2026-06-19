@@ -57,17 +57,9 @@ function ensureSweeper(): void {
 
 export async function getPool(connectionRid: string): Promise<Pool> {
   ensureSweeper();
-  // findByRid throws ConnectionNotFound; we re-throw with the canonical envelope.
-  let conn;
-  try {
-    // Pool layer has no tenant context — repo accepts cross-tenant for system
-    // callers and falls back to a per-rid lookup. We use the connection's own
-    // tenant for the vault lookup once we have it.
-    conn = await connectionsRepo.findByRid(connectionRid, "");
-  } catch {
-    // Retry with explicit no-tenant filter via a direct query.
-    conn = await connectionsRepo.findByRid(connectionRid, "default").catch(() => null);
-  }
+  // Look up connection without tenant filter (system caller);
+  // the connection record contains its tenant for credential lookups.
+  const conn = await connectionsRepo.findByRidAnyTenant(connectionRid);
   if (!conn) {
     throw new TellusError(ConnectionNotFound, { connectionRid });
   }
