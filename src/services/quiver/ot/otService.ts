@@ -253,6 +253,9 @@ export async function submitInstructions(
         });
         continue;
       }
+      // Snapshot doc and tombstones before apply to support rollback on 23505.
+      const docSnapshot = JSON.stringify(doc);
+      const tombstonesSnapshot = new Set(tombstones);
       const applyStart = process.hrtime.bigint();
       const r = applyInstruction(doc, entry.transformed, tombstones);
       otInstructionApplySeconds.observe(
@@ -281,10 +284,13 @@ export async function submitInstructions(
       } catch (err: any) {
         if (err?.code === "23505") {
           // Duplicate (rid, applied_by, client_op_id) — should have been caught
-          // in step 3, but if not, drop and continue.
+          // in step 3, but if not, rollback doc/tombstones and continue.
           otDuplicateOpIdTotal.inc();
           nextSeq -= 1;
           accepted.pop();
+          doc = JSON.parse(docSnapshot);
+          tombstones.clear();
+          tombstonesSnapshot.forEach((id) => tombstones.add(id));
           continue;
         }
         throw err;
