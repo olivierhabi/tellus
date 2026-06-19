@@ -8,6 +8,7 @@
 import { getCardType, listCardTypes } from '../dag/cardTypeRegistry';
 import { CircuitBreaker, CircuitOpenError } from './circuitBreaker';
 import type { CardBackend, BackendExecuteInput, BackendExecuteOutput } from './types';
+import { OssLimitExceededError, ActionApplyForbiddenError } from './oss/ossPort';
 
 export type BackendName =
   | 'OSS'
@@ -71,7 +72,11 @@ export class BackendRouter {
       return out;
     } catch (err) {
       // Don't count CircuitOpenError as a backend failure (it never reached the backend).
-      if (!(err instanceof CircuitOpenError)) {
+      // Don't count client validation errors as backend failures — they don't indicate
+      // infrastructure issues. Counting them would allow attackers to trip the circuit
+      // with malformed requests, causing a DoS for all users.
+      const isClientError = err instanceof OssLimitExceededError || err instanceof ActionApplyForbiddenError;
+      if (!(err instanceof CircuitOpenError) && !isClientError) {
         breaker.recordFailure();
       }
       throw err;

@@ -185,8 +185,11 @@ export class ComputeExecutor {
         } catch (err) {
           // Cache put failures are non-fatal; result still returned.
           // (Surfaced via metrics in routes/quiver/compute.ts.)
+          // Fall through to compute contentHash from payload if cache write failed.
         }
-      } else if (!result.contentHash) {
+      }
+      // Ensure contentHash is always set — either from cache, backend output, or computed.
+      if (!result.contentHash) {
         result.contentHash = await sha256OfPayload(result.payload);
       }
 

@@ -7,6 +7,7 @@
 
 import { Router, type Request, type Response } from "express";
 import { listCardTypes } from "../../services/quiver/dag";
+import { createHash } from "node:crypto";
 
 export const registryRouter = Router();
 
@@ -25,8 +26,14 @@ registryRouter.get("/registry/cards", (_req: Request, res: Response) => {
     ),
     output: e.output,
   }));
+  // Use a content hash of the serialized registry for the ETag so that
+  // changes to card type definitions (not just additions/removals) invalidate caches.
+  const contentHash = createHash("sha256")
+    .update(JSON.stringify(cards))
+    .digest("hex")
+    .slice(0, 16);
   res.set("Cache-Control", "public, max-age=300");
-  res.set("ETag", `W/"quiver-registry-v${cards.length}"`);
+  res.set("ETag", `W/"${contentHash}"`);
   res.status(200).json({
     version: 1,
     count: cards.length,
