@@ -63,11 +63,27 @@
           "type": "object",
           "additionalProperties": false,
           "properties": { "widgetId": { "type": "string" } }
+        },
+        "columnWidths": {
+          "type": "object",
+          "description": "Per-section COLUMN WIDTH / RESIZABLE specs, keyed by section id. Covers the empty-shell editor's two fixed columns (\"section-box\"/\"section-page\") AND any section in the layout tree (split/added sections). Authored in the SectionInspector (Absolute px or Flex factor, optionally resizable); persisted so a reloaded module keeps the user's resized layout.",
+          "additionalProperties": { "$ref": "#/$defs/sectionWidthSpec" }
         }
       }
     }
   },
   "$defs": {
+    "sectionWidthSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "pxWidth", "flexValue"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["absolute", "flex"] },
+        "pxWidth": { "type": "number" },
+        "flexValue": { "type": "number" },
+        "resizable": { "type": "boolean" }
+      }
+    },
     "variableId": {
       "type": "string",
       "pattern": "^v_[a-zA-Z0-9_]{1,128}$"

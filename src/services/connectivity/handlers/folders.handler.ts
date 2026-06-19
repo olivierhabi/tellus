@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Folders handler — GET /api/v2/connectivity/folders
+// Folders handler — GET /api/v1/connectivity/folders
 //
 // Returns folder-like resources from the `resources` table for the
 // folder-picker dialog used when creating a new connection.
@@ -23,7 +23,7 @@ import * as repo from "../store/folders.repo";
 import { extractUser, requireScope } from "./connections.handler";
 
 /**
- * GET /api/v2/connectivity/folders
+ * GET /api/v1/connectivity/folders
  *
  * Response shape: { items: [{ rid, displayName, type, hasChildren }] }
  */
@@ -61,7 +61,7 @@ export async function listFolders(
 }
 
 /**
- * GET /api/v2/connectivity/folders/:rid
+ * GET /api/v1/connectivity/folders/:rid
  *
  * Resolves a single folder-like resource by RID into display metadata
  * ({ rid, displayName, type, path, parentPath }). Powers connection-settings
@@ -114,7 +114,7 @@ const CreateOutputFolderBody = z.object({
 });
 
 /**
- * POST /api/v2/connectivity/folders
+ * POST /api/v1/connectivity/folders
  *
  * Creates (or reuses) a default output folder for syncs. Returns
  * { rid, name, path } where `path` is the folder's parent ancestor path,

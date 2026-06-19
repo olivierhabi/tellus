@@ -32,6 +32,14 @@ export const ConnectionNotFound = register(
   ),
 );
 
+export const BuildNotFound = register(
+  def(
+    "Tellus:Connectivity:BuildNotFound",
+    "NOT_FOUND",
+    "No build exists at the requested RID.",
+  ),
+);
+
 export const ResourceVersionMismatch = register(
   def(
     "Tellus:Connectivity:ResourceVersionMismatch",

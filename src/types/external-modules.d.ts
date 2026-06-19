@@ -71,6 +71,10 @@ declare module "@kubernetes/client-node" {
     listNamespacedPod(namespace: string, ...args: unknown[]): Promise<{ body: { items: unknown[] } }>;
     readNamespacedPodLog(name: string, namespace: string): Promise<{ body: string }>;
   }
+  export class NetworkingV1Api {
+    createNamespacedNetworkPolicy(namespace: string, body: unknown): Promise<{ body: unknown }>;
+    deleteNamespacedNetworkPolicy(name: string, namespace: string): Promise<unknown>;
+  }
   export const V1Job: unknown;
   export const V1JobSpec: unknown;
 }

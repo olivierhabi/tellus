@@ -1,5 +1,5 @@
 // B4.09 — evaluateBatch unit/integration test.
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { GatekeeperService } from "../../../src/services/gatekeeperService";
@@ -12,6 +12,14 @@ const pool = new Pool({
   database: process.env.PGDATABASE || "tellus_db",
 });
 const svc = new GatekeeperService(pool);
+
+// Each test mutates role_grants / project_members / markings directly and then
+// re-evaluates. The gatekeeper LRU cache is invalidated via async Postgres
+// LISTEN/NOTIFY, which races this synchronous test flow — so a key evaluated
+// (and cached) by an earlier test can be read stale here. Clear the cache
+// before each test for deterministic, pollution-free evaluations.
+beforeEach(() => svc.clearCache());
+
 const tag = `b4-batch-${randomUUID()}`;
 const DEFAULT_ORG = "00000000-0000-0000-0000-000000000001";
 let userId: string;

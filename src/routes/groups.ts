@@ -11,8 +11,14 @@ import {
   sendNoContent,
 } from "../utils/responseFormatter";
 import { client as osClient } from "../services/opensearch/client";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization: group create/update require ontology-editor;
+// delete requires ontology-admin (PATs scope-gated upstream, superadmin
+// passes, reads open).
+router.use(dataPlaneGuard({ post: "write" }));
 
 // Spec §Task 15: "Object count per card: cached in Elasticsearch _count,
 // refreshed every 60s (not on every render)."

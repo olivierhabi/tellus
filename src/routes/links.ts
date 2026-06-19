@@ -28,6 +28,7 @@ import { sendSuccess, sendCreated, sendNoContent, sendError, encodePageToken, de
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
 import { incCounter } from "../services/funnel/metrics";
+import { dataPlaneGuard, requireOntologyWrite } from "../middleware/requireRole";
 import type { Cardinality, LinkTypeRow } from "../models/linkType";
 import {
   applyReverseProjectionAll,
@@ -148,6 +149,14 @@ const UUID_RE =
 
 const router = Router({ mergeParams: true });
 
+// Function-level authorization. This router mixes link-type mutations with
+// many read-style POSTs (resolve/count/searchAround/multiHop/bulkCount/
+// validate), so POSTs are left open here and the genuine write-POSTs are
+// gated explicitly below; PUT (update / resolver config) requires
+// ontology-editor and DELETE (delete link type) requires ontology-admin via
+// the guard. PATs are scope-gated upstream; superadmin passes.
+router.use(dataPlaneGuard({ post: "open" }));
+
 router.param("apiName", async (req, _res, next, value) => {
   // Fast path: the param wasn't a UUID, so it must already be either an
   // apiName or one of the reserved sub-paths. Either way, nothing to do.
@@ -178,7 +187,7 @@ router.param("apiName", async (req, _res, next, value) => {
 // POST / — Create link type (Task 2)
 // ---------------------------------------------------------------------------
 
-router.post("/", async (req: Request, res: Response, next: NextFunction) => {
+router.post("/", requireOntologyWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { ontologyId } = req.params;
     const {
@@ -309,7 +318,7 @@ router.get("/export", async (req: Request, res: Response, next: NextFunction) =>
 // POST /import — Import link types from JSON (Task 26)
 // ---------------------------------------------------------------------------
 
-router.post("/import", async (req: Request, res: Response, next: NextFunction) => {
+router.post("/import", requireOntologyWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { ontologyId } = req.params;
     const { linkTypes } = req.body;
@@ -811,7 +820,7 @@ router.post("/:apiName/searchAround", async (req: Request, res: Response, next: 
 // POST /:apiName/upload — Join table CSV upload (Task 17)
 // ---------------------------------------------------------------------------
 
-router.post("/:apiName/upload", upload.single("file"), async (req: Request, res: Response, next: NextFunction) => {
+router.post("/:apiName/upload", requireOntologyWrite, upload.single("file"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { ontologyId, apiName } = req.params;
 
@@ -1099,6 +1108,7 @@ router.get("/:apiName/violations", async (req: Request, res: Response, next: Nex
 
 router.post(
   "/:apiName/violations/:violationId/resolve",
+  requireOntologyWrite,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { violationId } = req.params;
@@ -1127,6 +1137,7 @@ router.post(
 
 router.post(
   "/:apiName/violations/:violationId/dismiss",
+  requireOntologyWrite,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { violationId } = req.params;
@@ -1158,6 +1169,7 @@ router.post(
 // edit is allowed under the current policy.
 router.post(
   "/:apiName/enforce-one-to-one",
+  requireOntologyWrite,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId, apiName } = req.params;
@@ -1524,6 +1536,7 @@ router.get(
 
 router.post(
   "/:apiName/migrate-storage",
+  requireOntologyWrite,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId, apiName } = req.params;

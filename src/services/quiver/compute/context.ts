@@ -17,6 +17,7 @@ import { instrumentOssPort } from "./oss/instrumentedOss";
 import type { OssPort } from "./oss/ossPort";
 import { buildMatBackends, MAT_CARD_TYPES } from "./mat/matBackend";
 import { InProcessMatAdapter } from "./mat/inProcessMat";
+import { defaultMatPortFromEnv } from "./mat/sparkMatAdapter";
 import { instrumentMatPort } from "./mat/instrumentedMat";
 import type { MatPort } from "./mat/matPort";
 import { buildTsBackends, TS_CARD_TYPES } from "./ts/tsBackend";
@@ -89,7 +90,10 @@ export function getComputeContext(): ComputeContext {
   if (cached) return cached;
   const router = new BackendRouter();
   const ossPort = injectedOssPort ?? new InProcessOssAdapter();
-  const matPort = injectedMatPort ?? new InProcessMatAdapter();
+  // FOUNDRY-GAPS §1: when LIVY_URL is set the Spark tier submits via Livy
+  // (sparkMatAdapter.ts); with the env unset this returns the plain
+  // InProcessMatAdapter — zero behavior change for dev/test environments.
+  const matPort = injectedMatPort ?? defaultMatPortFromEnv();
   const codexPort = injectedCodexPort ?? new InProcessCodexAdapter();
   for (const b of buildBackendsWithRealAdapters(ossPort, matPort, codexPort)) router.register(b);
   const cache = new CacheRepository(pool);

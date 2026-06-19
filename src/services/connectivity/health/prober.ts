@@ -15,9 +15,9 @@
 // is otherwise swallowed so one bad connection can't abort the sweep.
 // ---------------------------------------------------------------------------
 
-import { pool } from "../../../db";
 import { getPool } from "../connectors/postgresql/pool";
 import { TellusError } from "../../../lib/errors/envelope";
+import { listProbeTargets } from "../store/connections.repo";
 import { recordStatus, stateForTellusError } from "./recordStatus";
 
 let timer: NodeJS.Timeout | null = null;
@@ -84,18 +84,14 @@ function stateForProbeError(err: unknown): "AUTH_FAILED" | "TLS_FAILED" | "UNREA
  * Returns a tally of probe outcomes.
  */
 export async function probeAll(): Promise<{ healthy: number; unhealthy: number }> {
-  const active = await pool.query<{ rid: string }>(
-    `SELECT rid FROM connectivity_connections
-      WHERE deleted_at IS NULL
-        AND connector_type = 'postgresql'
-      ORDER BY updated_at ASC
-      LIMIT $1`,
-    [PROBE_BATCH],
-  );
+  // Least-recently-checked first; skip connections probed within one poll
+  // interval so a bounded batch makes steady progress across the population.
+  const targets = await listProbeTargets(POLL_MS, PROBE_BATCH);
 
   let healthy = 0;
   let unhealthy = 0;
-  for (const { rid } of active.rows) {
+  for (const { rid, connectorType } of targets) {
+    if (connectorType !== "postgresql") continue;
     try {
       const pg = await getPool(rid);
       await withTimeout(pg.query("SELECT 1"), PROBE_TIMEOUT_MS);

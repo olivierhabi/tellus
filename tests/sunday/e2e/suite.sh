@@ -59,8 +59,8 @@ assert_status "$HTTP_STATUS" "200" "Health endpoint returns 200"
 # ===========================================================================
 section "2. Setup: Ontology and Object Types"
 
-do_request POST /api/v1/ontology '{"displayName":"E2E Sunday Ontology","description":"Sunday E2E testing"}'
-assert_status "$HTTP_STATUS" "201" "Create ontology"
+do_request GET /api/v1/ontology/default
+assert_status "$HTTP_STATUS" "200" "Resolve enterprise ontology"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "ontologyId returned"
 

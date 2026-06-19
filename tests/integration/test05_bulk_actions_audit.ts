@@ -124,11 +124,8 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("5.1  Setup ontology + Employee type + upload 50 employees");
 
-  const ontRes = await api("POST", "/api/v1/ontology", {
-    displayName: "Test05 Bulk Actions Ontology",
-  });
-  assert(ontRes.status === 201, "Ontology created");
-  ontologyId = ontRes.body?.data?.ontologyId;
+  const ontRes = await api("GET", "/api/v1/ontology/default");
+  ontologyId = ontRes.body?.data?.ontologyId ?? ontRes.body?.ontologyId; assert(!!ontologyId, "Enterprise ontology resolved");
 
   // Create Employee object type with properties via batch
   const otRes = await api(

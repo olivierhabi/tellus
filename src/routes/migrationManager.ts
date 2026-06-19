@@ -15,8 +15,14 @@ import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { client as osClient } from "../services/opensearch/client";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Schema migrations (plan + execute) are admin-only: executing a migration
+// rewrites indices / swaps aliases and must never be reachable by a plain
+// authenticated session. GET (list) stays open to any authenticated reader.
+router.use(dataPlaneGuard({ post: "admin" }));
 
 const BREAKING_OPS = new Set([
   "primary_key_change",

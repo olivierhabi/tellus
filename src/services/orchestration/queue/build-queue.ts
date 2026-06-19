@@ -4,24 +4,46 @@
 // Wraps WorkerRuntimeAdapter.submit() with admission control:
 //   - per-tenant FIFO ordering
 //   - global concurrency cap (TELLUS_BUILD_GLOBAL_CONCURRENCY)
-//   - weighted fair scheduling: tenants with higher 'weight' get more
-//     active slots, but no tenant starves (round-robin across pending
-//     tenants is applied after weight-based admission).
+//   - round-robin fairness across pending tenants so no tenant starves
 //
-// This is a thin admission layer that sits in front of the runtime adapter;
-// it does NOT replace BullMQ priorities — those are still used as a hint
-// downstream.
+// CONTRACT (important): `enqueue` is an *admission* call. It accepts the job
+// onto the queue and returns IMMEDIATELY — it does NOT await dispatch or the
+// runtime submit, and it never blocks on the worker lifecycle. This is what
+// lets the HTTP `execute` handler durably record the build and return
+// `202 Accepted` well within the request budget; the actual run proceeds in
+// the background and its outcome is observed via `onEvent`.
+//
+// Slot accounting is keyed on `buildRid`: every dispatched job occupies one
+// global + one per-tenant slot until a TERMINAL runtime event for that
+// buildRid arrives (or its submit throws). At that point the slot is freed,
+// the single-active lock for the import is released, and the next pending job
+// is dispatched. Keying on buildRid (rather than a best-effort tenant guess)
+// is what makes the accounting correct — the previous implementation leaked
+// slots and never released the lock on the success path, wedging the queue.
+//
+// All mutable state lives inside the closure returned by `makeBuildQueue` so
+// two queues — or a singleton re-created across a hot reload — can never
+// corrupt each other's counters.
 // ---------------------------------------------------------------------------
 
-import type { JobSpec, WorkerRuntimeAdapter } from "../runners/runtime-adapter";
+import type {
+  JobSpec,
+  RuntimeEvent,
+  WorkerRuntimeAdapter,
+} from "../runners/runtime-adapter";
 import * as singleActive from "./single-active-build";
 
 const GLOBAL_CAP = Number(process.env.TELLUS_BUILD_GLOBAL_CONCURRENCY ?? 8);
 
+/** Runtime event kinds that end a build's lifecycle. */
+const TERMINAL_KINDS: ReadonlySet<RuntimeEvent["kind"]> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+
 interface PendingItem {
   spec: JobSpec;
-  resolve: (buildRid: string) => void;
-  reject: (err: unknown) => void;
   weight: number;
   enqueuedMs: number;
 }
@@ -32,15 +54,27 @@ interface TenantQueue {
   active: number;
 }
 
-const tenants = new Map<string, TenantQueue>();
-let active = 0;
-const rrOrder: string[] = [];
-
 export interface BuildQueueHandle {
-  enqueue(
-    spec: JobSpec,
-    opts?: { weight?: number },
-  ): Promise<{ buildRid: string; coalesced: boolean }>;
+  /**
+   * Admit a job for execution. Returns immediately (synchronous, non-blocking);
+   * the job dispatches in the background as a global slot frees.
+   */
+  enqueue(spec: JobSpec, opts?: { weight?: number }): void;
+  /**
+   * Subscribe to the normalized build event stream: every runtime event is
+   * forwarded, plus a synthetic `failed` event when `submit` itself throws
+   * (the runtime can't emit for a job it never accepted). Returns unsubscribe.
+   */
+  onEvent(listener: (e: RuntimeEvent) => void): () => void;
+  /**
+   * Abort a build. If it is still PENDING (admitted but not dispatched) it is
+   * removed from its tenant queue and its coalescing lock released. If it is
+   * IN-FLIGHT the runtime is asked to cancel it (which emits a terminal
+   * `cancelled` event → slot + lock freed via the normal finalize path). No-op
+   * if the build is unknown / already finished. The authoritative DB status
+   * transition is owned by the cancel HTTP handler; this only stops the work.
+   */
+  cancel(buildRid: string): Promise<void>;
   pendingCount(): number;
   activeCount(): number;
 }
@@ -48,30 +82,30 @@ export interface BuildQueueHandle {
 export function makeBuildQueue(
   runtime: WorkerRuntimeAdapter,
 ): BuildQueueHandle {
-  function dispatch(): void {
-    if (active >= GLOBAL_CAP) return;
-    // Round-robin scan; pick the first pending tenant.
-    for (let i = 0; i < rrOrder.length; i++) {
-      const t = rrOrder.shift();
-      if (!t) break;
-      const q = tenants.get(t);
-      if (q && q.items.length) {
-        const item = q.items.shift()!;
-        q.active += 1;
-        active += 1;
-        rrOrder.push(t);
-        void runJob(runtime, item);
-        if (active < GLOBAL_CAP) {
-          // Continue dispatching if cap permits.
-          setImmediate(dispatch);
-        }
-        return;
+  const tenants = new Map<string, TenantQueue>();
+  const rrOrder: string[] = [];
+  // buildRid -> spec for every job occupying a slot. The single source of
+  // truth for "what is in flight", used to free the right slot + lock on a
+  // terminal event regardless of which tenant it belongs to.
+  const inflight = new Map<string, JobSpec>();
+  const listeners = new Set<(e: RuntimeEvent) => void>();
+  let active = 0;
+
+  function publish(e: RuntimeEvent): void {
+    for (const l of listeners) {
+      try {
+        l(e);
+      } catch {
+        /* a misbehaving listener must not break accounting */
       }
-      // Empty: drop from rotation.
     }
   }
 
-  function onJobTerminal(spec: JobSpec): void {
+  /** Free the slot + lock held by `buildRid`. Idempotent. */
+  function finalize(buildRid: string): void {
+    const spec = inflight.get(buildRid);
+    if (!spec) return; // unknown or already finalized
+    inflight.delete(buildRid);
     const q = tenants.get(spec.tenant);
     if (q) q.active = Math.max(0, q.active - 1);
     active = Math.max(0, active - 1);
@@ -79,49 +113,97 @@ export function makeBuildQueue(
     dispatch();
   }
 
-  // Listen for terminal runtime events to free slots.
-  runtime.onEvent((e) => {
-    if (e.kind === "succeeded" || e.kind === "failed" || e.kind === "cancelled") {
-      // We don't have the JobSpec here directly; the runtime adapter is
-      // expected to expose enough info via e.data.tenant when emitting
-      // terminal events. Conservative fallback: bump global counter only.
-      const tenant = (e.data?.tenant as string | undefined) ?? null;
-      if (tenant) {
-        const q = tenants.get(tenant);
-        if (q) q.active = Math.max(0, q.active - 1);
+  /** Round-robin pick of the next pending item across tenants. */
+  function pickNext(): PendingItem | null {
+    for (let i = 0; i < rrOrder.length; i++) {
+      const t = rrOrder.shift();
+      if (t === undefined) break;
+      const q = tenants.get(t);
+      if (q && q.items.length > 0) {
+        const item = q.items.shift()!;
+        // Keep the tenant in rotation if it still has work; otherwise it is
+        // re-added by the next enqueue for that tenant.
+        if (q.items.length > 0) rrOrder.push(t);
+        return item;
       }
-      active = Math.max(0, active - 1);
-      dispatch();
+      // Empty tenant: drop from rotation.
     }
+    return null;
+  }
+
+  function dispatch(): void {
+    while (active < GLOBAL_CAP) {
+      const item = pickNext();
+      if (!item) return;
+      const q = tenants.get(item.spec.tenant);
+      if (q) q.active += 1;
+      active += 1;
+      inflight.set(item.spec.buildRid, item.spec);
+      void runJob(item);
+    }
+  }
+
+  async function runJob(item: PendingItem): Promise<void> {
+    try {
+      // submit() returns as soon as the job is handed to the runtime; the
+      // outcome arrives asynchronously via runtime.onEvent → finalize().
+      await runtime.submit(item.spec);
+    } catch (err) {
+      // The runtime rejected the submit — it will never emit a terminal event
+      // for this build, so synthesize one to converge both the DB row (via the
+      // dispatcher's subscriber) and our own slot accounting.
+      publish({
+        buildRid: item.spec.buildRid,
+        ts: new Date().toISOString(),
+        kind: "failed",
+        data: { reason: err instanceof Error ? err.message : String(err) },
+      });
+      finalize(item.spec.buildRid);
+    }
+  }
+
+  // Forward every runtime event and drive slot release on terminal ones.
+  runtime.onEvent((e) => {
+    publish(e);
+    if (TERMINAL_KINDS.has(e.kind)) finalize(e.buildRid);
   });
 
   return {
-    async enqueue(spec: JobSpec, opts?: { weight?: number }) {
-      const lock = await singleActive.acquireOrJoin(spec.importRid, spec.buildRid);
-      if (lock.coalesced) {
-        // Another build is in flight for this import; return its rid.
-        return lock;
-      }
+    enqueue(spec: JobSpec, opts?: { weight?: number }): void {
       const weight = opts?.weight ?? 1;
-      return new Promise<{ buildRid: string; coalesced: boolean }>(
-        (resolve, reject) => {
-          let q = tenants.get(spec.tenant);
-          if (!q) {
-            q = { tenant: spec.tenant, items: [], active: 0 };
-            tenants.set(spec.tenant, q);
-            rrOrder.push(spec.tenant);
-          }
-          q.items.push({
-            spec,
-            resolve: (rid) =>
-              resolve({ buildRid: rid, coalesced: false }),
-            reject,
-            weight,
-            enqueuedMs: Date.now(),
-          });
-          dispatch();
-        },
-      );
+      let q = tenants.get(spec.tenant);
+      if (!q) {
+        q = { tenant: spec.tenant, items: [], active: 0 };
+        tenants.set(spec.tenant, q);
+      }
+      const wasEmpty = q.items.length === 0;
+      q.items.push({ spec, weight, enqueuedMs: Date.now() });
+      // (Re)insert the tenant into the round-robin rotation when it gains its
+      // first pending item.
+      if (wasEmpty && !rrOrder.includes(spec.tenant)) rrOrder.push(spec.tenant);
+      dispatch();
+    },
+    onEvent(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    async cancel(buildRid: string): Promise<void> {
+      // Pending (admitted, not yet dispatched): drop it from its tenant queue
+      // and release the coalescing lock. No slot was held, so no finalize.
+      for (const q of tenants.values()) {
+        const idx = q.items.findIndex((it) => it.spec.buildRid === buildRid);
+        if (idx >= 0) {
+          const [removed] = q.items.splice(idx, 1);
+          void singleActive.release(removed.spec.importRid);
+          return;
+        }
+      }
+      // In-flight: ask the runtime to abort. The runtime emits a terminal
+      // `cancelled` event → runtime.onEvent above → finalize frees the slot +
+      // lock. Nothing to do for an unknown/finished build.
+      if (inflight.has(buildRid)) {
+        await runtime.cancel(buildRid);
+      }
     },
     pendingCount() {
       let n = 0;
@@ -132,17 +214,4 @@ export function makeBuildQueue(
       return active;
     },
   };
-
-  async function runJob(
-    rt: WorkerRuntimeAdapter,
-    item: PendingItem,
-  ): Promise<void> {
-    try {
-      await rt.submit(item.spec);
-      item.resolve(item.spec.buildRid);
-    } catch (err) {
-      onJobTerminal(item.spec);
-      item.reject(err);
-    }
-  }
 }

@@ -29,6 +29,10 @@ const ENV_WHITELIST = new Set([
   "TELLUS_KMS_ADAPTER",
   "TELLUS_LOG_LEVEL",
   "TELLUS_OTEL_ENDPOINT",
+  // Base URL of the internal credential-unwrap endpoint the worker calls with
+  // its workload JWT. Without this the child falls back to a wrong default and
+  // the credential fetch fails ("fetch failed").
+  "TELLUS_INTERNAL_URL",
   "TZ",
   "LANG",
   "PATH",

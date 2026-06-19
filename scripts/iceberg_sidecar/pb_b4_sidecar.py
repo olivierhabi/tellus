@@ -658,6 +658,168 @@ def action_update_schema(cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# FOUNDRY-GAPS §6 — branch / tag refs (Foundry "dataset branches" analog).
+# Refs live entirely in Iceberg table metadata (snapshot-ref entries); no
+# Postgres schema involvement. All mutations go through the PyIceberg
+# ManageSnapshots API so they commit atomically against catalog OCC.
+# ---------------------------------------------------------------------------
+
+def _ref_type(ref: Any) -> Optional[str]:
+    rtype = getattr(ref, "snapshot_ref_type", None)
+    rtype = getattr(rtype, "value", rtype)
+    return str(rtype) if rtype is not None else None
+
+
+def _ref_row(name: str, ref: Any) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "type": _ref_type(ref),
+        "snapshot_id": str(ref.snapshot_id),
+        "max_ref_age_ms": getattr(ref, "max_ref_age_ms", None),
+        "max_snapshot_age_ms": getattr(ref, "max_snapshot_age_ms", None),
+        "min_snapshots_to_keep": getattr(ref, "min_snapshots_to_keep", None),
+    }
+
+
+def _resolve_ref_snapshot_id(table, cfg: Dict[str, Any]) -> int:
+    sid = cfg.get("snapshot_id")
+    if sid is not None:
+        return int(sid)
+    current = table.current_snapshot()
+    if current is None:
+        raise ValueError(
+            "table has no snapshots; cannot create a ref on an empty table",
+        )
+    return int(current.snapshot_id)
+
+
+def action_list_refs(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    catalog = _load_catalog(cfg)
+    table_ident = f"{cfg['namespace']}.{cfg['table']}"
+    try:
+        table = catalog.load_table(table_ident)
+    except Exception as err:
+        s = str(err).lower()
+        etype = err.__class__.__name__.lower()
+        if (
+            "nosuchtable" in etype
+            or "nosuchnamespace" in etype
+            or "does not exist" in s
+            or "not found" in s
+            or "404" in s
+        ):
+            return {"refs": []}
+        raise
+    refs = dict(table.metadata.refs)
+    return {"refs": [_ref_row(n, r) for n, r in sorted(refs.items())]}
+
+
+def action_create_branch(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    catalog = _load_catalog(cfg)
+    table = catalog.load_table(f"{cfg['namespace']}.{cfg['table']}")
+    name = cfg["branch_name"]
+    if name in table.metadata.refs:
+        raise ValueError(f"ref already exists: {name}")
+    sid = _resolve_ref_snapshot_id(table, cfg)
+    with table.manage_snapshots() as mgr:
+        mgr.create_branch(snapshot_id=sid, branch_name=name)
+    return {"ref": name, "type": "branch", "snapshot_id": str(sid)}
+
+
+def action_create_tag(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    catalog = _load_catalog(cfg)
+    table = catalog.load_table(f"{cfg['namespace']}.{cfg['table']}")
+    name = cfg["tag_name"]
+    if name in table.metadata.refs:
+        raise ValueError(f"ref already exists: {name}")
+    sid = _resolve_ref_snapshot_id(table, cfg)
+    with table.manage_snapshots() as mgr:
+        mgr.create_tag(snapshot_id=sid, tag_name=name)
+    return {"ref": name, "type": "tag", "snapshot_id": str(sid)}
+
+
+def action_drop_ref(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    catalog = _load_catalog(cfg)
+    table = catalog.load_table(f"{cfg['namespace']}.{cfg['table']}")
+    name = cfg["ref_name"]
+    ref = table.metadata.refs.get(name)
+    if ref is None:
+        raise ValueError(f"ref not found: {name}")
+    rtype = _ref_type(ref)
+    with table.manage_snapshots() as mgr:
+        if rtype == "branch":
+            mgr.remove_branch(branch_name=name)
+        else:
+            mgr.remove_tag(tag_name=name)
+    return {"dropped": name, "type": rtype}
+
+
+def action_fast_forward(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Fast-forward `branch_name` to the snapshot another ref points at.
+
+    Only a true fast-forward is allowed: the branch's current head must
+    be an ancestor of the target ref's snapshot. PyIceberg's
+    ManageSnapshots has no native fast_forward, so this is implemented
+    as remove_branch + create_branch (two commits; the second failure
+    triggers a best-effort restore of the original head).
+    """
+    catalog = _load_catalog(cfg)
+    table_ident = f"{cfg['namespace']}.{cfg['table']}"
+    table = catalog.load_table(table_ident)
+    branch = cfg["branch_name"]
+    to_ref = cfg["to_ref"]
+    refs = table.metadata.refs
+    bref = refs.get(branch)
+    if bref is None:
+        raise ValueError(f"ref not found: {branch}")
+    if _ref_type(bref) != "branch":
+        raise ValueError(f"{branch} is not a branch")
+    target = refs.get(to_ref)
+    if target is None:
+        raise ValueError(f"ref not found: {to_ref}")
+    target_id = int(target.snapshot_id)
+    branch_head = int(bref.snapshot_id)
+    if target_id == branch_head:
+        return {"branch": branch, "snapshot_id": str(target_id), "fast_forwarded": False}
+
+    # Ancestry walk: the branch head must appear in the target's parent
+    # chain, otherwise this is a divergent (non-fast-forward) move.
+    cursor = table.snapshot_by_id(target_id)
+    if cursor is None:
+        raise ValueError(f"unknown snapshot for ref {to_ref}: {target_id}")
+    is_ancestor = False
+    while cursor is not None:
+        if int(cursor.snapshot_id) == branch_head:
+            is_ancestor = True
+            break
+        if cursor.parent_snapshot_id is None:
+            break
+        cursor = table.snapshot_by_id(cursor.parent_snapshot_id)
+    if not is_ancestor:
+        raise ValueError(
+            f"cannot fast-forward: {branch} head {branch_head} is not an ancestor of {to_ref} ({target_id})",
+        )
+
+    with table.manage_snapshots() as mgr:
+        mgr.remove_branch(branch_name=branch)
+    try:
+        table = catalog.load_table(table_ident)
+        with table.manage_snapshots() as mgr:
+            mgr.create_branch(snapshot_id=target_id, branch_name=branch)
+    except Exception:
+        # Best-effort restore of the original head so a failed second
+        # commit does not leave the branch deleted.
+        try:
+            table = catalog.load_table(table_ident)
+            with table.manage_snapshots() as mgr:
+                mgr.create_branch(snapshot_id=branch_head, branch_name=branch)
+        except Exception:  # noqa: BLE001 — restore is best-effort
+            _log(f"fast_forward: failed to restore branch {branch} at {branch_head}")
+        raise
+    return {"branch": branch, "snapshot_id": str(target_id), "fast_forwarded": True}
+
+
 def action_expire(cfg: Dict[str, Any]) -> Dict[str, Any]:
     catalog = _load_catalog(cfg)
     table = catalog.load_table(f"{cfg['namespace']}.{cfg['table']}")
@@ -692,9 +854,102 @@ def action_compact(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {"snapshot_id": str(current.snapshot_id) if current else None}
 
 
+def action_multi_table_commit(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Atomically append to MULTIPLE Iceberg tables in ONE catalog transaction.
+
+    FOUNDRY-GAPS §6 — multi-table transactions. The single-table `append`
+    commits each table independently (a crash between two appends leaves a
+    cross-dataset write half-applied). This action stages the data files for
+    every table, then commits all of their metadata changes together through
+    the Iceberg REST `POST /v1/{prefix}/transactions/commit` endpoint that
+    Lakekeeper implements — so either every table advances to its new snapshot
+    or none do (the catalog applies the change set under one OCC check).
+
+    Input:
+      { "action": "multi_table_commit",
+        <catalog config>,
+        "tables": [ { "namespace": str, "table": str, "parquet_files": [str] }, ... ] }
+
+    Each table's data files are written eagerly by `Transaction.append` (inside
+    its snapshot-producer); only the catalog metadata commit is deferred and
+    batched. A rejected commit (409) leaves orphan data files that the existing
+    `expire`/orphan paths reclaim — exactly the semantics of a failed OCC append.
+    """
+    import json as _json
+    import pyarrow.parquet as pq
+    from pyiceberg.table import CommitTableRequest, TableIdentifier
+    from pyiceberg.table.update import AssertTableUUID
+
+    catalog = _load_catalog(cfg)
+    tables_cfg: List[Dict[str, Any]] = cfg.get("tables") or []
+    if len(tables_cfg) < 2:
+        raise ValueError("multi_table_commit requires at least two tables (use 'append' for one)")
+
+    requests: List[CommitTableRequest] = []
+    idents: List[str] = []
+    priors: List[str] = []
+    for entry in tables_cfg:
+        ident = f"{entry['namespace']}.{entry['table']}"
+        parquet_files: List[str] = entry.get("parquet_files") or []
+        if not parquet_files:
+            raise ValueError(f"table {ident} has no parquet_files")
+        table = catalog.load_table(ident)
+        prior = table.current_snapshot()
+        idents.append(ident)
+        priors.append(str(prior.snapshot_id) if prior else None)
+
+        # Stage every append into ONE per-table transaction WITHOUT committing —
+        # this writes the data files + manifests and accumulates the table's
+        # pending updates/requirements, which we then batch across tables.
+        txn = table.transaction()
+        for path in parquet_files:
+            _log(f"multi_table_commit: staging {path} -> {ident}")
+            txn.append(pq.read_table(path))
+        # Mirror Transaction.commit_transaction(): pin the table UUID so the
+        # batched commit fails closed if the table was concurrently replaced.
+        reqs = txn._requirements + (AssertTableUUID(uuid=txn.table_metadata.table_uuid),)  # noqa: SLF001
+        name_tuple = table.name()  # (namespace..., table)
+        requests.append(
+            CommitTableRequest(
+                identifier=TableIdentifier(namespace=name_tuple[:-1], name=name_tuple[-1]),
+                requirements=reqs,
+                updates=txn._updates,  # noqa: SLF001
+            ),
+        )
+
+    body = {"table-changes": [_json.loads(r.model_dump_json()) for r in requests]}
+    resp = catalog._session.post(  # noqa: SLF001 — reuse the catalog's authed session
+        catalog.url("transactions/commit", prefixed=True),
+        data=_json.dumps(body).encode("utf-8"),
+        headers=catalog._session.headers,  # noqa: SLF001
+    )
+    if resp.status_code not in (200, 204):
+        # 409 == OCC conflict / requirement failure (the whole set is rejected).
+        raise RuntimeError(
+            f"multi_table_commit rejected: HTTP {resp.status_code}: {resp.text[:600]}",
+        )
+
+    results = []
+    for ident, prior_id in zip(idents, priors):
+        table = catalog.load_table(ident)
+        current = table.current_snapshot()
+        ns, tbl = ident.rsplit(".", 1)
+        results.append(
+            {
+                "namespace": ns,
+                "table": tbl,
+                "prior_snapshot_id": prior_id,
+                "snapshot_id": str(current.snapshot_id) if current else None,
+                "location": table.location(),
+            },
+        )
+    return {"committed": True, "table_count": len(results), "tables": results}
+
+
 DISPATCH = {
     "create_or_get": action_create_or_get,
     "append": action_append,
+    "multi_table_commit": action_multi_table_commit,
     "rollback": action_rollback,
     "snapshots": action_snapshots,
     "scan_as_of": action_scan_as_of,
@@ -702,6 +957,12 @@ DISPATCH = {
     "expire": action_expire,
     "compact": action_compact,
     "update_schema": action_update_schema,
+    # FOUNDRY-GAPS §6 — Iceberg branches & tags
+    "create_branch": action_create_branch,
+    "create_tag": action_create_tag,
+    "list_refs": action_list_refs,
+    "drop_ref": action_drop_ref,
+    "fast_forward": action_fast_forward,
 }
 
 

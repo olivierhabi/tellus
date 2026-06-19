@@ -41,8 +41,14 @@ import {
 } from "../services/uploadService";
 import { scanFile } from "../services/fileScannerService";
 import { checkAndTriggerAutoIndex, AutoIndexResult } from "../services/autoIndexService";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router();
+
+// Function-level authorization: upload / append-transaction require
+// ontology-editor; delete requires ontology-admin. Reads stay open. PATs are
+// scope-gated upstream (datasets:upload / datasets:read); superadmin passes.
+router.use(dataPlaneGuard({ post: "write" }));
 
 // ---------------------------------------------------------------------------
 // Multer instances

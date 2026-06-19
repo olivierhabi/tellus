@@ -66,10 +66,14 @@ describe("Task 29 — OpenAPI Specification", () => {
   it("should contain all expected Actions API paths", async () => {
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
-    const paths = Object.keys(spec.paths);
+    // The served spec is now derived from the live Express route table with
+    // ABSOLUTE keys (`/api/v1/...`, servers: [{ url: '/' }]). It previously used
+    // a `/api` server base with `/v1/...` keys. Normalise by stripping an
+    // optional leading `/api` so this assertion is robust to either convention.
+    const paths = Object.keys(spec.paths).map((p: string) =>
+      p.replace(/^\/api/, "")
+    );
 
-    // Paths in the spec are relative to the server base URL (`/api`),
-    // so they start with `/v1/...` not `/api/v1/...`.
     const expectedPaths = [
       "/v1/ontology/{ontologyId}/actionTypes",
       "/v1/ontology/{ontologyId}/actionTypes/{actionApiName}",
@@ -125,7 +129,9 @@ describe("Task 29 — OpenAPI Specification", () => {
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/v1/ontology/{ontologyId}/actionTypes"] ?? {}
+      spec.paths["/v1/ontology/{ontologyId}/actionTypes"] ??
+        spec.paths["/api/v1/ontology/{ontologyId}/actionTypes"] ??
+        {}
     );
     expect(methods).toContain("post");
     expect(methods).toContain("get");
@@ -138,7 +144,9 @@ describe("Task 29 — OpenAPI Specification", () => {
     const res = await fetch(`${BASE}/api/docs/spec.json`);
     const spec = await res.json();
     const methods = Object.keys(
-      spec.paths["/v1/ontology/{ontologyId}/actionTypes/{actionApiName}"] ?? {}
+      spec.paths["/v1/ontology/{ontologyId}/actionTypes/{actionApiName}"] ??
+        spec.paths["/api/v1/ontology/{ontologyId}/actionTypes/{actionApiName}"] ??
+        {}
     );
     expect(methods).toContain("get");
     expect(methods).toContain("put");

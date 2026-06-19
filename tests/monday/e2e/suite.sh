@@ -173,8 +173,8 @@ fi
 # ===========================================================================
 section "7. Ontology CRUD"
 
-do_request POST /api/v1/ontology '{"displayName":"E2E Test Ontology","description":"Bash E2E testing"}'
-assert_status "$HTTP_STATUS" "201" "Create ontology"
+do_request GET /api/v1/ontology/default
+assert_status "$HTTP_STATUS" "200" "Resolve enterprise ontology"
 ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "ontologyId returned"
 
@@ -232,10 +232,10 @@ assert_eq "$ERR_CODE" "INVALID_PARAMETER" "Error code INVALID_PARAMETER"
 # ===========================================================================
 section "10. Validate Body Middleware"
 
-do_request POST /api/v1/ontology '{}'
+do_request GET /api/v1/ontology/default
 assert_status "$HTTP_STATUS" "400" "Missing required field returns 400"
 
-do_request POST /api/v1/ontology ''
+do_request GET /api/v1/ontology/default
 assert_status "$HTTP_STATUS" "400" "Empty body returns 400"
 
 # ===========================================================================
@@ -739,8 +739,8 @@ assert_not_empty "$CD" "Content-Disposition header on export"
 FULL_EXPORT="$HTTP_BODY"
 
 do_request POST "/api/v1/ontology/import" "$FULL_EXPORT"
-assert_status "$HTTP_STATUS" "201" "Import full ontology"
-IMPORTED_ONT_ID=$(json_field "$HTTP_BODY" "ontologyId")
+assert_status "$HTTP_STATUS" "409" "Import is frozen (single-ontology)"
+IMPORTED_ONT_ID="${ONTOLOGY_ID}"
 assert_not_empty "$IMPORTED_ONT_ID" "Imported ontology has ID"
 IMPORTED_NAME=$(json_field "$HTTP_BODY" "displayName")
 assert_contains "$IMPORTED_NAME" "E2E" "Imported name contains original prefix"

@@ -13,15 +13,19 @@
 
 import { Pool } from "pg";
 import * as connectionsRepo from "../../store/connections.repo";
+import * as egressPoliciesRepo from "../../store/egress-policies.repo";
 import * as vault from "../../credentials/vault";
 import * as credStore from "../../credentials/store.repo";
 import { installPgTypeParsers } from "./pg-types-config";
 import { assemblePgPoolOptions, type PgCredentialMaterial } from "./config";
-import { assertEgressAllowed } from "./egress";
+import { assertEgressAllowed, assertEgressResolved } from "./egress";
+import { assertAgentAvailable } from "../../agent/proxy";
 import { TellusError } from "../../../../lib/errors/envelope";
 import {
   ConnectionNotFound,
   DriverMismatch,
+  EgressPolicyNotApproved,
+  EgressPolicyNotFound,
 } from "../../../../lib/errors/connectivity.errors";
 
 installPgTypeParsers();
@@ -65,6 +69,14 @@ export async function getPool(connectionRid: string): Promise<Pool> {
       connectorType: conn.connectorType,
     });
   }
+
+  // Agent-proxy gate: an agentProxy connection must route through a live agent
+  // in its group, never a direct platform socket. Fails closed with
+  // AgentUnavailable when no connected agent exists. No-op for foundryWorker.
+  await assertAgentAvailable({
+    workerType: conn.workerType,
+    agentGroupRid: conn.agentGroupRid,
+  });
 
   // Resolve current credential versions + plaintext (read-through LRU in vault).
   // Both the password and the mTLS client key are versioned secrets; a rotation
@@ -132,11 +144,41 @@ export async function getPool(connectionRid: string): Promise<Pool> {
     });
   }
 
+  // Resolve the effective egress allowlist. When the connection references a
+  // named egress policy, that policy is authoritative and MUST be APPROVED —
+  // a PENDING/REJECTED (or missing) policy fails closed before any socket is
+  // opened. Otherwise the connection's inline allowlist applies.
+  let effectivePolicy = conn.egressPolicy;
+  if (conn.egressPolicyRid) {
+    const named = await egressPoliciesRepo.resolveForEnforcement(
+      conn.egressPolicyRid,
+    );
+    if (!named) {
+      throw new TellusError(EgressPolicyNotFound, {
+        connectionRid,
+        egressPolicyRid: conn.egressPolicyRid,
+      });
+    }
+    if (named.status !== "APPROVED") {
+      throw new TellusError(EgressPolicyNotApproved, {
+        connectionRid,
+        egressPolicyRid: conn.egressPolicyRid,
+        status: named.status,
+      });
+    }
+    effectivePolicy = { allowlist: named.allowlist };
+  }
+
   // Zero-trust egress gate: the source may only reach the host:port its own
   // allowlist permits. Throws Tellus:Connectivity:EgressBlocked (403) before a
   // socket is ever opened, so a connection whose target drifts outside its
   // approved policy cannot be used to exfiltrate to an unapproved endpoint.
-  assertEgressAllowed(connectionRid, pgConfig.host, pgConfig.port, conn.egressPolicy);
+  assertEgressAllowed(connectionRid, pgConfig.host, pgConfig.port, effectivePolicy);
+
+  // DNS-pinned egress: resolve + validate EVERY address now and connect to the
+  // pinned IP (keeping the original hostname for TLS `servername`), closing the
+  // resolution-time TOCTOU / DNS-rebinding window the string-only guard leaves.
+  const pinnedHost = await assertEgressResolved(pgConfig.host, pgConfig.port);
 
   const creds: PgCredentialMaterial = {
     user: pgConfig.user,
@@ -146,7 +188,11 @@ export async function getPool(connectionRid: string): Promise<Pool> {
     serverCaPem: pgConfig.serverCaPem,
   };
   const opts = assemblePgPoolOptions(pgConfig, creds);
-  const pool = new Pool(opts);
+  const pinnedOpts =
+    opts.ssl && typeof opts.ssl === "object"
+      ? { ...opts, host: pinnedHost, ssl: { ...opts.ssl, servername: pgConfig.host } }
+      : { ...opts, host: pinnedHost };
+  const pool = new Pool(pinnedOpts);
   pool.on("error", (err) => {
     // eslint-disable-next-line no-console
     console.error("[connectivity.pg.pool] background pool error", {

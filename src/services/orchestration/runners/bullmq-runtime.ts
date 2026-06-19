@@ -55,6 +55,9 @@ function createRealBullmqRuntime(bm: BullmqDeps): WorkerRuntimeAdapter {
   const queue = new bm.Queue(QUEUE_NAME, { connection });
   const listeners = new Set<(e: RuntimeEvent) => void>();
   const inflight = new Map<string, SandboxHandle>();
+  // Builds an operator explicitly cancelled — so the exit handler reports
+  // `cancelled` (a clean SIGTERM) rather than mislabelling it as `failed`.
+  const cancelled = new Set<string>();
 
   const worker = new bm.Worker(
     QUEUE_NAME,
@@ -72,8 +75,10 @@ function createRealBullmqRuntime(bm: BullmqDeps): WorkerRuntimeAdapter {
       const result = await handle.exit;
       clearTimeout(deadlineTimer);
       inflight.delete(spec.buildRid);
-      const status =
-        result.code === 0
+      const wasCancelled = cancelled.delete(spec.buildRid);
+      const status = wasCancelled
+        ? "cancelled"
+        : result.code === 0
           ? "succeeded"
           : result.signal === "SIGKILL"
             ? "timeout"
@@ -82,11 +87,18 @@ function createRealBullmqRuntime(bm: BullmqDeps): WorkerRuntimeAdapter {
         l({
           buildRid: spec.buildRid,
           ts: new Date().toISOString(),
-          kind: status === "succeeded" ? "succeeded" : "failed",
+          kind:
+            status === "succeeded"
+              ? "succeeded"
+              : status === "cancelled"
+                ? "cancelled"
+                : "failed",
           data: { exitCode: result.code, signal: result.signal },
         }),
       );
-      if (status !== "succeeded") {
+      // A cancel is an expected outcome, not a job failure — don't throw (which
+      // would mark the BullMQ job failed). Genuine abnormal exits still throw.
+      if (status !== "succeeded" && status !== "cancelled") {
         throw new Error(
           `worker terminated abnormally: code=${result.code} signal=${result.signal}`,
         );
@@ -104,6 +116,7 @@ function createRealBullmqRuntime(bm: BullmqDeps): WorkerRuntimeAdapter {
       });
     },
     async cancel(buildRid: string) {
+      cancelled.add(buildRid);
       const handle = inflight.get(buildRid);
       if (handle) handle.kill("SIGTERM");
       const job = await queue.getJob(buildRid);
@@ -128,6 +141,7 @@ function createRealBullmqRuntime(bm: BullmqDeps): WorkerRuntimeAdapter {
 function createInMemoryRuntime(): WorkerRuntimeAdapter {
   const listeners = new Set<(e: RuntimeEvent) => void>();
   const inflight = new Map<string, SandboxHandle>();
+  const cancelled = new Set<string>();
   return {
     async submit(spec: JobSpec) {
       const handle = spawnSandbox(spec, (e) =>
@@ -141,8 +155,10 @@ function createInMemoryRuntime(): WorkerRuntimeAdapter {
       void handle.exit.then((res) => {
         clearTimeout(deadlineTimer);
         inflight.delete(spec.buildRid);
-        const status =
-          res.code === 0
+        const wasCancelled = cancelled.delete(spec.buildRid);
+        const status = wasCancelled
+          ? "cancelled"
+          : res.code === 0
             ? "succeeded"
             : res.signal === "SIGKILL"
               ? "timeout"
@@ -151,13 +167,19 @@ function createInMemoryRuntime(): WorkerRuntimeAdapter {
           l({
             buildRid: spec.buildRid,
             ts: new Date().toISOString(),
-            kind: status === "succeeded" ? "succeeded" : "failed",
+            kind:
+              status === "succeeded"
+                ? "succeeded"
+                : status === "cancelled"
+                  ? "cancelled"
+                  : "failed",
             data: { exitCode: res.code, signal: res.signal },
           }),
         );
       });
     },
     async cancel(buildRid: string) {
+      cancelled.add(buildRid);
       const handle = inflight.get(buildRid);
       if (handle) handle.kill("SIGTERM");
     },

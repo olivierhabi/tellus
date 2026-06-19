@@ -86,7 +86,7 @@ export function buildOpenApiDocument(): ReturnType<
   // --- POST /connections ----------------------------------------------------
   registry.registerPath({
     method: "post",
-    path: "/api/v2/connectivity/connections",
+    path: "/api/v1/connectivity/connections",
     summary: "Create a new connection.",
     description:
       "Creates a connection bound to a Compass folder. Atomic with Compass " +
@@ -126,7 +126,7 @@ export function buildOpenApiDocument(): ReturnType<
   // --- GET /connections/{rid} ----------------------------------------------
   registry.registerPath({
     method: "get",
-    path: "/api/v2/connectivity/connections/{rid}",
+    path: "/api/v1/connectivity/connections/{rid}",
     summary: "Get a connection by RID.",
     tags: ["connectivity"],
     security: [{ multipass: ["connectivity:read"] }],
@@ -144,7 +144,7 @@ export function buildOpenApiDocument(): ReturnType<
   // --- GET /connections (list) ---------------------------------------------
   registry.registerPath({
     method: "get",
-    path: "/api/v2/connectivity/connections",
+    path: "/api/v1/connectivity/connections",
     summary: "List connections (paginated).",
     tags: ["connectivity"],
     security: [{ multipass: ["connectivity:read"] }],
@@ -167,7 +167,7 @@ export function buildOpenApiDocument(): ReturnType<
   // --- PUT /connections/{rid} ----------------------------------------------
   registry.registerPath({
     method: "put",
-    path: "/api/v2/connectivity/connections/{rid}",
+    path: "/api/v1/connectivity/connections/{rid}",
     summary: "Update a connection (OCC via If-Match).",
     tags: ["connectivity"],
     security: [{ multipass: ["connectivity:write"] }],
@@ -205,7 +205,7 @@ export function buildOpenApiDocument(): ReturnType<
   // --- DELETE /connections/{rid} -------------------------------------------
   registry.registerPath({
     method: "delete",
-    path: "/api/v2/connectivity/connections/{rid}",
+    path: "/api/v1/connectivity/connections/{rid}",
     summary: "Soft-delete a connection (OCC via If-Match).",
     description:
       "Sets deleted_at; excludes from list; returns 404 on subsequent read. " +
@@ -233,7 +233,7 @@ export function buildOpenApiDocument(): ReturnType<
   // --- GET /connections/{rid}/configuration --------------------------------
   registry.registerPath({
     method: "get",
-    path: "/api/v2/connectivity/connections/{rid}/configuration",
+    path: "/api/v1/connectivity/connections/{rid}/configuration",
     summary: "Get the operator-visible configuration (no secrets).",
     tags: ["connectivity"],
     security: [{ multipass: ["connectivity:read"] }],
@@ -262,7 +262,7 @@ export function buildOpenApiDocument(): ReturnType<
   // --- GET /connections/{rid}/status ---------------------------------------
   registry.registerPath({
     method: "get",
-    path: "/api/v2/connectivity/connections/{rid}/status",
+    path: "/api/v1/connectivity/connections/{rid}/status",
     summary: "Get last-known connectivity status.",
     tags: ["connectivity"],
     security: [{ multipass: ["connectivity:read"] }],

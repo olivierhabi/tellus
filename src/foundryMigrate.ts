@@ -342,8 +342,12 @@ async function migrateFoundry(): Promise<void> {
     await client.query(`
       ALTER TABLE foundry_datasets
         ADD CONSTRAINT foundry_datasets_format_check
-        CHECK (format IN ('csv','parquet','iceberg'))
+        CHECK (format IN ('csv','parquet','iceberg','stream'))
     `);
+    // 'stream' marks a Kafka-topic source for a streaming pipeline (§2 direct
+    // Kafka→pipeline path): file_path holds the topic name, dataset_columns the
+    // schema. Consumed by DeploymentService.resolveStreamingSources →
+    // compileStreamingJob (Flink Kafka source connector).
     await client.query(`ALTER TABLE foundry_datasets ADD COLUMN IF NOT EXISTS row_count_exact BIGINT`);
     await client.query(`ALTER TABLE dataset_columns ADD COLUMN IF NOT EXISTS logical_type TEXT`);
     console.log("  [ok] pipelines.output_format + dataset format tracking");
@@ -449,6 +453,25 @@ async function migrateFoundry(): Promise<void> {
          )
     `);
     console.log("  [ok] PB-B7 pipeline_acl + markings");
+
+    // FOUNDRY-GAPS §6 — per-dataset ACLs (owner/editor/viewer), mirroring
+    // pipeline_acl. Authorization for the by-id dataset surface resolves
+    // dataset_acl first, then falls back to the owning project's
+    // project_members role (via foundry_datasets.folder_id → folders.project_id),
+    // so pre-ACL deployments keep working and project roles act as a floor.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dataset_acl (
+        dataset_id     UUID NOT NULL REFERENCES foundry_datasets(id) ON DELETE CASCADE,
+        principal_id   UUID NOT NULL,
+        principal_type TEXT NOT NULL CHECK (principal_type IN ('user','group')),
+        role           TEXT NOT NULL CHECK (role IN ('owner','editor','viewer')),
+        granted_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+        granted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (dataset_id, principal_id, principal_type)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dataset_acl_principal ON dataset_acl (principal_id, principal_type)`);
+    console.log("  [ok] FOUNDRY-GAPS §6 dataset_acl");
 
     // PB-B8 — dataset lineage graph.
     await client.query(`
@@ -791,14 +814,33 @@ async function migrateFoundry(): Promise<void> {
     const ROOT_SPACE_RID =
       "ri.compass.main.space.00000000-0000-0000-0000-000000000000";
 
-    // Find a stable user to attribute the root space to. If `users` is empty
-    // (fresh install), defer the root-space insert: every later resources row
-    // requires space_rid, but on a fresh install there are no projects to
-    // backfill yet, so deferral is safe. The next migrate run, after the
-    // first user lands, will create the root.
-    const { rows: userRows } = await client.query<{ id: string }>(
+    // Find a stable user to attribute the root space to. The root space's
+    // `resources` row (and the parallel `spaces` row in B2 below) needs a
+    // `created_by`/`updated_by` FK into users(id). On a genuinely fresh
+    // database no user has authenticated yet. The original design deferred
+    // the root-space insert to "the next migrate run, after the first user
+    // lands" — but that run never happens for an ephemeral CI database (which
+    // migrates exactly once) or for a first deploy that creates a project
+    // before the second migrate. The result: every project-creating path
+    // fails its resources.space_rid FK, and the spaces-B2 invariant tests
+    // (which assert the migration materialised the root space) fail too.
+    //
+    // So instead of deferring, mint a stable system user when none exists and
+    // create the root space on this run. Idempotent: ON CONFLICT (email).
+    let { rows: userRows } = await client.query<{ id: string }>(
       `SELECT id FROM users ORDER BY created_at LIMIT 1`,
     );
+    if (userRows.length === 0) {
+      await client.query(
+        `INSERT INTO users (email, password_hash, display_name)
+         VALUES ('system@tellus.local', gen_random_uuid()::text, 'System')
+         ON CONFLICT (email) DO NOTHING`,
+      );
+      ({ rows: userRows } = await client.query<{ id: string }>(
+        `SELECT id FROM users ORDER BY created_at LIMIT 1`,
+      ));
+      console.log("  [ok] B1: minted system user to own the root space (fresh install)");
+    }
     if (userRows.length > 0) {
       const seedUserId = userRows[0].id;
       // Two-step insert: (a) create the root space resources row pointing at
@@ -1214,6 +1256,51 @@ async function migrateFoundry(): Promise<void> {
     `);
     console.log("  [ok] B4 Step 17-19: organizations + seeds + backfills");
 
+    // === B4 Step 19b: auto-enroll triggers ==============================
+    // The Step-19 backfill only covers rows that exist at migration time.
+    // Users provisioned at runtime (ensureLocalUserForClaims shadow rows) and
+    // projects created via createProject would otherwise have NO org row —
+    // leaving the gatekeeper unable to grant them anything (the B4.04 "no
+    // orphans" invariant). Keep the invariant self-maintaining with AFTER
+    // INSERT triggers that enroll every new user/project into the default org.
+    // Both target tables only FK to organizations(id) (which exists) — the
+    // project trigger does not touch resources, so it is safe even though
+    // createProject inserts the projects row before the resources row.
+    await client.query(`
+      CREATE OR REPLACE FUNCTION enroll_user_default_org() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO user_organizations (user_id, org_id)
+        VALUES (NEW.id, '00000000-0000-0000-0000-000000000001'::uuid)
+        ON CONFLICT DO NOTHING;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await client.query(`DROP TRIGGER IF EXISTS trg_enroll_user_default_org ON users`);
+    await client.query(`
+      CREATE TRIGGER trg_enroll_user_default_org
+        AFTER INSERT ON users
+        FOR EACH ROW EXECUTE FUNCTION enroll_user_default_org()
+    `);
+    await client.query(`
+      CREATE OR REPLACE FUNCTION enroll_project_default_org() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO project_organizations (project_rid, org_id)
+        VALUES ('ri.compass.main.project.' || NEW.id::text,
+                '00000000-0000-0000-0000-000000000001'::uuid)
+        ON CONFLICT DO NOTHING;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await client.query(`DROP TRIGGER IF EXISTS trg_enroll_project_default_org ON projects`);
+    await client.query(`
+      CREATE TRIGGER trg_enroll_project_default_org
+        AFTER INSERT ON projects
+        FOR EACH ROW EXECUTE FUNCTION enroll_project_default_org()
+    `);
+    console.log("  [ok] B4 Step 19b: default-org auto-enroll triggers (users + projects)");
+
     // === B4 Step 20 (B4.10): NOTIFY triggers for cache invalidation =====
     await client.query(`
       CREATE OR REPLACE FUNCTION gatekeeper_notify_invalidate() RETURNS trigger AS $func$
@@ -1543,6 +1630,65 @@ async function migrateFoundry(): Promise<void> {
 
     await client.query("COMMIT");
     console.log("\nFoundry migration complete — all tables created successfully.");
+
+    // ------------------------------------------------------------------
+    // Forward SQL migration scan (deferred tail).
+    //
+    // src/migrate.ts runs BEFORE this file and applies the numbered SQL
+    // migrations, but it must DEFER any migration whose dependency tables
+    // are created here (resources, foundry_datasets, pipeline_nodes, …) —
+    // e.g. the connectivity batch (074+). Now that those tables exist, we
+    // apply every ledger-missing forward migration. Idempotent: the shared
+    // schema_migrations_applied ledger means already-applied files are
+    // skipped, and each file runs in its own transaction. A failure here is
+    // fatal (re-thrown) so a genuinely broken migration still surfaces.
+    // ------------------------------------------------------------------
+    const fsMod = await import("fs");
+    const pathMod = await import("path");
+    const migrationsDir = pathMod.join(__dirname, "migrations");
+    const ledgerExists = (
+      await client.query(
+        `SELECT to_regclass('public.schema_migrations_applied') IS NOT NULL AS exists`
+      )
+    ).rows[0].exists;
+
+    if (ledgerExists && fsMod.existsSync(migrationsDir)) {
+      const applied = await client.query<{ migration_name: string }>(
+        "SELECT migration_name FROM schema_migrations_applied"
+      );
+      const appliedSet = new Set(applied.rows.map((r) => r.migration_name));
+
+      const pending = fsMod
+        .readdirSync(migrationsDir)
+        .filter((f: string) => f.endsWith(".sql"))
+        .filter((f: string) => !f.endsWith(".down.sql"))
+        .filter((f: string) => {
+          const m = /^(\d{3})_/.exec(f);
+          if (!m) return false;
+          return parseInt(m[1], 10) >= 33;
+        })
+        .filter((f: string) => !appliedSet.has(f))
+        .sort();
+
+      for (const fname of pending) {
+        const fpath = pathMod.join(migrationsDir, fname);
+        const sql = fsMod.readFileSync(fpath, "utf-8");
+        try {
+          await client.query("BEGIN");
+          await client.query(sql);
+          await client.query(
+            "INSERT INTO schema_migrations_applied(migration_name, applied_at) VALUES ($1, now()) ON CONFLICT DO NOTHING",
+            [fname]
+          );
+          await client.query("COMMIT");
+          console.log(`Applied (deferred tail) ${fname}`);
+        } catch (migErr) {
+          await client.query("ROLLBACK").catch(() => {});
+          const msg = migErr instanceof Error ? migErr.message : String(migErr);
+          throw new Error(`${fname} failed: ${msg}`);
+        }
+      }
+    }
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Migration failed:", err);

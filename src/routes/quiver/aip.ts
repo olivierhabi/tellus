@@ -6,6 +6,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { readBranch } from "../../services/quiver/branchHeader";
+import { isQuiverTestAuthAllowed } from "./testAuth";
 import {
   invalidAnalysisRequest,
   isQuiverError,
@@ -32,7 +33,7 @@ interface ActorAndBranch {
 }
 
 function actorAndBranch(req: Request): ActorAndBranch {
-  const allowTest = process.env.QUIVER_ALLOW_TEST_AUTH === "1";
+  const allowTest = isQuiverTestAuthAllowed();
   const fromCtx = (req as Request & {
     securityContext?: { userSubject?: string; orgRid?: string };
   }).securityContext;

@@ -1,8 +1,9 @@
 // Unit tests for the connection-open egress allowlist matcher.
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
   isEgressAllowed,
   assertEgressAllowed,
+  assertEgressForConfig,
 } from "../../../src/services/connectivity/connectors/postgresql/egress";
 import { TellusError } from "../../../src/lib/errors/envelope";
 
@@ -65,5 +66,67 @@ describe("connectivity egress allowlist", () => {
         { allowlist: [{ kind: "host", host: "db.example.com", port: 5432 }] },
       ),
     ).not.toThrow();
+  });
+});
+
+describe("reserved-range SSRF guard (assertEgressForConfig)", () => {
+  afterEach(() => {
+    delete process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED;
+  });
+
+  it("blocks localhost by default (no allowance set)", () => {
+    expect(() => assertEgressForConfig("localhost", 5432)).toThrowError(TellusError);
+    try {
+      assertEgressForConfig("localhost", 5432);
+    } catch (e) {
+      expect((e as TellusError).definition.errorName).toBe(
+        "Tellus:Connectivity:EgressBlocked",
+      );
+    }
+  });
+
+  it("blocks reserved IPv4 literals and cloud-metadata by default", () => {
+    expect(() => assertEgressForConfig("127.0.0.1", 5432)).toThrow();
+    expect(() => assertEgressForConfig("10.1.2.3", 5432)).toThrow();
+    expect(() => assertEgressForConfig("169.254.169.254", 80)).toThrow();
+  });
+
+  it("allows a public target", () => {
+    expect(() => assertEgressForConfig("db.example.com", 5432)).not.toThrow();
+    expect(() => assertEgressForConfig("8.8.8.8", 5432)).not.toThrow();
+  });
+
+  it("opts a reserved hostname back in when explicitly allowed", () => {
+    process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED = "localhost";
+    expect(() => assertEgressForConfig("localhost", 5432)).not.toThrow();
+    expect(() => assertEgressForConfig("LOCALHOST", 5432)).not.toThrow();
+    // A reserved target NOT on the allowlist is still blocked.
+    expect(() => assertEgressForConfig("169.254.169.254", 80)).toThrow();
+  });
+
+  it("opts a loopback CIDR back in (covers the resolved IP)", () => {
+    process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED = "127.0.0.1/8";
+    expect(() => assertEgressForConfig("127.0.0.1", 5432)).not.toThrow();
+    expect(() => assertEgressForConfig("127.9.9.9", 5432)).not.toThrow();
+    // RFC-1918 outside the allowed CIDR remains blocked.
+    expect(() => assertEgressForConfig("10.0.0.1", 5432)).toThrow();
+  });
+
+  it("treats a bare IPv4 entry as an exact (/32) allowance", () => {
+    process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED = "127.0.0.1";
+    expect(() => assertEgressForConfig("127.0.0.1", 5432)).not.toThrow();
+    expect(() => assertEgressForConfig("127.0.0.2", 5432)).toThrow();
+  });
+
+  it("allows an IPv6 loopback literal when listed", () => {
+    process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED = "::1";
+    expect(() => assertEgressForConfig("::1", 5432)).not.toThrow();
+    expect(() => assertEgressForConfig("[::1]", 5432)).not.toThrow();
+  });
+
+  it("re-parses when the env value changes (memo keyed on raw string)", () => {
+    expect(() => assertEgressForConfig("localhost", 5432)).toThrow();
+    process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED = "localhost";
+    expect(() => assertEgressForConfig("localhost", 5432)).not.toThrow();
   });
 });

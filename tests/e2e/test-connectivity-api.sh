@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 # Configuration
 BACKEND_URL="http://localhost:3000"
 FRONTEND_URL="http://localhost:3001"
-API_BASE="${BACKEND_URL}/api/v2/connectivity"
+API_BASE="${BACKEND_URL}/api/v1/connectivity"
 TEST_RID="ri.magritte.main.source.$(uuidgen | tr '[:upper:]' '[:lower:]')"
 TEST_NAME="test-connection-$(date +%s)"
 

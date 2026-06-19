@@ -22,8 +22,15 @@ import {
   CREATE_OBJECT_TYPE_SCHEMA,
 } from "../middleware/validateBody";
 import { setEtag, requireIfMatch } from "../middleware/etag";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization (OWASP API5): create/update require
+// ontology-editor, delete requires ontology-admin. PATs are scope-gated
+// upstream; superadmin always passes; reads stay open. All POSTs on this
+// router are schema mutations (create/batch/clone/changeStatus/import).
+router.use(dataPlaneGuard({ post: "write" }));
 
 // ---------------------------------------------------------------------------
 // Known error codes handled in catch blocks

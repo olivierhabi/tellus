@@ -63,7 +63,7 @@ async function buildAppForTests(scopes: string[] = ["connectivity:*"]) {
     };
     next();
   });
-  a.use("/api/v2/connectivity", createConnectivityRouter());
+  a.use("/api/v1/connectivity", createConnectivityRouter());
   return a;
 }
 
@@ -111,7 +111,7 @@ async function drainOutbox() {
 describe("B1 §76.1 — round-trip CRUD + ETag/If-Match", () => {
   it("POST → 201 with weak ETag W/\"1\" and Location header", async () => {
     const res = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac1-create" }));
     expect(res.status).toBe(201);
     expect(res.headers.etag).toBe('W/"1"');
@@ -123,12 +123,12 @@ describe("B1 §76.1 — round-trip CRUD + ETag/If-Match", () => {
 
   it("GET → 200 with ETag, matching the POST response", async () => {
     const created = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac1-read" }));
     expect(created.status).toBe(201);
 
     const got = await request(app).get(
-      `/api/v2/connectivity/connections/${created.body.rid}`,
+      `/api/v1/connectivity/connections/${created.body.rid}`,
     );
     expect(got.status).toBe(200);
     expect(got.headers.etag).toBe('W/"1"');
@@ -137,10 +137,10 @@ describe("B1 §76.1 — round-trip CRUD + ETag/If-Match", () => {
 
   it("PUT with valid If-Match → 200, version bumped, ETag bumped", async () => {
     const created = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac1-update" }));
     const updated = await request(app)
-      .put(`/api/v2/connectivity/connections/${created.body.rid}`)
+      .put(`/api/v1/connectivity/connections/${created.body.rid}`)
       .set("If-Match", 'W/"1"')
       .send({ description: "edited" });
     expect(updated.status).toBe(200);
@@ -151,10 +151,10 @@ describe("B1 §76.1 — round-trip CRUD + ETag/If-Match", () => {
 
   it("PUT with stale If-Match → 409 Tellus:Connectivity:ResourceVersionMismatch", async () => {
     const created = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac1-stale" }));
     const stale = await request(app)
-      .put(`/api/v2/connectivity/connections/${created.body.rid}`)
+      .put(`/api/v1/connectivity/connections/${created.body.rid}`)
       .set("If-Match", 'W/"99"')
       .send({ description: "edited" });
     expect(stale.status).toBe(409);
@@ -167,10 +167,10 @@ describe("B1 §76.1 — round-trip CRUD + ETag/If-Match", () => {
 
   it("PUT missing If-Match → 412 Tellus:Connectivity:IfMatchRequired", async () => {
     const created = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac1-noifmatch" }));
     const res = await request(app)
-      .put(`/api/v2/connectivity/connections/${created.body.rid}`)
+      .put(`/api/v1/connectivity/connections/${created.body.rid}`)
       .send({ description: "edited" });
     expect(res.status).toBe(412);
     expect(res.body.errorName).toBe("Tellus:Connectivity:IfMatchRequired");
@@ -178,24 +178,24 @@ describe("B1 §76.1 — round-trip CRUD + ETag/If-Match", () => {
 
   it("LIST returns the created connection", async () => {
     await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac1-list" }));
-    const list = await request(app).get("/api/v2/connectivity/connections");
+    const list = await request(app).get("/api/v1/connectivity/connections");
     expect(list.status).toBe(200);
     expect(list.body.data.length).toBeGreaterThan(0);
   });
 
   it("DELETE with valid If-Match → 204; subsequent GET → 404", async () => {
     const created = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac1-delete" }));
     const del = await request(app)
-      .delete(`/api/v2/connectivity/connections/${created.body.rid}`)
+      .delete(`/api/v1/connectivity/connections/${created.body.rid}`)
       .set("If-Match", 'W/"1"');
     expect(del.status).toBe(204);
 
     const got = await request(app).get(
-      `/api/v2/connectivity/connections/${created.body.rid}`,
+      `/api/v1/connectivity/connections/${created.body.rid}`,
     );
     expect(got.status).toBe(404);
     expect(got.body.errorName).toBe("Tellus:Connectivity:ConnectionNotFound");
@@ -209,16 +209,16 @@ describe("B1 §76.1 — round-trip CRUD + ETag/If-Match", () => {
 describe("B1 §76.2 — concurrent PUT OCC", () => {
   it("fires two PUTs with same If-Match; one wins, one 409s", async () => {
     const created = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac2-occ" }));
 
     const [a, b] = await Promise.all([
       request(app)
-        .put(`/api/v2/connectivity/connections/${created.body.rid}`)
+        .put(`/api/v1/connectivity/connections/${created.body.rid}`)
         .set("If-Match", 'W/"1"')
         .send({ description: "A" }),
       request(app)
-        .put(`/api/v2/connectivity/connections/${created.body.rid}`)
+        .put(`/api/v1/connectivity/connections/${created.body.rid}`)
         .set("If-Match", 'W/"1"')
         .send({ description: "B" }),
     ]);
@@ -239,18 +239,18 @@ describe("B1 §76.2 — concurrent PUT OCC", () => {
 describe("B1 §76.3 — soft-delete semantics", () => {
   it("after DELETE, list excludes the row and read returns 404", async () => {
     const created = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac3-soft" }));
     await request(app)
-      .delete(`/api/v2/connectivity/connections/${created.body.rid}`)
+      .delete(`/api/v1/connectivity/connections/${created.body.rid}`)
       .set("If-Match", 'W/"1"')
       .expect(204);
 
-    const list = await request(app).get("/api/v2/connectivity/connections");
+    const list = await request(app).get("/api/v1/connectivity/connections");
     expect(list.body.data.find((c: any) => c.rid === created.body.rid)).toBeUndefined();
 
     const got = await request(app).get(
-      `/api/v2/connectivity/connections/${created.body.rid}`,
+      `/api/v1/connectivity/connections/${created.body.rid}`,
     );
     expect(got.status).toBe(404);
   });
@@ -266,13 +266,13 @@ describe("B1 §76.4 — Idempotency-Key replay", () => {
     const body = createBody({ name: "ac4-idem" });
 
     const first = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .set("Idempotency-Key", key)
       .send(body);
     expect(first.status).toBe(201);
 
     const second = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .set("Idempotency-Key", key)
       .send(body);
     expect(second.status).toBe(201);
@@ -283,13 +283,13 @@ describe("B1 §76.4 — Idempotency-Key replay", () => {
   it("same key, different body → 409 IDEMPOTENCY_KEY_CONFLICT", async () => {
     const key = randomUUID();
     await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .set("Idempotency-Key", key)
       .send(createBody({ name: "ac4-same-key-A" }))
       .expect(201);
 
     const conflict = await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .set("Idempotency-Key", key)
       .send(createBody({ name: "ac4-same-key-B" }));
     expect(conflict.status).toBe(409);
@@ -303,7 +303,7 @@ describe("B1 §76.4 — Idempotency-Key replay", () => {
 describe("B1 §76.5 — folder deletion blocked while connection exists", () => {
   it("DELETE FROM resources WHERE rid = folder_rid → foreign_key_violation", async () => {
     await request(app)
-      .post("/api/v2/connectivity/connections")
+      .post("/api/v1/connectivity/connections")
       .send(createBody({ name: "ac5-folder" }))
       .expect(201);
     await drainOutbox();
@@ -328,19 +328,19 @@ describe("B1 §76.6 — OpenAPI emission", () => {
     const doc = buildOpenApiDocument() as any;
     expect(doc.openapi).toMatch(/^3\.1/);
     const paths = Object.keys(doc.paths);
-    expect(paths).toContain("/api/v2/connectivity/connections");
-    expect(paths).toContain("/api/v2/connectivity/connections/{rid}");
+    expect(paths).toContain("/api/v1/connectivity/connections");
+    expect(paths).toContain("/api/v1/connectivity/connections/{rid}");
     expect(paths).toContain(
-      "/api/v2/connectivity/connections/{rid}/configuration",
+      "/api/v1/connectivity/connections/{rid}/configuration",
     );
-    expect(paths).toContain("/api/v2/connectivity/connections/{rid}/status");
+    expect(paths).toContain("/api/v1/connectivity/connections/{rid}/status");
 
-    const ops = doc.paths["/api/v2/connectivity/connections/{rid}"];
+    const ops = doc.paths["/api/v1/connectivity/connections/{rid}"];
     expect(ops).toHaveProperty("get");
     expect(ops).toHaveProperty("put");
     expect(ops).toHaveProperty("delete");
 
-    const post = doc.paths["/api/v2/connectivity/connections"].post;
+    const post = doc.paths["/api/v1/connectivity/connections"].post;
     expect(post.responses["201"]).toBeDefined();
     expect(post.responses["409"]).toBeDefined();
     expect(post.security[0].multipass).toContain("connectivity:write");
@@ -354,7 +354,7 @@ describe("B1 §76.6 — OpenAPI emission", () => {
 describe("§9 cross-cutting — envelope shape on errors", () => {
   it("404 body has { errorCode, errorName, errorInstanceId, parameters }", async () => {
     const res = await request(app).get(
-      "/api/v2/connectivity/connections/ri.magritte.main.source.00000000-0000-0000-0000-000000000000",
+      "/api/v1/connectivity/connections/ri.magritte.main.source.00000000-0000-0000-0000-000000000000",
     );
     expect(res.status).toBe(404);
     expect(res.body).toMatchObject({

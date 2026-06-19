@@ -9,6 +9,11 @@ dist/
 .env.local
 .env.production
 
+# AI agents
+.claude
+.vix
+
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -35,3 +40,6 @@ uploads/
 
 # Local DB backups (never commit dumps)
 backups/
+
+# OSDK codegen output (scripts/osdk-regen.ts) — regenerated, not committed
+generated/osdk/

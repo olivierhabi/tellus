@@ -120,10 +120,75 @@ export const EgressEntry = z.union([
   z.object({ kind: z.literal("host"), host: z.string().min(1), port: z.number().int().min(1).max(65535) }),
   z.object({ kind: z.literal("cidr"), cidr: z.string().regex(/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/), port: z.number().int().min(1).max(65535) }),
 ]);
+export type EgressEntry = z.infer<typeof EgressEntry>;
 export const EgressPolicy = z.object({
   allowlist: z.array(EgressEntry).min(1),
 });
 export type EgressPolicy = z.infer<typeof EgressPolicy>;
+
+// --- named egress policy resource ------------------------------------------
+
+/** ri.magritte.main.egress-policy.<uuid> */
+export const EgressPolicyRid = z
+  .string()
+  .regex(
+    /^ri\.magritte\.main\.egress-policy\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    "EgressPolicyRid must match ri.magritte.main.egress-policy.<uuid>",
+  )
+  .brand<"EgressPolicyRid">();
+export type EgressPolicyRid = z.infer<typeof EgressPolicyRid>;
+
+/**
+ * Approval workflow status. A named policy is only enforceable once APPROVED;
+ * PENDING policies exist but cannot gate live traffic, and REJECTED policies
+ * are terminal. Mirrors the DB CHECK constraint (migration 088).
+ */
+export const EgressPolicyStatus = z.enum(["PENDING", "APPROVED", "REJECTED"]);
+export type EgressPolicyStatus = z.infer<typeof EgressPolicyStatus>;
+
+/** A reusable, named, approvable egress allowlist referenced by connections. */
+export const NamedEgressPolicy = z.object({
+  rid: EgressPolicyRid,
+  tenant: z.string().min(1),
+  name: z.string().min(1).max(128).regex(/^[a-zA-Z][a-zA-Z0-9_\-\.]{0,127}$/),
+  description: z.string().max(2000).default(""),
+  status: EgressPolicyStatus,
+  allowlist: z.array(EgressEntry).min(1),
+  version: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+  createdBy: z.string(),
+  updatedAt: z.string().datetime(),
+  updatedBy: z.string(),
+  approvedAt: z.string().datetime().nullable(),
+  approvedBy: z.string().nullable(),
+});
+export type NamedEgressPolicy = z.infer<typeof NamedEgressPolicy>;
+
+export const EgressPolicyCreateRequest = z.object({
+  name: NamedEgressPolicy.shape.name,
+  description: NamedEgressPolicy.shape.description.optional(),
+  allowlist: z.array(EgressEntry).min(1),
+});
+export type EgressPolicyCreateRequest = z.infer<typeof EgressPolicyCreateRequest>;
+
+export const EgressPolicyUpdateRequest = z.object({
+  name: NamedEgressPolicy.shape.name.optional(),
+  description: NamedEgressPolicy.shape.description.optional(),
+  allowlist: z.array(EgressEntry).min(1).optional(),
+});
+export type EgressPolicyUpdateRequest = z.infer<typeof EgressPolicyUpdateRequest>;
+
+/** Approve or reject a PENDING policy. */
+export const EgressPolicyDecisionRequest = z.object({
+  decision: z.enum(["APPROVED", "REJECTED"]),
+});
+export type EgressPolicyDecisionRequest = z.infer<typeof EgressPolicyDecisionRequest>;
+
+export const EgressPolicyListResponse = z.object({
+  data: z.array(NamedEgressPolicy),
+  nextPageToken: z.string().optional(),
+});
+export type EgressPolicyListResponse = z.infer<typeof EgressPolicyListResponse>;
 
 // --- connection settings (governance: exports + code imports) --------------
 
@@ -146,6 +211,18 @@ export const CodeImportSettings = z.object({
   allowVirtualTables: z.boolean().default(true),
 });
 export type CodeImportSettings = z.infer<typeof CodeImportSettings>;
+
+/** CDC defaults for this source — the transaction isolation level and any
+ *  advanced Debezium property overrides edited on the "CDC syncs" tab. */
+export const CdcSettings = z.object({
+  isolationLevel: z
+    .enum(["snapshot", "read_committed", "read_uncommitted", "repeatable_read", "serializable"])
+    .default("snapshot"),
+  debeziumProperties: z
+    .array(z.object({ key: z.string(), value: z.string() }))
+    .default([]),
+});
+export type CdcSettings = z.infer<typeof CdcSettings>;
 
 export const ConnectionSettings = z.object({
   export: ExportSettings.default({
@@ -170,6 +247,10 @@ export const ConnectionSettings = z.object({
     .regex(/^ri\.[a-z]/, "outputFolderRid must be a resource identifier (ri.…)")
     .nullable()
     .optional(),
+  /** Source-level CDC defaults edited on the "CDC syncs" tab. */
+  cdc: CdcSettings.optional(),
+  /** Free-form labels shown on the source Overview. */
+  tags: z.array(z.string()).optional(),
 });
 export type ConnectionSettings = z.infer<typeof ConnectionSettings>;
 
@@ -196,6 +277,12 @@ export const Connection = z.object({
   agentGroupRid: AgentGroupRid.optional(),
   config: ConnectionConfig,
   egressPolicy: EgressPolicy,
+  /**
+   * Optional reference to a named, approved egress policy. When set, the named
+   * policy's allowlist is enforced at connection-open time (and the policy must
+   * be APPROVED); when null, the inline `egressPolicy` allowlist is used.
+   */
+  egressPolicyRid: EgressPolicyRid.nullable().optional(),
   compassFolderRid: CompassFolderRid,
   status: ConnectionStatus,
   settings: ConnectionSettings.default({
@@ -212,6 +299,18 @@ export const Connection = z.object({
   createdBy: z.string(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string(),
+  /**
+   * Human-readable display names for `createdBy` / `updatedBy`, resolved from
+   * the `users` table. Read-only enrichment populated ONLY by the list
+   * endpoint (a single LEFT JOIN on `users`) so the list UI can render creator
+   * / last-editor labels without a separate user-directory round-trip.
+   *
+   * `null` when the referenced user row no longer exists; absent on the
+   * single-connection read paths (create / get / update) which do not join.
+   * Never accepted on write — the create/update request schemas omit it.
+   */
+  createdByName: z.string().nullable().optional(),
+  updatedByName: z.string().nullable().optional(),
 });
 export type Connection = z.infer<typeof Connection>;
 
@@ -225,6 +324,8 @@ export const ConnectionCreateRequest = z.object({
   agentGroupRid: AgentGroupRid.optional(),
   config: ConnectionConfig,
   egressPolicy: EgressPolicy,
+  /** Optional reference to a named, approved egress policy (see Connection). */
+  egressPolicyRid: EgressPolicyRid.nullable().optional(),
   compassFolderRid: CompassFolderRid,
   settings: ConnectionSettings.optional(),
   /**
@@ -256,6 +357,8 @@ export const ConnectionUpdateRequest = z.object({
   description: Connection.shape.description.optional(),
   config: ConnectionConfig.optional(),
   egressPolicy: EgressPolicy.optional(),
+  /** Re-point (or clear, via null) the named egress policy reference. */
+  egressPolicyRid: EgressPolicyRid.nullable().optional(),
   agentGroupRid: AgentGroupRid.optional(),
   settings: ConnectionSettings.optional(),
   /** Inline mTLS client private key (PEM); persisted to the vault, see create. */

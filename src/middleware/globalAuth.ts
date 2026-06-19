@@ -125,6 +125,9 @@ function isAllowlisted(req: Request): boolean {
 
   const p = req.path;
   const url = req.originalUrl || req.url || p;
+  
+  // DEBUG: Log the path being checked (remove after debugging)
+  console.log(`[globalAuth] checking path: ${p}, url: ${url}`);
 
   // K8s liveness/readiness — /health, /health/ready, /health/detailed, etc.
   if (p === "/health" || p.startsWith("/health/")) return true;
@@ -138,7 +141,12 @@ function isAllowlisted(req: Request): boolean {
   if (p === "/api/v1/funnel/metrics") return true;
 
   // Authentication surface itself — /api/v1/auth/*
-  if (p === "/api/v1/auth" || p.startsWith("/api/v1/auth/")) return true;
+  const authMatch = p === "/api/v1/auth" || p.startsWith("/api/v1/auth/");
+  console.log(`[globalAuth] auth allowlist check: ${p} -> ${authMatch}`);
+  if (authMatch) {
+    console.log(`[globalAuth] ALLOWLISTED: ${p}`);
+    return true;
+  }
 
   // Swagger UI + OpenAPI JSON spec. Note the `url` check catches
   // /api/docs?foo=bar; `p` check catches bare /api/docs and subpaths.
@@ -150,6 +158,15 @@ function isAllowlisted(req: Request): boolean {
 
   // Test hooks — defense in depth; also gated at mount by TELLUS_TEST_HOOKS.
   if (p.startsWith("/api/v1/_test/")) return true;
+
+  // Connectivity worker credential unwrap (B2/B4). The foundry-worker child
+  // calls this with a short-lived workload JWT (issuer tellus:multipass:
+  // workload), NOT a Keycloak user token, so the global gate would reject it.
+  // The handler (secrets.handler.internalUnwrapWorker) verifies the workload
+  // JWT's signature, expiry, scope, and connection_rid binding itself; in
+  // production a NetworkPolicy additionally restricts this /internal path to
+  // in-cluster callers. Exact-match only — no other /internal sub-paths.
+  if (p === "/api/v1/connectivity/internal/credentials/unwrap") return true;
 
   // Code Repositories (B2) — has its own auth chain (requireCodeReposAuth →
   // requireTellusAuth) that handles test-mode header bypass when
@@ -167,6 +184,12 @@ function isAllowlisted(req: Request): boolean {
   // in production.
   if (p === "/api/v1/functions" || p.startsWith("/api/v1/functions/")) return true;
 
+  // Transform builds + dataset lineage (migration 103) — same two-layer
+  // pattern as code-repositories: `createTransformsRouter` mounts
+  // `requireCodeReposAuth` internally (honours the CODE_REPOS_TEST_AUTH=1
+  // header bypass), so this allowlist entry only sidesteps the global gate.
+  if (p === "/api/v1/transforms" || p.startsWith("/api/v1/transforms/")) return true;
+
   // B3 — Templates service. Allowlisted on the same per-router-auth basis
   // as B2 above: `createTemplatesRouter` mounts `requireCodeReposAuth`
   // internally, so this allowlist entry only sidesteps the global Tellus
@@ -183,7 +206,10 @@ function isAllowlisted(req: Request): boolean {
   // whose `iss` claim matches the app's KC_URL. In production the bypass is
   // off and the per-route auth check + securityContext middleware still
   // enforce JWT validation — same two-layer pattern as code-repositories.
-  if (process.env.QUIVER_ALLOW_TEST_AUTH === "1") {
+  if (
+    process.env.QUIVER_ALLOW_TEST_AUTH === "1" &&
+    process.env.NODE_ENV !== "production"
+  ) {
     if (p === "/quiver" || p.startsWith("/quiver/")) return true;
   }
 
@@ -194,6 +220,25 @@ function isAllowlisted(req: Request): boolean {
 // Error envelope — matches the Conjure-compatible shape used by the rest
 // of the application's error handlers (middleware/errorHandler.ts).
 // ---------------------------------------------------------------------------
+
+// Read the Keycloak JWT from the httpOnly TELLUS_TOKEN cookie. Prefers the
+// cookie-parser-populated req.cookies, falling back to parsing the raw Cookie
+// header so this works regardless of middleware ordering.
+function readTellusTokenCookie(req: Request): string | undefined {
+  const fromParser = (req as Request & { cookies?: Record<string, string> })
+    .cookies?.["TELLUS_TOKEN"];
+  if (fromParser) return fromParser;
+  const raw = req.headers.cookie;
+  if (!raw) return undefined;
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === "TELLUS_TOKEN") {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    }
+  }
+  return undefined;
+}
 
 function authError(
   req: Request,
@@ -286,10 +331,21 @@ export function globalAuth() {
       return next();
     }
 
-    // 3. Extract Bearer JWT.
+    // 3. Extract Bearer JWT — or fall back to the TELLUS_TOKEN cookie.
+    //    Browser sessions authenticate via the httpOnly TELLUS_TOKEN cookie
+    //    set at login, not an Authorization header. The cookie carries the
+    //    same Keycloak JWT and is validated identically below, so accepting
+    //    it lets same-origin browser calls (e.g. /quiver, proxied via the
+    //    FE next.config rewrite) work without the client mirroring the token
+    //    into a Bearer header. Header still wins when both are present.
     const authHeader = req.headers.authorization || "";
     const m = authHeader.match(/^Bearer\s+(.+)$/i);
-    if (!m) {
+    let token = m ? m[1] : "";
+    if (!token) {
+      const cookieToken = readTellusTokenCookie(req);
+      if (cookieToken) token = cookieToken;
+    }
+    if (!token) {
       return authError(
         req,
         res,
@@ -298,7 +354,6 @@ export function globalAuth() {
         401,
       );
     }
-    const token = m[1];
 
     // Non-JWT tokens that aren't PATs shouldn't reach here — reject
     // explicitly so a malformed token can't masquerade as a PAT.

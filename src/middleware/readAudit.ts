@@ -39,6 +39,14 @@ export interface ReadAuditContext {
   linkTypeApiName?: string;
   queryFingerprint?: string;
   resultCount?: number;
+  /**
+   * FOUNDRY-GAPS §8 — the DECLARED purpose (access_purpose.api_name) that
+   * authorized this governed read. Normally injected by the purposeGate
+   * middleware via res.locals.declaredPurpose; routes may also set it here
+   * directly. Lands in the audit row as parameters.declared_purpose +
+   * metadata.purpose.
+   */
+  purpose?: string;
 }
 
 /** Attach a context descriptor to `req` for later emission. */
@@ -101,6 +109,12 @@ export function readAuditMiddleware() {
         primaryKey: ctx.primaryKey ?? null,
         linkTypeApiName: ctx.linkTypeApiName ?? null,
         queryFingerprint: ctx.queryFingerprint ?? null,
+        // Declared purpose (FOUNDRY-GAPS §8): explicit annotation wins;
+        // otherwise pick up what purposeGate validated for this request.
+        purpose:
+          ctx.purpose ??
+          ((res as any).locals?.declaredPurpose as string | undefined) ??
+          null,
         resultCount: ctx.resultCount ?? 0,
         statusCode: res.statusCode,
         executedBy: subjectOf(req),
@@ -122,6 +136,7 @@ interface EmitArgs {
   primaryKey: string | null;
   linkTypeApiName: string | null;
   queryFingerprint: string | null;
+  purpose: string | null;
   resultCount: number;
   statusCode: number;
   executedBy: string;
@@ -148,6 +163,7 @@ async function emitReadAudit(args: EmitArgs): Promise<void> {
         primary_key: args.primaryKey,
         link_type: args.linkTypeApiName,
         query_fingerprint: args.queryFingerprint,
+        declared_purpose: args.purpose,
       },
       affected_objects: [],
       affected_object_count: args.resultCount,
@@ -160,6 +176,10 @@ async function emitReadAudit(args: EmitArgs): Promise<void> {
       branch_id: null,
       metadata: {
         status_code: args.statusCode,
+        // Purpose-based access control (FOUNDRY-GAPS §8). Stored in the
+        // chained JSONB payload — no new audit column, so the hash-chain
+        // format is unchanged. Query via metadata->>'purpose'.
+        ...(args.purpose ? { purpose: args.purpose } : {}),
       },
     });
     incCounter("tellus_read_audit_emitted_total", {

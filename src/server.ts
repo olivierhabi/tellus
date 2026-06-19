@@ -3,6 +3,7 @@ import "dotenv/config";
 // @temporalio/client, kafkajs) so auto-instrumentations patch the
 // module graph on first require.
 import "./services/otelBootstrap";
+import { assertQuiverTestAuthSafe } from "./routes/quiver/testAuth";
 import crypto from "crypto";
 import http from "http";
 import express, { Request, Response, NextFunction } from "express";
@@ -38,6 +39,7 @@ import geoRouter from "./routes/geo";
 import comparisonsRouter from "./routes/comparisons";
 import migrationManagerRouter from "./routes/migrationManager";
 import governanceRouter from "./routes/governance";
+import purposesRouter from "./routes/purposes";
 import { securityContext } from "./middleware/securityContext";
 import { resolveOntologyAlias } from "./middleware/resolveOntologyAlias";
 import datasourceRouter, { suggestMappingRouter } from "./routes/datasources";
@@ -53,6 +55,7 @@ import editsRouter from "./routes/edits";
 import reindexStatusRouter from "./routes/reindexStatus";
 import dataPreviewRouter from "./routes/dataPreview";
 import datasetRouter from "./routes/datasets";
+import { foundryDatasetsV1Router } from "./routes/foundryDatasetsV1";
 import reindexRouter from "./routes/reindex";
 import {
   resolveObjectTypeIdToApiName,
@@ -65,7 +68,7 @@ import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 
 // Tellus PostgreSQL Connectivity v2 (B1) — Connections CRUD + Compass binding.
 // Spec: tasks/postgres-connection/postgres-connection-tasks.md §B1.
-// Mounted under /api/v2/connectivity to keep the spec's namespaced surface
+// Mounted under /api/v1/connectivity to keep the spec's namespaced surface
 // versioned independently of the existing /api/v1 ontology APIs.
 import connectivityRouter, {
   initConnectivity,
@@ -92,6 +95,7 @@ import {
   stopIcebergMaintenance,
 } from "./services/pipelines/icebergMaintenance";
 import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
+import { stopHealthProber } from "./services/connectivity/health/prober";
 import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
 
 // Background boot tasks (Lakekeeper, ClickHouse, superadmin seed, …) are
@@ -165,6 +169,34 @@ for (const key of REQUIRED_ENV_VARS) {
     );
     process.exit(1);
   }
+}
+
+// Refuse to boot a production process with any test-auth bypass enabled — a
+// single mis-set env var must never silently turn a request header into an
+// authenticated identity. Fail loud at deploy time, not latent at runtime.
+try {
+  assertQuiverTestAuthSafe();
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.CODE_REPOS_TEST_AUTH === "1"
+  ) {
+    throw new Error(
+      "CODE_REPOS_TEST_AUTH=1 is set in production — the X-Tellus-Test-Principal " +
+        "bypass must never be enabled in production. Unset it before deploying.",
+    );
+  }
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.TELLUS_TEST_HOOKS === "1"
+  ) {
+    throw new Error(
+      "TELLUS_TEST_HOOKS=1 is set in production — test hooks must never be " +
+        "enabled in production. Unset it before deploying.",
+    );
+  }
+} catch (err) {
+  console.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -260,27 +292,49 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
   return next(err);
 });
 
-// CORS — restrict origins via CORS_ORIGINS env var; empty = allow all (dev)
+// CORS — restrict origins via CORS_ORIGINS env var.
+// Fail-closed in production: an unset/empty CORS_ORIGINS resolves to NO allowed
+// origin (never `true`), so we never reflect arbitrary origins alongside
+// credentials. Outside production we keep dev allow-all for local DX.
+const isProduction = process.env.NODE_ENV === "production";
 const corsOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
-  : undefined; // undefined = allow all origins
+  ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+  : undefined;
+
+// Explicit list (any env) → use it. Else: dev allows all, prod allows none.
+const corsOrigin: string[] | boolean =
+  corsOrigins && corsOrigins.length > 0 ? corsOrigins : !isProduction;
+
+// Never expose the test-auth bypass headers in production.
+const corsAllowedHeaders = [
+  "Content-Type",
+  "Authorization",
+  "Idempotency-Key",
+  "If-Match",
+  "If-None-Match",
+  "X-Request-ID",
+  // Custom request headers the browser sends cross-origin (when the FE talks to
+  // the backend directly rather than through a same-origin proxy). Each triggers
+  // a CORS preflight, so they must be allow-listed or the request is blocked:
+  //   X-Tellus-Branch — Quiver client, branch routing (sent on every call)
+  //   X-Deadline      — Quiver compute deadline
+  //   x-branch-id     — ontology client, branch selection
+  //   X-Tellus-Reauth — settings client, step-up reauth token
+  "X-Tellus-Branch",
+  "X-Deadline",
+  "x-branch-id",
+  "X-Tellus-Reauth",
+  ...(isProduction
+    ? []
+    : ["X-Tellus-Test-Principal", "X-Tellus-Test-Role", "X-Tellus-Test-Roles"]),
+];
 
 app.use(
   cors({
-    origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
+    origin: corsOrigin,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "Idempotency-Key",
-      "If-Match",
-      "If-None-Match",
-      "X-Request-ID",
-      "X-Tellus-Test-Principal",
-      "X-Tellus-Test-Role",
-      "X-Tellus-Test-Roles",
-    ],
+    allowedHeaders: corsAllowedHeaders,
     exposedHeaders: [
       "X-Idempotency-Cached",
       "X-Idempotent-Replay",
@@ -496,21 +550,24 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
   );
 }
 
-// API routers — spec cypress tests hit `.../ontology/default/...`; rewrite
-// the URL path so every downstream router sees the real UUID. This is a
-// string substitution on `req.url` so Express re-parses params for us.
-const ALIAS_RE = /^(\/api\/v1\/ontology)\/(default|main|primary)(\/|$)/;
+// "One Enterprise, One Ontology" — collapse ANY ontology identifier in the
+// path (a real UUID, a symbolic alias like `default`/`main`/`primary`, or any
+// other value) onto the single canonical ontology, so every downstream router
+// operates on the one ontology. We rewrite `req.url` so Express re-parses the
+// param for us. `import` is excluded: it is a lifecycle sub-route of the
+// ontology router, not an ontology identifier.
 app.use(async (req, _res, next) => {
-  const m = req.url.match(ALIAS_RE);
-  if (!m) return next();
+  // Cheap pre-check: only ontology-scoped sub-paths can be collapsed. The bare
+  // `/api/v1/ontology` (list/create) has no trailing slash and is skipped.
+  if (!req.url.startsWith("/api/v1/ontology/")) return next();
   try {
-    const { query } = await import("./db");
-    const result = await query(
-      "SELECT ontology_id FROM ontology ORDER BY created_at ASC LIMIT 1"
+    const { getOntologyId, collapseOntologyUrl } = await import(
+      "./services/ontology/canonicalOntology"
     );
-    if (result.rowCount && result.rowCount > 0) {
-      const real = result.rows[0].ontology_id as string;
-      req.url = req.url.replace(ALIAS_RE, `$1/${real}$3`);
+    const canonical = await getOntologyId();
+    if (canonical) {
+      const rewritten = collapseOntologyUrl(req.url, canonical);
+      if (rewritten) req.url = rewritten;
     }
   } catch {
     // fall through — route will return its own error
@@ -575,6 +632,11 @@ app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/index",
   reindexStatusRouter
 );
+// Foundry-parity Datasets API (create + get + preview), keyed by dataset RID.
+// Mounted FIRST so its bare POST and its `ri.foundry.main.dataset.*` GET routes
+// win; non-RID (UUID) requests fall through (next()) to the legacy upload /
+// object-explorer datasets routers below, which keep working unchanged.
+app.use("/api/v1/datasets", foundryDatasetsV1Router);
 app.use("/api/v1/datasets", datasetRouter);
 app.use("/api/v1/datasets", dataPreviewRouter);
 
@@ -618,12 +680,27 @@ app.use(
   functionsRegistryRouter,
 );
 
+// Code Repositories — Python @transform -> datasets (migration 103).
+// The transform build engine: discover @transform on a committed ref,
+// publish one job_spec per transform, execute in python3, materialize the
+// OUTPUT dataset, and record input->output lineage. Mounted at /api/v1 AFTER
+// the code-repositories router so `/code-repositories/:rid/builds` falls through
+// to it. The jobSpec router (B7) is also mounted here so transform builds
+// persist job_spec rows.
+import { createTransformsRouter } from "./services/codeRepository/transforms/routes";
+import { createJobSpecRouter } from "./services/jobSpec/admin/routes";
+app.use("/api/v1", createTransformsRouter({ stemma: new PostgresStemma({ pool }) }));
+app.use("/api/v1", createJobSpecRouter({ pool }));
+
 // Boot-time rehydrator. No-op against a real Stemma client (production); a
 // best-effort re-seed against the in-memory adapter (dev / e2e). Awaited
 // inline at module load so the FE's first request after boot finds the
 // branches it expects. Errors are logged + swallowed: a partial rehydrate
 // must not block the server from accepting traffic.
 void (async () => {
+  // Skip if a shutdown is already underway — rehydrate is a best-effort boot
+  // task; running it against a draining pool just logs a spurious fatal.
+  if (isShuttingDown) return;
   try {
     const r = await rehydrateInMemoryStemma({
       pool,
@@ -767,6 +844,10 @@ app.use("/api/v1/ontology/:ontologyId/geo", geoRouter);
 app.use("/api/v1/ontology/:ontologyId/comparisons", comparisonsRouter);
 app.use("/api/v1/ontology/:ontologyId/migrations", migrationManagerRouter);
 app.use("/api/v1/ontology/:ontologyId/governance", governanceRouter);
+// FOUNDRY-GAPS §8 — purpose-based access control: purpose catalogue + grants.
+// Enforcement on data-plane reads is via purposeGate middleware (env-gated
+// by TELLUS_PURPOSE_ENFORCEMENT=on; default off).
+app.use("/api/v1/ontology/:ontologyId/purposes", purposesRouter);
 app.use("/api/v1/users/me/favorites", favoritesRouter);
 
 // New Palantir-stack endpoints (Furnace SQL, Polars charts, Funnel pipeline status).
@@ -775,11 +856,11 @@ app.use("/api/v1", chartsRouter);
 app.use("/api/v1", pipelinesStatusRouter);
 
 // Tellus Connectivity v2 — B1 wave.
-// Routes: POST/GET/PUT/DELETE /api/v2/connectivity/connections + /:rid/{configuration,status}
+// Routes: POST/GET/PUT/DELETE /api/v1/connectivity/connections + /:rid/{configuration,status}
 // The Compass outbox poller starts via initConnectivity() below; gated by
 // TELLUS_DISABLE_CONNECTIVITY_POLLER=1 for unit-test workers that should
 // not dispatch.
-app.use("/api/v2/connectivity", connectivityRouter);
+app.use("/api/v1/connectivity", connectivityRouter);
 initConnectivity();
 app.use("/api/v1/funnel", funnelRouter);
 
@@ -1105,7 +1186,6 @@ async function start(): Promise<void> {
         `WARNING: could not start Pipeline dispatcher: ${(err as Error).message}`
       );
     }
-    void stopPipelineDispatcher; // retain symbol for shutdown wiring
 
     // PB-B4 — Iceberg compaction + expiration loop for _pipeline.* tables.
     // Best-effort: skipped when PyIceberg sidecar is unreachable.
@@ -1119,7 +1199,6 @@ async function start(): Promise<void> {
         `WARNING: could not start Iceberg maintenance: ${(err as Error).message}`
       );
     }
-    void stopIcebergMaintenance;
 
     // B3: Sweep funnel_run rows orphaned by a prior worker restart.
     // A SIGKILL / OOM / container restart mid-activity leaves rows at
@@ -1315,6 +1394,16 @@ async function start(): Promise<void> {
           });
           user = { id: userId, email, username: email };
           console.log(`[bootstrap] created superadmin user ${email}`);
+        } else if (autoCreate) {
+          // Existing account: reconcile its Keycloak password with the
+          // current TELLUS_SUPERADMIN_PASSWORD. The create-time password is
+          // set ONCE; a later env rotation never reaches an already-created
+          // user, so the credential drifts and login starts failing with
+          // `invalid_grant`. Non-prod only — production must not silently
+          // overwrite an operator-managed credential (autoCreate is false
+          // there), so this is gated behind the same NODE_ENV check.
+          await kc.resetPassword(user.id, password);
+          console.log(`[bootstrap] reconciled superadmin password for ${email}`);
         }
         await kc.assignRealmRoleToUser(user.id, TELLUS_SUPERADMIN_ROLE);
         console.log(
@@ -1390,6 +1479,52 @@ async function shutdown(signal: string): Promise<void> {
 
   // Destroy the action rate limiter to prevent dangling setInterval
   limiter.destroy();
+
+  // The auth-maintenance sweep queries the foundry pool on a 60s timer; clear
+  // it before the drain so it can't fire against an ended pool.
+  clearInterval(authMaintenanceSweeper);
+
+  // Quiesce background workers / timers BEFORE draining the DB pools. Each of
+  // these runs a self-scheduling loop (FOR UPDATE SKIP LOCKED claimers, sweep
+  // ticks) that would otherwise keep issuing queries against a pool we are
+  // about to `end()`, racing the drain and logging spurious errors. Stop them
+  // first, tolerate individual failures, and keep going — shutdown must not
+  // hang on one misbehaving worker. The connectivity health prober is included
+  // because its recordStatus() writes to the foundry pool every tick.
+  const workerStops: Array<[string, () => unknown]> = [
+    ["funnelDispatcher", stopFunnelDispatcher],
+    ["pipelineDispatcher", stopPipelineDispatcher],
+    ["overlaySweeper", stopOverlaySweeper],
+    ["replacementScheduler", stopReplacementScheduler],
+    ["icebergMaintenance", stopIcebergMaintenance],
+    ["temporalWorker", stopTemporalWorker],
+    ["healthProber", stopHealthProber],
+  ];
+  for (const [name, stop] of workerStops) {
+    try {
+      await Promise.resolve(stop());
+    } catch (err) {
+      console.error(JSON.stringify({
+        type: "worker_stop_error",
+        worker: name,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  }
+
+  // Quit the Redis rate-limiter client, cache-invalidation bus and Kafka
+  // producer cleanly so their sockets/timers don't keep the event loop alive.
+  try {
+    const { shutdownK8sInfra } = await import("./boot/cacheAndRateLimit");
+    await shutdownK8sInfra();
+  } catch (err) {
+    console.error(JSON.stringify({ type: "k8s_infra_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+  try {
+    await shutdownKafka();
+  } catch (err) {
+    console.error(JSON.stringify({ type: "kafka_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+  }
 
   // Close foundry WebSocket connections
   const wss = getWss();

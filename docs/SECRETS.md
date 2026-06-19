@@ -37,6 +37,9 @@ and is not listed here, that is an audit finding.
 | `KAFKA_BOOTSTRAP_SERVERS`     | `/tellus/prod/kafka`          | Platform | never    | —     |
 | `KAFKA_SASL_USERNAME`         | `/tellus/prod/kafka`          | Platform | 90d      | 0     |
 | `KAFKA_SASL_PASSWORD`         | `/tellus/prod/kafka`          | Platform | 90d      | 0     |
+| `TELLUS_LOCAL_KEK_B64`        | `/tellus/prod/kek`            | Security | manual (rekey) | re-encrypt |
+| `TELLUS_SUPERADMIN_EMAIL`     | `/tellus/prod/superadmin`     | Security | never    | —     |
+| `TELLUS_SUPERADMIN_PASSWORD`  | `/tellus/prod/superadmin`     | Security | 90d      | 0     |
 
 "Rotation" is the mandatory maximum age. "Grace" is how long the previous
 value is still accepted by verifiers after rotation — applies to signing
@@ -79,6 +82,16 @@ There is no silent rotation failure path.
 Manual rotation — if the Lambda is unavailable, `scripts/rotate-secret.sh`
 performs the same steps from an operator workstation. The script refuses
 to run without MFA and logs to the audit channel.
+
+**KEK rekey is special.** `TELLUS_LOCAL_KEK_B64` is the master key that wraps
+every stored connection credential (envelope encryption). It cannot be rotated
+by overwriting the Secrets Manager value alone — that would orphan all existing
+ciphertext. Rekey is a dedicated procedure: stand up the new KEK alongside the
+old, walk every stored credential through decrypt-with-old → re-encrypt-with-new,
+verify the count, then retire the old KEK. Treat as a planned maintenance with a
+rollback path, never an emergency value swap. The `manual (rekey)` rotation cell
+in §1 reflects this. The bootstrap superadmin password (`/tellus/prod/superadmin`)
+rotates like any other 90-day credential.
 
 ## 4. Incident runbook
 

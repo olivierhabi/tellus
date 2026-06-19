@@ -5,6 +5,8 @@ import { convertValue } from '../utils/typeConverter';
 import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { findNearNameMatches } from '../utils/columnNameReconciler';
 import { getObjectStream, toDuckDbReadUri } from './storageService';
+import { validateUdfSpec } from './pipelines/udfTransform';
+import { runUdfTransform } from './pipelines/udfRunner';
 import {
   chainHashFromNodeConfig,
   fingerprintSchema,
@@ -1547,6 +1549,75 @@ export class TransformService {
       .where({ id: nodeId, pipeline_id: pipelineId })
       .update({ config: JSON.stringify(config) }).returning('*');
     return updated;
+  }
+
+  // =========================================================================
+  // UDF — user-authored transform (FOUNDRY-GAPS §2)
+  //
+  // A UDF is the one transform that cannot compile to engine SQL: it is
+  // arbitrary user code. It is stored on the node's `config.udfTransform`
+  // slot — deliberately NOT in `config.transforms` so the Trino/DuckDB
+  // compilers never try to fold it — and executed inside the gVisor sandbox
+  // proven in §1/§3 (a Kubernetes Job pinned to the `gvisor` RuntimeClass,
+  // hardened pod, deny-all egress). There is no in-process eval path: running
+  // user code unsandboxed is exactly the risk the substrate work removed.
+  // =========================================================================
+
+  /**
+   * Persist a UDF transform onto a node. Validates the spec (language allow-
+   * list, code size, entrypoint identifier, timeout bounds) before storing it.
+   */
+  async udfApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: unknown,
+  ) {
+    const spec = validateUdfSpec(input);
+    const node = await this.knex('pipeline_nodes as pn')
+      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
+      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
+      .select('pn.id', 'pn.config').first();
+    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
+
+    const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    config.udfTransform = { ...spec, createdAt: new Date().toISOString() };
+
+    const [updated] = await this.knex('pipeline_nodes')
+      .where({ id: nodeId, pipeline_id: pipelineId })
+      .update({ config: JSON.stringify(config) }).returning('*');
+    return updated;
+  }
+
+  /**
+   * Preview a UDF: resolve the node's input rows (the existing CSV + prior
+   * transform chain), then execute the user code over a bounded slice inside
+   * the gVisor sandbox and return the transformed rows. Requires the sandbox
+   * runtime (TELLUS_UDF_RUNTIME=k8s); otherwise surfaces a typed 503 so the
+   * UI can explain that the substrate isn't wired in this environment.
+   */
+  async udfPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: unknown,
+    limit = 100,
+  ) {
+    const spec = validateUdfSpec(input);
+    const { dataset, existingTransforms } = await this.resolveNodeDataset(
+      projectId, pipelineId, nodeId,
+    );
+    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rows = this.applyExistingTransforms(rawRows, existingTransforms)
+      .slice(0, limit);
+
+    const out = await runUdfTransform({
+      buildRid: `udf-preview-${pipelineId}-${nodeId}`,
+      tenant: projectId,
+      spec,
+      rows,
+    });
+
+    const columns = spec.outputColumns.length
+      ? spec.outputColumns
+      : Object.keys(out[0] ?? {}).map((name) => ({ name, type: 'string' }));
+    return { columns, rows: out, rowCount: out.length };
   }
 
   // =========================================================================

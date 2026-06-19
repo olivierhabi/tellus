@@ -46,6 +46,14 @@ function findUnboundedFetches(files: string[]): string[] {
       if (!/(?:^|[^.\w])fetch\s*\(/.test(l)) continue;
       // Ignore comments.
       if (/^\s*\/\//.test(l)) continue;
+      // Ignore DEFINITIONS / signatures of a method that merely happens to
+      // be named `fetch` — these are not the global fetch() and carry no
+      // AbortSignal by design (e.g. a `CursorHandle.fetch(n: number)`
+      // interface signature, or an `async fetch() {` strategy method). A
+      // global fetch() call passes runtime values, never a typed parameter
+      // list, and is never prefixed with the `async` keyword.
+      if (/\basync\s+fetch\s*\(/.test(l)) continue; // `async fetch() {`
+      if (/(?:^|[^.\w])fetch\s*\(\s*[A-Za-z_$][\w$]*\s*[?:]/.test(l)) continue; // `fetch(n: number)` / `fetch(x?: T)`
       // Look ahead up to 15 lines — enough for the widest multi-line
       // `fetch(url, { … })` call we have in the codebase.
       const window = lines.slice(i, i + 15).join("\n");

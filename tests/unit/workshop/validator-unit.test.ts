@@ -72,6 +72,95 @@ describe("B02 validateModule", () => {
     expect(result.compiled.widgetTree).not.toBeNull();
   });
 
+  it("B02: accepts layout.columnWidths (section column-width persistence)", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-box": { mode: "flex", pxWidth: 300, flexValue: 1 },
+        "section-page": { mode: "absolute", pxWidth: 333, flexValue: 1 },
+      },
+    };
+    expect(validateModule(m).valid).toBe(true);
+  });
+
+  it("B02: accepts a partial columnWidths (single column)", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-box": { mode: "absolute", pxWidth: 240, flexValue: 1 },
+      },
+    };
+    expect(validateModule(m).valid).toBe(true);
+  });
+
+  it("B02: rejects a columnWidths entry with an invalid mode", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-box": { mode: "bogus", pxWidth: 1, flexValue: 1 },
+      },
+    };
+    expectThrowsWith(
+      () => validateModule(m),
+      "Tellus:Workshop:InvalidModuleSchema",
+    );
+  });
+
+  it("B02: accepts columnWidths keyed by ARBITRARY section ids (tree sections, not just the two fixed columns)", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        "section-box": { mode: "absolute", pxWidth: 300, flexValue: 1 },
+        s_top: { mode: "absolute", pxWidth: 240, flexValue: 1 },
+        "section-1700000000000-1": { mode: "flex", pxWidth: 300, flexValue: 3 },
+      },
+    };
+    expect(validateModule(m).valid).toBe(true);
+  });
+
+  it("B02: accepts the optional resizable flag on a width spec", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        s_top: { mode: "absolute", pxWidth: 200, flexValue: 1, resizable: true },
+      },
+    };
+    expect(validateModule(m).valid).toBe(true);
+  });
+
+  it("B02: still strictly validates each spec's VALUE (unknown field rejected)", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        s_top: { mode: "flex", pxWidth: 1, flexValue: 1, bogusField: true },
+      },
+    };
+    expectThrowsWith(
+      () => validateModule(m),
+      "Tellus:Workshop:InvalidModuleSchema",
+    );
+  });
+
+  it("B02: rejects a non-boolean resizable", () => {
+    const m = baseModule();
+    (m as { layout: Record<string, unknown> }).layout = {
+      rootSection: "s_root",
+      columnWidths: {
+        s_top: { mode: "flex", pxWidth: 1, flexValue: 1, resizable: "yes" },
+      },
+    };
+    expectThrowsWith(
+      () => validateModule(m),
+      "Tellus:Workshop:InvalidModuleSchema",
+    );
+  });
+
   it("B02 C-01: malformed schema → InvalidModuleSchema", () => {
     const m = baseModule();
     delete (m as { schemaVersion?: unknown }).schemaVersion;

@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // B8 — Virtual Table CRUD + refreshSchema handlers (spec §B8 line 401).
 //
-// Routes (mounted under /api/v2/connectivity by the connectivity router):
+// Routes (mounted under /api/v1/connectivity by the connectivity router):
 //   POST   /connections/:rid/virtual-tables           -> create
 //   GET    /virtual-tables/:vrid                      -> read
 //   PUT    /virtual-tables/:vrid                      -> update (If-Match)
@@ -73,7 +73,7 @@ export async function postVirtualTable(
     res
       .status(201)
       .set("ETag", `W/"1"`)
-      .set("Location", `/api/v2/connectivity/virtual-tables/${vrid}`)
+      .set("Location", `/api/v1/connectivity/virtual-tables/${vrid}`)
       .json({ rid: vrid, version: 1 });
   } catch (err) {
     if (err instanceof TellusError) {
