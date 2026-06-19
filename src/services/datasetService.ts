@@ -2,6 +2,7 @@ import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { AppError, NotFoundError, ConflictError } from '../utils/foundryAppError';
 import { DatasetListQuery } from '../types/dataset';
+import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { getObjectStream } from './storageService';
 
 export class DatasetService {
@@ -146,7 +147,11 @@ export class DatasetService {
 
         const parser = parse({
           delimiter,
-          columns: true,
+          // See `src/utils/csvHeader.ts` — disambiguates duplicate / blank
+          // header cells that csv-parse's default `columns: true` would
+          // silently collapse, dropping columns from preview output.
+          columns: (h: string[]) =>
+            sanitizeCsvHeader(h, { source: dataset.file_path }),
           skip_empty_lines: true,
           trim: true,
           relax_column_count: true,

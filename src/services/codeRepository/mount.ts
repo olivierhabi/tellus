@@ -69,11 +69,13 @@ export interface MountCodeRepositoryResult {
  *   PUT    /:rid/settings                      update settings (If-Match)
  */
 export function mountCodeRepository(deps: MountCodeRepositoryRouterDeps): MountCodeRepositoryResult {
-  const adapters: CodeRepositoryAdapters = {
-    compass: deps.compass ?? new InMemoryCompass(),
-    stemma: deps.stemma ?? new InMemoryStemma(),
-    template: deps.template ?? new InMemoryTemplate(),
-  };
+  // Build adapters in dependency order: stemma first, then template
+  // (template wires through to stemma.commitFiles to materialize the B3
+  // manifest's file list onto the default branch).
+  const compass = deps.compass ?? new InMemoryCompass();
+  const stemma = deps.stemma ?? new InMemoryStemma();
+  const template = deps.template ?? new InMemoryTemplate({ stemma });
+  const adapters: CodeRepositoryAdapters = { compass, stemma, template };
   const router = codeRepositoryRouter({
     pool: deps.pool,
     compass: adapters.compass,

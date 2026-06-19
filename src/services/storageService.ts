@@ -126,6 +126,107 @@ function getConfig(): StorageConfig {
 // Public API — Production-grade object storage operations
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// DuckDB read URI normalisation
+// ---------------------------------------------------------------------------
+//
+// Bug context (PB-B2): `foundry_datasets.file_path` stores bare S3 object
+// keys produced by `buildObjectKey()`, e.g.
+//   `projects/<id>/folders/<id>/<uuid>_<filename>.csv`
+// The legacy preview reader (`readCsvRows` → `getObjectStream`) prepends the
+// bucket internally, so it Just Works. The DuckDB transform engine, on the
+// other hand, hands the path straight to `read_csv_auto('...')`. Without an
+// `s3://<bucket>/` prefix DuckDB treats the path as local filesystem,
+// resolves against the API process CWD, finds nothing, and surfaces a
+// `IO Error: No files found that match the pattern ...` 500 to the client.
+//
+// `toDuckDbReadUri` is the canonical converter from "whatever shape
+// `dataset.file_path` happens to be" → "a URI DuckDB's httpfs extension can
+// resolve". Every code path that hands a dataset path to DuckDB MUST go
+// through this function.
+// ---------------------------------------------------------------------------
+
+/**
+ * Branded type marking strings that are safe to embed in DuckDB
+ * `read_csv_auto` / `read_parquet` calls. The brand prevents callers from
+ * accidentally passing a raw `dataset.file_path` to the engine — the only
+ * way to obtain a `DuckDbReadUri` is via `toDuckDbReadUri()`.
+ *
+ * The brand is erased at runtime (it's just a string) but the compiler
+ * enforces the invariant at every call site that opts in.
+ */
+export type DuckDbReadUri = string & { readonly __duckDbReadUri: unique symbol };
+
+/**
+ * Pure, side-effect-free transform from a stored path to a DuckDB-readable
+ * URI. Split out from `toDuckDbReadUri` so unit tests can exercise the
+ * full branch matrix without instantiating an S3 client.
+ *
+ * Accepted inputs:
+ *   • Bare object keys (the common case)        → `s3://<bucket>/<key>`
+ *   • `s3://...` / `http(s)://...` / `file://...` → returned untouched
+ *   • Absolute filesystem paths (`/...`)          → returned untouched
+ *   • Empty / null-ish                            → returned untouched
+ *     (caller is responsible for rejecting; we don't synthesise a URI
+ *     that points at the bucket root)
+ */
+export function buildDuckDbReadUri(
+  filePath: string,
+  bucket: string,
+): DuckDbReadUri {
+  if (!filePath) return filePath as DuckDbReadUri;
+  // Already a URI / absolute path — do not rewrite.
+  if (
+    /^s3:\/\//i.test(filePath) ||
+    /^https?:\/\//i.test(filePath) ||
+    /^file:\/\//i.test(filePath) ||
+    filePath.startsWith("/")
+  ) {
+    return filePath as DuckDbReadUri;
+  }
+  if (!bucket) {
+    // Defensive: a misconfigured deployment with no S3_BUCKET would
+    // otherwise emit `s3:///key` which DuckDB rejects with an opaque
+    // error. Fail fast at the boundary so the operator sees the real
+    // cause in the API logs.
+    throw new Error(
+      "buildDuckDbReadUri: bucket is required to qualify a bare object key",
+    );
+  }
+  // Strip a leading slash if present so we never emit `s3://bucket//key`.
+  const key = filePath.replace(/^\/+/, "");
+  return `s3://${bucket}/${key}` as DuckDbReadUri;
+}
+
+/**
+ * Convert a `foundry_datasets.file_path` value into a fully-qualified URI
+ * that DuckDB's `httpfs` extension can resolve via `read_csv_auto` /
+ * `read_parquet`. Reads the configured bucket from the storage singleton.
+ *
+ * Centralising this in storageService keeps the bucket name out of the
+ * DuckDB engine and avoids a leaky abstraction across the
+ * services/pipelines/* layer.
+ */
+export function toDuckDbReadUri(filePath: string): DuckDbReadUri {
+  return buildDuckDbReadUri(filePath, getConfig().bucket);
+}
+
+/**
+ * Predicate matching the same set of "already qualified" URI shapes that
+ * `buildDuckDbReadUri` passes through. The DuckDB engine asserts on this
+ * at the boundary so a future caller who forgets to convert a bare key
+ * gets a clear `VALIDATION_ERROR` instead of an opaque DuckDB 500.
+ */
+export function isQualifiedDuckDbUri(uri: string): boolean {
+  if (!uri) return false;
+  return (
+    /^s3:\/\//i.test(uri) ||
+    /^https?:\/\//i.test(uri) ||
+    /^file:\/\//i.test(uri) ||
+    uri.startsWith("/")
+  );
+}
+
 /**
  * Builds the S3 object key for a dataset file.
  *

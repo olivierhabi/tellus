@@ -67,6 +67,26 @@ const { projectStageToPostgres } = proxyActivities<typeof Activities>({
   retry: { ...BACKOFF, maximumAttempts: 3 },
 });
 
+// Terminal `funnel_state` projection (badge: Indexed / Failed). Lives on the
+// same low-timeout policy as `projectStageToPostgres` — the underlying helper
+// already swallows DB errors internally, so retries here exist only to absorb
+// transient worker → Postgres network blips.
+const { projectFunnelTerminalActivity } = proxyActivities<typeof Activities>({
+  startToCloseTimeout: "1 minute",
+  retry: { ...BACKOFF, maximumAttempts: 3 },
+});
+
+// OpenSearch sync — runs after merge so the FE search panel
+// (`useObjectSearch` → /api/v1/objects/:apiName/search → OpenSearch)
+// reflects freshly-merged rows immediately. Without this the badge says
+// "Indexed / 500 objects" but the right-rail search returns 0 hits and
+// the "500 objects pending index" empty-state fires. 10 min is generous
+// for a 1M-row index; bulkIndex pages internally.
+const { syncOpenSearchActivity } = proxyActivities<typeof Activities>({
+  startToCloseTimeout: "10 minutes",
+  retry: { ...BACKOFF, maximumAttempts: 5 },
+});
+
 // Signals the parent workflow listens on. The dispatcher (or an external
 // Temporal client) signals the workflow via
 // `client.workflow.getHandle(workflowId).signal(sourceTxnSignal, {...})`.
@@ -166,47 +186,105 @@ export async function ObjectTypeFunnelWorkflow(
       // — `Date.now()` is NOT deterministic inside a workflow.
       const runKey = sig?.signalId ?? `nosig-${pendingDrainedCount++}`;
 
-      await projectStageToPostgres({ ...input, currentStage: "changelog", runKey });
-      const changelog = await runChangelogActivity(input);
+      // Per-signal terminal projection — wraps the four-stage pipeline so
+      // `funnel_state.status` always flips from 'indexing' to either
+      // 'indexed' (with the run's objects_indexed count) or 'failed' (with
+      // the activity error message). Before this guard existed the badge
+      // could stay stuck at 'indexing' forever if the pipeline threw
+      // anywhere between changelog and hydration — the dispatcher had
+      // already set `pre_temporal: 'indexing'` and nothing else ever ran
+      // to advance it. Wrapping here means a single round-trip to the
+      // projection activity catches both happy- and sad-path exits.
+      try {
+        await projectStageToPostgres({ ...input, currentStage: "changelog", runKey });
+        const changelog = await runChangelogActivity(input);
 
-      await projectStageToPostgres({
-        ...input,
-        currentStage: "merge",
-        completedPrevious: "changelog",
-        runKey,
-      });
-      const merge = await runMergeActivity({ ...input, changelogRows: changelog.rows });
+        await projectStageToPostgres({
+          ...input,
+          currentStage: "merge",
+          completedPrevious: "changelog",
+          runKey,
+        });
+        const merge = await runMergeActivity({ ...input, changelogRows: changelog.rows });
 
-      await projectStageToPostgres({
-        ...input,
-        currentStage: "indexing",
-        objectsIndexed: merge.upserts,
-        completedPrevious: "merge",
-        runKey,
-      });
-      const indexing = await runIndexingActivityProxy({
-        ...input,
-        mergedRows: merge.mergedRows,
-        editIds: merge.editIds,
-      });
+        // Sync the freshly-merged rows into OpenSearch so the FE search
+        // panel can see them in the same round-trip. Runs BEFORE the
+        // Quickwit indexing stage because that path goes through Kafka
+        // and has its own publish-wait — we don't want the FE pretending
+        // the OT is empty for that interval. Best-effort: if the sync
+        // fails we still continue with Quickwit indexing so the funnel's
+        // primary store stays consistent; the terminal projection's
+        // outer catch will surface any error in `funnel_state`.
+        await syncOpenSearchActivity({
+          ontologyId: input.ontologyId,
+          objectTypeApiName: input.objectTypeApiName,
+        });
 
-      await projectStageToPostgres({
-        ...input,
-        currentStage: "hydration",
-        completedPrevious: "indexing",
-        runKey,
-      });
-      await runHydrationActivityProxy({
-        ...input,
-        publishedSplitIds: indexing.publishedSplitIds,
-      });
+        await projectStageToPostgres({
+          ...input,
+          currentStage: "indexing",
+          objectsIndexed: merge.upserts,
+          completedPrevious: "merge",
+          runKey,
+        });
+        const indexing = await runIndexingActivityProxy({
+          ...input,
+          mergedRows: merge.mergedRows,
+          editIds: merge.editIds,
+        });
 
-      await projectStageToPostgres({
-        ...input,
-        currentStage: null,
-        completedPrevious: "hydration",
-        runKey,
-      });
+        await projectStageToPostgres({
+          ...input,
+          currentStage: "hydration",
+          completedPrevious: "indexing",
+          runKey,
+        });
+        await runHydrationActivityProxy({
+          ...input,
+          publishedSplitIds: indexing.publishedSplitIds,
+        });
+
+        await projectStageToPostgres({
+          ...input,
+          currentStage: null,
+          completedPrevious: "hydration",
+          runKey,
+        });
+
+        // Terminal projection: flip the UI badge from 'indexing' → 'indexed'
+        // and stamp `funnel_state.objects_indexed` with the merge stage's
+        // upsert count (which is the count of distinct primary keys
+        // surfaced from the backing datasource on this run). The shared
+        // helper additionally broadcasts a `funnel_state.changed` WebSocket
+        // event so the OT overview page updates in sub-second latency.
+        await projectFunnelTerminalActivity({
+          ontologyId: input.ontologyId,
+          objectTypeApiName: input.objectTypeApiName,
+          status: "indexed",
+          objectsIndexed: merge.upserts,
+        });
+      } catch (err) {
+        // ANY exception in the four-stage pipeline lands us here. We must
+        // still flip the badge so the user sees 'Failed' instead of an
+        // eternal 'Indexing' spinner — then re-throw so Temporal applies
+        // its activity-level retry policy and writes the workflow failure
+        // to history.
+        const message =
+          err instanceof Error ? err.message : "Funnel pipeline failed";
+        // Best-effort — if projection itself throws (e.g. PG down), the
+        // outer rethrow still surfaces the original pipeline error.
+        try {
+          await projectFunnelTerminalActivity({
+            ontologyId: input.ontologyId,
+            objectTypeApiName: input.objectTypeApiName,
+            status: "failed",
+            errorMessage: message,
+          });
+        } catch {
+          /* projection is best-effort; original error wins below */
+        }
+        throw err;
+      }
 
       completedRuns++;
       if (sig?.signalId) lastProcessedSignalId = sig.signalId;

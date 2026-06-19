@@ -26,11 +26,24 @@
 import type { Pool } from "pg";
 
 import { InMemoryStemma } from "./adapters/inMemory";
-import type { StemmaAdapter } from "./adapters/types";
+import type { StemmaAdapter, TemplateAdapter } from "./adapters/types";
+import { deriveDefaultPackageName } from "./saga/executor";
 
 export interface RehydrateInMemoryStemmaArgs {
   readonly pool: Pool;
   readonly stemma: StemmaAdapter;
+  /**
+   * Template adapter used to re-scaffold each rehydrated branch. Wave 22
+   * dropped the in-memory Stemma adapter's auto-seed (`DEFAULT_SCAFFOLD`)
+   * because it was a placeholder that diverged from the real B3 manifest.
+   * Without re-scaffolding here, every restart leaves existing repos as
+   * empty branches and the frontend file viewer renders blank.
+   *
+   * Optional: if absent the rehydrator only re-creates the empty branch
+   * (legacy behaviour, preserved for unit-test seams that don't need a
+   * scaffold).
+   */
+  readonly template?: TemplateAdapter;
   /**
    * Optional structured logger. Receives `(event, meta)` so callers can
    * pipe through pino/winston/etc. Defaults to a no-op (intentional — the
@@ -74,11 +87,19 @@ export async function rehydrateInMemoryStemma(
     return { applied: false, rehydrated: 0, skipped: 0, failed: 0, total: 0 };
   }
 
-  type Row = { rid: string; default_branch: string; created_by: string };
+  type Row = {
+    rid: string;
+    default_branch: string;
+    created_by: string;
+    display_name: string;
+    template_id: string;
+    template_version: string;
+  };
   let rows: ReadonlyArray<Row>;
   try {
     const r = await args.pool.query<Row>(
-      `SELECT rid, default_branch, created_by
+      `SELECT rid, default_branch, created_by,
+              display_name, template_id, template_version
          FROM code_repository
         WHERE state = 'ACTIVE'`,
     );
@@ -105,19 +126,56 @@ export async function rehydrateInMemoryStemma(
         defaultBranchName: row.default_branch,
         principalSub: row.created_by,
       });
-      if (out.kind === "ok") {
-        rehydrated += 1;
-        log("code-repos.rehydrate.seeded", {
-          rid: row.rid,
-          branch: row.default_branch,
-        });
-      } else {
+      if (out.kind !== "ok") {
         failed += 1;
         log("code-repos.rehydrate.seed-non-ok", {
           rid: row.rid,
           kind: out.kind,
         });
+        continue;
       }
+
+      // Re-scaffold the branch from the template manifest. This mirrors the
+      // saga's runStep3 (`executor.ts:267-323`): same packageName derivation,
+      // same template adapter call, same parameters envelope. Without this
+      // step the branch is structurally present but contains zero files,
+      // which is what a user sees in the file viewer as "empty repo".
+      if (args.template) {
+        try {
+          const scaffoldOut = await args.template.scaffoldAndPush({
+            repositoryRid: row.rid,
+            targetBranch: row.default_branch,
+            templateId: row.template_id,
+            templateVersion: row.template_version,
+            principalSub: row.created_by,
+            parameters: {
+              packageName: deriveDefaultPackageName(row.display_name),
+            },
+          });
+          if (scaffoldOut.kind !== "ok") {
+            failed += 1;
+            log("code-repos.rehydrate.scaffold-non-ok", {
+              rid: row.rid,
+              kind: scaffoldOut.kind,
+            });
+            continue;
+          }
+        } catch (err) {
+          failed += 1;
+          log("code-repos.rehydrate.scaffold-threw", {
+            rid: row.rid,
+            message: (err as Error).message,
+          });
+          continue;
+        }
+      }
+
+      rehydrated += 1;
+      log("code-repos.rehydrate.seeded", {
+        rid: row.rid,
+        branch: row.default_branch,
+        scaffolded: Boolean(args.template),
+      });
     } catch (err) {
       failed += 1;
       log("code-repos.rehydrate.seed-threw", {

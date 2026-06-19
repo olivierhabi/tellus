@@ -365,7 +365,14 @@ describe("B2 admin routes — DELETE /repositories/:rid (soft-delete)", () => {
 });
 
 describe("B2 admin routes — GET /repositories/:rid/branches", () => {
-  it("returns empty list for a freshly-created repo (cache not yet populated)", async () => {
+  it("falls back to Stemma for a freshly-created repo (cache not yet seeded)", async () => {
+    // The repo-create saga doesn't yet seed code_repository_branch_cache,
+    // so a brand-new repo would otherwise return []. The route now
+    // queries the StemmaAdapter for the default-branch HEAD, synthesizes
+    // a single-row response, and seeds the cache for subsequent calls.
+    // Without this fallback the IDE commit handler has no tipCommitSha
+    // to send back as `If-Match`, and the user sees an unrecoverable
+    // "Branch main not in branches list" error.
     const create = await withAuth(
       request(app)
         .post("/api/v1/code-repositories")
@@ -377,7 +384,21 @@ describe("B2 admin routes — GET /repositories/:rid/branches", () => {
       request(app).get(`/api/v1/code-repositories/${rid}/branches`),
     );
     expect(r.status).toBe(200);
-    expect(r.body.branches).toEqual([]);
+    expect(r.body.branches).toHaveLength(1);
+    expect(r.body.branches[0].name).toBe("main");
+    expect(r.body.branches[0].headSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(r.body.branches[0].isProtected).toBe(false);
+
+    // Subsequent call should now read directly from the cache — verify
+    // by querying the table and confirming the row was seeded.
+    const cacheRows = await schema.pool.query(
+      `SELECT branch_name, head_sha FROM code_repository_branch_cache
+        WHERE repository_rid = $1`,
+      [rid],
+    );
+    expect(cacheRows.rowCount).toBe(1);
+    expect(cacheRows.rows[0].branch_name).toBe("main");
+    expect(cacheRows.rows[0].head_sha).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("filters by ?protected=true|false", async () => {

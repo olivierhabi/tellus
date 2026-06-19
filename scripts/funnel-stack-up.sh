@@ -11,7 +11,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Pin the compose project name. Without -p, docker compose derives it from
+# the working directory ("tellus") for one compose file and from a
+# different basename ("docker-compose-filesprod") if invoked elsewhere,
+# which creates two disjoint `*_default` networks and the services that
+# need to talk to each other (temporal -> postgres, lakekeeper ->
+# postgres, etc.) silently fail with "no such host". Pinning here means
+# every service joins one network: `tellus_default`.
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-tellus}"
+
 COMPOSE_FILES=(
+  -p "$PROJECT_NAME"
   -f docker-compose-files.prod/postgres.docker-compose.yml
   -f docker-compose-files.prod/minio.docker-compose.yml
   -f docker-compose-files.prod/opensearch.docker-compose.yml
@@ -26,7 +36,7 @@ COMPOSE_FILES=(
 
 log() { printf '\033[36m[stack-up]\033[0m %s\n' "$*"; }
 
-log "bringing up stack"
+log "bringing up stack (project=$PROJECT_NAME)"
 docker compose "${COMPOSE_FILES[@]}" up -d "$@"
 
 log "waiting for postgres"

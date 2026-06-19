@@ -20,3 +20,7 @@ datasetRouter.get('/:datasetId/download', authenticate, datasetController.downlo
 datasetRouter.put('/:datasetId', authenticate, datasetController.update);
 datasetRouter.delete('/:datasetId', authenticate, datasetController.delete);
 datasetRouter.post('/:datasetId/duplicate', authenticate, datasetController.duplicate);
+// Re-parse a dataset's source file — recovers schemas that were
+// silently truncated by the pre-`sanitizeCsvHeader` ingestion path. See
+// `DatasetController.reparse` and `runbooks/csv-header-sanitization.md`.
+datasetRouter.post('/:datasetId/reparse', authenticate, datasetController.reparse);

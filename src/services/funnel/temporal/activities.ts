@@ -36,6 +36,11 @@ import { ensureIndex } from "../../quickwit/indexManager";
 import { MergedRow } from "../../quickwit/docBuilder";
 import { runHydrationActivity } from "../../quickwit/hydrationActivity";
 import { sleepForStageDelay } from "../stageDelay";
+import {
+  projectFunnelTerminalToState,
+  type FunnelStateStatus,
+} from "../funnelStateProjection";
+import { getObjectBuffer } from "../../storageService";
 
 // Heartbeat + stage-duration helper. Every long-running activity wraps
 // its body in `withStageInstrumentation(stage, obj, async () => ...)`.
@@ -127,30 +132,45 @@ async function runChangelogActivityImpl(
   // Optional dev/demo pacing — no-op in production (env default 0).
   await sleepForStageDelay();
   const table = await ensureTable(input.objectTypeApiName, "changelog", "default");
-  // Prefer DuckDB iceberg_scan when the source advertises an Iceberg
-  // location; otherwise derive rows from the pending edit queue.
-  const datasource = await loadIcebergSource(input.objectTypeApiName);
+  // Reader-selection precedence (most specific first):
+  //   1. Iceberg-backed datasource (DuckDB iceberg_scan over snapshot range)
+  //   2. Foundry-bridged file (CSV / TSV / JSON in MinIO — `#foundry-dataset:` tag)
+  //   3. Fallback: derive from the pending edit queue (dev / pure user edits)
+  //
+  // The PG dispatcher historically had paths (1) + (2-parquet) + (3); the
+  // Temporal pipeline was missing the foundry-bridged path entirely, which
+  // is why an object type registered through the wizard (foundry CSV upload)
+  // would complete the funnel with `objects_indexed = 0`. The fix below
+  // mirrors the dispatcher's `loadParquetBackingDatasource` precedence
+  // while also handling `.csv` / `.tsv` / `.json` so wizard-created OTs
+  // index correctly on every save.
   let reader: SnapshotDiffReader;
-  if (datasource && isDuckDBAvailable()) {
+  const iceberg = await loadIcebergSource(input.objectTypeApiName);
+  if (iceberg && isDuckDBAvailable()) {
     reader = duckdbIcebergDiffReader({
-      tableLocation: datasource.iceberg_location,
-      primaryKeyColumn: datasource.primary_key_column ?? "primary_key",
+      tableLocation: iceberg.iceberg_location,
+      primaryKeyColumn: iceberg.primary_key_column ?? "primary_key",
     });
   } else {
-    const pending = await getPendingMergeEdits(input.objectTypeApiName);
-    const rows: SourceChangeRow[] = pending.map((e) => ({
-      primary_key: e.primary_key,
-      operation:
-        e.operation === "delete" ? "DELETE" : e.operation === "create" ? "INSERT" : "UPDATE",
-      properties: e.property_values ?? {},
-      source_transaction_id: e.execution_id || e.edit_id,
-      source_commit_timestamp: e.executed_at,
-    }));
-    reader = {
-      async *read() {
-        for (const r of rows) yield r;
-      },
-    };
+    const foundry = await loadFoundryBridgedDatasource(input.objectTypeApiName);
+    if (foundry) {
+      reader = await buildFoundryBridgedReader(foundry);
+    } else {
+      const pending = await getPendingMergeEdits(input.objectTypeApiName);
+      const rows: SourceChangeRow[] = pending.map((e) => ({
+        primary_key: e.primary_key,
+        operation:
+          e.operation === "delete" ? "DELETE" : e.operation === "create" ? "INSERT" : "UPDATE",
+        properties: e.property_values ?? {},
+        source_transaction_id: e.execution_id || e.edit_id,
+        source_commit_timestamp: e.executed_at,
+      }));
+      reader = {
+        async *read() {
+          for (const r of rows) yield r;
+        },
+      };
+    }
   }
   const result = await computeChangelog(
     {
@@ -533,4 +553,250 @@ async function isQuickwitReachable(): Promise<boolean> {
     lastOk = false;
   }
   return lastOk;
+}
+
+// ---------------------------------------------------------------------------
+// Foundry-bridged datasource reader
+//
+// Wizard-created Object Types register their `backing_datasource.file_path`
+// as a synthetic string of the form
+//   `<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>`
+// where the pre-tag prefix is the MinIO object key (uploaded via
+// `storageService.uploadObject`). The legacy `reindexService.ts` already
+// knows how to read these — the funnel pipeline historically did NOT,
+// which is why a wizard-created OT would complete the Temporal funnel with
+// 0 objects indexed (the changelog stage couldn't see any rows).
+//
+// This helper mirrors `reindexService.readFoundryBridgedFile` but adapts
+// the output to the funnel's `SnapshotDiffReader` contract: each parsed
+// row becomes an INSERT change keyed on the OT's primary-key column.
+// ---------------------------------------------------------------------------
+
+interface FoundryBridgedDatasource {
+  filePath: string;
+  fileFormat: string;
+  primaryKeyColumn: string | null;
+}
+
+async function loadFoundryBridgedDatasource(
+  objectTypeApiName: string
+): Promise<FoundryBridgedDatasource | null> {
+  try {
+    const res = await query(
+      `SELECT bd.file_path, bd.file_format, bd.primary_key_column
+         FROM backing_datasource bd
+         JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+        WHERE ot.api_name = $1
+          AND bd.file_path IS NOT NULL
+        LIMIT 1`,
+      [objectTypeApiName]
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    const filePath: string = row.file_path;
+    if (!filePath) return null;
+    // Restrict to foundry-bridged files (presence of the `#foundry-dataset:`
+    // tag). Local-filesystem paths fall through to the pending-edit fallback
+    // — the funnel's contract is that "real" backing data lives in MinIO.
+    if (!filePath.includes("#foundry-dataset:")) return null;
+    const explicitFormat = (row.file_format as string | null) ?? null;
+    let fileFormat = explicitFormat;
+    if (!fileFormat) {
+      const cleanPath = filePath.slice(0, filePath.indexOf("#"));
+      const ext = cleanPath.toLowerCase();
+      if (ext.endsWith(".json") || ext.endsWith(".jsonl")) fileFormat = "json";
+      else if (ext.endsWith(".tsv")) fileFormat = "tsv";
+      else fileFormat = "csv";
+    }
+    return {
+      filePath,
+      fileFormat,
+      primaryKeyColumn: (row.primary_key_column as string | null) ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function stripFoundryTags(filePath: string): string {
+  const idx = filePath.indexOf("#foundry-dataset:");
+  return idx >= 0 ? filePath.slice(0, idx) : filePath;
+}
+
+/**
+ * Pull the `<uuid>` out of `#foundry-dataset:<uuid>` for use as
+ * `source_transaction_id` (column type `uuid`, NOT free-form text).
+ * Returns `null` when the tag is absent — the caller falls back to
+ * `ZERO_UUID` so the insert still satisfies the column type.
+ */
+function extractFoundryDatasetUuid(filePath: string): string | null {
+  const m = filePath.match(/#foundry-dataset:([0-9a-f-]{36})/i);
+  return m ? m[1] : null;
+}
+
+async function buildFoundryBridgedReader(
+  ds: FoundryBridgedDatasource
+): Promise<SnapshotDiffReader> {
+  const s3Key = stripFoundryTags(ds.filePath);
+  if (!s3Key) {
+    // Defensive: a `#foundry-dataset:` tag with no preceding key is corrupt.
+    // Treat as "no source" so the changelog stage emits zero rows instead of
+    // throwing — the projection activity will surface this as an empty run.
+    return { async *read() { /* no rows */ } };
+  }
+  const buffer = await getObjectBuffer(s3Key);
+  let content = buffer.toString("utf-8");
+  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
+
+  // Parse once, eagerly, so we don't keep the MinIO buffer alive during
+  // the (potentially long) stream-yield. The reader yields synchronously
+  // from an in-memory array; for >100k-row datasources we should swap
+  // this for a streaming parser, but the foundry CSV upload path already
+  // caps at the multer max (50 MiB) so the eager path is bounded.
+  const rows = await parseFoundryRows(content, ds.fileFormat, ds.filePath);
+  const pkCol = ds.primaryKeyColumn ?? "primary_key";
+  // `source_transaction_id` lands in `object_instances.source_transaction_id`
+  // which is a `uuid` column — passing a path-string here trips
+  // PG error 22P02 ("invalid input syntax for type uuid"). Extract the
+  // stable `foundry-dataset:<uuid>` tag baked into the synthetic file path
+  // by `datasetDatasourceService.registerWithFoundryDataset` and use that
+  // as the transaction id. The tag is invariant across runs of the same
+  // file so the funnel's idempotency keys collapse correctly.
+  const txnId = extractFoundryDatasetUuid(ds.filePath) ?? ZERO_UUID;
+  const ts = new Date().toISOString();
+
+  // The funnel's `computeChangelog` rejects duplicate primary keys within
+  // a single source transaction (see `seenInTxn` in changelogStage.ts).
+  // De-dupe with last-wins semantics — matches the SNAPSHOT transaction
+  // behaviour of `reindexService.ts` and avoids a "duplicate primary key"
+  // error that would otherwise abort the entire funnel run on dirty CSVs.
+  const dedup = new Map<string, SourceChangeRow>();
+  for (const row of rows) {
+    const pk = row[pkCol];
+    if (pk == null || pk === "") continue; // skip null-PK rows, mirror reindexService
+    const key = String(pk);
+    dedup.set(key, {
+      primary_key: key,
+      operation: "INSERT",
+      properties: row,
+      source_transaction_id: txnId,
+      source_commit_timestamp: ts,
+    });
+  }
+  const out = Array.from(dedup.values());
+  return {
+    async *read() {
+      for (const r of out) yield r;
+    },
+  };
+}
+
+async function parseFoundryRows(
+  content: string,
+  format: string,
+  rawFilePath: string,
+): Promise<Record<string, unknown>[]> {
+  if (format === "csv" || format === "tsv") {
+    const { parse } = await import("csv-parse/sync");
+    const { sanitizeCsvHeader } = await import("../../../utils/csvHeader");
+    const records: Record<string, string>[] = parse(content, {
+      columns: (h: string[]) => sanitizeCsvHeader(h, { source: rawFilePath }),
+      skip_empty_lines: true,
+      relax_column_count: true,
+      trim: true,
+      delimiter: format === "tsv" ? "\t" : ",",
+    });
+    for (const record of records) {
+      for (const key of Object.keys(record)) {
+        const v = (record as Record<string, unknown>)[key];
+        if (typeof v === "string") {
+          const n = v.trim().toLowerCase();
+          if (n === "" || n === "null" || n === "na" || n === "n/a") {
+            (record as Record<string, unknown>)[key] = null;
+          }
+        }
+      }
+    }
+    return records;
+  }
+  if (format === "json" || format === "jsonl") {
+    const trimmed = content.trim();
+    if (trimmed.startsWith("[")) {
+      return JSON.parse(trimmed) as Record<string, unknown>[];
+    }
+    return trimmed
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+  throw new Error(`Unsupported foundry-bridge file format: '${format}'`);
+}
+
+// ---------------------------------------------------------------------------
+// projectFunnelTerminalActivity
+//
+// Final stage of the Temporal pipeline: write the run's terminal status
+// back into `funnel_state` so the UI badge flips from "Indexing" to
+// "Indexed" / "Failed" and the object count surfaces in the OT overview.
+//
+// Before this activity existed the workflow only updated `funnel_run` +
+// `funnel_pipeline_state` — `funnel_state.status` was left at whatever the
+// dispatcher's `pre_temporal` hand-off set it to (always 'indexing'),
+// which is why object types appeared stuck on "Indexing" indefinitely
+// after the pipeline completed successfully. See `funnelStateProjection.ts`
+// for the shared SQL + WebSocket emission shared with the PG dispatcher.
+// ---------------------------------------------------------------------------
+
+export async function projectFunnelTerminalActivity(input: {
+  ontologyId: string;
+  objectTypeApiName: string;
+  status: FunnelStateStatus;
+  objectsIndexed?: number;
+  errorMessage?: string;
+}): Promise<void> {
+  await projectFunnelTerminalToState(
+    input.ontologyId,
+    input.objectTypeApiName,
+    input.status,
+    {
+      objectsIndexed: input.objectsIndexed,
+      errorMessage: input.errorMessage,
+      path: "post",
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// syncOpenSearchActivity
+//
+// Pushes every `object_instances` row for the Object Type into the
+// canonical OpenSearch index that the FE search panel reads from. This
+// closes the gap where the Temporal pipeline only wrote Postgres +
+// Quickwit splits, leaving `ontology-<apiname>` non-existent in
+// OpenSearch — so the right-rail "CURRENT VALUE" card showed
+// "500 objects pending index | Rows exist but aren't searchable yet"
+// even though `funnel_state.status='indexed'` and `objects_indexed=500`.
+//
+// Runs immediately after `runMergeActivity` so OpenSearch reflects the
+// freshly-merged truth before Quickwit indexing / hydration kick in.
+// Retry-safe: index is created on demand, bulkIndex uses the "index"
+// action keyed by `__pk` (insert-or-replace).
+// ---------------------------------------------------------------------------
+
+export async function syncOpenSearchActivity(input: {
+  ontologyId: string;
+  objectTypeApiName: string;
+}): Promise<{
+  indexName: string;
+  indexCreated: boolean;
+  rowsRead: number;
+  rowsIndexed: number;
+  durationMs: number;
+}> {
+  // Lazy import so the worker's bundle doesn't pull the opensearch
+  // client during cold-start unless this activity actually runs.
+  const { syncObjectInstancesToOpenSearch } = await import(
+    "../../opensearch/syncFromInstances"
+  );
+  return syncObjectInstancesToOpenSearch(input.objectTypeApiName);
 }

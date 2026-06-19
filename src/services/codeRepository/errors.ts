@@ -106,6 +106,112 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 429,
     errorCode: ERROR_CODES.RESOURCE_EXHAUSTED,
   },
+  // -------------------------------------------------------------------------
+  // F4 commit-route error names (B2-C-12 commit endpoint).
+  //
+  // StaleRefHead — the client's `If-Match: <parentSha>` does not equal the
+  // branch's current HEAD (per F4 spec line 957: "parentSha must equal
+  // current HEAD"). 412 mirrors the rest of the optimistic-concurrency
+  // family. The errorName is distinguishable so the IDE can route to F4's
+  // "rebase prompt" UX rather than the generic settings-mismatch flow.
+  //
+  // EmptyChangeSet — POST /commits with `fileChanges: []`. 400 because the
+  // request is shape-valid but semantically meaningless; we refuse rather
+  // than silently fast-forward an empty commit (which would just rotate
+  // the SHA without changing tree state — confusing for both users and
+  // downstream branch-cache consumers).
+  //
+  // CommitFailed — Stemma adapter returned `transient`. 502 because the
+  // failure is upstream of the route; bucketing it apart from 500 lets
+  // dashboards distinguish adapter-induced failures from in-process bugs.
+  // -------------------------------------------------------------------------
+  "CodeRepos:StaleRefHead": {
+    status: 412,
+    errorCode: ERROR_CODES.FAILED_PRECONDITION,
+  },
+  "CodeRepos:EmptyChangeSet": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  "CodeRepos:CommitFailed": {
+    status: 502,
+    errorCode: ERROR_CODES.INTERNAL,
+  },
+  // -------------------------------------------------------------------------
+  // B4 resource-imports route names (B4-C-10/11).
+  //
+  // InvalidImportsBody — PUT body is shape-valid JSON but fails semantic
+  // validation (duplicate (kind, apiName), missing ontologyId, item count
+  // beyond MAX_IMPORTS, etc.). 400 INVALID_ARGUMENT.
+  //
+  // StaleImportsState — If-Match ETag does not equal the current
+  // content-derived ETag for the repository's import set. 412.
+  // -------------------------------------------------------------------------
+  "CodeRepos:InvalidImportsBody": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  "CodeRepos:StaleImportsState": {
+    status: 412,
+    errorCode: ERROR_CODES.FAILED_PRECONDITION,
+  },
+  // -------------------------------------------------------------------------
+  // Function invoke (working-tree live-preview) error names. Backstop the
+  // Live Preview tab in F7 / FunctionBrowser. B9 Live Preview Execution
+  // Service is still BLOCKED; this set covers the sandboxed working-tree
+  // executor we run inside the admin process today.
+  //
+  // FunctionNotFound — :apiName does not resolve to a working-tree source
+  // file on the requested branch. 404 keeps it distinguishable from
+  // BranchNotFound (the branch exists but has no function with that name).
+  //
+  // RuntimeNotSupported — file extension we cannot execute in the sandbox
+  // (e.g. `.py` requires a Python runtime we do not host). 400 because the
+  // client picked an executable; we surface the constraint rather than
+  // silently no-op.
+  //
+  // FunctionCompileError — TS transpile or sandbox compile threw. 422
+  // because the request is well-formed but the user's source code is not.
+  //
+  // FunctionRuntimeError — sandboxed invocation returned status="error".
+  // The user's function threw at runtime; surface the error message and
+  // logs so the IDE can render them.
+  //
+  // FunctionTimeout — sandboxed invocation exceeded `FUNCTION_TIMEOUT_MS`.
+  // 504 because we want dashboards to alert separately from runtime errors.
+  // -------------------------------------------------------------------------
+  "CodeRepos:FunctionNotFound": {
+    status: 404,
+    errorCode: ERROR_CODES.NOT_FOUND,
+  },
+  "CodeRepos:RuntimeNotSupported": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  "CodeRepos:FunctionCompileError": {
+    status: 422,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  "CodeRepos:FunctionRuntimeError": {
+    status: 422,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  "CodeRepos:FunctionTimeout": {
+    status: 504,
+    errorCode: ERROR_CODES.INTERNAL,
+  },
+  // -------------------------------------------------------------------------
+  // InvalidArgumentBody — body.args is present but not a plain object.
+  // The invoke contract is `{apiName, branch?, args?}` and `args` must be a
+  // JSON-shaped object. A scalar or null surfaces as 422 (semantically:
+  // body parsed fine but a field is logically invalid) so the IDE can tell
+  // the user what's wrong with their input, instead of bubbling a sandbox
+  // runtime error from `JSON.stringify(42)` later in the pipeline.
+  // -------------------------------------------------------------------------
+  "CodeRepos:InvalidArgumentBody": {
+    status: 422,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
 });
 
 export type CodeReposErrorName = keyof typeof CODE_REPOS_ERROR_STATUS;
@@ -155,6 +261,10 @@ export function isCodeReposErrorName(s: string): s is CodeReposErrorName {
  *   - 4 cross-cutting (G-C-08/09/13)
  *   - 6 read-path B2-C-10/11 (InvalidPath, InvalidDepth, BranchNotFound,
  *     FileNotFound, InvalidPathType, RateLimited)
+ *   - 3 commit-route B2-C-12 (StaleRefHead, EmptyChangeSet, CommitFailed)
+ *   - 2 imports-route B4-C-10/11 (InvalidImportsBody, StaleImportsState)
+ *   - 5 function-invoke (FunctionNotFound, RuntimeNotSupported,
+ *     FunctionCompileError, FunctionRuntimeError, FunctionTimeout)
  * Useful for `it.each(...)` test patterns.
  */
 export const CODE_REPOS_ERROR_NAMES: readonly CodeReposErrorName[] =

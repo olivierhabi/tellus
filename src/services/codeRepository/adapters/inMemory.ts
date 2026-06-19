@@ -16,6 +16,8 @@ import type {
   CompassReserveArgs,
   CompassReserveOutcome,
   StemmaAdapter,
+  StemmaCommitFilesArgs,
+  StemmaCommitFilesOutcome,
   StemmaCreateArgs,
   StemmaCreateOutcome,
   StemmaListTreeArgs,
@@ -28,6 +30,7 @@ import type {
   TemplateScaffoldOutcome,
 } from "./types";
 import { projectTree, synthesizeTree } from "../stemma/treeFilter";
+import { getTemplateManifest } from "../../templates/manifest";
 
 // ---------------------------------------------------------------------------
 // In-memory Compass adapter.
@@ -103,8 +106,8 @@ export class InMemoryCompass implements CompassAdapter {
 export interface InMemoryStemmaConfig {
   readonly forceOutcome?: StemmaCreateOutcome;
   readonly tombstoneShouldThrow?: boolean;
-  /** When false, suppresses auto-seed of the default-branch scaffold. */
-  readonly autoSeedDefaultTree?: boolean;
+  /** When set, all `commitFiles()` calls return this outcome instead. */
+  readonly forceCommitOutcome?: StemmaCommitFilesOutcome;
 }
 
 /** A test seed: one branch's worth of files. */
@@ -144,15 +147,104 @@ export class InMemoryStemma implements StemmaAdapter {
   ): Promise<StemmaCreateOutcome> {
     if (this.cfg.forceOutcome) return this.cfg.forceOutcome;
     this.repos.add(args.proposedRid);
-    if (this.cfg.autoSeedDefaultTree !== false) {
-      this.seedBranch(args.proposedRid, args.defaultBranchName, {
-        headCommitSha: deterministicSha(
+    // Initialize an empty bare repo: the branch record exists with no
+    // files. The saga's step 3 (template.scaffoldAndPush) is responsible
+    // for committing the template's file list. Tests that need a
+    // pre-seeded branch use `seedBranch(...)` directly.
+    let r = this.branches.get(args.proposedRid);
+    if (!r) {
+      r = new Map();
+      this.branches.set(args.proposedRid, r);
+    }
+    if (!r.has(args.defaultBranchName)) {
+      r.set(args.defaultBranchName, {
+        head: deterministicSha(
           `${args.proposedRid}:${args.defaultBranchName}:initial`,
         ),
-        files: DEFAULT_SCAFFOLD,
+        files: new Map(),
       });
     }
     return { kind: "ok", repositoryRid: args.proposedRid };
+  }
+
+  async commitFiles(
+    args: StemmaCommitFilesArgs,
+  ): Promise<StemmaCommitFilesOutcome> {
+    if (this.cfg.forceCommitOutcome) return this.cfg.forceCommitOutcome;
+    if (this.tombstoned.has(args.repositoryRid)) {
+      return { kind: "branch-not-found" };
+    }
+    let repo = this.branches.get(args.repositoryRid);
+    if (!repo) {
+      // The saga normally calls createRepository first, which initializes
+      // the branch record. If a caller commits without doing so, treat it
+      // as branch-not-found rather than silently auto-creating — keeps the
+      // contract honest about adapter ordering.
+      if (!this.repos.has(args.repositoryRid)) {
+        return { kind: "branch-not-found" };
+      }
+      repo = new Map();
+      this.branches.set(args.repositoryRid, repo);
+    }
+    let branch = repo.get(args.branch);
+    if (!branch) {
+      return { kind: "branch-not-found" };
+    }
+
+    // F4 spec line 957: "parentSha must equal current HEAD". Reject with
+    // stale-ref before any mutation if the optimistic-concurrency fence
+    // is set and mismatched. Real-Stemma deployments enforce this via
+    // JGit's RefUpdate#setExpectedOldObjectId so the check is atomic with
+    // the ref write — in-memory we just compare under the JS event loop's
+    // implicit serialization (single-threaded).
+    if (args.parentSha !== undefined && args.parentSha !== branch.head) {
+      return {
+        kind: "stale-ref",
+        expectedSha: args.parentSha,
+        currentHead: branch.head,
+      };
+    }
+
+    // Adapter contract guard: a commit cannot both upsert and delete the
+    // same path. Catching it here keeps the in-memory and real-Stemma
+    // implementations from diverging on degenerate input.
+    const upsertPaths = new Set(args.files.map((f) => f.path));
+    const deletes = args.deletePaths ?? [];
+    for (const d of deletes) {
+      if (upsertPaths.has(d)) {
+        return {
+          kind: "transient",
+          reason: `delete-overlaps-upsert:${d}`,
+        };
+      }
+    }
+
+    let totalBytes = 0;
+    const files = new Map<string, BlobRecord>(branch.files);
+    for (const f of args.files) {
+      files.set(f.path, {
+        sha: blobSha(f.content),
+        mode: f.mode,
+        content: f.content,
+      });
+      totalBytes += f.content.byteLength;
+    }
+    // Deletes after upserts (the overlap check above means order doesn't
+    // affect outcome, but this matches the Map mutation order most readers
+    // expect when stepping through in a debugger).
+    for (const d of deletes) {
+      files.delete(d);
+    }
+    const head = deterministicSha(
+      `${args.repositoryRid}:${args.branch}:${args.message}:${[...files.keys()].sort().join(":")}`,
+    );
+    repo.set(args.branch, { head, files });
+    return {
+      kind: "ok",
+      commitSha: head,
+      fileCount: args.files.length + deletes.length,
+      totalBytes,
+    };
   }
 
   async tombstone(args: { repositoryRid: string }): Promise<void> {
@@ -260,49 +352,6 @@ export class InMemoryStemma implements StemmaAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// Default scaffold seeded by createRepository — mirrors the shape of
-// the typescript-functions template (B3) so the file-viewer demo (F2-C-03)
-// has something meaningful to render before B3's real scaffold lands on
-// the read path.
-// ---------------------------------------------------------------------------
-
-const DEFAULT_SCAFFOLD: ReadonlyArray<SeedFile> = Object.freeze([
-  {
-    path: "README.md",
-    content:
-      "# tellus repository\n\nScaffolded by the typescript-functions template.\n\n## Quick start\n\n```\nnpm install\nnpm run dev\n```\n",
-  },
-  {
-    path: "package.json",
-    content: JSON.stringify(
-      {
-        name: "tellus-repo",
-        version: "0.0.1",
-        scripts: { dev: "tsc --watch", build: "tsc -p ." },
-      },
-      null,
-      2,
-    ),
-  },
-  { path: "LICENSE", content: "Apache License 2.0\n" },
-  {
-    path: "src/index.ts",
-    content:
-      "export { calculateDaysSalesOutstanding } from './functions/calculateDaysSalesOutstanding';\n",
-  },
-  {
-    path: "src/functions/calculateDaysSalesOutstanding.ts",
-    content:
-      "// @Function decorator placeholder — wired by B8 Functions Registry.\nexport function calculateDaysSalesOutstanding(): number {\n  return 40.51;\n}\n",
-  },
-  {
-    path: "src/functions/index.ts",
-    content:
-      "export * from './calculateDaysSalesOutstanding';\n",
-  },
-]);
-
-// ---------------------------------------------------------------------------
 // Hash helpers — git-shaped (40 hex) so frontend code that displays the
 // SHA renders sensibly. Not git-format-compatible; the in-memory adapter
 // has no need to be byte-for-byte identical with git's blob hashing.
@@ -340,6 +389,13 @@ export interface InMemoryTemplateConfig {
   readonly forceOutcome?: TemplateScaffoldOutcome;
   /** Map of templateId → known set; reserve returns NOT_FOUND for missing. */
   readonly knownTemplates?: ReadonlySet<string>;
+  /**
+   * When set, scaffoldAndPush actually materializes the manifest's files
+   * by calling `stemma.commitFiles(...)`. When unset, the adapter falls
+   * back to a synthesized OK outcome (legacy behavior — used by tests
+   * that only need the saga to succeed and don't care about file content).
+   */
+  readonly stemma?: StemmaAdapter;
 }
 
 export class InMemoryTemplate implements TemplateAdapter {
@@ -369,6 +425,79 @@ export class InMemoryTemplate implements TemplateAdapter {
         version: args.templateVersion,
       };
     }
+
+    // ------------------------------------------------------------------
+    // Wired path: read the B3 manifest, substitute parameters across all
+    // file paths and content, and call stemma.commitFiles to materialize
+    // the scaffold. This is what produces the file tree the file viewer
+    // sees on a freshly-created repo.
+    // ------------------------------------------------------------------
+    if (this.cfg.stemma) {
+      const manifest = getTemplateManifest(args.templateId, args.templateVersion);
+      if (!manifest) {
+        return {
+          kind: "template-not-found",
+          templateId: args.templateId,
+          version: args.templateVersion,
+        };
+      }
+      const params = mergeWithDefaults(args.parameters, manifest);
+      let materialized: ReadonlyArray<{
+        path: string;
+        content: Uint8Array;
+        mode: "100644" | "100755";
+      }>;
+      try {
+        materialized = manifest.files.map((f) => {
+          const path = applyTemplate(f.path, params);
+          // Substitute UTF-8 file content; binary files (base64 in the
+          // manifest) get decoded as-is without substitution to keep
+          // bytes intact.
+          const content = f.isBinary
+            ? Buffer.from(f.content, "base64")
+            : Buffer.from(applyTemplate(f.content, params), "utf8");
+          return {
+            path,
+            content: new Uint8Array(content),
+            mode: f.mode,
+          };
+        });
+      } catch (err) {
+        return {
+          kind: "init-failed",
+          reason: `parameter-substitution-failed: ${(err as Error).message}`,
+        };
+      }
+      const out = await this.cfg.stemma.commitFiles({
+        repositoryRid: args.repositoryRid,
+        branch: args.targetBranch,
+        files: materialized,
+        message: `Initial commit from template ${args.templateId}@${args.templateVersion}`,
+        principalSub: args.principalSub,
+      });
+      if (out.kind !== "ok") {
+        return {
+          kind: "init-failed",
+          reason:
+            out.kind === "branch-not-found"
+              ? "branch-not-found-on-stemma"
+              : `stemma-${out.kind}`,
+        };
+      }
+      this.scaffolds.set(args.repositoryRid, { commitSha: out.commitSha });
+      return {
+        kind: "ok",
+        commitSha: out.commitSha,
+        fileCount: out.fileCount,
+        totalBytes: out.totalBytes,
+      };
+    }
+
+    // ------------------------------------------------------------------
+    // Legacy fallback (no stemma wired): preserve the previous fake-commit
+    // outcome so existing unit tests that don't care about file content
+    // continue to work without setup churn.
+    // ------------------------------------------------------------------
     const commitSha = generateFakeSha(args.repositoryRid + args.templateId);
     this.scaffolds.set(args.repositoryRid, { commitSha });
     return {
@@ -382,6 +511,40 @@ export class InMemoryTemplate implements TemplateAdapter {
   scaffoldedFor(rid: string): string | undefined {
     return this.scaffolds.get(rid)?.commitSha;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Template parameter substitution helpers.
+//
+// `{{name}}` placeholders in path or UTF-8 content. Missing required
+// parameters (no default in manifest, not provided by caller) throw — the
+// scaffolder converts that into an `init-failed` outcome upstream.
+// ---------------------------------------------------------------------------
+
+function mergeWithDefaults(
+  provided: Readonly<Record<string, string>>,
+  manifest: { parameters: ReadonlyArray<{ name: string; default?: string }> },
+): Record<string, string> {
+  const out: Record<string, string> = { ...provided };
+  for (const p of manifest.parameters) {
+    if (out[p.name] === undefined && p.default !== undefined) {
+      out[p.name] = p.default;
+    }
+  }
+  return out;
+}
+
+function applyTemplate(
+  source: string,
+  params: Readonly<Record<string, string>>,
+): string {
+  return source.replace(/\{\{(\w+)\}\}/g, (_match, name) => {
+    const v = params[name];
+    if (v === undefined) {
+      throw new Error(`missing template parameter: ${name}`);
+    }
+    return v;
+  });
 }
 
 // ---------------------------------------------------------------------------

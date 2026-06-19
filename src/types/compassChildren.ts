@@ -52,6 +52,10 @@ const DatasetChild = BaseChild.extend({
   status: z.enum(["pending", "processing", "ready", "error"]),
   rowCount: z.number().int().nonnegative().nullable(),
   fileSize: z.number().int().nonnegative().nullable(),
+  // Backend-authoritative formatted size string (e.g. "88 KB", "1.5 MB", "0 B").
+  // The frontend renders this verbatim — single source of truth for human-readable
+  // file sizes, so FE never has to coerce BIGINT-as-string from node-postgres.
+  fileSizeFormatted: z.string(),
   format: z.string().nullable(),
 });
 

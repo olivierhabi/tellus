@@ -66,9 +66,14 @@ export function indexIdForVersion(objectTypeApiName: string, version: number): s
 export async function getOrCreateActiveVersion(
   objectTypeApiName: string
 ): Promise<ActiveIndexRecord> {
+  // `target_api_name` is NOT NULL with no default — it's the
+  // polymorphic discriminator the replacement subsystem uses to
+  // address link-type targets later. For a plain object-type row it
+  // equals `object_type_api_name`. Omitting it tripped a NOT NULL
+  // constraint and silently bricked the replacement scheduler.
   await query(
-    `INSERT INTO object_type_active_index_version (object_type_api_name)
-     VALUES ($1)
+    `INSERT INTO object_type_active_index_version (object_type_api_name, target_api_name)
+     VALUES ($1, $1)
      ON CONFLICT (object_type_api_name) DO NOTHING`,
     [objectTypeApiName]
   );
@@ -131,13 +136,34 @@ export async function beginReplacementBackfill(
     throw new Error(`soakDays must be between 1 and 14 (got ${soakDays})`);
   }
   return withTransaction(async (client) => {
+    // Bootstrap the LIVE row up-front so `selectForUpdate` is guaranteed
+    // to return a record on the very first invocation. Without this the
+    // replacement scheduler's auto-trigger crashes with
+    // `Cannot read properties of undefined (reading 'object_type_api_name')`
+    // for every wizard-created OT that hasn't already been promoted to
+    // a versioned index (which is most of them).
+    await client.query(
+      `INSERT INTO object_type_active_index_version (object_type_api_name, target_api_name)
+       VALUES ($1, $1)
+       ON CONFLICT (object_type_api_name) DO NOTHING`,
+      [objectTypeApiName]
+    );
     const current = await selectForUpdate(client, objectTypeApiName);
-    if (current && current.state !== "LIVE") {
+    if (!current) {
+      // Should be unreachable — the INSERT above guarantees a row exists
+      // and the SELECT is within the same transaction — but we surface
+      // a typed error rather than tripping the same undefined-property
+      // crash if something has gone deeply wrong (e.g. table dropped).
+      throw new Error(
+        `beginReplacementBackfill: failed to materialize active-version row for '${objectTypeApiName}'`
+      );
+    }
+    if (current.state !== "LIVE") {
       throw new Error(
         `Cannot begin replacement: object type '${objectTypeApiName}' is in state '${current.state}'`
       );
     }
-    const nextVersion = (current?.activeVersion ?? 1) + 1;
+    const nextVersion = current.activeVersion + 1;
     const res = await client.query(
       `UPDATE object_type_active_index_version
           SET pending_version       = $2,
@@ -150,6 +176,11 @@ export async function beginReplacementBackfill(
         RETURNING *`,
       [objectTypeApiName, nextVersion, soakDays]
     );
+    if (!res.rows[0]) {
+      throw new Error(
+        `beginReplacementBackfill: UPDATE matched 0 rows for '${objectTypeApiName}' — concurrent state change?`
+      );
+    }
     return { newVersion: nextVersion, record: rowToRecord(res.rows[0]) };
   });
 }

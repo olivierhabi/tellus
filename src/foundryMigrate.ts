@@ -964,12 +964,14 @@ async function migrateFoundry(): Promise<void> {
     }
 
     // -----------------------------------------------------------------------
-    // B3: idempotency_keys table — Filesystem v2 Idempotency-Key store.
-    // Contracts: tasks/files-projects/contracts.md (B3-C-30..33).
+    // idempotency_keys — Idempotency-Key replay cache.
     //
-    // Stores the (status, response_body, request_hash) for state-allocating
-    // POST endpoints under /api/v2/filesystem so that replays within 24h
-    // return the cached response with `Idempotent-Replay: true`.
+    // Stores the (status_code, response_body, response_etag, request_hash)
+    // tuple for state-allocating POST endpoints (e.g. the ontology
+    // save-to-ontology commit) so that retries within 24h return the
+    // cached response with `Idempotent-Replay: true`. Lookups already
+    // filter `expires_at > now()`, so a missing TTL sweep job is a space
+    // hazard, not a correctness one.
     // -----------------------------------------------------------------------
     await client.query(`
       CREATE TABLE IF NOT EXISTS idempotency_keys (

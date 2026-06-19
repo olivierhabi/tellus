@@ -48,7 +48,6 @@ x-temporal-base: &temporal-base
       max-size: "50m"
       max-file: "5"
   networks:
-    - temporal-internal
     - default
 
 x-temporal-env: &temporal-env
@@ -70,10 +69,18 @@ x-temporal-env: &temporal-env
   # Server-side config lives in a mounted file; we keep the env schema
   # narrow so the templating image generates a deterministic config.
   #
-  # We intentionally DO NOT set TEMPORAL_BROADCAST_ADDRESS here — Temporal
-  # auto-detects the container's routable address on the `default` bridge
-  # network. Setting it to 0.0.0.0 broke ringpop membership (peers
-  # resolved back to 0.0.0.0 and the join always timed out).
+  # Temporal binds gRPC to a single routable IP (not 0.0.0.0) because
+  # ringpop's broadcast/advertise address must be a real address, not a
+  # wildcard — the server refuses to start otherwise. Therefore every
+  # temporal-* container MUST be single-homed: only the `default`
+  # network. The previous `temporal-internal` plane was a hardening
+  # nicety, but it caused dual-homing and the entrypoint's NIC
+  # auto-detection picked the WRONG interface (the role-only one), so
+  # application clients on `default` got connection-refused.
+  #
+  # If you reintroduce role-to-role isolation later, set both
+  # BIND_ON_IP and TEMPORAL_BROADCAST_ADDRESS to the routable IP on
+  # whichever network you want exposed — never to 0.0.0.0.
   NUM_HISTORY_SHARDS: ${TEMPORAL_NUM_HISTORY_SHARDS:-512}
   LOG_LEVEL: info
   LOG_FORMAT: json
@@ -324,7 +331,7 @@ services:
     # so read_only=true prevents startup. Drop the flag; keep the rest of
     # the hardening.
     logging: { driver: json-file, options: { max-size: "20m", max-file: "3" } }
-    networks: [temporal-internal, default]
+    networks: [default]
 
   # -------------------------------------------------------------------------
   # One-shot: create the `tellus-funnel` namespace with 30-day retention.
@@ -351,15 +358,10 @@ services:
           --description 'Object Data Funnel workflows (B3)' 2>&1 \
           | { grep -v 'already exists' || true; }
         echo 'Temporal namespace tellus-funnel ready'
-    networks: [temporal-internal, default]
+    networks: [default]
     logging: { driver: json-file, options: { max-size: "10m", max-file: "2" } }
     security_opt: [no-new-privileges:true]
 
-networks:
-  # Internal gRPC plane — role-to-role traffic only. The external `default`
-  # network is how frontend reaches Postgres/OpenSearch and how the UI
-  # reaches the frontend.
-  temporal-internal:
-    driver: bridge
-    internal: false
-    name: tellus-temporal-internal
+# All temporal-* services share `default` with the rest of the tellus
+# stack (postgres / opensearch / minio / the application). No private
+# plane — see x-temporal-env note.

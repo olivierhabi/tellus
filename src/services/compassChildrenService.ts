@@ -22,6 +22,7 @@
 // `partialErrors[]` in the response so the UI can warn the user.
 // ---------------------------------------------------------------------------
 import { pool } from "../db";
+import { formatFileSize } from "./foundryUploadService";
 import {
   ResourceChild,
   ChildrenResponse,
@@ -185,6 +186,12 @@ async function queryDatasets(a: QueryArgs): Promise<ResourceChild[]> {
       : "ready",
     rowCount: r.row_count_exact ? Number(r.row_count_exact) : (r.row_count ? Number(r.row_count) : null),
     fileSize: r.file_size_bytes ? Number(r.file_size_bytes) : null,
+    // Server-authoritative size string. The formatter accepts the
+    // BIGINT-as-string shape that node-postgres returns, so we don't
+    // need to coerce here — the canonical implementation in
+    // foundryUploadService.formatFileSize handles every realistic
+    // input (number | string | bigint | null | undefined).
+    fileSizeFormatted: formatFileSize(r.file_size_bytes),
     format: r.format ?? null,
   }));
 }

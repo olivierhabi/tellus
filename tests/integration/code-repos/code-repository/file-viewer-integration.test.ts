@@ -70,7 +70,11 @@ function withAuth(req: request.Test): request.Test {
 beforeEach(() => {
   compass = new InMemoryCompass();
   stemma = new InMemoryStemma();
-  template = new InMemoryTemplate();
+  // Wire stemma into the template so scaffoldAndPush actually materializes
+  // the B3 manifest's file list (the fix that replaced DEFAULT_SCAFFOLD).
+  // Without this the legacy fake-commit fallback fires and the tree
+  // would be empty.
+  template = new InMemoryTemplate({ stemma });
   app = createCodeRepositoryApp({
     pool: schema.pool,
     compass,
@@ -103,7 +107,7 @@ async function createRepo(displayName: string): Promise<string> {
 // ---------------------------------------------------------------------------
 
 describe("B2-C-10 GET /:rid/branches/:branch/tree", () => {
-  it("returns the seeded tree at root depth=1", async () => {
+  it("returns the seeded tree at root depth=1 (v2 typescript-functions scaffold)", async () => {
     const rid = await createRepo("Happy");
     const r = await withAuth(
       request(app).get(
@@ -115,13 +119,18 @@ describe("B2-C-10 GET /:rid/branches/:branch/tree", () => {
     expect(r.body.commitSha).toMatch(/^[0-9a-f]{40}$/);
     expect(r.body.truncated).toBe(false);
     const paths = (r.body.entries as Array<{ path: string }>).map((e) => e.path);
-    expect(paths).toContain("README.md");
-    expect(paths).toContain("src");
-    expect(paths).not.toContain("src/index.ts");
+    // v2 scaffold root: gradle wrapper metadata, repoSettings,
+    // and the `typescript-functions/` language subproject directory.
+    expect(paths).toContain("templateConfig.json");
+    expect(paths).toContain("repoSettings.json");
+    expect(paths).toContain("typescript-functions");
+    // `src/` no longer lives at root in v2 — it's inside the subproject.
+    expect(paths).not.toContain("src");
+    expect(paths).not.toContain("typescript-functions/package.json");
     expect(r.headers.etag).toMatch(/^"[0-9a-f]{40}"$/);
   });
 
-  it("depth=2 reaches one level deeper", async () => {
+  it("depth=2 reaches one level into the typescript-functions/ subproject", async () => {
     const rid = await createRepo("Depth2");
     const r = await withAuth(
       request(app).get(
@@ -130,22 +139,26 @@ describe("B2-C-10 GET /:rid/branches/:branch/tree", () => {
     );
     expect(r.status).toBe(200);
     const paths = (r.body.entries as Array<{ path: string }>).map((e) => e.path);
-    expect(paths).toContain("src/index.ts");
-    expect(paths).toContain("src/functions");
-    expect(paths).not.toContain("src/functions/dso.ts");
+    expect(paths).toContain("typescript-functions/package.json");
+    expect(paths).toContain("typescript-functions/src");
+    expect(paths).toContain("typescript-functions/test");
+    expect(paths).toContain("gradle/wrapper");
+    // depth=2 stops short of the leaf function file (depth=3).
+    expect(paths).not.toContain("typescript-functions/src/functions/helloWorld.ts");
   });
 
   it("path query scopes to a subtree", async () => {
     const rid = await createRepo("Sub");
     const r = await withAuth(
       request(app).get(
-        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/tree?path=src`,
+        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/tree?path=typescript-functions`,
       ),
     );
     expect(r.status).toBe(200);
     const paths = (r.body.entries as Array<{ path: string }>).map((e) => e.path);
+    expect(paths.length).toBeGreaterThan(0);
     for (const p of paths) {
-      expect(p.startsWith("src")).toBe(true);
+      expect(p.startsWith("typescript-functions")).toBe(true);
     }
   });
 
@@ -249,19 +262,24 @@ describe("B2-C-10 GET /:rid/branches/:branch/tree", () => {
 // ---------------------------------------------------------------------------
 
 describe("B2-C-11 GET /:rid/branches/:branch/files", () => {
-  it("returns README.md as utf-8", async () => {
-    const rid = await createRepo("ReadMe");
+  it("returns typescript-functions/package.json as utf-8", async () => {
+    const rid = await createRepo("PkgJson");
     const r = await withAuth(
       request(app).get(
-        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=README.md`,
+        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=typescript-functions/package.json`,
       ),
     );
     expect(r.status).toBe(200);
     expect(r.body.encoding).toBe("utf-8");
     expect(r.body.isBinary).toBe(false);
     expect(r.body.truncated).toBe(false);
-    expect(r.body.mimeType).toBe("text/markdown");
-    expect(r.body.content).toMatch(/tellus repository/);
+    expect(r.body.mimeType).toBe("application/json");
+    // v2 scaffold's package.json interpolates `{{packageName}}` (slugified
+    // from the displayName "PkgJson" → "pkgjson") in the `name` field.
+    expect(r.body.content).toMatch(/"name":\s*"pkgjson"/);
+    // OSDK v2 deps must be present (Wave 22 contract).
+    expect(r.body.content).toMatch(/@osdk\/functions/);
+    expect(r.body.content).toMatch(/@osdk\/client/);
     expect(r.body.sha).toMatch(/^[0-9a-f]{40}$/);
     expect(r.headers.etag).toMatch(/^"[0-9a-f]{40}"$/);
   });
@@ -270,14 +288,14 @@ describe("B2-C-11 GET /:rid/branches/:branch/files", () => {
     const rid = await createRepo("Etag2");
     const a = await withAuth(
       request(app).get(
-        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=README.md`,
+        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=templateConfig.json`,
       ),
     );
     expect(a.status).toBe(200);
     const b = await withAuth(
       request(app)
         .get(
-          `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=README.md`,
+          `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=templateConfig.json`,
         )
         .set("If-None-Match", a.headers.etag),
     );
@@ -292,7 +310,7 @@ describe("B2-C-11 GET /:rid/branches/:branch/files", () => {
       headCommitSha: "0000000000000000000000000000000000000099",
       files: [
         { path: "BIG.txt", content: new Uint8Array(big) },
-        { path: "README.md", content: "ok" },
+        { path: "OK.txt", content: "ok" },
       ],
     });
     const r = await withAuth(
@@ -333,7 +351,7 @@ describe("B2-C-11 GET /:rid/branches/:branch/files", () => {
     const rid = await createRepo("Dir");
     const r = await withAuth(
       request(app).get(
-        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=src`,
+        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=typescript-functions`,
       ),
     );
     expect(r.status).toBe(404);
@@ -382,7 +400,7 @@ describe("B2-C-11 GET /:rid/branches/:branch/files", () => {
     );
     const r = await withAuth(
       request(app).get(
-        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=README.md`,
+        `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=templateConfig.json`,
       ),
     );
     expect(r.status).toBe(200);
@@ -396,7 +414,7 @@ describe("B2-C-11 GET /:rid/branches/:branch/files", () => {
   it("401 Unauthenticated when no test-principal header", async () => {
     const rid = await createRepo("Unauth");
     const r = await request(app).get(
-      `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=README.md`,
+      `/api/v1/code-repositories/${encodeURIComponent(rid)}/branches/main/files?path=templateConfig.json`,
     );
     expect(r.status).toBe(401);
   });

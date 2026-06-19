@@ -57,7 +57,6 @@ x-lakekeeper-base: &lakekeeper-base
       max-size: "50m"
       max-file: "5"
   networks:
-    - lakekeeper-internal
     - default
 
 x-lakekeeper-env: &lakekeeper-env
@@ -207,10 +206,8 @@ services:
   # Run these from your deploy pipeline, not from compose.
   # -------------------------------------------------------------------------
 
-networks:
-  # Internal plane for lakekeeper -> postgres chatter. The `default`
-  # network is how the catalog reaches MinIO and how external clients
-  # (Spark / DuckDB / PyIceberg) reach :8181.
-  lakekeeper-internal:
-    driver: bridge
-    name: tellus-lakekeeper-internal
+# Single-network deployment: lakekeeper shares `default` with postgres /
+# minio / the application. The previous `lakekeeper-internal` plane was
+# redundant since every dependency already lived on `default`, and the
+# dual-home pattern was a footgun for any service that auto-detects a
+# bind address (Temporal hit it; keep this stack consistent).
