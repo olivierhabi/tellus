@@ -72,6 +72,22 @@ export async function headVersion(
   return result.rows[0] ? rowToHead(result.rows[0]) : null;
 }
 
+/**
+ * Find the tenant for a given connection RID by looking up any credential
+ * for that connection. Used by rotation worker to discover the tenant.
+ */
+export async function findTenantByConnectionRid(
+  connectionRid: string,
+): Promise<string | null> {
+  const result = await pool.query<{ tenant: string }>(
+    `SELECT tenant FROM connectivity_credentials
+      WHERE connection_rid = $1
+      LIMIT 1`,
+    [connectionRid],
+  );
+  return result.rows[0]?.tenant ?? null;
+}
+
 export async function insertNewVersion(params: {
   connectionRid: string;
   tenant: string;
