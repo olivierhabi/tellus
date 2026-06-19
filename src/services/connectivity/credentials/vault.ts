@@ -228,8 +228,15 @@ export async function rewrap(
   connectionRid: string,
   field: string,
 ): Promise<{ version: number }> {
-  // Look up the current row to discover its tenant + actor.
-  const head = await store.headVersion(connectionRid, "default", field as CredentialField);
+  // Look up the current row by RID only to discover its tenant.
+  // The rotation worker already filtered to specific (rid, tenant, field) rows.
+  const tenant = await store.findTenantByConnectionRid(connectionRid);
+  if (!tenant) {
+    throw new Error(
+      `vault.rewrap: no credential found at rid=${connectionRid}`,
+    );
+  }
+  const head = await store.headVersion(connectionRid, tenant, field as CredentialField);
   if (!head) {
     throw new Error(
       `vault.rewrap: no current credential at rid=${connectionRid} field=${field}`,
@@ -237,7 +244,6 @@ export async function rewrap(
   }
   // Generate a new password — 32 bytes URL-safe, 256 bits of entropy.
   const fresh = new Uint8Array(randomBytes(32));
-  const tenant = (head as { tenant?: string }).tenant ?? "default";
   const result = await createOrRotate(
     connectionRid,
     tenant,
