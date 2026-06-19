@@ -30,6 +30,19 @@ export function computeAnalysisEtag(snap: AnalysisRowSnapshot): string {
   return `W/"${digest}"`;
 }
 
+/**
+ * Generic ETag-over-canonical-JSON helper used by the OT engine when
+ * recomputing an analysis ETag after submitInstructions. Same shape as
+ * computeAnalysisEtag but accepts any sortable payload — used internally
+ * after applying instructions to the (cards, canvases, parameters, version)
+ * tuple. Same SHA-256 + W/"..." envelope as the row ETag.
+ */
+export function computeEtagOf(payload: unknown): string {
+  const canonical = canonicalizeJson(payload as any);
+  const digest = createHash("sha256").update(canonical, "utf8").digest("hex");
+  return `W/"${digest}"`;
+}
+
 export function stripWeakPrefix(etag: string): string {
   return etag.startsWith("W/") ? etag.slice(2) : etag;
 }
