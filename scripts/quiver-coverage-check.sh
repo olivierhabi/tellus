@@ -43,8 +43,8 @@ done < "$IDS_TMP"
 # gate is not falsely red while the drive is in-progress. Each entry must
 # correspond to a row in PROGRESS.md whose status is not yet DONE.
 PENDING_PREFIXES=(
-  "B3"  "B5"  "B6"  "B7"  "B8"  "B9"  "B10"
-  "F2"  "F3"  "F4"  "F5"  "F6"  "F7"  "F8"  "F9"  "F10"
+  "B3"  "B7"  "B8"  "B9"  "B10"
+  "F3"  "F4"  "F6"  "F7"  "F8"  "F9"  "F10"
   "GATE"
 )
 
@@ -53,9 +53,12 @@ PENDING_PREFIXES=(
 DEFERRED_IDS=(
   "B1 C-21"   # marking-based CBAC enforcement — D-2026-05-04 D-16 (defer to a CBAC task)
   "B1 C-24"   # load-test SLO — D-2026-05-04 D-17 (load tests run on phase boundary, not per-task)
-  "G-06"      # deadline propagation — D-2026-05-04 D-17 (B1 has no compute path)
   "G-08"      # markings + organizations — same as B1 C-21 (D-16)
   "G-12"      # service-to-service JWT — D-2026-05-04 D-18 (defer; existing securityContext covers in-tree)
+  "B5 C-11"   # idempotency on POST /compute/cards — D-2026-05-04 D-25 (defer; cache-keying already gives idempotent reads)
+  "B5 C-12"   # SLO load measurement — D-2026-05-04 D-17 (load tests run at phase boundary)
+  "B5 C-15"   # OTel trace event emission — D-2026-05-04 D-26 (deferred to OTel rollout phase)
+  "B6 C-12"   # SLO load measurement — D-2026-05-04 D-17 (load tests run at phase boundary)
 )
 
 is_pending() {

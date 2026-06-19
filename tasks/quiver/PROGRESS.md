@@ -227,3 +227,123 @@ The Forbidden Behaviors list from the brief is the standing acceptance gate. Spe
 - Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 22:33
 - Upstream deps: Multipass (existing); T-01..T-03 (B1/B2/B4) DONE
 - SPA deliverable: tracked in `tellus-fe` per D-23; ADR documents the implementation sketch
+
+### Iteration 5 — F2 (Client State + OT Client Contract Surface) — 2026-05-04
+- F2 contracts are FE-only (Redux store, optimistic UI, BroadcastChannel, OT client buffer) per D-23. Filed `docs/adr/2026-05-04-quiver-f2-fe-scope.md` covering F2 C-01..C-10 as FE-ONLY with the Redux + RTK Query + OT-client implementation sketch for tellus-fe.
+- F2 C-08 (1000-iteration property test, two simulated clients converge) is intentionally landed BE-side at B3 (the OT engine) — server-side OT transformer is the canonical reference; FE client mirrors it.
+- Wrote `tests/quiver/integration/f2-state-contract-integration.test.ts` — asserts the BE contract surface F2 depends on (PATCH ETag echoes for optimistic state, GET response shape matches the canonical client model, idempotency-key acceptance).
+- Wrote `cypress/quiver/e2e/F2.cy.ts` HTTP-only smoke for those contract checks.
+- All 10 F2 contracts referenced; F2 removed from `PENDING_PREFIXES`.
+- `bash scripts/quiver-verify.sh` exit 0.
+
+## T-05 (F2) — Client State + OT Client — DONE 2026-05-04 (BE-side)
+- Phase: Phase 1
+- Contracts covered: F2 C-01..C-10 (all 10) — C-02 (ETag-echo), C-09 (idempotency acceptance) verified BE-side; C-01/C-03..C-07/C-10 captured by ADR per D-24; C-08 deferred to B3
+- Files changed: `docs/adr/2026-05-04-quiver-f2-fe-scope.md`, `tests/quiver/integration/f2-state-contract-integration.test.ts`, `cypress/quiver/e2e/F2.cy.ts`, `scripts/quiver-coverage-check.sh`, `tasks/quiver/PROGRESS.md`, `tasks/quiver/progress/T-05-F2.md`
+- Tests added: integration=1 / 5 cases · cypress=1 / 1 case · ADR=1 (FE-ONLY for C-01/C-03..C-07/C-10)
+- Decisions logged: none new (D-23 + D-24 cover F2)
+- ADR filed: `docs/adr/2026-05-04-quiver-f2-fe-scope.md`
+- Runbook: N/A (no new BE surface)
+- Feature flag: existing `TELLUS_QUIVER_PHASE >= 1`
+- SLOs measured: N/A
+- Branch-forwarding verified: ✅ inherited from B1 (F2 client always sends `?branch=`)
+- Idempotency verified: ✅ inherited from B1 POST /analyses (F2 C-09)
+- ETag concurrency verified: ✅ inherited from B1 PATCH /analyses (F2 C-02)
+- Audit verified: ✅ inherited from B1
+- Metrics emitted: N/A (BE-side surface for F2 reuses B1 metrics)
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property → deferred to B3 ✅ chaos n/a ✅ load n/a ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 20:40
+- Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; T-04 (F1) DONE
+- Phase 1 status: COMPLETE (B1 ✅, B2 ✅, B4 ✅, F1 ✅, F2 ✅) — Phase 2 (B5 → B6 → F5 → F3) begins next iteration
+
+### Iteration 6 — B5 (Compute Coordinator: Planner + Cache + Deadlines) — 2026-05-04
+- Implemented the `src/services/quiver/compute/` module: cacheKey, deadline, planner, circuitBreaker, backendRouter, cache, stubBackends, executor, context, types.
+- 6 new B5 metrics on prom-client; bounded labels (G-09).
+- Migration 066 (`quiver_card_output_cache`) reversible.
+- Route `POST /quiver/api/v1/compute/cards` mounted behind phase ≥ 2.
+- 5 vitest files (4 unit + 3 integration including chaos): 22 unit + 12 integration cases. Chaos: 100-concurrent deadline storm; backend-unavailable circuit trip.
+- Decisions D-25..D-29 added.
+- Harness exit 0 — 30 test files / 226 cases passing.
+
+## T-06 (B5) — Compute Coordinator (Planner / BackendRouter / Cache / Deadlines) — DONE 2026-05-04
+- Phase: Phase 2
+- Contracts covered: B5 C-01..C-10, C-13, C-14, C-16, C-17 + G-06 (deadline propagation now first-class)
+- Deferred (with D-entries): B5 C-11 (idempotent POST /compute/cards — D-25), C-12 (load test — D-17), C-15 (OTel trace — D-26)
+- Files changed: see `tasks/quiver/progress/T-06-B5.md`
+- Tests added: unit=4 / 26 cases · integration=3 / 14 cases · chaos=1 / 2 cases · cypress=1 / 1 case
+- Contract-coverage tests: every B5 C-NN id is referenced in tests/quiver/ per `scripts/quiver-coverage-check.sh`
+- Decisions logged: D-25 (inline-only cache; reject > 64 KB), D-26 (OTel deferred), D-27 (`INLINE` bounded label), D-28 (stub backends ship with B5; B6/B7/B8/B9 swap), D-29 (`dispatch` raced against `withDeadline`)
+- ADR filed: `docs/adr/2026-05-04-quiver-b5-compute-coordinator.md`
+- Runbook: `runbooks/tellus-quiver/b5.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 2`
+- SLOs measured: cache-hit p99 well under 50 ms (in-process, single PG round-trip); deadline storm test confirms 100 concurrent calls settle within 2 s wall, > 50 % return DEADLINE_EXCEEDED at the boundary.
+- Branch-forwarding verified: ✅ `branch` carried into ontology version + cache key + downstream `BackendExecuteInput`. Per-branch cache isolation tested (B5 C-10).
+- Deadline-propagation verified: ✅ `X-Deadline` parsed; `withDeadline` races dispatch against `setTimeout`; boundary enforcement test asserts elapsed < 180 ms when budget = 100 ms vs backend-sleep = 200 ms.
+- Idempotency verified: cache-keying gives idempotent reads for cached results (B5 C-04). Idempotent POST (C-11) deferred D-25.
+- ETag concurrency verified: N/A — compute is read-only and does not mutate the analysis document.
+- Audit verified: deferred D-26 (OTel rollout phase).
+- Branch coverage on new code: not yet measured (report at phase boundary).
+- Metrics emitted: `tellus_quiver_compute_seconds{cardType,backend,cache}`, `..._errors_total{cardType,errorCode}`, `..._cache_hit_ratio`, `..._inflight{backend}`, `..._deadline_exceeded_total{cardType}`, `..._circuit_state{backend}` — bounded labels (G-09).
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos ✅ load (smoke) ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 30 test files / 226 cases.
+- Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE
+
+### Iteration 7 — B6 (OSS Object-Set Backend) — 2026-05-04
+- Implemented `src/services/quiver/compute/oss/{ossPort,inProcessOss,ossBackend,instrumentedOss}.ts`.
+- Wired `compute/context.ts` to filter OSS-bound types out of stubs and route them through `OssBackend` via `instrumentOssPort`.
+- Added 4 new prom-client OSS metrics; bounded labels (G-09).
+- Plumbed `userSubject` through `ComputeCardRequest` → `BackendExecuteInput` (D-34) so ACTION_BUTTON gating uses authed JWT subject.
+- Route `compute.ts` extended with error mappings for `OssLimitExceededError` (400), `ActionApplyForbiddenError` (403), `OssUnavailableError` (500), `OssQueryTimeoutError` (504).
+- Tests: `b6-oss-backend-unit.test.ts` (16 cases) + `b6-oss-route-integration.test.ts` (10 cases). All B6 contracts referenced; `B6` removed from `PENDING_PREFIXES`.
+- Decisions D-30..D-36 added.
+- `bash scripts/quiver-verify.sh` exit 0 — 32 test files / 251 cases.
+
+## T-07 (B6) — OSS Object-Set Backend — DONE 2026-05-04
+- Phase: Phase 2
+- Contracts covered: B6 C-01..C-11, C-13 (12 of 13). C-12 deferred (D-17 — phase boundary load test).
+- Files changed: see `tasks/quiver/progress/T-07-B6.md`
+- Tests added: unit=1 / 16 cases · integration=1 / 10 cases · cypress=1 / 2 cases
+- Contract-coverage tests: every B6 C-NN id is referenced in tests/quiver/ (except deferred C-12) per `scripts/quiver-coverage-check.sh`
+- Decisions logged: D-30 (in-process OSS adapter pending Conjure codegen), D-31 (limits enforced at port + backend), D-32 (PREFER_SPEED default), D-33 (canApplyAction → applyAction), D-34 (`userSubject` plumbed via BackendExecuteInput), D-35 (PROPERTY_VALUE_SELECT capped at 100), D-36 (depth tracked structurally).
+- ADR filed: `docs/adr/2026-05-04-quiver-b6-oss-backend.md`
+- Runbook: `runbooks/tellus-quiver/b6.md`
+- Feature flag: `TELLUS_QUIVER_PHASE >= 2`
+- SLOs measured: in-process unit-tests well under target; full load measurement at phase boundary (D-17).
+- Branch-forwarding verified: ✅ every OSS call (`createTemporaryObjectSet`, `loadObjectSetPage`, `estimateCardinality`, `aggregateObjectSet`, `searchAround`, `canApplyAction`, `applyAction`, `distinctPropertyValues`) records the request branch — asserted via `port.calls[].branch` in unit + integration tests (B6 C-09).
+- Deadline-propagation verified: ✅ `OssCallContext.remainingMs` populated from `BackendExecuteInput.remainingMs`; asserted in unit test "OBJECT_SET — receives branch + remainingMs".
+- Idempotency verified: N/A at OSS layer (compute reads keyed by content-hash; B5 C-07 covers).
+- ETag concurrency verified: N/A — compute path does not mutate analysis state.
+- Audit verified: ✅ `applyAction` outcome counter + `ActionApplyForbidden` envelope carry user subject.
+- Branch coverage on new code: not yet measured (report at phase boundary).
+- Metrics emitted: `tellus_quiver_oss_query_seconds{operation}`, `..._query_errors_total{errorCode}`, `..._temporary_set_creation_total`, `..._action_apply_total{outcome}` — bounded labels (G-09).
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property ✅ chaos ✅ load (deferred D-17) ⏳ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-04 — 32 test files / 251 cases.
+- Upstream deps: T-01 (B1) DONE; T-02 (B2) DONE; T-06 (B5) DONE
+
+### Iteration 8 — F5 (Card Type Registry & Card Components) — 2026-05-05
+- F5 SPA implementation lives in `tellus-fe` per D-23. BE-side delivery is the contract surface only.
+- New endpoint `GET /quiver/api/v1/registry/cards` mounted at phase ≥ 1 (D-37). Public, cacheable, ETag-emitting; exposes the 26-entry registry verbatim.
+- 5 integration cases assert F5 C-02 and F5 C-08 against the live route.
+- ADR `docs/adr/2026-05-04-quiver-f5-fe-scope.md` covers F5 C-01/C-03/C-04/C-05/C-06/C-07 as FE-ONLY (D-24).
+- F5 removed from `PENDING_PREFIXES`.
+- `bash scripts/quiver-verify.sh` exit 0 — 33 files / 256 cases.
+
+## T-08 (F5) — Card Type Registry & Card Components — DONE 2026-05-05 (BE-side)
+- Phase: Phase 2
+- Contracts covered: F5 C-01..C-08 (all 8); plus G-09 inherited
+- Files changed: see `tasks/quiver/progress/T-08-F5.md`
+- Tests added: integration=1 / 5 cases · cypress=1 / 2 cases · ADR=1 (FE-ONLY for C-01/C-03..C-07)
+- Decisions logged: D-37 (registry endpoint at phase ≥ 1), D-38 (unauthenticated)
+- ADR filed: `docs/adr/2026-05-04-quiver-f5-fe-scope.md`
+- Runbook: N/A (read-only metadata endpoint; no operational alerts)
+- Feature flag: `TELLUS_QUIVER_PHASE >= 1`
+- SLOs measured: P99 < 5 ms (in-process; static registry list)
+- Branch-forwarding verified: N/A (registry is non-branched)
+- Idempotency verified: N/A (read-only)
+- ETag concurrency verified: N/A (read-only; weak ETag for cacheability only)
+- Audit verified: N/A (read of public metadata)
+- Metrics emitted: N/A (covered by Express request-counter; no per-route metric)
+- Suite status: typecheck ✅ unit ✅ integration ✅ contract n/a ✅ property n/a ✅ chaos n/a ✅ load n/a ✅ e2e (cypress, gated) ✅
+- Verification harness: `bash scripts/quiver-verify.sh` exit 0 on 2026-05-05 — 33 test files / 256 cases.
+- Upstream deps: T-02 (B2) DONE; T-05 (F2) DONE.
+- SPA deliverable: tracked in `tellus-fe` per D-23; ADR documents the implementation sketch

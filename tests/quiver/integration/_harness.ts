@@ -36,6 +36,7 @@ export async function applyQuiverMigrations(): Promise<void> {
     await client.query(up("063_b1_quiver_idempotency.sql"));
     await client.query(up("064_b4_quiver_versions.sql"));
     await client.query(up("065_b4_quiver_working_state.sql"));
+    await client.query(up("066_b5_quiver_card_output_cache.sql"));
     await client.query("COMMIT");
   } catch (e) {
     await client.query("ROLLBACK");
@@ -50,7 +51,7 @@ export async function teardownQuiverTables(): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query(
-      "TRUNCATE quiver_analysis, quiver_idempotency_record, quiver_analysis_version, quiver_working_state",
+      "TRUNCATE quiver_analysis, quiver_idempotency_record, quiver_analysis_version, quiver_working_state, quiver_card_output_cache",
     );
   } finally {
     client.release();
@@ -64,6 +65,7 @@ export async function dropQuiverMigrations(): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query(down("066_b5_quiver_card_output_cache.down.sql"));
     await client.query(down("065_b4_quiver_working_state.down.sql"));
     await client.query(down("064_b4_quiver_versions.down.sql"));
     await client.query(down("063_b1_quiver_idempotency.down.sql"));
