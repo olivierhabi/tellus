@@ -28,12 +28,21 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 
-import { isRid, isStructurallyRid } from "../../codeRepos/contracts/rid";
+import { isRid, isStructurallyRid, mintFunctionVersionRid } from "../../codeRepos/contracts/rid";
+import { publishVersion, listVersions } from "../../functionsRegistry/store";
+import { parseSemver, compareSemver } from "../../functionsRegistry/semver";
 import { ERROR_CODES } from "../../codeRepos/contracts/errors";
 import { requireCodeReposAuth } from "../../codeRepos/middleware/principal";
 import { idempotencyMiddleware } from "../../codeRepos/middleware/idempotency";
 import { codeReposError, type CodeReposErrorName } from "../errors";
-import { runSandboxed } from "../../functionRuntime";
+import { runSandboxed, runSandboxedWithSdk } from "../../functionRuntime";
+import {
+  applyEdits,
+  buildOntologySdk,
+  loadOntologySnapshot,
+  normalizeOntologyId,
+  type OntologyEdit,
+} from "../../functions/ontologyRuntime";
 import {
   executeCreateRepositorySaga,
   type SagaExecutorDeps,
@@ -295,6 +304,13 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       if (!ifMatch) {
         return sendError(res, codeReposError("CodeRepos:InvalidSettings", { field: "If-Match" }));
       }
+      const ifMatchVersion = parseVersionEtagOrNull(ifMatch);
+      if (ifMatchVersion === null) {
+        return sendError(res, codeReposError("CodeRepos:InvalidSettings", {
+          field: "If-Match",
+          reason: 'must be a resource-version ETag of the form W/"<n>" or "<n>"',
+        }));
+      }
       const body = (req.body ?? {}) as PatchRepoBody;
 
       const updates: string[] = [];
@@ -325,7 +341,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       }
       updates.push(`resource_version = resource_version + 1`);
       updates.push(`updated_at = now()`);
-      values.push(rid, parseEtag(ifMatch));
+      values.push(rid, ifMatchVersion);
 
       const sql = `UPDATE code_repository
                       SET ${updates.join(", ")}
@@ -345,8 +361,10 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         if (exists.rowCount === 0) {
           return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
         }
-        return sendError(res, codeReposError("CodeRepos:InvalidSettings", {
-          reason: "ETag mismatch",
+        // Row exists but resource_version did not match → optimistic-concurrency
+        // failure. 412 Precondition Failed (RFC 7232), not 400. (Fix CR-11b.)
+        return sendError(res, codeReposError("CodeRepos:PreconditionFailed", {
+          reason: "If-Match resource version does not match current version",
           currentVersion: exists.rows[0].resource_version,
         }));
       }
@@ -371,12 +389,19 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       if (!ifMatch) {
         return sendError(res, codeReposError("CodeRepos:InvalidSettings", { field: "If-Match" }));
       }
+      const ifMatchVersion = parseVersionEtagOrNull(ifMatch);
+      if (ifMatchVersion === null) {
+        return sendError(res, codeReposError("CodeRepos:InvalidSettings", {
+          field: "If-Match",
+          reason: 'must be a resource-version ETag of the form W/"<n>" or "<n>"',
+        }));
+      }
 
       const r = await pool.query(
         `UPDATE code_repository
             SET state = 'TRASHED', updated_at = now(), resource_version = resource_version + 1
           WHERE rid = $1 AND resource_version = $2 AND state = 'ACTIVE'`,
-        [rid, parseEtag(ifMatch)],
+        [rid, ifMatchVersion],
       );
       if (r.rowCount === 0) {
         const ex = await pool.query(
@@ -386,8 +411,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         if (ex.rowCount === 0 || ex.rows[0].state === "TRASHED") {
           return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
         }
-        return sendError(res, codeReposError("CodeRepos:InvalidSettings", {
-          reason: "ETag mismatch",
+        // Row exists & ACTIVE but version mismatch → 412 (RFC 7232). (Fix CR-11b.)
+        return sendError(res, codeReposError("CodeRepos:PreconditionFailed", {
+          reason: "If-Match resource version does not match current version",
           currentVersion: ex.rows[0].resource_version,
         }));
       }
@@ -414,97 +440,159 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       if (exists.rowCount === 0) {
         return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
       }
-      const defaultBranch = exists.rows[0].default_branch;
+      void exists.rows[0].default_branch;
       const protectedFilter = req.query.protected;
-      const params: unknown[] = [rid];
-      let where = `repository_rid = $1`;
-      if (protectedFilter === "true") {
-        where += ` AND is_protected = TRUE`;
-      } else if (protectedFilter === "false") {
-        where += ` AND is_protected = FALSE`;
-      }
-      const r = await pool.query(
+
+      // Branch-cache metadata (is_protected / PR count / last-commit), keyed by
+      // branch name. This is a denormalised ENRICHMENT only — never the source
+      // of which branches exist (that drifts after restarts / new branches).
+      const cacheRows = await pool.query<{
+        branch_name: string; head_sha: string; is_protected: boolean;
+        last_commit_at: Date | null; last_commit_author: string | null;
+        open_pr_count: number; updated_at: Date;
+      }>(
         `SELECT branch_name, head_sha, is_protected, last_commit_at,
                 last_commit_author, open_pr_count, updated_at
-           FROM code_repository_branch_cache
-          WHERE ${where}
-          ORDER BY branch_name`,
-        params,
+           FROM code_repository_branch_cache WHERE repository_rid = $1`,
+        [rid],
       );
+      const meta = new Map(cacheRows.rows.map((b) => [b.branch_name, b]));
 
-      // Cache-miss fallback. The repo-create saga does not yet seed the
-      // branch_cache table (the cache is upserted by the commit endpoint
-      // on every successful commit; see line 970). For brand-new repos
-      // this leaves the cache empty until the first commit lands, which
-      // is a chicken-and-egg: the IDE's commit handler needs the
-      // tipCommitSha from this endpoint to populate its `If-Match`
-      // header before the first commit can succeed. We close the gap by
-      // asking the StemmaAdapter for the canonical HEAD of the default
-      // branch and synthesizing a single-row response, then seeding the
-      // cache so subsequent calls are O(1) again. Stemma is the source
-      // of truth for ref state, so this is correct, not a workaround.
-      if (r.rows.length === 0 && (protectedFilter === undefined || protectedFilter === "false")) {
-        try {
-          const treeOutcome = await deps.stemma.listTree({
-            repositoryRid: rid,
-            branch: defaultBranch,
-            path: "",
-            depth: 0,
-          });
-          if (treeOutcome.kind === "ok") {
-            const headSha = treeOutcome.branchHead;
-            const nowIso = new Date().toISOString();
-            // Best-effort cache seed. We do NOT fail the request if the
-            // INSERT throws (e.g. a race where another tab committed
-            // simultaneously and the row now exists) — ON CONFLICT DO
-            // NOTHING keeps the seed idempotent.
-            try {
-              await pool.query(
-                `INSERT INTO code_repository_branch_cache
-                   (repository_rid, branch_name, head_sha, is_protected,
-                    last_commit_at, last_commit_author, open_pr_count, updated_at)
-                 VALUES ($1, $2, $3, FALSE, $4, NULL, 0, $4)
-                 ON CONFLICT (repository_rid, branch_name) DO NOTHING`,
-                [rid, defaultBranch, headSha, nowIso],
-              );
-            } catch {
-              // Cache seed is best-effort; the response itself is still
-              // correct because we are returning the live Stemma value.
-            }
-            return res.status(200).json({
-              branches: [
-                {
-                  name: defaultBranch,
-                  headSha,
-                  isProtected: false,
-                  lastCommitAt: nowIso,
-                  lastCommitAuthor: null,
-                  openPrCount: 0,
-                  updatedAt: nowIso,
-                },
-              ],
-            });
-          }
-          // Stemma also doesn't know about this branch — return an
-          // empty list rather than erroring; downstream consumers (the
-          // IDE commit handler) surface a diagnostic toast.
-        } catch {
-          // Stemma transport failure. Empty list is still the safest
-          // response — the IDE will retry on next render.
-        }
+      // Authoritative branch list comes from the Stemma adapter (durable),
+      // NOT the cache. This is the fix for branches disappearing/duplicating
+      // after a restart or after creating a branch the cache hasn't caught up on.
+      const sb = await deps.stemma.listBranches({ repositoryRid: rid });
+      let branches: Array<{
+        name: string; headSha: string; isProtected: boolean;
+        lastCommitAt: unknown; lastCommitAuthor: string | null;
+        openPrCount: number; updatedAt: unknown;
+      }>;
+      if (sb.kind === "ok") {
+        branches = sb.branches.map((br) => {
+          const m = meta.get(br.name);
+          return {
+            name: br.name,
+            headSha: br.head, // live Stemma HEAD wins over any stale cached sha
+            isProtected: m?.is_protected ?? false,
+            lastCommitAt: m?.last_commit_at ?? null,
+            lastCommitAuthor: m?.last_commit_author ?? null,
+            openPrCount: m?.open_pr_count ?? 0,
+            updatedAt: m?.updated_at ?? new Date().toISOString(),
+          };
+        });
+      } else {
+        // Adapter has no branch list (e.g. a test seam) — fall back to cache.
+        branches = cacheRows.rows.map((b) => ({
+          name: b.branch_name, headSha: b.head_sha, isProtected: b.is_protected,
+          lastCommitAt: b.last_commit_at, lastCommitAuthor: b.last_commit_author,
+          openPrCount: b.open_pr_count, updatedAt: b.updated_at,
+        }));
       }
 
-      res.status(200).json({
-        branches: r.rows.map((b) => ({
-          name: b.branch_name,
-          headSha: b.head_sha,
-          isProtected: b.is_protected,
-          lastCommitAt: b.last_commit_at,
-          lastCommitAuthor: b.last_commit_author,
-          openPrCount: b.open_pr_count,
-          updatedAt: b.updated_at,
-        })),
-      });
+      if (protectedFilter === "true") branches = branches.filter((b) => b.isProtected);
+      else if (protectedFilter === "false") branches = branches.filter((b) => !b.isProtected);
+      branches.sort((a, b) => a.name.localeCompare(b.name));
+
+      res.status(200).json({ branches });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /:rid/branches  — create a branch.
+  //
+  // Forks `fromBranch` (default: the repo's default branch) into a NEW ref
+  // `name`. Body: { name, fromBranch? }. 201 { name, headSha, fromBranch }.
+  //   409 BranchExists — name already taken.
+  //   404 BranchNotFound — fromBranch does not exist.
+  // -------------------------------------------------------------------------
+  router.post("/:rid/branches", auth, idempotencyMiddleware({ pool }), async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      const body = (req.body ?? {}) as { name?: unknown; fromBranch?: unknown };
+      const name = typeof body.name === "string" ? body.name : "";
+      if (!isLegalBranchName(name)) {
+        return sendError(res, codeReposError("CodeRepos:InvalidSettings", {
+          field: "name",
+          reason: "branch name must match [A-Za-z0-9._/-], no leading dash/slash, no '..'",
+        }));
+      }
+      const { rows } = await pool.query<{ default_branch: string; state: string }>(
+        `SELECT default_branch, state FROM code_repository WHERE rid = $1`,
+        [rid],
+      );
+      if (rows.length === 0 || rows[0].state === "TRASHED") {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const fromBranch =
+        typeof body.fromBranch === "string" && body.fromBranch.length > 0
+          ? body.fromBranch
+          : rows[0].default_branch;
+
+      const out = await deps.stemma.createBranch({ repositoryRid: rid, newBranch: name, fromBranch });
+      if (out.kind === "branch-exists") {
+        return sendError(res, codeReposError("CodeRepos:BranchExists", { name }));
+      }
+      if (out.kind === "source-not-found") {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { branch: fromBranch }));
+      }
+      if (out.kind !== "ok") {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: out.reason }));
+      }
+      // Seed branch_cache so GET /branches reflects the new branch immediately.
+      await pool
+        .query(
+          `INSERT INTO code_repository_branch_cache
+             (repository_rid, branch_name, head_sha, is_protected,
+              last_commit_at, last_commit_author, open_pr_count, updated_at)
+           VALUES ($1, $2, $3, FALSE, now(), NULL, 0, now())
+           ON CONFLICT (repository_rid, branch_name)
+           DO UPDATE SET head_sha = EXCLUDED.head_sha, updated_at = now()`,
+          [rid, name, out.head],
+        )
+        .catch(() => {});
+      return res.status(201).json({ name, headSha: out.head, fromBranch, isProtected: false });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // DELETE /:rid/branches/:branch  — delete a branch.
+  //
+  // The repo's default branch cannot be deleted (412). 204 on success.
+  // -------------------------------------------------------------------------
+  router.delete("/:rid/branches/:branch", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      const branch = req.params.branch;
+      if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      const { rows } = await pool.query<{ default_branch: string; state: string }>(
+        `SELECT default_branch, state FROM code_repository WHERE rid = $1`,
+        [rid],
+      );
+      if (rows.length === 0 || rows[0].state === "TRASHED") {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      if (branch === rows[0].default_branch) {
+        return sendError(res, codeReposError("CodeRepos:CannotModifyDefaultBranch", { branch }));
+      }
+      const out = await deps.stemma.deleteBranch({ repositoryRid: rid, branch });
+      if (out.kind === "not-found") {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { branch }));
+      }
+      if (out.kind !== "ok") {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: out.reason }));
+      }
+      await pool
+        .query(
+          `DELETE FROM code_repository_branch_cache WHERE repository_rid = $1 AND branch_name = $2`,
+          [rid, branch],
+        )
+        .catch(() => {});
+      return res.status(204).end();
     } catch (err) {
       next(err);
     }
@@ -1138,6 +1226,13 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       if (!ifMatch) {
         return sendError(res, codeReposError("CodeRepos:InvalidSettings", { field: "If-Match" }));
       }
+      const ifMatchVersion = parseVersionEtagOrNull(ifMatch);
+      if (ifMatchVersion === null) {
+        return sendError(res, codeReposError("CodeRepos:InvalidSettings", {
+          field: "If-Match",
+          reason: 'must be a resource-version ETag of the form W/"<n>" or "<n>"',
+        }));
+      }
       const body = req.body;
       if (typeof body !== "object" || body === null) {
         return sendError(res, codeReposError("CodeRepos:InvalidSettings", { reason: "body must be JSON object" }));
@@ -1150,7 +1245,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 updated_at = now()
           WHERE rid = $2 AND resource_version = $3 AND state IN ('ACTIVE','ARCHIVED')
           RETURNING settings_json, resource_version`,
-        [JSON.stringify(body), rid, parseEtag(ifMatch)],
+        [JSON.stringify(body), rid, ifMatchVersion],
       );
       if (r.rowCount === 0) {
         const ex = await pool.query(
@@ -1161,8 +1256,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         if (ex.rowCount === 0) {
           return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
         }
-        return sendError(res, codeReposError("CodeRepos:InvalidSettings", {
-          reason: "ETag mismatch",
+        // Settings ETag mismatch → 412 (RFC 7232). (Fix CR-11b consistency.)
+        return sendError(res, codeReposError("CodeRepos:PreconditionFailed", {
+          reason: "If-Match resource version does not match current version",
           currentVersion: ex.rows[0].resource_version,
         }));
       }
@@ -1444,18 +1540,203 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
   });
 
   // -------------------------------------------------------------------------
+  // POST /:rid/tags  — Tag & Release (Foundry parity A16/B5).
+  //
+  // This is the load-bearing bridge from repository → functions registry that
+  // makes TypeScript Functions v2 actually publishable. Steps (mirroring
+  // Foundry's "Tag and release publishes ALL functions in the repository"):
+  //
+  //   1. Resolve the branch + its content-pinned tree hash (the publish's
+  //      commit identifier).
+  //   2. Discover every function under src/functions/*.ts (one default export
+  //      per file; basename = apiName).
+  //   3. Build each artifact (transpile-validate; a compile error fails the
+  //      whole release — Foundry blocks publish on a failing build).
+  //   4. Backward-compatibility check vs the prior highest version on the
+  //      branch: a dropped function requires a MAJOR bump.
+  //   5. Publish ONE immutable function_version row carrying the whole bundle
+  //      (manifest.exports = [apiNames], manifest.sources = {apiName: src}),
+  //      content-addressed by artifact_sha256. Immutability is enforced by the
+  //      registry store's unique index.
+  //
+  //   Body: { tag | semver: "X.Y.Z", branch?, message? }
+  //   201  { version, functions: [...], deduplicated? }
+  // -------------------------------------------------------------------------
+  router.post("/:rid/tags", auth, idempotencyMiddleware({ pool }), async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+
+      const b = (req.body ?? {}) as { tag?: unknown; semver?: unknown; branch?: unknown; message?: unknown };
+      const semverStr = typeof b.semver === "string" ? b.semver : typeof b.tag === "string" ? b.tag : "";
+      let parsedSemver;
+      try {
+        parsedSemver = parseSemver(semverStr.replace(/^v/, ""));
+      } catch {
+        return sendError(res, codeReposError("CodeRepos:InvalidSettings", { field: "semver", reason: "must be a valid SemVer X.Y.Z[-prerelease]" }));
+      }
+      const semver = semverStr.replace(/^v/, "");
+
+      const { rows: repoRows } = await pool.query<{ default_branch: string; state: string }>(
+        `SELECT default_branch, state FROM code_repository WHERE rid = $1`,
+        [rid],
+      );
+      if (repoRows.length === 0 || repoRows[0].state === "TRASHED") {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const defaultBranch = repoRows[0].default_branch;
+      const branch = typeof b.branch === "string" && b.branch.length > 0 ? b.branch : defaultBranch;
+      // Preview vs stable: a release off a non-default branch, or a prerelease
+      // SemVer (1.2.3-rc1), is a preview build (never resolves on default).
+      const isPreview = branch !== defaultBranch || parsedSemver.preRelease.length > 0;
+
+      // 1 + 2 — tree + function discovery.
+      const tree = await deps.stemma.listTree({ repositoryRid: rid, branch, path: "", depth: 6 });
+      if (tree.kind === "branch-not-found") {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { branch }));
+      }
+      if (tree.kind !== "ok") {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "tree-read-failed" }));
+      }
+      const commitSha = tree.treeSha; // content-pinned identifier of the release tree
+      const FN_RE = /(^|\/)src\/functions\/([A-Za-z_][A-Za-z0-9_]*)\.ts$/;
+      const discovered: Array<{ apiName: string; path: string }> = [];
+      for (const entry of tree.entries) {
+        if (entry.type !== "blob") continue;
+        if (entry.name.includes(".test.")) continue;
+        const m = FN_RE.exec(entry.path);
+        if (m) discovered.push({ apiName: m[2], path: entry.path });
+      }
+      if (discovered.length === 0) {
+        return sendError(res, codeReposError("CodeRepos:NoFunctionsToPublish", { branch }));
+      }
+
+      // 3 — build each artifact (read + transpile-validate).
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const ts = require("typescript") as typeof import("typescript");
+      const sources: Record<string, string> = {};
+      const exportsList: string[] = [];
+      for (const fn of discovered.sort((a, c) => a.apiName.localeCompare(c.apiName))) {
+        const blob = await deps.stemma.readBlob({ repositoryRid: rid, branch, path: fn.path });
+        if (blob.kind !== "ok") {
+          return sendError(res, codeReposError("CodeRepos:ReleaseCompileError", { apiName: fn.apiName, reason: "source unreadable" }));
+        }
+        const src = new TextDecoder("utf-8").decode(blob.content);
+        const out = ts.transpileModule(src, {
+          compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true, isolatedModules: true },
+          fileName: `${fn.apiName}.ts`,
+        });
+        if (out.diagnostics && out.diagnostics.length > 0) {
+          return sendError(res, codeReposError("CodeRepos:ReleaseCompileError", { apiName: fn.apiName, reason: "transpile diagnostics" }));
+        }
+        sources[fn.apiName] = src;
+        exportsList.push(fn.apiName);
+      }
+
+      // 4 — backward-compatibility check vs prior highest version on branch.
+      let prior: { semver: string; exports: string[] } | null = null;
+      const existing = await listVersions(pool, rid, { branch, includeYanked: false });
+      for (const v of existing) {
+        const exp = Array.isArray((v.manifest as { exports?: unknown }).exports)
+          ? ((v.manifest as { exports: unknown[] }).exports.filter((x): x is string => typeof x === "string"))
+          : [];
+        if (prior === null || compareSemver(parseSemver(v.semver), parseSemver(prior.semver)) > 0) {
+          prior = { semver: v.semver, exports: exp };
+        }
+      }
+      if (prior !== null) {
+        const cmp = compareSemver(parsedSemver, parseSemver(prior.semver));
+        // Strictly-lower version → reject. Equal version falls through to the
+        // registry's idempotent dedupe (same artifact → 200) or immutability
+        // conflict (different artifact → 409); we must not pre-empt that here.
+        if (cmp < 0) {
+          return sendError(res, codeReposError("CodeRepos:VersionConflict", { reason: "semver must be greater than the latest published version", latest: prior.semver }));
+        }
+        const removed = prior.exports.filter((e) => !exportsList.includes(e));
+        const majorBump = parseSemver(semver).major > parseSemver(prior.semver).major;
+        if (removed.length > 0 && !majorBump) {
+          return sendError(res, codeReposError("CodeRepos:BackwardIncompatible", {
+            reason: "functions were removed without a major version bump",
+            removedFunctions: removed,
+            requiredBump: "major",
+            latest: prior.semver,
+          }));
+        }
+      }
+
+      // 5 — publish the immutable bundle.
+      const manifest = {
+        exports: exportsList,
+        sources,
+        runtime: "NODE_20" as const,
+        functionCount: exportsList.length,
+        message: typeof b.message === "string" ? b.message.slice(0, 1024) : null,
+      };
+      const canonical = JSON.stringify({ exports: exportsList, sources });
+      const artifactSha256 = createHash("sha256").update(canonical).digest("hex");
+      const artifactBytes = Buffer.byteLength(canonical, "utf8");
+
+      let publishResult;
+      try {
+        publishResult = await publishVersion(pool, {
+          rid: mintFunctionVersionRid(),
+          repositoryRid: rid,
+          branch,
+          isPreview,
+          semver,
+          commitSha,
+          runtime: "NODE_20",
+          artifactBlobId: `inline:${artifactSha256.slice(0, 16)}`,
+          artifactSha256,
+          artifactBytes,
+          manifest,
+        });
+      } catch (e) {
+        const code = (e as { code?: string }).code;
+        if (code === "23505") {
+          return sendError(res, codeReposError("CodeRepos:VersionConflict", { reason: "version already exists", semver }));
+        }
+        throw e;
+      }
+      if (publishResult.outcome === "immutable-conflict") {
+        return sendError(res, codeReposError("CodeRepos:VersionConflict", {
+          reason: "this version already exists with a different artifact (immutable)",
+          semver,
+        }));
+      }
+
+      const status = publishResult.outcome === "inserted" ? 201 : 200;
+      res.setHeader("ETag", `W/"${semver}"`);
+      return res.status(status).type("application/json").send(JSON.stringify({
+        version: {
+          rid: publishResult.row.rid,
+          repositoryRid: rid,
+          branch,
+          semver,
+          isPreview,
+          commitSha,
+          runtime: "NODE_20",
+          state: publishResult.row.state,
+          artifactSha256,
+          publishedAt: publishResult.row.publishedAt,
+        },
+        functions: exportsList,
+        deduplicated: publishResult.outcome === "deduplicated",
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // GET /:rid/functions  — B2-C-13 (user-facing read aggregator over B8)
   //
   // Returns the set of published functions for a repository on a given branch,
   // derived from the highest-semver AVAILABLE row per (repo, branch). The
   // manifest convention is { exports: string[] } (B8 publish payload).
   //
-  // This is intentionally read-only and stateless — publishing is owned by
-  // Jemma CI workers (B6) via the B8 admin router; invocation is owned by
-  // B9 Live Preview Execution Service (BLOCKED). The IDE's FunctionBrowser
-  // calls this endpoint to populate the Published tab; Live Preview tab and
-  // Run are gated on F7/B9 respectively and remain disabled until those
-  // services exist.
+  // The IDE's FunctionBrowser calls this endpoint to populate the Published
+  // tab. Published versions are produced by POST /:rid/tags (Tag & Release).
   // -------------------------------------------------------------------------
   router.get("/:rid/functions", auth, async (req, res, next) => {
     try {
@@ -1520,7 +1801,10 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           is_preview: boolean;
           runtime: string;
           commit_sha: string;
-          published_at: Date;
+          // NB: the app configures node-postgres to return TIMESTAMPTZ (OID
+          // 1184) as a raw ISO string, not a JS Date (src/db.ts). So this is
+          // a string at runtime — never call Date methods on it directly.
+          published_at: string | Date;
           manifest_json: { exports?: unknown };
         }>(
           `SELECT rid, branch, semver, is_preview, runtime, commit_sha, published_at, manifest_json
@@ -1544,7 +1828,11 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 isPreview: r.is_preview,
                 runtime: r.runtime,
                 commitSha: r.commit_sha,
-                publishedAt: r.published_at.toISOString(),
+                // Robust to both string (production: db.ts type parser) and Date.
+                publishedAt:
+                  r.published_at instanceof Date
+                    ? r.published_at.toISOString()
+                    : new Date(r.published_at).toISOString(),
                 source: "published",
                 path: null,
               });
@@ -1561,6 +1849,16 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // We walk at depth 5 to cover scaffold-nested layouts; if the branch
       // doesn't exist or the tree walk fails (transient), we silently fall
       // back to the published-only list — never 500 on discovery failure.
+      // Working-tree entries are tracked SEPARATELY from published ones (not
+      // merged into byApiName). A function that is both published AND present
+      // in the working tree must surface under BOTH sources, because the
+      // Published tab and the Live Preview tab are distinct surfaces: Published
+      // runs the released artifact; Live Preview runs the current in-tree file
+      // (which may differ from what was released). Masking working-tree behind
+      // published would leave the Live Preview tab empty even though the file
+      // exists — the exact symptom users hit after Tag & Release.
+      const workingTree: MergedFunctionRow[] = [];
+      const wtSeen = new Set<string>();
       try {
         const tree = await deps.stemma.listTree({
           repositoryRid: rid,
@@ -1580,8 +1878,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             // convention says one function per file, but a `helloWorld.test.ts`
             // sibling could land in the same directory in real repos).
             if (apiName.endsWith("Test") || entry.name.includes(".test.")) continue;
-            if (byApiName.has(apiName)) continue; // published wins
-            byApiName.set(apiName, {
+            if (wtSeen.has(apiName)) continue; // one working-tree entry per apiName
+            wtSeen.add(apiName);
+            workingTree.push({
               apiName,
               versionRid: null,
               semver: null,
@@ -1600,7 +1899,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         // published-versions response.
       }
 
-      const data = [...byApiName.values()].sort((a, b) => a.apiName.localeCompare(b.apiName));
+      const data = [...byApiName.values(), ...workingTree].sort((a, b) =>
+        a.apiName.localeCompare(b.apiName) || a.source.localeCompare(b.source),
+      );
       res
         .status(200)
         .type("application/json")
@@ -1635,6 +1936,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         source?: unknown;
         inlineSource?: unknown;
         inlineSourcePath?: unknown;
+        applyEdits?: unknown;
       };
       const apiName = typeof body.apiName === "string" ? body.apiName : "";
       if (!apiName || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiName) || apiName.length > 128) {
@@ -1752,6 +2054,26 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           runtime = "PY_311";
         }
         resolvedPath = inlineSourcePath; // informational only
+      } else if (body.source === "published") {
+        // Path B (published) — run the artifact registered by Tag & Release.
+        // Resolve the highest-semver AVAILABLE version on the branch and pull
+        // the function's source from its bundle manifest.
+        const versions = await listVersions(deps.pool, rid, { branch, includeYanked: false });
+        let chosen: { semver: string; sources: Record<string, string> } | null = null;
+        for (const v of versions) {
+          const m = v.manifest as { sources?: Record<string, unknown> };
+          const src = m.sources && typeof m.sources[apiName] === "string" ? (m.sources[apiName] as string) : null;
+          if (src === null) continue;
+          if (chosen === null || compareSemver(parseSemver(v.semver), parseSemver(chosen.semver)) > 0) {
+            chosen = { semver: v.semver, sources: { [apiName]: src } };
+          }
+        }
+        if (chosen === null) {
+          return sendError(res, codeReposError("CodeRepos:FunctionNotFound", { apiName, source: "published" }));
+        }
+        source = chosen.sources[apiName];
+        runtime = "NODE_20";
+        resolvedPath = `published:${chosen.semver}`;
       } else {
         const tree = await deps.stemma.listTree({
           repositoryRid: rid,
@@ -1851,7 +2173,67 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       }
 
       const input = (body.args ?? {}) as unknown;
-      const result = runSandboxed(transpiled, input);
+
+      // ---- Ontology SDK injection (snapshot isolation) ------------------
+      // Materialise a consistent view of the Ontology from the repo's imported
+      // object types and inject `Objects`/`Edits` so the function can read and
+      // express edits exactly like a Foundry TS Function v2. The snapshot is
+      // built BEFORE the sandbox runs (the sandbox is synchronous).
+      const imports = await deps.pool.query<{ ontology_id: string; api_name: string }>(
+        `SELECT ontology_id, api_name FROM code_repository_resource_imports
+          WHERE repository_rid = $1 AND kind = 'object_type'`,
+        [rid],
+      );
+      let ontologyId: string | null = null;
+      const importedTypes: string[] = [];
+      for (const row of imports.rows) {
+        const norm = normalizeOntologyId(row.ontology_id);
+        if (norm) ontologyId = norm;
+        importedTypes.push(row.api_name);
+      }
+      const snapshot = ontologyId
+        ? await loadOntologySnapshot(deps.pool, { ontologyId, objectTypes: importedTypes })
+        : { byType: new Map(), ontologyId: "", objectCount: 0, objectTypes: [] as string[] };
+      const { sdk, getEdits } = buildOntologySdk(snapshot);
+
+      const result = runSandboxedWithSdk(transpiled, input, {
+        Objects: sdk.Objects,
+        Edits: sdk.Edits,
+        createEditBatch: sdk.createEditBatch,
+        __ontologyTypes: sdk.objectTypeDescriptors,
+      });
+      // Foundry TS v2: an edit function RETURNS `batch.getEdits()`. Prefer the
+      // returned edit array; fall back to the ambient `Edits` side-channel
+      // (v1-style functions that mutate via Edits.update and return a value).
+      const isEdit = (x: unknown): x is OntologyEdit =>
+        !!x && typeof x === "object" &&
+        ["create", "update", "delete", "link", "unlink"].includes((x as { op?: unknown }).op as string);
+      const returnedEdits: OntologyEdit[] =
+        Array.isArray(result.output) && result.output.length > 0 && result.output.every(isEdit)
+          ? (result.output as OntologyEdit[])
+          : [];
+      const sideChannelEdits = result.status === "ok" ? getEdits() : [];
+      const collectedEdits: OntologyEdit[] =
+        result.status === "ok" ? (returnedEdits.length > 0 ? returnedEdits : sideChannelEdits) : [];
+
+      // Edits do NOT persist on a plain invoke (Foundry: preview is read-only).
+      // The caller opts in via `applyEdits: true`, simulating a function-backed
+      // Action committing the batch to the Ontology system-of-record.
+      let editsApplied: { created: number; updated: number; deleted: number; linked: number; unlinked: number } | null = null;
+      if (result.status === "ok" && collectedEdits.length > 0 && body.applyEdits === true && ontologyId) {
+        try {
+          editsApplied = await applyEdits(deps.pool, {
+            ontologyId,
+            edits: collectedEdits,
+            actorUserId: (req as { codeReposPrincipal?: { userId?: string } }).codeReposPrincipal?.userId ?? null,
+          });
+        } catch (e) {
+          return sendError(res, codeReposError("CodeRepos:Internal", {
+            reason: "edit-apply-failed",
+            message: (e as Error)?.message ?? "unknown",
+          }));
+        }
+      }
 
       // Partition captured logs into stdout/stderr (the runtime tags
       // error frames with a `[err] ` prefix; everything else is stdout).
@@ -1918,6 +2300,14 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             stdout: stdoutLines.join("\n"),
             stderr: stderrLines.join("\n"),
             status: "ok",
+            // Ontology integration surface (Foundry parity B7):
+            edits: collectedEdits,
+            editsApplied,
+            ontology: {
+              ontologyId: ontologyId ?? null,
+              objectsLoaded: snapshot.objectCount,
+              objectTypes: snapshot.objectTypes,
+            },
           }),
         );
     } catch (err) {
@@ -2003,6 +2393,18 @@ function parseEtag(s: string): number {
   const m = s.match(/^(?:W\/)?"(\d+)"$/);
   if (!m) return Number.NaN;
   return parseInt(m[1], 10);
+}
+
+/**
+ * Parse an `If-Match` resource-version ETag, returning `null` when the header
+ * is present but unparseable (e.g. a bare token like `not-a-version`). Routes
+ * must short-circuit to 400 on `null` BEFORE binding the value into a SQL
+ * `bigint` parameter — otherwise `NaN` reaches Postgres and crashes the query
+ * with "invalid input syntax for type bigint" (500). Fixes parity defect CR-11d.
+ */
+function parseVersionEtagOrNull(s: string): number | null {
+  const n = parseEtag(s);
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 /**

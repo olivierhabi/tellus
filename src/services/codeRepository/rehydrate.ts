@@ -25,9 +25,21 @@
 
 import type { Pool } from "pg";
 
-import { InMemoryStemma } from "./adapters/inMemory";
 import type { StemmaAdapter, TemplateAdapter } from "./adapters/types";
 import { deriveDefaultPackageName } from "./saga/executor";
+
+/**
+ * Any StemmaAdapter that can report whether a repo has already been provisioned
+ * durably. Both InMemoryStemma (sync) and PostgresStemma (async) expose this,
+ * so the rehydrator works against either — it scaffolds repos that have no
+ * content yet and SKIPS those already provisioned (preserving user commits).
+ */
+type RehydratableStemma = StemmaAdapter & {
+  exists(rid: string): boolean | Promise<boolean>;
+};
+function isRehydratable(a: StemmaAdapter): a is RehydratableStemma {
+  return typeof (a as Partial<RehydratableStemma>).exists === "function";
+}
 
 export interface RehydrateInMemoryStemmaArgs {
   readonly pool: Pool;
@@ -78,14 +90,17 @@ export async function rehydrateInMemoryStemma(
   const log = args.logger ?? (() => {});
 
   // ---------------------------------------------------------------------
-  // Production guard. Only the in-memory adapter accepts arbitrary
-  // re-seeding. A real Stemma client persists its own state and must not
-  // be poked from this metadata-driven loop.
+  // Works against any adapter that can report `exists(rid)` — both the
+  // in-memory adapter (re-scaffolds volatile state every boot) and the
+  // durable PostgresStemma (scaffolds each repo exactly ONCE, then skips so
+  // user commits persist). An adapter without `exists` cannot be reconciled
+  // from metadata, so we skip.
   // ---------------------------------------------------------------------
-  if (!(args.stemma instanceof InMemoryStemma)) {
+  if (!isRehydratable(args.stemma)) {
     log("code-repos.rehydrate.skip-real-adapter");
     return { applied: false, rehydrated: 0, skipped: 0, failed: 0, total: 0 };
   }
+  const stemma = args.stemma;
 
   type Row = {
     rid: string;
@@ -116,12 +131,12 @@ export async function rehydrateInMemoryStemma(
   let failed = 0;
 
   for (const row of rows) {
-    if (args.stemma.exists(row.rid)) {
+    if (await stemma.exists(row.rid)) {
       skipped += 1;
       continue;
     }
     try {
-      const out = await args.stemma.createRepository({
+      const out = await stemma.createRepository({
         proposedRid: row.rid,
         defaultBranchName: row.default_branch,
         principalSub: row.created_by,

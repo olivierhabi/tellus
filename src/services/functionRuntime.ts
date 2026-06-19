@@ -141,3 +141,146 @@ export function runSandboxed(
     logs,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Ontology-aware runtime — runs a TypeScript Function v2 with a real Ontology
+// SDK injected. Unlike `runSandboxed`, this builds ONE context that holds the
+// SDK, then both compiles AND invokes the user function in it — so the
+// function's closure resolves `Objects`/`Edits` (whether referenced as ambient
+// globals or imported via the `require` shim below).
+//
+// The SDK reaches the function two ways, mirroring Foundry's authoring styles:
+//   • `import { Objects, Edits } from "@foundry/functions"`  (transpiles to
+//     `require("@foundry/functions")` → resolved by the shim), and
+//   • bare ambient `Objects` / `Edits` references.
+// Unknown module specifiers throw, like Foundry's restricted runtime.
+// ---------------------------------------------------------------------------
+
+/** Module specifiers whose `require(...)` resolves to the injected Ontology SDK. */
+const SDK_MODULE_SPECIFIERS = new Set([
+  "@foundry/functions",
+  "@foundry/functions-api",
+  "@foundry/ontology-api",
+  "@ontology/sdk",
+  "@osdk/functions",
+  "@osdk/client",
+]);
+
+export function runSandboxedWithSdk(
+  transpiledCjs: string,
+  input: unknown,
+  sdkGlobals: Record<string, unknown>,
+): SandboxResult {
+  const start = Date.now();
+  const logs: string[] = [];
+  const sandboxConsole = {
+    log: (...a: unknown[]) => logs.push(a.map(stringify).join(" ")),
+    error: (...a: unknown[]) => logs.push("[err] " + a.map(stringify).join(" ")),
+    warn: (...a: unknown[]) => logs.push(a.map(stringify).join(" ")),
+    info: (...a: unknown[]) => logs.push(a.map(stringify).join(" ")),
+  };
+
+  // The SDK namespace returned by `require(<known module>)` and also spread as
+  // ambient globals. Numeric type aliases are identity no-ops (types are erased
+  // at transpile; only value-position uses would hit these).
+  const numericAlias = (x: unknown) => x;
+  const sdkNamespace: Record<string, unknown> = {
+    ...sdkGlobals,
+    Integer: numericAlias, Long: numericAlias, Float: numericAlias,
+    Double: numericAlias, Short: numericAlias, Byte: numericAlias,
+    // No-op decorator factories so v1-style `@Function()` / `@Query()` /
+    // `@OntologyEditFunction()` imports don't crash if present.
+    Function: () => () => undefined,
+    Query: () => () => undefined,
+    OntologyEditFunction: () => () => undefined,
+    Edits: sdkGlobals.Edits,
+    createEditBatch: sdkGlobals.createEditBatch,
+  };
+  // The generated ontology SDK (`@ontology/sdk`) exposes the object-TYPE
+  // descriptors (so `import { Flight } from "@ontology/sdk"` resolves to a
+  // `{ apiName }` usable in `batch.create(Flight, …)`), plus the runtime SDK.
+  const ontologyTypes = (sdkGlobals.__ontologyTypes as Record<string, unknown>) ?? {};
+  const ontologySdkNamespace: Record<string, unknown> = { ...sdkNamespace, ...ontologyTypes };
+  const requireShim = (spec: string): unknown => {
+    if (spec === "@ontology/sdk") return ontologySdkNamespace;
+    if (SDK_MODULE_SPECIFIERS.has(spec)) return sdkNamespace;
+    throw new Error(
+      `Cannot import "${spec}" in the Functions sandbox — only the Ontology SDK is available.`,
+    );
+  };
+
+  const moduleObj: { exports: unknown } = { exports: {} };
+  const context: Record<string, unknown> = {
+    module: moduleObj,
+    exports: moduleObj.exports,
+    require: requireShim,
+    console: sandboxConsole,
+    __input: input,
+    __result: undefined,
+    ...sdkGlobals, // ambient Objects / Edits
+  };
+  vm.createContext(context);
+
+  // Phase 1 — evaluate the module to populate module.exports.
+  try {
+    new vm.Script(transpiledCjs, { filename: "user-function.js" }).runInContext(context, {
+      timeout: FUNCTION_TIMEOUT_MS,
+      breakOnSigint: true,
+    });
+  } catch (err) {
+    return errorResult(start, logs, err);
+  }
+
+  const exported = (context.module as { exports: unknown }).exports;
+  const fn =
+    typeof exported === "function"
+      ? exported
+      : exported && typeof (exported as Record<string, unknown>).default === "function"
+        ? (exported as Record<string, unknown>).default
+        : undefined;
+  if (typeof fn !== "function") {
+    return {
+      output: null, durationMs: Date.now() - start, status: "error", logs,
+      errorMessage: "Function source must export a callable (export default fn).",
+    };
+  }
+  context.__fn = fn;
+
+  // Phase 2 — invoke it against the input, in the SAME context.
+  try {
+    new vm.Script("__result = __fn(__input);").runInContext(context, {
+      timeout: FUNCTION_TIMEOUT_MS,
+      breakOnSigint: true,
+    });
+  } catch (err) {
+    return errorResult(start, logs, err);
+  }
+
+  const out = context.__result;
+  if (out && typeof (out as { then?: unknown }).then === "function") {
+    return {
+      output: null, durationMs: Date.now() - start, status: "error", logs,
+      errorMessage: "Async functions are not supported in the sandbox runtime.",
+    };
+  }
+  return { output: out, durationMs: Date.now() - start, status: "ok", logs };
+}
+
+function stringify(v: unknown): string {
+  if (typeof v === "string") return v;
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+
+function errorResult(start: number, logs: string[], err: unknown): SandboxResult {
+  const msg = err instanceof Error ? err.message : String(err);
+  const isTimeout =
+    msg.includes("Script execution timed out") ||
+    msg.includes("Script execution was interrupted");
+  return {
+    output: null,
+    durationMs: Date.now() - start,
+    status: isTimeout ? "timeout" : "error",
+    errorMessage: msg,
+    logs,
+  };
+}

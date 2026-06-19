@@ -4,12 +4,50 @@
 #           Keycloak, MinIO (S3-compatible object store), App
 # ---------------------------------------------------------------------------
 
-version: "3.8"
+# Shared hardening defaults. Log rotation caps container log growth so a
+# chatty or crash-looping service can't fill the host disk (a top cause of
+# "everything went down at once" incidents). Merge into each service with
+# `logging: *default-logging`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
+  # -------------------------------------------------------------------------
+  # autoheal — the missing recovery half of our healthchecks.
+  #
+  # Docker Compose's `restart:` policy only reacts to a process EXITING; it
+  # does NOT restart a container that goes `unhealthy` while its process is
+  # still alive (e.g. a deadlocked server still holding the port). autoheal
+  # watches the Docker socket and restarts any container whose healthcheck
+  # has gone unhealthy. With AUTOHEAL_CONTAINER_LABEL=all it covers every
+  # container that defines a healthcheck — no per-service label needed.
+  #
+  # This is what turns our healthchecks from "a red light on a dashboard"
+  # into actual self-healing.
+  # -------------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: all
+      AUTOHEAL_INTERVAL: 10           # seconds between health sweeps
+      AUTOHEAL_START_PERIOD: 30       # grace before the first action
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: 30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging: *default-logging
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    command: >
+      postgres
+        -c wal_level=logical
+        -c max_replication_slots=10
+        -c max_wal_senders=10
     environment:
       POSTGRES_DB: tellus_db
       POSTGRES_USER: tellus
@@ -23,6 +61,41 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  # -------------------------------------------------------------------------
+  # pg-backup — scheduled logical backups of the APP Postgres.
+  #
+  # The app's Postgres holds the only irreplaceable data (ontology, edits,
+  # connectivity, credentials). Temporal's history is ephemeral and
+  # Lakekeeper's catalog is rebuildable, so we back up THIS one on a schedule
+  # with retention. Dumps land in ./backups/app on the host (gitignored) and
+  # can be restored with `pg_restore`/`psql`. BACKUP_ON_START makes the first
+  # dump happen immediately so the backup path is proven, not assumed.
+  #
+  # NOTE: this is logical backup only. Production also needs WAL archiving /
+  # PITR and an OFF-HOST copy — a local dump on the same disk dies with the
+  # disk. See docs/runbook for the gap.
+  # -------------------------------------------------------------------------
+  pg-backup:
+    image: prodrigestivill/postgres-backup-local:16
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: tellus_db
+      POSTGRES_USER: tellus
+      POSTGRES_PASSWORD: ${PGPASSWORD:-changeme}
+      SCHEDULE: "@daily"
+      BACKUP_ON_START: "TRUE"
+      BACKUP_KEEP_DAYS: "7"
+      BACKUP_KEEP_WEEKS: "4"
+      BACKUP_KEEP_MONTHS: "6"
+      HEALTHCHECK_PORT: "8080"
+    volumes:
+      - ./backups/app:/backups
+    logging: *default-logging
 
   opensearch:
     image: opensearchproject/opensearch:2.17.0
@@ -196,8 +269,267 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin} &&
       mc mb --ignore-existing local/${S3_BUCKET:-tellus-uploads} &&
-      echo 'MinIO bucket ${S3_BUCKET:-tellus-uploads} ready.'
+      mc mb --ignore-existing local/${ICEBERG_BUCKET:-iceberg-warehouse} &&
+      echo 'MinIO buckets ${S3_BUCKET:-tellus-uploads} + ${ICEBERG_BUCKET:-iceberg-warehouse} ready.'
       "
+
+  # -------------------------------------------------------------------------
+  # Redis — overlay store backend (Task B7).
+  #
+  # The backend's overlay store (`src/services/overlay/getOverlayStore.ts`)
+  # connects to `REDIS_URL` (see `.env`: redis://:tellus_overlay_pw@localhost:6379).
+  # Without Redis it transparently falls back to an in-memory store, but the
+  # in-memory store does not survive a restart and is not shared across
+  # processes — so for real testing we run Redis. The password here MUST match
+  # the one embedded in `.env`'s REDIS_URL (`tellus_overlay_pw`).
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # --appendonly yes turns on AOF so the overlay store survives a Redis
+    # restart instead of losing everything since the last RDB snapshot.
+    # maxmemory + allkeys-lru bounds memory and degrades gracefully (evicts
+    # cold keys) instead of OOM-killing the container under load.
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "tellus_overlay_pw"
+      - "--appendonly"
+      - "yes"
+      - "--maxmemory"
+      - "384mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a tellus_overlay_pw ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # -------------------------------------------------------------------------
+  # ClickHouse — link-traversal analytics store (Task LT-B1 / search-around).
+  #
+  # `src/services/searchAround/clickhouseClient.ts` talks to it over HTTP
+  # (CLICKHOUSE_URL=http://localhost:8123) as user `tellus`. The backend
+  # creates its own MergeTree tables on bootstrap; we only need the server
+  # up with the matching user/password/database. Native port 9000 collides
+  # with MinIO so we deliberately do NOT publish it — the app only uses 8123.
+  # -------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tellus}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tellus_ch_pw}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-default}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:8123:8123"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - chdata:/var/lib/clickhouse
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      # `localhost` resolves to IPv6 ::1 inside this image, where ClickHouse
+      # isn't listening — use the IPv4 loopback explicitly.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # -------------------------------------------------------------------------
+  # Temporal — workflow orchestration for the Funnel (Task FNL).
+  #
+  # `src/services/funnel/temporal/worker.ts` connects to TEMPORAL_ADDRESS
+  # (localhost:7233) in namespace `tellus-funnel`. When Temporal is down the
+  # PG-backed dispatcher stays primary — so this is best-effort.
+  #
+  # SPOF removal: Temporal runs on its OWN Postgres (temporal-postgres), not
+  # the app's. Losing the orchestration store no longer takes the app's data
+  # down with it, and vice versa. Temporal's workflow history is ephemeral for
+  # our purposes (the PG dispatcher is the source of truth), so this instance
+  # starts fresh — auto-setup builds the schema and temporal-init re-registers
+  # the namespace.
+  # -------------------------------------------------------------------------
+  temporal-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: temporal
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_PG_PASSWORD:-temporal_pw}
+    volumes:
+      - temporal_pgdata:/var/lib/postgresql/data
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    restart: unless-stopped
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${TEMPORAL_PG_PASSWORD:-temporal_pw}
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "127.0.0.1:7233:7233"
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    healthcheck:
+      # The frontend binds to the container address, not loopback, so probe
+      # via the service alias. SERVING ⇒ healthy; anything else exits non-zero.
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 | grep -q SERVING"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # One-shot: register the `tellus-funnel` namespace the worker expects.
+  # Retries until the Temporal frontend answers, then creates the namespace
+  # idempotently. ($$ escapes shell vars from Compose interpolation.)
+  temporal-init:
+    image: temporalio/admin-tools:1.25
+    restart: "no"
+    depends_on:
+      temporal:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 60); do
+          if temporal operator cluster health --address temporal:7233 >/dev/null 2>&1; then break; fi
+          echo "waiting for temporal frontend... ($$i)"; sleep 2;
+        done
+        temporal operator namespace describe --address temporal:7233 tellus-funnel >/dev/null 2>&1 \
+          || temporal operator namespace create --address temporal:7233 --retention 72h tellus-funnel
+        echo "temporal namespace tellus-funnel ready"
+
+  # -------------------------------------------------------------------------
+  # Lakekeeper — Iceberg REST catalog (Task B2).
+  #
+  # `src/services/funnel/lakekeeperClient.ts` calls the management + Iceberg
+  # REST APIs at LAKEKEEPER_URL (localhost:8181), creating the `tellus-funnel`
+  # warehouse (backed by the MinIO `iceberg-warehouse` bucket) and namespaces
+  # itself. We just need the catalog serving, with its own PG database and a
+  # one-time server bootstrap. When unreachable the app falls back to a PG
+  # shim, so this is best-effort.
+  #
+  # SPOF removal: Lakekeeper runs on its OWN Postgres (lakekeeper-postgres),
+  # not the app's. POSTGRES_DB auto-creates the `lakekeeper` database, so the
+  # old `lakekeeper-db-init` step is gone. Existing catalog metadata was
+  # migrated off the app DB via `scripts/migrate-split-dbs.sh` (pg_dump |
+  # pg_restore), so warehouses/namespaces are preserved. Steps now: migrate
+  # schema → serve → POST server bootstrap.
+  # -------------------------------------------------------------------------
+  lakekeeper-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lakekeeper
+      POSTGRES_USER: lakekeeper
+      POSTGRES_PASSWORD: ${LAKEKEEPER_PG_PASSWORD:-lakekeeper_pw}
+    volumes:
+      - lakekeeper_pgdata:/var/lib/postgresql/data
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakekeeper -d lakekeeper"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog:v0.12.3@sha256:519773ef486d62fd93019bc763d7c0ce71dbb6fce041ccc915cee604649c3db8
+    restart: "no"
+    depends_on:
+      lakekeeper-postgres:
+        condition: service_healthy
+    command: ["migrate"]
+    environment:
+      LAKEKEEPER__PG_ENCRYPTION_KEY: ${LAKEKEEPER_PG_ENCRYPTION_KEY}
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://lakekeeper:${LAKEKEEPER_PG_PASSWORD:-lakekeeper_pw}@lakekeeper-postgres:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://lakekeeper:${LAKEKEEPER_PG_PASSWORD:-lakekeeper_pw}@lakekeeper-postgres:5432/lakekeeper
+
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:v0.12.3@sha256:519773ef486d62fd93019bc763d7c0ce71dbb6fce041ccc915cee604649c3db8
+    restart: unless-stopped
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+    command: ["serve"]
+    environment:
+      LAKEKEEPER__PG_ENCRYPTION_KEY: ${LAKEKEEPER_PG_ENCRYPTION_KEY}
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://lakekeeper:${LAKEKEEPER_PG_PASSWORD:-lakekeeper_pw}@lakekeeper-postgres:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://lakekeeper:${LAKEKEEPER_PG_PASSWORD:-lakekeeper_pw}@lakekeeper-postgres:5432/lakekeeper
+    ports:
+      - "127.0.0.1:8181:8181"
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    healthcheck:
+      # Distroless image — no shell/curl. The binary ships its own probe.
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  lakekeeper-bootstrap:
+    image: curlimages/curl:8.10.1
+    restart: "no"
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 60); do
+          if curl -sf http://lakekeeper:8181/health >/dev/null 2>&1; then break; fi
+          echo "waiting for lakekeeper... ($$i)"; sleep 2;
+        done
+        curl -s -o /dev/null -w "bootstrap HTTP %{http_code}\n" -X POST \
+          http://lakekeeper:8181/management/v1/bootstrap \
+          -H 'content-type: application/json' \
+          -d '{"accept-terms-of-use": true}' || true
+        echo "lakekeeper bootstrap attempted"
 
   app:
     build: .
@@ -213,6 +545,19 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      # Best-effort dependencies: the app degrades gracefully when these are
+      # down (overlay→in-memory, link traversal disabled, PG-backed dispatcher
+      # stays primary, Iceberg→PG shim). Gating startup on their *health* would
+      # let one of them take the whole app offline — so we only order startup
+      # (service_started), never block readiness on them.
+      redis:
+        condition: service_started
+      clickhouse:
+        condition: service_started
+      temporal:
+        condition: service_started
+      lakekeeper:
+        condition: service_started
     environment:
       PGHOST: postgres
       PGPORT: 5432
@@ -234,6 +579,20 @@ services:
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
       S3_FORCE_PATH_STYLE: "true"
+      # Overlay store → Redis (in-cluster). Overrides the .env localhost URL.
+      REDIS_URL: redis://:tellus_overlay_pw@redis:6379
+      # Link-traversal analytics → ClickHouse (in-cluster).
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tellus}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tellus_ch_pw}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
+      # Funnel orchestration → Temporal (in-cluster).
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-tellus-funnel}
+      # Iceberg REST catalog → Lakekeeper (in-cluster). The warehouse storage
+      # endpoint must be reachable from the Lakekeeper container, hence minio:9000.
+      LAKEKEEPER_URL: http://lakekeeper:8181
+      ICEBERG_S3_ENDPOINT: http://minio:9000
       PORT: 3000
       NODE_ENV: production
     ports:
@@ -252,3 +611,7 @@ volumes:
   kcdata:
   appdata:
   miniodata:
+  redisdata:
+  chdata:
+  temporal_pgdata:
+  lakekeeper_pgdata:

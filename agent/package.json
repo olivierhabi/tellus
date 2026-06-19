@@ -1,0 +1,35 @@
+{
+  "name": "tellus-agent",
+  "version": "0.1.0",
+  "description": "On-prem relay agent for Tellus connectivity (B6).",
+  "private": true,
+  "main": "dist/bootvisor.js",
+  "bin": {
+    "tellus-agent": "dist/bootvisor.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:binary": "node scripts/build-binary.js",
+    "start": "node dist/bootvisor.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "pkg": "^5.8.1",
+    "typescript": "^5.5.0"
+  },
+  "pkg": {
+    "scripts": "dist/**/*.js",
+    "targets": [
+      "node20-linux-x64",
+      "node20-macos-x64"
+    ],
+    "outputPath": "build"
+  }
+}

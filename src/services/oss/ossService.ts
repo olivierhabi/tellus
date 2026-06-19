@@ -15,7 +15,7 @@ export function indexNameFor(req: { ontologyRid: string; objectType: string; bra
 export class OssService {
   async load(req: SearchRequest, executeFn: ExecuteFn): Promise<{ hits: unknown[]; nextCursor?: string; total?: number }> {
     const compiled = compileSearch(req);
-    const r = await executeFn(indexNameFor(req), compiled);
+    const r = await executeFn(indexNameFor(req), compiled as unknown as Record<string, unknown>);
     const hits = (r.hits ?? []).map((h) => ({ id: h._id, ...(h._source as Record<string, unknown>) }));
     let nextCursor: string | undefined;
     if (r.hits && r.hits.length === req.pageSize && r.hits[r.hits.length - 1]?.sort) {
@@ -26,7 +26,7 @@ export class OssService {
 
   async aggregate(req: AggregateRequest, executeFn: ExecuteFn): Promise<{ aggregations: unknown }> {
     const compiled = compileAggregate(req);
-    const r = await executeFn(indexNameFor(req), compiled);
+    const r = await executeFn(indexNameFor(req), compiled as unknown as Record<string, unknown>);
     return { aggregations: r.aggregations ?? {} };
   }
 
@@ -78,7 +78,7 @@ export class OssService {
       filter: { kind: 'term', field: opts.primaryKey, operator: 'eq', value: opts.primaryKeyValue },
       pageSize: 1,
     } as any);
-    const r = await opts.executeFn(indexNameFor(opts), compiled);
+    const r = await opts.executeFn(indexNameFor(opts), compiled as unknown as Record<string, unknown>);
     if (!r.hits || r.hits.length === 0) return null;
     const h = r.hits[0]!;
     return { id: h._id, ...(h._source as Record<string, unknown>) };
