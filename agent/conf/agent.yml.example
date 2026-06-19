@@ -1,0 +1,11 @@
+# Tellus Agent configuration (spec §B6 line 310).
+#
+# Copy to /etc/tellus/agent/agent.yml, chown root:root, chmod 0640.
+
+coordinatorUrl: 'wss://magritte.tellus.example.gov.rw/agent'
+agentId: 'agent-rra-dc1-01'
+group: 'rra-prod-pg'
+version: '0.1.0'
+# Joining token issued by Tellus Multipass; rotate quarterly via
+# `tellus admin agents rotate-token --group <group>`.
+token: 'REPLACE_ME_WITH_REAL_JOINING_TOKEN'

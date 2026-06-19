@@ -309,7 +309,7 @@ describe("B2 admin routes — PATCH /repositories/:rid (ETag)", () => {
     expect(r.headers.etag).toBe('W/"2"');
   });
 
-  it("400 on If-Match mismatch (412 semantically; spec uses InvalidSettings envelope here)", async () => {
+  it("412 PreconditionFailed on stale If-Match (RFC 7232 optimistic concurrency)", async () => {
     const create = await withAuth(
       request(app)
         .post("/api/v1/code-repositories")
@@ -323,8 +323,27 @@ describe("B2 admin routes — PATCH /repositories/:rid (ETag)", () => {
         .set("If-Match", 'W/"99"')
         .send({ displayName: "x" }),
     );
+    expect(r.status).toBe(412);
+    expect(r.body.errorName).toBe("CodeRepos:PreconditionFailed");
+    expect(String(r.body.parameters?.currentVersion)).toBe("1");
+  });
+
+  it("400 InvalidSettings on a malformed (non-version) If-Match — no 500", async () => {
+    const create = await withAuth(
+      request(app)
+        .post("/api/v1/code-repositories")
+        .set("Idempotency-Key", nextIdem())
+        .send(createBody({ displayName: "PatchBadEtag" })),
+    );
+    const rid = create.body.rid;
+    const r = await withAuth(
+      request(app)
+        .patch(`/api/v1/code-repositories/${rid}`)
+        .set("If-Match", "not-a-version")
+        .send({ displayName: "x" }),
+    );
     expect(r.status).toBe(400);
-    expect(r.body.parameters?.reason).toBe("ETag mismatch");
+    expect(r.body.parameters?.field).toBe("If-Match");
   });
 
   it("400 InvalidSettings when If-Match missing", async () => {
@@ -342,6 +361,86 @@ describe("B2 admin routes — PATCH /repositories/:rid (ETag)", () => {
     );
     expect(r.status).toBe(400);
     expect(r.body.parameters?.field).toBe("If-Match");
+  });
+});
+
+describe("B2 admin routes — branch lifecycle (POST/DELETE /:rid/branches)", () => {
+  it("creates a branch (fork), rejects duplicates, lists it, and deletes it", async () => {
+    const create = await withAuth(
+      request(app)
+        .post("/api/v1/code-repositories")
+        .set("Idempotency-Key", nextIdem())
+        .send(createBody({ displayName: "BranchOps" })),
+    );
+    const rid = create.body.rid;
+
+    const mk = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/branches`)
+        .set("Idempotency-Key", nextIdem())
+        .send({ name: "feature/x", fromBranch: "main" }),
+    );
+    expect(mk.status).toBe(201);
+    expect(mk.body.name).toBe("feature/x");
+    expect(mk.body.fromBranch).toBe("main");
+
+    // duplicate name → 409
+    const dup = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/branches`)
+        .set("Idempotency-Key", nextIdem())
+        .send({ name: "feature/x" }),
+    );
+    expect(dup.status).toBe(409);
+    expect(dup.body.errorName).toBe("CodeRepos:BranchExists");
+
+    // unknown source → 404
+    const badSrc = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/branches`)
+        .set("Idempotency-Key", nextIdem())
+        .send({ name: "feature/y", fromBranch: "nope" }),
+    );
+    expect(badSrc.status).toBe(404);
+
+    // list shows the new branch
+    const list = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}/branches`));
+    expect(list.body.branches.map((b: { name: string }) => b.name)).toContain("feature/x");
+
+    // cannot delete the default branch
+    const delDefault = await withAuth(
+      request(app).delete(`/api/v1/code-repositories/${rid}/branches/main`),
+    );
+    expect(delDefault.status).toBe(412);
+    expect(delDefault.body.errorName).toBe("CodeRepos:CannotModifyDefaultBranch");
+
+    // delete the feature branch → 204; deleting again → 404
+    const del = await withAuth(
+      request(app).delete(`/api/v1/code-repositories/${rid}/branches/${encodeURIComponent("feature/x")}`),
+    );
+    expect(del.status).toBe(204);
+    const delAgain = await withAuth(
+      request(app).delete(`/api/v1/code-repositories/${rid}/branches/${encodeURIComponent("feature/x")}`),
+    );
+    expect(delAgain.status).toBe(404);
+  });
+
+  it("rejects an invalid branch name (400)", async () => {
+    const create = await withAuth(
+      request(app)
+        .post("/api/v1/code-repositories")
+        .set("Idempotency-Key", nextIdem())
+        .send(createBody({ displayName: "BranchOpsBad" })),
+    );
+    const rid = create.body.rid;
+    const mk = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/branches`)
+        .set("Idempotency-Key", nextIdem())
+        .send({ name: "../evil" }),
+    );
+    expect(mk.status).toBe(400);
+    expect(mk.body.parameters?.field).toBe("name");
   });
 });
 
@@ -365,14 +464,10 @@ describe("B2 admin routes — DELETE /repositories/:rid (soft-delete)", () => {
 });
 
 describe("B2 admin routes — GET /repositories/:rid/branches", () => {
-  it("falls back to Stemma for a freshly-created repo (cache not yet seeded)", async () => {
-    // The repo-create saga doesn't yet seed code_repository_branch_cache,
-    // so a brand-new repo would otherwise return []. The route now
-    // queries the StemmaAdapter for the default-branch HEAD, synthesizes
-    // a single-row response, and seeds the cache for subsequent calls.
-    // Without this fallback the IDE commit handler has no tipCommitSha
-    // to send back as `If-Match`, and the user sees an unrecoverable
-    // "Branch main not in branches list" error.
+  it("lists the default branch from the Stemma adapter (authoritative, no cache needed)", async () => {
+    // The branch list is sourced from the StemmaAdapter (durable), so a
+    // freshly-created repo correctly returns its default branch without any
+    // branch_cache seeding. The cache is metadata-enrichment only.
     const create = await withAuth(
       request(app)
         .post("/api/v1/code-repositories")
@@ -388,17 +483,6 @@ describe("B2 admin routes — GET /repositories/:rid/branches", () => {
     expect(r.body.branches[0].name).toBe("main");
     expect(r.body.branches[0].headSha).toMatch(/^[0-9a-f]{40}$/);
     expect(r.body.branches[0].isProtected).toBe(false);
-
-    // Subsequent call should now read directly from the cache — verify
-    // by querying the table and confirming the row was seeded.
-    const cacheRows = await schema.pool.query(
-      `SELECT branch_name, head_sha FROM code_repository_branch_cache
-        WHERE repository_rid = $1`,
-      [rid],
-    );
-    expect(cacheRows.rowCount).toBe(1);
-    expect(cacheRows.rows[0].branch_name).toBe("main");
-    expect(cacheRows.rows[0].head_sha).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("filters by ?protected=true|false", async () => {
@@ -409,10 +493,18 @@ describe("B2 admin routes — GET /repositories/:rid/branches", () => {
         .send(createBody({ displayName: "BranchFilter" })),
     );
     const rid = create.body.rid;
-    // Seed cache directly.
+    // Create a real 'dev' branch in the Stemma (so it's actually listed), then
+    // enrich protection metadata via the cache: main protected, dev not.
+    await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/branches`)
+        .set("Idempotency-Key", nextIdem())
+        .send({ name: "dev", fromBranch: "main" }),
+    );
     await schema.pool.query(
       `INSERT INTO code_repository_branch_cache (repository_rid, branch_name, head_sha, is_protected)
-       VALUES ($1, 'main', 'aaaa', TRUE), ($1, 'dev', 'bbbb', FALSE)`,
+       VALUES ($1, 'main', 'aaaa', TRUE)
+       ON CONFLICT (repository_rid, branch_name) DO UPDATE SET is_protected = TRUE`,
       [rid],
     );
     const r1 = await withAuth(

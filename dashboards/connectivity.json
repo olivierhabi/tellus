@@ -1,0 +1,145 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "title": "Tellus Connectivity",
+  "uid": "tellus-connectivity",
+  "schemaVersion": 39,
+  "tags": ["tellus", "connectivity", "magritte"],
+  "timezone": "browser",
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      },
+      {
+        "name": "route",
+        "type": "query",
+        "datasource": "${datasource}",
+        "query": "label_values(tellus_connectivity_request_duration_seconds_bucket, route)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request latency p50/p95/p99 by route",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, route) (rate(tellus_connectivity_request_duration_seconds_bucket{route=~\"$route\"}[5m])))",
+          "legendFormat": "p50 {{route}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(tellus_connectivity_request_duration_seconds_bucket{route=~\"$route\"}[5m])))",
+          "legendFormat": "p95 {{route}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(tellus_connectivity_request_duration_seconds_bucket{route=~\"$route\"}[5m])))",
+          "legendFormat": "p99 {{route}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "RPS by status",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(tellus_connectivity_request_duration_seconds_count[1m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Errors by errorName (1m rate)",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum by (errorName) (rate(tellus_connectivity_errors_total[1m]))",
+          "legendFormat": "{{errorName}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Idempotency-Key replays (5m)",
+      "type": "stat",
+      "datasource": "${datasource}",
+      "gridPos": { "x": 0, "y": 14, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(increase(tellus_idempotent_replay_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Outbox dispatch p99 latency",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "x": 6, "y": 14, "w": 9, "h": 4 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, operation) (rate(tellus_connectivity_outbox_dispatch_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Outbox backlog (enqueued - delivered)",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "x": 15, "y": 14, "w": 9, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(tellus_connectivity_outbox_enqueued_total) - sum(tellus_connectivity_outbox_deliveries_total{result=\"ok\"})",
+          "legendFormat": "backlog",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Outbox failure rate",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(tellus_connectivity_outbox_deliveries_total{result=\"failure\"}[5m]))",
+          "legendFormat": "failures {{operation}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

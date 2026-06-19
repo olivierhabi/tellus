@@ -247,6 +247,43 @@ export class InMemoryStemma implements StemmaAdapter {
     };
   }
 
+  async createBranch(
+    args: import("./types").StemmaCreateBranchArgs,
+  ): Promise<import("./types").StemmaCreateBranchOutcome> {
+    if (this.tombstoned.has(args.repositoryRid)) return { kind: "source-not-found" };
+    const repo = this.branches.get(args.repositoryRid);
+    const src = repo?.get(args.fromBranch);
+    if (!repo || !src) return { kind: "source-not-found" };
+    if (repo.has(args.newBranch)) return { kind: "branch-exists" };
+    // Fork the full file set + head into the new branch.
+    repo.set(args.newBranch, { head: src.head, files: new Map(src.files) });
+    return { kind: "ok", head: src.head };
+  }
+
+  async deleteBranch(
+    args: import("./types").StemmaDeleteBranchArgs,
+  ): Promise<import("./types").StemmaDeleteBranchOutcome> {
+    if (this.tombstoned.has(args.repositoryRid)) return { kind: "not-found" };
+    const repo = this.branches.get(args.repositoryRid);
+    if (!repo || !repo.has(args.branch)) return { kind: "not-found" };
+    repo.delete(args.branch);
+    return { kind: "ok" };
+  }
+
+  async listBranches(
+    args: { repositoryRid: string },
+  ): Promise<import("./types").StemmaListBranchesOutcome> {
+    if (this.tombstoned.has(args.repositoryRid)) return { kind: "not-found" };
+    const repo = this.branches.get(args.repositoryRid);
+    if (!repo) return { kind: "not-found" };
+    return {
+      kind: "ok",
+      branches: [...repo.entries()]
+        .map(([name, rec]) => ({ name, head: rec.head }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    };
+  }
+
   async tombstone(args: { repositoryRid: string }): Promise<void> {
     if (this.cfg.tombstoneShouldThrow) {
       throw new Error("simulated stemma.tombstone failure");
