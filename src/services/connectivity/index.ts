@@ -40,6 +40,9 @@ import {
 } from "./credentials/rotation.worker";
 import { startHealthProber, stopHealthProber } from "./health/prober";
 import { drainAll as drainPgPools } from "./connectors/postgresql/pool";
+import { extractUser, requireScope } from "./handlers/connections.handler";
+import { TellusError } from "../../lib/errors/envelope";
+import { ConnectionNotFound } from "../../lib/errors/connectivity.errors";
 
 export function createConnectivityRouter(): Router {
   const router = Router({ mergeParams: true });
@@ -175,6 +178,22 @@ export function createConnectivityRouter(): Router {
     "/connections/:rid/cdc/preflight",
     async (req, res, next) => {
       try {
+        // Extract user and require read scope
+        const user = extractUser(req);
+        requireScope(user, "connectivity:read");
+
+        // Verify the connection exists and belongs to the user's tenant.
+        const connResult = await pool.query(
+          `SELECT 1 FROM connectivity_connections WHERE rid=$1 AND tenant=$2 AND deleted_at IS NULL`,
+          [req.params.rid, user.tenant],
+        );
+        if (connResult.rowCount === 0) {
+          new TellusError(ConnectionNotFound, {
+            rid: req.params.rid,
+          }).send(res);
+          return;
+        }
+
         res.json(await runPreflight(req.params.rid));
       } catch (err) {
         next(err);

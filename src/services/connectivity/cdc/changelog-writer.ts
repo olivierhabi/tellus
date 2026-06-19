@@ -37,6 +37,8 @@ export class ChangelogWriter {
   private buffer: KafkaMessage[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private importShort: string;
+  private flushPromise: Promise<void> | null = null;
+  private stopping = false;
 
   constructor(importRid: string, partitions = 12, topic?: string) {
     this.importShort = importRid.split(".").pop()!.slice(0, 12);
@@ -52,6 +54,7 @@ export class ChangelogWriter {
   }
 
   async append(ev: ChangelogEvent): Promise<void> {
+    if (this.stopping) return;
     const key = ev.pk ? JSON.stringify(ev.pk) : `${ev.source.schema}.${ev.source.table}`;
     this.buffer.push({
       topic: this.topic,
@@ -75,6 +78,17 @@ export class ChangelogWriter {
   }
 
   async flush(): Promise<void> {
+    if (!this.kafka || this.buffer.length === 0 || this.stopping) return;
+    // Track in-flight flush to prevent race with stop()
+    const currentFlush = this.doFlush();
+    this.flushPromise = currentFlush;
+    await currentFlush;
+    if (this.flushPromise === currentFlush) {
+      this.flushPromise = null;
+    }
+  }
+
+  private async doFlush(): Promise<void> {
     if (!this.kafka || this.buffer.length === 0) return;
     const batch = this.buffer;
     this.buffer = [];
@@ -82,7 +96,12 @@ export class ChangelogWriter {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     if (this.flushTimer) clearInterval(this.flushTimer);
+    // Wait for any in-flight flush to complete before proceeding
+    if (this.flushPromise) {
+      await this.flushPromise.catch(() => undefined);
+    }
     await this.flush();
     if (this.kafka) await this.kafka.close();
     this.kafka = null;

@@ -14,6 +14,10 @@ import {
   InvalidConfiguration,
 } from "../../../lib/errors/connectivity.errors";
 import { CdcImportCreateRequest } from "./contracts";
+import {
+  extractUser,
+  requireScope,
+} from "../handlers/connections.handler";
 
 function buildRid(): string {
   return `ri.magritte.main.extract.${randomUUID()}`;
@@ -32,6 +36,10 @@ export async function postCdcStream(
   next: NextFunction,
 ): Promise<void> {
   try {
+    // Extract user and require write scope
+    const user = extractUser(req);
+    requireScope(user, "connectivity:write");
+
     const parsed = CdcImportCreateRequest.safeParse(req.body);
     if (!parsed.success) {
       new TellusError(InvalidConfiguration, {
@@ -41,10 +49,10 @@ export async function postCdcStream(
     }
     const body = parsed.data;
 
-    // Verify the connection exists.
+    // Verify the connection exists and belongs to the user's tenant.
     const conn = await pool.query(
-      `SELECT 1 FROM connectivity_connections WHERE rid=$1 AND deleted_at IS NULL`,
-      [body.connectionRid],
+      `SELECT 1 FROM connectivity_connections WHERE rid=$1 AND tenant=$2 AND deleted_at IS NULL`,
+      [body.connectionRid, user.tenant],
     );
     if (conn.rowCount === 0) {
       new TellusError(ConnectionNotFound, {
