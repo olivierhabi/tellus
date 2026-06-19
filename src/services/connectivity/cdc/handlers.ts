@@ -39,7 +39,6 @@ export async function postCdcStream(
     // Extract user and require write scope
     const user = extractUser(req);
     requireScope(user, "connectivity:write");
-
     const parsed = CdcImportCreateRequest.safeParse(req.body);
     if (!parsed.success) {
       new TellusError(InvalidConfiguration, {
