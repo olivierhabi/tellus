@@ -467,8 +467,21 @@ export type JoinApplyInput = z.infer<typeof JoinApplySchema>;
 /**
  * Request body for POST .../nodes/:nodeId/union/preview
  *
- * Union by name: stacks rows from two datasets, matching columns by name.
- * Columns unique to one side get null in rows from the other side.
+ * Union semantics:
+ *   - `name-merge` (default, backwards-compatible): stacks rows from both
+ *     sides matching columns by name. Columns unique to one side get
+ *     null on rows from the other side. Output column count can EXCEED
+ *     either input's column count when names diverge (e.g. one side
+ *     renamed `order_id` to `orderid`). The response includes
+ *     `LEFT_ONLY_COLUMNS` / `RIGHT_ONLY_COLUMNS` warnings AND, when the
+ *     near-name detector finds plausible same-column-renamed pairs
+ *     (e.g. `orderid` ↔ `order_id`, `customerName` ↔ `customer_name`),
+ *     a high-severity `NAME_MISMATCH_SUGGESTION` warning so the UI can
+ *     surface a "Did you mean to align these?" hint.
+ *   - `strict`: fail with a structured 400 if either side has any
+ *     column the other does not. Use this in pipelines that promise a
+ *     stable output schema to downstream consumers (deploy graph
+ *     fingerprinting, Iceberg writers, ontology object types).
  */
 export const UnionPreviewSchema = z.object({
   /** UUID of the second input node. */
@@ -476,6 +489,10 @@ export const UnionPreviewSchema = z.object({
   /** Max rows to return. */
   limit: z.number().int().min(1).max(5000).default(500),
   priorTransforms: z.array(PriorTransformSchema).optional(),
+  /**
+   * Schema-reconciliation policy. Omitted = `name-merge` (legacy default).
+   */
+  mode: z.enum(['name-merge', 'strict']).optional(),
 });
 
 export type UnionPreviewInput = z.infer<typeof UnionPreviewSchema>;

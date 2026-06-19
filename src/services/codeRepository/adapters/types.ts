@@ -67,7 +67,84 @@ export interface StemmaAdapter {
   // -----------------------------------------------------------------------
   listTree(args: StemmaListTreeArgs): Promise<StemmaListTreeOutcome>;
   readBlob(args: StemmaReadBlobArgs): Promise<StemmaReadBlobOutcome>;
+  // -----------------------------------------------------------------------
+  // B3 → Stemma write path.
+  //
+  // Used by the Templates Engine to commit a scaffold into a freshly-created
+  // bare repo on its default branch. The saga calls `createRepository` to
+  // mint the empty repo, then `template.scaffoldAndPush` to push the
+  // template's file list — the template adapter calls back through this
+  // method.
+  //
+  // Idempotency: callers are expected to commit a deterministic file set;
+  // re-issuing the same commit against an already-populated branch
+  // overwrites the head (no merge semantics — this is the in-memory
+  // analogue of `git push --force` for a freshly-scaffolded repo). Real
+  // Stemma deployments enforce the standard CAS contract via ref updates.
+  // -----------------------------------------------------------------------
+  commitFiles(args: StemmaCommitFilesArgs): Promise<StemmaCommitFilesOutcome>;
 }
+
+/** A file to commit. `content` carries raw bytes — binary-safe. */
+export interface StemmaCommitFile {
+  readonly path: string;
+  readonly content: Uint8Array;
+  readonly mode: "100644" | "100755";
+}
+
+export interface StemmaCommitFilesArgs {
+  readonly repositoryRid: string;
+  readonly branch: string;
+  /**
+   * Files to add or modify (upsert). The blob at each `path` is set to
+   * `content` regardless of whether the path existed previously. This is
+   * the only field consumed by the legacy template-scaffold path.
+   */
+  readonly files: ReadonlyArray<StemmaCommitFile>;
+  /**
+   * Optional list of repo-relative paths to remove from the tree as part
+   * of the same commit. Unknown paths are tolerated (idempotent delete);
+   * the adapter does NOT 404 on missing paths. Empty / omitted ⇒ no
+   * deletes. Must NOT overlap with any path in `files` — adapter rejects
+   * with `transient: "delete-overlaps-upsert"` if violated.
+   */
+  readonly deletePaths?: ReadonlyArray<string>;
+  /**
+   * Optional CAS fence: if provided, the adapter MUST reject the commit
+   * with `kind: "stale-ref"` when the branch's current HEAD does not
+   * equal `parentSha`. When omitted the commit always fast-forwards
+   * (legacy template-scaffold semantics — the bare repo just received
+   * `createRepository` and we want to stamp the initial scaffold).
+   *
+   * Real-Stemma deployments translate this into a JGit `RefUpdate.update`
+   * with `setExpectedOldObjectId(parentSha)` so CAS is enforced under
+   * the same lock as the ref write.
+   */
+  readonly parentSha?: string;
+  readonly message: string;
+  readonly principalSub: string;
+}
+
+export type StemmaCommitFilesOutcome =
+  | {
+      kind: "ok";
+      commitSha: string;
+      fileCount: number;
+      totalBytes: number;
+    }
+  | { kind: "branch-not-found" }
+  | {
+      /**
+       * `parentSha` was provided and did not equal the branch's current
+       * HEAD at commit time. `currentHead` is the HEAD as observed by the
+       * adapter under its serializing lock — the route surfaces this back
+       * to the client so the IDE can resync without re-querying.
+       */
+      kind: "stale-ref";
+      expectedSha: string;
+      currentHead: string;
+    }
+  | { kind: "transient"; reason: string };
 
 /** A flattened tree entry. `path` is repo-root-relative. */
 export interface StemmaTreeEntry {

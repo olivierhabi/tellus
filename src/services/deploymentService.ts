@@ -177,6 +177,70 @@ export class DeploymentService {
     private transformService: TransformService,
   ) {}
 
+  // ============================================================================
+  // Output dataset name validation
+  // ============================================================================
+  //
+  // The deploy writes bytes to S3 BEFORE it touches `foundry_datasets`. If the
+  // dataset row write later fails because of a constraint violation, those
+  // bytes orphan in object storage and the user sees `deploy failed` with the
+  // deploy log pointing at a Postgres error that has no bearing on what they
+  // edited. To make rename-driven failures fail-fast with an actionable error,
+  // validate the canvas label at the deploy boundary BEFORE materialization.
+  //
+  // Rules (kept in lock-step with the `foundry_datasets.name` column):
+  //   - non-empty after trim
+  //   - ≤ 255 chars (the varchar(255) column width)
+  //   - no NUL bytes or control chars (these tend to come from copy-paste from
+  //     terminal output and silently corrupt the file listing)
+  //
+  // Collision (same name in same folder) is intentionally NOT enforced here —
+  // datasetService.updateDataset has its own ConflictError flow, and the
+  // existing-dataset UPDATE in this file is keyed on the immutable
+  // `outputDatasetId`, not on (folder_id, name). A collision policy can be
+  // layered on later without changing this signature.
+  //
+  // Exported as a static so the canvas's Apply/save flow on the output node
+  // can call the same function before persisting the new label — a single
+  // source of truth for "is this a deploy-safe name?".
+  static readonly OUTPUT_DATASET_NAME_MAX = 255;
+  static validateOutputDatasetName(label: unknown): void {
+    if (typeof label !== 'string') {
+      throw new AppError(
+        'Output node label must be a string.',
+        400,
+        'OUTPUT_NAME_INVALID',
+      );
+    }
+    const trimmed = label.trim();
+    if (trimmed.length === 0) {
+      throw new AppError(
+        'Output node label cannot be empty. Open the output node and give it a name.',
+        400,
+        'OUTPUT_NAME_EMPTY',
+      );
+    }
+    if (label.length > DeploymentService.OUTPUT_DATASET_NAME_MAX) {
+      throw new AppError(
+        `Output node label is ${label.length} characters; the maximum is ` +
+          `${DeploymentService.OUTPUT_DATASET_NAME_MAX}. Shorten the name on the canvas before deploying.`,
+        400,
+        'OUTPUT_NAME_TOO_LONG',
+      );
+    }
+    // U+0000 + C0 controls + U+007F + C1 controls. Newlines and tabs are
+    // included because a name that wraps a file-tree row is almost never
+    // intentional and is a footgun for downstream consumers (CSV exports,
+    // shell scripts, S3 keys).
+    if (/[\u0000-\u001F\u007F-\u009F]/.test(label)) {
+      throw new AppError(
+        'Output node label contains control characters. Use printable characters only.',
+        400,
+        'OUTPUT_NAME_CONTROL_CHARS',
+      );
+    }
+  }
+
   /**
    * Start a deployment — PB-B1 supervised path.
    *
@@ -1762,12 +1826,22 @@ export class DeploymentService {
             Number(process.env.PB_B6_S3_ROW_CAP ?? 10_000_000),
           );
           let truncated = false;
+          // Dynamic import so this hot path stays out of the deploy
+          // service's cold start cost when the chain has no pinned
+          // S3 inputs. Hoisted out of the Promise executor because that
+          // executor is a sync callback — `await` is not legal there.
+          const { sanitizeCsvHeader } = await import('../utils/csvHeader');
           const rows = await new Promise<Array<Record<string, string>>>(
             (resolve, reject) => {
               const acc: Array<Record<string, string>> = [];
               const parser = parse({
                 delimiter: node.file_path.endsWith('.tsv') ? '\t' : ',',
-                columns: true,
+                // See `src/utils/csvHeader.ts` — prevents silent column
+                // drop when the pinned-version CSV has duplicate or blank
+                // header cells. Matches the sanitizer used at preview
+                // time so deploy reads the same schema.
+                columns: (h: string[]) =>
+                  sanitizeCsvHeader(h, { source: node.file_path }),
                 skip_empty_lines: true,
                 trim: true,
                 relax_column_count: true,
@@ -1879,12 +1953,17 @@ export class DeploymentService {
         100_000,
         Number(process.env.PB_B6_S3_ROW_CAP ?? 10_000_000),
       );
+      const { sanitizeCsvHeader } = await import('../utils/csvHeader');
       const rows = await new Promise<Array<Record<string, string>>>(
         (resolve, reject) => {
           const acc: Array<Record<string, string>> = [];
           const parser = parse({
             delimiter: entry.file_path.endsWith('.tsv') ? '\t' : ',',
-            columns: true,
+            // See `src/utils/csvHeader.ts` — prevents silent column drop
+            // when the pinned transitive-input CSV has duplicate or blank
+            // header cells.
+            columns: (h: string[]) =>
+              sanitizeCsvHeader(h, { source: entry.file_path }),
             skip_empty_lines: true,
             trim: true,
             relax_column_count: true,
@@ -2009,14 +2088,47 @@ export class DeploymentService {
         : (outputNode.config ?? {});
 
       try {
+        // ── Output-name boundary validation ──────────────────────
+        // We MUST validate the display name before the S3 upload —
+        // otherwise an over-length or empty label would orphan bytes
+        // in object storage (PUT succeeds, foundry_datasets UPDATE
+        // fails with `value too long for type character varying(255)`
+        // and the deploy marks failed). Fail fast, before any side
+        // effects, with a typed error the FE can render.
+        DeploymentService.validateOutputDatasetName(outputNode.label);
+
         // Resolve upstream data
         let data: { columns: Array<{ name: string; type: string }>; rows: Array<Record<string, unknown>>; totalRows: number };
         try {
-          data = await this.transformService.outputPreview(
-            projectId, pipelineId, outputNode.id, 100_000,
+          // PB-deploy-fix — full DAG re-execution, unbounded. The legacy
+          // outputPreview path resolved each output via resolveNodeData →
+          // previewSnapshot.rows, and join/union nodes HARD-REQUIRE the
+          // snapshot (they can't be linearly composed). The canvas persists
+          // those snapshots capped at ~500 rows for instant feedback, so
+          // any pipeline whose terminal output passed through a join or
+          // union silently dropped every row past 500 — independent of
+          // the 100k cap on the outputPreview slice itself. The deploy
+          // path now re-reads every CSV unbounded and re-executes every
+          // transform / join / union from raw inputs (Foundry semantics:
+          // preview is bounded; deploy is unbounded).
+          data = await this.transformService.materializeForDeploy(
+            projectId, pipelineId, outputNode.id,
           );
         } catch (resolveErr) {
           const msg = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+          const code = (resolveErr as { code?: string })?.code;
+          if (
+            code === 'SNAPSHOT_REQUIRED' ||
+            msg.includes('SNAPSHOT_REQUIRED') ||
+            msg.includes('no preview snapshot has been captured')
+          ) {
+            throw new Error(
+              `Cannot build "${outputNode.label}": an upstream join/union node has ` +
+                `no preview snapshot. Open the node and click "Apply" before deploying. ` +
+                `Deploys must replay the snapshot — they cannot re-execute joins/unions ` +
+                `from the linear transform chain (would silently drop one branch).`,
+            );
+          }
           if (msg.includes('NO_DATASET') || msg.includes('no associated dataset')) {
             throw new Error(
               `Cannot build "${outputNode.label}": upstream join/union node hasn't been applied. ` +
@@ -2028,6 +2140,61 @@ export class DeploymentService {
 
         if (data.rows.length === 0) {
           throw new Error('Upstream chain produced zero rows');
+        }
+
+        // ── Defense-in-depth: deploy-output schema invariant ──────
+        // If the output node's immediate upstream is a join or union,
+        // its previewSnapshot.columns IS the contractual output schema.
+        // Hard-fail when what we're about to write disagrees — this
+        // catches any future resolveNodeData regression at the LAST
+        // possible point before bytes hit S3.
+        try {
+          const cfgForInvariant =
+            typeof outputNode.config === 'string'
+              ? JSON.parse(outputNode.config)
+              : (outputNode.config ?? {});
+          const srcId = (cfgForInvariant?.sourceNodeId ?? null) as string | null;
+          if (srcId) {
+            const upstream = await this.knex('pipeline_nodes')
+              .where({ id: srcId, pipeline_id: pipelineId })
+              .select('node_type', 'config')
+              .first();
+            const isAggregating =
+              upstream?.node_type === 'join' || upstream?.node_type === 'union';
+            if (isAggregating) {
+              const upCfg =
+                typeof upstream.config === 'string'
+                  ? JSON.parse(upstream.config)
+                  : (upstream.config ?? {});
+              const expected: Array<{ name: string; type: string }> =
+                upCfg?.previewSnapshot?.columns ?? [];
+              if (expected.length > 0 && expected.length !== data.columns.length) {
+                const expectedNames = expected.map((c) => c.name);
+                const actualNames = data.columns.map((c) => c.name);
+                const missing = expectedNames.filter((n) => !actualNames.includes(n));
+                const extra = actualNames.filter((n) => !expectedNames.includes(n));
+                throw new AppError(
+                  `Deploy schema invariant violated for "${outputNode.label}": ` +
+                    `upstream ${upstream.node_type} (${srcId}) snapshot has ` +
+                    `${expected.length} columns but resolved data has ` +
+                    `${data.columns.length}. ` +
+                    (missing.length ? `Missing: ${missing.join(', ')}. ` : '') +
+                    (extra.length ? `Extra: ${extra.join(', ')}. ` : '') +
+                    `Refusing to write a corrupted dataset.`,
+                  500,
+                  'DEPLOY_SCHEMA_DRIFT',
+                );
+              }
+            }
+          }
+        } catch (invariantErr) {
+          if (invariantErr instanceof AppError) throw invariantErr;
+          // Non-fatal invariant lookup failure — log and proceed; the
+          // primary correctness gate is resolveNodeData itself.
+          console.warn(
+            `[deploy] schema invariant check failed (non-fatal): ` +
+              `${(invariantErr as Error).message}`,
+          );
         }
 
         // PB-B3 — branch on the pipeline's output_format. CSV path is
@@ -2325,9 +2492,19 @@ export class DeploymentService {
             : `${safeName}.csv`;
 
         if (existingDatasetId) {
+          // Keep the dataset's display name in lock-step with the
+          // output node's label. Without this, renaming the output
+          // node on the canvas would write a new CSV at the new
+          // sanitized filename but leave the project's file listing
+          // showing the stale name from the first deploy — the user
+          // sees the rename in the canvas but never in the file tree.
+          // `original_filename` is already refreshed from `safeName`
+          // below; pairing `name` with it keeps the two columns in
+          // a consistent state across renames.
           await this.knex('foundry_datasets')
             .where({ id: existingDatasetId })
             .update({
+              name: outputNode.label,
               file_path: s3Key,
               row_count: data.rows.length,
               row_count_exact: rowCountExact,

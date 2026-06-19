@@ -1,5 +1,12 @@
 import { Knex } from 'knex';
 import { AppError } from '../utils/foundryAppError';
+import { ROOT_SPACE_RID } from '../lib/rid';
+import { mirrorToTrash, type TrashMirrorRow } from './trashMirror';
+import {
+  type FolderSnapshot,
+  MAX_TRASH_SUBTREE_SIZE,
+  snapshotTotalRows,
+} from '../schemas/trashSnapshot';
 
 export class FolderService {
   constructor(private knex: Knex) {}
@@ -22,12 +29,47 @@ export class FolderService {
       .first();
     if (duplicate) throw new AppError('A folder with this name already exists in this location', 409, 'CONFLICT');
 
-    const [folder] = await this.knex('folders')
-      .insert({ name, parent_folder_id: parentFolderId || null, project_id: projectId })
-      .returning('*');
+    // B1-C-24: folder insert + Compass `resources` row in one transaction.
+    return this.knex.transaction(async (trx) => {
+      const [folder] = await trx('folders')
+        .insert({ name, parent_folder_id: parentFolderId || null, project_id: projectId })
+        .returning('*');
 
-    // Return with has_children = false (newly created folder can't have children)
-    return { ...folder, has_children: false, child_count: 0, dataset_count: 0 };
+      const folderRid = `ri.compass.main.compass-folder.${folder.id}`;
+      const projectRid = `ri.compass.main.project.${projectId}`;
+      const parentRid = parentFolderId
+        ? `ri.compass.main.compass-folder.${parentFolderId}`
+        : projectRid;
+
+      await trx.raw(
+        `
+        INSERT INTO resources (rid, service, type, display_name,
+                               parent_folder_rid, project_rid, space_rid,
+                               created_by, created_at, updated_by, updated_at,
+                               legacy_uuid)
+        VALUES (?, 'compass', 'COMPASS_FOLDER', ?,
+                ?, ?, ?,
+                ?, ?, ?, ?,
+                ?)
+        ON CONFLICT (legacy_uuid) DO NOTHING
+        `,
+        [
+          folderRid,
+          folder.name,
+          parentRid,
+          projectRid,
+          ROOT_SPACE_RID,
+          ownerId,
+          folder.created_at,
+          ownerId,
+          folder.updated_at,
+          folder.id,
+        ],
+      );
+
+      // Return with has_children = false (newly created folder can't have children)
+      return { ...folder, has_children: false, child_count: 0, dataset_count: 0 };
+    });
   }
 
   async listFolders(projectId: string, parentId: string | null) {
@@ -58,7 +100,7 @@ export class FolderService {
    * Find or create an "Uploads" folder at the root level of a project.
    * Used by project-level uploads to ensure files always have a folder.
    */
-  async getOrCreateUploadsFolder(projectId: string, _ownerId: string): Promise<string> {
+  async getOrCreateUploadsFolder(projectId: string, ownerId: string): Promise<string> {
     const UPLOADS_FOLDER_NAME = 'Uploads';
 
     // Check if an "Uploads" folder already exists at root level
@@ -70,12 +112,43 @@ export class FolderService {
 
     if (existing) return existing.id;
 
-    // Create the "Uploads" folder at root level
-    const [folder] = await this.knex('folders')
-      .insert({ name: UPLOADS_FOLDER_NAME, parent_folder_id: null, project_id: projectId })
-      .returning('id');
+    // B1-C-24: Uploads folder insert + Compass `resources` row in one txn.
+    return this.knex.transaction(async (trx) => {
+      const [folder] = await trx('folders')
+        .insert({ name: UPLOADS_FOLDER_NAME, parent_folder_id: null, project_id: projectId })
+        .returning(['id', 'created_at', 'updated_at']);
 
-    return folder.id;
+      const folderRid = `ri.compass.main.compass-folder.${folder.id}`;
+      const projectRid = `ri.compass.main.project.${projectId}`;
+
+      await trx.raw(
+        `
+        INSERT INTO resources (rid, service, type, display_name,
+                               parent_folder_rid, project_rid, space_rid,
+                               created_by, created_at, updated_by, updated_at,
+                               legacy_uuid)
+        VALUES (?, 'compass', 'COMPASS_FOLDER', ?,
+                ?, ?, ?,
+                ?, ?, ?, ?,
+                ?)
+        ON CONFLICT (legacy_uuid) DO NOTHING
+        `,
+        [
+          folderRid,
+          UPLOADS_FOLDER_NAME,
+          projectRid,
+          projectRid,
+          ROOT_SPACE_RID,
+          ownerId,
+          folder.created_at,
+          ownerId,
+          folder.updated_at,
+          folder.id,
+        ],
+      );
+
+      return folder.id;
+    });
   }
 
   async getFolderById(projectId: string, folderId: string, sortBy = 'name', sortOrder: 'asc' | 'desc' = 'asc') {
@@ -262,44 +335,245 @@ export class FolderService {
     });
   }
 
+  /**
+   * Trash a folder and its entire subtree (Foundry-faithful soft delete).
+   *
+   * Mirrors the dataset-trash pattern (`DatasetService.deleteDataset`):
+   *
+   *   1. Snapshot the subtree (folders + datasets) BEFORE the transaction.
+   *   2. Inside the transaction:
+   *        a) Upsert a `resources` row for every folder + every dataset in
+   *           the subtree, with `trash_status = DIRECTLY_TRASHED` for the
+   *           clicked folder and `ANCESTOR_TRASHED` for everything below.
+   *           The clicked folder's row carries the full snapshot in
+   *           `metadata.snapshot` so restore can rebuild the tree.
+   *        b) Hard-delete from the source-of-truth tables (`folders` —
+   *           `foundry_datasets` cascades via FK).
+   *   3. S3 objects are DELIBERATELY retained. Physical GC is gated on
+   *      the permanent-delete endpoint and only fires after the 30-day
+   *      retention window. The previous implementation hard-deleted both
+   *      the rows and the S3 objects synchronously, so a folder click
+   *      was unrecoverable AND the row never appeared in the trash UI
+   *      (its `resources` row stayed at `NOT_TRASHED`). That was a
+   *      data-loss bug and is the reason this method was rewritten.
+   */
   async deleteFolder(projectId: string, folderId: string, ownerId: string) {
     const project = await this.knex('projects').where({ id: projectId, owner_id: ownerId }).first();
     if (!project) throw new AppError('Project not found', 404, 'NOT_FOUND');
     const folder = await this.knex('folders').where({ id: folderId, project_id: projectId }).first();
     if (!folder) throw new AppError('Folder not found', 404, 'NOT_FOUND');
 
-    // Count descendant folders and datasets for feedback
-    const [descendantStats] = await this.knex.raw(
-      `SELECT 
-        (SELECT COUNT(*)::integer FROM folders WHERE path <@ (SELECT path FROM folders WHERE id = ?) AND project_id = ? AND id != ?) AS subfolder_count,
-        (SELECT COUNT(*)::integer FROM foundry_datasets d INNER JOIN folders f ON d.folder_id = f.id WHERE f.path <@ (SELECT path FROM folders WHERE id = ?) AND f.project_id = ?) AS dataset_count`,
-      [folderId, projectId, folderId, folderId, projectId]
-    ).then((r: any) => r.rows);
+    const projectRid = `ri.compass.main.project.${projectId}`;
 
-    const fileRows = await this.knex.raw(
-      `SELECT d.file_path FROM foundry_datasets d INNER JOIN folders f ON d.folder_id = f.id WHERE f.path <@ (SELECT path FROM folders WHERE id = ?) AND f.project_id = ?`,
-      [folderId, projectId]
+    // Snapshot the subtree (root included). Reads outside the txn are
+    // safe because we hold no locks yet.
+    const subtreeFolders = ((await this.knex.raw(
+      `SELECT id, name, parent_folder_id, path::text AS path, depth,
+              created_at, updated_at
+       FROM folders
+       WHERE path <@ (SELECT path FROM folders WHERE id = ? AND project_id = ?)
+         AND project_id = ?`,
+      [folderId, projectId, projectId],
+    )) as { rows: Array<{
+      id: string;
+      name: string;
+      parent_folder_id: string | null;
+      path: string;
+      depth: number;
+      created_at: Date;
+      updated_at: Date;
+    }> }).rows;
+
+    const subtreeDatasets = ((await this.knex.raw(
+      `SELECT d.*
+       FROM foundry_datasets d
+       INNER JOIN folders f ON d.folder_id = f.id
+       WHERE f.path <@ (SELECT path FROM folders WHERE id = ? AND project_id = ?)
+         AND f.project_id = ?`,
+      [folderId, projectId, projectId],
+    )) as { rows: Array<Record<string, unknown>> }).rows;
+
+    // Capture the *full* set of resources that hang off the trashed
+    // subtree, so restore can rebuild every one of them. Each kind has
+    // a different storage / linkage:
+    //
+    //   pipelines.folder_id            UUID  → reference by folder UUID
+    //   code_repository.parent_folder_rid  rid string `ri.compass.main.folder.<uuid>`
+    //   workshop_module.parent_folder_rid  rid string `ri.compass.main.folder.<uuid>`
+    //
+    // We compute the folder-rid set once and reuse for the latter two.
+    const subtreeFolderUuidList = subtreeFolders.map((f) => f.id);
+    const subtreeFolderRidList = subtreeFolderUuidList.map(
+      (id) => `ri.compass.main.folder.${id}`,
     );
 
-    // Delete files from S3 object storage
-    const { deleteObjects } = await import('./storageService');
-    const s3Keys = fileRows.rows.map((row: any) => row.file_path as string).filter(Boolean);
-    if (s3Keys.length > 0) {
-      try { await deleteObjects(s3Keys); }
-      catch (err) { console.error(`Failed to delete S3 objects during folder delete:`, err); }
+    const subtreePipelines =
+      subtreeFolderUuidList.length === 0
+        ? []
+        : ((await this.knex.raw(
+            `SELECT * FROM pipelines WHERE folder_id = ANY(?::uuid[])`,
+            [subtreeFolderUuidList],
+          )) as { rows: Array<Record<string, unknown>> }).rows;
+
+    const subtreeCodeRepos =
+      subtreeFolderRidList.length === 0
+        ? []
+        : ((await this.knex.raw(
+            `SELECT * FROM code_repository
+              WHERE parent_folder_rid = ANY(?::text[])
+                AND state = 'ACTIVE'`,
+            [subtreeFolderRidList],
+          )) as { rows: Array<Record<string, unknown>> }).rows;
+
+    const subtreeWorkshopModules =
+      subtreeFolderRidList.length === 0
+        ? []
+        : ((await this.knex.raw(
+            `SELECT * FROM workshop_module
+              WHERE parent_folder_rid = ANY(?::text[])
+                AND deleted_at IS NULL`,
+            [subtreeFolderRidList],
+          )) as { rows: Array<Record<string, unknown>> }).rows;
+
+    const snapshotPayload: FolderSnapshot = {
+      v: 1,
+      kind: 'folder',
+      capturedAt: new Date().toISOString(),
+      rootFolderId: folderId,
+      folders: subtreeFolders.map((f) => ({
+        id: f.id,
+        name: f.name,
+        parent_folder_id: f.parent_folder_id,
+        path: f.path,
+        depth: f.depth,
+        // Coerce timestamps to ISO so the JSONB representation is
+        // round-trippable (pg returns Date instances; toJSON yields ISO).
+        created_at: f.created_at instanceof Date ? f.created_at.toISOString() : f.created_at,
+        updated_at: f.updated_at instanceof Date ? f.updated_at.toISOString() : f.updated_at,
+      })),
+      datasets: subtreeDatasets,
+      pipelines: subtreePipelines,
+      codeRepositories: subtreeCodeRepos,
+      workshopModules: subtreeWorkshopModules,
+    };
+
+    // Enforce the snapshot-total cap before doing any destructive work.
+    // `mirrorToTrash` already gates on the resources mirror row count
+    // (folders + datasets), but pipelines / code-repos / workshop-modules
+    // also count toward total bytes written into `metadata.snapshot`.
+    // Without this guard a folder with 50k pipelines would slip past
+    // the mirror cap (1k mirror rows) yet write a 100MB+ JSONB blob.
+    const totalSnapshotRows = snapshotTotalRows(snapshotPayload);
+    if (totalSnapshotRows > MAX_TRASH_SUBTREE_SIZE) {
+      throw new AppError(
+        `Folder is too large to trash in a single click (` +
+          `${totalSnapshotRows} resources > ${MAX_TRASH_SUBTREE_SIZE} cap).` +
+          ` Use the bulk-trash worker.`,
+        409,
+        'RESOURCE_TOO_LARGE',
+      );
     }
 
-    // Delete entire subtree using ltree path (parent_folder_id has ON DELETE SET NULL,
-    // so we must explicitly delete all descendants, not just the root folder)
-    await this.knex.raw(
-      `DELETE FROM folders WHERE path <@ (SELECT path FROM folders WHERE id = ? AND project_id = ?) AND project_id = ?`,
-      [folderId, projectId, projectId]
-    );
+    // Build the full set of trash-mirror rows up front so we can hand
+    // them to the batched primitive in a single round-trip.
+    const mirrorRows: TrashMirrorRow[] = [];
+    for (const f of subtreeFolders) {
+      const isRoot = f.id === folderId;
+      mirrorRows.push({
+        rid: `ri.compass.main.compass-folder.${f.id}`,
+        type: 'COMPASS_FOLDER',
+        service: 'compass',
+        displayName: f.name,
+        parentFolderRid: f.parent_folder_id
+          ? `ri.compass.main.compass-folder.${f.parent_folder_id}`
+          : projectRid,
+        projectRid,
+        spaceRid: ROOT_SPACE_RID,
+        status: isRoot ? 'DIRECTLY_TRASHED' : 'ANCESTOR_TRASHED',
+        legacyUuid: f.id,
+        metadata: isRoot ? { snapshot: snapshotPayload } : undefined,
+      });
+    }
+    for (const d of subtreeDatasets) {
+      mirrorRows.push({
+        rid: `ri.compass.main.foundry-dataset.${d.id as string}`,
+        type: 'FOUNDRY_DATASET',
+        service: 'foundry-datasets',
+        displayName: d.name as string,
+        parentFolderRid: `ri.compass.main.compass-folder.${d.folder_id as string}`,
+        projectRid,
+        spaceRid: ROOT_SPACE_RID,
+        status: 'ANCESTOR_TRASHED',
+        legacyUuid: d.id as string,
+      });
+    }
+
+    const startMs = Date.now();
+    await this.knex.transaction(async (trx) => {
+      // 1) Single batched upsert for every mirror row in the subtree.
+      //    `mirrorToTrash` enforces MAX_TRASH_SUBTREE_SIZE (throws 409
+      //    above 10k rows) so a runaway click on a huge tree fails
+      //    fast instead of locking the table for minutes.
+      await mirrorToTrash({ trx, rows: mirrorRows, actorId: ownerId });
+
+      // 2) Hard-delete the satellite resources whose linkage references
+      //    a folder we're about to remove. They live in tables that do
+      //    NOT cascade off `folders` (separate FK domains for code-repo
+      //    and workshop-module which use rid strings; pipelines have
+      //    `folder_id` SET NULL, not CASCADE). We delete them here so
+      //    the live tables stay consistent with the trash. Restore
+      //    rebuilds them from the snapshot.
+      if (subtreeFolderUuidList.length > 0) {
+        await trx.raw(
+          `DELETE FROM pipelines WHERE folder_id = ANY(?::uuid[])`,
+          [subtreeFolderUuidList],
+        );
+        await trx.raw(
+          `DELETE FROM code_repository WHERE parent_folder_rid = ANY(?::text[])`,
+          [subtreeFolderRidList],
+        );
+        await trx.raw(
+          `DELETE FROM workshop_module WHERE parent_folder_rid = ANY(?::text[])`,
+          [subtreeFolderRidList],
+        );
+      }
+
+      // 3) Hard-delete from the source-of-truth tables. S3 objects are
+      //    deliberately retained — the permanent-delete endpoint owns
+      //    physical GC after the 30-day retention window.
+      //    `foundry_datasets.folder_id` cascades via FK; only the
+      //    `folders` subtree needs explicit deletion (parent_folder_id
+      //    is ON DELETE SET NULL, not CASCADE).
+      await trx.raw(
+        `DELETE FROM folders WHERE path <@ (SELECT path FROM folders WHERE id = ? AND project_id = ?) AND project_id = ?`,
+        [folderId, projectId, projectId],
+      );
+    });
+
+    // Structured telemetry on the destructive path so SREs can trace
+    // impact later. JSON-shaped so log pipelines can index it.
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({
+      event: 'folder.trash',
+      project_id: projectId,
+      folder_id: folderId,
+      actor_id: ownerId,
+      subtree_folders: subtreeFolders.length,
+      subtree_datasets: subtreeDatasets.length,
+      subtree_pipelines: subtreePipelines.length,
+      subtree_code_repos: subtreeCodeRepos.length,
+      subtree_workshop_modules: subtreeWorkshopModules.length,
+      duration_ms: Date.now() - startMs,
+    }));
+
     return {
       deleted: true,
       folderName: folder.name,
-      subfolderCount: descendantStats?.subfolder_count ?? 0,
-      datasetCount: descendantStats?.dataset_count ?? 0,
+      subfolderCount: Math.max(0, subtreeFolders.length - 1),
+      datasetCount: subtreeDatasets.length,
+      pipelineCount: subtreePipelines.length,
+      codeRepoCount: subtreeCodeRepos.length,
+      workshopModuleCount: subtreeWorkshopModules.length,
     };
   }
 }

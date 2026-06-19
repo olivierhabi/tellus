@@ -21,6 +21,32 @@
 import type { PoolClient } from "pg";
 import { getWorkshopDb } from "./db";
 import { computeEtag, canonicalizeJson } from "./etag";
+import { captureSnapshot } from "../autosaveService";
+
+// Project-root folder rid format: ri.compass.main.folder.<projectId>
+const FOLDER_RID_RE = /^ri\.compass\.main\.folder\.([0-9a-fA-F-]{36})$/;
+
+/**
+ * Map a Compass folder rid to the project_id that owns it. Returns null
+ * if the rid doesn't resolve (orphaned workshop, malformed rid, etc.) so
+ * the caller can skip snapshot capture without failing the mutation.
+ */
+async function resolveProjectIdFromFolderRid(
+  client: PoolClient,
+  folderRid: string,
+): Promise<string | null> {
+  const m = FOLDER_RID_RE.exec(folderRid);
+  if (!m) return null;
+  const uuid = m[1].toLowerCase();
+  const { rows } = await client.query<{ project_id: string }>(
+    `SELECT id::text AS project_id FROM projects WHERE id = $1
+     UNION ALL
+     SELECT project_id::text FROM folders WHERE id = $1
+     LIMIT 1`,
+    [uuid],
+  );
+  return rows.length > 0 ? rows[0].project_id : null;
+}
 import {
   invalidSemver,
   moduleNotFound,
@@ -100,7 +126,7 @@ function assertSemver(semver: string): void {
 
 const SELECT_HEAD = `
   rid, schema_version, definition, etag, updated_at,
-  published_semver, published_at
+  published_semver, published_at, parent_folder_rid, display_name
 `;
 
 interface ModuleHeadRow {
@@ -111,6 +137,8 @@ interface ModuleHeadRow {
   updated_at: string;
   published_semver: string | null;
   published_at: string | null;
+  parent_folder_rid: string;
+  display_name: string;
 }
 
 /**
@@ -225,6 +253,50 @@ async function _publishVersionInner(
         `SELECT pg_notify('workshop_module_published', $1)`,
         [JSON.stringify({ rid, semver: request.semver })],
       );
+
+      // Step 6.5 — capture autosave snapshot inside the same transaction
+      // so the history row commits atomically with the version write.
+      // Project id is resolved from parent_folder_rid (Foundry-faithful
+      // convention: project root folder uuid == project uuid; otherwise
+      // look up the folder's project_id).
+      try {
+        const projectId = await resolveProjectIdFromFolderRid(
+          client,
+          head.parent_folder_rid,
+        );
+        if (projectId !== null) {
+          await captureSnapshot(
+            {
+              resourceRid: rid,
+              resourceKind: "workshop-module",
+              projectId,
+              parentFolderRid: head.parent_folder_rid,
+              actorId: null, // workshop actor.userId is the JWT sub, not a tellus user uuid
+              actorEmail: null,
+              changeKind: "published",
+              changeSummary: `Published ${request.semver}`,
+              payload: {
+                kind: "workshop-module",
+                displayName: head.display_name,
+                parentFolderRid: head.parent_folder_rid,
+                publishedSemver: request.semver,
+                currentSemver: request.semver,
+                publishedAt,
+              },
+            },
+            client,
+          );
+        }
+      } catch (snapErr) {
+        // Snapshot failure must not break the publish — autosave is a
+        // history-keeping concern, not a correctness concern. Log and
+        // continue. The user's publish still succeeded.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[workshop:publish] autosave snapshot capture failed",
+          snapErr instanceof Error ? snapErr.message : snapErr,
+        );
+      }
 
       const versionEtag = computeEtag(head.definition, 0);
       const response: ModuleVersionResponse = {

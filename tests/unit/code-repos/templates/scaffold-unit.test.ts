@@ -46,7 +46,8 @@ describe("scaffold — determinism (B3 acceptance §1)", () => {
   it("file content reflects parameter substitution", () => {
     const m = getTemplateManifest("typescript-functions", "2.4.0")!;
     const r = scaffold({ manifest: m, parameters: { packageName: "tellus-fns" }, repositoryRid: REPO_RID, repoDisplayName: "x" });
-    const pkg = r.files.find((f) => f.path === "package.json");
+    // v2 scaffold lives in the `typescript-functions/` language subproject.
+    const pkg = r.files.find((f) => f.path === "typescript-functions/package.json");
     expect(pkg).toBeDefined();
     expect(pkg!.content).toContain('"name": "tellus-fns"');
     expect(pkg!.content).not.toContain("{{packageName}}");
@@ -113,28 +114,63 @@ describe("scaffold — deprecated template", () => {
   });
 });
 
-describe("scaffold — typescript-functions content invariants (spec line 376)", () => {
-  it("includes the spec-mandated 7 files", () => {
+describe("scaffold — typescript-functions v2 content invariants", () => {
+  it("includes the v2 file set: 8 root files + gradle wrapper + 8 subproject files (17 total)", () => {
     const m = getTemplateManifest("typescript-functions", "2.4.0")!;
     const r = scaffold({ manifest: m, parameters: { packageName: "demo" }, repositoryRid: REPO_RID, repoDisplayName: "Demo" });
     const paths = new Set(r.files.map((f) => f.path));
-    expect(paths.has("package.json")).toBe(true);
-    expect(paths.has("tsconfig.json")).toBe(true);
-    expect(paths.has("src/index.ts")).toBe(true);
+    // Root-level Gradle wrapper + repo metadata.
+    expect(paths.has("templateConfig.json")).toBe(true);
+    // README.md was dropped from the v2 manifest in Wave 22 (2026-05-10):
+    // user-facing repos don't ship a stub README — that's the user's job.
+    expect(paths.has("README.md")).toBe(false);
     expect(paths.has(".gitignore")).toBe(true);
-    expect(paths.has("README.md")).toBe(true);
-    expect(paths.has("osdk.config.json")).toBe(true);
+    expect(paths.has(".gitattributes")).toBe(true);
+    expect(paths.has("ci.yml")).toBe(true);
+    expect(paths.has("build.gradle")).toBe(true);
+    expect(paths.has("settings.gradle")).toBe(true);
+    expect(paths.has("gradle.properties")).toBe(true);
+    expect(paths.has("gradle/wrapper/gradle-wrapper.properties")).toBe(true);
     expect(paths.has("repoSettings.json")).toBe(true);
+    // typescript-functions/ subproject (v2 discriminator).
+    expect(paths.has("typescript-functions/build.gradle")).toBe(true);
+    expect(paths.has("typescript-functions/package.json")).toBe(true);
+    expect(paths.has("typescript-functions/tsconfig.json")).toBe(true);
+    expect(paths.has("typescript-functions/functions.json")).toBe(true);
+    expect(paths.has("typescript-functions/resources.json")).toBe(true);
+    expect(paths.has("typescript-functions/.npmrc")).toBe(true);
+    expect(paths.has("typescript-functions/src/functions/helloWorld.ts")).toBe(true);
+    expect(paths.has("typescript-functions/test/.gitkeep")).toBe(true);
+    expect(r.files.length).toBe(17);
   });
 
-  it("src/index.ts contains @Function() example", () => {
+  it("typescript-functions/src/functions/helloWorld.ts is a default export (B8 discovery contract)", () => {
     const m = getTemplateManifest("typescript-functions", "2.4.0")!;
     const r = scaffold({ manifest: m, parameters: { packageName: "demo" }, repositoryRid: REPO_RID, repoDisplayName: "Demo" });
-    const idx = r.files.find((f) => f.path === "src/index.ts");
-    expect(idx?.content).toContain("@Function()");
+    const fn = r.files.find((f) => f.path === "typescript-functions/src/functions/helloWorld.ts");
+    expect(fn?.content).toMatch(/^export default function helloWorld\(/m);
+    // V1's `@Function()` decorator class shape must NOT leak into v2.
+    expect(fn?.content).not.toContain("@Function()");
+    expect(fn?.content).not.toContain("export class ");
   });
 
-  it(".gitignore excludes .osdk-generated/", () => {
+  it("typescript-functions/package.json declares both @osdk/client and @osdk/functions", () => {
+    const m = getTemplateManifest("typescript-functions", "2.4.0")!;
+    const r = scaffold({ manifest: m, parameters: { packageName: "demo" }, repositoryRid: REPO_RID, repoDisplayName: "Demo" });
+    const pkg = r.files.find((f) => f.path === "typescript-functions/package.json");
+    expect(pkg?.content).toContain('"@osdk/client":');
+    expect(pkg?.content).toContain('"@osdk/functions":');
+  });
+
+  it("templateConfig.json carries the upgrade-system metadata", () => {
+    const m = getTemplateManifest("typescript-functions", "2.4.0")!;
+    const r = scaffold({ manifest: m, parameters: { packageName: "demo" }, repositoryRid: REPO_RID, repoDisplayName: "Demo" });
+    const cfg = r.files.find((f) => f.path === "templateConfig.json");
+    expect(cfg?.content).toContain('"parentTemplateId": "typescript-functions"');
+    expect(cfg?.content).toContain('"parentTemplateVersion": "2.4.0"');
+  });
+
+  it(".gitignore excludes .osdk-generated/ (codegen output never committed)", () => {
     const m = getTemplateManifest("typescript-functions", "2.4.0")!;
     const r = scaffold({ manifest: m, parameters: { packageName: "demo" }, repositoryRid: REPO_RID, repoDisplayName: "Demo" });
     const gi = r.files.find((f) => f.path === ".gitignore");

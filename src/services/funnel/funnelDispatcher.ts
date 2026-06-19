@@ -19,6 +19,7 @@
 import { query } from "../../db";
 import { claimNextSignal, runWorkflow, WorkflowContext } from "./durableWorkflow";
 import { sleepForStageDelay } from "./stageDelay";
+import { projectFunnelTerminalToState } from "./funnelStateProjection";
 import {
   computeChangelog,
   SnapshotDiffReader,
@@ -128,8 +129,30 @@ async function tick(options: DispatcherOptions): Promise<number> {
          RETURNING run_id`,
         [signal.ontology_id, objectTypeApiName, JSON.stringify(signal.payload)]
       );
+      // Project that we've handed off to Temporal so the UI badge
+      // flips to "Indexing" immediately. Temporal's own activities
+      // are responsible for projecting the terminal state.
+      await projectFunnelTerminalToState(
+        signal.ontology_id,
+        objectTypeApiName,
+        "indexing"
+      );
       continue;
     }
+
+    // PG-dispatcher path. Flip the UI badge to "Indexing" BEFORE the
+    // workflow runs so the user sees activity within one client poll
+    // tick. Then project the terminal state (indexed / failed) once
+    // `runWorkflow` returns. The funnel pipeline itself only writes
+    // to `funnel_run` + `funnel_pipeline_state`; without this
+    // projection the user-facing `funnel_state.status` would stay at
+    // its previous value forever (typically `not_indexed`), which is
+    // the bug pre-2026-05-06.
+    await projectFunnelTerminalToState(
+      signal.ontology_id,
+      objectTypeApiName,
+      "indexing"
+    );
 
     const result = await runWorkflow(
       {
@@ -140,6 +163,22 @@ async function tick(options: DispatcherOptions): Promise<number> {
       (ctx) => objectTypeFunnelWorkflow(ctx, signal.signal_type, signal.payload)
     );
 
+    if (result.status === "completed") {
+      await projectFunnelTerminalToState(
+        signal.ontology_id,
+        objectTypeApiName,
+        "indexed",
+        { runId: result.runId }
+      );
+    } else {
+      await projectFunnelTerminalToState(
+        signal.ontology_id,
+        objectTypeApiName,
+        "failed",
+        { errorMessage: result.errorMessage ?? "Funnel pipeline failed" }
+      );
+    }
+
     await query(
       `UPDATE funnel_signal SET consumed_by_run_id = $1 WHERE signal_id = $2`,
       [result.runId, signal.signal_id]
@@ -148,6 +187,14 @@ async function tick(options: DispatcherOptions): Promise<number> {
   }
   return runsStarted;
 }
+
+// ---------------------------------------------------------------------------
+// projectFunnelTerminalToState moved to ./funnelStateProjection (2026-05-16)
+// so the Temporal worker can reuse the exact same projection semantics.
+// Both this dispatcher and `temporal/activities.ts::projectFunnelTerminalActivity`
+// call into the shared helper, which fixes a class of "indexing-stuck" bugs
+// caused by drifted implementations on the two pipeline paths.
+// ---------------------------------------------------------------------------
 
 async function listObjectTypesWithSignals(): Promise<string[]> {
   try {

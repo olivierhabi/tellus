@@ -462,6 +462,20 @@ export async function executeTransformChain(
   transforms: TransformStep[],
   options: ExecuteOptions,
 ): Promise<ExecuteResult> {
+  // ── Defense-in-depth: reject unqualified inputPath ─────────────────
+  //
+  // The legacy bug we shipped (PB-B2) was a caller passing a bare S3
+  // object key. DuckDB then resolved it as a local FS path relative to
+  // the API process CWD and returned an opaque 500 —
+  // `IO Error: No files found that match the pattern ...`. Guarding here
+  // means a future contributor who adds a new caller and forgets to
+  // convert via `toDuckDbReadUri()` gets a fast, actionable error
+  // instead of a confusing IO failure deep inside DuckDB.
+  //
+  // Accepted shapes mirror `storageService.isQualifiedDuckDbUri`:
+  //   s3://, http(s)://, file://, or absolute /path. Anything else
+  //   should never reach this engine.
+  rejectUnqualifiedInputPath(options.inputPath);
   const plan = compileTransformChain(transforms, options);
   const conn = await acquireConnection({
     memoryLimit: options.memoryLimit,
@@ -506,6 +520,39 @@ function normaliseValue(v: unknown): unknown {
 
 function shouldSkipHttpfs(path: string): boolean {
   return !/^s3:/i.test(path) && !/^https?:/i.test(path);
+}
+
+/**
+ * Throw if `inputPath` is not one of the URI shapes DuckDB's httpfs (or
+ * the local FS reader) can resolve. See `executeTransformChain` for the
+ * historical bug that motivated this guard.
+ *
+ * Kept inline rather than imported from `storageService` so this engine
+ * module stays free of an upward dependency on storage — the engine
+ * accepts URIs and that's it.
+ */
+function rejectUnqualifiedInputPath(inputPath: string): void {
+  if (!inputPath) {
+    throw new AppError(
+      "DuckDB transform engine: inputPath is required",
+      400,
+      "VALIDATION_ERROR",
+    );
+  }
+  const qualified =
+    /^s3:\/\//i.test(inputPath) ||
+    /^https?:\/\//i.test(inputPath) ||
+    /^file:\/\//i.test(inputPath) ||
+    inputPath.startsWith("/");
+  if (!qualified) {
+    throw new AppError(
+      `DuckDB transform engine: inputPath must be a qualified URI ` +
+        `(s3://, http(s)://, file://, or absolute path); received "${inputPath}". ` +
+        `Pass dataset.file_path through storageService.toDuckDbReadUri() first.`,
+      400,
+      "VALIDATION_ERROR",
+    );
+  }
 }
 
 function inferColumns(

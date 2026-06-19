@@ -15,7 +15,12 @@ import {
   enforceMigrationGate,
   MigrationDriftError,
 } from "./db/migrationGate";
+import {
+  enforceSchemaContract,
+  SchemaContractError,
+} from "./db/schemaContract";
 import requestLogger from "./middleware/requestLogger";
+import { idempotencyKeyMiddleware } from "./middleware/idempotencyKey";
 import { inputSanitizer } from "./middleware/inputSanitizer";
 import { notFoundHandler } from "./middleware/notFoundHandler";
 import errorHandler from "./middleware/errorHandler";
@@ -105,9 +110,12 @@ import { startReplacementScheduler, stopReplacementScheduler } from "./services/
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
 import foundryProjectsRouter from "./routes/projects";
+import compassChildrenRouter from "./routes/compassChildren";
 import foundryFoldersRouter from "./routes/folders";
 import foundryUploadsRouter from "./routes/uploads";
 import foundryProjectUploadsRouter from "./routes/projectUploads";
+import projectWorkspaceRouter, { resourceLifecycleRouter } from "./routes/projectWorkspace";
+import { autosaveProjectRouter, autosaveResourceRouter } from "./routes/autosaveSnapshots";
 import { folderDatasetsRouter as foundryFolderDatasetsRouter, datasetRouter as foundryDatasetRouter } from "./routes/foundryDatasets";
 import foundrySearchRouter from "./routes/search";
 import foundryBreadcrumbRouter from "./routes/breadcrumb";
@@ -540,6 +548,17 @@ app.use(
 app.use("/api/v1/actions", validateRouter);
 app.use("/api/v1/actions", batchRouter);
 app.use("/api/v1/audit", globalAuditRouter);
+// Edits feed — mounted at two paths so callers can address the parent
+// object type by either its mutable apiName (legacy) or its stable
+// UUID. Both mounts share the same router (`mergeParams: true`) and
+// are disambiguated inside the handler by `resolveFromParams`. The
+// `/by-id/...` mount must be registered FIRST so Express's
+// first-match routing picks it before falling through to the api_name
+// mount when callers send a UUID.
+app.use(
+  "/api/v1/ontology/:ontologyId/objectTypes/by-id/:objectTypeId/edits",
+  editsRouter
+);
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/edits",
   editsRouter
@@ -550,11 +569,6 @@ app.use(
 );
 app.use("/api/v1/datasets", datasetRouter);
 app.use("/api/v1/datasets", dataPreviewRouter);
-
-// PB-B8: v2 lineage surface (new semantics → v2 prefix per the
-// project's framing note).
-import lineageRouter from "./routes/lineage";
-app.use("/api/v2", lineageRouter);
 
 // Code Repositories (B2) — admin router mounted on the main server so
 // the FE can reach the saga + ledger + branches via the existing auth chain.
@@ -579,6 +593,10 @@ void (async () => {
     const r = await rehydrateInMemoryStemma({
       pool,
       stemma: codeRepoMount.adapters.stemma,
+      // Wave 22: scaffold-on-rehydrate so existing repos come back with the
+      // v2 file tree, not as empty branches. Without this the file viewer
+      // renders blank for every repo created before the current process boot.
+      template: codeRepoMount.adapters.template,
       logger: (event, meta) =>
         console.log(JSON.stringify({ event, ...(meta ?? {}) })),
     });
@@ -634,6 +652,12 @@ app.use("/api/v1/pipelines", pipelinesMetricsRouter);
 import workshopModulesRouter from "./routes/workshopModules";
 app.use("/api/v1/workshop", workshopModulesRouter);
 
+// Quiver B1 — analysis CRUD (Phase 1).
+// Spec: tasks/quiver/quiver-tasks.md §B1. Phase-flagged via TELLUS_QUIVER_PHASE.
+// Mounted at /quiver/api/v1 to mirror the spec's base-path verbatim.
+import { buildQuiverRouter } from "./routes/quiver";
+app.use("/quiver/api/v1", buildQuiverRouter());
+
 // Wire the production-default Workshop OSS adapter to read from the seeded
 // `workshop_demo_order` Postgres table (migration 061). Tests that exercise
 // the OSS path swap their own RecordingOssAdapter via setOss() in beforeAll
@@ -649,8 +673,27 @@ app.use(
 // reindexRouter mount below so this handler wins for POST requests and
 // the router only ever serves GET /status and GET /history for the
 // UUID path.
+// Idempotency-Key middleware: when the FE sends a UUIDv4 in the
+// `Idempotency-Key` header, the same key replays the cached 202 +
+// signalId without emitting a duplicate `editBatchPending` signal.
+//
+// Why this is required and `isCommitting` (FE) alone isn't:
+//   - Two browser tabs open on the same OT can each fire a Save POST
+//     concurrently. The FE in-flight lock is per-component-instance,
+//     not cross-tab.
+//   - axios retries on transient failures (e.g., network hiccup after
+//     the backend received the request but before the response made
+//     it back). Without idempotency, the retry creates a duplicate
+//     funnel run.
+//   - Browser back/forward navigation that unmounts and remounts the
+//     editor mid-flight resets `isCommitting` to false; a follow-up
+//     click would emit a second signal.
+//
+// The middleware sits BEFORE the resolver so a malformed key
+// short-circuits with 400 INVALID_ARGUMENT without touching the DB.
 app.post(
   "/api/v1/ontology/:ontologyId/objectTypeId/:objectTypeId",
+  idempotencyKeyMiddleware(pool, "POST /ontology/{ontologyId}/objectTypeId/{objectTypeId}"),
   resolveObjectTypeIdToApiName,
   saveToOntology
 );
@@ -705,6 +748,13 @@ app.use("/api/v1/projects", foundryProjectsRouter);
 app.use("/api/v1/projects/:projectId/folders", foundryFoldersRouter);
 app.use("/api/v1/projects/:projectId/folders/:folderId", foundryUploadsRouter);
 app.use("/api/v1/projects/:projectId", foundryProjectUploadsRouter);
+// Project workspace sub-tabs: trashed listing + file/external references.
+// Mounted at /api/v1/projects/:projectId so handlers can read req.params.projectId.
+app.use("/api/v1/projects/:projectId", projectWorkspaceRouter);
+app.use("/api/v1/projects", autosaveProjectRouter);
+app.use("/api/v1/resources", autosaveResourceRouter);
+// Resource lifecycle (restore, permanently-delete) is RID-scoped, not project-scoped.
+app.use("/api/v1/resources", resourceLifecycleRouter);
 app.use("/api/v1/projects/:projectId/folders/:folderId/datasets", foundryFolderDatasetsRouter);
 app.use("/api/v1/datasets", foundryDatasetRouter);
 app.use("/api/v1/datasets", foundryColumnStatsRouter);
@@ -725,6 +775,15 @@ if (process.env.NODE_ENV !== "production") {
 }
 app.use("/api/v1/projects/:projectId/members", foundryMembersRouter);
 app.use("/api/v1/projects/:projectId/pipelines", foundryPipelinesRouter);
+
+// ---------------------------------------------------------------------------
+// Compass Children Gateway — single fan-out endpoint that powers the
+// project / folder workspace pages. Replaces the per-service list calls
+// the FE used to make against /v1/projects/:id/{folders,datasets,...}.
+//
+//   GET /api/v1/compass/folders/:folderRid/children
+// ---------------------------------------------------------------------------
+app.use("/api/v1/compass", compassChildrenRouter);
 
 // ---------------------------------------------------------------------------
 // API Specification & Documentation
@@ -872,6 +931,39 @@ async function start(): Promise<void> {
       }
       // Refusing to start the server — drift / apply failure must
       // be treated as a deploy bug, not a soft warning.
+      await pool.end().catch(() => {
+        /* ignored — already shutting down */
+      });
+      process.exit(1);
+    }
+
+    // Schema contract — verifies that every column the codebase writes
+    // to via raw SQL exists on the live DB. Catches the class of bug
+    // where a column rename / removal lands without an accompanying SQL
+    // edit. Runs after the migration gate so any pending migrations are
+    // already applied.
+    try {
+      await enforceSchemaContract(pool);
+    } catch (contractErr) {
+      if (contractErr instanceof SchemaContractError) {
+        console.error(
+          JSON.stringify({
+            type: "schema_contract.refused",
+            violations: contractErr.violations,
+            message: contractErr.message,
+          }),
+        );
+      } else {
+        console.error(
+          JSON.stringify({
+            type: "schema_contract.error",
+            error:
+              contractErr instanceof Error
+                ? contractErr.message
+                : String(contractErr),
+          }),
+        );
+      }
       await pool.end().catch(() => {
         /* ignored — already shutting down */
       });

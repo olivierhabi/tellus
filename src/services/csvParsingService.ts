@@ -1,6 +1,7 @@
 import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { getObjectStream } from './storageService';
+import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { Readable } from 'stream';
 
 const MAX_SAMPLE_ROWS = 10000;
@@ -169,7 +170,17 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
 
     const parser = parse({
       delimiter,
-      columns: true,
+      // `sanitizeCsvHeader` replaces csv-parse's default `columns: true`
+      // behaviour. csv-parse's default collapses duplicate / empty
+      // header cells (because each record becomes a JS object whose
+      // keys are deduplicated), which silently drops columns from the
+      // schema. The sanitizer guarantees:
+      //   - one key per physical header cell (no collapse),
+      //   - blanks named `column_<n>`,
+      //   - duplicates suffixed `_2`, `_3`, …
+      // and emits a single-line structured warning when it had to fix
+      // anything (event=csv_header_sanitized) for log alerting.
+      columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
       skip_empty_lines: true,
       trim: true,
       relax_column_count: true,
