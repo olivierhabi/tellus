@@ -15,7 +15,12 @@ import {
   enforceMigrationGate,
   MigrationDriftError,
 } from "./db/migrationGate";
+import {
+  enforceSchemaContract,
+  SchemaContractError,
+} from "./db/schemaContract";
 import requestLogger from "./middleware/requestLogger";
+import { idempotencyKeyMiddleware } from "./middleware/idempotencyKey";
 import { inputSanitizer } from "./middleware/inputSanitizer";
 import { notFoundHandler } from "./middleware/notFoundHandler";
 import errorHandler from "./middleware/errorHandler";
@@ -105,9 +110,17 @@ import { startReplacementScheduler, stopReplacementScheduler } from "./services/
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
 import foundryProjectsRouter from "./routes/projects";
+import filesystemV2Router from "./routes/filesystemV2";
+import filesystemSearchV2Router from "./routes/filesystemSearchV2";
+import resourceGraphV2Router from "./routes/resourceGraphV2";
+import branchesV2Router from "./routes/branchesV2";
+import omsV2Router from "./routes/omsV2";
+import compassChildrenV2Router from "./routes/compassChildrenV2";
 import foundryFoldersRouter from "./routes/folders";
 import foundryUploadsRouter from "./routes/uploads";
 import foundryProjectUploadsRouter from "./routes/projectUploads";
+import projectWorkspaceRouter, { resourceLifecycleRouter } from "./routes/projectWorkspace";
+import { autosaveProjectRouter, autosaveResourceRouter } from "./routes/autosaveSnapshots";
 import { folderDatasetsRouter as foundryFolderDatasetsRouter, datasetRouter as foundryDatasetRouter } from "./routes/foundryDatasets";
 import foundrySearchRouter from "./routes/search";
 import foundryBreadcrumbRouter from "./routes/breadcrumb";
@@ -540,6 +553,17 @@ app.use(
 app.use("/api/v1/actions", validateRouter);
 app.use("/api/v1/actions", batchRouter);
 app.use("/api/v1/audit", globalAuditRouter);
+// Edits feed — mounted at two paths so callers can address the parent
+// object type by either its mutable apiName (legacy) or its stable
+// UUID. Both mounts share the same router (`mergeParams: true`) and
+// are disambiguated inside the handler by `resolveFromParams`. The
+// `/by-id/...` mount must be registered FIRST so Express's
+// first-match routing picks it before falling through to the api_name
+// mount when callers send a UUID.
+app.use(
+  "/api/v1/ontology/:ontologyId/objectTypes/by-id/:objectTypeId/edits",
+  editsRouter
+);
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/edits",
   editsRouter
@@ -655,8 +679,27 @@ app.use(
 // reindexRouter mount below so this handler wins for POST requests and
 // the router only ever serves GET /status and GET /history for the
 // UUID path.
+// Idempotency-Key middleware: when the FE sends a UUIDv4 in the
+// `Idempotency-Key` header, the same key replays the cached 202 +
+// signalId without emitting a duplicate `editBatchPending` signal.
+//
+// Why this is required and `isCommitting` (FE) alone isn't:
+//   - Two browser tabs open on the same OT can each fire a Save POST
+//     concurrently. The FE in-flight lock is per-component-instance,
+//     not cross-tab.
+//   - axios retries on transient failures (e.g., network hiccup after
+//     the backend received the request but before the response made
+//     it back). Without idempotency, the retry creates a duplicate
+//     funnel run.
+//   - Browser back/forward navigation that unmounts and remounts the
+//     editor mid-flight resets `isCommitting` to false; a follow-up
+//     click would emit a second signal.
+//
+// The middleware sits BEFORE the resolver so a malformed key
+// short-circuits with 400 INVALID_ARGUMENT without touching the DB.
 app.post(
   "/api/v1/ontology/:ontologyId/objectTypeId/:objectTypeId",
+  idempotencyKeyMiddleware(pool, "POST /ontology/{ontologyId}/objectTypeId/{objectTypeId}"),
   resolveObjectTypeIdToApiName,
   saveToOntology
 );
@@ -711,6 +754,13 @@ app.use("/api/v1/projects", foundryProjectsRouter);
 app.use("/api/v1/projects/:projectId/folders", foundryFoldersRouter);
 app.use("/api/v1/projects/:projectId/folders/:folderId", foundryUploadsRouter);
 app.use("/api/v1/projects/:projectId", foundryProjectUploadsRouter);
+// Project workspace sub-tabs: trashed listing + file/external references.
+// Mounted at /api/v1/projects/:projectId so handlers can read req.params.projectId.
+app.use("/api/v1/projects/:projectId", projectWorkspaceRouter);
+app.use("/api/v1/projects", autosaveProjectRouter);
+app.use("/api/v1/resources", autosaveResourceRouter);
+// Resource lifecycle (restore, permanently-delete) is RID-scoped, not project-scoped.
+app.use("/api/v1/resources", resourceLifecycleRouter);
 app.use("/api/v1/projects/:projectId/folders/:folderId/datasets", foundryFolderDatasetsRouter);
 app.use("/api/v1/datasets", foundryDatasetRouter);
 app.use("/api/v1/datasets", foundryColumnStatsRouter);
@@ -731,6 +781,25 @@ if (process.env.NODE_ENV !== "production") {
 }
 app.use("/api/v1/projects/:projectId/members", foundryMembersRouter);
 app.use("/api/v1/projects/:projectId/pipelines", foundryPipelinesRouter);
+
+// ---------------------------------------------------------------------------
+// Files & Projects B3 — Filesystem v2 Public API (Conjure-compatible).
+// Spec:      tasks/files-projects/files-projects-tasks.md §B3.
+// Contracts: tasks/files-projects/contracts.md (B3-C-01..71).
+// ---------------------------------------------------------------------------
+app.use("/api/v2/filesystem", filesystemSearchV2Router);
+app.use("/api/v2/filesystem", filesystemV2Router);
+// B6.07 — resource graph + project references endpoints
+app.use("/api/v2/graph", resourceGraphV2Router);
+app.use("/api/v2/compass", branchesV2Router);
+// Unified Compass Gateway: GET /api/v1/compass/folders/:folderRid/children
+// — single fan-out endpoint replacing the 5 per-service /v1 list calls
+// the project workspace used to make. Promoted to the v1 namespace
+// because the project workspace consumes it as a stable production
+// surface (the v2 prefix above remains for branches/proposals which are
+// still beta).
+app.use("/api/v1/compass", compassChildrenV2Router);
+app.use("/api/v2/oms", omsV2Router);
 
 // ---------------------------------------------------------------------------
 // API Specification & Documentation
@@ -878,6 +947,39 @@ async function start(): Promise<void> {
       }
       // Refusing to start the server — drift / apply failure must
       // be treated as a deploy bug, not a soft warning.
+      await pool.end().catch(() => {
+        /* ignored — already shutting down */
+      });
+      process.exit(1);
+    }
+
+    // Schema contract — verifies that every column the codebase writes
+    // to via raw SQL exists on the live DB. Catches the class of bug
+    // where a column rename / removal lands without an accompanying SQL
+    // edit. Runs after the migration gate so any pending migrations are
+    // already applied.
+    try {
+      await enforceSchemaContract(pool);
+    } catch (contractErr) {
+      if (contractErr instanceof SchemaContractError) {
+        console.error(
+          JSON.stringify({
+            type: "schema_contract.refused",
+            violations: contractErr.violations,
+            message: contractErr.message,
+          }),
+        );
+      } else {
+        console.error(
+          JSON.stringify({
+            type: "schema_contract.error",
+            error:
+              contractErr instanceof Error
+                ? contractErr.message
+                : String(contractErr),
+          }),
+        );
+      }
       await pool.end().catch(() => {
         /* ignored — already shutting down */
       });

@@ -483,14 +483,34 @@ export default function errorHandler(
       }
 
       case "23503": { // foreign_key_violation
-        const pgErr = new OntologyError(
-          "Referenced resource does not exist.",
-          "VALIDATION_FAILED"
-        );
+        // Postgres 23503 fires in two opposite directions:
+        //  - INSERT/UPDATE referencing a parent row that does not exist
+        //    (e.g. `dataset_id` points at a missing dataset)
+        //  - DELETE of a parent row that is still referenced by children
+        //    (e.g. deleting a dataset that pipelines still consume)
+        // The pg driver surfaces the second case via err.detail with the
+        // marker "is still referenced from table". Returning a single
+        // generic 400 message conflates the two — a dataset owner sees
+        // "Referenced resource does not exist" when their dataset is
+        // alive and well, just in use.
+        const pgErrAny = err as { detail?: string; table?: string; constraint?: string };
+        const isStillReferenced =
+          typeof pgErrAny.detail === "string" &&
+          pgErrAny.detail.includes("is still referenced");
+        const message = isStillReferenced
+          ? "Resource cannot be deleted because other resources still reference it."
+          : "Referenced resource does not exist.";
+        const code = isStillReferenced ? "RESOURCE_IN_USE" : "VALIDATION_FAILED";
+        const status = isStillReferenced ? 409 : 400;
+        const pgErr = new OntologyError(message, code);
         const response = pgErr.toResponse();
         (response as any).requestId = requestId;
         (response as any).timestamp = new Date().toISOString();
-        return void res.status(400).json(response);
+        (response as any).details = {
+          table: pgErrAny.table,
+          constraint: pgErrAny.constraint,
+        };
+        return void res.status(status).json(response);
       }
 
       case "23502": { // not_null_violation

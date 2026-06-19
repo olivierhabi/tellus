@@ -181,7 +181,8 @@ export class DatasetController {
       const uuidParse = z.string().uuid().safeParse(datasetId);
       if (!uuidParse.success) return sendError(res, 400, 'VALIDATION_ERROR', 'Invalid dataset ID');
 
-      await this.datasetService.deleteDataset(datasetId);
+      const user = (req as unknown as { user?: { id: string } }).user;
+      await this.datasetService.deleteDataset(datasetId, user?.id);
       return res.status(204).send();
     } catch (err) { next(err); }
   };

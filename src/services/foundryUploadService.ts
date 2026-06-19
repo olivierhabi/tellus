@@ -1,6 +1,7 @@
 import { Knex } from 'knex';
 import { scheduleParseJob } from '../jobs/parseDatasetJob';
 import { buildObjectKey, uploadObject, deleteObject } from './storageService';
+import { ROOT_SPACE_RID } from '../lib/rid';
 
 export function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -36,7 +37,13 @@ export class UploadService {
         (file as any).s3Key = objectKey;
       }
 
-      // 2. Insert dataset records in a transaction
+      // 2. Insert dataset records + Compass `resources` rows in a single
+      //    transaction (B1-C-24). Both succeed or both roll back.
+      const projectRid = `ri.compass.main.project.${projectId}`;
+      const parentFolderRid = folderId
+        ? `ri.compass.main.compass-folder.${folderId}`
+        : null;
+
       await this.knex.transaction(async (trx) => {
         for (const file of files) {
           const [dataset] = await trx('foundry_datasets')
@@ -54,6 +61,33 @@ export class UploadService {
             })
             .returning('*');
           datasets.push(dataset);
+
+          const datasetRid = `ri.compass.main.foundry-dataset.${dataset.id}`;
+          await trx.raw(
+            `
+            INSERT INTO resources (rid, service, type, display_name,
+                                   parent_folder_rid, project_rid, space_rid,
+                                   created_by, created_at, updated_by, updated_at,
+                                   legacy_uuid)
+            VALUES (?, 'compass', 'FOUNDRY_DATASET', ?,
+                    ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?)
+            ON CONFLICT (legacy_uuid) DO NOTHING
+            `,
+            [
+              datasetRid,
+              dataset.name,
+              parentFolderRid,
+              projectRid,
+              ROOT_SPACE_RID,
+              ownerId,
+              dataset.created_at,
+              ownerId,
+              dataset.updated_at,
+              dataset.id,
+            ],
+          );
         }
       });
     } catch (error) {
