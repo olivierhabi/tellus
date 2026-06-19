@@ -169,6 +169,17 @@ function isAllowlisted(req: Request): boolean {
   if (p === "/api/v1/templates" || p.startsWith("/api/v1/templates/")) return true;
   if (p === "/api/v1/scaffold") return true;
 
+  // Quiver — has its own per-route test-auth bypass via QUIVER_ALLOW_TEST_AUTH=1
+  // (analogous to CODE_REPOS_TEST_AUTH for B2 above). When the bypass is on,
+  // we allowlist the /quiver/api/v1 prefix here so the per-route x-test-user
+  // path works end-to-end without forcing cypress to obtain a Keycloak JWT
+  // whose `iss` claim matches the app's KC_URL. In production the bypass is
+  // off and the per-route auth check + securityContext middleware still
+  // enforce JWT validation — same two-layer pattern as code-repositories.
+  if (process.env.QUIVER_ALLOW_TEST_AUTH === "1") {
+    if (p === "/quiver" || p.startsWith("/quiver/")) return true;
+  }
+
   return false;
 }
 

@@ -1,0 +1,58 @@
+# otel-collector-config.yaml — Quiver verification stack OTel sink.
+#
+# Receives OTLP/gRPC on :4317 and OTLP/HTTP on :4318. Exports to its own
+# /metrics endpoint via prometheus exporter and to log files via the file
+# exporter so cypress specs can assert span emission via the collector's
+# debug log.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 10
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 256
+
+exporters:
+  debug:
+    verbosity: detailed
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: tellus_quiver_otel
+  file:
+    path: /tmp/otel-spans.jsonl
+    rotation:
+      max_megabytes: 10
+      max_days: 1
+      max_backups: 1
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, file]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, file]

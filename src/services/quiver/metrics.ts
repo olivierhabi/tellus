@@ -333,3 +333,161 @@ export const otSubmitSeconds =
     labelNames: ["result"] as const,
     buckets: seconds,
   });
+
+// === B7 — Materialization (Polars/Spark/MMDP) Backend ======================
+export const matComputeSeconds =
+  existing<Histogram<"tier" | "operation">>("tellus_quiver_mat_compute_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_mat_compute_seconds",
+    help: "Materialization tier execute latency by (tier, operation)",
+    labelNames: ["tier", "operation"] as const,
+    buckets: seconds,
+  });
+
+export const matInputRows =
+  existing<Histogram<never>>("tellus_quiver_mat_input_rows") ??
+  new Histogram({
+    name: "tellus_quiver_mat_input_rows",
+    help: "Row counts observed by materialization backend (sampled)",
+    buckets: [10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000],
+  });
+
+export const matTierSelectionTotal =
+  existing<Counter<"tier" | "reason">>("tellus_quiver_mat_tier_selection_total") ??
+  new Counter({
+    name: "tellus_quiver_mat_tier_selection_total",
+    help: "Tier selection decisions by (tier, reason)",
+    labelNames: ["tier", "reason"] as const,
+  });
+
+export const matIcebergSnapshotAgeSeconds =
+  existing<Histogram<never>>("tellus_quiver_mat_iceberg_snapshot_age_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_mat_iceberg_snapshot_age_seconds",
+    help: "Drift between materialization read time and pinned Iceberg snapshot timestamp",
+    buckets: [1, 10, 60, 600, 3600, 86_400],
+  });
+
+// === B8 — Time-Series (Codex) Backend ======================================
+export const tsHydrationSeconds =
+  existing<Histogram<"state">>("tellus_quiver_ts_hydration_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_ts_hydration_seconds",
+    help: "Time-series hydration latency by state (warm|cold)",
+    labelNames: ["state"] as const,
+    buckets: seconds,
+  });
+
+export const tsBucketsReturned =
+  existing<Histogram<never>>("tellus_quiver_ts_buckets_returned") ??
+  new Histogram({
+    name: "tellus_quiver_ts_buckets_returned",
+    help: "Bucket count returned per series (capped at 1000)",
+    buckets: [10, 50, 100, 200, 500, 750, 1000],
+  });
+
+export const tsEventDetectionSeconds =
+  existing<Histogram<never>>("tellus_quiver_ts_event_detection_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_ts_event_detection_seconds",
+    help: "Event detection latency",
+    buckets: seconds,
+  });
+
+export const tsHydrationTimeoutsTotal =
+  existing<Counter<never>>("tellus_quiver_ts_hydration_timeouts_total") ??
+  new Counter({
+    name: "tellus_quiver_ts_hydration_timeouts_total",
+    help: "Cold-hydration timeouts (token TTL exceeded)",
+  });
+
+// === B9 — AIP Integration ===================================================
+export const aipFirstTokenSeconds =
+  existing<Histogram<"surface">>("tellus_quiver_aip_first_token_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_aip_first_token_seconds",
+    help: "AIP first-token latency by surface (generate|configure|assist)",
+    labelNames: ["surface"] as const,
+    buckets: seconds,
+  });
+
+export const aipToolInvocationTotal =
+  existing<Counter<"tool">>("tellus_quiver_aip_tool_invocation_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_tool_invocation_total",
+    help: "AIP tool invocations by tool name",
+    labelNames: ["tool"] as const,
+  });
+
+export const aipToolUnauthorizedTotal =
+  existing<Counter<"tool">>("tellus_quiver_aip_tool_unauthorized_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_tool_unauthorized_total",
+    help: "Denied tool invocations (filtered out of manifest or refused at boundary)",
+    labelNames: ["tool"] as const,
+  });
+
+export const aipTokensUsedTotal =
+  existing<Counter<"surface" | "model">>("tellus_quiver_aip_tokens_used_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_tokens_used_total",
+    help: "Total tokens consumed by surface + model",
+    labelNames: ["surface", "model"] as const,
+  });
+
+export const aipCostUsdMicrosTotal =
+  existing<Counter<"surface" | "model">>("tellus_quiver_aip_cost_usd_micros_total") ??
+  new Counter({
+    name: "tellus_quiver_aip_cost_usd_micros_total",
+    help: "Total cost in USD micros by surface + model",
+    labelNames: ["surface", "model"] as const,
+  });
+
+export const aipPropertyHintSampleSize =
+  existing<Histogram<never>>("tellus_quiver_aip_property_hint_sample_size") ??
+  new Histogram({
+    name: "tellus_quiver_aip_property_hint_sample_size",
+    help: "Property-value hint sample size (capped per B9 C-08)",
+    buckets: [10, 50, 100, 500, 1000],
+  });
+
+// === B10 - Publishing (Dashboards, Visual Functions, Templates) ===========
+export const dashboardPublishTotal =
+  existing<Counter<"result">>("tellus_quiver_dashboard_publish_total") ??
+  new Counter({
+    name: "tellus_quiver_dashboard_publish_total",
+    help: "Dashboard publish attempts by result (ok|conflict|compass_failed)",
+    labelNames: ["result"] as const,
+  });
+
+export const visualFunctionPublishTotal =
+  existing<Counter<"result">>("tellus_quiver_visual_function_publish_total") ??
+  new Counter({
+    name: "tellus_quiver_visual_function_publish_total",
+    help: "Visual Function publish attempts by result (ok|conflict|compass_failed)",
+    labelNames: ["result"] as const,
+  });
+
+export const dashboardEmbedTotal =
+  existing<Counter<"surface">>("tellus_quiver_dashboard_embed_total") ??
+  new Counter({
+    name: "tellus_quiver_dashboard_embed_total",
+    help: "Dashboard embed registrations by surface (OBJECT_VIEW|WORKSHOP)",
+    labelNames: ["surface"] as const,
+  });
+
+export const visualFunctionInlineTotal =
+  existing<Counter<never>>("tellus_quiver_visual_function_inline_total") ??
+  new Counter({
+    name: "tellus_quiver_visual_function_inline_total",
+    help: "Visual Function consumer inlines (count of executions resolved)",
+  });
+
+export const publishingDurationSeconds =
+  existing<Histogram<"surface">>("tellus_quiver_publishing_seconds") ??
+  new Histogram({
+    name: "tellus_quiver_publishing_seconds",
+    help: "Publishing latency by surface (dashboard|visual_function)",
+    labelNames: ["surface"] as const,
+    buckets: seconds,
+  });

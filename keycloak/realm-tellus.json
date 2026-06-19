@@ -1,0 +1,110 @@
+{
+  "realm": "tellus",
+  "enabled": true,
+  "displayName": "Tellus Verify Realm",
+  "registrationAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "sslRequired": "none",
+  "accessTokenLifespan": 3600,
+  "ssoSessionIdleTimeout": 7200,
+  "ssoSessionMaxLifespan": 36000,
+  "webAuthnPolicyRpEntityName": "Tellus Verify",
+  "webAuthnPolicyPasswordlessRpEntityName": "Tellus Verify Passwordless",
+  "requiredActions": [
+    {
+      "alias": "CONFIGURE_TOTP",
+      "name": "Configure OTP",
+      "providerId": "CONFIGURE_TOTP",
+      "enabled": false,
+      "defaultAction": false,
+      "priority": 10,
+      "config": {}
+    },
+    {
+      "alias": "webauthn-register",
+      "name": "Webauthn Register",
+      "providerId": "webauthn-register",
+      "enabled": false,
+      "defaultAction": false,
+      "priority": 70,
+      "config": {}
+    },
+    {
+      "alias": "webauthn-register-passwordless",
+      "name": "Webauthn Register Passwordless",
+      "providerId": "webauthn-register-passwordless",
+      "enabled": false,
+      "defaultAction": false,
+      "priority": 80,
+      "config": {}
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "tellus-app",
+      "name": "Tellus Verify Client",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"],
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "attributes": {
+        "post.logout.redirect.uris": "*"
+      }
+    }
+  ],
+  "groups": [
+    { "name": "tellus-users", "path": "/tellus-users" },
+    { "name": "tellus-admins", "path": "/tellus-admins" },
+    { "name": "tellus-no-action-apply", "path": "/tellus-no-action-apply" }
+  ],
+  "users": [
+    {
+      "username": "verify-user",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "verify-user@tellus.local",
+      "firstName": "Verify",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "verify-password", "temporary": false }
+      ],
+      "groups": ["/tellus-users"],
+      "realmRoles": ["default-roles-tellus"],
+      "attributes": {
+        "org": ["tellus-verify-org"],
+        "mks": ["public"],
+        "applyAction": ["true"]
+      }
+    },
+    {
+      "username": "verify-user-no-action",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "verify-no-action@tellus.local",
+      "firstName": "NoAction",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "verify-password", "temporary": false }
+      ],
+      "groups": ["/tellus-no-action-apply"],
+      "realmRoles": ["default-roles-tellus"],
+      "attributes": {
+        "org": ["tellus-verify-org"],
+        "mks": ["public"],
+        "applyAction": ["false"]
+      }
+    }
+  ]
+}

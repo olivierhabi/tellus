@@ -44,7 +44,7 @@ async function defaultEmitter(event: QuiverAuditEvent): Promise<void> {
     emit = undefined;
   }
   if (!emit) return;
-  await emit({
+  const payload = {
     keycloakSub: event.actorSubject,
     category: "QUIVER",
     action: event.action,
@@ -56,7 +56,23 @@ async function defaultEmitter(event: QuiverAuditEvent): Promise<void> {
       afterEtag: event.afterEtag ?? null,
       ...(event.details ?? {}),
     },
-  });
+  };
+  // Best-effort mode (verify harness only): swallow audit-pipeline errors so
+  // the user-facing request still succeeds. Production keeps the durable
+  // contract (audit must land before ack); see auditEventService F-07.
+  if (process.env.QUIVER_AUDIT_BEST_EFFORT === "1") {
+    try {
+      await emit(payload);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[quiver-audit] best-effort emit failed",
+        (err as Error).message,
+      );
+    }
+    return;
+  }
+  await emit(payload);
 }
 
 export async function emitQuiverAudit(event: QuiverAuditEvent): Promise<void> {

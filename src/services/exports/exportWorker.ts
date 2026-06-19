@@ -106,8 +106,8 @@ export async function executeExportActivity(
   const txn = deps.withTransaction ?? withTransaction;
 
   // 1. Load the job under FOR UPDATE so concurrent worker replicas can't
-  //    double-transition. The connection is reused for the eventual
-  //    status update so the row stays locked across the body.
+  //    double-transition. The UPDATE to RUNNING runs INSIDE the same
+  //    transaction so the lock is held across the state transition.
   const job: ExportJobRow = await txn(async (client: PoolClient) => {
     const res = await client.query(
       `SELECT job_id, ontology_id, requested_by, object_type_api_name,
@@ -123,10 +123,25 @@ export async function executeExportActivity(
         jobId,
       });
     }
-    return res.rows[0] as ExportJobRow;
+    const row = res.rows[0] as ExportJobRow;
+
+    // 2. Idempotency guard — checked inside the transaction while holding
+    //    the FOR UPDATE lock so two concurrent workers cannot both pass.
+    if (row.status === "COMPLETED") {
+      return row; // Caller handles COMPLETED below
+    }
+
+    // 3. Mark RUNNING inside the same transaction/connection — lock held.
+    await client.query(
+      `UPDATE export_job
+          SET status = 'RUNNING', started_at = now(), updated_at = now()
+        WHERE job_id = $1`,
+      [jobId],
+    );
+    return { ...row, status: "RUNNING" };
   });
 
-  // 2. Idempotency guard. Workflow-level retry must not re-export.
+  // 4. Post-transaction idempotency handler.
   if (job.status === "COMPLETED") {
     return {
       jobId,
@@ -136,16 +151,8 @@ export async function executeExportActivity(
     };
   }
 
-  // 3. Validate format defensively even though the route already did.
+  // 5. Validate format defensively even though the route already did.
   assertSupportedFormat(job.format);
-
-  // 4. Mark RUNNING.
-  await query(
-    `UPDATE export_job
-        SET status = 'RUNNING', started_at = now(), updated_at = now()
-      WHERE job_id = $1`,
-    [jobId],
-  );
 
   let rowCount = 0;
   let failureReason: string | undefined;
