@@ -117,7 +117,7 @@ async function create(ontologyId: string, data: CreateInput) {
 async function getByApiName(ontologyId: string, apiName: string) {
   // 1. Object type
   const otResult = await query(
-    "SELECT * FROM object_type WHERE ontology_id = $1 AND api_name = $2",
+    "SELECT * FROM object_type WHERE ontology_id = $1 AND LOWER(api_name) = LOWER($2)",
     [ontologyId, apiName]
   );
   if (otResult.rows.length === 0) {
@@ -408,7 +408,7 @@ async function update(ontologyId: string, apiName: string, data: UpdateInput) {
 
   const sql = `UPDATE object_type
                SET ${setClauses.join(", ")}
-               WHERE ontology_id = $${paramIndex++} AND api_name = $${paramIndex}
+               WHERE ontology_id = $${paramIndex++} AND LOWER(api_name) = LOWER($${paramIndex})
                RETURNING *`;
 
   try {
@@ -452,7 +452,7 @@ async function update(ontologyId: string, apiName: string, data: UpdateInput) {
 async function remove(ontologyId: string, apiName: string): Promise<void> {
   // 1. Look up the object type
   const otResult = await query(
-    "SELECT object_type_id FROM object_type WHERE ontology_id = $1 AND api_name = $2",
+    "SELECT object_type_id FROM object_type WHERE ontology_id = $1 AND LOWER(api_name) = LOWER($2)",
     [ontologyId, apiName]
   );
   if (otResult.rows.length === 0) {

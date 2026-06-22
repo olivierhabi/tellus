@@ -153,6 +153,12 @@ function isAllowlisted(req: Request): boolean {
   if (p === "/api/docs" || p.startsWith("/api/docs/")) return true;
   if (url.startsWith("/api/docs?")) return true;
 
+  // Code-Server Web-IDE proxy. The frontend iframe makes a direct
+  // cross-origin connection to the backend proxy. Since code-server
+  // handles its own inner requests statically and via ws, this route
+  // needs to be allowlisted globally.
+  if (p === "/api/v1/workspaces" || p.startsWith("/api/v1/workspaces/")) return true;
+
   // Dev tools — defense in depth; also gated at mount by NODE_ENV.
   if (p.startsWith("/api/v1/dev/") || p === "/api/v1/dev") return true;
 
@@ -377,7 +383,7 @@ export function globalAuth() {
       getSigningKey,
       {
         algorithms: ["RS256"],
-        issuer: KC_ISSUER,
+        issuer: [KC_ISSUER, `http://localhost:8086/realms/${KC_REALM}`, `http://keycloak:8086/realms/${KC_REALM}`],
       },
       (err, decoded) => {
         if (err || !decoded || typeof decoded !== "object") {

@@ -189,6 +189,8 @@ router.put(
     try {
       const parsed = updateModuleRequestSchema.safeParse(req.body);
       if (!parsed.success) {
+        console.error("[route-debug] UPDATE MODULE ZOD PARSE FAILURE:", JSON.stringify(parsed.error.issues, null, 2));
+        console.error("[route-debug] BODY RECEIVED:", JSON.stringify(req.body, null, 2));
         throw invalidModuleSchema("update-module body did not validate", {
           issues: parsed.error.issues,
         });

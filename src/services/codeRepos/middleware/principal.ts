@@ -84,41 +84,35 @@ export function requireCodeReposAuth() {
   })();
 
   return (req: Request, res: Response, next: NextFunction): void => {
-    // Test-mode fake principal — only honoured when env opt-in is set.
-    // Test mode is TERMINAL: when CODE_REPOS_TEST_AUTH=1, the header
-    // either succeeds (sets a synthetic principal) or fails (returns our
-    // §1.3 envelope). We do NOT fall through to upstream because the
-    // upstream `requireTellusAuth` middleware has its own envelope shape
-    // (errorName: "AuthenticationError") which would violate G-C-08's
-    // requirement of `Stemma:Unauthenticated`.
+    // Test mode is NOT terminal for valid JWT credentials:
+    // When CODE_REPOS_TEST_AUTH=1, we first check for the synthetic header.
+    // If it's missing, we STILL FALL THROUGH to the standard JWT check.
     if (
       process.env.CODE_REPOS_TEST_AUTH === "1" &&
       process.env.NODE_ENV !== "production"
     ) {
       const header = req.header("X-Tellus-Test-Principal");
-      if (typeof header !== "string" || header.length === 0) {
-        sendUnauthenticated(res, req, "Authentication required");
+      if (typeof header === "string" && header.length > 0) {
+        const [userId, rolesCsv] = header.split("/");
+        if (!userId) {
+          sendUnauthenticated(res, req, "X-Tellus-Test-Principal missing userId");
+          return;
+        }
+        const roles = (rolesCsv ?? "")
+          .split(",")
+          .map((r) => r.trim())
+          .filter((r) => r.length > 0);
+        req.codeReposPrincipal = {
+          userId,
+          source: "test",
+          roles,
+          scopes: [],
+          sourceIp: extractIp(req),
+          userAgent: extractUa(req),
+        };
+        next();
         return;
       }
-      const [userId, rolesCsv] = header.split("/");
-      if (!userId) {
-        sendUnauthenticated(res, req, "X-Tellus-Test-Principal missing userId");
-        return;
-      }
-      const roles = (rolesCsv ?? "")
-        .split(",")
-        .map((r) => r.trim())
-        .filter((r) => r.length > 0);
-      req.codeReposPrincipal = {
-        userId,
-        source: "test",
-        roles,
-        scopes: [],
-        sourceIp: extractIp(req),
-        userAgent: extractUa(req),
-      };
-      next();
-      return;
     }
 
     if (!upstream) {

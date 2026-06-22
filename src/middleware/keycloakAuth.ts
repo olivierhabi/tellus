@@ -111,7 +111,7 @@ export function keycloakAuth(opts: { requiredRole?: string } = {}) {
       getKey,
       {
         algorithms: ["RS256"],
-        issuer: KC_ISSUER,
+        issuer: [KC_ISSUER, `http://localhost:8086/realms/${KC_REALM}`, `http://keycloak:8086/realms/${KC_REALM}`],
       },
       (err, decoded) => {
         if (err) {

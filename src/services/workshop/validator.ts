@@ -112,6 +112,8 @@ function _validateModuleInner(definition: unknown): ValidationResult {
   ensureAjv();
   if (!ajvValidate!(definition)) {
     const issues = ajvErrors ? ajvErrors() : [];
+    console.error("[validator-debug] SCHEMA VALIDATION ISSUES:", JSON.stringify(issues, null, 2));
+    console.error("[validator-debug] DEFINITION FAILED:", JSON.stringify(definition, null, 2));
     throw invalidModuleSchema(
       "JSON Schema validation failed",
       { issues },

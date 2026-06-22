@@ -129,7 +129,7 @@ function verifyJwt(
     jwt.verify(
       token,
       getKey,
-      { algorithms: ["RS256"], issuer: ISSUER, ...opts },
+      { algorithms: ["RS256"], issuer: [ISSUER, `http://localhost:8086/realms/${KC_REALM}`, `http://keycloak:8086/realms/${KC_REALM}`], ...opts },
       (err, decoded) => {
         if (err || !decoded || typeof decoded !== "object") {
           return reject(err || new Error("JWT verification failed"));

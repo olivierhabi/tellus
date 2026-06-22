@@ -90,19 +90,11 @@ function validatePublishBody(body: unknown): { ok: true; body: ParsedPublishBody
 
 export function createJobSpecRouter(deps: JobSpecRouterDeps): Router {
   const router = express.Router();
-  router.use(express.json({ limit: "10mb" }));
-  // Skip auth endpoints (mounted at /api/v1/auth) so they're not caught by
-  // requireCodeReposAuth. The auth router must handle its own auth logic.
-  router.use((req, res, next) => {
-    if (req.path.startsWith("/auth/")) {
-      return next("router"); // Exit this router, continue to app-level middleware
-    }
-    next();
-  });
-  router.use(requireCodeReposAuth());
-  router.use(idempotencyMiddleware({ pool: deps.pool }));
+  const auth = requireCodeReposAuth();
+  const idem = idempotencyMiddleware({ pool: deps.pool });
+  const json = express.json({ limit: "10mb" });
 
-  router.post("/repositories/:rid/branches/:branch/job-specs", async (req: Request, res: Response) => {
+  router.post("/repositories/:rid/branches/:branch/job-specs", auth, idem, json, async (req: Request, res: Response) => {
     const { rid, branch } = req.params;
     if (!isStructurallyRid(rid)) {
       sendError(res, jobSpecError("JobSpec:InvalidArgument", { reason: "invalid-repository-rid" }));
@@ -160,7 +152,7 @@ export function createJobSpecRouter(deps: JobSpecRouterDeps): Router {
     }
   });
 
-  router.get("/job-specs", async (req: Request, res: Response) => {
+  router.get("/job-specs", auth, async (req: Request, res: Response) => {
     const outputDatasetRid = typeof req.query.outputDatasetRid === "string" ? req.query.outputDatasetRid : undefined;
     const branch = typeof req.query.branch === "string" ? req.query.branch : undefined;
     if (outputDatasetRid === undefined || branch === undefined) {
@@ -180,7 +172,7 @@ export function createJobSpecRouter(deps: JobSpecRouterDeps): Router {
     res.status(200).json(row);
   });
 
-  router.get("/repositories/:rid/branches/:branch/job-specs", async (req: Request, res: Response) => {
+  router.get("/repositories/:rid/branches/:branch/job-specs", auth, async (req: Request, res: Response) => {
     const { rid, branch } = req.params;
     if (!isStructurallyRid(rid)) {
       sendError(res, jobSpecError("JobSpec:InvalidArgument", { reason: "invalid-repository-rid" }));

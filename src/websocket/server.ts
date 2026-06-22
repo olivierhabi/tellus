@@ -84,7 +84,23 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
     }
     wss.close();
   }
-  wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  // Use noServer mode to prevent ws library from auto-handling upgrades
+  // This allows other upgrade handlers to process different paths
+  wss = new WebSocketServer({ noServer: true });
+
+  // Handle upgrade requests for /ws path
+  // Use prependListener to ensure this runs before other handlers
+  httpServer.prependListener('upgrade', (request, socket, head) => {
+    const pathname = request.url ? new URL(request.url, `http://127.0.0.1:3000`).pathname : '';
+    console.log(`[websocket] Upgrade event for pathname: ${pathname}`);
+    if (pathname === '/ws') {
+      console.log('[websocket] Handling /ws upgrade');
+      wss!.handleUpgrade(request, socket, head, (ws) => {
+        wss!.emit('connection', ws, request);
+      });
+    }
+  });
+
   const clients = new Map<WebSocket, ClientState>();
 
   // Heartbeat interval (15s)

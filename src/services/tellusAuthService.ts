@@ -227,10 +227,17 @@ export class TellusAuthService {
   /** Verify a Keycloak-issued JWT and return the decoded claims. */
   verifyAccessToken(token: string): Promise<TellusClaims> {
     return new Promise((resolve, reject) => {
+      // Support loopback and docker network issuer profiles (consistent with globalAuth.ts)
+      const allowedIssuers = [
+        this.issuer,
+        `http://localhost:8086/realms/${this.config.kcRealm}`,
+        `http://keycloak:8086/realms/${this.config.kcRealm}`,
+      ];
+
       jwt.verify(
         token,
         this.getKey,
-        { algorithms: ['RS256'], issuer: this.issuer },
+        { algorithms: ['RS256'], issuer: allowedIssuers },
         (err, decoded) => {
           if (err) {
             if (err.name === 'TokenExpiredError') {

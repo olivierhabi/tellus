@@ -11,6 +11,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import propertyService from "../services/propertyService";
+import { sendSignal } from "../services/funnel/durableWorkflow";
 import {
   formatProperty,
   sendSuccess,
@@ -100,6 +101,17 @@ router.post(
       const rows = await propertyService.batchCreate(objectTypeId, properties);
       const formatted = rows.map((row: any) => formatProperty(row));
 
+      // Trigger funnel indexing/update after schema changes
+      try {
+        await sendSignal({
+          ontologyId: req.params.ontologyId,
+          objectTypeApiName: req.params.apiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for property batch create:", signalErr);
+      }
+
       sendCreated(res, { data: formatted });
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
@@ -149,6 +161,18 @@ router.post(
       });
 
       const formatted = formatProperty(row);
+
+      // Trigger funnel indexing/update after schema changes
+      try {
+        await sendSignal({
+          ontologyId: req.params.ontologyId,
+          objectTypeApiName: req.params.apiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for property creation:", signalErr);
+      }
+
       sendCreated(res, formatted);
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
@@ -250,6 +274,18 @@ router.put(
         req.body
       );
       const formatted = formatProperty(row);
+
+      // Trigger funnel indexing/update after schema changes
+      try {
+        await sendSignal({
+          ontologyId: req.params.ontologyId,
+          objectTypeApiName: req.params.apiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for property update:", signalErr);
+      }
+
       sendSuccess(res, formatted);
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
@@ -272,6 +308,18 @@ router.delete(
       if (!objectTypeId) return;
 
       await propertyService.delete(objectTypeId, req.params.propApiName);
+
+      // Trigger funnel indexing/update after schema changes
+      try {
+        await sendSignal({
+          ontologyId: req.params.ontologyId,
+          objectTypeApiName: req.params.apiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for property deletion:", signalErr);
+      }
+
       sendNoContent(res);
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
@@ -307,6 +355,18 @@ router.post(
       }
 
       await propertyService.setPrimaryKey(objectTypeId, propertyApiName);
+
+      // Trigger funnel indexing/update after schema changes
+      try {
+        await sendSignal({
+          ontologyId: req.params.ontologyId,
+          objectTypeApiName: req.params.apiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for setting primary key:", signalErr);
+      }
+
       sendSuccess(res, {
         message: `Primary key set to '${propertyApiName}'.`,
       });
@@ -344,6 +404,18 @@ router.post(
       }
 
       await propertyService.setTitleProperty(objectTypeId, propertyApiName);
+
+      // Trigger funnel indexing/update after schema changes
+      try {
+        await sendSignal({
+          ontologyId: req.params.ontologyId,
+          objectTypeApiName: req.params.apiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for setting title property:", signalErr);
+      }
+
       sendSuccess(res, {
         message: `Title property set to '${propertyApiName}'.`,
       });
