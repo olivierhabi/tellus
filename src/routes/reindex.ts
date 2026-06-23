@@ -168,46 +168,57 @@ router.post(
       }
 
       // ---------------------------------------------------------------
-      // Step 5: Atomic lock — prevent concurrent reindex
+      // Step 5: Atomic lock — prevent concurrent reindex (unless force)
       // ---------------------------------------------------------------
-      const lockResult = await query(
-        `UPDATE funnel_state SET status = 'indexing', error_message = NULL, updated_at = now()
-         WHERE object_type_id = $1 AND status != 'indexing'
-         RETURNING *`,
-        [objectType.object_type_id]
-      );
-
-      if (lockResult.rows.length === 0) {
-        // Either no row exists or status is already 'indexing'
-        const existsResult = await query(
-          "SELECT status FROM funnel_state WHERE object_type_id = $1",
+      if (!force) {
+        const lockResult = await query(
+          `UPDATE funnel_state SET status = 'indexing', error_message = NULL, updated_at = now()
+           WHERE object_type_id = $1 AND status != 'indexing'
+           RETURNING *`,
           [objectType.object_type_id]
         );
 
-        if (existsResult.rows.length === 0) {
-          // No row — create one with 'indexing' status
-          const insertResult = await query(
-            `INSERT INTO funnel_state (object_type_id, status)
-             VALUES ($1, 'indexing')
-             ON CONFLICT (object_type_id) DO NOTHING
-             RETURNING *`,
+        if (lockResult.rows.length === 0) {
+          // Either no row exists or status is already 'indexing'
+          const existsResult = await query(
+            "SELECT status FROM funnel_state WHERE object_type_id = $1",
             [objectType.object_type_id]
           );
-          if (insertResult.rows.length === 0) {
-            // Lost the race — another reindex just started
+
+          if (existsResult.rows.length === 0) {
+            // No row — create one with 'indexing' status
+            const insertResult = await query(
+              `INSERT INTO funnel_state (object_type_id, status)
+               VALUES ($1, 'indexing')
+               ON CONFLICT (object_type_id) DO NOTHING
+               RETURNING *`,
+              [objectType.object_type_id]
+            );
+            if (insertResult.rows.length === 0) {
+              // Lost the race — another reindex just started
+              return sendError(
+                res,
+                "REINDEX_IN_PROGRESS",
+                `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`
+              );
+            }
+          } else if (existsResult.rows[0].status === "indexing") {
             return sendError(
               res,
               "REINDEX_IN_PROGRESS",
               `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`
             );
           }
-        } else if (existsResult.rows[0].status === "indexing") {
-          return sendError(
-            res,
-            "REINDEX_IN_PROGRESS",
-            `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`
-          );
         }
+      } else {
+        // Force mode: ensure funnel_state exists and set to 'indexing'
+        await query(
+          `INSERT INTO funnel_state (object_type_id, status, error_message)
+           VALUES ($1, 'indexing', NULL)
+           ON CONFLICT (object_type_id)
+           DO UPDATE SET status = 'indexing', error_message = NULL, updated_at = now()`,
+          [objectType.object_type_id]
+        );
       }
 
       // ---------------------------------------------------------------

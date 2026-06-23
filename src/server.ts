@@ -6,7 +6,6 @@ import "./services/otelBootstrap";
 import { assertQuiverTestAuthSafe } from "./routes/quiver/testAuth";
 import crypto from "crypto";
 import http from "http";
-import net from "net";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -25,8 +24,6 @@ import requestLogger from "./middleware/requestLogger";
 import { idempotencyKeyMiddleware } from "./middleware/idempotencyKey";
 import { inputSanitizer } from "./middleware/inputSanitizer";
 import { notFoundHandler } from "./middleware/notFoundHandler";
-import { createProxyMiddleware } from "http-proxy-middleware";
-import { workspaceBroker } from "./services/workspaceBroker";
 import errorHandler from "./middleware/errorHandler";
 import ontologyRouter from "./routes/ontology";
 import objectTypeRouter from "./routes/objectTypes";
@@ -208,34 +205,7 @@ try {
 const app = express();
 
 // Security headers (helmet defaults are sensible for APIs)
-app.use(helmet({
-  crossOriginResourcePolicy: false,
-  crossOriginOpenerPolicy: false,
-}));
-
-// Provide explicit Content-Security-Policy exceptions allowing our frontend to embed us.
-app.use(
-  helmet.contentSecurityPolicy({
-    directives: {
-      defaultSrc: ["'self'"],
-      // Allow embedding this backend inside the TELLUS_FE_BASE_URL iframe
-      frameAncestors: ["'self'", process.env.TELLUS_FE_BASE_URL || "http://localhost:3001"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "blob:"],
-      fontSrc: ["'self'", "data:"],
-      connectSrc: ["'self'", "ws:", "wss:", process.env.TELLUS_FE_BASE_URL || "http://localhost:3001"],
-    },
-  })
-);
-
-// We MUST delete the X-Frame-Options SAMEORIGIN header because it conflicts
-// with the CSP frameAncestors policy we just set, preventing code-server loading.
-app.use((req, res, next) => {
-  res.removeHeader("X-Frame-Options");
-  next();
-});
-
+app.use(helmet());
 // PB-B9 — trace context + X-Trace-Id response header. Must sit before
 // any handler that might respond (including the helmet chain's early
 // writes) so a user-facing error response ALWAYS carries the trace id
@@ -288,14 +258,7 @@ app.use(
 // Parse JSON request bodies. The 10 MB limit is needed because some API
 // requests (like registering a backing datasource with a very large column
 // mapping) can have substantial JSON bodies.
-// Skip WebSocket upgrade requests to avoid 400 errors
-app.use((req: Request, res: Response, next: NextFunction) => {
-  // Skip body parsing for WebSocket upgrade requests
-  if (req.headers.upgrade?.toLowerCase() === 'websocket') {
-    return next();
-  }
-  return express.json({ limit: "10mb" })(req, res, next);
-});
+app.use(express.json({ limit: "10mb" }));
 
 // Body-parser error catcher. Without this, Express maps `entity.too.large`
 // and `entity.parse.failed` errors to a generic 500, which violates the
@@ -688,130 +651,13 @@ app.use("/api/v1/datasets", dataPreviewRouter);
 import { mountCodeRepository } from "./services/codeRepository/mount";
 import { rehydrateInMemoryStemma } from "./services/codeRepository/rehydrate";
 import { PostgresStemma } from "./services/codeRepository/adapters/postgres";
-import { DiskStemma } from "./services/codeRepository/adapters/disk";
 // DURABLE Stemma (migration 086): persist branches/blobs/HEADs to Postgres so
 // committed code survives restarts. Previously the in-memory adapter lost all
 // git content on every reload, leaving repos showing only the template scaffold
 // and drifting branch_cache (→ 412 on commit). The template adapter scaffolds
 // through this same instance, so new repos materialise into Postgres too.
-// Choose StemmaAdapter based on USE_DISK_STORAGE feature flag
-const useDiskStorage = process.env.USE_DISK_STORAGE === "true";
-const stemmaAdapter = useDiskStorage
-  ? new DiskStemma({ pool })
-  : new PostgresStemma({ pool });
-
-const codeRepoMount = mountCodeRepository({ pool, stemma: stemmaAdapter });
+const codeRepoMount = mountCodeRepository({ pool, stemma: new PostgresStemma({ pool }) });
 app.use("/api/v1/code-repositories", codeRepoMount.router);
-
-// Helper to manually proxy raw WebSockets directly to the dynamically resolved workspace container ports
-function proxyWebSocket(req: http.IncomingMessage, socket: net.Socket, head: Buffer, targetHost: string, targetPort: number, rewrittenUrl: string) {
-  console.log(`[WS-Proxy] Proxying to ${targetHost}:${targetPort}, rewrittenUrl=${rewrittenUrl}`);
-
-  // Re-serialize request headers with the rewritten URL so the target receives the correct relative path
-  let rawRequest = `${req.method || 'GET'} ${rewrittenUrl} HTTP/${req.httpVersion}\r\n`;
-
-  for (let i = 0; i < req.rawHeaders.length; i += 2) {
-    const key = req.rawHeaders[i];
-    const value = req.rawHeaders[i + 1];
-
-    // Rewrite host and origin headers to match target host/port so code-server CSRF protection is satisfied
-    if (key.toLowerCase() === 'host') {
-      rawRequest += `Host: ${targetHost}:${targetPort}\r\n`;
-    } else if (key.toLowerCase() === 'origin') {
-      rawRequest += `Origin: http://${targetHost}:${targetPort}\r\n`;
-    } else {
-      rawRequest += `${key}: ${value}\r\n`;
-    }
-  }
-  rawRequest += '\r\n';
-
-  console.log(`[WS-Proxy] Raw request headers:\n${rawRequest.split('\r\n').slice(0, 10).join('\n')}`);
-
-  // Connect TCP socket to target service
-  const targetSocket = net.connect({ host: targetHost, port: targetPort }, () => {
-    console.log(`[WS-Proxy] Connected to target ${targetHost}:${targetPort}`);
-    // Write handshake headers and pre-buffered head data
-    targetSocket.write(rawRequest);
-    if (head && head.length > 0) {
-      targetSocket.write(head);
-    }
-
-    // Pipe streams Bidirectionally at layer 4
-    targetSocket.pipe(socket);
-    socket.pipe(targetSocket);
-  });
-
-  targetSocket.on('error', (err) => {
-    console.error(`[WS-Proxy] Error connecting to workspace backend at ${targetHost}:${targetPort}:`, err);
-    socket.destroy();
-  });
-
-  socket.on('error', (err) => {
-    console.error('[WS-Proxy] Client socket error:', err);
-    targetSocket.destroy();
-  });
-}
-
-// Single, persistent reverse-proxy instance to manage HTTP/WS traffic to dynamically spawned code-server workspaces
-const workspacesProxy = createProxyMiddleware({
-  target: "http://127.0.0.1:12000",
-  router: async (req: any) => {
-    // Debug: log the URL to understand what we're receiving
-    const url = req.originalUrl || req.url || "";
-    console.log(`[Proxy] originalUrl/url: ${url}`);
-
-    // When mounted via app.use("/api/v1/workspaces/:rid/:branch"), req.originalUrl retains the full path
-    const match = url.match(/^\/api\/v1\/workspaces\/([^/]+)\/([^/]+)/);
-    if (match) {
-      const [, rid, branch] = match;
-      console.log(`[Proxy] Extracted rid: ${rid}, branch: ${branch}`);
-      const targetClusterUrl = await workspaceBroker.getOrCreateWorkspaceSession(rid, branch);
-      console.log(`[Proxy] Routing workspace setup requests to: ${targetClusterUrl}`);
-      return targetClusterUrl;
-    }
-    return "http://127.0.0.1:12000";
-  },
-  ws: false, // MUST be false to prevent http-proxy-middleware v4 from auto-registering conflict listeners!
-  changeOrigin: true,
-  pathRewrite: (path) => {
-    return path.replace(/^\/api\/v1\/workspaces\/[^/]+\/[^/]+/, "");
-  },
-});
-
-// Silence VSDA (Visual Studio Digital Asset) proprietary signature 404 console spam in open-source code-server bundles
-app.use("/api/v1/workspaces/:rid/:branch", (req, res, next) => {
-  if (req.path.endsWith("/vsda.js")) {
-    res.setHeader("Content-Type", "application/javascript");
-    const mockVsda = `
-      (function() {
-        var Signer = function() {
-          this.sign = function(x) { return x; };
-          this.signAsync = function(x) { return Promise.resolve(x); };
-        };
-        var factory = function() {
-          return {
-            Signer: Signer
-          };
-        };
-        if (typeof define === 'function' && define.amd) {
-          define([], factory);
-        } else if (typeof module === 'object' && module.exports) {
-          module.exports = factory();
-        } else {
-          window.vsda = factory();
-        }
-      })();
-    `;
-    return res.status(200).send(mockVsda);
-  }
-  if (req.path.endsWith("/vsda_bg.wasm")) {
-    res.setHeader("Content-Type", "application/wasm");
-    return res.status(200).send(Buffer.from([]));
-  }
-  next();
-});
-
-app.use("/api/v1/workspaces/:rid/:branch", workspacesProxy);
 
 // Functions Registry (B8) — the platform-wide store of published, immutable,
 // SemVer-versioned TypeScript Functions v2. Produced by Tag & Release
@@ -843,7 +689,7 @@ app.use(
 // persist job_spec rows.
 import { createTransformsRouter } from "./services/codeRepository/transforms/routes";
 import { createJobSpecRouter } from "./services/jobSpec/admin/routes";
-app.use("/api/v1", createTransformsRouter({ stemma: stemmaAdapter }));
+app.use("/api/v1", createTransformsRouter({ stemma: new PostgresStemma({ pool }) }));
 app.use("/api/v1", createJobSpecRouter({ pool }));
 
 // Boot-time rehydrator. No-op against a real Stemma client (production); a
@@ -1290,69 +1136,6 @@ async function start(): Promise<void> {
       console.log(
         `Ontology Engine started on port ${PORT} | PostgreSQL connected`
       );
-      setTimeout(() => {
-        const listeners = server.listeners("upgrade");
-        console.log(`[Server] Total registered 'upgrade' listeners: ${listeners.length}`);
-        listeners.forEach((l, i) => {
-          console.log(`[Server] Listener ${i}: ${l.toString().substring(0, 300)}...`);
-        });
-      }, 5000);
-    });
-
-    // Debug: Log all incoming connections
-    server.on("connection", (socket) => {
-      console.log(`[Server] New connection from ${socket.remoteAddress}:${socket.remotePort}`);
-    });
-
-    // Explicitly handle socket upgrade routing to isolate workspaces and native WS connections cleanly
-    // Use prependListener to ensure our handler runs before the ws library's handler
-    server.prependListener("upgrade", (request, socket, head) => {
-      console.log(`[Workspace-Upgrade] Handler called for URL: ${request.url}`);
-      let pathname = "";
-      const url = request.url || "";
-      try {
-        pathname = request.url ? new URL(request.url, `http://127.0.0.1:${PORT}`).pathname : "";
-      } catch (e) {
-        pathname = url.split("?")[0];
-      }
-
-      console.log(`[WS-Upgrade] Received upgrade request for pathname: ${pathname}`);
-
-      if (pathname.startsWith("/api/v1/workspaces/")) {
-        // Pause the socket to prevent data loss during async operations
-        socket.pause();
-        console.log(`[WS-Upgrade] Handling workspace upgrade for URL: ${url}`);
-        const match = url.match(/^\/api\/v1\/workspaces\/([^/]+)\/([^/]+)/);
-        if (match) {
-          const [, rid, branch] = match;
-          // Handle async work without blocking the upgrade event
-          workspaceBroker.getOrCreateWorkspaceSession(rid, branch)
-            .then((targetClusterUrl) => {
-              console.log(`[WS-Upgrade] Routing WS upgrade to: ${targetClusterUrl}`);
-
-              // Parse target URL to fetch host and port
-              const parsedTarget = new URL(targetClusterUrl);
-              const targetHost = parsedTarget.hostname;
-              const targetPort = parsedTarget.port ? parseInt(parsedTarget.port, 10) : 80;
-
-              // Rewrite path: remove `/api/v1/workspaces/:rid/:branch` from request url
-              const rewrittenUrl = url.replace(/^\/api\/v1\/workspaces\/[^/]+\/[^/]+/, "");
-
-              socket.resume();
-              proxyWebSocket(request, socket as net.Socket, head, targetHost, targetPort, rewrittenUrl);
-            })
-            .catch((err) => {
-              console.error(`[WS-Upgrade] Failed to resolve target session for rid=${rid}, branch=${branch}:`, err);
-              socket.destroy();
-            });
-        } else {
-          console.warn(`[WS-Upgrade] Invalid workspace upgrade URL format: ${url}`);
-          socket.destroy();
-        }
-      } else {
-        // Log what's happening with non-workspace upgrades
-        console.log(`[WS-Upgrade] Not a workspace path, passing through for other handlers (pathname: ${pathname})`);
-      }
     });
 
     // Object Data Funnel background workers.
@@ -1372,6 +1155,15 @@ async function start(): Promise<void> {
       console.warn(
         `WARNING: could not start Funnel dispatcher: ${(err as Error).message}`
       );
+    }
+
+    // Start Asynchronous Multi-Source Compilation Worker
+    try {
+      const { startDatasourceCompilerConsumer } = require("./services/orchestration/datasource-compiler-consumer");
+      startDatasourceCompilerConsumer();
+      console.log("Multi-Source Compilation Worker started");
+    } catch (err) {
+      console.warn(`WARNING: could not start Multi-Source Compilation Worker: ${(err as Error).message}`);
     }
 
     // PB-B1: Pipeline dispatcher + one-shot orphan sweep.

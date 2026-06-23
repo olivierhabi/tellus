@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";
+import objectTypeService from "../services/objectTypeService";
 import ontologyService from "../services/ontologyService";
 import {
   formatOntology,
@@ -229,6 +230,96 @@ router.delete(
   async (_req: Request, res: Response) => {
     // The single enterprise ontology cannot be deleted.
     sendError(res, "ONTOLOGY_SINGLETON", SINGLETON_MESSAGE);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Route 6a: GET /api/v1/ontology/object-types/:objectTypeRid/datasources
+// List the backing datasources attached to an Object Type.
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/api/v1/ontology/object-types/:objectTypeRid/datasources",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectTypeRid } = req.params;
+      const datasources = await objectTypeService.listDatasources(objectTypeRid);
+      sendSuccess(res, { data: datasources });
+    } catch (err: any) {
+      if (err.code === "OBJECT_TYPE_NOT_FOUND") {
+        return sendError(res, "OBJECT_TYPE_NOT_FOUND", err.message, { statusCode: 404 });
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Route 6: POST /api/v1/ontology/object-types/:objectTypeRid/datasources
+// Append a backing data source to an existing Object Type.
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/api/v1/ontology/object-types/:objectTypeRid/datasources",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { objectTypeRid } = req.params;
+      const {
+        datasourceRid,
+        primaryKeyMapping,
+        propertyMappings,
+        resolutionStrategy,
+        conflictPolicy,
+      } = req.body;
+
+      if (!datasourceRid || !primaryKeyMapping || !propertyMappings) {
+        return sendError(
+          res,
+          "VALIDATION_FAILED",
+          "datasourceRid, primaryKeyMapping, and propertyMappings are required.",
+          { statusCode: 422 }
+        );
+      }
+
+      const ifMatch = req.header("If-Match");
+
+      const result = await objectTypeService.addDatasource(objectTypeRid, {
+        datasourceRid,
+        primaryKeyMapping,
+        propertyMappings,
+        resolutionStrategy,
+        conflictPolicy,
+        ifMatch,
+      });
+
+      sendSuccess(res, result);
+    } catch (err: any) {
+      if (err.code === "OBJECT_TYPE_NOT_FOUND" || err.code === "DATASET_NOT_FOUND") {
+        return sendError(res, err.code, err.message, { statusCode: 404 });
+      }
+      if (
+        err.code === "CONCURRENT_EDIT_CONFLICT" ||
+        err.code === "DATASOURCE_ALREADY_REGISTERED" ||
+        err.code === "DATASET_ALREADY_BACKING"
+      ) {
+        return sendError(res, err.code, err.message, { statusCode: 409 });
+      }
+      if (err.code === "PRECONDITION_REQUIRED") {
+        return sendError(res, "PRECONDITION_REQUIRED", err.message, { statusCode: 428 });
+      }
+      // Validation errors from the column-mapping / foundry-bridge path.
+      if (
+        err.code === "VALIDATION_FAILED" ||
+        err.code === "COLUMN_MAPPING_INVALID" ||
+        err.code === "COLUMN_NOT_FOUND" ||
+        err.code === "PRIMARY_KEY_MISMATCH" ||
+        err.code === "DATASET_EMPTY" ||
+        err.code === "AMBIGUOUS_DATASOURCE"
+      ) {
+        return sendError(res, err.code, err.message, { statusCode: 422 });
+      }
+      next(err);
+    }
   }
 );
 

@@ -63,6 +63,13 @@ export interface LoadSnapshotArgs {
   readonly objectTypes?: readonly string[];
   /** Hard cap on rows materialised, to bound memory. */
   readonly limit?: number;
+  /**
+   * Optional abort signal (typically the request's `timeoutSignal`). When
+   * aborted, the in-flight SELECT is cancelled server-side instead of running
+   * to completion after the caller has already given up (504). `pg` honours
+   * `signal` on the query config object.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -85,14 +92,15 @@ export async function loadOntologySnapshot(
     object_type_api_name: string;
     primary_key: string;
     properties: Record<string, unknown>;
-  }>(
-    `SELECT object_type_api_name, primary_key, properties
+  }>({
+    text: `SELECT object_type_api_name, primary_key, properties
        FROM object_instances
       WHERE ontology_id = $1::uuid ${typeFilter}
       ORDER BY object_type_api_name, last_modified_at DESC
       LIMIT $${params.length}`,
-    params,
-  );
+    values: params,
+    signal: args.signal,
+  });
 
   const byType = new Map<string, Map<string, OntologyObject>>();
   let count = 0;

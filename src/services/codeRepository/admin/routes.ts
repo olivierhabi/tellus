@@ -42,7 +42,12 @@ import {
   loadOntologySnapshot,
   normalizeOntologyId,
   type OntologyEdit,
+  type OntologySnapshot,
 } from "../../functions/ontologyRuntime";
+import {
+  createTtlCache,
+  transpileCacheKey,
+} from "./invokeCache";
 import {
   executeCreateRepositorySaga,
   type SagaExecutorDeps,
@@ -1780,23 +1785,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         publishedAt: string | null;
         source: "published" | "working_tree";
         path: string | null;
-        objectTypeName: string | null;
-        objectTypeIcon: string | null;
       };
       const byApiName = new Map<string, MergedFunctionRow>();
-
-      // Fetch imported object types to enrich function metadata (Foundry parity:
-      // Workshop shows the object type icon/name for functions that operate on
-      // Ontology objects like calculateMaintenance(aircraft: Aircraft)).
-      const importsRes = await pool.query<{ api_name: string; display_name: string | null }>(
-        `SELECT api_name, display_name
-           FROM code_repository_resource_imports
-          WHERE repository_rid = $1 AND kind = 'object_type'
-          ORDER BY api_name
-          LIMIT 1`,
-        [rid],
-      );
-      const primaryImport = importsRes.rows[0];
 
       // ---- Published versions (B8) ------------------------------------
       // The function_version table may not exist on test schemas that didn't
@@ -1843,14 +1833,13 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 isPreview: r.is_preview,
                 runtime: r.runtime,
                 commitSha: r.commit_sha,
+                // Robust to both string (production: db.ts type parser) and Date.
                 publishedAt:
                   r.published_at instanceof Date
                     ? r.published_at.toISOString()
                     : new Date(r.published_at).toISOString(),
                 source: "published",
                 path: null,
-                objectTypeName: primaryImport?.display_name ?? primaryImport?.api_name ?? null,
-                objectTypeIcon: "cube",
               });
             }
           }
@@ -1907,8 +1896,6 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
               publishedAt: null,
               source: "working_tree",
               path: entry.path,
-              objectTypeName: primaryImport?.display_name ?? primaryImport?.api_name ?? null,
-              objectTypeIcon: "cube",
             });
           }
         }

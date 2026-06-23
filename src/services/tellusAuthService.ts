@@ -236,9 +236,9 @@ export class TellusAuthService {
 
       jwt.verify(
         token,
-        this.getKey,
-        { algorithms: ['RS256'], issuer: allowedIssuers },
-        (err, decoded) => {
+        this.getKey as jwt.GetPublicKeyOrSecret,
+        { algorithms: ['RS256'], issuer: allowedIssuers } as jwt.VerifyOptions,
+        (err: any, decoded: any) => {
           if (err) {
             if (err.name === 'TokenExpiredError') {
               return reject(new AppError('Access token has expired.', 401, 'TOKEN_EXPIRED'));

@@ -64,10 +64,11 @@ export function enterpriseOntologyRid(): string {
 
 // Matches an ontology-scoped request path and captures (prefix, idSegment,
 // rest). The negative lookahead excludes `/api/v1/ontology/import` — a
-// lifecycle sub-route, not an ontology id. The bare `/api/v1/ontology`
-// (list/create, no id) does not match.
+// lifecycle sub-route, not an ontology id — and `/api/v1/ontology/object-types`
+// which is a B8 route that doesn't include an ontologyId in the path.
+// The bare `/api/v1/ontology` (list/create, no id) does not match.
 const ONTOLOGY_SEG_RE =
-  /^(\/api\/v1\/ontology)\/(?!import(?:\/|\?|$))([^/?]+)([/?].*)?$/;
+  /^(\/api\/v1\/ontology)\/(?!import(?:\/|\?|$)|object-types(?:\/|\?|$))([^/?]+)([/?].*)?$/;
 
 /**
  * "One Enterprise, One Ontology" edge collapse. Given a request URL and the
