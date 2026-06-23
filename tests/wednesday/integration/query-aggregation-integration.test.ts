@@ -20,12 +20,12 @@ describe("Query Aggregations (Task 28)", () => {
       throw new Error("F-P2-01: integration server unreachable — beforeAll fails loudly rather than ghost-passing");
     }
 
-    const { body } = await api("POST", "/api/v1/ontology", {
-      displayName: "T28 Agg Test",
-      description: "Task 28",
-    });
-    ONTOLOGY_ID = body?.data?.ontologyId || body?.ontologyId;
-    if (!ONTOLOGY_ID) throw new Error("F-P2-01: ontology create returned no id — beforeAll fails loudly");
+    // Singleton ontology deployment: POST /api/v1/ontology is frozen
+    // (ONTOLOGY_SINGLETON). Resolve the single canonical enterprise
+    // ontology instead of creating a fresh one per run.
+    const { body } = await api("GET", "/api/v1/ontology");
+    ONTOLOGY_ID = body?.data?.[0]?.ontologyId;
+    if (!ONTOLOGY_ID) throw new Error("F-P2-01: canonical ontology not found — beforeAll fails loudly");
 
     await api("POST", `/api/v1/ontology/${ONTOLOGY_ID}/objectTypes`, {
       apiName: "T28Employee",

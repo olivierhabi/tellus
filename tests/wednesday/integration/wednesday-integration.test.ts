@@ -53,15 +53,14 @@ describe("Wednesday Integration Tests", () => {
       );
     }
 
-    // Create test ontology
-    const { status: ontStatus, body: ontBody } = await api("POST", "/api/v1/ontology", {
-      displayName: "WedIntTest",
-      description: "Wednesday integration tests",
-    });
-    ONTOLOGY_ID = ontBody?.data?.ontologyId || ontBody?.ontologyId;
+    // Singleton ontology deployment: POST /api/v1/ontology is frozen
+    // (ONTOLOGY_SINGLETON). Resolve the single canonical enterprise
+    // ontology instead of creating a fresh one per run.
+    const { status: ontStatus, body: ontBody } = await api("GET", "/api/v1/ontology");
+    ONTOLOGY_ID = ontBody?.data?.[0]?.ontologyId;
     if (!ONTOLOGY_ID) {
       throw new Error(
-        `F-P2-01: ontology create returned no id — beforeAll fails loudly. status=${ontStatus} body=${JSON.stringify(ontBody)?.slice(0, 300)}`,
+        `F-P2-01: canonical ontology not found — beforeAll fails loudly. status=${ontStatus} body=${JSON.stringify(ontBody)?.slice(0, 300)}`,
       );
     }
 
