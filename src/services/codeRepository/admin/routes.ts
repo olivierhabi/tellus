@@ -35,10 +35,8 @@ import { ERROR_CODES } from "../../codeRepos/contracts/errors";
 import { requireCodeReposAuth } from "../../codeRepos/middleware/principal";
 import { idempotencyMiddleware } from "../../codeRepos/middleware/idempotency";
 import { codeReposError, type CodeReposErrorName } from "../errors";
-import { runSandboxed, runSandboxedWithSdk } from "../../functionRuntime";
 import {
   applyEdits,
-  buildOntologySdk,
   loadOntologySnapshot,
   normalizeOntologyId,
   type OntologyEdit,
@@ -48,6 +46,7 @@ import {
   createTtlCache,
   transpileCacheKey,
 } from "./invokeCache";
+import { runSandboxedWithSdkAsync } from "../../functionWorkerPool";
 import {
   executeCreateRepositorySaga,
   type SagaExecutorDeps,
@@ -2255,14 +2254,12 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         objectCount: 0,
         objectTypes: [] as string[],
       };
-      const { sdk, getEdits } = buildOntologySdk(resolvedSnapshot);
-
-      const result = runSandboxedWithSdk(transpiled, input, {
-        Objects: sdk.Objects,
-        Edits: sdk.Edits,
-        createEditBatch: sdk.createEditBatch,
-        __ontologyTypes: sdk.objectTypeDescriptors,
-      });
+      // Execute the sandboxed function OFF the main event loop (a worker
+      // pool) so a long-running function cannot starve concurrent request
+      // handling (e.g. object-search reads → 504). Falls back to inline
+      // sync execution if the pool is unavailable. Edits are collected by
+      // the SDK during execution and returned with the result.
+      const result = await runSandboxedWithSdkAsync(transpiled, input, resolvedSnapshot);
       // Foundry TS v2: an edit function RETURNS `batch.getEdits()`. Prefer the
       // returned edit array; fall back to the ambient `Edits` side-channel
       // (v1-style functions that mutate via Edits.update and return a value).
@@ -2273,7 +2270,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         Array.isArray(result.output) && result.output.length > 0 && result.output.every(isEdit)
           ? (result.output as OntologyEdit[])
           : [];
-      const sideChannelEdits = result.status === "ok" ? getEdits() : [];
+      const sideChannelEdits = result.status === "ok" ? (result.edits ?? []) : [];
       const collectedEdits: OntologyEdit[] =
         result.status === "ok" ? (returnedEdits.length > 0 ? returnedEdits : sideChannelEdits) : [];
 

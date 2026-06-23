@@ -114,7 +114,11 @@ describe("Wednesday Integration Tests", () => {
   });
 
   it("should reject invalid $pageSize", async () => {
-    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=0");
+    // `$pageSize=0` is a VALID "count-only" request (the executor still
+    // returns an accurate `totalCount` with an empty `data` array), so it
+    // yields 200 — see validatePageSize in src/services/queryValidator.ts.
+    // A negative value, by contrast, is genuinely out of range → 400.
+    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=-1");
     expect(status).toBe(400);
   });
 

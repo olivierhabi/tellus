@@ -179,14 +179,23 @@ ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
 assert_not_empty "$ONTOLOGY_ID" "ontologyId returned"
 
 DISP=$(json_field "$HTTP_BODY" "displayName")
-assert_eq "$DISP" "E2E Test Ontology" "displayName matches"
+# Singleton deployment: this is the single canonical enterprise ontology.
+# Its displayName / objectTypeCount are seed-dependent (e.g. "Enterprise
+# Ontology" / 5 in CI, "Default Ontology" / 11 locally) — asserting a
+# hardcoded value is non-portable. Assert the field is present instead.
+assert_not_empty "$DISP" "displayName present"
 
 OT_COUNT=$(json_field_raw "$HTTP_BODY" "objectTypeCount")
-assert_eq "$OT_COUNT" "0" "objectTypeCount = 0"
+# Assert objectTypeCount is a non-negative integer (seed-dependent value).
+if echo "$OT_COUNT" | grep -qE '^[0-9]+$'; then
+  pass "objectTypeCount is a non-negative integer"
+else
+  fail "objectTypeCount is a non-negative integer (got '$OT_COUNT')"
+fi
 
 do_request GET "/api/v1/ontology/${ONTOLOGY_ID}"
 assert_status "$HTTP_STATUS" "200" "Get ontology by ID"
-assert_contains "$HTTP_BODY" '"E2E Test Ontology"' "displayName in response"
+assert_contains "$HTTP_BODY" "\"ontologyId\"" "ontologyId in response"
 
 do_request GET "/api/v1/ontology?pageSize=5"
 assert_status "$HTTP_STATUS" "200" "List ontologies"
@@ -202,41 +211,47 @@ assert_eq "$UPDATED_NAME" "E2E Updated ${UNIQUE_SUFFIX}" "displayName updated"
 do_request POST /api/v1/ontology "{\"displayName\":\"E2E Updated ${UNIQUE_SUFFIX}\"}"
 assert_status "$HTTP_STATUS" "409" "Duplicate ontology returns 409"
 ERR_CODE=$(json_error_code "$HTTP_BODY")
-assert_eq "$ERR_CODE" "ONTOLOGY_ALREADY_EXISTS" "Error code ONTOLOGY_ALREADY_EXISTS"
+# Singleton deployment: creating an ontology is frozen, so a duplicate
+# POST yields 409 ONTOLOGY_SINGLETON (not ONTOLOGY_ALREADY_EXISTS).
+assert_eq "$ERR_CODE" "ONTOLOGY_SINGLETON" "Error code ONTOLOGY_SINGLETON"
 
 # ===========================================================================
 # 8. ERROR RESPONSE SHAPE
 # ===========================================================================
 section "8. Error Response Shape"
 
+# Singleton deployment: ANY ontology id (even an unknown UUID) collapses to
+# the single canonical ontology, so the not-found path no longer exists at
+# the ontology level. Verify the canonical ontology is returned instead.
 do_request GET "/api/v1/ontology/00000000-0000-0000-0000-000000000000"
-assert_status "$HTTP_STATUS" "404" "Not found returns 404"
-assert_contains "$HTTP_BODY" '"error"' "error key present"
-assert_contains "$HTTP_BODY" '"code"' "error.code present"
-assert_contains "$HTTP_BODY" '"message"' "error.message present"
-assert_contains "$HTTP_BODY" '"details"' "error.details present"
-assert_contains "$HTTP_BODY" '"timestamp"' "error.timestamp present"
+assert_status "$HTTP_STATUS" "200" "Unknown ontology id resolves to canonical"
+assert_contains "$HTTP_BODY" '"ontologyId"' "canonical ontologyId present"
+# Error-envelope shape is still exercised by object-type-level 404s
+# (section 33 — Not-Found Scenarios), which are NOT collapsed by the
+# singleton model.
 
 # ===========================================================================
 # 9. UUID VALIDATION
 # ===========================================================================
 section "9. UUID Validation"
 
+# Singleton deployment: the ontology id is not UUID-validated — any value
+# (including a non-UUID string) resolves to the canonical ontology → 200.
 do_request GET "/api/v1/ontology/not-a-uuid"
-assert_status "$HTTP_STATUS" "400" "Invalid UUID returns 400"
-ERR_CODE=$(json_error_code "$HTTP_BODY")
-assert_eq "$ERR_CODE" "INVALID_PARAMETER" "Error code INVALID_PARAMETER"
+assert_status "$HTTP_STATUS" "200" "Non-UUID id resolves to canonical"
+assert_contains "$HTTP_BODY" '"ontologyId"' "canonical ontologyId present"
 
 # ===========================================================================
 # 10. VALIDATE BODY MIDDLEWARE
 # ===========================================================================
 section "10. Validate Body Middleware"
 
+# Singleton deployment: GET /api/v1/ontology/default resolves the
+# canonical ontology → 200 (no body validation applies to a GET that
+# resolves a singleton).
 do_request GET /api/v1/ontology/default
-assert_status "$HTTP_STATUS" "400" "Missing required field returns 400"
-
-do_request GET /api/v1/ontology/default
-assert_status "$HTTP_STATUS" "400" "Empty body returns 400"
+assert_status "$HTTP_STATUS" "200" "Default ontology resolves to canonical"
+assert_contains "$HTTP_BODY" '"ontologyId"' "canonical ontologyId present"
 
 # ===========================================================================
 # 11. OBJECT TYPE CRUD
@@ -740,13 +755,11 @@ FULL_EXPORT="$HTTP_BODY"
 
 do_request POST "/api/v1/ontology/import" "$FULL_EXPORT"
 assert_status "$HTTP_STATUS" "409" "Import is frozen (single-ontology)"
-IMPORTED_ONT_ID="${ONTOLOGY_ID}"
-assert_not_empty "$IMPORTED_ONT_ID" "Imported ontology has ID"
-IMPORTED_NAME=$(json_field "$HTTP_BODY" "displayName")
-assert_contains "$IMPORTED_NAME" "E2E" "Imported name contains original prefix"
-
-do_request DELETE "/api/v1/ontology/${IMPORTED_ONT_ID}"
-assert_status "$HTTP_STATUS" "204" "Delete imported ontology"
+# Singleton deployment: ontology import is frozen, so the 409 body is the
+# ONTOLOGY_SINGLETON error envelope — there is no imported ontology to name
+# or delete. Assert the error code instead of the (now-impossible) name/delete.
+ERR_CODE=$(json_error_code "$HTTP_BODY")
+assert_eq "$ERR_CODE" "ONTOLOGY_SINGLETON" "Import returns ONTOLOGY_SINGLETON"
 
 # ===========================================================================
 # 29. DATASOURCE UNREGISTER
@@ -834,7 +847,8 @@ section "33. Not-Found Scenarios"
 FAKE_UUID="00000000-0000-0000-0000-000000000099"
 
 do_request GET "/api/v1/ontology/${FAKE_UUID}"
-assert_status "$HTTP_STATUS" "404" "Non-existent ontology 404"
+# Singleton deployment: any ontology id collapses to the canonical ontology → 200.
+assert_status "$HTTP_STATUS" "200" "Non-existent ontology id resolves to canonical"
 
 do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/NonExistent"
 assert_status "$HTTP_STATUS" "404" "Non-existent object type 404"
@@ -948,10 +962,12 @@ do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Employee"
 assert_status "$HTTP_STATUS" "404" "Employee OT gone after delete"
 
 do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
-assert_status "$HTTP_STATUS" "204" "Delete ontology"
+# Singleton deployment: deleting the canonical ontology is frozen → 409.
+assert_status "$HTTP_STATUS" "409" "Delete ontology is frozen (singleton)"
 
 do_request GET "/api/v1/ontology/${ONTOLOGY_ID}"
-assert_status "$HTTP_STATUS" "404" "Ontology gone after delete"
+# Singleton deployment: the ontology is never gone — any id resolves to it.
+assert_status "$HTTP_STATUS" "200" "Canonical ontology still resolves"
 
 rm -f "$CSV_FILE" "$JSON_FILE" "${DATA_DIR}/e2e-mapping-test.csv"
 

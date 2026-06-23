@@ -900,10 +900,39 @@ async function teardown(t: Runner): Promise<void> {
     }
   }
 
-  // Delete the ontology (cascades to object types, properties, link types, datasources)
+  // Singleton deployment: the ontology is the shared canonical enterprise
+  // ontology and DELETE is frozen (→ 409 ONTOLOGY_SINGLETON). The historical
+  // ontology-level cascade therefore no longer cleans up the object/link
+  // types this suite creates — so we delete them explicitly here. This keeps
+  // the suite idempotent (re-runnable without leftover-type 409s) and avoids
+  // permanently polluting the shared canonical ontology.
+  const LINK_TYPES = [
+    "companyEmployees",
+    "employeeCompany",
+    "employeeTicket",
+    "employeeCourses",
+    "employeeManager",
+    "tempLink",
+  ];
+  for (const apiName of LINK_TYPES) {
+    try {
+      await api("DELETE", `/api/v1/ontology/${state.ontologyId}/linkTypes/${apiName}`);
+    } catch {
+      // Ignore — link type may not exist
+    }
+  }
+  for (const apiName of ["Company", "LREmployee", "Ticket", "Course"]) {
+    try {
+      await api("DELETE", `/api/v1/ontology/${state.ontologyId}/objectTypes/${apiName}`);
+    } catch {
+      // Ignore — object type may not exist
+    }
+  }
+
+  // Confirm the ontology delete is frozen under the singleton deployment.
   await t.test("Delete test ontology", async () => {
     const { status } = await api("DELETE", `/api/v1/ontology/${state.ontologyId}`);
-    t.assert(status === 204 || status === 200, `Expected 204/200, got ${status}`);
+    t.assert(status === 204 || status === 200 || status === 409, `Expected 204/200/409, got ${status}`);
   });
 
   // Clean up CSV files
