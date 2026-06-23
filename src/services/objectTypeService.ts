@@ -1429,7 +1429,7 @@ async function addDatasource(
   }
 
   const otResult = await query(
-    "SELECT object_type_id, api_name FROM object_type WHERE object_type_id = $1",
+    "SELECT object_type_id, api_name, ontology_id FROM object_type WHERE object_type_id = $1",
     [objectTypeId]
   );
   if (otResult.rows.length === 0) {
@@ -1439,6 +1439,7 @@ async function addDatasource(
     );
   }
   const objectType = otResult.rows[0];
+  const objectOntologyId: string = objectType.ontology_id;
 
   // 2. Convert the wizard's array-form propertyMappings into the canonical
   //    columnMapping (Record<propertyApiName, sourceColumn>) the register
@@ -1489,7 +1490,44 @@ async function addDatasource(
     });
   }
 
-  // 5. Notify the orchestration pipeline that the backing source changed.
+  // 5. Reindex the object type so objects actually appear in OpenSearch.
+  //    Registering the backing datasource only wrote the `backing_datasource`
+  //    row — without this, a fresh save leaves the search index empty and the
+  //    Object Explorer shows zero objects. Fire-and-forget (non-blocking): the
+  //    HTTP response returns immediately, the pipeline runs on the event loop,
+  //    and the UI badge (funnel_state — written by the reindex pipeline's
+  //    terminal step) flips to "indexed" once it lands. Errors are logged,
+  //    never thrown, so a dataset/indexing failure can't fail an otherwise-valid
+  //    save. Matches the non-blocking contract of autoIndexService.
+  //
+  //    Uses reindexObjectType (the same engine the FE "Force Reindex" button
+  //    calls) rather than indexObjectType: it resolves Foundry-bridged S3
+  //    objects (#foundry-dataset: tag) AND legacy local files, and writes the
+  //    UI-facing funnel_state directly (Step 11). The pre-existing
+  //    DataSourceAddedEvent consumer is NOT relied upon (it joins a B8 rid
+  //    against the projected RID and no-ops for this path). Dynamic import
+  //    avoids any module-init cycle between this service and reindexService.
+  const apiNameForIndex = objectType.api_name;
+  const ontologyIdForIndex = objectOntologyId;
+  setImmediate(() => {
+    import("./reindexService")
+      .then(({ reindexObjectType }) =>
+        reindexObjectType(ontologyIdForIndex, apiNameForIndex),
+      )
+      .then((r) => {
+        console.log(
+          `[addDatasource] auto-reindexed '${apiNameForIndex}': ${r.totalObjectsIndexed ?? 0} objects indexed`,
+        );
+      })
+      .catch((e: unknown) => {
+        console.error(
+          `[addDatasource] auto-reindex error for '${apiNameForIndex}':`,
+          e instanceof Error ? e.message : e,
+        );
+      });
+  });
+
+  // 6. Notify the orchestration pipeline that the backing source changed.
   eventBus.emit("ws:event", {
     event: "DataSourceAddedEvent",
     projectId: null,

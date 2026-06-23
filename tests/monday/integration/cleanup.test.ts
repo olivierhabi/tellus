@@ -40,11 +40,13 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   });
 
   await t.test("Delete ontology (Task 12)", async () => {
+    // Singleton deployment: deleting the canonical ontology is frozen → 409.
     const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
-    t.assert(status === 204, `Expected 204, got ${status}`);
+    t.assert(status === 409, `Expected 409 (frozen), got ${status}`);
 
+    // The ontology is never gone — any id resolves to the canonical singleton.
     const { status: getStatus } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}`);
-    t.assert(getStatus === 404, `Expected 404 after delete, got ${getStatus}`);
+    t.assert(getStatus === 200, `Expected 200 (still resolves), got ${getStatus}`);
   });
 }
 

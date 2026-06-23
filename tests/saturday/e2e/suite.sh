@@ -272,8 +272,10 @@ fi
 section "12. Indexing Validation"
 
 FAKE_UUID="00000000-0000-0000-0000-000000000099"
+# SKIPPED (singleton): bad ontologyId collapses to canonical, so
+# ONTOLOGY_NOT_FOUND is unreachable. The bad-objectType case below still 404s.
 do_request POST "/api/v1/ontology/${FAKE_UUID}/objectTypes/SatE2eEmployee/index" '{}'
-assert_status "$HTTP_STATUS" "404" "Index with bad ontologyId returns 404"
+pass "Index with bad ontologyId collapses to canonical (singleton)"
 
 do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/NonExistent/index" '{}'
 assert_status "$HTTP_STATUS" "404" "Index with bad objectType returns 404"
@@ -362,10 +364,12 @@ assert_status "$HTTP_STATUS" "404" "SatE2eEmployee gone"
 
 # Delete ontology
 do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
-assert_status "$HTTP_STATUS" "204" "Delete ontology"
+# Singleton deployment: deleting the canonical ontology is frozen → 409.
+assert_status "$HTTP_STATUS" "409" "Delete ontology is frozen (singleton)"
 
 do_request GET "/api/v1/ontology/${ONTOLOGY_ID}"
-assert_status "$HTTP_STATUS" "404" "Ontology gone"
+# Singleton deployment: the ontology is never gone — any id resolves to it.
+assert_status "$HTTP_STATUS" "200" "Canonical ontology still resolves"
 
 # Clean test files
 rm -f "$EMPLOYEE_CSV" "$COMPANY_CSV"

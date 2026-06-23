@@ -78,9 +78,13 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
       `/api/v1/ontology/${ctx.ontologyId}/objectTypes`
     );
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.data.length === 1, `Expected 1, got ${body.data.length}`);
-    t.assert(body.data[0].propertyCount === 6, "propertyCount = 6");
-    t.assert(body.data[0].indexStatus === "not_indexed", "indexStatus = not_indexed");
+    // Singleton deployment: the canonical ontology is shared and may contain
+    // other (seeded) object types. Locate the Employee type this suite
+    // created rather than asserting the list length.
+    const emp = (body.data || []).find((o: any) => o.apiName === "Employee");
+    t.assert(!!emp, "Employee object type present in list");
+    t.assert(emp.propertyCount === 6, "propertyCount = 6");
+    t.assert(emp.indexStatus === "not_indexed", "indexStatus = not_indexed");
   });
 
   await t.test("Get object type with full details (Task 14)", async () => {

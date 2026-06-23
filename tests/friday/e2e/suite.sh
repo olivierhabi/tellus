@@ -644,6 +644,7 @@ else
   for i in $(seq 1 120); do
     STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
       -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${AUTH_TOKEN}" \
       -d '{"parameters":{"returnRef":"'"${TEST_RETURN_ID}"'"}}' \
       "${BASE_URL}/api/v1/ontology/${ONTOLOGY_ID}/actions/closeTaxReturn/apply" 2>/dev/null)
     if [[ "$STATUS" == "429" ]]; then

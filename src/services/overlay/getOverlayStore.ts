@@ -66,7 +66,28 @@ export async function getOverlayStore(): Promise<OverlayStore> {
         loggedError = true;
         console.warn(`[overlay] Redis error: ${describeRedisError(err)}`);
       });
-      await client.connect();
+      // F-P4-05b: hard deadline on the connect handshake. A paused/frozen
+      // Redis container (cgroup freezer) still accepts the TCP SYN at the
+      // kernel, so node-redis's `socket.connectTimeout` (which only bounds
+      // the SYN/ACK) fires successfully — but the frozen process never
+      // answers the AUTH/HELLO command, so `client.connect()` never
+      // settles. Because the resulting Promise is cached in `connecting`
+      // above, EVERY subsequent read that reaches the overlay would block
+      // on it forever. Race the connect against a wall-clock deadline so
+      // we fall back to the in-memory store within a bounded time instead
+      // of hanging the whole data plane for the process lifetime.
+      const CONNECT_DEADLINE_MS = Number(
+        process.env.REDIS_CONNECT_DEADLINE_MS ?? 3_000,
+      );
+      await Promise.race([
+        client.connect(),
+        new Promise<void>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("redis connect deadline exceeded")),
+            CONNECT_DEADLINE_MS,
+          ),
+        ),
+      ]);
       const adapter: MinimalRedisClient = {
         set: (k, v, o) => client.set(k, v, o as never),
         mGet: (keys) => client.mGet(keys),
@@ -144,5 +165,23 @@ function describeRedisError(err: unknown): string {
 
 export function setOverlayStoreForTesting(s: OverlayStore | null): void {
   store = s;
+  connecting = null;
+}
+
+/**
+ * Switch the overlay to the in-memory store for the rest of the process
+ * lifetime. Called when a live Redis-backed overlay operation blows its read
+ * budget — a connected-but-stuck Redis client would otherwise queue every
+ * subsequent read behind the hung operation (accumulating memory and 504-ing
+ * every search/list). The overlay is an optimisation (recent-edit visibility
+ * within a ~1s SLO); degrading to memory loses only the cross-process
+ * recent-edit window, never correctness. A process restart re-tries Redis.
+ */
+export function markOverlayDegraded(): void {
+  if (store instanceof MemoryOverlayStore) return;
+  console.warn(
+    "[overlay] degrading to in-memory store — a Redis operation exceeded the read budget",
+  );
+  store = new MemoryOverlayStore();
   connecting = null;
 }

@@ -340,10 +340,12 @@ assert_status "$HTTP_STATUS" "404" "E2eAirport gone"
 
 # Delete ontology
 do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
-assert_status "$HTTP_STATUS" "204" "Delete ontology"
+# Singleton deployment: deleting the canonical ontology is frozen → 409.
+assert_status "$HTTP_STATUS" "409" "Delete ontology is frozen (singleton)"
 
 do_request GET "/api/v1/ontology/${ONTOLOGY_ID}"
-assert_status "$HTTP_STATUS" "404" "Ontology gone"
+# Singleton deployment: the ontology is never gone — any id resolves to it.
+assert_status "$HTTP_STATUS" "200" "Canonical ontology still resolves"
 
 # ===========================================================================
 # REPORT

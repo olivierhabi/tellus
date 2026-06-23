@@ -118,7 +118,10 @@ assert_contains "$HTTP_BODY" '"data"' "Response has data field"
 section "4. PageSize Validation"
 
 do_request GET "/api/v1/objects/WedTestEmployee?\$pageSize=0"
-assert_status "$HTTP_STATUS" "400" "pageSize=0 rejected"
+# `$pageSize=0` is a VALID count-only request (returns totalCount, empty
+# data) — see validatePageSize in src/services/queryValidator.ts. The
+# negative-value case below covers the actual rejection.
+assert_status "$HTTP_STATUS" "200" "pageSize=0 accepted (count-only)"
 
 do_request GET "/api/v1/objects/WedTestEmployee?\$pageSize=-1"
 assert_status "$HTTP_STATUS" "400" "pageSize=-1 rejected"
@@ -234,8 +237,9 @@ assert_status "$HTTP_STATUS" "200" "\$select with valid fields accepted"
 section "Cleanup"
 
 do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
-if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
-  pass "Deleted test ontology"
+# Singleton deployment: deleting the canonical ontology is frozen → 409.
+if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "409" ]]; then
+  pass "Deleted test ontology (frozen under singleton: $HTTP_STATUS)"
 else
   fail "Deleted test ontology (status: $HTTP_STATUS)"
 fi

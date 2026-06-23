@@ -37,7 +37,7 @@ import {
   mergeOverlayIntoSearch,
   readOverlay,
 } from "../services/overlay/writebackOverlay";
-import { getOverlayStore } from "../services/overlay/getOverlayStore";
+import { getOverlayStore, markOverlayDegraded } from "../services/overlay/getOverlayStore";
 import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 import { CellMarkingService, redactCells } from "../services/security/cellMarkingService";
 
@@ -68,31 +68,64 @@ async function mergeWithOverlay<R extends { data: unknown[] }>(
   whereClause?: unknown,
   branchId: string | null = null
 ): Promise<R> {
-  try {
-    const store = await getOverlayStore();
-    const filter = buildOverlayFilter(whereClause);
-    const merged = await mergeOverlayIntoSearch({
-      objectType,
-      hits: result.data as Array<Record<string, unknown>>,
-      filter,
-      store,
-      branchId,
-    });
-    return { ...result, data: merged } as R;
-  } catch {
-    // Overlay is an optimisation — on any failure we fall back to the
-    // underlying result so queries never fail due to overlay issues.
+  // The overlay is an OPTIMISATION (recent-edit visibility within a ~1s SLO).
+  // A connected-but-stuck Redis client can hang a read for tens of seconds →
+  // the request-budget middleware 504s the search/list. Cap the overlay work
+  // with a hard budget; on expiry, return the raw result AND degrade the
+  // overlay to in-memory so subsequent reads don't queue behind the stuck
+  // client. Correctness never depends on the overlay.
+  const OVERLAY_BUDGET_MS = Number(process.env.OVERLAY_BUDGET_MS ?? 1_000);
+  let timedOut = false;
+
+  const run = async (): Promise<R> => {
     try {
       const store = await getOverlayStore();
-      const replaced = await applyOverlayToResults(
+      const filter = buildOverlayFilter(whereClause);
+      const merged = await mergeOverlayIntoSearch({
         objectType,
-        result.data as Array<Record<string, unknown>>,
+        hits: result.data as Array<Record<string, unknown>>,
+        filter,
         store,
-        branchId
-      );
-      return { ...result, data: replaced } as R;
+        branchId,
+      });
+      return { ...result, data: merged } as R;
     } catch {
-      return result;
+      // Overlay is an optimisation — on any failure we fall back to the
+      // underlying result so queries never fail due to overlay issues.
+      try {
+        const store = await getOverlayStore();
+        const replaced = await applyOverlayToResults(
+          objectType,
+          result.data as Array<Record<string, unknown>>,
+          store,
+          branchId
+        );
+        return { ...result, data: replaced } as R;
+      } catch {
+        return result;
+      }
+    }
+  };
+
+  try {
+    return await Promise.race<R>([
+      run(),
+      new Promise<R>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          resolve(result);
+        }, OVERLAY_BUDGET_MS);
+      }),
+    ]);
+  } catch {
+    return result;
+  } finally {
+    if (timedOut) {
+      try {
+        markOverlayDegraded();
+      } catch {
+        /* best-effort */
+      }
     }
   }
 }

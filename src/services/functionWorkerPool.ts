@@ -8,18 +8,24 @@
 // reads to 504 — now blocks only a worker's loop. The main thread stays free
 // to serve requests.
 //
-// Robustness contract:
-//   • If the worker file can't be resolved, or a worker errors / exceeds its
-//     wall budget, the call falls back to `runSandboxedWithSdkSync` (the old
-//     inline behaviour). Correctness never depends on the pool being healthy;
-//     a broken pool only degrades latency, never data.
-//   • Each task carries a wall-clock budget (FUNCTION_TIMEOUT_MS × 2 + slack,
-//     to cover both vm phases). On expiry the worker is terminated + respawned
-//     and the caller falls back to sync for that invocation.
-//   • A crashed worker is respawned so subsequent calls recover automatically.
+// HARD GUARANTEE (the fix for the production 504): as long as the worker file
+// can be loaded, the pool NEVER falls back to synchronous execution — not on
+// a worker error, not on a timeout. A previous version fell back to sync on
+// any worker hiccup; under a burst of concurrent invokes that re-introduced
+// main-loop blocking and 504'd concurrent searches. Now a hung/errored worker
+// resolves that ONE task with `status: "timeout"|"error"` (the route surfaces
+// it as a single failed invoke) and the worker is respawned. The main event
+// loop is never blocked by a sandbox.
 //
-// Toggle: set FUNCTION_WORKER_POOL=0 to force the sync fallback everywhere
-// (escape hatch for prod rollout / debugging).
+// Concurrency model (race-free): dispatch is SYNCHRONOUS. `submit` either
+// dispatches to a free worker (mark busy + postMessage, same tick) or enqueues.
+// A worker's message handler frees the worker and pumps the next queued task
+// synchronously. There is no `await` between finding a free worker and
+// dispatching, so a freed slot can never be handed to two tasks.
+//
+// Sync fallback (`runSandboxedWithSdkSync`) is used ONLY when the pool is
+// structurally unavailable — the worker file can't be resolved or
+// FUNCTION_WORKER_POOL=0. It is never used as a per-task error fallback.
 // ---------------------------------------------------------------------------
 
 import { Worker } from "worker_threads";
@@ -39,20 +45,15 @@ export interface SandboxAsyncResult extends SandboxResult {
 }
 
 // ---- Worker file resolution + dev/prod execArgv ---------------------------
-//
-// `require.resolve('./functionWorker')` resolves to the `.ts` in dev (tsx)
-// and the compiled `.js` in prod. We pass `--require tsx/cjs` to the worker
-// ONLY when tsx is installed (dev); prod runs compiled JS with no tsx.
 let workerFile: string | null = null;
 let workerExecArgv: string[] = [];
 try {
   workerFile = require.resolve("./functionWorker");
   try {
-    // Throws in prod (tsx is dev-only) → workerExecArgv stays [].
-    require.resolve("tsx/cjs");
+    require.resolve("tsx/cjs"); // throws in prod (tsx is dev-only)
     workerExecArgv = ["--require", require.resolve("tsx/cjs")];
   } catch {
-    workerExecArgv = [];
+    workerExecArgv = []; // prod: compiled JS, no tsx
   }
 } catch {
   workerFile = null;
@@ -60,64 +61,65 @@ try {
 
 const POOL_ENABLED = process.env.FUNCTION_WORKER_POOL !== "0";
 const POOL_SIZE = Math.max(1, Number(process.env.FUNCTION_WORKER_POOL_SIZE ?? 4));
-// The vm cap is per-phase (module eval, then invocation); allow both phases to
-// run to the cap plus slack before we give up on the worker.
+// The vm cap is per-phase (module eval, then invocation). Allow both phases to
+// reach the cap plus slack before declaring the worker hung.
 const WORKER_WALL_BUDGET_MS = FUNCTION_TIMEOUT_MS * 2 + 2_000;
 
-interface Pending {
-  resolve: (v: SandboxAsyncResult) => void;
-  reject: (e: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+interface Task {
+  readonly transpiled: string;
+  readonly input: unknown;
+  readonly snapshot: OntologySnapshot;
 }
-
+interface Pending {
+  readonly task: Task;
+  readonly resolve: (v: SandboxAsyncResult) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
 interface Slot {
   worker: Worker;
   busy: boolean;
-  pending: Pending | null;
+  current: Pending | null;
   dead: boolean;
 }
 
 const pool: Slot[] = [];
-const waitQueue: Array<(slot: Slot) => void> = [];
-let nextTaskId = 1;
+const queue: Pending[] = [];
 let poolInitialized = false;
+let nextTaskId = 1;
 
 function spawnSlot(): Slot | null {
   if (!workerFile) return null;
   try {
     const worker = new Worker(workerFile, { execArgv: workerExecArgv });
-    const slot: Slot = { worker, busy: false, pending: null, dead: false };
+    const slot: Slot = { worker, busy: false, current: null, dead: false };
 
     worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[] }) => {
-      if (msg?.type === "__ready__") return; // worker loaded OK
-      const pending = slot.pending;
-      slot.pending = null;
+      if (msg?.type === "__ready__") return;
+      const pending = slot.current;
+      slot.current = null;
       slot.busy = false;
       if (pending && msg && typeof msg.id === "number" && msg.result) {
         clearTimeout(pending.timer);
         pending.resolve({ ...msg.result, edits: msg.edits ?? [] });
       } else if (pending) {
+        // Malformed worker response — fail this ONE task, keep the worker.
         clearTimeout(pending.timer);
-        pending.reject(new Error("functionWorker: malformed response"));
+        pending.resolve(errorResult("functionWorker: malformed response"));
       }
-      drainWaitQueue();
+      pump(slot);
     });
 
     worker.on("error", (err) => {
-      failSlot(slot, err instanceof Error ? err : new Error(String(err)));
+      failSlot(slot, err instanceof Error ? err.message : String(err));
     });
-
-    // A worker shouldn't exit while the pool is alive; treat exit as death.
     worker.on("exit", (code) => {
-      if (!slot.dead) {
-        failSlot(slot, new Error(`functionWorker exited (code=${code})`));
-      }
+      if (!slot.dead) failSlot(slot, `functionWorker exited (code=${code})`);
     });
 
     try {
       worker.unref();
     } catch {
-      /* unref is best-effort */
+      /* best-effort */
     }
     return slot;
   } catch {
@@ -125,104 +127,147 @@ function spawnSlot(): Slot | null {
   }
 }
 
-function failSlot(slot: Slot, err: Error): void {
+function failSlot(slot: Slot, message: string): void {
   slot.dead = true;
-  const pending = slot.pending;
-  slot.pending = null;
+  const pending = slot.current;
+  slot.current = null;
   slot.busy = false;
   if (pending) {
     clearTimeout(pending.timer);
-    pending.reject(err);
+    // Resolve (do NOT reject) with an error result — the route surfaces it
+    // as a failed invoke; the main loop is never blocked.
+    pending.resolve(errorResult(message));
   }
   try {
     slot.worker.terminate().catch(() => {});
   } catch {
     /* ignore */
   }
-  // Respawn a fresh worker so the pool recovers for subsequent calls.
+  // Respawn a fresh worker so the pool recovers its capacity.
   const idx = pool.indexOf(slot);
   if (idx >= 0) {
     const fresh = spawnSlot();
-    if (fresh) pool[idx] = fresh;
-    else pool.splice(idx, 1);
+    if (fresh) {
+      pool[idx] = fresh;
+      pump(fresh);
+    } else {
+      pool.splice(idx, 1);
+    }
   }
-  drainWaitQueue();
+  // A worker freed (effectively) — try to drain the queue on the others.
+  drainQueue();
+}
+
+function errorResult(message: string): SandboxAsyncResult {
+  return {
+    output: null,
+    durationMs: 0,
+    status: "error",
+    errorMessage: message,
+    logs: [],
+    edits: [],
+  };
 }
 
 function initPool(): void {
-  if (poolInitialized || !POOL_ENABLED || !workerFile) {
-    poolInitialized = true;
-    return;
-  }
+  if (poolInitialized) return;
   poolInitialized = true;
+  if (!POOL_ENABLED || !workerFile) return;
   for (let i = 0; i < POOL_SIZE; i++) {
     const slot = spawnSlot();
     if (slot) pool.push(slot);
   }
 }
 
-function drainWaitQueue(): void {
-  while (waitQueue.length) {
+/** Dispatch `pending` to `slot` synchronously (race-free: no await gap). */
+function dispatch(slot: Slot, pending: Pending): void {
+  slot.busy = true;
+  slot.current = pending;
+  const id = nextTaskId++;
+  slot.worker.postMessage({
+    id,
+    transpiled: pending.task.transpiled,
+    input: pending.task.input,
+    snapshot: pending.task.snapshot,
+  });
+}
+
+/** If `slot` is free and a task is queued, dispatch the next one. */
+function pump(slot: Slot): void {
+  if (slot.busy || slot.dead) return;
+  const next = queue.shift();
+  if (next) dispatch(slot, next);
+}
+
+/** Any free worker can pick up the head of the queue. */
+function drainQueue(): void {
+  while (queue.length) {
     const free = pool.find((s) => !s.dead && !s.busy);
     if (!free) break;
-    const waiter = waitQueue.shift()!;
-    waiter(free);
+    const next = queue.shift()!;
+    dispatch(free, next);
   }
 }
 
-function acquireSlot(): Promise<Slot | null> {
-  initPool();
-  const free = pool.find((s) => !s.dead && !s.busy);
-  if (free) return Promise.resolve(free);
-  if (!POOL_ENABLED || !workerFile || pool.length === 0) return Promise.resolve(null);
-  return new Promise<Slot | null>((resolve) => {
-    waitQueue.push((slot) => resolve(slot));
-    // Safety: if no worker ever frees (all dead), don't hang forever.
-    setTimeout(() => resolve(null), WORKER_WALL_BUDGET_MS);
+function submitToPool(task: Task): Promise<SandboxAsyncResult> {
+  return new Promise<SandboxAsyncResult>((resolve) => {
+    const timer = setTimeout(() => {
+      // Wall budget exceeded — the worker is hung. Resolve this ONE task as a
+      // timeout (the route returns 504 for it), then terminate + respawn the
+      // worker so capacity recovers. The main loop is never blocked.
+      const slot = pool.find((s) => s.current && s.current.timer === timer);
+      if (slot) {
+        slot.dead = true;
+        slot.current = null;
+        slot.busy = false;
+        try {
+          slot.worker.terminate().catch(() => {});
+        } catch {
+          /* ignore */
+        }
+        const idx = pool.indexOf(slot);
+        if (idx >= 0) {
+          const fresh = spawnSlot();
+          if (fresh) {
+            pool[idx] = fresh;
+            pump(fresh);
+          } else {
+            pool.splice(idx, 1);
+          }
+        }
+        drainQueue();
+      }
+      resolve(timeoutResult());
+    }, WORKER_WALL_BUDGET_MS);
+
+    const pending: Pending = { task, resolve, timer };
+    initPool();
+    const free = pool.find((s) => !s.dead && !s.busy);
+    if (free) {
+      dispatch(free, pending);
+    } else {
+      queue.push(pending);
+    }
   });
 }
 
-function dispatchToWorker(
-  slot: Slot,
-  transpiled: string,
-  input: unknown,
-  snapshot: OntologySnapshot,
-): Promise<SandboxAsyncResult> {
-  return new Promise<SandboxAsyncResult>((resolve, reject) => {
-    const id = nextTaskId++;
-    const timer = setTimeout(() => {
-      // Wall budget exceeded — terminate the worker (it's likely stuck) and
-      // reject so the caller falls back to sync. The slot will respawn via
-      // the exit handler.
-      slot.dead = true;
-      slot.pending = null;
-      slot.busy = false;
-      try {
-        slot.worker.terminate().catch(() => {});
-      } catch {
-        /* ignore */
-      }
-      const idx = pool.indexOf(slot);
-      if (idx >= 0) {
-        const fresh = spawnSlot();
-        if (fresh) pool[idx] = fresh;
-        else pool.splice(idx, 1);
-      }
-      drainWaitQueue();
-      reject(new Error(`functionWorker: wall budget (${WORKER_WALL_BUDGET_MS}ms) exceeded`));
-    }, WORKER_WALL_BUDGET_MS);
-
-    slot.busy = true;
-    slot.pending = { resolve, reject, timer };
-    slot.worker.postMessage({ id, transpiled, input, snapshot });
-  });
+function timeoutResult(): SandboxAsyncResult {
+  return {
+    output: null,
+    durationMs: WORKER_WALL_BUDGET_MS,
+    status: "timeout",
+    errorMessage: `Function worker exceeded the ${WORKER_WALL_BUDGET_MS}ms wall budget.`,
+    logs: [],
+    edits: [],
+  };
 }
 
 /**
- * Execute a sandboxed function off the main event loop, falling back to
- * inline synchronous execution if the worker pool is unavailable or errors.
- * `edits` carries the side-channel edits the function collected (Foundry
- * TS v2 `Edits` API / `createEditBatch().getEdits()`), empty unless status is "ok".
+ * Execute a sandboxed function off the main event loop. ALWAYS resolves (never
+ * rejects) with a SandboxResult + collected edits. A hung/errored worker
+ * resolves with `status: "timeout"|"error"` for that single invocation — the
+ * main event loop is never blocked. The sync fallback is used ONLY when the
+ * pool is structurally unavailable (worker file missing or explicitly disabled).
  */
 export async function runSandboxedWithSdkAsync(
   transpiled: string,
@@ -232,23 +277,12 @@ export async function runSandboxedWithSdkAsync(
   if (!POOL_ENABLED || !workerFile) {
     return runSandboxedWithSdkSync(transpiled, input, snapshot);
   }
-  const slot = await acquireSlot();
-  if (!slot) {
-    return runSandboxedWithSdkSync(transpiled, input, snapshot);
-  }
-  try {
-    return await dispatchToWorker(slot, transpiled, input, snapshot);
-  } catch {
-    // Worker unavailable / errored / timed out — run inline. The sandbox will
-    // block the main loop as before, but the result is correct.
-    return runSandboxedWithSdkSync(transpiled, input, snapshot);
-  }
+  return submitToPool({ transpiled, input, snapshot });
 }
 
 /**
- * Inline (main-thread) execution — the previous behaviour and the safe
- * fallback. Exported so it can be unit-tested directly and so the route
- * can use it in contexts where offloading is undesired.
+ * Inline (main-thread) execution — the structural fallback, used only when the
+ * worker pool is unavailable. Exported for direct unit testing.
  */
 export function runSandboxedWithSdkSync(
   transpiled: string,
@@ -265,10 +299,10 @@ export function runSandboxedWithSdkSync(
   return { ...result, edits: result.status === "ok" ? getEdits() : [] };
 }
 
-// Test-only: reset pool state (workers are terminated by process teardown).
+// Test-only: reset pool state.
 export function __resetPoolForTests(): void {
   poolInitialized = false;
   pool.length = 0;
-  waitQueue.length = 0;
+  queue.length = 0;
   nextTaskId = 1;
 }

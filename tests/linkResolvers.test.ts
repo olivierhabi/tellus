@@ -157,6 +157,13 @@ async function setup(t: Runner): Promise<void> {
     t.assert(!!state.ontologyId, "ontologyId set");
   });
 
+  // Singleton deployment: the ontology is the shared canonical enterprise
+  // ontology, so leftover artifacts from a prior (interrupted) run of this
+  // suite — or from another suite that created the same apiNames — would
+  // make the create calls below 409 and skew the "List link types returns 5"
+  // count. Clean them up idempotently before creating anything.
+  await cleanupLinkResolverArtifacts();
+
   const oid = () => state.ontologyId;
 
   // 2. Create Company object type
@@ -441,10 +448,17 @@ async function runLinkTests(t: Runner): Promise<void> {
   // =========================================================================
   t.section("Link Type CRUD");
 
-  await t.test("1. List link types returns 5", async () => {
+  await t.test("1. List link types returns the 5 created", async () => {
     const { status, body } = await api("GET", `/api/v1/ontology/${state.ontologyId}/linkTypes`);
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.data.length === 5, `Expected 5 link types, got ${body.data.length}`);
+    // Singleton deployment: the canonical ontology is shared and may already
+    // contain seeded link types (e.g. taxpayerBusiness). Assert the 5 link
+    // types this suite created are all present rather than the exact total.
+    const names = (body.data || []).map((o: any) => o.apiName);
+    for (const expected of LR_LINK_TYPES.filter((n) => n !== "tempLink")) {
+      t.assert(names.includes(expected), `link type '${expected}' present`);
+    }
+    t.assert(names.length >= 5, `at least 5 link types, got ${names.length}`);
   });
 
   await t.test("2. Get link type by apiName", async () => {
@@ -888,46 +902,10 @@ async function runLinkTests(t: Runner): Promise<void> {
 async function teardown(t: Runner): Promise<void> {
   t.section("Teardown");
 
-  // Delete OpenSearch indices
-  for (const apiName of ["Company", "LREmployee", "Ticket", "Course"]) {
-    try {
-      await api(
-        "DELETE",
-        `/api/v1/ontology/${state.ontologyId}/objectTypes/${apiName}/index`
-      );
-    } catch {
-      // Ignore — index may not exist
-    }
-  }
-
-  // Singleton deployment: the ontology is the shared canonical enterprise
-  // ontology and DELETE is frozen (→ 409 ONTOLOGY_SINGLETON). The historical
-  // ontology-level cascade therefore no longer cleans up the object/link
-  // types this suite creates — so we delete them explicitly here. This keeps
-  // the suite idempotent (re-runnable without leftover-type 409s) and avoids
-  // permanently polluting the shared canonical ontology.
-  const LINK_TYPES = [
-    "companyEmployees",
-    "employeeCompany",
-    "employeeTicket",
-    "employeeCourses",
-    "employeeManager",
-    "tempLink",
-  ];
-  for (const apiName of LINK_TYPES) {
-    try {
-      await api("DELETE", `/api/v1/ontology/${state.ontologyId}/linkTypes/${apiName}`);
-    } catch {
-      // Ignore — link type may not exist
-    }
-  }
-  for (const apiName of ["Company", "LREmployee", "Ticket", "Course"]) {
-    try {
-      await api("DELETE", `/api/v1/ontology/${state.ontologyId}/objectTypes/${apiName}`);
-    } catch {
-      // Ignore — object type may not exist
-    }
-  }
+  // Delete OpenSearch indices + the object/link types this suite created.
+  // (See setup() for why explicit cleanup is required under the singleton
+  // deployment — the ontology-level cascade no longer fires.)
+  await cleanupLinkResolverArtifacts();
 
   // Confirm the ontology delete is frozen under the singleton deployment.
   await t.test("Delete test ontology", async () => {
@@ -938,6 +916,49 @@ async function teardown(t: Runner): Promise<void> {
   // Clean up CSV files
   cleanupCSV();
   console.log("  CSV files cleaned up.");
+}
+
+// ---------------------------------------------------------------------------
+// Idempotent cleanup of the artifacts this suite creates. Called from both
+// setup (pre-clean leftovers from a prior run) and teardown. Safe to call
+// when nothing exists — every deletion ignores errors.
+// ---------------------------------------------------------------------------
+const LR_LINK_TYPES = [
+  "companyEmployees",
+  "employeeCompany",
+  "employeeTicket",
+  "employeeCourses",
+  "employeeManager",
+  "tempLink",
+];
+const LR_OBJECT_TYPES = ["Company", "LREmployee", "Ticket", "Course"];
+
+async function cleanupLinkResolverArtifacts(): Promise<void> {
+  if (!state.ontologyId) return;
+  for (const apiName of LR_OBJECT_TYPES) {
+    try {
+      await api(
+        "DELETE",
+        `/api/v1/ontology/${state.ontologyId}/objectTypes/${apiName}/index`
+      );
+    } catch {
+      // Ignore — index may not exist
+    }
+  }
+  for (const apiName of LR_LINK_TYPES) {
+    try {
+      await api("DELETE", `/api/v1/ontology/${state.ontologyId}/linkTypes/${apiName}`);
+    } catch {
+      // Ignore — link type may not exist
+    }
+  }
+  for (const apiName of LR_OBJECT_TYPES) {
+    try {
+      await api("DELETE", `/api/v1/ontology/${state.ontologyId}/objectTypes/${apiName}`);
+    } catch {
+      // Ignore — object type may not exist
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

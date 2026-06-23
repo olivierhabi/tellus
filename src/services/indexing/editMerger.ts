@@ -102,11 +102,19 @@ export async function mergeEditsWithDatasource(
 
   // -----------------------------------------------------------------------
   // 2. Query all previously indexed create/update edits (they must still
-  //    win over a re-uploaded datasource that may contain original values)
+  //    win over a re-uploaded datasource that may contain original values),
+  //    PLUS any delete that is already indexed=true. Without the delete
+  //    clause, a forceRecreateIndex would re-read the datasource and silently
+  //    resurrect an object the user previously deleted (indexed=false deletes
+  //    are already caught by `unindexedResult` above; this closes the gap for
+  //    deletes that a prior run already marked indexed). buildEditMap keeps
+  //    the latest executed_at per PK and the delete branch below drops them.
   // -----------------------------------------------------------------------
   const persistentResult = await qfn(
     `SELECT * FROM ontology_edit
-     WHERE object_type_api_name = $1 AND operation IN ('update', 'create')
+     WHERE object_type_api_name = $1
+       AND (operation IN ('update', 'create')
+            OR (operation = 'delete' AND indexed = true))
      ORDER BY executed_at ASC`,
     [objectTypeApiName]
   );
