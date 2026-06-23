@@ -16,7 +16,12 @@ const pool = new Pool({
 const tag = `ts-add-${randomUUID()}`;
 const legacyOntologyId = "00000000-0000-0000-0000-000000000001"; // Canonical enterprise ontology UUID
 const ontoRid = "ri.ontology.main.ontology.default";
-const objectTypeRid = `ri.ontology.main.object-type.${tag}`;
+// objectTypeService.addDatasource resolves the legacy object_type_id by
+// slicing the RID prefix, so the RID locator MUST be the legacy UUID itself
+// (object_type.object_type_id is a uuid column). Generate it up-front and
+// use it for both the RID locator and the legacy row's primary key.
+const objectTypeUuid = randomUUID();
+const objectTypeRid = `ri.ontology.main.object-type.${objectTypeUuid}`;
 const datasourceRid = `ri.foundry.main.dataset.${tag}-ds`;
 
 beforeAll(async () => {
@@ -27,6 +32,19 @@ beforeAll(async () => {
   await pool.query(
     "INSERT INTO ontology (ontology_id, display_name, description, created_by) VALUES ($1, 'Default', 'Desc', 'system') ON CONFLICT (ontology_id) DO NOTHING",
     [legacyOntologyId]
+  );
+
+  // Synchronize object_type & property in legacy schema FIRST so we control
+  // the object_type_id (the RID locator must equal this UUID).
+  await pool.query(
+    "INSERT INTO object_type (object_type_id, ontology_id, api_name, display_name, version) VALUES ($1, $2, $3, 'IT-Add-Source-Legacy', 1)",
+    [objectTypeUuid, legacyOntologyId, `${tag}-api`]
+  );
+  const ontologyId = objectTypeUuid;
+
+  await pool.query(
+    "INSERT INTO property (property_id, object_type_id, api_name, display_name, base_type, is_required) VALUES ($1, $2, 'id', 'ID', 'string', true)",
+    [randomUUID(), ontologyId]
   );
 
   // In B8 layer, insert ontology + object_types
@@ -44,18 +62,6 @@ beforeAll(async () => {
   await pool.query(
     "INSERT INTO object_type_properties (object_type_rid, api_name, display_name, data_type, nullable) VALUES ($1, 'id', 'ID', 'string', false)",
     [objectTypeRid]
-  );
-
-  // Synchronize object_type & property in legacy schema
-  const legacyIdResult = await pool.query(
-    "INSERT INTO object_type (ontology_id, api_name, display_name, version) VALUES ($1, $2, 'IT-Add-Source-Legacy', 1) RETURNING object_type_id",
-    [legacyOntologyId, `${tag}-api`]
-  );
-  const ontologyId = legacyIdResult.rows[0].object_type_id;
-
-  await pool.query(
-    "INSERT INTO property (property_id, object_type_id, api_name, display_name, base_type, is_required) VALUES ($1, $2, 'id', 'ID', 'string', true)",
-    [randomUUID(), ontologyId]
   );
 
   // Expose legacy UUID dynamically so afterAll cleanup has access to it

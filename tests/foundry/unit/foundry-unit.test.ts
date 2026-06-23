@@ -1435,13 +1435,29 @@ describe('BE-020 — Rate Limiter', () => {
 
     it('should define read category', () => {
       expect(RATE_LIMIT_CATEGORIES.read).toBeDefined();
-      expect(RATE_LIMIT_CATEGORIES.read.max).toBe(100);
+      // Source relaxes the read cap in non-prod environments (see auth
+      // category below) so cypress walks don't trip the 100/min prod cap.
+      // Under vitest (NODE_ENV=test) the relaxed value is expected.
+      const expected =
+        process.env.NODE_ENV === "production" &&
+        process.env.RATE_LIMIT_MODE !== "relaxed"
+          ? 100
+          : 2_000;
+      expect(RATE_LIMIT_CATEGORIES.read.max).toBe(expected);
       expect(RATE_LIMIT_CATEGORIES.read.windowMs).toBe(60_000);
     });
 
     it('should define write category', () => {
       expect(RATE_LIMIT_CATEGORIES.write).toBeDefined();
-      expect(RATE_LIMIT_CATEGORIES.write.max).toBe(30);
+      // Source relaxes the write cap in non-prod environments (see auth
+      // category below). Under vitest (NODE_ENV=test) the relaxed value
+      // is expected.
+      const expected =
+        process.env.NODE_ENV === "production" &&
+        process.env.RATE_LIMIT_MODE !== "relaxed"
+          ? 30
+          : 500;
+      expect(RATE_LIMIT_CATEGORIES.write.max).toBe(expected);
       expect(RATE_LIMIT_CATEGORIES.write.windowMs).toBe(60_000);
     });
 

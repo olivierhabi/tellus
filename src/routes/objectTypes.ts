@@ -481,6 +481,10 @@ router.get(
         (result.objectType as Record<string, unknown>).version ?? 1
       );
       setEtag(res, version);
+      // Object types are mutable (backing datasource, properties, funnel
+      // state change independently of the version field the ETag is derived
+      // from). Prevent the browser from serving a stale 304 on refetch.
+      res.setHeader("Cache-Control", "no-store");
       const formatted = formatObjectType(
         result.objectType,
         result.properties,

@@ -88,7 +88,10 @@ export async function loadOntologySnapshot(
     typeFilter = `AND object_type_api_name = ANY($${params.length})`;
   }
   params.push(limit);
-  const { rows } = await pool.query<{
+  // `pg` honours a `signal` on the query config at runtime (it cancels the
+  // in-flight SELECT server-side when the request aborts), but its TypeScript
+  // `QueryConfig` type doesn't include it — cast to add it.
+  const result = await pool.query<{
     object_type_api_name: string;
     primary_key: string;
     properties: Record<string, unknown>;
@@ -100,7 +103,8 @@ export async function loadOntologySnapshot(
       LIMIT $${params.length}`,
     values: params,
     signal: args.signal,
-  });
+  } as unknown as Parameters<typeof pool.query>[0]);
+  const { rows } = result;
 
   const byType = new Map<string, Map<string, OntologyObject>>();
   let count = 0;

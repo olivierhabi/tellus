@@ -383,7 +383,23 @@ app.use(inputSanitizer);
 // 504 instead of hanging the connection). /health, /ready, /metrics,
 // and /openapi.json are exempted inside the middleware itself.
 import { requestTimeoutMiddleware } from "./middleware/requestTimeout";
-app.use(requestTimeoutMiddleware());
+// The code-repositories function-invoke path (transpile + 200k-row ontology
+// snapshot load + a 5s sandbox run) cannot fit the 5s data-plane budget, so
+// it gets its own longer ceiling (CODE_REPOS_REQUEST_TIMEOUT_MS, default 30s)
+// mounted on its router below. Exempt the whole mount prefix here so the
+// global 5s timer does not fire first and 504 a request the longer budget
+// would have allowed.
+//
+// `/api/v1/objects` is also exempted + given a longer ceiling below: the
+// object-search read itself is sub-second, but it shares the single Node
+// event loop with the (synchronous) function sandbox, which can block for up
+// to FUNCTION_TIMEOUT_MS. A search queued behind a sandbox would otherwise
+// blow the 5s budget and 504 even though its own work is ~ms. The longer
+// ceiling lets it complete once the sandbox yields; the root-cause fix (the
+// sandbox moved to a worker thread) is in functionRuntime/functionWorkerPool.
+app.use(requestTimeoutMiddleware({
+  exemptPaths: ["/api/v1/code-repositories", "/api/v1/objects"],
+}));
 {
   const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
   const mounted = stack.some((layer) => layer.name === "requestTimeoutMw");
@@ -657,7 +673,30 @@ import { PostgresStemma } from "./services/codeRepository/adapters/postgres";
 // and drifting branch_cache (→ 412 on commit). The template adapter scaffolds
 // through this same instance, so new repos materialise into Postgres too.
 const codeRepoMount = mountCodeRepository({ pool, stemma: new PostgresStemma({ pool }) });
+// Dedicated wall budget for code-repositories routes (the function-invoke
+// path transpiles + loads an ontology snapshot + runs a sandboxed function).
+// The global 5s middleware exempted this prefix above; this longer ceiling
+// (default 30s) still protects against true hangs while letting legitimate
+// invokes complete. The sandbox's own FUNCTION_TIMEOUT_MS (5s) bounds CPU.
+const CODE_REPOS_REQUEST_TIMEOUT_MS = Number(
+  process.env.CODE_REPOS_REQUEST_TIMEOUT_MS ?? 30_000,
+);
+app.use(
+  "/api/v1/code-repositories",
+  requestTimeoutMiddleware({ timeoutMs: CODE_REPOS_REQUEST_TIMEOUT_MS }),
+);
 app.use("/api/v1/code-repositories", codeRepoMount.router);
+
+// Longer ceiling for the object read path (search/get/aggregate) so a request
+// queued behind a synchronous function-sandbox block completes instead of
+// 504ing at the 5s data-plane budget. See the exemption comment above.
+const OBJECTS_REQUEST_TIMEOUT_MS = Number(
+  process.env.OBJECTS_REQUEST_TIMEOUT_MS ?? 15_000,
+);
+app.use(
+  "/api/v1/objects",
+  requestTimeoutMiddleware({ timeoutMs: OBJECTS_REQUEST_TIMEOUT_MS }),
+);
 
 // Functions Registry (B8) — the platform-wide store of published, immutable,
 // SemVer-versioned TypeScript Functions v2. Produced by Tag & Release

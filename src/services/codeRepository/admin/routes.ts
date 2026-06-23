@@ -100,6 +100,18 @@ interface PatchRepoBody {
 // Builder.
 // ---------------------------------------------------------------------------
 
+// Per-process caches for the function-invoke hot path. See invokeCache.ts for
+// the rationale (burst-coalescing the invokes a Workshop Object Table fires).
+// `transpileCache` is content-addressed (no TTL); `snapshotCache` is TTL-bound
+// because `object_instances` is mutable — a few seconds of staleness is the
+// right tradeoff for a Workshop Live-Preview read (point-in-time snapshot).
+const transpileCache = createTtlCache<string, string>({ maxEntries: 64 });
+const SNAPSHOT_TTL_MS = Number(process.env.FUNCTION_SNAPSHOT_TTL_MS ?? 5_000);
+const snapshotCache = createTtlCache<string, OntologySnapshot>({
+  maxEntries: 8,
+  ttlMs: SNAPSHOT_TTL_MS,
+});
+
 export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
   const router = Router();
   const { pool } = deps;
@@ -2142,39 +2154,46 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       void resolvedPath; // surface for future telemetry; not used in response today
 
       // Transpile TS → CommonJS via the isolated-module path (fast, no
-      // type-check diagnostics blocking execution).
-      let transpiled: string;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const ts = require("typescript") as typeof import("typescript");
-        const out = ts.transpileModule(source, {
-          compilerOptions: {
-            module: ts.ModuleKind.CommonJS,
-            target: ts.ScriptTarget.ES2020,
-            esModuleInterop: true,
-            isolatedModules: true,
-          },
-          fileName: `${apiName}.ts`,
-        });
-        // TS may emit either `exports.<apiName>` (named exports) or
-        // `exports.default` (default exports). Surface whichever is a
-        // callable as the module's export so the sandbox picks it up.
-        transpiled =
-          out.outputText +
-          `\nif (typeof module !== "undefined") {` +
-          ` module.exports = ` +
-          `(typeof exports[${JSON.stringify(apiName)}] === "function" ? exports[${JSON.stringify(apiName)}]` +
-          ` : (typeof exports.default === "function" ? exports.default : module.exports));` +
-          `}\n`;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return sendError(
-          res,
-          codeReposError("CodeRepos:FunctionCompileError", {
-            apiName,
-            reason: msg,
-          }),
-        );
+      // type-check diagnostics blocking execution). Content-addressed by
+      // (apiName, source) so a repeated invoke (the common case — Workshop
+      // re-invokes the same committed function on every render + retry) skips
+      // the transpile entirely.
+      const transpileKey = transpileCacheKey(apiName, source);
+      let transpiled = transpileCache.get(transpileKey);
+      if (transpiled === undefined) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const ts = require("typescript") as typeof import("typescript");
+          const out = ts.transpileModule(source, {
+            compilerOptions: {
+              module: ts.ModuleKind.CommonJS,
+              target: ts.ScriptTarget.ES2020,
+              esModuleInterop: true,
+              isolatedModules: true,
+            },
+            fileName: `${apiName}.ts`,
+          });
+          // TS may emit either `exports.<apiName>` (named exports) or
+          // `exports.default` (default exports). Surface whichever is a
+          // callable as the module's export so the sandbox picks it up.
+          transpiled =
+            out.outputText +
+            `\nif (typeof module !== "undefined") {` +
+            ` module.exports = ` +
+            `(typeof exports[${JSON.stringify(apiName)}] === "function" ? exports[${JSON.stringify(apiName)}]` +
+            ` : (typeof exports.default === "function" ? exports.default : module.exports));` +
+            `}\n`;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return sendError(
+            res,
+            codeReposError("CodeRepos:FunctionCompileError", {
+              apiName,
+              reason: msg,
+            }),
+          );
+        }
+        transpileCache.set(transpileKey, transpiled);
       }
 
       const input = (body.args ?? {}) as unknown;
@@ -2196,10 +2215,47 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         if (norm) ontologyId = norm;
         importedTypes.push(row.api_name);
       }
-      const snapshot = ontologyId
-        ? await loadOntologySnapshot(deps.pool, { ontologyId, objectTypes: importedTypes })
-        : { byType: new Map(), ontologyId: "", objectCount: 0, objectTypes: [] as string[] };
-      const { sdk, getEdits } = buildOntologySdk(snapshot);
+      // Snapshot load is the single most expensive step on this path (up to a
+      // 200k-row SELECT). Cache it per (ontology, imported types) with a short
+      // TTL so the burst of invokes one table render fires reuses one load.
+      // The request's abort signal cancels the SELECT if the budget is
+      // exceeded, instead of letting it run to completion after we 504.
+      const snapshotKey = ontologyId
+        ? `${ontologyId}:${[...importedTypes].sort().join(",")}`
+        : "";
+      let snapshot: OntologySnapshot | undefined =
+        ontologyId ? snapshotCache.get(snapshotKey) : undefined;
+      if (ontologyId && !snapshot) {
+        let loaded: OntologySnapshot;
+        try {
+          loaded = await loadOntologySnapshot(deps.pool, {
+            ontologyId,
+            objectTypes: importedTypes,
+            signal: (req as unknown as { timeoutSignal?: AbortSignal }).timeoutSignal,
+          });
+        } catch (err) {
+          // The request-budget middleware may have already 504'd (aborting the
+          // SELECT). Don't double-send; otherwise surface a 500.
+          if (res.headersSent || res.writableEnded) return;
+          const msg = err instanceof Error ? err.message : String(err);
+          return sendError(
+            res,
+            codeReposError("CodeRepos:Internal", {
+              reason: "ontology-snapshot-load-failed",
+              message: msg,
+            }),
+          );
+        }
+        snapshotCache.set(snapshotKey, loaded);
+        snapshot = loaded;
+      }
+      const resolvedSnapshot: OntologySnapshot = snapshot ?? {
+        byType: new Map(),
+        ontologyId: "",
+        objectCount: 0,
+        objectTypes: [] as string[],
+      };
+      const { sdk, getEdits } = buildOntologySdk(resolvedSnapshot);
 
       const result = runSandboxedWithSdk(transpiled, input, {
         Objects: sdk.Objects,
@@ -2310,8 +2366,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             editsApplied,
             ontology: {
               ontologyId: ontologyId ?? null,
-              objectsLoaded: snapshot.objectCount,
-              objectTypes: snapshot.objectTypes,
+              objectsLoaded: resolvedSnapshot.objectCount,
+              objectTypes: resolvedSnapshot.objectTypes,
             },
           }),
         );
