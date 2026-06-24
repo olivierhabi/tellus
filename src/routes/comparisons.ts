@@ -22,7 +22,10 @@ import { Router, Request, Response, NextFunction } from "express";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { mapFilters } from "../services/opensearch/filterMapper";
 import { client as osClient } from "../services/opensearch/client";
+import { applyContextToQuery } from "../services/opensearch/applyContext";
 import { buildSecurityFilter } from "../middleware/securityContext";
+import { readBranchHeader } from "../middleware/branchHeader";
+import { routeMetric } from "../utils/routeInstrumentation";
 
 const router = Router({ mergeParams: true });
 
@@ -77,16 +80,30 @@ router.post(
         },
       });
 
+      // T-01: every read-path query runs through the canonical
+      // applyContextToQuery helper. The local "wrap-with-security"
+      // lambda that previously lived here is intentionally deleted —
+      // we no longer have two definitions of "apply request context
+      // to a query" in the codebase.
       const security = buildSecurityFilter(req.security);
-      const wrapWithSecurity = (q: Record<string, unknown>): Record<string, unknown> =>
-        security ? { bool: { must: [q, security] } } : q;
+      const branchId = readBranchHeader(req);
+      const applyCtx = (q: Record<string, unknown>): Record<string, unknown> =>
+        applyContextToQuery(q, security, branchId);
+
+      // Cardinality-bounded route metric. The route enum lives in
+      // src/utils/routeInstrumentation.ts so the AST contract guard can
+      // validate every handler at PR time (see T-10).
+      routeMetric(req, "comparisons.aggregate", branchId);
 
       const index = `ontology-${objectTypeApiName.toLowerCase()}`;
       const msearchBody: unknown[] = [
         { index },
-        buildAggBody(wrapWithSecurity(buildQuery(setA.filter))),
+        // The `aggs` block is NOT wrapped — only the per-sub-body
+        // `query` field. Aggregations operate over the result set
+        // produced by the wrapped query.
+        buildAggBody(applyCtx(buildQuery(setA.filter))),
         { index },
-        buildAggBody(wrapWithSecurity(buildQuery(setB.filter))),
+        buildAggBody(applyCtx(buildQuery(setB.filter))),
       ];
 
       let bucketsA: unknown[] = [];

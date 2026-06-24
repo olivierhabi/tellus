@@ -17,35 +17,29 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
     t.assert(typeof body.timestamp === "string", "Expected timestamp string");
   });
 
-  await t.test("Create ontology (Task 2)", async () => {
+  // "One Enterprise, One Ontology": creating ontologies is frozen. The create
+  // endpoint returns 409 ONTOLOGY_SINGLETON; tests resolve the single canonical
+  // ontology via the `default` alias instead.
+  await t.test("Create ontology is frozen (single-ontology)", async () => {
     const { status, body } = await api("POST", "/api/v1/ontology", {
       displayName: "Test Ontology",
       description: "Integration test ontology",
     });
-    t.assert(status === 201, `Expected 201, got ${status}`);
-    t.assert(typeof body.ontologyId === "string", "Expected ontologyId string");
-    t.assert(/^[0-9a-f]{8}-[0-9a-f]{4}/.test(body.ontologyId), "UUID format");
-    t.assert(body.displayName === "Test Ontology", "displayName matches");
-    t.assert(body.description === "Integration test ontology", "description matches");
-    t.assert(body.objectTypeCount === 0, "objectTypeCount = 0");
-    t.assert(typeof body.createdAt === "string", "createdAt present");
-    t.assert(typeof body.updatedAt === "string", "updatedAt present");
-    ctx.ontologyId = body.ontologyId;
-  });
-
-  await t.test("Duplicate ontology fails (Task 2)", async () => {
-    const { status, body } = await api("POST", "/api/v1/ontology", {
-      displayName: "Test Ontology",
-    });
     t.assert(status === 409, `Expected 409, got ${status}`);
-    t.assert(body.error.code === "ONTOLOGY_ALREADY_EXISTS", `code = ${body.error.code}`);
+    t.assert(body.error.code === "ONTOLOGY_SINGLETON", `code = ${body.error?.code}`);
+
+    // Resolve the canonical ontology for downstream tests.
+    const got = await api("GET", "/api/v1/ontology/default");
+    t.assert(got.status === 200, `Expected 200, got ${got.status}`);
+    ctx.ontologyId = got.body.ontologyId ?? got.body?.data?.ontologyId;
+    t.assert(typeof ctx.ontologyId === "string", "Expected canonical ontologyId");
   });
 
-  await t.test("List ontologies with pagination (Task 11/12)", async () => {
+  await t.test("List returns exactly one ontology (single-ontology)", async () => {
     const { status, body } = await api("GET", "/api/v1/ontology?pageSize=10");
     t.assert(status === 200, `Expected 200, got ${status}`);
     t.assert(Array.isArray(body.data), "data is array");
-    t.assert(body.data.length >= 1, "at least 1 ontology");
+    t.assert(body.data.length === 1, "exactly 1 ontology");
     t.assert(typeof body.totalCount === "number", "totalCount is number");
     t.assert(typeof body.pageSize === "number", "pageSize is number");
   });
@@ -53,21 +47,24 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   await t.test("Get ontology by ID (Task 11/12)", async () => {
     const { status, body } = await api("GET", `/api/v1/ontology/${ctx.ontologyId}`);
     t.assert(status === 200, `Expected 200, got ${status}`);
-    t.assert(body.displayName === "Test Ontology", "displayName matches");
+    t.assert(typeof body.displayName === "string", "displayName present");
   });
 
   t.section("Validation Middleware (Task 19)");
 
-  await t.test("validateBody rejects missing required fields (Task 19)", async () => {
+  await t.test("Create endpoint is frozen regardless of body (single-ontology)", async () => {
+    // The create route no longer validates a body — it is frozen, so any POST
+    // (even an empty one) returns 409 ONTOLOGY_SINGLETON.
     const { status, body } = await api("POST", "/api/v1/ontology", {});
-    t.assert(status === 400, `Expected 400, got ${status}`);
-    t.assert(body.error.code === "VALIDATION_FAILED", `code = ${body.error.code}`);
-    t.assert(body.error.message.includes("displayName"), "mentions displayName");
+    t.assert(status === 409, `Expected 409, got ${status}`);
+    t.assert(body.error.code === "ONTOLOGY_SINGLETON", `code = ${body.error?.code}`);
   });
 
-  await t.test("Invalid UUID rejected (Task 9)", async () => {
+  await t.test("Any ontology id collapses to the canonical ontology (single-ontology)", async () => {
+    // The edge collapse rewrites ANY :ontologyId (even a non-UUID) to the one
+    // enterprise ontology, so this resolves instead of 404/400.
     const { status, body } = await api("GET", "/api/v1/ontology/not-a-uuid");
-    t.assert(status === 400, `Expected 400, got ${status}`);
-    t.assert(body.error.code === "INVALID_PARAMETER", `code = ${body.error.code}`);
+    t.assert(status === 200, `Expected 200, got ${status}`);
+    t.assert(typeof body.ontologyId === "string", "resolved to the canonical ontology");
   });
 }

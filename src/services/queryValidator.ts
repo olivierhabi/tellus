@@ -17,7 +17,8 @@ import {
 } from "./propertyResolver";
 import { appError } from "../utils/appError";
 import {
-  MAX_PAGE_SIZE,
+  MAX_EXPLORER_PAGE_SIZE,
+  MAX_EXPLORER_PAGE_SIZE_OPT_IN,
   DEFAULT_PAGE_SIZE,
   MAX_ORDER_BY_FIELDS,
   MAX_IN_CLAUSE_VALUES,
@@ -25,6 +26,11 @@ import {
   MAX_FILTER_NESTING_DEPTH,
   SUPPORTED_FILTER_TYPES as FILTER_TYPES_ARRAY,
 } from "../utils/constants";
+import { incCounter, observeHistogram } from "./funnel/metrics";
+
+// Re-export under the legacy name so existing consumers don't break;
+// internally we use the new explorer-specific constant.
+export const MAX_PAGE_SIZE = MAX_EXPLORER_PAGE_SIZE;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -321,7 +327,8 @@ async function validateWhereClause(
 
 export async function validateSearchQuery(
   body: any,
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  largePage: boolean = false,
 ): Promise<any> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw validationError("INVALID_BODY", "Request body must be a JSON object.");
@@ -348,8 +355,11 @@ export async function validateSearchQuery(
     await validateOrderBy(body.$orderBy, objectTypeApiName);
   }
 
-  // Validate $pageSize
-  const pageSize = validatePageSize(body.$pageSize);
+  // Validate $pageSize (T-09: cap clamped via the explorer constants;
+  // opt-in path requires the `x-tellus-large-page: true` header to
+  // raise the ceiling from MAX_EXPLORER_PAGE_SIZE to
+  // MAX_EXPLORER_PAGE_SIZE_OPT_IN).
+  const pageSize = validatePageSize(body.$pageSize, largePage);
 
   // Validate $pageToken
   if (body.$pageToken !== undefined) {
@@ -377,7 +387,8 @@ export async function validateSearchQuery(
 
 export async function validateListQuery(
   queryParams: Record<string, any>,
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  largePage: boolean = false,
 ): Promise<{
   pageSize: number;
   pageToken: string | undefined;
@@ -387,7 +398,8 @@ export async function validateListQuery(
   const pageSize = validatePageSize(
     queryParams.$pageSize !== undefined
       ? Number(queryParams.$pageSize)
-      : undefined
+      : undefined,
+    largePage,
   );
 
   const pageToken =
@@ -513,6 +525,71 @@ export async function validateAggregateQuery(
         );
       }
     }
+
+    // --- Optional nested metric (Pie Chart aggregation method) ---
+    // A bucketing aggregation may carry a metric sub-aggregation whose value
+    // is computed per bucket. Only `terms` supports it today.
+    if (agg.metric !== undefined && agg.metric !== null) {
+      if (agg.type !== "terms") {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': a nested 'metric' is only supported on 'terms' aggregations.`
+        );
+      }
+      const m = agg.metric;
+      const validMetricTypes = ["count", "sum", "avg", "min", "max", "cardinality"];
+      if (!m.type || typeof m.type !== "string" || !validMetricTypes.includes(m.type)) {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': metric.type must be one of ${validMetricTypes.join(", ")}.`
+        );
+      }
+      // Every metric except `count` aggregates over a field.
+      if (m.type !== "count") {
+        if (!m.field || typeof m.field !== "string") {
+          throw validationError(
+            "INVALID_AGGREGATION",
+            `Aggregation '${agg.name}': metric.type '${m.type}' requires a 'metric.field'.`
+          );
+        }
+        const mMeta = await resolveProperty(objectTypeApiName, m.field);
+        const mbt = mMeta.baseType.endsWith("_array")
+          ? mMeta.baseType.replace("_array", "")
+          : mMeta.baseType;
+        const NUMERIC = new Set(["integer", "long", "double", "float", "byte", "short", "decimal"]);
+        const DATE = new Set(["date", "timestamp"]);
+        if ((m.type === "sum" || m.type === "avg") && !NUMERIC.has(mbt)) {
+          throw validationError(
+            "INCOMPATIBLE_FILTER",
+            `Aggregation '${agg.name}': metric '${m.type}' requires a numeric field, but '${m.field}' is of type '${mMeta.baseType}'.`
+          );
+        }
+        if ((m.type === "min" || m.type === "max") && !NUMERIC.has(mbt) && !DATE.has(mbt)) {
+          throw validationError(
+            "INCOMPATIBLE_FILTER",
+            `Aggregation '${agg.name}': metric '${m.type}' requires a numeric or date field, but '${m.field}' is of type '${mMeta.baseType}'.`
+          );
+        }
+      }
+    }
+
+    // --- Optional secondary group-by ("segment by"/series, Chart XY) ---
+    if (agg.groupBy !== undefined && agg.groupBy !== null) {
+      if (agg.type !== "terms") {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': a nested 'groupBy' is only supported on 'terms' aggregations.`
+        );
+      }
+      if (!agg.groupBy.field || typeof agg.groupBy.field !== "string") {
+        throw validationError(
+          "INVALID_AGGREGATION",
+          `Aggregation '${agg.name}': groupBy.field is required.`
+        );
+      }
+      // Resolve to confirm the property exists (throws if unknown).
+      await resolveProperty(objectTypeApiName, agg.groupBy.field);
+    }
   }
 
   return body;
@@ -522,17 +599,45 @@ export async function validateAggregateQuery(
 // Shared validation helpers
 // ---------------------------------------------------------------------------
 
-function validatePageSize(value: unknown): number {
-  if (value === undefined || value === null) return DEFAULT_PAGE_SIZE;
+function validatePageSize(value: unknown, largePage: boolean = false): number {
+  if (value === undefined || value === null) {
+    observeHistogram("tellus_pagination_size", DEFAULT_PAGE_SIZE);
+    return DEFAULT_PAGE_SIZE;
+  }
+  const ceiling = largePage ? MAX_EXPLORER_PAGE_SIZE_OPT_IN : MAX_EXPLORER_PAGE_SIZE;
   const num = Number(value);
-  if (!Number.isInteger(num) || num < 1 || num > MAX_PAGE_SIZE) {
+  // `$pageSize: 0` is a valid "count-only" request — callers that only need
+  // `totalCount` (e.g. the object-type overview's live-count reconciliation)
+  // ask for zero rows. The executor still returns an accurate `totalCount`
+  // (track_total_hits) and an empty `data` array.
+  if (!Number.isInteger(num) || num < 0 || num > ceiling) {
+    incCounter("tellus_pagination_rejected_total", {
+      reason: !Number.isInteger(num) ? "non_integer" : num < 0 ? "underflow" : "overflow",
+      large_page: largePage ? "true" : "false",
+    });
     throw validationError(
       "PAGE_SIZE_OUT_OF_RANGE",
-      `$pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}. Got: ${value}.`,
+      `$pageSize must be an integer between 0 and ${ceiling}. Got: ${value}.`,
       "$pageSize"
     );
   }
+  observeHistogram("tellus_pagination_size", num);
   return num;
+}
+
+/**
+ * Read the explorer's `x-tellus-large-page` opt-in header. Anything
+ * other than the literal lowercase string "true" is treated as false
+ * (no silent toggling on stray values).
+ */
+export function readLargePageHeader(
+  req: { get?: (n: string) => string | undefined; headers?: Record<string, unknown> } | undefined,
+): boolean {
+  if (!req) return false;
+  const fromGet = typeof req.get === "function" ? req.get("x-tellus-large-page") : undefined;
+  const fromHeaders = (req.headers as Record<string, unknown> | undefined)?.["x-tellus-large-page"];
+  const raw = (fromGet ?? (fromHeaders as string | undefined)) ?? "";
+  return String(raw).toLowerCase() === "true";
 }
 
 async function validateOrderBy(
@@ -633,12 +738,7 @@ export async function runSelfTests(): Promise<void> {
     // 1. pageSize validation
     assert(validatePageSize(undefined) === 100, "Default pageSize is 100");
     assert(validatePageSize(50) === 50, "pageSize 50 accepted");
-
-    await expectThrow(
-      () => Promise.resolve(validatePageSize(0)),
-      "pageSize 0 rejected",
-      "$pageSize must be an integer"
-    );
+    assert(validatePageSize(0) === 0, "pageSize 0 accepted (count-only)");
 
     await expectThrow(
       () => Promise.resolve(validatePageSize(-1)),

@@ -122,8 +122,11 @@ async function readFoundryBridgedFile(
 
   if (format === "csv" || format === "tsv") {
     const { parse } = await import("csv-parse/sync");
+    const { sanitizeCsvHeader } = await import("../utils/csvHeader");
     const records: Record<string, string>[] = parse(content, {
-      columns: true,
+      // See `src/utils/csvHeader.ts` — prevents silent column drop when
+      // the foundry-bridged file has duplicate or blank header cells.
+      columns: (h: string[]) => sanitizeCsvHeader(h, { source: rawFilePath }),
       skip_empty_lines: true,
       relax_column_count: true,
       trim: true,
@@ -222,8 +225,11 @@ async function readCsvFile(
     content = content.slice(1);
   }
 
+  const { sanitizeCsvHeader } = await import("../utils/csvHeader");
   const records: Record<string, string>[] = parse(content, {
-    columns: true,
+    // See `src/utils/csvHeader.ts` — prevents silent column drop when
+    // the on-disk transaction file has duplicate or blank header cells.
+    columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
     skip_empty_lines: true,
     relax_column_count: true,
     trim: true,

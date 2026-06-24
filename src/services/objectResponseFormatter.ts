@@ -127,10 +127,34 @@ export function formatAggregationResponse(
         break;
 
       case "terms":
-        result[def.name] = (aggResult.buckets || []).map((b: any) => ({
-          key: b.key,
-          count: b.doc_count,
-        }));
+        result[def.name] = (aggResult.buckets || []).map((b: any) => {
+          const bucket: Record<string, unknown> = {
+            key: b.key,
+            count: b.doc_count,
+            // `value` is what charts plot: the nested metric's result when a
+            // metric sub-aggregation is present (sum/avg/min/max/approx-unique
+            // per slice), otherwise the bucket's document count. Always set so
+            // consumers never have to branch on metric presence.
+            value:
+              b.metric && typeof b.metric === "object"
+                ? (b.metric.value ?? 0)
+                : b.doc_count,
+          };
+          // Secondary group-by ("segment by"/series) sub-buckets, when the
+          // request asked for a nested `groupBy` — the Chart XY multi-series
+          // matrix. Each series sub-bucket carries its own count + value.
+          if (b.series && Array.isArray(b.series.buckets)) {
+            bucket.series = b.series.buckets.map((sb: any) => ({
+              key: sb.key,
+              count: sb.doc_count,
+              value:
+                sb.metric && typeof sb.metric === "object"
+                  ? (sb.metric.value ?? 0)
+                  : sb.doc_count,
+            }));
+          }
+          return bucket;
+        });
         break;
 
       case "date_histogram":

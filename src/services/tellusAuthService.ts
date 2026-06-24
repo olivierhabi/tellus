@@ -227,11 +227,18 @@ export class TellusAuthService {
   /** Verify a Keycloak-issued JWT and return the decoded claims. */
   verifyAccessToken(token: string): Promise<TellusClaims> {
     return new Promise((resolve, reject) => {
+      // Support loopback and docker network issuer profiles (consistent with globalAuth.ts)
+      const allowedIssuers = [
+        this.issuer,
+        `http://localhost:8086/realms/${this.config.kcRealm}`,
+        `http://keycloak:8086/realms/${this.config.kcRealm}`,
+      ];
+
       jwt.verify(
         token,
-        this.getKey,
-        { algorithms: ['RS256'], issuer: this.issuer },
-        (err, decoded) => {
+        this.getKey as jwt.GetPublicKeyOrSecret,
+        { algorithms: ['RS256'], issuer: allowedIssuers } as jwt.VerifyOptions,
+        (err: any, decoded: any) => {
           if (err) {
             if (err.name === 'TokenExpiredError') {
               return reject(new AppError('Access token has expired.', 401, 'TOKEN_EXPIRED'));
@@ -310,8 +317,18 @@ export class TellusAuthService {
       if (!row) return false;
       if (new Date(row.expires_at) < new Date()) return false;
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      // Fail CLOSED: if we cannot confirm a token is NOT revoked, we must
+      // not accept it. The revocation table lives in the primary Postgres
+      // that every data path already depends on, so a failure here means
+      // the request would fail downstream regardless — rejecting it does
+      // not widen the outage, but it does close the window in which a token
+      // revoked on another replica (logout / compromise) would be honored.
+      console.error('isJtiRevoked: revocation check failed, denying token', {
+        jti,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return true;
     }
   }
 

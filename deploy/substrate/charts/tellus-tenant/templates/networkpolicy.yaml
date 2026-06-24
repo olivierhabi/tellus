@@ -1,0 +1,20 @@
+{{- if .Values.networkIsolation }}
+# Default-deny cross-namespace ingress: only pods within this tenant's
+# namespace may reach the tenant's pods. East-west isolation is Cilium-enforced
+# on the substrate (verify-substrate.sh §3 proves the deny works).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tellus-tenant.fullname" . }}-default-deny
+  namespace: {{ include "tellus-tenant.namespace" . }}
+  labels:
+    {{- include "tellus-tenant.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tellus.io/tenant: {{ .Values.tenant | quote }}
+{{- end }}

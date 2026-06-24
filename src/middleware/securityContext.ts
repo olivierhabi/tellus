@@ -29,9 +29,30 @@
 // between Multipass (user auth) and Service-Tokens (machine auth) — a
 // human with empty markings fails closed; a service with empty markings
 // is explicitly exempted.
+//
+// Marking-bypass for superadmins (T-26):
+//   Foundry's data model gives every principal an explicit set of
+//   marking handles; admins are simply principals that hold every
+//   handle. We can't enumerate "every handle" cheaply on every read,
+//   so we approximate Foundry's "admin holds all handles" with a
+//   single role-based bypass: a human bearing the
+//   `tellus-superadmin` realm role gets `markingBypass=true`, which
+//   short-circuits the marking filter to match-all (same effect as
+//   `systemPrincipal`). The two flags are kept ORTHOGONAL because
+//   they describe different things:
+//     • `systemPrincipal` — "this is a machine, not a human";
+//        consumed by audit hooks, PAT gating, explorations RBAC,
+//        etc. Setting it for a human would mis-attribute writes.
+//     • `markingBypass`   — "this principal may read every marking";
+//        consumed ONLY by `buildSecurityFilter`. Human admins set
+//        this true while staying systemPrincipal=false so their
+//        writes still flow through the human audit path.
+//   Service principals get BOTH flags so existing call sites that
+//   keyed on `systemPrincipal` for filter bypass keep working.
 // ---------------------------------------------------------------------------
 
 import { Request, Response, NextFunction } from "express";
+import { TELLUS_SUPERADMIN_ROLE } from "./requireSuperAdmin";
 
 export interface SecurityContext {
   userId: string;
@@ -45,8 +66,29 @@ export interface SecurityContext {
    * Service principals bypass marking enforcement because they operate
    * on behalf of the platform (Funnel dispatcher, reindex, etc.). All
    * other principals MUST satisfy the marking filter.
+   *
+   * Note: this flag is consumed by audit / PAT / explorations RBAC.
+   * Do NOT set it true for human principals — use `markingBypass`
+   * for the read-side filter-skip semantics without polluting the
+   * write-side principal-type semantics.
    */
   systemPrincipal: boolean;
+  /**
+   * True when the principal may read every marking — i.e. the
+   * marking filter is suppressed for reads. Orthogonal to
+   * `systemPrincipal` (see file header).
+   *
+   * Sources:
+   *   • `systemPrincipal === true`  → always true (service ids
+   *     have always bypassed marking enforcement)
+   *   • realm role `tellus-superadmin` → true (T-26: aligns with
+   *     Foundry's "admin holds all marking handles" model and
+   *     with the existing `requireSuperAdmin` route gate)
+   *
+   * Consumed ONLY by `buildSecurityFilter`. Audit / PAT / RBAC
+   * code must continue to key on `systemPrincipal`.
+   */
+  markingBypass: boolean;
 }
 
 declare global {
@@ -123,6 +165,21 @@ export function securityContext(
     token.iss === INTERNAL_ISSUER;
   const systemPrincipal = Boolean(hasSystemScope || isInternalIssuer);
 
+  // ---- Marking-bypass (T-26) -------------------------------------------
+  // Superadmin holders read everything. We consult BOTH the resolved
+  // principal's role list (the canonical post-auth view, populated by
+  // the `tellusPrincipal` resolver and respecting role-mapper edits)
+  // AND the raw `realm_access.roles` JWT claim (the pre-resolver
+  // fallback). Either being present is sufficient.
+  const principalRoles: string[] = Array.isArray(principal?.roles)
+    ? (principal.roles as string[])
+    : [];
+  const tokenRoles = asStringArray(token.realm_access?.roles);
+  const isSuperAdmin =
+    principalRoles.includes(TELLUS_SUPERADMIN_ROLE) ||
+    tokenRoles.includes(TELLUS_SUPERADMIN_ROLE);
+  const markingBypass = Boolean(systemPrincipal || isSuperAdmin);
+
   req.security = {
     userId: user.id || principal?.userId || token.sub || "anonymous",
     markings,
@@ -130,6 +187,7 @@ export function securityContext(
     cbac,
     markingMode: "disjunctive",
     systemPrincipal,
+    markingBypass,
   };
 
   next();
@@ -174,12 +232,17 @@ export function buildSecurityFilter(
     return { match_none: {} };
   }
 
-  // System principals (internal services, reindex workers, Funnel
-  // dispatcher) bypass marking enforcement because they operate on
-  // behalf of the platform and must be able to re-index every object.
-  // They still get no match-all shortcut; callers who want unfiltered
-  // access should skip `buildSecurityFilter` entirely.
-  if (ctx.systemPrincipal) {
+  // Marking-bypass principals (internal services AND human
+  // superadmins) skip marking enforcement entirely. See file header.
+  // We key on `markingBypass` rather than `systemPrincipal` so the
+  // bypass is granted via role assignment, not by mis-stamping a
+  // human as a service identity. `markingBypass` is the union of
+  // (systemPrincipal || tellus-superadmin); legacy contexts without
+  // the field default to `systemPrincipal` so older callers keep
+  // their behaviour.
+  const bypass = (ctx as { markingBypass?: boolean }).markingBypass
+    ?? ctx.systemPrincipal;
+  if (bypass) {
     return null;
   }
 

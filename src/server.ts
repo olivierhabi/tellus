@@ -3,6 +3,7 @@ import "dotenv/config";
 // @temporalio/client, kafkajs) so auto-instrumentations patch the
 // module graph on first require.
 import "./services/otelBootstrap";
+import { assertQuiverTestAuthSafe } from "./routes/quiver/testAuth";
 import crypto from "crypto";
 import http from "http";
 import express, { Request, Response, NextFunction } from "express";
@@ -11,7 +12,16 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { pool, query } from "./db";
+import {
+  enforceMigrationGate,
+  MigrationDriftError,
+} from "./db/migrationGate";
+import {
+  enforceSchemaContract,
+  SchemaContractError,
+} from "./db/schemaContract";
 import requestLogger from "./middleware/requestLogger";
+import { idempotencyKeyMiddleware } from "./middleware/idempotencyKey";
 import { inputSanitizer } from "./middleware/inputSanitizer";
 import { notFoundHandler } from "./middleware/notFoundHandler";
 import errorHandler from "./middleware/errorHandler";
@@ -29,6 +39,7 @@ import geoRouter from "./routes/geo";
 import comparisonsRouter from "./routes/comparisons";
 import migrationManagerRouter from "./routes/migrationManager";
 import governanceRouter from "./routes/governance";
+import purposesRouter from "./routes/purposes";
 import { securityContext } from "./middleware/securityContext";
 import { resolveOntologyAlias } from "./middleware/resolveOntologyAlias";
 import datasourceRouter, { suggestMappingRouter } from "./routes/datasources";
@@ -44,6 +55,7 @@ import editsRouter from "./routes/edits";
 import reindexStatusRouter from "./routes/reindexStatus";
 import dataPreviewRouter from "./routes/dataPreview";
 import datasetRouter from "./routes/datasets";
+import { foundryDatasetsV1Router } from "./routes/foundryDatasetsV1";
 import reindexRouter from "./routes/reindex";
 import {
   resolveObjectTypeIdToApiName,
@@ -53,6 +65,14 @@ import interfaceRouter from "./routes/interfaces";
 import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
 import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
+
+// Tellus PostgreSQL Connectivity v2 (B1) — Connections CRUD + Compass binding.
+// Spec: tasks/postgres-connection/postgres-connection-tasks.md §B1.
+// Mounted under /api/v1/connectivity to keep the spec's namespaced surface
+// versioned independently of the existing /api/v1 ontology APIs.
+import connectivityRouter, {
+  initConnectivity,
+} from "./routes/connectivity.routes";
 
 // Modern Palantir-stack additions: DuckDB SQL, Polars charts, Kafka producer,
 // pipeline status. Each module is documented inline.
@@ -75,6 +95,7 @@ import {
   stopIcebergMaintenance,
 } from "./services/pipelines/icebergMaintenance";
 import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
+import { stopHealthProber } from "./services/connectivity/health/prober";
 import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
 
 // Background boot tasks (Lakekeeper, ClickHouse, superadmin seed, …) are
@@ -101,9 +122,12 @@ import { startReplacementScheduler, stopReplacementScheduler } from "./services/
 
 // Foundry data ingestion layer routes (BE-003 through BE-030)
 import foundryProjectsRouter from "./routes/projects";
+import compassChildrenRouter from "./routes/compassChildren";
 import foundryFoldersRouter from "./routes/folders";
 import foundryUploadsRouter from "./routes/uploads";
 import foundryProjectUploadsRouter from "./routes/projectUploads";
+import projectWorkspaceRouter, { resourceLifecycleRouter } from "./routes/projectWorkspace";
+import { autosaveProjectRouter, autosaveResourceRouter } from "./routes/autosaveSnapshots";
 import { folderDatasetsRouter as foundryFolderDatasetsRouter, datasetRouter as foundryDatasetRouter } from "./routes/foundryDatasets";
 import foundrySearchRouter from "./routes/search";
 import foundryBreadcrumbRouter from "./routes/breadcrumb";
@@ -145,6 +169,34 @@ for (const key of REQUIRED_ENV_VARS) {
     );
     process.exit(1);
   }
+}
+
+// Refuse to boot a production process with any test-auth bypass enabled — a
+// single mis-set env var must never silently turn a request header into an
+// authenticated identity. Fail loud at deploy time, not latent at runtime.
+try {
+  assertQuiverTestAuthSafe();
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.CODE_REPOS_TEST_AUTH === "1"
+  ) {
+    throw new Error(
+      "CODE_REPOS_TEST_AUTH=1 is set in production — the X-Tellus-Test-Principal " +
+        "bypass must never be enabled in production. Unset it before deploying.",
+    );
+  }
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.TELLUS_TEST_HOOKS === "1"
+  ) {
+    throw new Error(
+      "TELLUS_TEST_HOOKS=1 is set in production — test hooks must never be " +
+        "enabled in production. Unset it before deploying.",
+    );
+  }
+} catch (err) {
+  console.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,18 +292,59 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
   return next(err);
 });
 
-// CORS — restrict origins via CORS_ORIGINS env var; empty = allow all (dev)
+// CORS — restrict origins via CORS_ORIGINS env var.
+// Fail-closed in production: an unset/empty CORS_ORIGINS resolves to NO allowed
+// origin (never `true`), so we never reflect arbitrary origins alongside
+// credentials. Outside production we keep dev allow-all for local DX.
+const isProduction = process.env.NODE_ENV === "production";
 const corsOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
-  : undefined; // undefined = allow all origins
+  ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+  : undefined;
+
+// Explicit list (any env) → use it. Else: dev allows all, prod allows none.
+const corsOrigin: string[] | boolean =
+  corsOrigins && corsOrigins.length > 0 ? corsOrigins : !isProduction;
+
+// Never expose the test-auth bypass headers in production.
+const corsAllowedHeaders = [
+  "Content-Type",
+  "Authorization",
+  "Idempotency-Key",
+  "If-Match",
+  "If-None-Match",
+  "X-Request-ID",
+  // Custom request headers the browser sends cross-origin (when the FE talks to
+  // the backend directly rather than through a same-origin proxy). Each triggers
+  // a CORS preflight, so they must be allow-listed or the request is blocked:
+  //   X-Tellus-Branch — Quiver client, branch routing (sent on every call)
+  //   X-Deadline      — Quiver compute deadline
+  //   x-branch-id     — ontology client, branch selection
+  //   X-Tellus-Reauth — settings client, step-up reauth token
+  "X-Tellus-Branch",
+  "X-Deadline",
+  "x-branch-id",
+  "X-Tellus-Reauth",
+  ...(isProduction
+    ? []
+    : ["X-Tellus-Test-Principal", "X-Tellus-Test-Role", "X-Tellus-Test-Roles"]),
+];
 
 app.use(
   cors({
-    origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
+    origin: corsOrigin,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "X-Request-ID"],
-    exposedHeaders: ["X-Idempotency-Cached", "X-Total-Count", "Server-Timing", "Retry-After", "Content-Language", "X-Request-ID"],
+    allowedHeaders: corsAllowedHeaders,
+    exposedHeaders: [
+      "X-Idempotency-Cached",
+      "X-Idempotent-Replay",
+      "X-Total-Count",
+      "Server-Timing",
+      "Retry-After",
+      "Content-Language",
+      "X-Request-ID",
+      "ETag",
+    ],
   })
 );
 
@@ -290,7 +383,23 @@ app.use(inputSanitizer);
 // 504 instead of hanging the connection). /health, /ready, /metrics,
 // and /openapi.json are exempted inside the middleware itself.
 import { requestTimeoutMiddleware } from "./middleware/requestTimeout";
-app.use(requestTimeoutMiddleware());
+// The code-repositories function-invoke path (transpile + 200k-row ontology
+// snapshot load + a 5s sandbox run) cannot fit the 5s data-plane budget, so
+// it gets its own longer ceiling (CODE_REPOS_REQUEST_TIMEOUT_MS, default 30s)
+// mounted on its router below. Exempt the whole mount prefix here so the
+// global 5s timer does not fire first and 504 a request the longer budget
+// would have allowed.
+//
+// `/api/v1/objects` is also exempted + given a longer ceiling below: the
+// object-search read itself is sub-second, but it shares the single Node
+// event loop with the (synchronous) function sandbox, which can block for up
+// to FUNCTION_TIMEOUT_MS. A search queued behind a sandbox would otherwise
+// blow the 5s budget and 504 even though its own work is ~ms. The longer
+// ceiling lets it complete once the sandbox yields; the root-cause fix (the
+// sandbox moved to a worker thread) is in functionRuntime/functionWorkerPool.
+app.use(requestTimeoutMiddleware({
+  exemptPaths: ["/api/v1/code-repositories", "/api/v1/objects"],
+}));
 {
   const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
   const mounted = stack.some((layer) => layer.name === "requestTimeoutMw");
@@ -457,21 +566,24 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
   );
 }
 
-// API routers — spec cypress tests hit `.../ontology/default/...`; rewrite
-// the URL path so every downstream router sees the real UUID. This is a
-// string substitution on `req.url` so Express re-parses params for us.
-const ALIAS_RE = /^(\/api\/v1\/ontology)\/(default|main|primary)(\/|$)/;
+// "One Enterprise, One Ontology" — collapse ANY ontology identifier in the
+// path (a real UUID, a symbolic alias like `default`/`main`/`primary`, or any
+// other value) onto the single canonical ontology, so every downstream router
+// operates on the one ontology. We rewrite `req.url` so Express re-parses the
+// param for us. `import` is excluded: it is a lifecycle sub-route of the
+// ontology router, not an ontology identifier.
 app.use(async (req, _res, next) => {
-  const m = req.url.match(ALIAS_RE);
-  if (!m) return next();
+  // Cheap pre-check: only ontology-scoped sub-paths can be collapsed. The bare
+  // `/api/v1/ontology` (list/create) has no trailing slash and is skipped.
+  if (!req.url.startsWith("/api/v1/ontology/")) return next();
   try {
-    const { query } = await import("./db");
-    const result = await query(
-      "SELECT ontology_id FROM ontology ORDER BY created_at ASC LIMIT 1"
+    const { getOntologyId, collapseOntologyUrl } = await import(
+      "./services/ontology/canonicalOntology"
     );
-    if (result.rowCount && result.rowCount > 0) {
-      const real = result.rows[0].ontology_id as string;
-      req.url = req.url.replace(ALIAS_RE, `$1/${real}$3`);
+    const canonical = await getOntologyId();
+    if (canonical) {
+      const rewritten = collapseOntologyUrl(req.url, canonical);
+      if (rewritten) req.url = rewritten;
     }
   } catch {
     // fall through — route will return its own error
@@ -517,6 +629,17 @@ app.use(
 app.use("/api/v1/actions", validateRouter);
 app.use("/api/v1/actions", batchRouter);
 app.use("/api/v1/audit", globalAuditRouter);
+// Edits feed — mounted at two paths so callers can address the parent
+// object type by either its mutable apiName (legacy) or its stable
+// UUID. Both mounts share the same router (`mergeParams: true`) and
+// are disambiguated inside the handler by `resolveFromParams`. The
+// `/by-id/...` mount must be registered FIRST so Express's
+// first-match routing picks it before falling through to the api_name
+// mount when callers send a UUID.
+app.use(
+  "/api/v1/ontology/:ontologyId/objectTypes/by-id/:objectTypeId/edits",
+  editsRouter
+);
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/edits",
   editsRouter
@@ -525,18 +648,174 @@ app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/index",
   reindexStatusRouter
 );
+// Foundry-parity Datasets API (create + get + preview), keyed by dataset RID.
+// Mounted FIRST so its bare POST and its `ri.foundry.main.dataset.*` GET routes
+// win; non-RID (UUID) requests fall through (next()) to the legacy upload /
+// object-explorer datasets routers below, which keep working unchanged.
+app.use("/api/v1/datasets", foundryDatasetsV1Router);
 app.use("/api/v1/datasets", datasetRouter);
 app.use("/api/v1/datasets", dataPreviewRouter);
 
-// PB-B8: v2 lineage surface (new semantics → v2 prefix per the
-// project's framing note).
-import lineageRouter from "./routes/lineage";
-app.use("/api/v2", lineageRouter);
+// Code Repositories (B2) — admin router mounted on the main server so
+// the FE can reach the saga + ledger + branches via the existing auth chain.
+//
+// We use `mountCodeRepository` (not the router-only helper) so we keep a
+// handle on the in-memory adapter instances. That lets the rehydrator below
+// re-seed every ACTIVE `code_repository` row into the same adapter the
+// router will use at request time — without it, a backend restart leaves
+// existing repository RIDs unreadable until the row is re-created.
+import { mountCodeRepository } from "./services/codeRepository/mount";
+import { rehydrateInMemoryStemma } from "./services/codeRepository/rehydrate";
+import { PostgresStemma } from "./services/codeRepository/adapters/postgres";
+// DURABLE Stemma (migration 086): persist branches/blobs/HEADs to Postgres so
+// committed code survives restarts. Previously the in-memory adapter lost all
+// git content on every reload, leaving repos showing only the template scaffold
+// and drifting branch_cache (→ 412 on commit). The template adapter scaffolds
+// through this same instance, so new repos materialise into Postgres too.
+const codeRepoMount = mountCodeRepository({ pool, stemma: new PostgresStemma({ pool }) });
+// Dedicated wall budget for code-repositories routes (the function-invoke
+// path transpiles + loads an ontology snapshot + runs a sandboxed function).
+// The global 5s middleware exempted this prefix above; this longer ceiling
+// (default 30s) still protects against true hangs while letting legitimate
+// invokes complete. The sandbox's own FUNCTION_TIMEOUT_MS (5s) bounds CPU.
+const CODE_REPOS_REQUEST_TIMEOUT_MS = Number(
+  process.env.CODE_REPOS_REQUEST_TIMEOUT_MS ?? 30_000,
+);
+app.use(
+  "/api/v1/code-repositories",
+  requestTimeoutMiddleware({ timeoutMs: CODE_REPOS_REQUEST_TIMEOUT_MS }),
+);
+app.use("/api/v1/code-repositories", codeRepoMount.router);
+
+// Longer ceiling for the object read path (search/get/aggregate) so a request
+// queued behind a synchronous function-sandbox block completes instead of
+// 504ing at the 5s data-plane budget. See the exemption comment above.
+const OBJECTS_REQUEST_TIMEOUT_MS = Number(
+  process.env.OBJECTS_REQUEST_TIMEOUT_MS ?? 15_000,
+);
+app.use(
+  "/api/v1/objects",
+  requestTimeoutMiddleware({ timeoutMs: OBJECTS_REQUEST_TIMEOUT_MS }),
+);
+
+// Functions Registry (B8) — the platform-wide store of published, immutable,
+// SemVer-versioned TypeScript Functions v2. Produced by Tag & Release
+// (POST /api/v1/code-repositories/:rid/tags) and consumed by Workshop/Actions
+// via resolve. Mounted here so /api/v1/functions/* is live in the running
+// product (previously the router existed but was never wired up).
+import { createFunctionsRouter } from "./services/functionsRegistry/admin/routes";
+// The registry router declares its routes as `/functions/:rid/...` (it was
+// authored to mount at the root of a standalone app). Re-base it under
+// `/api/v1/functions` by prepending `/functions` to the post-mount URL — this
+// keeps the router's own auth/idempotency middleware scoped to this prefix
+// (mounting it at `/api/v1` would apply those globally).
+const functionsRegistryRouter = createFunctionsRouter({ pool });
+app.use(
+  "/api/v1/functions",
+  (req: Request, _res: Response, next: NextFunction) => {
+    req.url = "/functions" + (req.url === "/" ? "" : req.url);
+    next();
+  },
+  functionsRegistryRouter,
+);
+
+// Code Repositories — Python @transform -> datasets (migration 103).
+// The transform build engine: discover @transform on a committed ref,
+// publish one job_spec per transform, execute in python3, materialize the
+// OUTPUT dataset, and record input->output lineage. Mounted at /api/v1 AFTER
+// the code-repositories router so `/code-repositories/:rid/builds` falls through
+// to it. The jobSpec router (B7) is also mounted here so transform builds
+// persist job_spec rows.
+import { createTransformsRouter } from "./services/codeRepository/transforms/routes";
+import { createJobSpecRouter } from "./services/jobSpec/admin/routes";
+app.use("/api/v1", createTransformsRouter({ stemma: new PostgresStemma({ pool }) }));
+app.use("/api/v1", createJobSpecRouter({ pool }));
+
+// Boot-time rehydrator. No-op against a real Stemma client (production); a
+// best-effort re-seed against the in-memory adapter (dev / e2e). Awaited
+// inline at module load so the FE's first request after boot finds the
+// branches it expects. Errors are logged + swallowed: a partial rehydrate
+// must not block the server from accepting traffic.
+void (async () => {
+  // Skip if a shutdown is already underway — rehydrate is a best-effort boot
+  // task; running it against a draining pool just logs a spurious fatal.
+  if (isShuttingDown) return;
+  try {
+    const r = await rehydrateInMemoryStemma({
+      pool,
+      stemma: codeRepoMount.adapters.stemma,
+      // Wave 22: scaffold-on-rehydrate so existing repos come back with the
+      // v2 file tree, not as empty branches. Without this the file viewer
+      // renders blank for every repo created before the current process boot.
+      template: codeRepoMount.adapters.template,
+      logger: (event, meta) =>
+        console.log(JSON.stringify({ event, ...(meta ?? {}) })),
+    });
+    if (r.applied && (r.rehydrated > 0 || r.failed > 0)) {
+      console.log(
+        JSON.stringify({
+          event: "code-repos.rehydrate.summary",
+          rehydrated: r.rehydrated,
+          skipped: r.skipped,
+          failed: r.failed,
+          total: r.total,
+        }),
+      );
+    }
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        event: "code-repos.rehydrate.fatal",
+        message: (err as Error).message,
+      }),
+    );
+  }
+})();
+
+// Code Repositories — B3 Templates service.
+//
+// Per ADR-008 the B3 surface is split into two router factories, each
+// mounted at its own resource prefix. This makes the mount strictly
+// resource-scoped (no middleware leak across siblings) and lets every
+// router declare its auth/idempotency stack as router-internal without
+// risk of intercepting unrelated `/api/v1/*` traffic.
+//
+// History: this previously shipped as a single router whose router-level
+// `requireCodeReposAuth()` middleware leaked across `/api/v1/*` (including
+// `/api/v1/auth/login`) and 401-rejected sibling routes. ADR-008 codifies
+// the rule that prevents the regression.
+import {
+  createTemplatesRouter,
+  createScaffoldRouter,
+} from "./services/templates/admin/routes";
+app.use("/api/v1/templates", createTemplatesRouter({ pool }));
+app.use("/api/v1/scaffold", createScaffoldRouter({ pool }));
 
 // PB-B9: Prometheus scrape endpoint for the Pipeline Builder,
 // parallel to /api/v1/funnel/metrics.
 import pipelinesMetricsRouter from "./routes/pipelinesMetrics";
 app.use("/api/v1/pipelines", pipelinesMetricsRouter);
+
+// Workshop B01 — module CRUD with ETag/If-Match optimistic concurrency.
+// Spec: tasks/workshop/workshop-tasks.md §B01. Mounted under the spec's
+// `/api/v1/workshop` prefix (separate from `/api/v1` so the surface stays
+// versioned independently of the existing Foundry-shaped APIs).
+import workshopModulesRouter from "./routes/workshopModules";
+app.use("/api/v1/workshop", workshopModulesRouter);
+
+// Quiver B1 — analysis CRUD (Phase 1).
+// Spec: tasks/quiver/quiver-tasks.md §B1. Phase-flagged via TELLUS_QUIVER_PHASE.
+// Mounted at /quiver/api/v1 to mirror the spec's base-path verbatim.
+import { buildQuiverRouter } from "./routes/quiver";
+app.use("/quiver/api/v1", buildQuiverRouter());
+
+// Wire the production-default Workshop OSS adapter to read from the seeded
+// `workshop_demo_order` Postgres table (migration 061). Tests that exercise
+// the OSS path swap their own RecordingOssAdapter via setOss() in beforeAll
+// and restore it in afterAll, so this default does not affect the suite.
+import { setOss } from "./services/workshop/ossAdapter";
+import { PostgresOssAdapter } from "./services/workshop/postgresOssAdapter";
+setOss(new PostgresOssAdapter());
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex",
   reindexRouter
@@ -545,8 +824,27 @@ app.use(
 // reindexRouter mount below so this handler wins for POST requests and
 // the router only ever serves GET /status and GET /history for the
 // UUID path.
+// Idempotency-Key middleware: when the FE sends a UUIDv4 in the
+// `Idempotency-Key` header, the same key replays the cached 202 +
+// signalId without emitting a duplicate `editBatchPending` signal.
+//
+// Why this is required and `isCommitting` (FE) alone isn't:
+//   - Two browser tabs open on the same OT can each fire a Save POST
+//     concurrently. The FE in-flight lock is per-component-instance,
+//     not cross-tab.
+//   - axios retries on transient failures (e.g., network hiccup after
+//     the backend received the request but before the response made
+//     it back). Without idempotency, the retry creates a duplicate
+//     funnel run.
+//   - Browser back/forward navigation that unmounts and remounts the
+//     editor mid-flight resets `isCommitting` to false; a follow-up
+//     click would emit a second signal.
+//
+// The middleware sits BEFORE the resolver so a malformed key
+// short-circuits with 400 INVALID_ARGUMENT without touching the DB.
 app.post(
   "/api/v1/ontology/:ontologyId/objectTypeId/:objectTypeId",
+  idempotencyKeyMiddleware(pool, "POST /ontology/{ontologyId}/objectTypeId/{objectTypeId}"),
   resolveObjectTypeIdToApiName,
   saveToOntology
 );
@@ -585,12 +883,24 @@ app.use("/api/v1/ontology/:ontologyId/geo", geoRouter);
 app.use("/api/v1/ontology/:ontologyId/comparisons", comparisonsRouter);
 app.use("/api/v1/ontology/:ontologyId/migrations", migrationManagerRouter);
 app.use("/api/v1/ontology/:ontologyId/governance", governanceRouter);
+// FOUNDRY-GAPS §8 — purpose-based access control: purpose catalogue + grants.
+// Enforcement on data-plane reads is via purposeGate middleware (env-gated
+// by TELLUS_PURPOSE_ENFORCEMENT=on; default off).
+app.use("/api/v1/ontology/:ontologyId/purposes", purposesRouter);
 app.use("/api/v1/users/me/favorites", favoritesRouter);
 
 // New Palantir-stack endpoints (Furnace SQL, Polars charts, Funnel pipeline status).
 app.use("/api/v1", sqlRouter);
 app.use("/api/v1", chartsRouter);
 app.use("/api/v1", pipelinesStatusRouter);
+
+// Tellus Connectivity v2 — B1 wave.
+// Routes: POST/GET/PUT/DELETE /api/v1/connectivity/connections + /:rid/{configuration,status}
+// The Compass outbox poller starts via initConnectivity() below; gated by
+// TELLUS_DISABLE_CONNECTIVITY_POLLER=1 for unit-test workers that should
+// not dispatch.
+app.use("/api/v1/connectivity", connectivityRouter);
+initConnectivity();
 app.use("/api/v1/funnel", funnelRouter);
 
 // ---------------------------------------------------------------------------
@@ -601,6 +911,13 @@ app.use("/api/v1/projects", foundryProjectsRouter);
 app.use("/api/v1/projects/:projectId/folders", foundryFoldersRouter);
 app.use("/api/v1/projects/:projectId/folders/:folderId", foundryUploadsRouter);
 app.use("/api/v1/projects/:projectId", foundryProjectUploadsRouter);
+// Project workspace sub-tabs: trashed listing + file/external references.
+// Mounted at /api/v1/projects/:projectId so handlers can read req.params.projectId.
+app.use("/api/v1/projects/:projectId", projectWorkspaceRouter);
+app.use("/api/v1/projects", autosaveProjectRouter);
+app.use("/api/v1/resources", autosaveResourceRouter);
+// Resource lifecycle (restore, permanently-delete) is RID-scoped, not project-scoped.
+app.use("/api/v1/resources", resourceLifecycleRouter);
 app.use("/api/v1/projects/:projectId/folders/:folderId/datasets", foundryFolderDatasetsRouter);
 app.use("/api/v1/datasets", foundryDatasetRouter);
 app.use("/api/v1/datasets", foundryColumnStatsRouter);
@@ -621,6 +938,15 @@ if (process.env.NODE_ENV !== "production") {
 }
 app.use("/api/v1/projects/:projectId/members", foundryMembersRouter);
 app.use("/api/v1/projects/:projectId/pipelines", foundryPipelinesRouter);
+
+// ---------------------------------------------------------------------------
+// Compass Children Gateway — single fan-out endpoint that powers the
+// project / folder workspace pages. Replaces the per-service list calls
+// the FE used to make against /v1/projects/:id/{folders,datasets,...}.
+//
+//   GET /api/v1/compass/folders/:folderRid/children
+// ---------------------------------------------------------------------------
+app.use("/api/v1/compass", compassChildrenRouter);
 
 // ---------------------------------------------------------------------------
 // API Specification & Documentation
@@ -730,6 +1056,83 @@ async function start(): Promise<void> {
     // Verify the database is reachable before accepting requests.
     await pool.query("SELECT NOW()");
 
+    // Migration gate — fail-fast on schema drift (production) or
+    // auto-apply pending migrations (dev).  Mode is selected by
+    // TELLUS_MIGRATION_GATE env var; defaults to `strict` when
+    // NODE_ENV=production, `auto` otherwise.  Gate runs BEFORE any
+    // service tries to write to a Postgres table — failure here
+    // exits the process so K8s/Apollo treats it as a deploy
+    // failure and stops the rollout.  See decisions/code-repository/
+    // D-2026-05-04-008-boot-migration-gate.md.
+    try {
+      const gateResult = await enforceMigrationGate({ pool });
+      console.log(
+        JSON.stringify({
+          type: "migration_gate.ok",
+          mode: gateResult.mode,
+          appliedDuringRun: gateResult.appliedDuringRun.length,
+          pendingBefore: gateResult.pending.length,
+          durationMs: gateResult.durationMs,
+        }),
+      );
+    } catch (gateErr) {
+      if (gateErr instanceof MigrationDriftError) {
+        console.error(
+          JSON.stringify({
+            type: "migration_gate.drift",
+            pending: gateErr.pending,
+            message: gateErr.message,
+          }),
+        );
+      } else {
+        console.error(
+          JSON.stringify({
+            type: "migration_gate.error",
+            error: gateErr instanceof Error ? gateErr.message : String(gateErr),
+          }),
+        );
+      }
+      // Refusing to start the server — drift / apply failure must
+      // be treated as a deploy bug, not a soft warning.
+      await pool.end().catch(() => {
+        /* ignored — already shutting down */
+      });
+      process.exit(1);
+    }
+
+    // Schema contract — verifies that every column the codebase writes
+    // to via raw SQL exists on the live DB. Catches the class of bug
+    // where a column rename / removal lands without an accompanying SQL
+    // edit. Runs after the migration gate so any pending migrations are
+    // already applied.
+    try {
+      await enforceSchemaContract(pool);
+    } catch (contractErr) {
+      if (contractErr instanceof SchemaContractError) {
+        console.error(
+          JSON.stringify({
+            type: "schema_contract.refused",
+            violations: contractErr.violations,
+            message: contractErr.message,
+          }),
+        );
+      } else {
+        console.error(
+          JSON.stringify({
+            type: "schema_contract.error",
+            error:
+              contractErr instanceof Error
+                ? contractErr.message
+                : String(contractErr),
+          }),
+        );
+      }
+      await pool.end().catch(() => {
+        /* ignored — already shutting down */
+      });
+      process.exit(1);
+    }
+
     // Ensure the OpenSearch index template is in place before any indexing
     // operations. This is a best-effort call — if OpenSearch is not yet
     // reachable the server still starts (indexing will fail later with a
@@ -793,6 +1196,15 @@ async function start(): Promise<void> {
       );
     }
 
+    // Start Asynchronous Multi-Source Compilation Worker
+    try {
+      const { startDatasourceCompilerConsumer } = require("./services/orchestration/datasource-compiler-consumer");
+      startDatasourceCompilerConsumer();
+      console.log("Multi-Source Compilation Worker started");
+    } catch (err) {
+      console.warn(`WARNING: could not start Multi-Source Compilation Worker: ${(err as Error).message}`);
+    }
+
     // PB-B1: Pipeline dispatcher + one-shot orphan sweep.
     //
     // The dispatcher drains pipeline_signal on a 2s tick and runs the
@@ -822,7 +1234,6 @@ async function start(): Promise<void> {
         `WARNING: could not start Pipeline dispatcher: ${(err as Error).message}`
       );
     }
-    void stopPipelineDispatcher; // retain symbol for shutdown wiring
 
     // PB-B4 — Iceberg compaction + expiration loop for _pipeline.* tables.
     // Best-effort: skipped when PyIceberg sidecar is unreachable.
@@ -836,7 +1247,6 @@ async function start(): Promise<void> {
         `WARNING: could not start Iceberg maintenance: ${(err as Error).message}`
       );
     }
-    void stopIcebergMaintenance;
 
     // B3: Sweep funnel_run rows orphaned by a prior worker restart.
     // A SIGKILL / OOM / container restart mid-activity leaves rows at
@@ -1032,6 +1442,16 @@ async function start(): Promise<void> {
           });
           user = { id: userId, email, username: email };
           console.log(`[bootstrap] created superadmin user ${email}`);
+        } else if (autoCreate) {
+          // Existing account: reconcile its Keycloak password with the
+          // current TELLUS_SUPERADMIN_PASSWORD. The create-time password is
+          // set ONCE; a later env rotation never reaches an already-created
+          // user, so the credential drifts and login starts failing with
+          // `invalid_grant`. Non-prod only — production must not silently
+          // overwrite an operator-managed credential (autoCreate is false
+          // there), so this is gated behind the same NODE_ENV check.
+          await kc.resetPassword(user.id, password);
+          console.log(`[bootstrap] reconciled superadmin password for ${email}`);
         }
         await kc.assignRealmRoleToUser(user.id, TELLUS_SUPERADMIN_ROLE);
         console.log(
@@ -1107,6 +1527,52 @@ async function shutdown(signal: string): Promise<void> {
 
   // Destroy the action rate limiter to prevent dangling setInterval
   limiter.destroy();
+
+  // The auth-maintenance sweep queries the foundry pool on a 60s timer; clear
+  // it before the drain so it can't fire against an ended pool.
+  clearInterval(authMaintenanceSweeper);
+
+  // Quiesce background workers / timers BEFORE draining the DB pools. Each of
+  // these runs a self-scheduling loop (FOR UPDATE SKIP LOCKED claimers, sweep
+  // ticks) that would otherwise keep issuing queries against a pool we are
+  // about to `end()`, racing the drain and logging spurious errors. Stop them
+  // first, tolerate individual failures, and keep going — shutdown must not
+  // hang on one misbehaving worker. The connectivity health prober is included
+  // because its recordStatus() writes to the foundry pool every tick.
+  const workerStops: Array<[string, () => unknown]> = [
+    ["funnelDispatcher", stopFunnelDispatcher],
+    ["pipelineDispatcher", stopPipelineDispatcher],
+    ["overlaySweeper", stopOverlaySweeper],
+    ["replacementScheduler", stopReplacementScheduler],
+    ["icebergMaintenance", stopIcebergMaintenance],
+    ["temporalWorker", stopTemporalWorker],
+    ["healthProber", stopHealthProber],
+  ];
+  for (const [name, stop] of workerStops) {
+    try {
+      await Promise.resolve(stop());
+    } catch (err) {
+      console.error(JSON.stringify({
+        type: "worker_stop_error",
+        worker: name,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  }
+
+  // Quit the Redis rate-limiter client, cache-invalidation bus and Kafka
+  // producer cleanly so their sockets/timers don't keep the event loop alive.
+  try {
+    const { shutdownK8sInfra } = await import("./boot/cacheAndRateLimit");
+    await shutdownK8sInfra();
+  } catch (err) {
+    console.error(JSON.stringify({ type: "k8s_infra_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+  try {
+    await shutdownKafka();
+  } catch (err) {
+    console.error(JSON.stringify({ type: "kafka_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+  }
 
   // Close foundry WebSocket connections
   const wss = getWss();

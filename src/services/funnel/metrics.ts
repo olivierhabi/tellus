@@ -172,6 +172,42 @@ const COUNTER_HELP: Record<string, string> = {
     "Count of funnel_run rows swept as orphans on server boot.",
   funnel_iceberg_metadata_emission_failures_total:
     "Count of S3 metadata.json emission failures requiring sweeper retry.",
+  // T-01 — object-explorer read-path branch-filter audit.
+  tellus_read_branch_filtered_total:
+    "Count of explorer read-path queries by route and whether a branch filter was applied (scoped='true' iff branchId !== null).",
+  // T-03 — SQL surface.
+  tellus_sql_cache_hits_total:
+    "Count of furnace-SQL cache outcomes by result label (hit/miss/inflight_join).",
+  tellus_sql_invalidate_total:
+    "Count of /sql/invalidate calls by caller role.",
+  tellus_sql_query_total:
+    "Count of /sql executions by terminal outcome (ok/timeout/execution_error/rejected).",
+  tellus_sql_sandbox_set_failed_total:
+    "Count of DuckDB sandbox SET statements that failed during initialisation; non-zero indicates version drift.",
+  // T-04 — overlay branch isolation.
+  tellus_overlay_reads_total:
+    "Count of overlay reads by branch_match (match/mismatch_rejected) and source (new_key/legacy_key).",
+  tellus_overlay_writes_total:
+    "Count of overlay writes by outcome (ok/version_conflict).",
+  tellus_overlay_legacy_hits_total:
+    "Count of legacy-key overlay reads (Phase progression monitor — should trend to zero).",
+  tellus_overlay_branch_mismatch_total:
+    "Count of overlay reads suppressed because the only hit lived in the legacy key but the request targeted a non-main branch (MUST be zero in phase 3).",
+  // T-05 — exports.
+  tellus_export_jobs_total:
+    "Count of export jobs by format and terminal outcome.",
+  tellus_export_rows_streamed_total:
+    "Count of rows streamed by export workers, partitioned by format.",
+  tellus_export_download_issued_total:
+    "Count of presigned download URLs returned to authenticated owners by format.",
+  tellus_export_download_expired_total:
+    "Count of download requests rejected with EXPORT_DOWNLOAD_EXPIRED by format.",
+  // T-08 — saved explorations.
+  tellus_saved_exploration_marking_misses_total:
+    "Count of saved-exploration reads filtered by required_markings markings mismatch.",
+  // T-09 — full-text spec syntax usage.
+  tellus_full_text_spec_syntax_total:
+    "Count of full-text queries by whether spec syntax (operators, wildcards, quotes) was detected.",
 };
 const GAUGE_HELP: Record<string, string> = {
   funnel_run_in_flight:
@@ -182,4 +218,20 @@ const HISTOGRAM_HELP: Record<string, string> = {
     "Wall-clock duration of each Funnel stage (changelog/merge/indexing/hydration) in seconds.",
   funnel_workflow_cancel_latency_seconds:
     "Time between cancel signal and workflow closure.",
+  // T-03 — SQL.
+  tellus_sql_query_duration_seconds:
+    "End-to-end duration of /sql executions in seconds, partitioned by outcome.",
+  // T-05 — exports.
+  tellus_export_duration_seconds:
+    "End-to-end duration of export workflows by format.",
+  // T-09 — search around.
+  tellus_search_around_visited_pks:
+    "Cardinality of accumulated visitedPKs per search-around traversal.",
+  tellus_search_around_hops:
+    "Number of hops per search-around traversal.",
+  tellus_pagination_size:
+    "Effective per-page size after MAX_PAGE_SIZE clamp.",
+  // T-10 — per-route latency.
+  tellus_route_duration_seconds:
+    "Per-route end-to-end duration in seconds, partitioned by route and status_class.",
 };

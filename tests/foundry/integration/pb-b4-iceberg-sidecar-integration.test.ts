@@ -52,6 +52,8 @@ const namespace = pipelineNamespace(projectSlug, pipelineSlug);
 const table = "output";
 let sidecarUp = false;
 let lakekeeperUp = false;
+let warehouseUp = false;
+let minioUp = false;
 
 async function lakekeeperReachable(): Promise<boolean> {
   try {
@@ -59,6 +61,41 @@ async function lakekeeperReachable(): Promise<boolean> {
       signal: AbortSignal.timeout(2_000),
     });
     return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Lakekeeper's /management/v1/info answers 2xx even when no warehouse is
+// provisioned. The operation that actually fails is the REST catalog's
+// config fetch: GET /catalog/v1/config?warehouse=<wh> returns 404 →
+// pyiceberg raises NoSuchWarehouseException. Probing this endpoint is the
+// only way to tell "warehouse usable" from "server answers pings".
+async function warehouseReachable(): Promise<boolean> {
+  try {
+    const base = process.env.LAKEKEEPER_URL ?? "http://localhost:8181";
+    const warehouse =
+      process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ??
+      process.env.LAKEKEEPER_WAREHOUSE ??
+      "tellus-pipeline";
+    const url = `${base}/catalog/v1/config?warehouse=${encodeURIComponent(warehouse)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+    return r.ok; // 200 = warehouse provisioned; 404 = NoSuchWarehouse
+  } catch {
+    return false;
+  }
+}
+
+// MinIO/S3 is the warehouse's backing object store. A warehouse can be
+// registered with the catalog while its object store is unreachable, in
+// which case commits fail with an S3-unreachable error.
+async function minioReachable(): Promise<boolean> {
+  try {
+    const endpoint =
+      process.env.S3_ENDPOINT ?? process.env.ICEBERG_S3_ENDPOINT ?? "http://localhost:9000";
+    const url = new URL("/minio/health/live", endpoint).toString();
+    const r = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+    return r.ok;
   } catch {
     return false;
   }
@@ -87,9 +124,11 @@ pq.write_table(t, sys.argv[2], compression="zstd")
 beforeAll(async () => {
   sidecarUp = await icebergSidecarAvailable();
   lakekeeperUp = await lakekeeperReachable();
-  if (!sidecarUp || !lakekeeperUp) {
+  warehouseUp = await warehouseReachable();
+  minioUp = await minioReachable();
+  if (!sidecarUp || !lakekeeperUp || !warehouseUp || !minioUp) {
     console.warn(
-      `[pb-b4] skipping — sidecar=${sidecarUp} lakekeeper=${lakekeeperUp}`,
+      `[pb-b4] skipping — sidecar=${sidecarUp} lakekeeper=${lakekeeperUp} warehouse=${warehouseUp} minio=${minioUp}`,
     );
   }
 });
@@ -102,7 +141,7 @@ afterAll(() => {
 });
 
 function guard(): boolean {
-  return sidecarUp && lakekeeperUp;
+  return sidecarUp && lakekeeperUp && warehouseUp && minioUp;
 }
 
 describe("PB-B4 Iceberg sidecar", () => {

@@ -127,11 +127,8 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("7.1  Setup ontology + Employee type");
 
-  const ontRes = await api("POST", "/api/v1/ontology", {
-    displayName: "Test07 Mapping Suggestions",
-  });
-  assert(ontRes.status === 201, "Ontology created");
-  ontologyId = ontRes.body?.data?.ontologyId;
+  const ontRes = await api("GET", "/api/v1/ontology/default");
+  ontologyId = ontRes.body?.data?.ontologyId ?? ontRes.body?.ontologyId; assert(!!ontologyId, "Enterprise ontology resolved");
 
   const otRes = await api(
     "POST",

@@ -1,0 +1,36 @@
+verdict|id|description
+PASS|CR-2|Unauthenticated request → 401 (auth required, like Stemma)
+PASS|CR-1|Create repo from TS-Functions template → 201, rid=ri.stemma.main.repository.63fcaec6-9296-49ad-8d57-b62f051c2ade
+PASS|CR-1b|New repo resource_version ETag = W/"1"
+PASS|CR-3|Idempotent create replay → same rid, X-Idempotent-Replay:true
+PASS|CR-4|Duplicate name in same folder → 409 conflict
+PASS|CR-5|GET repo by rid → 200
+PASS|CR-5b|GET unknown repo → 404 (IDOR-safe)
+PASS|CR-6|Default 'master' branch listed
+PASS|CR-9|Tree returns scaffolded TS-Functions files
+PASS|CR-9b|Tree If-None-Match → 304 Not Modified
+PASS|CR-7|Commit file on master (parent-SHA If-Match) → 201
+PASS|CR-7b|Empty commit message rejected → 400
+PASS|CR-8|Commit on stale parent SHA → 412 (ref moved)
+PASS|CR-10|Read committed blob back → 200
+PASS|CR-11|PATCH with correct If-Match W/"1" → 200 (rename)
+PASS|CR-11b|PATCH with stale If-Match → 412
+PASS|CR-11c|PATCH without If-Match → 400 (precondition required)
+PASS|CR-11d|Malformed If-Match → 400 (handled cleanly)
+PASS|CR-12|GET resource-imports → 200 (Ontology imports surface)
+PASS|CR-13|DELETE repo (If-Match:W/"2") → soft-trash (204)
+GAP|CR-14|List returns nextPageToken but it is always null (pagination stubbed)
+GAP|CR-15|Pull Requests / Proposals: no endpoint (Foundry core review flow MISSING)
+GAP|CR-16|Branch protection: no endpoint (MISSING; Foundry enforces via PreReceiveHook)
+GAP|CR-17|CI Checks: no endpoint (MISSING; template declares steps but nothing runs them)
+PASS|CR-18|Tag & Release v1.0.0 → 201 (published helloWorld)
+PASS|FN-1|List repo functions → 200 (published + working_tree union)
+INFO|FN-2|Invoke 200 but result={"apiName":"adhoc","result":"{\"doubled\":42}","durationMs":1,"stdout":"","stderr":"","status":"ok","edits":[],"editsApplied":null,"ontology":{"ontologyId":null,"objectsLoaded":0,"objectTypes":[]}}
+INFO|FN-2x|NOTE: execution is Node 'vm' (NOT a security boundary) — diverges from Foundry's isolated V8/Node sandbox
+PASS|FN-3|Functions Registry versions endpoint live → 200
+PASS|FN-4|Registry lists published v1.0.0 with artifact sha256
+PASS|FN-5|Re-release identical v1.0.0 → 200 dedupe (idempotent, immutable)
+PASS|FN-5b|Release a LOWER version (0.9.0) → 409 (monotonic SemVer enforced)
+PASS|FN-6|Resolve caret range ^1.0.0 → 1.0.0 (max satisfying)
+PASS|FN-7|Yank published v1.0.0 → state=YANKED
+PASS|FN-8|Invoke has Ontology SDK injected (Objects/Edits available; ontology meta returned)

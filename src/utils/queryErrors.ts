@@ -75,6 +75,25 @@ export const STANDARD_ERROR_CODES: Record<string, { status: number; name: string
   METADATA_STORE_UNAVAILABLE: { status: 503, name: "ServiceUnavailableError" },
   OPENSEARCH_CONNECTION_ERROR: { status: 503, name: "ServiceUnavailableError" },
   OPENSEARCH_ERROR:           { status: 503, name: "ServiceUnavailableError" },
+
+  // Files & Projects B1 (tasks/files-projects/files-projects-tasks.md:125)
+  INVALID_RID_FORMAT:         { status: 400, name: "InvalidRidFormatError" },
+  RESOURCE_NOT_FOUND:         { status: 404, name: "ResourceNotFoundError" },
+  BATCH_TOO_LARGE:            { status: 400, name: "BatchTooLargeError" },
+
+  // Files & Projects B2 (tasks/files-projects/files-projects-tasks.md:185)
+  SPACE_NOT_FOUND:                  { status: 404, name: "SpaceNotFoundError" },
+  MOVE_BETWEEN_SPACES_FORBIDDEN:    { status: 409, name: "MoveBetweenSpacesForbiddenError" },
+  ROOT_SPACE_IMMUTABLE:             { status: 409, name: "RootSpaceImmutableError" },
+
+  // Files & Projects B3 — Filesystem v2 Public API (Conjure-faithful codes).
+  // Contracts: tasks/files-projects/contracts.md (B3-C-50, B3-C-51).
+  PRECONDITION_FAILED:              { status: 412, name: "PreconditionFailedError" },
+  PRECONDITION_REQUIRED:            { status: 428, name: "PreconditionRequiredError" },
+  INVALID_ARGUMENT:                 { status: 400, name: "InvalidArgumentError" },
+  RESOURCE_NAME_CONFLICT:           { status: 409, name: "ResourceNameConflictError" },
+  IDEMPOTENCY_KEY_CONFLICT:         { status: 409, name: "IdempotencyKeyConflictError" },
+  PERMISSION_DENIED:                { status: 403, name: "PermissionDeniedError" },
 };
 
 // ---------------------------------------------------------------------------

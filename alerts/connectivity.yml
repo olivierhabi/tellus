@@ -1,0 +1,115 @@
+# ---------------------------------------------------------------------------
+# Tellus Connectivity Prometheus alerts.
+# Mounted by Alertmanager via prometheus.yml rule_files.
+# SLOs (spec §25): connectivity p99 read ≤150ms, p99 write ≤400ms.
+# ---------------------------------------------------------------------------
+
+groups:
+  - name: tellus_connectivity_slo
+    interval: 30s
+    rules:
+      - alert: TellusConnectivityReadLatencyHigh
+        expr: >
+          histogram_quantile(
+            0.99,
+            sum by (le, route) (
+              rate(tellus_connectivity_request_duration_seconds_bucket{method="GET"}[5m])
+            )
+          ) > 0.150
+        for: 5m
+        labels:
+          severity: warning
+          service: connectivity
+        annotations:
+          summary: "Connectivity p99 read latency >150ms on {{ $labels.route }}"
+          description: |
+            Route {{ $labels.route }} exceeded the spec §25 SLO of 150ms p99 read
+            for 5 minutes. Inspect tellus_connectivity_errors_total and
+            tellus_connectivity_outbox_* to determine whether the cause is a
+            downstream PG slowdown or an internal serialization bottleneck.
+          runbook_url: https://docs.tellus.local/runbooks/connectivity-read-latency
+
+      - alert: TellusConnectivityWriteLatencyHigh
+        expr: >
+          histogram_quantile(
+            0.99,
+            sum by (le, route) (
+              rate(tellus_connectivity_request_duration_seconds_bucket{method=~"POST|PUT|DELETE"}[5m])
+            )
+          ) > 0.400
+        for: 5m
+        labels:
+          severity: warning
+          service: connectivity
+        annotations:
+          summary: "Connectivity p99 write latency >400ms on {{ $labels.route }}"
+          description: |
+            Route {{ $labels.route }} exceeded the spec §25 SLO of 400ms p99 write
+            for 5 minutes.
+          runbook_url: https://docs.tellus.local/runbooks/connectivity-write-latency
+
+  - name: tellus_connectivity_errors
+    interval: 30s
+    rules:
+      - alert: TellusConnectivityErrorRateHigh
+        expr: >
+          sum by (errorName) (
+            rate(tellus_connectivity_errors_total{errorName!~"Tellus:Connectivity:(ConnectionNotFound|ResourceVersionMismatch|IfMatchRequired|ScopeRequired)"}[5m])
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: connectivity
+        annotations:
+          summary: "Connectivity error {{ $labels.errorName }} exceeds 0.1/s"
+          description: |
+            Error rate for {{ $labels.errorName }} is sustained > 0.1/s over 10
+            minutes. Routine 4xx codes (ConnectionNotFound, ResourceVersionMismatch,
+            IfMatchRequired, ScopeRequired) are excluded; this alert fires only on
+            unusual codes (InvalidConfiguration, CompassFolderNotFound, KmsUnavailable,
+            JdbcAuthFailed, etc.).
+
+      - alert: TellusConnectivityFatalError
+        expr: increase(tellus_connectivity_errors_total{errorName="Tellus:Connectivity:Internal"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: connectivity
+        annotations:
+          summary: "Tellus:Connectivity:Internal raised — unhandled exception"
+          description: |
+            The catch-all internal envelope was emitted at least once in the
+            last 5 minutes. Tail the connectivity service logs for the
+            errorInstanceId carried on the 5xx response.
+
+  - name: tellus_connectivity_outbox
+    interval: 30s
+    rules:
+      - alert: TellusConnectivityOutboxBacklog
+        expr: >
+          (sum(tellus_connectivity_outbox_enqueued_total) -
+           sum(tellus_connectivity_outbox_deliveries_total{result="ok"})) > 1000
+        for: 10m
+        labels:
+          severity: warning
+          service: connectivity
+        annotations:
+          summary: "Compass outbox backlog > 1000 messages"
+          description: |
+            Outbox poller is falling behind. Check Compass health, the
+            connectivity_outbox table's last_error column, and the poller
+            log line "[connectivity_outbox] poll tick failed".
+
+      - alert: TellusConnectivityOutboxDispatchFailureRate
+        expr: >
+          sum by (operation) (rate(tellus_connectivity_outbox_deliveries_total{result="failure"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: connectivity
+        annotations:
+          summary: "Outbox dispatch failure rate > 0.05/s for {{ $labels.operation }}"
+          description: |
+            Sustained failures dispatching {{ $labels.operation }} to Compass.
+            Investigate the resource_permissions / resources table availability
+            and the compass.client error logs.

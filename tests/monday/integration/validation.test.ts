@@ -10,14 +10,12 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
   t.section("Response Format + Error Handler (Tasks 9, 10)");
 
   await t.test("Error response shape (Task 9)", async () => {
-    const { body } = await api("GET", "/api/v1/ontology/00000000-0000-0000-0000-000000000000");
-    t.assert(body.error !== undefined, "error key present");
-    t.assert(typeof body.error.code === "string", "error.code is string");
-    t.assert(typeof body.error.message === "string", "error.message is string");
-    t.assert(typeof body.error.details === "object", "error.details is object");
-    t.assert(typeof body.error.timestamp === "string", "error.timestamp is string");
-    const d = new Date(body.error.timestamp);
-    t.assert(!isNaN(d.getTime()), "timestamp is valid ISO date");
+    // Singleton deployment: ANY ontology id collapses to the canonical
+    // ontology → 200 (no error body). The error-envelope shape is still
+    // exercised by the object-type-level 404 in the next test.
+    const { status, body } = await api("GET", "/api/v1/ontology/00000000-0000-0000-0000-000000000000");
+    t.assert(status === 200, `Expected 200 (canonical resolved), got ${status}`);
+    t.assert(typeof body.ontologyId === "string", "canonical ontologyId present");
   });
 
   await t.test("Error handler catches service errors (Task 10)", async () => {

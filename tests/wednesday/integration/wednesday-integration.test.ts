@@ -53,15 +53,14 @@ describe("Wednesday Integration Tests", () => {
       );
     }
 
-    // Create test ontology
-    const { status: ontStatus, body: ontBody } = await api("POST", "/api/v1/ontology", {
-      displayName: "WedIntTest",
-      description: "Wednesday integration tests",
-    });
-    ONTOLOGY_ID = ontBody?.data?.ontologyId || ontBody?.ontologyId;
+    // Singleton ontology deployment: POST /api/v1/ontology is frozen
+    // (ONTOLOGY_SINGLETON). Resolve the single canonical enterprise
+    // ontology instead of creating a fresh one per run.
+    const { status: ontStatus, body: ontBody } = await api("GET", "/api/v1/ontology");
+    ONTOLOGY_ID = ontBody?.data?.[0]?.ontologyId;
     if (!ONTOLOGY_ID) {
       throw new Error(
-        `F-P2-01: ontology create returned no id — beforeAll fails loudly. status=${ontStatus} body=${JSON.stringify(ontBody)?.slice(0, 300)}`,
+        `F-P2-01: canonical ontology not found — beforeAll fails loudly. status=${ontStatus} body=${JSON.stringify(ontBody)?.slice(0, 300)}`,
       );
     }
 
@@ -115,7 +114,11 @@ describe("Wednesday Integration Tests", () => {
   });
 
   it("should reject invalid $pageSize", async () => {
-    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=0");
+    // `$pageSize=0` is a VALID "count-only" request (the executor still
+    // returns an accurate `totalCount` with an empty `data` array), so it
+    // yields 200 — see validatePageSize in src/services/queryValidator.ts.
+    // A negative value, by contrast, is genuinely out of range → 400.
+    const { status, body } = await api("GET", "/api/v1/objects/WedEmployee?$pageSize=-1");
     expect(status).toBe(400);
   });
 

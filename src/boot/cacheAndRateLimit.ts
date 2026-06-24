@@ -115,6 +115,25 @@ export async function bootstrapK8sInfra(): Promise<void> {
     if (bootedRedis) {
       initRedisRateLimiters(bootedRedis);
       console.log("[boot] redis-backed rate limiter armed");
+    } else if (
+      process.env.NODE_ENV === "production" &&
+      process.env.ALLOW_INMEMORY_RATELIMIT !== "1"
+    ) {
+      // Boot-time (NOT runtime) fail-closed: a per-replica in-memory limiter
+      // silently grants N× the configured limit across N pods and resets on
+      // every restart — unacceptable for a multi-replica production rollout.
+      // We refuse to start rather than degrade silently. Single-replica
+      // deployments that genuinely want the in-memory limiter must opt in
+      // explicitly with ALLOW_INMEMORY_RATELIMIT=1. (Runtime Redis outages
+      // still fail OPEN inside redisRateLimiter to avoid cascading a Redis
+      // blip into a full outage — see that module; this guard only governs
+      // the deliberate boot-time backend choice.)
+      throw new Error(
+        "Production start refused: no Redis-backed rate limiter is armed. " +
+          "Set RATE_LIMIT_BACKEND=redis with a reachable REDIS_URL, or, for a " +
+          "single-replica deployment, opt into the per-replica in-memory " +
+          "limiter explicitly with ALLOW_INMEMORY_RATELIMIT=1.",
+      );
     }
   }
 

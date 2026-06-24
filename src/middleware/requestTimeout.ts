@@ -29,6 +29,9 @@ const EXEMPT_PATHS = [
   // to the queue depth and routinely exceeds the 5s data-plane budget.
   // It is not user-facing and never on the hot path.
   "/api/v1/funnel/drain",
+  // Workspace pods can take 30+ seconds to provision (K8s API calls, pod readiness polling).
+  // The workspace broker handles its own timeout logic with waitForPodReadiness.
+  "/api/v1/workspaces",
 ];
 
 export interface RequestTimeoutOptions {
@@ -39,11 +42,18 @@ export interface RequestTimeoutOptions {
 /** Attach `req.timeoutSignal: AbortSignal` and arm a 504 on expiry. */
 export function requestTimeoutMiddleware(opts: RequestTimeoutOptions = {}) {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const exempt = new Set([...EXEMPT_PATHS, ...(opts.exemptPaths ?? [])]);
+  const exemptSet = new Set([...EXEMPT_PATHS, ...(opts.exemptPaths ?? [])]);
 
   return function requestTimeoutMw(req: Request, res: Response, next: NextFunction) {
-    if (exempt.has(req.path)) {
+    // Check exact match first
+    if (exemptSet.has(req.path)) {
       return next();
+    }
+    // Check prefix match for dynamic paths (e.g., /api/v1/workspaces/:rid/:branch)
+    for (const exemptPath of exemptSet) {
+      if (req.path.startsWith(exemptPath + "/") || req.path === exemptPath) {
+        return next();
+      }
     }
 
     const controller = new AbortController();

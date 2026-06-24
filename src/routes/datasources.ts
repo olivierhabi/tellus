@@ -32,8 +32,14 @@ import {
   validateBody,
   REGISTER_DATASOURCE_SCHEMA,
 } from "../middleware/validateBody";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization: registering / re-scanning a backing
+// datasource require ontology-editor; unregister (DELETE) requires
+// ontology-admin (PATs scope-gated upstream, superadmin passes, reads open).
+router.use(dataPlaneGuard({ post: "write" }));
 
 // ---------------------------------------------------------------------------
 // Known error codes handled in catch blocks

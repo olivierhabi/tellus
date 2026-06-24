@@ -44,41 +44,23 @@ pass "Server is healthy"
 
 section "Setup — Ontology & Object Types"
 
-# Create test ontology
-do_request POST "/api/v1/ontology" '{"displayName":"ThursdayE2E","description":"E2E test ontology for Thursday"}'
-if [[ "$HTTP_STATUS" == "409" ]]; then
-  # Already exists — find it
-  do_request GET "/api/v1/ontology"
-  ONTOLOGY_ID=$(echo "$HTTP_BODY" | grep -o '"ontologyId":"[^"]*"' | head -1 | sed 's/"ontologyId":"//;s/"//')
+# Singleton deployment: POST /api/v1/ontology is frozen (ONTOLOGY_SINGLETON).
+# Resolve the single canonical enterprise ontology instead of creating one.
+do_request GET "/api/v1/ontology"
+ONTOLOGY_ID=$(echo "$HTTP_BODY" | grep -o '"ontologyId":"[^"]*"' | head -1 | sed 's/"ontologyId":"//;s/"//')
+assert_not_empty "$ONTOLOGY_ID" "Resolved canonical ontology"
 
-  # Try to find our test ontology by listing all
-  for id in $(echo "$HTTP_BODY" | grep -o '"ontologyId":"[^"]*"' | sed 's/"ontologyId":"//;s/"//g'); do
-    do_request GET "/api/v1/ontology/${id}"
-    if echo "$HTTP_BODY" | grep -q "ThursdayE2E"; then
-      ONTOLOGY_ID="$id"
-      break
-    fi
-  done
-
-  # Clean up existing link types
-  do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes"
-  for lt_name in $(echo "$HTTP_BODY" | grep -o '"apiName":"[^"]*"' | sed 's/"apiName":"//;s/"//g'); do
-    do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/${lt_name}"
-  done
-
-  # Clean up existing object types
-  do_request GET "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes"
-  for ot_name in $(echo "$HTTP_BODY" | grep -o '"apiName":"[^"]*"' | sed 's/"apiName":"//;s/"//g'); do
-    do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/${ot_name}"
-  done
-
-  # Delete and recreate ontology
-  do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
-  do_request POST "/api/v1/ontology" '{"displayName":"ThursdayE2E","description":"E2E test ontology for Thursday"}'
-fi
-
-ONTOLOGY_ID=$(json_field "$HTTP_BODY" "ontologyId")
-assert_not_empty "$ONTOLOGY_ID" "Created test ontology"
+# Idempotent pre-cleanup: remove leftover artifacts from a prior interrupted
+# run so the creates below don't 409. Only deletes the specific apiNames this
+# suite creates — never seeded types (e.g. Taxpayer, taxpayerBusiness).
+THURSDAY_LINK_TYPES="companyEmployees employeeCompany employeeDepartments importedLink renamedLink badLink"
+THURSDAY_OBJECT_TYPES="Company Employee Department badObjType"
+for lt_name in $THURSDAY_LINK_TYPES; do
+  do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/${lt_name}"
+done
+for ot_name in $THURSDAY_OBJECT_TYPES; do
+  do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/${ot_name}"
+done
 
 # Create Company object type with properties (batch endpoint)
 do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/batch" \
@@ -384,19 +366,19 @@ assert_status "$HTTP_STATUS" "404" "404 for deleting non-existent"
 
 section "Cleanup"
 
-# Delete remaining link types
-do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/companyEmployees"
-do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/employeeDepartments"
+# Singleton deployment: the ontology cannot be deleted (frozen → 409), so
+# clean up the specific object/link types this suite created instead.
+for lt_name in $THURSDAY_LINK_TYPES; do
+  do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/linkTypes/${lt_name}"
+done
+for ot_name in $THURSDAY_OBJECT_TYPES; do
+  do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/${ot_name}"
+done
 
-# Delete object types
-do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Employee"
-do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Company"
-do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}/objectTypes/Department"
-
-# Delete ontology
+# Ontology delete is frozen under the singleton deployment.
 do_request DELETE "/api/v1/ontology/${ONTOLOGY_ID}"
-if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
-  pass "Cleaned up test ontology"
+if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "409" ]]; then
+  pass "Cleaned up test artifacts (ontology frozen: $HTTP_STATUS)"
 else
   fail "Cleanup test ontology [HTTP $HTTP_STATUS]"
 fi

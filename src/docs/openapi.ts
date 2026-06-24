@@ -1,4 +1,5 @@
 import { Express } from 'express';
+import { extractLiveRoutes } from './routeIntrospection';
 import { ontologyPaths, ontologySchemas } from './ontology-openapi';
 import actionsSpec from '../api-spec/actions.openapi.json';
 import { pbFnlLtPaths, pbFnlLtTags } from './pb-fnl-lt-openapi';
@@ -1155,12 +1156,67 @@ const baseSpec = {
     '/v1/search/suggest': {
       get: {
         tags: ['Search'],
-        summary: 'Get search suggestions and autocomplete',
+        summary: 'Multi-token autocomplete across projects, folders, datasets, and pipelines',
+        description:
+          'Production-grade suggester used by the SelectDatasetDialog "JUMP TO" overlay in tellus-fe.\n\n' +
+          'Behavior:\n' +
+          '- Splits the query on whitespace + common name separators (`_`, `-`, `/`, `.`) and AND-s all tokens, so "customer da" matches `customer_data.csv` AND any file living under `/Project/customer/data/`.\n' +
+          '- Scopes results to projects the caller owns OR is a member of (`project_members`).\n' +
+          '- Walks the full nested folder hierarchy in-process so dataset/pipeline matches surface via the path (\"find by where it lives\").\n' +
+          '- Ranks results by exact / prefix / substring / path-token / recency heuristics with a stable type prior (dataset > folder > pipeline > project).\n' +
+          '- Returns the top 10 hits.\n\n' +
+          'Empty / whitespace-only `q` returns an empty array (no-op short-circuit).',
         parameters: [
-          { name: 'q', in: 'query' as const, required: false, schema: { type: 'string' as const }, description: 'Search query text' },
+          {
+            name: 'q',
+            in: 'query' as const,
+            required: false,
+            schema: { type: 'string' as const, maxLength: 1000 },
+            description: 'Free-text query. Tokenized on whitespace + `_-/.` separators.',
+          },
         ],
         responses: {
-          '200': { description: 'Search suggestions' },
+          '200': {
+            description: 'Up to 10 ranked suggestions across resource types',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object' as const,
+                  properties: {
+                    success: { type: 'boolean' as const, enum: [true] },
+                    data: {
+                      type: 'array' as const,
+                      maxItems: 10,
+                      items: {
+                        type: 'object' as const,
+                        required: ['id', 'name', 'type', 'path', 'projectId'],
+                        properties: {
+                          id: { type: 'string' as const, description: 'Resource UUID' },
+                          name: { type: 'string' as const, description: 'Display name (leaf segment of the path)' },
+                          type: {
+                            type: 'string' as const,
+                            enum: ['project', 'folder', 'dataset', 'pipeline'],
+                            description: 'Resource type the suggestion came from',
+                          },
+                          path: {
+                            type: 'string' as const,
+                            description: 'Full nested pretty-path, e.g. "/Acme/customer/data/orders.csv"',
+                          },
+                          projectId: {
+                            type: 'string' as const,
+                            nullable: true,
+                            description: 'Owning project (null is reserved for future ontology-global suggestions)',
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'QUERY_VALIDATION_ERROR — query exceeded length cap or used a forbidden `*term*` pattern' },
+          '401': { description: 'UNAUTHORIZED — bearer token / cookie required' },
         },
       },
     },
@@ -2578,20 +2634,15 @@ const baseSpec = {
     },
     // ---------------------------------------------------------------
     // Charts
+    //
+    // T-02: `/v1/charts/auto`, `/v1/charts/listogram`,
+    // `/v1/charts/histogram`, and `/v1/charts/dateHistogram` were deleted
+    // because they read directly from Postgres without going through
+    // `injectSecurityFilter` (markings + branch context). All chart
+    // traffic now flows through `/v1/charts/batch`. See
+    // tasks/object-explorer/object-explorer-tasks.md \u00a7T-02 and
+    // decisions/object-explorer/D-2026-04-30-006-fe-coordination-deferred.md.
     // ---------------------------------------------------------------
-    '/v1/charts/auto': {
-      post: {
-        tags: ['Charts'],
-        summary: 'Auto-select one chart per field in a given field list',
-        requestBody: {
-          required: true,
-          content: { 'application/json': { schema: { type: 'object' as const, properties: { ontologyId: { type: 'string' as const }, objectType: { type: 'string' as const }, fields: { type: 'array' as const, items: { type: 'object' as const, properties: { field: { type: 'string' as const }, baseType: { type: 'string' as const } } } } }, required: ['ontologyId', 'objectType', 'fields'] } } },
-        },
-        responses: {
-          '200': { description: 'Auto charts', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const } } } } } },
-        },
-      },
-    },
     // ---------------------------------------------------------------
     // Pipelines Status (Funnel / Streaming)
     // ---------------------------------------------------------------
@@ -2762,6 +2813,152 @@ export const openApiSpec = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Live-route-derived spec assembly.
+//
+// The curated `openApiSpec` above is hand-maintained and drifts (it documented
+// ~45% of the surface and carried 3 phantom paths — see
+// docs/audit/api-docs-coverage.md). To make /api/docs ALWAYS complete and
+// phantom-free, we derive the served `paths` from the real Express route table
+// at request time: every live route is keyed in, reusing the rich curated
+// operation when one matches its shape, otherwise an auto-generated stub.
+// Curated-only (phantom) paths simply never appear because they are not in the
+// live route set.
+// ---------------------------------------------------------------------------
+
+/** Collapse param segments so curated `{ontologyId}` / `:id` match live `{x}`. */
+function normShape(path: string): string {
+  return path.replace(/\{[^}]+\}/g, '{}').replace(/:[^/]+/g, '{}');
+}
+
+function areaTag(path: string): string {
+  if (path.startsWith('/health')) return 'Health';
+  if (path.startsWith('/api/docs') || path.startsWith('/api/metrics')) return 'Meta';
+  if (path.startsWith('/quiver')) return 'Quiver';
+  const segs = path.split('/').filter(Boolean); // [api, v1, ontology, ...]
+  const a = (segs[2] || segs[1] || 'root').toLowerCase();
+  const map: Record<string, string> = {
+    connectivity: 'Connectivity', ontology: 'Ontology', funnel: 'Funnel',
+    workshop: 'Workshop', auth: 'Auth', 'code-repositories': 'Code Repositories',
+    projects: 'Projects', datasets: 'Datasets', objects: 'Objects',
+    functions: 'Functions', templates: 'Templates', actions: 'Actions',
+    search: 'Search', dev: 'Dev', resources: 'Foundry', system: 'System',
+    compass: 'Foundry', users: 'Users', scaffold: 'Templates', charts: 'Objects',
+    status: 'System', breadcrumb: 'Foundry',
+  };
+  return map[a] || a.charAt(0).toUpperCase() + a.slice(1);
+}
+
+function pathParameters(path: string): Array<Record<string, unknown>> {
+  return [...path.matchAll(/\{([^}]+)\}/g)].map((m) => ({
+    name: m[1], in: 'path', required: true,
+    schema: { type: 'string' }, description: `${m[1]} path parameter`,
+  }));
+}
+
+function isPublicPath(path: string): boolean {
+  return (
+    path.startsWith('/health') ||
+    path.startsWith('/api/docs') ||
+    path === '/api/metrics' ||
+    path === '/api/v1/auth/health' ||
+    /^\/api\/v1\/auth\/(login|oidc|refresh|logout|register|pat-scopes|password)/.test(path)
+  );
+}
+
+function autoStub(method: string, path: string): Record<string, unknown> {
+  const op: Record<string, unknown> = {
+    tags: [areaTag(path)],
+    summary: `${method} ${path}`,
+    description:
+      'Auto-generated from the live route table. Not yet hand-documented with ' +
+      'full request/response schemas — see docs/openapi.ts to enrich.',
+    'x-auto-generated': true,
+    parameters: pathParameters(path),
+    responses: {
+      '200': { description: 'Successful response' },
+      '400': { description: 'Bad request' },
+      '401': { description: 'Unauthorized' },
+      '403': { description: 'Forbidden' },
+      '404': { description: 'Not found' },
+      '500': { description: 'Server error' },
+    },
+    security: isPublicPath(path) ? [] : [{ bearerAuth: [] }],
+  };
+  if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+    op.requestBody = {
+      required: false,
+      content: { 'application/json': { schema: { type: 'object' } } },
+    };
+  }
+  return op;
+}
+
+/** Index curated operations by `${method} ${normShape}` (with and without /api). */
+function curatedLookup(): Map<string, Record<string, unknown>> {
+  const idx = new Map<string, Record<string, unknown>>();
+  for (const [key, ops] of Object.entries(openApiSpec.paths as Record<string, Record<string, unknown>>)) {
+    for (const [method, op] of Object.entries(ops)) {
+      if (!['get', 'post', 'put', 'patch', 'delete'].includes(method)) continue;
+      const m = method.toUpperCase();
+      idx.set(`${m} ${normShape(key)}`, op as Record<string, unknown>);
+      idx.set(`${m} ${normShape('/api' + key)}`, op as Record<string, unknown>);
+    }
+  }
+  return idx;
+}
+
+let servedSpecCache: Record<string, unknown> | null = null;
+
+/**
+ * Build the spec actually served at /api/docs — derived from the live Express
+ * route table so it is always complete and phantom-free. Computed once and
+ * cached (the route table is static after boot).
+ */
+export function buildServedSpec(app: Express): Record<string, unknown> {
+  if (servedSpecCache) return servedSpecCache;
+  const live = extractLiveRoutes(app);
+  const curated = curatedLookup();
+  const paths: Record<string, Record<string, unknown>> = {};
+  const usedTags = new Set<string>();
+  let documented = 0;
+  let stubbed = 0;
+
+  for (const { method, path } of live) {
+    // Skip the spec's own self-reference endpoints from the listing noise.
+    if (path === '/api/docs' || path === '/api/docs/spec.json') continue;
+    const curatedOp = curated.get(`${method} ${normShape(path)}`);
+    const op = curatedOp ?? autoStub(method, path);
+    if (curatedOp) documented++; else stubbed++;
+    if (!paths[path]) paths[path] = {};
+    paths[path][method.toLowerCase()] = op;
+    const tags = (op.tags as string[] | undefined) ?? [areaTag(path)];
+    tags.forEach((t) => usedTags.add(t));
+  }
+
+  // Union curated tags with any new area tags introduced by stubs.
+  const existingTagNames = new Set((mergedTags as Array<{ name: string }>).map((t) => t.name));
+  const extraTags = [...usedTags]
+    .filter((t) => !existingTagNames.has(t))
+    .map((t) => ({ name: t, description: `${t} endpoints` }));
+
+  servedSpecCache = {
+    ...openApiSpec,
+    // All path keys are now ABSOLUTE, so the server base is root.
+    servers: [{ url: '/', description: 'Tellus backend (absolute paths)' }],
+    info: {
+      ...(openApiSpec.info as Record<string, unknown>),
+      description:
+        `${(openApiSpec.info as { description?: string }).description ?? ''} ` +
+        `Auto-completed from the live route table: ${documented} hand-documented + ` +
+        `${stubbed} auto-generated = ${documented + stubbed} endpoints.`,
+    },
+    tags: [...(mergedTags as unknown[]), ...extraTags],
+    paths,
+  };
+  return servedSpecCache;
+}
+
 /**
  * Set up Swagger UI and serve the OpenAPI spec.
  *
@@ -2769,9 +2966,10 @@ export const openApiSpec = {
  * and a dark-mode Swagger UI at GET /api/docs.
  */
 export function setupSwagger(app: Express): void {
-  // Serve the raw OpenAPI spec
+  // Serve the raw OpenAPI spec — derived from the live route table so it is
+  // always complete (every real endpoint) and phantom-free (only real ones).
   app.get('/api/docs/spec.json', (_req, res) => {
-    res.json(openApiSpec);
+    res.json(buildServedSpec(app));
   });
 
   // Serve a dark-mode Swagger UI HTML page.

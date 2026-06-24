@@ -61,14 +61,51 @@ run() {
   echo ""
 }
 
+# ---------------------------------------------------------------------------
+# Temporal gate for the two reset / stage-delay contracts.
+#
+# verify-funnel-reset.sh and verify-funnel-stage-delay.sh restart the backend
+# and assert a funnel_run reaches `status == "completed"` — that requires the
+# Temporal dispatcher (signal-with-start → worker → pipeline). The e2e CI job
+# (.github/workflows/ci.yml `e2e`) provisions postgres / opensearch / keycloak
+# / minio but NOT Temporal, so against CI a paced run polls for a `completed`
+# row that never arrives and dies after 60 s, turning the whole funnel suite
+# red for a reason unrelated to the implementation. verify-save-to-ontology.sh
+# is CI-safe — it treats a missing funnel_run as a non-fatal warning — so it
+# always runs. The two Temporal-dependent contracts are skipped when Temporal
+# is unreachable, mirroring run-all.sh's `pb_dep_available` skip pattern for
+# Lakekeeper / docker-dependent PB smokes. Override the probe target via
+# TEMPORAL_ADDRESS (default mirrors src: TEMPORAL_ADDRESS ?? "localhost:7233").
+# A bare bash /dev/tcp probe is used (no nc dependency on the runner host).
+# ---------------------------------------------------------------------------
+TEMPORAL_ADDR="${TEMPORAL_ADDRESS:-localhost:7233}"
+temporal_reachable() {
+  local host="${TEMPORAL_ADDR%%:*}" port="${TEMPORAL_ADDR##*:}"
+  # Subshell so the opened fd is scoped + auto-closed on exit. Connection to
+  # a closed localhost port fails fast (RST); returns 0 only if the TCP
+  # handshake completes — i.e. something is listening on the Temporal gRPC port.
+  (exec 3<>/dev/tcp/"$host"/"$port") >/dev/null 2>&1
+}
+skip() {
+  local label="$1"; local reason="$2"
+  echo -e "${BOLD}SKIP${NC}  ${label} — ${reason}"
+  echo ""
+}
+
 run "save-to-ontology (UUID commit contract)" \
   "${REPO_ROOT}/scripts/verify-save-to-ontology.sh"
 
-run "funnel-reset (repeat-save → fresh run_id)" \
-  "${REPO_ROOT}/scripts/verify-funnel-reset.sh"
-
-run "stage-delay (per-stage pacing + prod baseline)" \
-  "${REPO_ROOT}/scripts/verify-funnel-stage-delay.sh"
+if temporal_reachable; then
+  run "funnel-reset (repeat-save → fresh run_id)" \
+    "${REPO_ROOT}/scripts/verify-funnel-reset.sh"
+  run "stage-delay (per-stage pacing + prod baseline)" \
+    "${REPO_ROOT}/scripts/verify-funnel-stage-delay.sh"
+else
+  skip "funnel-reset (repeat-save → fresh run_id)" \
+    "Temporal unreachable at ${TEMPORAL_ADDR} (CI e2e job has no Temporal)"
+  skip "stage-delay (per-stage pacing + prod baseline)" \
+    "Temporal unreachable at ${TEMPORAL_ADDR} (CI e2e job has no Temporal)"
+fi
 
 echo -e "${BOLD}========================================${NC}"
 if [[ $EXIT_CODE -eq 0 ]]; then

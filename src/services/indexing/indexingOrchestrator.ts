@@ -200,6 +200,7 @@ export interface OrchestratorDeps {
 
 async function defaultSetRunning(objectTypeApiName: string): Promise<void> {
   await funnelSetRunning(objectTypeApiName);
+  await mirrorFunnelStateUi(objectTypeApiName, { status: "indexing" });
 }
 
 async function defaultSetSuccess(
@@ -209,6 +210,11 @@ async function defaultSetSuccess(
   datasourceVersion: string | null
 ): Promise<void> {
   await funnelSetSuccess(objectTypeApiName, objectsIndexed, durationMs, datasourceVersion);
+  await mirrorFunnelStateUi(objectTypeApiName, {
+    status: "indexed",
+    objectsIndexed,
+    durationMs,
+  });
 }
 
 async function defaultSetFailed(
@@ -216,6 +222,82 @@ async function defaultSetFailed(
   errorMessage: string
 ): Promise<void> {
   await funnelSetFailed(objectTypeApiName, errorMessage);
+  await mirrorFunnelStateUi(objectTypeApiName, { status: "failed", error: errorMessage });
+}
+
+/**
+ * Mirror the detailed `funnel_pipeline_state` write into the UI-facing
+ * `funnel_state` table.
+ *
+ * The funnelState model writes the detailed, apiName-keyed execution ledger
+ * to `funnel_pipeline_state`. The object-type GET (`objectTypeService`) joins
+ * the SEPARATE `funnel_state` table (object_type_id-keyed) to populate the
+ * `index_status` badge and `object_count`. The funnel dispatcher projects one
+ * into the other at its terminal — but the direct `indexObjectType` pipeline
+ * never did, so a successful manual or auto index left the badge stuck at
+ * "not_indexed / 0 objects". This keeps the two in sync on every indexing run.
+ *
+ * Non-fatal: the `funnel_pipeline_state` write is the source of truth; this
+ * is purely the UI projection, so any error here is logged and swallowed.
+ */
+async function mirrorFunnelStateUi(
+  objectTypeApiName: string,
+  fields: {
+    status: "indexing" | "indexed" | "failed";
+    objectsIndexed?: number;
+    durationMs?: number;
+    error?: string;
+  },
+): Promise<void> {
+  try {
+    const ot = await dbQuery(
+      "SELECT object_type_id FROM object_type WHERE api_name = $1",
+      [objectTypeApiName],
+    );
+    if (ot.rows.length === 0) return;
+    const objectTypeId = ot.rows[0].object_type_id as string;
+    const indexName = getIndexName(objectTypeApiName);
+    await dbQuery(
+      `INSERT INTO funnel_state
+         (object_type_id, status, objects_indexed, last_indexed_at,
+          last_index_duration_ms, index_name, error_message, error_count, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       ON CONFLICT (object_type_id) DO UPDATE SET
+         status                 = EXCLUDED.status,
+         objects_indexed        = CASE WHEN EXCLUDED.status = 'indexed'
+                                       THEN EXCLUDED.objects_indexed
+                                       ELSE funnel_state.objects_indexed END,
+         last_indexed_at        = CASE WHEN EXCLUDED.status = 'indexed'
+                                       THEN EXCLUDED.last_indexed_at
+                                       ELSE funnel_state.last_indexed_at END,
+         last_index_duration_ms = CASE WHEN EXCLUDED.status = 'indexed'
+                                       THEN EXCLUDED.last_index_duration_ms
+                                       ELSE funnel_state.last_index_duration_ms END,
+         index_name             = COALESCE(EXCLUDED.index_name, funnel_state.index_name),
+         error_message          = CASE WHEN EXCLUDED.status = 'failed'
+                                       THEN EXCLUDED.error_message
+                                       ELSE NULL END,
+         error_count            = CASE WHEN EXCLUDED.status = 'failed'
+                                       THEN funnel_state.error_count + 1
+                                       ELSE 0 END,
+         updated_at             = now()`,
+      [
+        objectTypeId,
+        fields.status,
+        fields.objectsIndexed ?? 0,
+        fields.status === "indexed" ? new Date() : null,
+        fields.durationMs ?? null,
+        indexName,
+        fields.status === "failed" ? (fields.error ?? "Indexing failed") : null,
+        fields.status === "failed" ? 1 : 0,
+      ],
+    );
+  } catch (err) {
+    console.warn(
+      `[indexing] failed to mirror funnel_state UI status for '${objectTypeApiName}':`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

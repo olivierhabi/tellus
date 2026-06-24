@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tellus.example.com/schemas/workshop-module-v4.json",
+  "title": "Tellus Workshop Module Document v4",
+  "description": "Source-of-truth JSON Schema for Workshop module documents. Referenced by B01 (CRUD) and B02 (validator). Derived from tasks/workshop/workshop-tasks.md and the Tellus Workshop architecture spec §3. Schema version 4 corresponds to workshop_module.schema_version = 4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "variables", "widgets", "layout"],
+  "properties": {
+    "schemaVersion": { "const": 4 },
+    "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": ["string", "null"], "maxLength": 2000 },
+    "moduleInterface": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "variables": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/moduleInterfaceVariable" }
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "promotedExternalIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "variables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/variable" }
+    },
+    "widgets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/widget" }
+    },
+    "sections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/section" }
+    },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Module-level page header. Rendered as the strip at the top of the canvas; configured via the editor's HeaderInspector. Distinct from `layout.header` (the header-widget slot pointer) and `sections[*].header` (section-strip titles).",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "icon": { "type": ["string", "null"], "maxLength": 100 },
+        "color": { "type": ["string", "null"], "maxLength": 100 }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rootSection"],
+      "properties": {
+        "rootSection": { "type": "string" },
+        "header": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "widgetId": { "type": "string" } }
+        },
+        "columnWidths": {
+          "type": "object",
+          "description": "Per-section COLUMN WIDTH / RESIZABLE specs, keyed by section id. Covers the empty-shell editor's two fixed columns (\"section-box\"/\"section-page\") AND any section in the layout tree (split/added sections). Authored in the SectionInspector (Absolute px or Flex factor, optionally resizable); persisted so a reloaded module keeps the user's resized layout.",
+          "additionalProperties": { "$ref": "#/$defs/sectionWidthSpec" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sectionWidthSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "pxWidth", "flexValue"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["absolute", "flex"] },
+        "pxWidth": { "type": "number" },
+        "flexValue": { "type": "number" },
+        "resizable": { "type": "boolean" }
+      }
+    },
+    "variableId": {
+      "type": "string",
+      "pattern": "^v_[a-zA-Z0-9_]{1,128}$"
+    },
+    "widgetId": {
+      "type": "string",
+      "pattern": "^w_[a-zA-Z0-9_]{1,128}$"
+    },
+    "sectionId": {
+      "type": "string",
+      "pattern": "^s_[a-zA-Z0-9_]{1,128}$"
+    },
+    "variableType": {
+      "type": "string",
+      "enum": [
+        "objectSet",
+        "object",
+        "scalar",
+        "array",
+        "struct",
+        "objectSetFilter",
+        "timeSeriesSet"
+      ]
+    },
+    "definitionType": {
+      "type": "string",
+      "enum": [
+        "static",
+        "function",
+        "objectProperty",
+        "objectSetDefinition",
+        "variableTransformation",
+        "widgetOutput",
+        "moduleInterface"
+      ]
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "definitionType"],
+      "properties": {
+        "id": { "$ref": "#/$defs/variableId" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "type": { "$ref": "#/$defs/variableType" },
+        "definitionType": { "$ref": "#/$defs/definitionType" },
+        "definition": { "type": "object" },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/variableConstraint" }
+        },
+        "events": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "recomputeBehavior": {
+          "type": "string",
+          "enum": ["automatic", "manual"]
+        }
+      }
+    },
+    "variableConstraint": {
+      "type": "object",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["kind", "filterVariableId"],
+          "properties": {
+            "kind": { "const": "filterByVariable" },
+            "filterVariableId": { "$ref": "#/$defs/variableId" }
+          }
+        }
+      ]
+    },
+    "moduleInterfaceVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["externalId", "variableId", "required"],
+      "properties": {
+        "externalId": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
+        "variableId": { "$ref": "#/$defs/variableId" },
+        "required": { "type": "boolean" }
+      }
+    },
+    "widget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "config"],
+      "properties": {
+        "id": { "$ref": "#/$defs/widgetId" },
+        "type": { "type": "string", "minLength": 1 },
+        "config": { "type": "object" },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/variableId" }
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/variableId" }
+        },
+        "events": { "type": "object" },
+        "display": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "visibilityVariableId": { "$ref": "#/$defs/variableId" },
+            "size": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": { "type": "string", "enum": ["auto", "absolute", "flex"] },
+                "value": { "type": "number" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "layout", "children"],
+      "properties": {
+        "id": { "$ref": "#/$defs/sectionId" },
+        "layout": {
+          "type": "string",
+          "enum": ["rows", "columns", "tabs", "flow", "toolbar", "loop"]
+        },
+        "header": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "visible": { "type": "boolean" },
+            "title": { "type": "string", "maxLength": 200 },
+            "format": { "type": "string", "enum": ["block", "contained", "floating"] },
+            "collapsible": { "type": "boolean" },
+            "initiallyCollapsed": { "type": "boolean" },
+            "collapsedIcon": { "type": "string" },
+            "expandedIcon": { "type": "string" }
+          }
+        },
+        "sizing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "type": "string", "enum": ["auto", "absolute", "flex"] },
+            "value": { "type": "number" }
+          }
+        },
+        "padding": {
+          "oneOf": [
+            { "type": "string", "enum": ["none", "compact", "comfortable"] },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["h", "v"],
+              "properties": {
+                "h": { "type": "number" },
+                "v": { "type": "number" }
+              }
+            }
+          ]
+        },
+        "background": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "color": { "type": "string" },
+            "borderStyle": { "type": "string", "enum": ["none", "thin", "shadow"] }
+          }
+        },
+        "scrolling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "loopConfig": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "embeddedModuleRid": { "type": "string" },
+            "interfaceMapping": { "type": "object" },
+            "iterationVariableId": { "$ref": "#/$defs/variableId" }
+          }
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "ref"],
+                "properties": {
+                  "kind": { "const": "section" },
+                  "ref": { "$ref": "#/$defs/sectionId" }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "ref"],
+                "properties": {
+                  "kind": { "const": "widget" },
+                  "ref": { "$ref": "#/$defs/widgetId" }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

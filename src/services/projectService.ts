@@ -1,23 +1,98 @@
 import { Knex } from 'knex';
 import { AppError } from '../utils/foundryAppError';
 import { deletePrefix } from './storageService';
+import { ROOT_SPACE_RID, parseRid, InvalidRidFormatError } from '../lib/rid';
+import { OntologyError } from '../utils/queryErrors';
+
+export interface CreateProjectOptions {
+  /**
+   * Compass space RID. When omitted, defaults to ROOT_SPACE_RID.
+   * Per B2-C-10/B2-C-11: validated against the `spaces` table; missing
+   * rows reject with `SPACE_NOT_FOUND`.
+   */
+  spaceRid?: string;
+}
 
 export class ProjectService {
   constructor(private knex: Knex) {}
 
-  async createProject(name: string, ownerId: string) {
+  async createProject(name: string, ownerId: string, opts: CreateProjectOptions = {}) {
     const existing = await this.knex('projects').where({ name, owner_id: ownerId }).first();
     if (existing) throw new AppError('A project with this name already exists', 409, 'CONFLICT');
 
-    const [project] = await this.knex('projects').insert({ name, owner_id: ownerId }).returning('*');
+    // B2-C-10..C-12: validate the space rid (defaulting to ROOT_SPACE_RID).
+    let spaceRid: string = ROOT_SPACE_RID;
+    if (opts.spaceRid !== undefined) {
+      try {
+        // B2-C-12 — RID grammar enforced.
+        parseRid(opts.spaceRid);
+      } catch (e) {
+        if (e instanceof InvalidRidFormatError) {
+          throw new OntologyError(
+            `Invalid spaceRid: ${e.message}`,
+            'INVALID_RID_FORMAT',
+            undefined,
+            { value: opts.spaceRid },
+          );
+        }
+        throw e;
+      }
+      // B2-C-11 — verify spaces row exists.
+      const found = await this.knex('spaces').where({ rid: opts.spaceRid }).select('rid').first();
+      if (!found) {
+        throw new OntologyError(
+          `Space not found: ${opts.spaceRid}`,
+          'SPACE_NOT_FOUND',
+          undefined,
+          { spaceRid: opts.spaceRid },
+        );
+      }
+      spaceRid = opts.spaceRid;
+    }
 
-    // Auto-add the creator as an owner member so authorizeRoles works
-    await this.knex('project_members')
-      .insert({ project_id: project.id, user_id: ownerId, role: 'owner' })
-      .onConflict(['project_id', 'user_id'])
-      .ignore();
+    // B1-C-24: project insert + Compass `resources` row + project_members must
+    // be a single transaction. A failure in any step rolls all back; a
+    // successful return guarantees the resources row exists with
+    // legacy_uuid = project.id (matching the foundryMigrate backfill, so
+    // re-running migrate is a no-op via ON CONFLICT (legacy_uuid)).
+    return this.knex.transaction(async (trx) => {
+      const [project] = await trx('projects')
+        .insert({ name, owner_id: ownerId })
+        .returning('*');
 
-    return project;
+      const projectRid = `ri.compass.main.project.${project.id}`;
+      await trx.raw(
+        `
+        INSERT INTO resources (rid, service, type, display_name,
+                               parent_folder_rid, project_rid, space_rid,
+                               created_by, created_at, updated_by, updated_at,
+                               legacy_uuid)
+        VALUES (?, 'compass', 'PROJECT', ?,
+                NULL, ?, ?,
+                ?, ?, ?, ?,
+                ?)
+        ON CONFLICT (legacy_uuid) DO NOTHING
+        `,
+        [
+          projectRid,
+          project.name,
+          projectRid,
+          spaceRid,
+          ownerId,
+          project.created_at,
+          ownerId,
+          project.updated_at,
+          project.id,
+        ],
+      );
+
+      await trx('project_members')
+        .insert({ project_id: project.id, user_id: ownerId, role: 'owner' })
+        .onConflict(['project_id', 'user_id'])
+        .ignore();
+
+      return project;
+    });
   }
 
   async listProjects(ownerId: string, fields?: string[]) {

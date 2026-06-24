@@ -23,6 +23,7 @@ import {
   type FormattedListResponse,
 } from "./objectResponseFormatter";
 import { appError } from "../utils/appError";
+import { incCounter } from "./funnel/metrics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,6 +46,26 @@ export interface AggregateParams {
     size?: number;
     interval?: string;
     ranges?: Array<{ key?: string; from?: unknown; to?: unknown }>;
+    /**
+     * Optional nested metric for a bucketing aggregation (`terms` today).
+     * When present, each bucket carries a sub-aggregated VALUE in addition
+     * to its document `count` — this is what lets the Pie Chart widget plot
+     * "sum/avg/min/max/approximate-unique-count of <metric.field> per
+     * <group-by> slice" rather than only a per-slice document count.
+     * `type: "count"` is a no-op (the bucket's doc_count already IS the
+     * count) and emits no sub-aggregation.
+     */
+    metric?: { type: string; field?: string };
+    /**
+     * Optional SECONDARY group-by ("segment by"/series) nested under a
+     * `terms` aggregation. When present each top-level bucket carries a
+     * `series` array — one sub-bucket per distinct value of `groupBy.field`,
+     * each with its own `count` and (if a `metric` is set) `value`. This is
+     * what lets the Chart XY widget plot multiple series (grouped/stacked
+     * bars, multi-line/area) from ONE request: the full X × series × Y
+     * matrix comes back in a single round-trip.
+     */
+    groupBy?: { field: string; size?: number };
   }>;
 }
 
@@ -232,7 +253,33 @@ export async function executeAggregate(
   return formatAggregationResponse(response, params.aggregations);
 }
 
-function buildAggClause(def: AggregateParams["aggregations"][0]): Record<string, unknown> {
+/**
+ * Build the OpenSearch sub-aggregation for a bucket's nested metric.
+ * Mirrors the leaf-metric clauses in `buildAggClause` but is only ever
+ * attached UNDER a `terms` bucket (see the `metric` handling there).
+ * `count` returns a `value_count` on `__pk` so the value matches the
+ * bucket's own `doc_count`; everything else aggregates over `metric.field`.
+ */
+function buildMetricClause(metric: { type: string; field?: string }): Record<string, unknown> {
+  const f = metric.field;
+  switch (metric.type) {
+    case "sum":
+      return { sum: { field: f } };
+    case "avg":
+      return { avg: { field: f } };
+    case "min":
+      return { min: { field: f } };
+    case "max":
+      return { max: { field: f } };
+    case "cardinality":
+      return { cardinality: { field: f } };
+    case "count":
+    default:
+      return { value_count: { field: "__pk" } };
+  }
+}
+
+export function buildAggClause(def: AggregateParams["aggregations"][0]): Record<string, unknown> {
   const fieldName = def.field || "__pk";
 
   switch (def.type) {
@@ -248,8 +295,32 @@ function buildAggClause(def: AggregateParams["aggregations"][0]): Record<string,
       return { min: { field: fieldName } };
     case "max":
       return { max: { field: fieldName } };
-    case "terms":
-      return { terms: { field: `${fieldName}.keyword`, size: def.size || 100 } };
+    case "terms": {
+      const clause: Record<string, unknown> = {
+        terms: { field: `${fieldName}.keyword`, size: def.size || 100 },
+      };
+      const hasMetric = !!def.metric && def.metric.type !== "count";
+      const sub: Record<string, unknown> = {};
+      if (def.groupBy) {
+        // Secondary group-by ("segment by"/series) → a nested `terms` whose
+        // own buckets carry the metric (Chart XY multi-series). One request
+        // returns the full X × series × Y matrix.
+        const seriesAgg: Record<string, unknown> = {
+          terms: {
+            field: `${def.groupBy.field}.keyword`,
+            size: def.groupBy.size || 50,
+          },
+        };
+        if (hasMetric) seriesAgg.aggs = { metric: buildMetricClause(def.metric!) };
+        sub.series = seriesAgg;
+      } else if (hasMetric) {
+        // Nested per-bucket metric (Pie Chart aggregation method). `count`
+        // is a no-op — the bucket's `doc_count` already carries it.
+        sub.metric = buildMetricClause(def.metric!);
+      }
+      if (Object.keys(sub).length > 0) clause.aggs = sub;
+      return clause;
+    }
     case "date_histogram":
       return {
         date_histogram: {
@@ -301,32 +372,64 @@ export async function executeFullTextSearch(
     return { data: [], nextPageToken: null, totalCount: 0 };
   }
 
-  // Build multi_match query across all text fields.
-  // Use cross_fields for multi-term cross-field matching. Fuzziness is applied
-  // via a separate bool/should clause because cross_fields does not support
-  // fuzziness in OpenSearch. The primary clause uses cross_fields + operator:and
-  // for exact token matching; the secondary clause uses best_fields + fuzziness
-  // for typo tolerance.
+  // T-09 (C-153..C-155): Build multi_match query across all text fields,
+  // and additionally a `query_string` clause when the search text uses
+  // Lucene spec syntax (`~` fuzz, `*?` wildcards, `"phrase"`, `AND/OR/NOT`,
+  // parens). Without this branch the executor silently dropped operator
+  // semantics on the floor.
+  //
+  // Hard-set:
+  //   - allow_leading_wildcard: false  — leading `*foo` is O(n) on the
+  //     term dictionary (per Foundry §3 footnote); operator opt-in via
+  //     env if ever needed.
+  //   - lenient: true                  — tolerate field-type mismatch on
+  //     broad fielded queries; without this, a typo on a numeric field
+  //     would 400 the entire search.
+  //   - analyze_wildcard               — env-gated. Default off because
+  //     analyzed wildcards are an order of magnitude slower than
+  //     non-analyzed.
+  const SPEC_SYNTAX_RE = /[~*?"]|\b(?:AND|OR|NOT)\b|[()]/;
+  const ANALYZE_WILDCARD_ENABLED =
+    process.env.TELLUS_FT_ANALYZE_WILDCARD === "true";
+  const usesSpecSyntax = SPEC_SYNTAX_RE.test(searchText);
+  // Metric label is bounded ("true" | "false"), no user-supplied input.
+  incCounter("tellus_full_text_spec_syntax_total", {
+    syntax_used: usesSpecSyntax ? "true" : "false",
+  });
+
+  const fullTextShould: Record<string, unknown>[] = [
+    {
+      multi_match: {
+        query: searchText,
+        fields: textFields,
+        type: "cross_fields",
+        operator: "and",
+      },
+    },
+    {
+      multi_match: {
+        query: searchText,
+        fields: textFields,
+        type: "best_fields",
+        fuzziness: "AUTO",
+      },
+    },
+  ];
+  if (usesSpecSyntax) {
+    fullTextShould.push({
+      query_string: {
+        query: searchText,
+        fields: textFields,
+        default_operator: "AND",
+        analyze_wildcard: ANALYZE_WILDCARD_ENABLED,
+        allow_leading_wildcard: false,
+        lenient: true,
+      },
+    });
+  }
   const fullTextQuery: Record<string, unknown> = {
     bool: {
-      should: [
-        {
-          multi_match: {
-            query: searchText,
-            fields: textFields,
-            type: "cross_fields",
-            operator: "and",
-          },
-        },
-        {
-          multi_match: {
-            query: searchText,
-            fields: textFields,
-            type: "best_fields",
-            fuzziness: "AUTO",
-          },
-        },
-      ],
+      should: fullTextShould,
       minimum_should_match: 1,
     },
   };

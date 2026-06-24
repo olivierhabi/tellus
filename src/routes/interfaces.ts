@@ -23,8 +23,15 @@ import {
   executePolymorphicSearch,
   executePolymorphicAggregation,
 } from "../services/interfaceQueryService";
+import { dataPlaneGuard, requireOntologyWrite } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization. This router mixes mutations with read-style
+// POSTs (`/:interfaceApiName/search`, `/aggregate`), so POSTs are left open
+// here and the create-POST below is gated explicitly; PUT requires
+// ontology-editor and DELETE requires ontology-admin via the guard.
+router.use(dataPlaneGuard({ post: "open" }));
 
 // ---------------------------------------------------------------------------
 // Known error codes handled in catch blocks
@@ -217,6 +224,7 @@ const THREE_WAY_JOIN_SQL = `
 
 router.post(
   "/",
+  requireOntologyWrite,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId } = req.params;

@@ -130,12 +130,9 @@ async function run() {
     // -----------------------------------------------------------------------
     // 1.1 Create ontology
     // -----------------------------------------------------------------------
-    const ontRes = await api("POST", "/api/v1/ontology", {
-      displayName: "RRA Tax System",
-      description: "Integration test ontology for RRA",
-    });
+    const ontRes = await api("GET", "/api/v1/ontology/default");
     ontologyId = ontRes.body?.data?.ontologyId ?? ontRes.body?.ontologyId ?? null;
-    assert(ontRes.status === 201 && !!ontologyId, "1.1 Create ontology", `status=${ontRes.status}`);
+    assert(!!ontologyId, "1.1 Create ontology", `status=${ontRes.status}`);
 
     // -----------------------------------------------------------------------
     // 1.2 Create Employee object type (batch) with 10 properties

@@ -28,11 +28,14 @@ log()  { printf '\033[36m[pb-b3]\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m[pb-b3 FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[32m[pb-b3 OK]\033[0m %s\n' "$*"; }
 
-TOKEN=$(curl -sSf \
+# Prefer the shared token from run-all.sh (AUTH_TOKEN); re-acquiring per script
+# trips Keycloak brute-force/quick-login throttling (HTTP 400). Fall back to a
+# direct grant for standalone local runs.
+TOKEN="${AUTH_TOKEN:-$(curl -sSf \
   -d "client_id=${KC_CLIENT}" -d "grant_type=password" \
   -d "username=${KC_USER}" -d "password=${KC_PASS}" \
   "${KC_URL}/realms/${KC_REALM}/protocol/openid-connect/token" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')}"
 [ -n "${TOKEN}" ] || fail "no token"
 AUTH="Authorization: Bearer ${TOKEN}"
 JSON="Content-Type: application/json"

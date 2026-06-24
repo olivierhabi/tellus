@@ -9,6 +9,7 @@
 
 import { Router, Request, Response, NextFunction } from "express";
 import objectTypeService from "../services/objectTypeService";
+import { sendSignal } from "../services/funnel/durableWorkflow";
 import {
   formatObjectType,
   formatObjectTypeSummary,
@@ -22,8 +23,15 @@ import {
   CREATE_OBJECT_TYPE_SCHEMA,
 } from "../middleware/validateBody";
 import { setEtag, requireIfMatch } from "../middleware/etag";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization (OWASP API5): create/update require
+// ontology-editor, delete requires ontology-admin. PATs are scope-gated
+// upstream; superadmin always passes; reads stay open. All POSTs on this
+// router are schema mutations (create/batch/clone/changeStatus/import).
+router.use(dataPlaneGuard({ post: "write" }));
 
 // ---------------------------------------------------------------------------
 // Known error codes handled in catch blocks
@@ -87,6 +95,17 @@ router.post(
         "Location",
         `/api/v1/ontology/${req.params.ontologyId}/objectTypes/${full.objectType.api_name}`
       );
+
+      // Trigger funnel indexing/registration after successful creation
+      try {
+        await sendSignal({
+          ontologyId,
+          objectTypeApiName: full.objectType.api_name,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for object type creation:", signalErr);
+      }
 
       sendCreated(res, formatted);
     } catch (err: any) {
@@ -163,6 +182,17 @@ router.post(
         result.funnelState
       );
 
+      // Trigger funnel indexing after successful batch creation
+      try {
+        await sendSignal({
+          ontologyId,
+          objectTypeApiName: result.objectType.api_name,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for batch creation:", signalErr);
+      }
+
       sendCreated(res, formatted);
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
@@ -207,6 +237,17 @@ router.post(
         full.datasource,
         full.funnelState
       );
+
+      // Trigger funnel indexing after status change
+      try {
+        await sendSignal({
+          ontologyId,
+          objectTypeApiName: apiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for status change:", signalErr);
+      }
 
       sendSuccess(res, formatted);
     } catch (err: any) {
@@ -257,6 +298,17 @@ router.post(
         result.datasource,
         result.funnelState
       );
+
+      // Trigger funnel indexing/registration after successful clone
+      try {
+        await sendSignal({
+          ontologyId,
+          objectTypeApiName: result.objectType.api_name,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for clone:", signalErr);
+      }
 
       sendCreated(res, formatted);
     } catch (err: any) {
@@ -314,6 +366,17 @@ router.post(
         result.datasource,
         result.funnelState
       );
+
+      // Trigger funnel indexing/registration after import
+      try {
+        await sendSignal({
+          ontologyId,
+          objectTypeApiName: result.objectType.api_name,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        console.error("Failed to send schemaChanged signal for import:", signalErr);
+      }
 
       sendCreated(res, formatted);
     } catch (err: any) {
@@ -418,6 +481,10 @@ router.get(
         (result.objectType as Record<string, unknown>).version ?? 1
       );
       setEtag(res, version);
+      // Object types are mutable (backing datasource, properties, funnel
+      // state change independently of the version field the ETag is derived
+      // from). Prevent the browser from serving a stale 304 on refetch.
+      res.setHeader("Cache-Control", "no-store");
       const formatted = formatObjectType(
         result.objectType,
         result.properties,
@@ -546,6 +613,19 @@ router.put(
         ontologyId,
         effectiveApiName,
       );
+
+      // Trigger funnel indexing after successful update
+      try {
+        await sendSignal({
+          ontologyId,
+          objectTypeApiName: effectiveApiName,
+          signalType: "schemaChanged",
+        });
+      } catch (signalErr) {
+        // Log error but do not fail the request if signal sending fails
+        console.error("Failed to send schemaChanged signal:", signalErr);
+      }
+
       const newVersion = Number(
         (full.objectType as Record<string, unknown>).version ?? currentVersion + 1
       );

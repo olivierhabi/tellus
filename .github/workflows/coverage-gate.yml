@@ -113,7 +113,31 @@ jobs:
               console.error("coverage gate FAIL:\n" + fails.join("\n"));
               process.exit(1);
             }
-            console.log("coverage gate OK");
+            // Engineering-debt visibility + self-expiring deadline (audit D-02).
+            // The RATCHET tier is honest technical debt: these core mutation /
+            // merge modules are gated BELOW the 80% goal (some at 0%). A gate
+            // that stays green forever silently hides that the most
+            // safety-critical code is effectively untested. So we (a) report
+            // every sub-goal module on EVERY run, and (b) HARD-FAIL once the
+            // remediation deadline passes, so the debt cannot be carried
+            // indefinitely without a deliberate decision to extend it.
+            const GOAL = 80;
+            const DEBT_DEADLINE = Date.UTC(2026, 8, 1); // 2026-09-01
+            const debt = Object.entries(RATCHET).filter(([, m]) => m < GOAL);
+            if (debt.length) {
+              console.warn(
+                "coverage DEBT — modules below the " + GOAL + "% goal (tracked, not yet enforced):\n" +
+                debt.map(([c, m]) => "  " + c + " floor=" + m + "%").join("\n")
+              );
+              if (Date.now() > DEBT_DEADLINE) {
+                console.error(
+                  "coverage DEBT deadline (2026-09-01) has passed: raise the RATCHET floors toward " +
+                  GOAL + "% by writing the deferred unit tests, or consciously extend the deadline. Failing the gate."
+                );
+                process.exit(1);
+              }
+            }
+            console.log("coverage gate OK" + (debt.length ? " (with tracked debt — see warnings above)" : ""));
           '
       - uses: actions/upload-artifact@v4
         with: { name: coverage-report, path: coverage/ }

@@ -11,8 +11,14 @@ import {
   sendNoContent,
 } from "../utils/responseFormatter";
 import { client as osClient } from "../services/opensearch/client";
+import { dataPlaneGuard } from "../middleware/requireRole";
 
 const router = Router({ mergeParams: true });
+
+// Function-level authorization: group create/update require ontology-editor;
+// delete requires ontology-admin (PATs scope-gated upstream, superadmin
+// passes, reads open).
+router.use(dataPlaneGuard({ post: "write" }));
 
 // Spec §Task 15: "Object count per card: cached in Elasticsearch _count,
 // refreshed every 60s (not on every render)."
@@ -146,6 +152,71 @@ router.get("/graph", async (req: Request, res: Response, next: NextFunction) => 
     next(err);
   }
 });
+
+// UUID v1-v5 matcher. Both the group_id and object_type_id are UUIDs in
+// `object_type_group` / `object_type` so we validate strictly before
+// touching the DB.
+const UUID_REGEX_GROUPS =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// UUID-keyed group membership add. Production callers should use this
+// path — both group and object type are addressed by their stable UUID
+// so a downstream rename never breaks the binding. Mounted BEFORE the
+// `/:groupApiName/members` route so the literal `/by-id/...` segment
+// wins under Express's first-match routing.
+router.post(
+  "/by-id/:groupId/members",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId, groupId } = req.params;
+      const { objectTypeId } = (req.body || {}) as { objectTypeId?: string };
+      if (!UUID_REGEX_GROUPS.test(groupId)) {
+        return sendError(
+          res,
+          "INVALID_PARAMETER",
+          `'${groupId}' is not a valid group UUID.`
+        );
+      }
+      if (!objectTypeId || !UUID_REGEX_GROUPS.test(objectTypeId)) {
+        return sendError(
+          res,
+          "VALIDATION_FAILED",
+          "Body must include a valid `objectTypeId` UUID."
+        );
+      }
+      const g = await query(
+        "SELECT group_id FROM object_type_group WHERE ontology_id = $1 AND group_id = $2",
+        [ontologyId, groupId]
+      );
+      const o = await query(
+        "SELECT object_type_id FROM object_type WHERE ontology_id = $1 AND object_type_id = $2",
+        [ontologyId, objectTypeId]
+      );
+      if (g.rowCount === 0) {
+        return sendError(
+          res,
+          "GROUP_NOT_FOUND",
+          `Group '${groupId}' not found in ontology '${ontologyId}'.`
+        );
+      }
+      if (o.rowCount === 0) {
+        return sendError(
+          res,
+          "OBJECT_TYPE_NOT_FOUND",
+          `Object type '${objectTypeId}' not found in ontology '${ontologyId}'.`
+        );
+      }
+      await query(
+        `INSERT INTO object_type_group_member (group_id, object_type_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [g.rows[0].group_id, o.rows[0].object_type_id]
+      );
+      sendNoContent(res);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 router.post(
   "/:groupApiName/members",

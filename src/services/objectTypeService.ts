@@ -11,6 +11,11 @@ import { validateObjectTypeName } from "../utils/apiNameValidator";
 import { decodePageToken, encodePageToken } from "../utils/responseFormatter";
 import propertyService from "./propertyService";
 import linkTypeModel from "../models/linkType";
+import { eventBus } from "../websocket/eventBus";
+import {
+  registerWithDataset,
+  registerWithFoundryDataset,
+} from "./datasetDatasourceService";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -117,7 +122,7 @@ async function create(ontologyId: string, data: CreateInput) {
 async function getByApiName(ontologyId: string, apiName: string) {
   // 1. Object type
   const otResult = await query(
-    "SELECT * FROM object_type WHERE ontology_id = $1 AND api_name = $2",
+    "SELECT * FROM object_type WHERE ontology_id = $1 AND LOWER(api_name) = LOWER($2)",
     [ontologyId, apiName]
   );
   if (otResult.rows.length === 0) {
@@ -408,7 +413,7 @@ async function update(ontologyId: string, apiName: string, data: UpdateInput) {
 
   const sql = `UPDATE object_type
                SET ${setClauses.join(", ")}
-               WHERE ontology_id = $${paramIndex++} AND api_name = $${paramIndex}
+               WHERE ontology_id = $${paramIndex++} AND LOWER(api_name) = LOWER($${paramIndex})
                RETURNING *`;
 
   try {
@@ -452,7 +457,7 @@ async function update(ontologyId: string, apiName: string, data: UpdateInput) {
 async function remove(ontologyId: string, apiName: string): Promise<void> {
   // 1. Look up the object type
   const otResult = await query(
-    "SELECT object_type_id FROM object_type WHERE ontology_id = $1 AND api_name = $2",
+    "SELECT object_type_id FROM object_type WHERE ontology_id = $1 AND LOWER(api_name) = LOWER($2)",
     [ontologyId, apiName]
   );
   if (otResult.rows.length === 0) {
@@ -486,9 +491,41 @@ async function remove(ontologyId: string, apiName: string): Promise<void> {
     objectTypeId,
   ]);
 
+  // 4. Best-effort downstream cleanup so deleting an object type doesn't leave
+  //    a zombie funnel workflow retrying against a missing type, or an orphaned
+  //    OpenSearch index serving stale rows. The row is already gone, so these
+  //    failures MUST NOT roll back or throw — log and continue.
+  await cleanupAfterDelete(apiName);
+
   console.log(
     `Deleted object type ${apiName} (${objectTypeId}) with all cascaded resources`
   );
+}
+
+/**
+ * Terminate the funnel workflow and drop the OpenSearch index for a deleted
+ * object type. Both are best-effort and isolated so one failure doesn't block
+ * the other or the delete.
+ */
+async function cleanupAfterDelete(apiName: string): Promise<void> {
+  try {
+    const { terminateTemporalWorkflow } = await import(
+      "./funnel/temporal/worker"
+    );
+    await terminateTemporalWorkflow(apiName, "object type deleted");
+  } catch (err) {
+    console.warn(
+      `[objectType.delete] funnel workflow terminate failed for ${apiName}: ${(err as Error).message}`
+    );
+  }
+  try {
+    const { deleteIndex } = await import("./opensearch/indexLifecycleManager");
+    await deleteIndex(apiName);
+  } catch (err) {
+    console.warn(
+      `[objectType.delete] OpenSearch index drop failed for ${apiName}: ${(err as Error).message}`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,6 +1372,219 @@ async function getById(ontologyId: string, objectTypeId: string) {
   return getByApiName(ontologyId, otResult.rows[0].api_name as string);
 }
 
+/**
+ * Set (or replace) the backing data source for an object type.
+ *
+ * The wizard POSTs to `/object-types/:objectTypeRid/datasources` with a
+ * Palantir-style RID. That RID is a *non-persisted projection* of the legacy
+ * `object_type.object_type_id` UUID (see `formatObjectTypeRid` in
+ * responseFormatter.ts) — the object type lives in the canonical `object_type`
+ * table, not the B8 `object_types` table. So we strip the RID prefix back to
+ * the UUID and operate on the canonical storage.
+ *
+ * The single canonical backing datasource is the `backing_datasource` row the
+ * object-type GET response joins to populate `backingDatasource` (the field
+ * the frontend renders). An object type has exactly one backing datasource, so
+ * "add" means *replace*: we delete any prior registration first, then delegate
+ * to the dataset-aware register path (legacy `dataset` table or Foundry
+ * `foundry_datasets` table) which validates the column mapping against the
+ * dataset's real columns and writes the canonical row.
+ */
+async function addDatasource(
+  objectTypeRid: string,
+  payload: {
+    datasourceRid: string;
+    primaryKeyMapping: string;
+    propertyMappings: Array<{ sourceColumn: string; targetPropertyId: string }>;
+    resolutionStrategy?: string;
+    conflictPolicy?: string;
+    ifMatch?: string;
+  }
+) {
+  const {
+    datasourceRid,
+    primaryKeyMapping,
+    propertyMappings,
+    resolutionStrategy = "UNION",
+    conflictPolicy = "OVERWRITE_WITH_NEW",
+  } = payload;
+
+  // 1. Resolve the canonical object_type_id (UUID) from the projected RID.
+  //    RIDs look like `ri.ontology.main.object-type.<uuid>`; a raw UUID is
+  //    also accepted for callers that already hold the id.
+  const RID_PREFIX = "ri.ontology.main.object-type.";
+  const UUID_PATTERN =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let objectTypeId: string | null = null;
+  if (objectTypeRid.startsWith(RID_PREFIX)) {
+    objectTypeId = objectTypeRid.slice(RID_PREFIX.length);
+  } else if (UUID_PATTERN.test(objectTypeRid)) {
+    objectTypeId = objectTypeRid;
+  }
+  if (!objectTypeId) {
+    throw appError(
+      "OBJECT_TYPE_NOT_FOUND",
+      `Object type '${objectTypeRid}' not found.`
+    );
+  }
+
+  const otResult = await query(
+    "SELECT object_type_id, api_name, ontology_id FROM object_type WHERE object_type_id = $1",
+    [objectTypeId]
+  );
+  if (otResult.rows.length === 0) {
+    throw appError(
+      "OBJECT_TYPE_NOT_FOUND",
+      `Object type '${objectTypeRid}' not found.`
+    );
+  }
+  const objectType = otResult.rows[0];
+  const objectOntologyId: string = objectType.ontology_id;
+
+  // 2. Convert the wizard's array-form propertyMappings into the canonical
+  //    columnMapping (Record<propertyApiName, sourceColumn>) the register
+  //    paths expect, and validate each mapping is well-formed.
+  const columnMapping: Record<string, string> = {};
+  for (const m of propertyMappings) {
+    if (!m.targetPropertyId || !m.sourceColumn) {
+      throw appError(
+        "VALIDATION_FAILED",
+        "Each property mapping must include both sourceColumn and targetPropertyId."
+      );
+    }
+    columnMapping[m.targetPropertyId] = m.sourceColumn;
+  }
+  if (!primaryKeyMapping) {
+    throw appError("VALIDATION_FAILED", "primaryKeyMapping is required.");
+  }
+
+  // 3. REPLACE semantics: an object type owns exactly one backing datasource,
+  //    so drop any prior registration before inserting the new one. The
+  //    register helpers refuse to insert when a row already exists
+  //    (DATASOURCE_ALREADY_REGISTERED), so this delete is what makes "add"
+  //    behave as "replace".
+  await query(
+    "DELETE FROM backing_datasource WHERE object_type_id = $1",
+    [objectTypeId]
+  );
+
+  // 4. Delegate to the canonical dataset-aware register path. Route by which
+  //    table the supplied id actually lives in: legacy `dataset` (requires a
+  //    committed transaction) or Foundry `foundry_datasets`. Both write the
+  //    canonical `backing_datasource` row and refresh funnel_state.
+  const legacyDs = await query(
+    "SELECT dataset_id FROM dataset WHERE dataset_id = $1",
+    [datasourceRid]
+  );
+  if (legacyDs.rows.length > 0) {
+    await registerWithDataset(objectTypeId, {
+      datasetId: datasourceRid,
+      columnMapping,
+      primaryKeyColumn: primaryKeyMapping,
+    });
+  } else {
+    await registerWithFoundryDataset(objectTypeId, {
+      foundryDatasetId: datasourceRid,
+      columnMapping,
+      primaryKeyColumn: primaryKeyMapping,
+    });
+  }
+
+  // 5. Reindex the object type so objects actually appear in OpenSearch.
+  //    Registering the backing datasource only wrote the `backing_datasource`
+  //    row — without this, a fresh save leaves the search index empty and the
+  //    Object Explorer shows zero objects. Fire-and-forget (non-blocking): the
+  //    HTTP response returns immediately, the pipeline runs on the event loop,
+  //    and the UI badge (funnel_state — written by the reindex pipeline's
+  //    terminal step) flips to "indexed" once it lands. Errors are logged,
+  //    never thrown, so a dataset/indexing failure can't fail an otherwise-valid
+  //    save. Matches the non-blocking contract of autoIndexService.
+  //
+  //    Uses reindexObjectType (the same engine the FE "Force Reindex" button
+  //    calls) rather than indexObjectType: it resolves Foundry-bridged S3
+  //    objects (#foundry-dataset: tag) AND legacy local files, and writes the
+  //    UI-facing funnel_state directly (Step 11). The pre-existing
+  //    DataSourceAddedEvent consumer is NOT relied upon (it joins a B8 rid
+  //    against the projected RID and no-ops for this path). Dynamic import
+  //    avoids any module-init cycle between this service and reindexService.
+  const apiNameForIndex = objectType.api_name;
+  const ontologyIdForIndex = objectOntologyId;
+  setImmediate(() => {
+    import("./reindexService")
+      .then(({ reindexObjectType }) =>
+        reindexObjectType(ontologyIdForIndex, apiNameForIndex),
+      )
+      .then((r) => {
+        console.log(
+          `[addDatasource] auto-reindexed '${apiNameForIndex}': ${r.totalObjectsIndexed ?? 0} objects indexed`,
+        );
+      })
+      .catch((e: unknown) => {
+        console.error(
+          `[addDatasource] auto-reindex error for '${apiNameForIndex}':`,
+          e instanceof Error ? e.message : e,
+        );
+      });
+  });
+
+  // 6. Notify the orchestration pipeline that the backing source changed.
+  eventBus.emit("ws:event", {
+    event: "DataSourceAddedEvent",
+    projectId: null,
+    payload: {
+      objectTypeRid,
+      objectTypeApiName: objectType.api_name,
+      datasourceRid,
+      primaryKeyMapping,
+      resolutionStrategy,
+      conflictPolicy,
+      propertyMappings,
+    },
+  });
+
+  return {
+    success: true,
+    message: "Backing datasource replaced successfully.",
+    datasourceRid,
+    resolutionStrategy,
+    conflictPolicy,
+  };
+}
+
+/**
+ * List the backing datasources attached to an object type.
+ *
+ * Returns rows projected to the multi-source datasource contract
+ * ({ datasourceRid, primaryKeyMapping, propertyMappings, resolutionStrategy,
+ * conflictPolicy, isPrimary, createdAt, updatedAt }) so the frontend can render
+ * the attached-datasources list and refresh it after an append.
+ */
+async function listDatasources(objectTypeRid: string) {
+  const result = await query(
+    `SELECT * FROM object_type_datasources WHERE object_type_rid = $1 ORDER BY created_at ASC`,
+    [objectTypeRid]
+  );
+
+  return result.rows.map((row: any) => {
+    const mapping = row.property_mapping ?? {};
+    const primaryKeyColumns: string[] = Array.isArray(row.primary_key_columns)
+      ? row.primary_key_columns
+      : [];
+    return {
+      datasourceRid: row.datasource_rid,
+      primaryKeyMapping: primaryKeyColumns[0] ?? null,
+      propertyMappings: Array.isArray(mapping.propertyMappings)
+        ? mapping.propertyMappings
+        : [],
+      resolutionStrategy: mapping.resolutionStrategy ?? "UNION",
+      conflictPolicy: mapping.conflictPolicy ?? "OVERWRITE_WITH_NEW",
+      isPrimary: row.is_primary ?? false,
+      createdAt: row.created_at,
+      updatedAt: row.created_at,
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -1352,5 +1602,7 @@ const objectTypeService = {
   importDefinition,
   getStatistics,
   batchCreate,
+  addDatasource,
+  listDatasources,
 };
 export default objectTypeService;

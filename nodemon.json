@@ -1,0 +1,13 @@
+{
+  "watch": ["src"],
+  "ext": "ts,json",
+  "ignore": [
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts",
+    "dist",
+    "logs",
+    "var"
+  ],
+  "delay": "400",
+  "exec": "tsx src/server.ts"
+}

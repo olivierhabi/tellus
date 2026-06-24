@@ -59,10 +59,10 @@ import {
   type KnownSettingKey,
 } from '../services/systemSettingsService';
 import { getKeycloakRealm } from '../auth/keycloakConfig'; // F-P4-26
+import { SESSION_MAX_AGE_SECONDS, SESSION_IDLE_TIMEOUT_SECONDS } from '../config/sessionConfig';
 
 const TELLUS_COOKIE = 'TELLUS_TOKEN';
 const TELLUS_REFRESH_COOKIE = 'TELLUS_REFRESH';
-const TELLUS_COOKIE_MAX_AGE_SECONDS = 57600; // 16h, matching spec
 
 const router = Router();
 
@@ -87,6 +87,12 @@ function envelope(errorCode: string, statusCode: number, message: string, req: R
 }
 
 function sendError(err: unknown, req: Request, res: Response) {
+  // Defensive guard: the wall-clock requestTimeoutMiddleware (5s) may have
+  // already written a 504 envelope while a slow upstream (Keycloak) was
+  // still in flight. Writing a second response throws ERR_HTTP_HEADERS_SENT
+  // and surfaces as an unhandled rejection. The timeout middleware owns the
+  // response in that case; we silently drop the late error.
+  if (res.headersSent || res.writableEnded) return;
   if (err instanceof AppError) {
     return res.status(err.statusCode).json(envelope(err.code, err.statusCode, err.message, req));
   }
@@ -113,11 +119,20 @@ const loginLimiter = rateLimit({
 
 function setSessionCookies(res: Response, accessToken: string, refreshToken?: string) {
   const isProd = process.env.NODE_ENV === 'production';
+  // Both cookies share the single configured session window
+  // (TELLUS_SESSION_MAX_AGE). The access cookie is the edge gate's
+  // liveness signal and the refresh cookie is what silentRefresh()
+  // rotates against — keeping their Max-Age identical (and matched to
+  // the FE marker via the `sessionMaxAgeSeconds` we echo back) means a
+  // tab opened any time inside the window always finds a cookie to act
+  // on, instead of the gate lapsing while the session is still
+  // refreshable. See src/config/sessionConfig.ts.
+  const maxAgeMs = SESSION_MAX_AGE_SECONDS * 1000;
   res.cookie(TELLUS_COOKIE, accessToken, {
     httpOnly: true,
     secure: isProd,
     sameSite: isProd ? 'strict' : 'lax',
-    maxAge: TELLUS_COOKIE_MAX_AGE_SECONDS * 1000,
+    maxAge: maxAgeMs,
     path: '/',
   });
   if (refreshToken) {
@@ -125,13 +140,18 @@ function setSessionCookies(res: Response, accessToken: string, refreshToken?: st
       httpOnly: true,
       secure: isProd,
       sameSite: isProd ? 'strict' : 'lax',
-      maxAge: 30 * 24 * 3600 * 1000,
+      maxAge: maxAgeMs,
       path: '/api/v1/auth',
     });
   }
 }
 
 function clearSessionCookies(res: Response) {
+  // Same race as sendError: if requestTimeoutMiddleware already flushed a
+  // 504, res.clearCookie -> res.cookie -> res.append('Set-Cookie', ...)
+  // throws ERR_HTTP_HEADERS_SENT. The cookies are stale either way; the
+  // FE will retry through /login on a 401/504.
+  if (res.headersSent || res.writableEnded) return;
   res.clearCookie(TELLUS_COOKIE, { path: '/' });
   res.clearCookie(TELLUS_REFRESH_COOKIE, { path: '/api/v1/auth' });
 }
@@ -267,6 +287,16 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
       req,
       details: { mfa: false },
     });
+    // Surface the passkey-enrollment hint so the FE can decide whether
+    // to route the user through the post-login soft-prompt without
+    // having to make a follow-up GET /me/webauthn/credentials round-
+    // trip. `requiresPasskeyEnrollment` is the FE's contract — it is
+    // intentionally a boolean rather than a count so the BE owns the
+    // policy decision and the FE never has to interpret raw counts.
+    // We only emit `true` when the policy is "soft prompt": the user
+    // signed in successfully (no mandatory enrollment, no MFA gate)
+    // but has zero passkeys. Mandatory enrollment took the
+    // passkeyEnrollmentRequired branch above and never reaches here.
     res.json({
       success: true,
       data: {
@@ -274,6 +304,10 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
         accessToken: result.accessToken,
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
+        sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
+        hasPasskey,
+        requiresPasskeyEnrollment: !hasPasskey,
       },
     });
   } catch (err) {
@@ -432,6 +466,8 @@ router.post('/refresh', async (req: Request, res: Response) => {
         accessToken: result.accessToken,
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
+        sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
       },
     });
   } catch (err) {
@@ -621,6 +657,8 @@ router.post('/enroll/passkey/verify', loginLimiter, async (req: Request, res: Re
         tokenType: 'Bearer',
         accessToken: resolved.stashedAccessToken,
         tokenInfo: tellusAuthService.toTokenInfo(claims),
+        sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
         credential: {
           credentialId: registerResult.credentialId,
           userLabel: registerResult.userLabel,
@@ -639,6 +677,12 @@ async function completeMfaLogin(
 ) {
   const claims = await tellusAuthService.verifyAccessToken(challenge.accessToken);
   setSessionCookies(res, challenge.accessToken, challenge.refreshToken ?? undefined);
+  // Re-probe passkey enrollment AFTER the second factor succeeds so the
+  // FE soft-prompt decision survives the MFA detour. A user who passed
+  // /login with TOTP but has no passkey will still see the soft prompt
+  // here, identical to the fast-path branch in /login above.
+  const webauthn = getWebauthnService(foundryDb as unknown as Knex);
+  const hasPasskey = await webauthn.hasAny(challenge.keycloakSub);
   await emitAuditEvent({
     keycloakSub: challenge.keycloakSub,
     category: 'session',
@@ -653,6 +697,10 @@ async function completeMfaLogin(
       tokenType: 'Bearer',
       accessToken: challenge.accessToken,
       tokenInfo: tellusAuthService.toTokenInfo(claims),
+      sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+      idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
+      hasPasskey,
+      requiresPasskeyEnrollment: !hasPasskey,
     },
   });
 }
@@ -684,10 +732,31 @@ router.post('/logout', requireTellusAuth({ allowPat: false }), async (req: Reque
 // authenticated with a Keycloak JWT (cookie or Bearer) or a Personal
 // Access Token. For PATs we synthesize a minimal info block from the
 // stored principal since there are no JWT claims to decode.
-router.get('/token-info', requireTellusAuth(), (req: Request, res: Response) => {
+router.get('/token-info', requireTellusAuth(), async (req: Request, res: Response) => {
   const claims = (req as Request & { tellusClaims?: TellusClaims }).tellusClaims;
   if (claims) {
-    return res.json({ success: true, data: tellusAuthService.toTokenInfo(claims) });
+    // Probe passkey enrollment so the FE's cold-load path on
+    // /login/passkey can decide whether to render the soft-prompt
+    // card without a second round-trip to /me/webauthn/credentials.
+    // Best-effort: if the probe blows up we surface `hasPasskey:false`
+    // so the page degrades to a soft-prompt invitation rather than a
+    // bounce. We never return 5xx on /token-info — the FE relies on
+    // this endpoint as a session liveness check.
+    let hasPasskey = false;
+    try {
+      const webauthn = getWebauthnService(foundryDb as unknown as Knex);
+      hasPasskey = await webauthn.hasAny(claims.sub);
+    } catch {
+      hasPasskey = false;
+    }
+    return res.json({
+      success: true,
+      data: {
+        ...tellusAuthService.toTokenInfo(claims),
+        hasPasskey,
+        requiresPasskeyEnrollment: !hasPasskey,
+      },
+    });
   }
   const principal = req.tellusPrincipal;
   if (!principal || principal.source !== 'pat') {
@@ -711,6 +780,11 @@ router.get('/token-info', requireTellusAuth(), (req: Request, res: Response) => 
       exp: null,
       iat: null,
       iss: `${kcConfig.kcUrl}/realms/${kcConfig.kcRealm}`,
+      // PATs are non-interactive and never go through the soft-prompt
+      // flow; report `false` so a misbehaving FE that calls this with
+      // a PAT cookie can't accidentally trigger an enrollment loop.
+      hasPasskey: false,
+      requiresPasskeyEnrollment: false,
     },
   });
 });

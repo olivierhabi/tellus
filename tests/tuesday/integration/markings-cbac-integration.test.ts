@@ -153,15 +153,28 @@ describe("CBAC + Markings enforcement (F-02 / F-03)", () => {
       getToken("cypress-nogroups@tellus.local"),
     ]);
 
-    // Discover the seeded ontology id.
+    // Discover the canonical ontology id. Singleton deployment: there is
+    // exactly one ontology, so body.data[0] is it. Do NOT match on
+    // displayName === "RRA Tax Ontology" — other suites (e.g. monday's
+    // "Update ontology" test) mutate the shared canonical ontology's
+    // displayName, which would break a name-based lookup. Verify the real
+    // dependency (the seeded Taxpayer object type) exists instead.
     const res = await authedFetch("/api/v1/ontology", aliceToken);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       data: Array<{ ontologyId: string; displayName: string }>;
     };
-    const o = body.data.find((x) => x.displayName === "RRA Tax Ontology");
-    if (!o) throw new Error("Seeded 'RRA Tax Ontology' is missing");
+    const o = body.data?.[0];
+    if (!o) throw new Error("Canonical ontology is missing");
     ontologyId = o.ontologyId;
+
+    const otRes = await authedFetch(
+      `/api/v1/ontology/${ontologyId}/objectTypes/Taxpayer`,
+      aliceToken,
+    );
+    if (otRes.status !== 200) {
+      throw new Error(`Seeded 'Taxpayer' object type is missing (status ${otRes.status})`);
+    }
 
     // Stamp the four fixture docs. Order does not matter — OpenSearch
     // PUTs are independent.

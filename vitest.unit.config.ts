@@ -33,6 +33,18 @@ export default defineConfig({
       "tests/saturday/unit/**/*-unit.test.ts",
       "tests/sunday/unit/**/*-unit.test.ts",
       "tests/foundry/unit/**/*-unit.test.ts",
+      // T-04: pure-unit overlay/funnel tests (MemoryOverlayStore in-memory,
+      // no Redis/PG/Quickwit). Including the whole dir keeps the offline
+      // lane aligned with the funnel test surface.
+      "tests/funnel/unit/**/*-unit.test.ts",
+      // Quiver drive (B1..B10 + F1..F10): pure-unit tests under tests/quiver/unit/.
+      "tests/quiver/unit/**/*-unit.test.ts",
+      // T-10: AST-level route contract guard (no I/O beyond fs reads).
+      "tests/contract/**/*.test.ts",
+      // postgres-connection program: pure-unit tests for the connectivity
+      // service tier (Zod contracts, error envelope, ETag helpers, FK
+      // detector, type mapping, vault primitives, pg-types config).
+      "tests/connectivity/unit/**/*-unit.test.ts",
     ],
     exclude: ["node_modules", "dist", "tests/**/*-integration.test.ts", "tests/**/*-e2e.test.ts"],
     sequence: { concurrent: false },

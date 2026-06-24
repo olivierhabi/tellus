@@ -64,6 +64,26 @@ const pool = new Pool({
     process.env.PG_CONNECT_TIMEOUT_MS || "5000",
     10,
   ),
+
+  // Server-side deadline for any single statement. Without this a single
+  // pathological query (missing index, runaway recompute) holds its pooled
+  // connection indefinitely; a handful of them exhaust `max` and wedge the
+  // whole service. node-postgres forwards these as libpq connection
+  // parameters, so PostgreSQL itself cancels the statement — defence that
+  // does not depend on the client staying connected. Generous default (60s)
+  // tunable via env; set to 0 to disable for analytics-heavy deployments
+  // that drive long queries through this pool.
+  statement_timeout: parseInt(
+    process.env.PG_STATEMENT_TIMEOUT_MS || "60000",
+    10,
+  ),
+  // Releases a connection left holding an open transaction (a leaked
+  // BEGIN without COMMIT/ROLLBACK) so it cannot pin a slot forever. Paired
+  // with `withTransaction`'s poison-on-rollback guard below.
+  idle_in_transaction_session_timeout: parseInt(
+    process.env.PG_IDLE_TX_TIMEOUT_MS || "60000",
+    10,
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -116,10 +136,24 @@ async function query(text: string, values?: unknown[]): Promise<QueryResult> {
     // full SQL stack dump that makes it look like a real failure.
     const isShutdownRace =
       /pool after calling end on the pool|Pool is ending|cannot use a pool/i.test(msg);
-    if (!isShutdownRace) {
+
+    // Unique-violation (Postgres SQLSTATE 23505) is an expected,
+    // caller-handled signal in several places — most notably
+    // `linkTypeModel.create`'s apiName disambiguation retry loop,
+    // which converts a 23505 into a numeric-suffix retry. Logging
+    // the full SQL + params on every retry pollutes the journal
+    // with what looks like a stack trace but is in fact a controlled
+    // happy-path branch. Callers that *don't* handle 23505 will
+    // still see the error rethrown below and can log it themselves
+    // with their own context.
+    const sqlState = (err as { code?: unknown })?.code;
+    const isUniqueViolation = sqlState === "23505";
+
+    if (!isShutdownRace && !isUniqueViolation) {
       console.error("PostgreSQL query error:", {
         sql: text,
-        params: values,
+        sqlState,
+        paramCount: Array.isArray(values) ? values.length : 0,
         error: msg,
       });
     }
@@ -330,12 +364,20 @@ async function queryWithRetry(
         }));
       }
 
-      // Log and re-throw
-      console.error("PostgreSQL query error:", {
-        sql: text,
-        params: values,
-        error: err.message,
-      });
+      // Log and re-throw — but skip the noisy SQL/params dump for
+      // unique-violation (23505), which is an expected, caller-handled
+      // signal (see the matching block in `query()` above for the
+      // full rationale).
+      const isUniqueViolation =
+        (err as { code?: unknown })?.code === "23505";
+      if (!isUniqueViolation) {
+        console.error("PostgreSQL query error:", {
+          sql: text,
+          sqlState: (err as { code?: unknown })?.code,
+          paramCount: Array.isArray(values) ? values.length : 0,
+          error: err.message,
+        });
+      }
       throw err;
     }
   }

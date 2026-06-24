@@ -1463,6 +1463,14 @@ async function migrate(): Promise<void> {
       `ALTER TABLE property ADD COLUMN IF NOT EXISTS marking_required TEXT`
     );
 
+    // Property.conditional_formatting — ordered list of conditional-formatting
+    // rules (first match wins, "Always true" as fallback) authored in the
+    // Ontology Manager and consumed by Workshop's Object Table. JSONB blob of
+    // the FE `ConditionalFormattingRule[]` shape; null/empty means no rules.
+    await client.query(
+      `ALTER TABLE property ADD COLUMN IF NOT EXISTS conditional_formatting JSONB`
+    );
+
     console.log("Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)");
 
     // ------------------------------------------------------------------
@@ -1970,6 +1978,21 @@ async function migrate(): Promise<void> {
           .filter((f: string) => !appliedSet.has(f))
           .sort();
 
+        // Migrations whose dependency tables/columns are owned by a LATER
+        // migrator (src/foundryMigrate.ts creates resources, foundry_datasets,
+        // pipeline_nodes, …) cannot run here — foundryMigrate runs AFTER this
+        // file. Rather than fail the whole run, we DEFER those: roll the file
+        // back, leave it OUT of the ledger, and let foundryMigrate's own
+        // forward scan apply it once its tables exist. Deferral is keyed on
+        // the Postgres SQLSTATE for "missing relation/column", so a genuinely
+        // broken migration (referencing a table NO migrator creates) is not
+        // silently lost — it will still fail, loudly, in foundryMigrate's scan.
+        const DEFERRABLE_SQLSTATES = new Set([
+          "42P01", // undefined_table
+          "42703", // undefined_column
+        ]);
+        const deferred: string[] = [];
+
         for (const fname of all) {
           const fpath = pathMod.join(migrationsDir, fname);
           const sql = fsMod.readFileSync(fpath, "utf-8");
@@ -1988,9 +2011,28 @@ async function migrate(): Promise<void> {
             console.log(`Applied ${fname}`);
           } catch (migErr) {
             await client.query("ROLLBACK").catch(() => {});
+            const code =
+              migErr && typeof migErr === "object" && "code" in migErr
+                ? String((migErr as { code?: unknown }).code)
+                : "";
+            if (DEFERRABLE_SQLSTATES.has(code)) {
+              deferred.push(fname);
+              const msg =
+                migErr instanceof Error ? migErr.message : String(migErr);
+              console.log(
+                `Deferred ${fname} (dependency not present yet — will be applied by migrate:foundry): ${msg}`
+              );
+              continue;
+            }
             const msg = migErr instanceof Error ? migErr.message : String(migErr);
             throw new Error(`${fname} failed: ${msg}`);
           }
+        }
+
+        if (deferred.length > 0) {
+          console.log(
+            `Deferred ${deferred.length} migration(s) to migrate:foundry: ${deferred.join(", ")}`
+          );
         }
       }
     } catch (sqlErr) {

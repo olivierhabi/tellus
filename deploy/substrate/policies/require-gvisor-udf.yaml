@@ -1,0 +1,46 @@
+# FOUNDRY-GAPS §3 — Policy-as-code (Kyverno).
+#
+# Enforces the §2 UDF isolation guarantee at admission: any pod in a tellus
+# user-code namespace MUST run under the gVisor (runsc) RuntimeClass and MUST
+# NOT be privileged. This is the cluster-level backstop that complements the
+# per-Job manifest hardening — a workload can't opt out of the sandbox even if
+# something upstream forgets to set it.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-gvisor-udf
+  annotations:
+    policies.kyverno.io/title: Require gVisor for user-code namespaces
+    policies.kyverno.io/category: Sandbox Isolation
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: udf-pods-must-use-gvisor
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [tellus-udf, tellus-workers]
+      validate:
+        message: "Pods in user-code namespaces must set runtimeClassName: gvisor (UDF/worker sandbox)."
+        pattern:
+          spec:
+            runtimeClassName: gvisor
+    - name: udf-pods-must-not-be-privileged
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [tellus-udf, tellus-workers]
+      validate:
+        message: "Privileged containers are not allowed in user-code namespaces."
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"

@@ -31,22 +31,19 @@ import { query } from "../../../src/db";
 import { projectStageToPostgres } from "../../../src/services/funnel/temporal/activities";
 
 const STAMP = Date.now();
-const ONTOLOGY_ID = `11111111-aaaa-aaaa-aaaa-${STAMP.toString(16).padStart(12, "0").slice(-12)}`;
+// Singleton-ontology adaptation: the deployment uses a single canonical
+// enterprise ontology whose id is fixed (uq_ontology_singleton). We must
+// NOT INSERT/DELETE ontology rows; object_type fixtures reference the
+// canonical ontology_id for FK integrity instead.
+const ONTOLOGY_ID = "00000000-0000-0000-0000-000000000001";
 const OBJECT_TYPE_API_NAME = `RunKeyProbe${STAMP}`;
 let OBJECT_TYPE_ID = "";
 
 beforeAll(async () => {
-  // Minimal self-contained fixture — one ontology + one object_type.
-  // Both `projectStageToPostgres` branches only need a matching
-  // object_type_api_name to INSERT/UPDATE funnel_run rows; the ontology
-  // row is required for FK integrity.
-  await query(
-    `INSERT INTO ontology (ontology_id, display_name, description, created_by)
-     VALUES ($1, $2, 'runKey integration fixture', 'vitest')
-     ON CONFLICT (ontology_id) DO NOTHING`,
-    [ONTOLOGY_ID, `RunKey Fixture ${STAMP}`]
-  );
-
+  // Singleton-ontology adaptation: the canonical ontology already exists,
+  // so we only insert our object_type fixture (FK satisfied by canonical).
+  // `projectStageToPostgres` only needs a matching object_type_api_name to
+  // INSERT/UPDATE funnel_run rows.
   const inserted = await query(
     `INSERT INTO object_type (ontology_id, api_name, display_name, status)
      VALUES ($1, $2, $3, 'experimental')
@@ -68,6 +65,9 @@ afterAll(async () => {
   // Ordering: funnel_stage_run is FK'd to funnel_run → delete stage
   // rows first. object_type_active_index_version might also carry a
   // row if the test touched replacement — clean both defensively.
+  // Singleton-ontology adaptation: NEVER DELETE FROM ontology (would
+  // remove the canonical singleton row); only clean this test's own
+  // fixture rows below.
   await query(
     `DELETE FROM funnel_stage_run WHERE run_id IN
        (SELECT run_id FROM funnel_run WHERE object_type_api_name = $1)`,
@@ -84,7 +84,6 @@ afterAll(async () => {
   if (OBJECT_TYPE_ID) {
     await query(`DELETE FROM object_type WHERE object_type_id = $1`, [OBJECT_TYPE_ID]);
   }
-  await query(`DELETE FROM ontology WHERE ontology_id = $1`, [ONTOLOGY_ID]);
 });
 
 async function runsForProbe(): Promise<

@@ -34,6 +34,32 @@ export class PipelineService {
       throw new AppError('Project not found', 404, 'NOT_FOUND');
     }
 
+    // Defense in depth: refuse a `folderId` whose folder lives in a
+    // different project. The frontend already guards this, but a
+    // direct API caller (script, curl, third-party) could still
+    // submit a foreign-project folder and corrupt the cross-project
+    // graph if we trusted the input.
+    if (input.folderId) {
+      const folder = await this.knex('folders')
+        .where({ id: input.folderId })
+        .select('id', 'project_id')
+        .first();
+      if (!folder) {
+        throw new AppError(
+          'Destination folder not found',
+          404,
+          'FOLDER_NOT_FOUND',
+        );
+      }
+      if (folder.project_id !== projectId) {
+        throw new AppError(
+          'Destination folder belongs to a different project',
+          409,
+          'CROSS_PROJECT_FOLDER',
+        );
+      }
+    }
+
     // Check for duplicate name within the project
     const existing = await this.knex('pipelines')
       .where({ project_id: projectId, name: input.name })
@@ -268,6 +294,79 @@ export class PipelineService {
       .returning('*');
 
     return nodes;
+  }
+
+  /**
+   * Register a Kafka topic as a streaming-pipeline source (FOUNDRY-GAPS §2
+   * direct Kafka→pipeline path). Creates a `foundry_datasets` row with
+   * `format='stream'` (topic name stored in `file_path`), its `dataset_columns`
+   * schema, and a `dataset` pipeline node wired to it. At deploy time
+   * `DeploymentService.resolveStreamingSources` turns this into a Flink Kafka
+   * source connector (`compileStreamingJob`).
+   */
+  async createKafkaStreamSource(
+    projectId: string,
+    pipelineId: string,
+    input: {
+      label?: string;
+      topic: string;
+      columns: Array<{ name: string; type: string }>;
+      positionX?: number;
+      positionY?: number;
+    },
+  ) {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    const topic = (input.topic ?? '').trim();
+    if (!topic) {
+      throw new AppError('Kafka topic is required', 400, 'VALIDATION_ERROR');
+    }
+    if (!Array.isArray(input.columns) || input.columns.length === 0) {
+      throw new AppError(
+        'At least one column is required for a Kafka stream source',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    const label = input.label?.trim() || `kafka:${topic}`;
+
+    return this.knex.transaction(async (trx) => {
+      const [dataset] = await trx('foundry_datasets')
+        .insert({
+          name: label,
+          project_id: projectId,
+          folder_id: null,
+          // The topic is stored as file_path; the streaming source resolver
+          // reads it as the Flink Kafka connector `topic`.
+          file_path: topic,
+          format: 'stream',
+          status: 'ready',
+          column_count: input.columns.length,
+        })
+        .returning('*');
+
+      await trx('dataset_columns').insert(
+        input.columns.map((c, i) => ({
+          dataset_id: dataset.id,
+          column_name: c.name,
+          column_type: c.type,
+          ordinal_position: i,
+        })),
+      );
+
+      const [node] = await trx('pipeline_nodes')
+        .insert({
+          pipeline_id: pipelineId,
+          dataset_id: dataset.id,
+          node_type: 'dataset',
+          label,
+          position_x: input.positionX ?? 0,
+          position_y: input.positionY ?? 0,
+          config: JSON.stringify({ kafkaTopic: topic, streamFormat: 'json' }),
+        })
+        .returning('*');
+
+      return { dataset, node };
+    });
   }
 
   /**

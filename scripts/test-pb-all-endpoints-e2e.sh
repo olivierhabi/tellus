@@ -50,11 +50,15 @@ json() { python3 -c "import sys,json; d=json.load(sys.stdin); $*"; }
 # ---------------------------------------------------------------------------
 # Bootstrap: token + scratch project + pipeline
 # ---------------------------------------------------------------------------
-TOKEN=$(curl -sSf \
+# Prefer the shared token acquired once by tests/e2e/run-all.sh (exported as
+# AUTH_TOKEN). Re-acquiring per script floods Keycloak with repeated logins of
+# the same user, tripping brute-force/quick-login throttling (HTTP 400). Fall
+# back to a direct grant for standalone local runs.
+TOKEN="${AUTH_TOKEN:-$(curl -sSf \
   -d "client_id=${KC_CLIENT}" -d "grant_type=password" \
   -d "username=${KC_USER}" -d "password=${KC_PASS}" \
   "${KC_URL}/realms/${KC_REALM}/protocol/openid-connect/token" \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')}"
 AUTH="Authorization: Bearer ${TOKEN}"
 JSON="Content-Type: application/json"
 

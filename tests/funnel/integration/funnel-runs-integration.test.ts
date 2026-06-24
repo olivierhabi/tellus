@@ -15,19 +15,20 @@ import { api } from "../../helpers/api";
 import { query } from "../../../src/db";
 
 const STAMP = Date.now();
-const ONTOLOGY_ID = `33333333-aaaa-aaaa-aaaa-${STAMP.toString(16).padStart(12, "0").slice(-12)}`;
+// Singleton-ontology adaptation: the deployment has ONE canonical ontology
+// (uq_ontology_singleton) whose id is fixed. POST/DELETE/IMPORT on /ontology
+// are frozen (-> 409), and any ontology id collapses to the canonical. So we
+// reuse the canonical ontology instead of inserting/deleting our own.
+const ONTOLOGY_ID = `00000000-0000-0000-0000-000000000001`;
 const OT_API_NAME = `RunsProbe${STAMP}`;
 let OT_ID = "";
 let REAL_RUN_ID = "";
 let HANDOFF_RUN_ID = "";
 
 beforeAll(async () => {
-  await query(
-    `INSERT INTO ontology (ontology_id, display_name, description, created_by)
-     VALUES ($1, $2, 'runs integration fixture', 'vitest')
-     ON CONFLICT DO NOTHING`,
-    [ONTOLOGY_ID, `Runs Fixture ${STAMP}`],
-  );
+  // Singleton-ontology: do NOT insert into ontology (uq_ontology_singleton).
+  // The canonical ontology row already exists; just insert our own
+  // object_type fixture (FK satisfied by the canonical ontology_id).
   const ot = await query(
     `INSERT INTO object_type (ontology_id, api_name, display_name, status)
      VALUES ($1, $2, $3, 'experimental')
@@ -70,7 +71,9 @@ afterAll(async () => {
   if (OT_ID) {
     await query(`DELETE FROM object_type WHERE object_type_id = $1`, [OT_ID]);
   }
-  await query(`DELETE FROM ontology WHERE ontology_id = $1`, [ONTOLOGY_ID]);
+  // Singleton-ontology: do NOT delete from ontology — that would remove the
+  // shared canonical ontology row. Only the test's own fixture rows above are
+  // torn down (funnel_stage_run, funnel_run, object_type).
 });
 
 describe("GET /api/v1/funnel/runs/:objectType (legacy apiName)", () => {

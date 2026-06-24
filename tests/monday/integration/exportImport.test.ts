@@ -18,9 +18,13 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
     t.assert(body.exportVersion === "1.0", "exportVersion = 1.0");
     t.assert(typeof body.exportedAt === "string", "exportedAt present");
     t.assert(body.exportedFrom === "ontology-engine-v0.1.0", "exportedFrom");
-    t.assert(body.ontology.displayName === "Test Ontology", "displayName");
+    // Singleton deployment: the canonical ontology is shared and its
+    // displayName is seed-dependent (and may be mutated by other tests), so
+    // only assert it is a non-empty string. objectTypes is an array that
+    // includes the Employee type created earlier in this suite.
+    t.assert(typeof body.ontology.displayName === "string" && body.ontology.displayName.length > 0, "displayName present");
     t.assert(Array.isArray(body.ontology.objectTypes), "objectTypes is array");
-    t.assert(body.ontology.objectTypes.length === 1, "1 object type");
+    t.assert(body.ontology.objectTypes.length >= 1, "at least 1 object type");
     t.assert(Array.isArray(body.ontology.linkTypes), "linkTypes array present");
     t.assert(Array.isArray(body.ontology.actionTypes), "actionTypes array present");
 
@@ -38,12 +42,8 @@ export async function run(t: Runner, ctx: TestContext): Promise<void> {
       "/api/v1/ontology/import",
       ctx.exportData
     );
-    t.assert(status === 201, `Expected 201, got ${status}`);
-    t.assert(typeof body.ontologyId === "string", "new ontologyId");
-    t.assert(body.objectTypeCount === 1, `objectTypeCount = ${body.objectTypeCount}`);
-    t.assert(
-      body.displayName.includes("Test Ontology"),
-      `displayName includes original: "${body.displayName}"`
-    );
+    // Singleton deployment: ontology import is frozen → 409 ONTOLOGY_SINGLETON.
+    t.assert(status === 409, `Expected 409 (import frozen), got ${status}`);
+    t.assert(body?.error?.code === "ONTOLOGY_SINGLETON", `code = ${body?.error?.code}`);
   });
 }

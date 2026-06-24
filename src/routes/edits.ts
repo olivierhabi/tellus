@@ -51,14 +51,26 @@ async function ontologyExists(ontologyId: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: resolve object type by ontology + apiName
+// Helper: resolve object type by ontology + apiName OR by ontology + UUID
 // ---------------------------------------------------------------------------
+//
+// The same router is mounted at two paths in `server.ts`:
+//
+//   /api/v1/ontology/:ontologyId/objectTypes/:apiName/edits          (legacy)
+//   /api/v1/ontology/:ontologyId/objectTypes/by-id/:objectTypeId/edits
+//
+// `mergeParams: true` propagates either `apiName` or `objectTypeId`
+// from the parent mount, and `resolveFromParams` picks whichever is
+// present so the handler bodies don't need separate code paths.
 
 interface ObjectTypeInfo {
   object_type_id: string;
   api_name: string;
   primary_key_property_id: string | null;
 }
+
+const UUID_REGEX_EDITS =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 async function resolveObjectType(
   ontologyId: string,
@@ -71,6 +83,63 @@ async function resolveObjectType(
     [ontologyId, apiName]
   );
   return result.rows.length > 0 ? (result.rows[0] as ObjectTypeInfo) : null;
+}
+
+async function resolveObjectTypeById(
+  ontologyId: string,
+  objectTypeId: string
+): Promise<ObjectTypeInfo | null> {
+  if (!UUID_REGEX_EDITS.test(objectTypeId)) return null;
+  const result = await query(
+    `SELECT object_type_id, api_name, primary_key_property_id
+     FROM object_type
+     WHERE ontology_id = $1 AND object_type_id = $2`,
+    [ontologyId, objectTypeId]
+  );
+  return result.rows.length > 0 ? (result.rows[0] as ObjectTypeInfo) : null;
+}
+
+/**
+ * Resolve the object type from whichever of `apiName` / `objectTypeId`
+ * the parent mount supplied. Returns:
+ *   - `{ ok: true, info }` when found
+ *   - `{ ok: false, code, message }` for a typed sendError
+ *   - `null` when neither parent param was provided (caller-side bug)
+ */
+async function resolveFromParams(req: Request): Promise<
+  | { ok: true; info: ObjectTypeInfo }
+  | { ok: false; code: string; message: string }
+  | null
+> {
+  const { ontologyId, apiName, objectTypeId } = req.params as {
+    ontologyId?: string;
+    apiName?: string;
+    objectTypeId?: string;
+  };
+  if (!ontologyId) return null;
+  if (objectTypeId) {
+    const info = await resolveObjectTypeById(ontologyId, objectTypeId);
+    if (!info) {
+      return {
+        ok: false,
+        code: "OBJECT_TYPE_NOT_FOUND",
+        message: `Object type '${objectTypeId}' not found in ontology '${ontologyId}'.`,
+      };
+    }
+    return { ok: true, info };
+  }
+  if (apiName) {
+    const info = await resolveObjectType(ontologyId, apiName);
+    if (!info) {
+      return {
+        ok: false,
+        code: "OBJECT_TYPE_NOT_FOUND",
+        message: `Object type '${apiName}' not found in ontology '${ontologyId}'.`,
+      };
+    }
+    return { ok: true, info };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +159,7 @@ async function resolveObjectType(
 router.get(
   "/",
   async (req: Request, res: Response, next: NextFunction) => {
-    const { ontologyId, apiName } = req.params;
+    const { ontologyId } = req.params as { ontologyId: string };
 
     try {
       // -----------------------------------------------------------------
@@ -106,15 +175,25 @@ router.get(
 
       // -----------------------------------------------------------------
       // Validation 2: Object type exists in this ontology
+      //
+      // Accepts either `:apiName` (legacy mount) or `:objectTypeId`
+      // (UUID mount) from the parent route. Once resolved, the rest
+      // of the handler always reads `objectType.api_name` since the
+      // `ontology_edit` table is keyed on api_name today.
       // -----------------------------------------------------------------
-      const objectType = await resolveObjectType(ontologyId, apiName);
-      if (!objectType) {
+      const resolved = await resolveFromParams(req);
+      if (!resolved) {
         return sendError(
           res,
-          "OBJECT_TYPE_NOT_FOUND",
-          `Object type '${apiName}' not found in ontology '${ontologyId}'.`
+          "INVALID_PARAMETER",
+          "Missing object type identifier in request path."
         );
       }
+      if (!resolved.ok) {
+        return sendError(res, resolved.code, resolved.message);
+      }
+      const objectType = resolved.info;
+      const apiName = objectType.api_name;
 
       // -----------------------------------------------------------------
       // Parse query parameters

@@ -300,6 +300,32 @@ export class PipelineController {
   };
 
   /**
+   * POST /projects/:projectId/pipelines/:pipelineId/nodes/kafka-source
+   * Register a Kafka topic as a streaming-pipeline source (§2 direct
+   * Kafka→pipeline path). Body: { label?, topic, columns: [{name,type}], positionX?, positionY? }.
+   */
+  addKafkaStreamSource = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const body = req.body ?? {};
+      if (typeof body.topic !== 'string' || !Array.isArray(body.columns)) {
+        throw new AppError('topic (string) and columns (array) are required', 400, 'VALIDATION_ERROR');
+      }
+      const result = await this.pipelineService.createKafkaStreamSource(projectId, pipelineId, {
+        label: typeof body.label === 'string' ? body.label : undefined,
+        topic: body.topic,
+        columns: body.columns,
+        positionX: typeof body.positionX === 'number' ? body.positionX : undefined,
+        positionY: typeof body.positionY === 'number' ? body.positionY : undefined,
+      });
+      res.status(201).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
    * POST /projects/:projectId/pipelines/:pipelineId/nodes/bulk
    * Bulk-add nodes (used when user selects multiple datasets in Add Data dialog).
    */
@@ -542,6 +568,61 @@ export class PipelineController {
       );
 
       res.json({ success: true, data: node });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /* ======================================================================= */
+  /*  Transform endpoints — UDF (user-authored code, gVisor sandbox §2)      */
+  /* ======================================================================= */
+
+  /**
+   * POST /projects/:projectId/pipelines/:pipelineId/nodes/:nodeId/transforms/udf/apply
+   * Body is validated inside the service (validateUdfSpec) so the typed
+   * UDF_* errors flow through the standard error envelope.
+   */
+  udfApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) {
+        throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      }
+      const node = await this.transformService.udfApply(
+        projectId,
+        pipelineId,
+        nodeParsed.data.nodeId,
+        req.body,
+      );
+      res.json({ success: true, data: node });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * POST /projects/:projectId/pipelines/:pipelineId/nodes/:nodeId/transforms/udf/preview
+   * Runs the UDF over a bounded slice of input rows inside the gVisor sandbox.
+   */
+  udfPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) {
+        throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      }
+      const limit = Math.min(1000, Math.max(1, Number(req.body?.limit ?? 100)));
+      const result = await this.transformService.udfPreview(
+        projectId,
+        pipelineId,
+        nodeParsed.data.nodeId,
+        req.body,
+        limit,
+      );
+      res.json({ success: true, data: result });
     } catch (error) {
       next(error);
     }

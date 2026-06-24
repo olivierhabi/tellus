@@ -303,28 +303,75 @@ import { formatFileSize } from '../../../src/services/foundryUploadService';
 
 describe('BE-005 — Upload Utilities', () => {
   describe('formatFileSize', () => {
+    // Contract: must stay byte-identical to tellus-fe/lib/format.ts
+    // 3 significant figures, trailing zeros stripped, base-1024.
+
     it('should format 0 bytes', () => {
       expect(formatFileSize(0)).toBe('0 B');
     });
 
-    it('should format exactly 1 KB', () => {
-      expect(formatFileSize(1024)).toBe('1.00 KB');
+    it('should collapse negative / NaN / Infinity to 0 B', () => {
+      expect(formatFileSize(-1)).toBe('0 B');
+      expect(formatFileSize(NaN)).toBe('0 B');
+      expect(formatFileSize(Infinity)).toBe('0 B');
     });
 
-    it('should format exactly 1 MB', () => {
-      expect(formatFileSize(1024 * 1024)).toBe('1.00 MB');
-    });
-
-    it('should format exactly 1 GB', () => {
-      expect(formatFileSize(1024 * 1024 * 1024)).toBe('1.00 GB');
-    });
-
-    it('should format fractional MB', () => {
-      expect(formatFileSize(1536 * 1024)).toBe('1.50 MB');
-    });
-
-    it('should format small byte values without decimals', () => {
+    it('should render small byte values as integers (no decimals)', () => {
+      expect(formatFileSize(1)).toBe('1 B');
       expect(formatFileSize(512)).toBe('512 B');
+      expect(formatFileSize(1023)).toBe('1,023 B');
+    });
+
+    it('should drop trailing zeros at unit boundaries', () => {
+      expect(formatFileSize(1024)).toBe('1 KB');
+      expect(formatFileSize(1024 * 1024)).toBe('1 MB');
+      expect(formatFileSize(1024 * 1024 * 1024)).toBe('1 GB');
+    });
+
+    it('should keep meaningful decimals only', () => {
+      expect(formatFileSize(1536 * 1024)).toBe('1.5 MB'); // was "1.50 MB"
+      expect(formatFileSize(1_234_567)).toBe('1.18 MB');
+      expect(formatFileSize(Math.round(2.4e6))).toBe('2.29 MB');
+    });
+
+    it('should pin the production screenshot regression (90 136 B → "88 KB")', () => {
+      // Prior to the rewrite this rendered "88.02 KB" on the server and
+      // "88.0 KB" on the client. Both are unprofessional; the canonical
+      // contract is "88 KB" with no padded zeros.
+      expect(formatFileSize(90136)).toBe('88 KB');
+    });
+
+    it('should pin the API-boundary regression: pg BIGINT string → "88 KB"', () => {
+      // BIGINT columns are serialised as JS strings by node-postgres
+      // to preserve 64-bit precision. The strict variant rejected that
+      // and produced "0 B" — the failure that left the column with only
+      // a "KB" label visible. Coercion is once, at the boundary.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(formatFileSize('90136' as any)).toBe('88 KB');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(formatFileSize(BigInt(90136) as any)).toBe('88 KB');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(formatFileSize('' as any)).toBe('0 B');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(formatFileSize('nonsense' as any)).toBe('0 B');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(formatFileSize(null as any)).toBe('0 B');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(formatFileSize(undefined as any)).toBe('0 B');
+    });
+
+    it('should switch precision by magnitude (3 sig figs)', () => {
+      expect(formatFileSize(1024 * 5)).toBe('5 KB');        //   5.0  →  "5"
+      expect(formatFileSize(1024 * 50)).toBe('50 KB');      //  50.0  →  "50"
+      expect(formatFileSize(1024 * 500)).toBe('500 KB');    // 500    →  "500"
+      expect(formatFileSize(1024 * 1024 * 12)).toBe('12 MB');
+      expect(formatFileSize(1024 * 1024 * 123)).toBe('123 MB');
+    });
+
+    it('should clamp very large values to the PB unit', () => {
+      expect(formatFileSize(1024 ** 5)).toBe('1 PB');
+      expect(formatFileSize(2 * (1024 ** 5))).toBe('2 PB');
+      expect(formatFileSize(1024 ** 6)).toBe('1,024 PB');
     });
   });
 });
@@ -1388,13 +1435,29 @@ describe('BE-020 — Rate Limiter', () => {
 
     it('should define read category', () => {
       expect(RATE_LIMIT_CATEGORIES.read).toBeDefined();
-      expect(RATE_LIMIT_CATEGORIES.read.max).toBe(100);
+      // Source relaxes the read cap in non-prod environments (see auth
+      // category below) so cypress walks don't trip the 100/min prod cap.
+      // Under vitest (NODE_ENV=test) the relaxed value is expected.
+      const expected =
+        process.env.NODE_ENV === "production" &&
+        process.env.RATE_LIMIT_MODE !== "relaxed"
+          ? 100
+          : 2_000;
+      expect(RATE_LIMIT_CATEGORIES.read.max).toBe(expected);
       expect(RATE_LIMIT_CATEGORIES.read.windowMs).toBe(60_000);
     });
 
     it('should define write category', () => {
       expect(RATE_LIMIT_CATEGORIES.write).toBeDefined();
-      expect(RATE_LIMIT_CATEGORIES.write.max).toBe(30);
+      // Source relaxes the write cap in non-prod environments (see auth
+      // category below). Under vitest (NODE_ENV=test) the relaxed value
+      // is expected.
+      const expected =
+        process.env.NODE_ENV === "production" &&
+        process.env.RATE_LIMIT_MODE !== "relaxed"
+          ? 30
+          : 500;
+      expect(RATE_LIMIT_CATEGORIES.write.max).toBe(expected);
       expect(RATE_LIMIT_CATEGORIES.write.windowMs).toBe(60_000);
     });
 

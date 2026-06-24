@@ -28,6 +28,16 @@ export interface SanitizerOptions {
   maxDepth?: number;
   /** Whether to strip <script> tags (default true). */
   stripScriptTags?: boolean;
+  /**
+   * Predicate that, when it returns true for a request, SKIPS body string
+   * mutation (truncation / trim / script-strip) for that request. The depth
+   * guard still runs (cheap DoS protection). Use for routes whose body is a
+   * large, schema-validated, size-capped structured document where silently
+   * truncating an embedded string would corrupt it — e.g. a Workshop module
+   * definition carrying a Vega spec JSON string longer than `maxStringLength`.
+   * Query and route params are always sanitized.
+   */
+  shouldSkipBody?: (req: Request) => boolean;
 }
 
 const DEFAULT_MAX_STRING_LENGTH = 10000;
@@ -170,6 +180,7 @@ export function createInputSanitizer(options: SanitizerOptions = {}) {
   const maxStringLength = options.maxStringLength ?? DEFAULT_MAX_STRING_LENGTH;
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
   const stripScriptTags = options.stripScriptTags ?? true;
+  const shouldSkipBody = options.shouldSkipBody;
 
   return function inputSanitizer(
     req: Request,
@@ -188,7 +199,13 @@ export function createInputSanitizer(options: SanitizerOptions = {}) {
         });
         return;
       }
-      req.body = sanitizeValue(req.body, maxStringLength, stripScriptTags);
+      // Skip string mutation for routes carrying large, schema-validated,
+      // size-capped structured bodies (e.g. a Workshop module definition with
+      // an embedded Vega spec) — truncating an embedded JSON string there is
+      // silent data corruption. The depth guard above still applies.
+      if (!shouldSkipBody || !shouldSkipBody(req)) {
+        req.body = sanitizeValue(req.body, maxStringLength, stripScriptTags);
+      }
     }
 
     // Sanitize query parameters
@@ -532,6 +549,65 @@ export function runSelfTests(): void {
 
     assert(nextCalled, "next() called");
     assert(mockReq.body.name === "abcde", `truncated to 5 chars (got: "${mockReq.body.name}")`);
+  }
+
+  // =========================================================================
+  // 13. shouldSkipBody: large structured bodies are not string-mutated
+  // =========================================================================
+  console.log("\n=== 13. shouldSkipBody (workshop module path) ===");
+  {
+    const middleware = createInputSanitizer({
+      shouldSkipBody: (req) => (req.path || "").startsWith("/api/v1/workshop"),
+    });
+    const bigSpec = "x".repeat(16000); // a Vega spec longer than the 10k cap
+
+    // (a) Skipped path: the body string survives intact (no truncation/trim).
+    let nextA = false;
+    const reqA = {
+      path: "/api/v1/workshop/modules/ri.workshop.main.module.x",
+      body: { definition: { spec: "  " + bigSpec + "  " } },
+      query: {},
+      params: {},
+    } as unknown as Request;
+    const resNoop = { status: () => resNoop, json: () => resNoop } as unknown as Response;
+    middleware(reqA, resNoop, () => { nextA = true; });
+    assert(nextA, "skipped path: next() called");
+    assert(
+      (reqA.body.definition.spec as string).length === bigSpec.length + 4,
+      `skipped path: 16k spec NOT truncated/trimmed (got ${(reqA.body.definition.spec as string).length})`,
+    );
+
+    // (b) Non-skipped path: the default 10k truncation still applies.
+    let nextB = false;
+    const reqB = {
+      path: "/api/v1/objects/Foo/search",
+      body: { note: bigSpec },
+      query: {},
+      params: {},
+    } as unknown as Request;
+    middleware(reqB, resNoop, () => { nextB = true; });
+    assert(nextB, "non-skipped path: next() called");
+    assert(
+      (reqB.body.note as string).length === 10000,
+      `non-skipped path: still truncated to 10000 (got ${(reqB.body.note as string).length})`,
+    );
+
+    // (c) Depth guard still applies on a skipped path (DoS protection kept).
+    let nextC = false;
+    let statusC = 0;
+    const deep = { a: { b: { c: { d: { e: { f: { g: { h: { i: { j: { k: 1 } } } } } } } } } } };
+    const reqC = {
+      path: "/api/v1/workshop/modules/x",
+      body: deep,
+      query: {},
+      params: {},
+    } as unknown as Request;
+    const resC = {
+      status: (c: number) => { statusC = c; return resC; },
+      json: () => resC,
+    } as unknown as Response;
+    middleware(reqC, resC, () => { nextC = true; });
+    assert(!nextC && statusC === 400, "skipped path: depth guard still rejects >10 levels");
   }
 
   // =========================================================================

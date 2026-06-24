@@ -15,6 +15,7 @@ import { NativeConnection, Worker } from "@temporalio/worker";
 import { Client, Connection } from "@temporalio/client";
 import * as activities from "./activities";
 import * as pipelineActivities from "../../pipelines/temporal/activities";
+import * as tableImportActivities from "../../connectivity/imports/temporal/activities";
 import type { SignalPayload } from "./workflows";
 
 let workerInstance: Worker | null = null;
@@ -59,7 +60,7 @@ export async function startTemporalWorker(): Promise<boolean> {
       // we expose a re-exporting bridge module that barrels both sets
       // into a single package; activities merge cleanly via spread.
       workflowsPath: require.resolve("./workflowsBundle"),
-      activities: { ...activities, ...pipelineActivities },
+      activities: { ...activities, ...pipelineActivities, ...tableImportActivities },
       // Keep the worker small for single-process dev; raise these in prod.
       maxConcurrentActivityTaskExecutions: 20,
       maxConcurrentWorkflowTaskExecutions: 10,
@@ -235,6 +236,39 @@ function incrementCounter(name: string, labels: Record<string, string>): void {
     m.incCounter(name, labels);
   } catch {
     /* metrics module not loaded — no-op */
+  }
+}
+
+/**
+ * Terminate the durable ObjectTypeFunnelWorkflow for an Object Type. Called
+ * when the Object Type is DELETED — the long-running workflow would otherwise
+ * outlive the type and keep retrying activities (e.g. syncOpenSearchActivity)
+ * against a now-missing type, failing on every attempt.
+ *
+ * Best-effort: returns false (never throws) when Temporal is disconnected or
+ * the workflow doesn't exist. Termination is immediate (not a graceful cancel)
+ * because there's nothing left to converge to — the type is gone.
+ */
+export async function terminateTemporalWorkflow(
+  objectTypeApiName: string,
+  reason: string = "object type deleted"
+): Promise<boolean> {
+  if (!temporalClient) return false;
+  const workflowId = `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
+  try {
+    await temporalClient.workflow.getHandle(workflowId).terminate(reason);
+    incrementCounter("funnel_workflow_terminated_total", {
+      object_type: objectTypeApiName,
+    });
+    return true;
+  } catch (err) {
+    const msg = (err as Error).message;
+    // Not-found = nothing to terminate (no workflow for this type). Quiet.
+    if (/not found/i.test(msg) || /NotFound/i.test(msg)) return false;
+    console.warn(
+      `[temporal] terminate failed for ${objectTypeApiName}: ${msg}`
+    );
+    return false;
   }
 }
 

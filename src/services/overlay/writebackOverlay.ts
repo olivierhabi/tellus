@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Writeback overlay — Task B7
+// Writeback overlay — Task B7, hardened by T-04.
 //
 // Public surface for the three call sites:
 //
@@ -10,13 +10,22 @@
 //                                     not-yet-indexed edits into the result
 //                                     set
 //
-// These three together give the invariants that B7 demands:
-//   (a) immediate edit visibility (<1s) regardless of Quickwit freshness
-//   (b) no stale overlay — the sweeper drops keys once Quickwit has
-//       absorbed the edit (applied_to_index_at > overlay.createdAt)
-//   (c) deletes visible too — we emit a `deleted=true` overlay so query
-//       merge drops the row from results until Quickwit's own delete cadence
-//       catches up
+// T-04 — branch-aware overlay (closes B-4):
+//
+//   • `OverlayRecord.branchId` is required (`_main` sentinel for unbranched
+//     writes).
+//   • `writeOverlay(rec, store, ttl)` does CAS on `version`
+//     (`OVERLAY_VERSION_CONFLICT` on `incoming.version <= existing.version`),
+//     writes to the new keyspace, and dual-writes to the legacy key only
+//     when (a) `OVERLAY_DUAL_WRITE !== "false"` and (b) `branchId === "_main"`.
+//   • `readOverlay(branchId, ot, pk, store)` reads the new key, falls back
+//     to the legacy key only when (a) `OVERLAY_READ_LEGACY !== "false"` and
+//     (b) the request's `branchId` is null/`_main`. Branch-mismatch reads
+//     (legacy hit on a non-main branch request) emit
+//     `OVERLAY_BRANCH_MISMATCH` via a counter; the record is suppressed.
+//   • `applyOverlayToResults` and `collectFilterMatchingOverlays` accept a
+//     `branchId` parameter (default `null` ≡ `_main`) and route every read
+//     through `readOverlay`.
 // ---------------------------------------------------------------------------
 
 import type { PoolClient } from "pg";
@@ -24,15 +33,26 @@ import {
   OverlayRecord,
   OverlayStore,
   overlayKey,
+  legacyOverlayKey,
   linkOverlayKey,
   LinkOverlayRecord,
+  MAIN_BRANCH_SENTINEL,
+  isDualWriteEnabled,
+  isLegacyReadEnabled,
 } from "./overlayStore";
 import { getOverlayStore } from "./getOverlayStore";
 import { recordOverlayWrite } from "./slis";
 import { deriveMainBranchId } from "../branchContext";
+import { incCounter } from "../funnel/metrics";
 
 export interface WriteOverlayInput {
   ontologyId: string;
+  /**
+   * T-04: optional. When omitted, the `_main` sentinel is used. New
+   * branch-aware callers SHOULD pass the actual branchId so the new
+   * keyspace correctly segregates by branch.
+   */
+  branchId?: string | null;
   objectType: string;
   primaryKey: string;
   /** Full current object state (post-edit). Quickwit-ready shape. */
@@ -63,6 +83,133 @@ function computeTtlSeconds(explicit?: number): number {
   return commit * 3;
 }
 
+function resolveBranchSlot(branchId?: string | null): string {
+  if (typeof branchId !== "string" || branchId.length === 0) {
+    return MAIN_BRANCH_SENTINEL;
+  }
+  return branchId;
+}
+
+// ---------------------------------------------------------------------------
+// T-04 — branch-aware write helper.
+//
+// Performs CAS on `version` against any existing slot. Throws
+// `OVERLAY_VERSION_CONFLICT` (HTTP 409 via the canonical envelope) when an
+// older version arrives after a newer one has been persisted. Dual-writes
+// to the legacy key during phases 0–1 of the rollout, and only when the
+// branch slot is `_main` — branch writes never pollute the legacy
+// namespace.
+// ---------------------------------------------------------------------------
+
+async function getExistingRecord(
+  store: OverlayStore,
+  key: string,
+): Promise<OverlayRecord | null> {
+  if (typeof store.get === "function") {
+    return store.get(key);
+  }
+  const [v] = await store.mget([key]);
+  return v ?? null;
+}
+
+export async function writeOverlay(
+  rec: OverlayRecord,
+  store: OverlayStore,
+  ttlSeconds: number,
+): Promise<void> {
+  const slot = resolveBranchSlot(rec.branchId);
+  const newKey = overlayKey(slot, rec.objectType, rec.primaryKey);
+
+  // CAS on version. `version <= existing.version` rejects out-of-order
+  // arrivals; equal versions are treated as conflicts so accidental
+  // double-writes surface in the metric / 409.
+  const existing = await getExistingRecord(store, newKey);
+  if (existing && rec.version <= existing.version) {
+    incCounter("tellus_overlay_writes_total", { outcome: "version_conflict" });
+    throw Object.assign(
+      new Error(
+        `Incoming overlay version ${rec.version} is not strictly greater than stored version ${existing.version}.`,
+      ),
+      {
+        code: "OVERLAY_VERSION_CONFLICT",
+        details: {
+          incomingVersion: rec.version,
+          storedVersion: existing.version,
+        },
+      },
+    );
+  }
+
+  // Persist with the canonical branchId stamped (tests can inspect this
+  // field directly to verify the write went into the right slot).
+  const stamped: OverlayRecord = { ...rec, branchId: slot };
+  await store.put(newKey, stamped, ttlSeconds);
+
+  // Dual-write to the legacy key during phases 0–1, and only for `_main`
+  // writes. Branch writes never spill into the legacy namespace.
+  if (isDualWriteEnabled() && slot === MAIN_BRANCH_SENTINEL) {
+    const legacyKey = legacyOverlayKey(rec.objectType, rec.primaryKey);
+    await store.put(legacyKey, stamped, ttlSeconds);
+  }
+
+  incCounter("tellus_overlay_writes_total", { outcome: "ok" });
+}
+
+// ---------------------------------------------------------------------------
+// T-04 — branch-aware read helper.
+//
+// Returns null if (a) no overlay exists in either keyspace, or (b) the
+// only hit was a legacy record served against a non-main branch request
+// (which we treat as a branch mismatch and SUPPRESS — the read does not
+// see the legacy edit).
+// ---------------------------------------------------------------------------
+
+export async function readOverlay(
+  branchId: string | null | undefined,
+  objectType: string,
+  primaryKey: string,
+  store: OverlayStore,
+): Promise<OverlayRecord | null> {
+  const slot = resolveBranchSlot(branchId);
+  const newKey = overlayKey(slot, objectType, primaryKey);
+  const newVal = await getExistingRecord(store, newKey);
+  if (newVal) {
+    incCounter("tellus_overlay_reads_total", {
+      branch_match: "match",
+      source: "new_key",
+    });
+    return newVal;
+  }
+  if (isLegacyReadEnabled()) {
+    const legacyKey = legacyOverlayKey(objectType, primaryKey);
+    const legacyVal = await getExistingRecord(store, legacyKey);
+    if (legacyVal) {
+      // Legacy records have no branchId. Serve them only when the
+      // request itself targets `_main` — never on a real branch read.
+      if (slot === MAIN_BRANCH_SENTINEL) {
+        incCounter("tellus_overlay_reads_total", {
+          branch_match: "match",
+          source: "legacy_key",
+        });
+        incCounter("tellus_overlay_legacy_hits_total");
+        return legacyVal;
+      }
+      incCounter("tellus_overlay_reads_total", {
+        branch_match: "mismatch_rejected",
+        source: "legacy_key",
+      });
+      // Branch mismatch — surface via the alert metric so phase 3 can
+      // be confirmed (this counter MUST be zero in phase 3).
+      incCounter("tellus_overlay_branch_mismatch_total", {
+        branch_id: slot,
+        object_type: objectType,
+      });
+      return null;
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // writeOverlayForEdit() — MUST be called in the same txn as object_edits
 // insert so the visible state mirrors Postgres exactly. The PG transaction
@@ -81,7 +228,7 @@ function computeTtlSeconds(explicit?: number): number {
 
 export async function writeOverlayForEdit(
   client: PoolClient,
-  input: WriteOverlayInput
+  input: WriteOverlayInput,
 ): Promise<WriteOverlayOutputs> {
   const store = input.store ?? (await getOverlayStore());
 
@@ -96,6 +243,12 @@ export async function writeOverlayForEdit(
   // plain try/catch here wouldn't rescue it). Rolling back to the
   // savepoint preserves the outer txn exactly.
   let upsertedInstance = false;
+  // Default to caller-supplied version. Overwritten below from the
+  // UPSERT's RETURNING clause when the table exists — that is the
+  // monotonic value that downstream readers compare against the indexed
+  // `__version`. Falling through with a hard-coded `1` (the editApplicator
+  // default) would conflict on the next edit for the same PK.
+  let canonicalVersion = input.version;
   await client.query("SAVEPOINT b1_object_instances");
   try {
     // Migration 041 extended the object_instances PK to include branch_id
@@ -104,9 +257,9 @@ export async function writeOverlayForEdit(
     // rejects with "there is no unique or exclusion constraint matching
     // the ON CONFLICT specification". Thread the main-branch UUID through
     // so the INSERT resolves and branch isolation semantics are preserved
-    // (future branch-aware callers will pass input.branchId explicitly;
-    // today every write path operates on 'main').
-    const branchId = deriveMainBranchId(input.ontologyId);
+    // (T-04 layers an explicit-branch keyspace on top — the PG row is
+    // still per-ontology-`_main`-by-default for now).
+    const branchUuid = deriveMainBranchId(input.ontologyId);
     const res = await client.query(
       `INSERT INTO object_instances
          (ontology_id, branch_id, object_type_api_name, primary_key, properties,
@@ -124,10 +277,22 @@ export async function writeOverlayForEdit(
         input.primaryKey,
         JSON.stringify(input.doc),
         input.version,
-        branchId,
-      ]
+        branchUuid,
+      ],
     );
     upsertedInstance = (res.rowCount ?? 0) > 0;
+    // Capture the canonical monotonic version from the UPSERT — on INSERT
+    // it equals the inserted value, on UPDATE it equals existing+1. This
+    // is what we MUST stamp on the overlay record; using the caller's
+    // `input.version` produces same-version writes for distinct edits and
+    // trips OVERLAY_VERSION_CONFLICT for legitimate sequences (a single
+    // hard-coded `1` from editApplicator stamps every edit identically).
+    if (upsertedInstance && res.rows[0]?.version != null) {
+      const v = Number(res.rows[0].version);
+      if (Number.isFinite(v) && v > 0) {
+        canonicalVersion = v;
+      }
+    }
     await client.query("RELEASE SAVEPOINT b1_object_instances");
   } catch (err) {
     await client.query("ROLLBACK TO SAVEPOINT b1_object_instances");
@@ -137,15 +302,17 @@ export async function writeOverlayForEdit(
     }
   }
 
-  // Step 3 — Redis overlay. Must not throw out of the Action response path,
-  // but we DO let caller-supplied errors propagate in tests (so retries and
-  // SLI recording stay observable).
+  // Step 3 — Redis overlay. Routed through `writeOverlay` for CAS,
+  // dual-write, and metrics. Errors propagate up to the caller for
+  // observability; the caller decides whether to retry from the sweeper.
+  const slot = resolveBranchSlot(input.branchId);
   const record: OverlayRecord = {
+    branchId: slot,
     objectType: input.objectType,
     primaryKey: input.primaryKey,
     doc: input.doc,
     deleted: input.deleted,
-    version: input.version,
+    version: canonicalVersion,
     createdAt: Date.now(),
     editId: input.editId,
     actorUserId: input.actorUserId ?? null,
@@ -153,12 +320,20 @@ export async function writeOverlayForEdit(
   let wrote = false;
   const ttl = computeTtlSeconds(input.ttlSeconds);
   try {
-    await store.put(overlayKey(input.objectType, input.primaryKey), record, ttl);
+    await writeOverlay(record, store, ttl);
     wrote = true;
     recordOverlayWrite(input.editId, record.createdAt);
   } catch (err) {
+    const code = (err as { code?: string }).code;
+    // OVERLAY_VERSION_CONFLICT is a contractual outcome — propagate it so
+    // callers can render a 409. Non-conflict failures (Redis offline, etc.)
+    // are softened to a warning so the Action response path still returns
+    // 200 (Postgres is authoritative; the sweeper retries the overlay).
+    if (code === "OVERLAY_VERSION_CONFLICT") {
+      throw err;
+    }
     console.warn(
-      `[overlay] put failed for ${input.objectType}/${input.primaryKey}: ${(err as Error).message}`
+      `[overlay] put failed for ${input.objectType}/${input.primaryKey}: ${(err as Error).message}`,
     );
   }
 
@@ -169,19 +344,16 @@ export async function writeOverlayForEdit(
 // applyOverlayToResults()
 //
 // Post-processes a Quickwit search result:
-//   • fetches overlays for every returned PK
+//   • fetches overlays for every returned PK (branch-aware)
 //   • replaces the Quickwit doc with the overlay doc when present
 //   • drops any hit whose overlay is a delete-tombstone
-//
-// Shape is intentionally loose: we receive `hits` as an array of shallow
-// docs (each with `__pk`) and return the same shape, filtered and
-// substituted. Callers keep total-count, pagination, aggregations etc.
 // ---------------------------------------------------------------------------
 
 export async function applyOverlayToResults(
   objectType: string,
   hits: Array<Record<string, unknown>>,
-  storeOverride?: OverlayStore
+  storeOverride?: OverlayStore,
+  branchId: string | null = null,
 ): Promise<Array<Record<string, unknown>>> {
   if (hits.length === 0) return hits;
   const store = storeOverride ?? (await getOverlayStore());
@@ -191,12 +363,18 @@ export async function applyOverlayToResults(
     .filter((pk): pk is string => pk !== null);
   if (pks.length === 0) return hits;
 
-  const keys = pks.map((pk) => overlayKey(objectType, pk));
-  const overlays = await store.mget(keys);
+  // Read each overlay through the branch-aware path. We accept the per-PK
+  // round-trips here (vs. mget) because the read helper has to make the
+  // legacy/branch-mismatch decision per-key; a vectorised mget would force
+  // us to recompute that logic at the caller. For typical pages of ≤100
+  // hits this is well within p95 budgets.
   const overlayByPk = new Map<string, OverlayRecord>();
-  for (const rec of overlays) {
-    if (rec) overlayByPk.set(rec.primaryKey, rec);
-  }
+  await Promise.all(
+    pks.map(async (pk) => {
+      const rec = await readOverlay(branchId, objectType, pk, store);
+      if (rec) overlayByPk.set(pk, rec);
+    }),
+  );
 
   const out: Array<Record<string, unknown>> = [];
   for (const hit of hits) {
@@ -235,18 +413,36 @@ export async function applyOverlayToResults(
 // place it lives. We SCAN the overlay namespace for this Object Type, apply
 // the (optional) caller-supplied filter predicate, and return records that
 // match. The caller merges them with the Quickwit hits (deduped by PK).
+//
+// T-04: the SCAN sees every overlay record across every branch slot and
+// the legacy slot. We post-filter to records whose `branchId === slot` for
+// the request's branch context. Legacy-slot records (no branchId, parsed
+// as null in the key) are admitted only on `_main` requests when
+// `OVERLAY_READ_LEGACY` is enabled.
 // ---------------------------------------------------------------------------
 
 export async function collectFilterMatchingOverlays(
   objectType: string,
   filter: (doc: Record<string, unknown>) => boolean,
-  storeOverride?: OverlayStore
+  storeOverride?: OverlayStore,
+  branchId: string | null = null,
 ): Promise<Array<Record<string, unknown>>> {
   const store = storeOverride ?? (await getOverlayStore());
   const records = await store.scan(objectType);
+  const slot = resolveBranchSlot(branchId);
   const out: Array<Record<string, unknown>> = [];
+  const legacyAllowed = isLegacyReadEnabled() && slot === MAIN_BRANCH_SENTINEL;
   for (const r of records) {
     if (r.deleted) continue;
+    // Records persisted before T-04 may not carry a branchId at all. The
+    // store deserialises them as `branchId === undefined`; we treat that
+    // as a legacy-slot record subject to the legacy-fallback gate.
+    const recBranch = typeof r.branchId === "string" ? r.branchId : null;
+    if (recBranch === null) {
+      if (!legacyAllowed) continue;
+    } else if (recBranch !== slot) {
+      continue;
+    }
     if (!filter(r.doc)) continue;
     out.push({
       ...r.doc,
@@ -283,15 +479,18 @@ export interface MergeInput {
   hits: Array<Record<string, unknown>>;
   filter?: (doc: Record<string, unknown>) => boolean;
   store?: OverlayStore;
+  /** T-04: branch context for the request. Defaults to `_main`. */
+  branchId?: string | null;
 }
 
 export async function mergeOverlayIntoSearch(
-  input: MergeInput
+  input: MergeInput,
 ): Promise<Array<Record<string, unknown>>> {
   const store = input.store ?? (await getOverlayStore());
-  const replaced = await applyOverlayToResults(input.objectType, input.hits, store);
+  const branchId = input.branchId ?? null;
+  const replaced = await applyOverlayToResults(input.objectType, input.hits, store, branchId);
   if (!input.filter) return replaced;
-  const extras = await collectFilterMatchingOverlays(input.objectType, input.filter, store);
+  const extras = await collectFilterMatchingOverlays(input.objectType, input.filter, store, branchId);
   // Dedup by PK — a PK already in `replaced` must not appear again.
   const seen = new Set<string>();
   for (const h of replaced) {
@@ -310,12 +509,9 @@ export async function mergeOverlayIntoSearch(
 
 
 // ---------------------------------------------------------------------------
-// FNL-H5 — link-edge writeback overlay
-//
-// Gives link edits the same sub-second visibility as object edits. The
-// overlay store abstraction is reused; we keep link keys under a
-// dedicated `overlay:link:*` prefix so sweeper/query code can tell them
-// apart without inventing a new store.
+// FNL-H5 — link-edge writeback overlay (unchanged surface — T-04 does
+// not extend branch-awareness to link overlays in this PR; tracked
+// separately).
 // ---------------------------------------------------------------------------
 
 interface LinkOverlayStore {
@@ -326,15 +522,12 @@ interface LinkOverlayStore {
 
 async function getLinkOverlayStore(): Promise<LinkOverlayStore> {
   const store = await getOverlayStore();
-  // Our two concrete stores (memory + redis) both accept arbitrary JSON
-  // under the OverlayRecord type; we downcast for link usage since the
-  // schema discriminator is the key prefix.
   return {
     put: (key, rec, ttl) =>
       (store as unknown as { put: (k: string, r: unknown, t: number) => Promise<void> }).put(
         key,
         rec,
-        ttl
+        ttl,
       ),
     mget: async (keys) =>
       (await (store as unknown as {
@@ -357,7 +550,7 @@ export interface WriteLinkOverlayInput {
 }
 
 export async function writeOverlayForLinkEdit(
-  input: WriteLinkOverlayInput
+  input: WriteLinkOverlayInput,
 ): Promise<void> {
   const store = await getLinkOverlayStore();
   const ttl = computeLinkOverlayTtl(input.linkTypeApiName, input.ttlSeconds);
@@ -383,7 +576,7 @@ export async function writeOverlayForLinkEdit(
 
 function computeLinkOverlayTtl(
   linkTypeApiName: string,
-  explicit?: number
+  explicit?: number,
 ): number {
   if (typeof explicit === "number" && explicit > 0) return explicit;
   const override = process.env[`LINK_OVERLAY_TTL_${linkTypeApiName.toUpperCase()}`];
@@ -398,16 +591,12 @@ function computeLinkOverlayTtl(
  * result:
  *   - REMOVE/RETRACT entries drop the pair from results.
  *   - ADD entries confirm the pair (and merge link_props if provided).
- *
- * Callers pass plain PK pairs; the returned array is the filtered set
- * in the same order with removed entries omitted and any overlay
- * `link_props` merged onto matching rows.
  */
 export async function mergeWithLinkOverlay<
-  Row extends { sourcePk?: string; targetPk?: string; source_pk?: string; target_pk?: string }
+  Row extends { sourcePk?: string; targetPk?: string; source_pk?: string; target_pk?: string },
 >(
   linkTypeApiName: string,
-  rows: Row[]
+  rows: Row[],
 ): Promise<Row[]> {
   if (rows.length === 0) return rows;
   const store = await getLinkOverlayStore();
@@ -415,8 +604,8 @@ export async function mergeWithLinkOverlay<
     linkOverlayKey(
       linkTypeApiName,
       String(r.sourcePk ?? r.source_pk ?? ""),
-      String(r.targetPk ?? r.target_pk ?? "")
-    )
+      String(r.targetPk ?? r.target_pk ?? ""),
+    ),
   );
   const overlays = await store.mget(keys);
   const result: Row[] = [];

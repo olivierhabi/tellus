@@ -1,6 +1,7 @@
 import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { AppError } from '../utils/foundryAppError';
+import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { getObjectStream } from './storageService';
 
 export type FilterOperator =
@@ -145,7 +146,9 @@ export class AdvancedPreviewService {
 
       const parser = parse({
         delimiter,
-        columns: true,
+        // See `src/utils/csvHeader.ts` — prevents silent column drop
+        // when the file has duplicate or blank header cells.
+        columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
         skip_empty_lines: true,
         trim: true,
         relax_column_count: true,

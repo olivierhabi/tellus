@@ -20,7 +20,6 @@ import type { Knex } from "knex";
 import foundryDb from "../../config/foundryDb";
 import { DeploymentService } from "../deploymentService";
 import { TransformService } from "../transformService";
-import { isTemporalConnected } from "../funnel/temporal/worker";
 
 export interface DispatcherOptions {
   intervalMs?: number;
@@ -142,7 +141,19 @@ async function tick(options: DispatcherOptions): Promise<number> {
     options.deploymentService ??
     new DeploymentService(knex, new TransformService(knex));
 
-  const temporalActive = isTemporalConnected();
+  // NOTE on the historical `isTemporalConnected()` short-circuit
+  // (removed deliberately): an earlier revision skipped PG execution
+  // whenever Temporal was reachable, on the premise that "the API
+  // layer has already issued signalWithStart against a Temporal
+  // worker." That worker is **only registered for the Funnel
+  // namespace** (`src/services/funnel/temporal/worker.ts`) — there is
+  // no pipeline-deploy workflow or worker anywhere in this codebase.
+  // The result: as soon as Temporal came back up, every `deployStart`
+  // signal got consumed and dropped on the floor, leaving
+  // `pipeline_deployments` rows pinned at `status='running'` until the
+  // orphan sweeper terminated them 5 minutes later (or forever, if the
+  // sweeper itself didn't catch them). Until a pipeline-deploy
+  // Temporal workflow actually ships, PG is the only executor.
   let processed = 0;
 
   for (const pipelineId of pipelineIds) {
@@ -162,20 +173,31 @@ async function tick(options: DispatcherOptions): Promise<number> {
       if (signal.signal_type !== "deployStart") continue;
       if (!signal.deployment_id) continue;
 
-      if (temporalActive) {
-        // When Temporal is connected it owns execution; the API layer
-        // has already issued `signalWithStart` against the worker.
-        // Nothing for the PG dispatcher to do beyond consuming the row.
-        processed++;
-        continue;
-      }
-
       await deploymentService.executeDeploymentById(signal.deployment_id);
       processed++;
     } catch (err) {
       console.warn(
-        `[pipelines/dispatcher] signal ${signal.signal_id} failed: ${(err as Error).message}`
+        `[pipelines/dispatcher] signal ${signal.signal_id} failed: ${(err as Error).message}`,
       );
+      // Failed signals should mark the deployment failed so the UI
+      // doesn't show a perma-spinner. The dispatcher owns this — the
+      // executor may have crashed before it could update the row.
+      if (signal.deployment_id) {
+        try {
+          await knex("pipeline_deployments")
+            .where({ id: signal.deployment_id, status: "running" })
+            .update({
+              status: "failed",
+              finished_at: knex.fn.now(),
+              error_message: `dispatcher error: ${(err as Error).message}`.slice(0, 1000),
+            });
+        } catch (markErr) {
+          console.warn(
+            `[pipelines/dispatcher] failed to mark deployment ${signal.deployment_id} ` +
+              `as failed: ${(markErr as Error).message}`,
+          );
+        }
+      }
     }
   }
   return processed;

@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { parse } from "csv-parse";
+import { sanitizeCsvHeader } from "../utils/csvHeader";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -158,7 +159,12 @@ export async function extractCsvMetadata(
     let rowCount = 0;
 
     const parser = parse({
-      columns: true,
+      // See `src/utils/csvHeader.ts` — prevents silent column drop when
+      // the source CSV has duplicate or blank header cells. Without this,
+      // csv-parse's default `columns: true` collapses them via the JS
+      // object-key dedup, persisting a corrupted column_count back to
+      // foundry_datasets.
+      columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
       skip_empty_lines: true,
       relax_column_count: true,
       bom: true,

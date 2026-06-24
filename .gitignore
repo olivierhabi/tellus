@@ -9,6 +9,11 @@ dist/
 .env.local
 .env.production
 
+# AI agents
+.claude
+.vix
+
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -32,3 +37,9 @@ data/
 
 # Legacy local uploads (now stored in MinIO/S3)
 uploads/
+
+# Local DB backups (never commit dumps)
+backups/
+
+# OSDK codegen output (scripts/osdk-regen.ts) — regenerated, not committed
+generated/osdk/

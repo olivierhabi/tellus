@@ -58,6 +58,21 @@ describe("compileStreamingJob", () => {
     expect(ddl).toMatch(/'scan\.startup\.mode' = 'earliest-offset'/);
   });
 
+  it("uses the resolved bootstrap.servers when the source carries one (§2 Kafka path)", () => {
+    // DeploymentService.resolveStreamingSources sets bootstrapServers from the
+    // env so the deployed job points at the real broker, not the placeholder.
+    const plan = compileStreamingJob({
+      jobName: "orders",
+      inputs: [{ ...ORDERS_TOPIC, bootstrapServers: "kafka:29092" }],
+      transforms: [],
+      outputSchema: ORDERS_TOPIC.columns,
+      outputIceberg: ICEBERG,
+    });
+    const ddl = plan.statements.find((s) => s.includes("'connector' = 'kafka'"));
+    expect(ddl).toMatch(/'properties\.bootstrap\.servers' = 'kafka:29092'/);
+    expect(ddl).not.toMatch(/\$\{KAFKA_BOOTSTRAP_SERVERS\}/);
+  });
+
   it("emits an Iceberg CREATE TABLE sink with REST catalog", () => {
     const plan = compileStreamingJob({
       jobName: "orders",

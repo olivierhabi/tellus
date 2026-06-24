@@ -188,13 +188,11 @@ describe("PB-B8 lineage service", () => {
   it("findObjectTypesFor returns OT mappings via backing_datasource.dataset_id", async () => {
     if (!dbUp) return;
     // Minimal OT + backing_datasource fixture.
-    const ontologyId = `88888888-8888-8888-8888-${STAMP.toString(16).padStart(12, "0").slice(-12)}`;
-    await foundryDb.raw(
-      `INSERT INTO ontology (ontology_id, display_name, description, created_by)
-         VALUES (?, ?, 'pb-b8 lineage fixture', 'vitest')
-         ON CONFLICT DO NOTHING`,
-      [ontologyId, `pb-b8-${STAMP}`],
-    );
+    // SINGLETON-ONTOLOGY: deployment has one canonical ontology
+    // (00000000-0000-0000-0000-000000000001) guarded by uq_ontology_singleton.
+    // Do NOT INSERT INTO ontology (would fail the unique constraint); reuse the
+    // canonical row — its id satisfies the object_type FK below.
+    const ontologyId = "00000000-0000-0000-0000-000000000001";
     const [ot] = await foundryDb("object_type")
       .insert({
         ontology_id: ontologyId,
@@ -231,19 +229,17 @@ describe("PB-B8 lineage service", () => {
     } finally {
       await foundryDb("backing_datasource").where({ mapping_id: bd.mapping_id }).del();
       await foundryDb("object_type").where({ object_type_id: ot.object_type_id }).del();
-      await foundryDb("ontology").where({ ontology_id: ontologyId }).del();
+      // SINGLETON-ONTOLOGY: never DELETE the canonical ontology row.
     }
   });
 
   it("(e) Funnel signal fingerprint dedupes two deploys in quick succession", async () => {
     if (!dbUp) return;
-    const ontologyId = `77777777-7777-7777-7777-${STAMP.toString(16).padStart(12, "0").slice(-12)}`;
-    await foundryDb.raw(
-      `INSERT INTO ontology (ontology_id, display_name, description, created_by)
-         VALUES (?, ?, 'pb-b8 signal-dedup fixture', 'vitest')
-         ON CONFLICT DO NOTHING`,
-      [ontologyId, `pb-b8-dedup-${STAMP}`],
-    );
+    // SINGLETON-ONTOLOGY: deployment has one canonical ontology
+    // (00000000-0000-0000-0000-000000000001) guarded by uq_ontology_singleton.
+    // Do NOT INSERT INTO ontology (would fail the unique constraint); reuse the
+    // canonical row — its id satisfies the object_type FK below.
+    const ontologyId = "00000000-0000-0000-0000-000000000001";
     const apiName = `DedupOt${STAMP}`;
     const [ot] = await foundryDb("object_type")
       .insert({
@@ -273,6 +269,6 @@ describe("PB-B8 lineage service", () => {
     expect(sid2).toBe(sid1); // same signal id → dedup via fingerprint
     await foundryDb("funnel_signal").where({ signal_id: sid1 }).del();
     await foundryDb("object_type").where({ object_type_id: ot.object_type_id }).del();
-    await foundryDb("ontology").where({ ontology_id: ontologyId }).del();
+    // SINGLETON-ONTOLOGY: never DELETE the canonical ontology row.
   });
 });

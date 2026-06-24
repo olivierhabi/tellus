@@ -417,6 +417,7 @@ describe("B7 overlay store", () => {
     await store.put(
       "overlay:Orders:O-1",
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-1",
         doc: { status: "open" },
@@ -430,6 +431,7 @@ describe("B7 overlay store", () => {
     await store.put(
       "overlay:Customers:C-1",
       {
+        branchId: "_main",
         objectType: "Customers",
         primaryKey: "C-1",
         doc: {},
@@ -454,8 +456,9 @@ describe("B7 overlay query merge", () => {
   it("replaces Quickwit hit with overlay doc when overlay is newer", async () => {
     const store = new MemoryOverlayStore();
     await store.put(
-      overlayKey("Orders", "O-1"),
+      overlayKey(null, "Orders", "O-1"),
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-1",
         doc: { status: "paid", total: 100 },
@@ -480,8 +483,9 @@ describe("B7 overlay query merge", () => {
   it("drops rows whose overlay is a delete tombstone", async () => {
     const store = new MemoryOverlayStore();
     await store.put(
-      overlayKey("Orders", "O-1"),
+      overlayKey(null, "Orders", "O-1"),
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-1",
         doc: {},
@@ -499,8 +503,9 @@ describe("B7 overlay query merge", () => {
   it("yields overlay to index when indexed __version is strictly newer", async () => {
     const store = new MemoryOverlayStore();
     await store.put(
-      overlayKey("Orders", "O-1"),
+      overlayKey(null, "Orders", "O-1"),
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-1",
         doc: { status: "old" },
@@ -522,8 +527,9 @@ describe("B7 overlay query merge", () => {
   it("collectFilterMatchingOverlays returns matches for not-yet-indexed edits", async () => {
     const store = new MemoryOverlayStore();
     await store.put(
-      overlayKey("Orders", "O-new"),
+      overlayKey(null, "Orders", "O-new"),
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-new",
         doc: { status: "open", total: 50 },
@@ -546,8 +552,9 @@ describe("B7 overlay query merge", () => {
   it("mergeOverlayIntoSearch dedupes by PK", async () => {
     const store = new MemoryOverlayStore();
     await store.put(
-      overlayKey("Orders", "O-1"),
+      overlayKey(null, "Orders", "O-1"),
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-1",
         doc: { status: "paid" },
@@ -599,8 +606,9 @@ describe("B7 overlay sweeper", () => {
 
     // Simulate one still-pending and one already-indexed edit.
     await store.put(
-      overlayKey("Orders", "O-a"),
+      overlayKey(null, "Orders", "O-a"),
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-a",
         doc: {},
@@ -612,8 +620,9 @@ describe("B7 overlay sweeper", () => {
       60
     );
     await store.put(
-      overlayKey("Orders", "O-b"),
+      overlayKey(null, "Orders", "O-b"),
       {
+        branchId: "_main",
         objectType: "Orders",
         primaryKey: "O-b",
         doc: {},
@@ -692,7 +701,7 @@ describe("B7 writeOverlayForEdit", () => {
     });
     expect(result.wroteOverlay).toBe(true);
     expect(result.upsertedInstance).toBe(false);
-    const [rec] = await store.mget([overlayKey("Orders", "O-1")]);
+    const [rec] = await store.mget([overlayKey(null, "Orders", "O-1")]);
     expect(rec?.doc.status).toBe("open");
   });
 });

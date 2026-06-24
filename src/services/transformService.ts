@@ -2,7 +2,11 @@ import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { AppError } from '../utils/foundryAppError';
 import { convertValue } from '../utils/typeConverter';
-import { getObjectStream } from './storageService';
+import { sanitizeCsvHeader } from '../utils/csvHeader';
+import { findNearNameMatches } from '../utils/columnNameReconciler';
+import { getObjectStream, toDuckDbReadUri } from './storageService';
+import { validateUdfSpec } from './pipelines/udfTransform';
+import { runUdfTransform } from './pipelines/udfRunner';
 import {
   chainHashFromNodeConfig,
   fingerprintSchema,
@@ -964,29 +968,99 @@ export class TransformService {
 
   /**
    * Resolve the effective columns and rows for a node, using the best
-   * available data source:
-   *   1. previewSnapshot (for join/union nodes that have computed output)
-   *   2. Raw CSV + transform chain (for dataset/transform nodes)
+   * available data source. The decision tree is driven by node_type so
+   * deploy and preview share the exact same materialization semantics:
+   *
+   *   - `dataset`   → read the raw CSV + apply this node's transforms.
+   *   - `transform` → walk upstream via `resolveNodeDataset` which
+   *                   collapses the linear transform chain onto a single
+   *                   dataset CSV; then apply the merged transforms.
+   *   - `join` / `union` → MUST use `previewSnapshot`. Joins and unions
+   *                   are not linearly compose-able onto a single CSV;
+   *                   replaying them requires the snapshot captured at
+   *                   Apply time. If the snapshot is missing or empty
+   *                   we hard-fail with `SNAPSHOT_REQUIRED` rather than
+   *                   silently degrading to "read the leftmost CSV"
+   *                   (which is the deploy-correctness bug fixed here).
+   *   - `output`    → recurse into `sourceNodeId`. The output node
+   *                   itself never carries a snapshot; its data is
+   *                   exactly the data of the node it points at. This
+   *                   is the entry point used by the deploy worker.
+   *
+   * The previous implementation only honored the snapshot of the
+   * requested node; for an output node (which never has one) the
+   * fallback walked `sourceNodeId` via `resolveNodeDataset` and
+   * collapsed everything onto the leftmost dataset's CSV — silently
+   * dropping every join and union in the graph. The deployed dataset
+   * ended up reflecting one branch instead of the union's output.
    */
   private async resolveNodeData(
     projectId: string, pipelineId: string, nodeId: string,
     priorTransforms?: unknown[],
+    /** Internal guard: detect sourceNodeId cycles in malformed graphs. */
+    _visited: Set<string> = new Set<string>(),
   ): Promise<{ columns: Array<{ name: string; type: string }>; rows: Array<Record<string, unknown>> }> {
-    // Check if node has a snapshot (join/union nodes store their output here)
+    if (_visited.has(nodeId)) {
+      throw new AppError(
+        `Cycle detected in pipeline node graph at ${nodeId}.`,
+        400,
+        'PIPELINE_CYCLE',
+      );
+    }
+    _visited.add(nodeId);
+
     const node = await this.knex('pipeline_nodes')
       .where({ id: nodeId, pipeline_id: pipelineId })
-      .select('node_type', 'config')
+      .select('id', 'node_type', 'config')
       .first();
+    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
 
-    if (node) {
-      const cfg = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
-      const snap = cfg.previewSnapshot;
-      if (snap?.columns?.length > 0 && snap?.rows?.length > 0) {
-        return { columns: snap.columns, rows: snap.rows };
+    const cfg = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    const snap = cfg.previewSnapshot;
+    const hasSnapshot =
+      snap && Array.isArray(snap.columns) && Array.isArray(snap.rows)
+        && snap.columns.length > 0;
+
+    // Output nodes are pure passthroughs — never carry their own snapshot.
+    // Forward to the upstream node so the union/join semantics are honored.
+    if (node.node_type === 'output') {
+      const src = cfg.sourceNodeId as string | undefined;
+      if (!src) {
+        throw new AppError(
+          'Output node has no sourceNodeId configured.',
+          400,
+          'OUTPUT_UNWIRED',
+        );
       }
+      return this.resolveNodeData(projectId, pipelineId, src, priorTransforms, _visited);
     }
 
-    // Fallback: resolve from raw CSV + transform chain
+    // Join/union outputs must come from the pinned snapshot — they are
+    // not linearly compose-able with the transform chain. A missing
+    // snapshot at this point means the user added the node but never
+    // hit Apply; failing loudly here prevents the deploy from silently
+    // reading only the left branch.
+    if (node.node_type === 'join' || node.node_type === 'union') {
+      if (hasSnapshot) {
+        return { columns: snap.columns, rows: snap.rows };
+      }
+      throw new AppError(
+        `Cannot resolve ${node.node_type} node "${nodeId}" — no preview ` +
+          `snapshot has been captured. Open the node and click "Apply" ` +
+          `to materialize its output before previewing or deploying.`,
+        400,
+        'SNAPSHOT_REQUIRED',
+      );
+    }
+
+    // For dataset/transform nodes the snapshot, when present, is still
+    // the freshest representation (e.g. a transform node where Apply
+    // pinned the output). Prefer it.
+    if (hasSnapshot) {
+      return { columns: snap.columns, rows: snap.rows };
+    }
+
+    // Fallback: resolve from raw CSV + transform chain.
     const { dataset, sourceColumns, existingTransforms } =
       await this.resolveNodeDataset(projectId, pipelineId, nodeId);
     const transforms = priorTransforms ?? existingTransforms;
@@ -1011,11 +1085,308 @@ export class TransformService {
     return { columns: data.columns, rows, totalRows };
   }
 
+  // ============================================================================
+  // Deploy-time materialization — FULL DAG RE-EXECUTION (unbounded)
+  // ============================================================================
+  //
+  // Foundry semantics: preview is bounded (the canvas needs instant
+  // feedback, ~500 rows). Deploy is UNBOUNDED — the dataset written to
+  // storage must reflect every input row, not the canvas's truncated
+  // preview snapshot.
+  //
+  // The legacy deploy path resolved each output via `outputPreview` →
+  // `resolveNodeData` → `previewSnapshot.rows`. For join/union nodes
+  // `resolveNodeData` HARD-REQUIRES the snapshot (because joins/unions
+  // can't be linearly composed). That snapshot is persisted by the
+  // canvas at Apply time with at most ~500 rows. Result: any pipeline
+  // whose terminal output passed through a join or union silently
+  // dropped every row past 500 — independent of the 100k cap on the
+  // `outputPreview` slice itself.
+  //
+  // This method bypasses snapshots entirely on the deploy path. It
+  // walks the node graph from the requested node back to its dataset
+  // leaves, re-reading every CSV unbounded and re-executing every
+  // transform / join / union from raw inputs.
+  //
+  // The execution primitives are the same battle-tested ones used by
+  // the canvas preview (`readCsvRows`, `applyExistingTransforms`,
+  // `executeJoin`, the union-by-name rebase) — only the row bound and
+  // the snapshot dependency differ.
+  //
+  // Topology (mirrors `walkTransitiveInputs`):
+  //   - dataset   → `pn.dataset_id` → `foundry_datasets.file_path`
+  //   - transform → `config.sourceNodeId` (recurse)
+  //   - join      → `config.sourceNodeId` (left) + `config.rightNodeId`
+  //                 or the rightNodeId persisted on the Join transform step
+  //   - union     → `config.sourceNodeId` (left) + `config.rightNodeId`
+  //   - output    → `config.sourceNodeId` (recurse)
+  async materializeForDeploy(
+    projectId: string,
+    pipelineId: string,
+    nodeId: string,
+    _visited: Set<string> = new Set<string>(),
+  ): Promise<{
+    columns: Array<{ name: string; type: string }>;
+    rows: Array<Record<string, unknown>>;
+    totalRows: number;
+  }> {
+    if (_visited.has(nodeId)) {
+      throw new AppError(
+        `Cycle detected in pipeline node graph at ${nodeId}.`,
+        400,
+        'PIPELINE_CYCLE',
+      );
+    }
+    _visited.add(nodeId);
+
+    const node = await this.knex('pipeline_nodes as pn')
+      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
+      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
+      .select('pn.id', 'pn.node_type', 'pn.dataset_id', 'pn.config')
+      .first();
+    if (!node) {
+      throw new AppError(
+        `Pipeline node not found: ${nodeId}`,
+        404,
+        'NOT_FOUND',
+      );
+    }
+
+    const cfg =
+      typeof node.config === 'string'
+        ? JSON.parse(node.config)
+        : (node.config ?? {});
+    const ownTransforms: unknown[] = Array.isArray(cfg.transforms)
+      ? cfg.transforms
+      : [];
+
+    switch (node.node_type) {
+      case 'output': {
+        const src = cfg.sourceNodeId as string | undefined;
+        if (!src) {
+          throw new AppError(
+            `Output node ${nodeId} has no sourceNodeId configured.`,
+            400,
+            'OUTPUT_UNWIRED',
+          );
+        }
+        return this.materializeForDeploy(projectId, pipelineId, src, _visited);
+      }
+
+      case 'dataset': {
+        const { dataset, sourceColumns } = await this.resolveNodeDataset(
+          projectId, pipelineId, nodeId,
+        );
+        // FULL read — no row cap. Pinned-input cache (PB-B6) is still
+        // honoured inside readCsvRows so deploy parity with the captured
+        // pin is preserved when seedPinnedInputsForDeploy ran first.
+        const raw = await this.readCsvRows(
+          dataset.file_path,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const rows = this.applyExistingTransforms(raw, ownTransforms);
+        const columns = this.applyExistingTransformColumns(
+          sourceColumns,
+          ownTransforms,
+        );
+        return { columns, rows, totalRows: rows.length };
+      }
+
+      case 'transform': {
+        // Prefer explicit upstream wiring (canvas graph edge). When a
+        // transform points at a join/union/transform parent we recurse
+        // through materializeForDeploy so the FULL upstream is rebuilt
+        // — never the capped snapshot.
+        const src = cfg.sourceNodeId as string | undefined;
+        if (src) {
+          const up = await this.materializeForDeploy(
+            projectId, pipelineId, src, _visited,
+          );
+          const rows = this.applyExistingTransforms(up.rows, ownTransforms);
+          const columns = this.applyExistingTransformColumns(
+            up.columns,
+            ownTransforms,
+          );
+          return { columns, rows, totalRows: rows.length };
+        }
+        // Legacy/seed shape — transform node bound directly to a dataset
+        // through resolveNodeDataset's recursive walk (no sourceNodeId
+        // hop). Replays the full collapsed transform chain unbounded.
+        const { dataset, sourceColumns, existingTransforms } =
+          await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+        const raw = await this.readCsvRows(
+          dataset.file_path,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const rows = this.applyExistingTransforms(raw, existingTransforms);
+        const columns = this.applyExistingTransformColumns(
+          sourceColumns,
+          existingTransforms,
+        );
+        return { columns, rows, totalRows: rows.length };
+      }
+
+      case 'join': {
+        // Canvas convention: join spec lives at the TOP LEVEL of
+        // config (joinType, conditions, sourceNodeId, rightNodeId,
+        // *SelectedColumns). The legacy `transforms[].{function:'Join'}`
+        // shape is still honoured as a fallback so older pipelines
+        // deploy correctly without a migration.
+        const joinStep = ownTransforms.find(
+          (t) => (t as { function?: string })?.function === 'Join',
+        ) as
+          | {
+              joinType?: JoinType;
+              conditions?: Array<{ leftColumn: string; rightColumn: string }>;
+              rightNodeId?: string;
+              rightPrefix?: string;
+            }
+          | undefined;
+        const joinType =
+          ((cfg.joinType ?? joinStep?.joinType) as JoinType | undefined);
+        const conditions = (cfg.conditions ?? joinStep?.conditions) as
+          | Array<{ leftColumn: string; rightColumn: string }>
+          | undefined;
+        const leftSrc = cfg.sourceNodeId as string | undefined;
+        const rightSrc =
+          (cfg.rightNodeId as string | undefined) ?? joinStep?.rightNodeId;
+        const rightPrefix = (cfg.rightPrefix as string | undefined)
+          ?? joinStep?.rightPrefix ?? 'right_';
+        const leftSelected = Array.isArray(cfg.leftSelectedColumns)
+          ? new Set<string>(cfg.leftSelectedColumns as string[])
+          : null;
+        const rightSelected = Array.isArray(cfg.rightSelectedColumns)
+          ? new Set<string>(cfg.rightSelectedColumns as string[])
+          : null;
+        if (!leftSrc) {
+          throw new AppError(
+            `Join node ${nodeId} has no sourceNodeId (left input).`,
+            400,
+            'JOIN_UNWIRED',
+          );
+        }
+        if (!rightSrc) {
+          throw new AppError(
+            `Join node ${nodeId} has no rightNodeId (right input).`,
+            400,
+            'JOIN_UNWIRED',
+          );
+        }
+        if (!joinType || !Array.isArray(conditions) || conditions.length === 0) {
+          throw new AppError(
+            `Join node ${nodeId} is missing joinType or conditions.`,
+            400,
+            'JOIN_SPEC_MISSING',
+          );
+        }
+        // Two-input fan-in: clone _visited per branch so a legitimate
+        // shared upstream (the same dataset feeding both arms of a
+        // self-join, for instance) is not falsely flagged as a cycle.
+        // Within a single branch the original cycle guard still fires.
+        const left = await this.materializeForDeploy(
+          projectId, pipelineId, leftSrc, new Set<string>(_visited),
+        );
+        const right = await this.materializeForDeploy(
+          projectId, pipelineId, rightSrc, new Set<string>(_visited),
+        );
+        // Execute the join with the FULL column set on both sides so
+        // outer-join null fills land on every name the canvas knows
+        // about — column selection is applied as a projection after.
+        const joinedRows = this.executeJoin(
+          left.rows,
+          right.rows,
+          joinType,
+          conditions,
+          left.columns,
+          right.columns,
+          rightPrefix,
+        );
+        // Compose output columns mirroring joinPreview: filter each
+        // side by its *SelectedColumns set, then concatenate with the
+        // right names prefixed on collision with left.
+        const filteredLeftCols = leftSelected
+          ? left.columns.filter((c) => leftSelected.has(c.name))
+          : left.columns;
+        const filteredRightCols = rightSelected
+          ? right.columns.filter((c) => rightSelected.has(c.name))
+          : right.columns;
+        const leftNames = new Set(filteredLeftCols.map((c) => c.name));
+        const columns: Array<{ name: string; type: string }> = [
+          ...filteredLeftCols,
+          ...filteredRightCols.map((c) => ({
+            name: leftNames.has(c.name) ? `${rightPrefix}${c.name}` : c.name,
+            type: c.type,
+          })),
+        ];
+        // Project rows down to the selected column set (preserves
+        // output ordering; absent keys are omitted, matching the
+        // canvas's filteredRows step in joinPreview).
+        const outputColNames = columns.map((c) => c.name);
+        const rows = joinedRows.map((r) => {
+          const out: Record<string, unknown> = {};
+          for (const c of outputColNames) if (c in r) out[c] = r[c];
+          return out;
+        });
+        return { columns, rows, totalRows: rows.length };
+      }
+
+      case 'union': {
+        const leftSrc = cfg.sourceNodeId as string | undefined;
+        const rightSrc = cfg.rightNodeId as string | undefined;
+        if (!leftSrc || !rightSrc) {
+          throw new AppError(
+            `Union node ${nodeId} requires both sourceNodeId and rightNodeId.`,
+            400,
+            'UNION_UNWIRED',
+          );
+        }
+        const left = await this.materializeForDeploy(
+          projectId, pipelineId, leftSrc, new Set<string>(_visited),
+        );
+        const right = await this.materializeForDeploy(
+          projectId, pipelineId, rightSrc, new Set<string>(_visited),
+        );
+        // Union-by-name (canvas default): output columns = unique union
+        // with left ordering preserved; rows from each side are rebased
+        // onto the unified column set with null-fill for missing names.
+        const seen = new Set<string>();
+        const columns: Array<{ name: string; type: string }> = [];
+        for (const c of left.columns) {
+          if (!seen.has(c.name)) { seen.add(c.name); columns.push(c); }
+        }
+        for (const c of right.columns) {
+          if (!seen.has(c.name)) { seen.add(c.name); columns.push(c); }
+        }
+        const colNames = columns.map((c) => c.name);
+        const rebase = (
+          r: Record<string, unknown>,
+        ): Record<string, unknown> => {
+          const out: Record<string, unknown> = {};
+          for (const c of colNames) out[c] = (c in r) ? r[c] : null;
+          return out;
+        };
+        const rows = [
+          ...left.rows.map(rebase),
+          ...right.rows.map(rebase),
+        ];
+        return { columns, rows, totalRows: rows.length };
+      }
+
+      default:
+        throw new AppError(
+          `materializeForDeploy: unknown node_type "${node.node_type}" for node ${nodeId}.`,
+          400,
+          'UNKNOWN_NODE_TYPE',
+        );
+    }
+  }
+
   async unionPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: UnionPreviewInput,
   ) {
-    const warnings: Array<{ code: string; message: string }> = [];
+    const warnings: Array<{ code: string; message: string; details?: unknown }> = [];
+    const mode = input.mode ?? 'name-merge';
 
     // ── Resolve left and right data (uses snapshot if available) ──
     const left = await this.resolveNodeData(projectId, pipelineId, nodeId, input.priorTransforms);
@@ -1073,13 +1444,57 @@ export class TransformService {
       warnings.push({
         code: 'LEFT_ONLY_COLUMNS',
         message: `${leftOnly.length} column${leftOnly.length > 1 ? 's' : ''} only in left: ${leftOnly.join(', ')}. Right rows will have null for these.`,
+        details: { columns: leftOnly },
       });
     }
     if (rightOnly.length > 0) {
       warnings.push({
         code: 'RIGHT_ONLY_COLUMNS',
         message: `${rightOnly.length} column${rightOnly.length > 1 ? 's' : ''} only in right: ${rightOnly.join(', ')}. Left rows will have null for these.`,
+        details: { columns: rightOnly },
       });
+    }
+
+    // ── Near-name detection ────────────────────────────────────
+    // Two 11-column inputs that diverged on a rename (e.g.
+    // `order_id` → `orderid`) silently widen to 12 columns under
+    // union-by-name. Surface those pairs so the UI can offer a
+    // one-click rename and keep the schema stable downstream.
+    const nameMismatches = findNearNameMatches(leftOnly, rightOnly);
+    if (nameMismatches.length > 0) {
+      const preview = nameMismatches
+        .slice(0, 3)
+        .map((m) => `"${m.left}" ↔ "${m.right}"`)
+        .join(', ');
+      const more = nameMismatches.length > 3 ? ` (+${nameMismatches.length - 3} more)` : '';
+      warnings.push({
+        code: 'NAME_MISMATCH_SUGGESTION',
+        message:
+          `${nameMismatches.length} column pair${nameMismatches.length > 1 ? 's' : ''} ` +
+          `look like the same column under different names: ${preview}${more}. ` +
+          `Rename one side to align the schema and avoid widening the union.`,
+        details: { suggestedRenames: nameMismatches },
+      });
+    }
+
+    // ── Strict mode: fail fast on any schema divergence ────────
+    // Pipelines that promise a stable output schema (deploy graph
+    // fingerprinting, Iceberg writers, ontology object types) opt
+    // into strict mode rather than silently widening.
+    if (mode === 'strict' && (leftOnly.length > 0 || rightOnly.length > 0)) {
+      const err = new AppError(
+        'Union in strict mode requires identical column sets on both inputs. ' +
+          (leftOnly.length > 0 ? `Left-only: ${leftOnly.join(', ')}. ` : '') +
+          (rightOnly.length > 0 ? `Right-only: ${rightOnly.join(', ')}.` : ''),
+        400,
+        'UNION_SCHEMA_MISMATCH',
+      );
+      (err as AppError & { details?: unknown }).details = {
+        leftOnly,
+        rightOnly,
+        suggestedRenames: nameMismatches,
+      };
+      throw err;
     }
 
     // ── Build unified rows ──────────────────────────────────────
@@ -1134,6 +1549,75 @@ export class TransformService {
       .where({ id: nodeId, pipeline_id: pipelineId })
       .update({ config: JSON.stringify(config) }).returning('*');
     return updated;
+  }
+
+  // =========================================================================
+  // UDF — user-authored transform (FOUNDRY-GAPS §2)
+  //
+  // A UDF is the one transform that cannot compile to engine SQL: it is
+  // arbitrary user code. It is stored on the node's `config.udfTransform`
+  // slot — deliberately NOT in `config.transforms` so the Trino/DuckDB
+  // compilers never try to fold it — and executed inside the gVisor sandbox
+  // proven in §1/§3 (a Kubernetes Job pinned to the `gvisor` RuntimeClass,
+  // hardened pod, deny-all egress). There is no in-process eval path: running
+  // user code unsandboxed is exactly the risk the substrate work removed.
+  // =========================================================================
+
+  /**
+   * Persist a UDF transform onto a node. Validates the spec (language allow-
+   * list, code size, entrypoint identifier, timeout bounds) before storing it.
+   */
+  async udfApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: unknown,
+  ) {
+    const spec = validateUdfSpec(input);
+    const node = await this.knex('pipeline_nodes as pn')
+      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
+      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
+      .select('pn.id', 'pn.config').first();
+    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
+
+    const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    config.udfTransform = { ...spec, createdAt: new Date().toISOString() };
+
+    const [updated] = await this.knex('pipeline_nodes')
+      .where({ id: nodeId, pipeline_id: pipelineId })
+      .update({ config: JSON.stringify(config) }).returning('*');
+    return updated;
+  }
+
+  /**
+   * Preview a UDF: resolve the node's input rows (the existing CSV + prior
+   * transform chain), then execute the user code over a bounded slice inside
+   * the gVisor sandbox and return the transformed rows. Requires the sandbox
+   * runtime (TELLUS_UDF_RUNTIME=k8s); otherwise surfaces a typed 503 so the
+   * UI can explain that the substrate isn't wired in this environment.
+   */
+  async udfPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: unknown,
+    limit = 100,
+  ) {
+    const spec = validateUdfSpec(input);
+    const { dataset, existingTransforms } = await this.resolveNodeDataset(
+      projectId, pipelineId, nodeId,
+    );
+    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rows = this.applyExistingTransforms(rawRows, existingTransforms)
+      .slice(0, limit);
+
+    const out = await runUdfTransform({
+      buildRid: `udf-preview-${pipelineId}-${nodeId}`,
+      tenant: projectId,
+      spec,
+      rows,
+    });
+
+    const columns = spec.outputColumns.length
+      ? spec.outputColumns
+      : Object.keys(out[0] ?? {}).map((name) => ({ name, type: 'string' }));
+    return { columns, rows: out, rowCount: out.length };
   }
 
   // =========================================================================
@@ -1298,9 +1782,19 @@ export class TransformService {
         const { executeTransformChain } = await import(
           './pipelines/duckdbTransformEngine'
         );
+        // `dataset.file_path` is the bare S3 object key produced by
+        // `buildObjectKey()` (e.g. `projects/<id>/folders/<id>/file.csv`).
+        // DuckDB cannot read that directly — without an `s3://<bucket>/`
+        // prefix it falls through to the local filesystem and fails with
+        // `IO Error: No files found that match the pattern ...`.
+        // `toDuckDbReadUri` prepends the configured bucket so the engine's
+        // httpfs path can resolve the object via the same MinIO/S3
+        // endpoint that the legacy `getObjectStream()` reader uses. The
+        // engine itself also asserts the URI is qualified (defense in depth).
+        const inputUri = toDuckDbReadUri(dataset.file_path);
         const out = await executeTransformChain(
           existingTransforms as Parameters<typeof executeTransformChain>[0],
-          { inputPath: dataset.file_path, limit: 10_000 },
+          { inputPath: inputUri, limit: 10_000 },
         );
         return {
           columns: out.columns,
@@ -1310,11 +1804,35 @@ export class TransformService {
           engine: 'duckdb' as const,
         };
       } catch (err) {
-        // If the native binding is missing OR compilation rejects the
-        // chain (cross-join, malformed config), surface the typed error
-        // to the caller rather than silently degrading. The controller
-        // turns AppError into a 4xx response; anything else bubbles as 500.
+        // Already-typed errors (compile rejection, cross-join, native
+        // binding missing, our boundary validation) flow through as-is.
         if (err instanceof AppError) throw err;
+        // Map DuckDB IO failures to a typed 404 so clients can
+        // distinguish "the dataset's underlying file is gone" from a
+        // genuine 500. The DuckDB binding surfaces these as plain
+        // `Error` with messages like:
+        //   `IO Error: No files found that match the pattern "..."`
+        //   `HTTP Error: HTTP GET error on '...' (HTTP 403)`
+        //   `HTTP Error: HTTP GET error on '...' (HTTP 404)`
+        // We sanitise the message so the SQL line marker DuckDB appends
+        // does not leak into the API contract.
+        const message = err instanceof Error ? err.message : String(err);
+        if (
+          /^IO Error: No files found that match the pattern/i.test(message) ||
+          /HTTP\s+(?:404|403)/i.test(message) ||
+          /HTTPException.*(?:NoSuchKey|AccessDenied)/i.test(message)
+        ) {
+          throw new AppError(
+            `Dataset file is not readable from object storage. ` +
+              `It may have been deleted, moved, or the storage credentials ` +
+              `may have changed. Re-upload the source file or contact an ` +
+              `administrator.`,
+            404,
+            'DATASET_FILE_NOT_FOUND',
+          );
+        }
+        // Anything else bubbles as 500 — let the global error handler
+        // log it with the request id for follow-up.
         throw err;
       }
     }
@@ -1900,7 +2418,10 @@ export class TransformService {
 
       const parser = parse({
         delimiter,
-        columns: true,
+        // See `src/utils/csvHeader.ts` — the sanitizer guarantees the
+        // record keys we read below are 1:1 with physical header cells,
+        // even when the source file has duplicate or blank header names.
+        columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
         skip_empty_lines: true,
         trim: true,
         relax_column_count: true,

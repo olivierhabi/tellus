@@ -38,6 +38,26 @@ import {
 } from './throughputGuard';
 import { isRbacEnabled as isRbacEnabledForDeploy } from './pipelines/pipelineAcl';
 import {
+  selectedBatchEngine,
+  batchEngineMinRows,
+  parseIcebergLocation,
+  type IcebergTarget,
+  type EngineExecutionResult,
+} from './pipelines/computeEngine';
+import {
+  getTrinoEngine,
+  trinoConfigFromEnv,
+  trinoCoordinatorConfigured,
+} from './pipelines/trinoAdapter';
+import {
+  compileBatchJob,
+  compileFusedJob,
+  type BatchSourceTable,
+  type CompiledBatchJob,
+  type FusedJoinSpec,
+} from './pipelines/trinoSqlCompiler';
+import type { TransformStep } from './pipelines/duckdbTransformEngine';
+import {
   recordDeployDuration,
   incActiveDeploys,
   addInputRowsProcessed,
@@ -171,11 +191,107 @@ export interface StartDeploymentResult {
 // This prevents HTTP timeouts on large datasets and gives the UI real-time
 // progress visibility.
 
+/**
+ * Map a join NODE's canvas config to the compiler's FusedJoinSpec. Returns
+ * null for a malformed/unsupported spec (missing join type, or a non-cross
+ * join with no equi-keys) so the caller falls back to the in-process path.
+ * Mirrors the field reads in transformService.materializeForDeploy's join case.
+ */
+ 
+function joinFusionSpecFromConfig(cfg: any): FusedJoinSpec | null {
+  const joinType = cfg?.joinType as FusedJoinSpec['joinType'] | undefined;
+  if (!joinType) return null;
+  const conditions = Array.isArray(cfg.conditions) ? cfg.conditions : [];
+  const on = conditions
+     
+    .filter((c: any) => c && c.leftColumn && c.rightColumn)
+     
+    .map((c: any) => ({ left: String(c.leftColumn), right: String(c.rightColumn) }));
+  if (joinType !== 'cross' && on.length === 0) return null;
+  return {
+    kind: 'join',
+    joinType,
+    on,
+    rightPrefix: typeof cfg.rightPrefix === 'string' ? cfg.rightPrefix : 'right_',
+    allowCrossJoin: cfg.allowCrossJoin === true,
+    leftSelected: Array.isArray(cfg.leftSelectedColumns)
+      ? cfg.leftSelectedColumns.map(String)
+      : undefined,
+    rightSelected: Array.isArray(cfg.rightSelectedColumns)
+      ? cfg.rightSelectedColumns.map(String)
+      : undefined,
+  };
+}
+
 export class DeploymentService {
   constructor(
     private knex: Knex,
     private transformService: TransformService,
   ) {}
+
+  // ============================================================================
+  // Output dataset name validation
+  // ============================================================================
+  //
+  // The deploy writes bytes to S3 BEFORE it touches `foundry_datasets`. If the
+  // dataset row write later fails because of a constraint violation, those
+  // bytes orphan in object storage and the user sees `deploy failed` with the
+  // deploy log pointing at a Postgres error that has no bearing on what they
+  // edited. To make rename-driven failures fail-fast with an actionable error,
+  // validate the canvas label at the deploy boundary BEFORE materialization.
+  //
+  // Rules (kept in lock-step with the `foundry_datasets.name` column):
+  //   - non-empty after trim
+  //   - ≤ 255 chars (the varchar(255) column width)
+  //   - no NUL bytes or control chars (these tend to come from copy-paste from
+  //     terminal output and silently corrupt the file listing)
+  //
+  // Collision (same name in same folder) is intentionally NOT enforced here —
+  // datasetService.updateDataset has its own ConflictError flow, and the
+  // existing-dataset UPDATE in this file is keyed on the immutable
+  // `outputDatasetId`, not on (folder_id, name). A collision policy can be
+  // layered on later without changing this signature.
+  //
+  // Exported as a static so the canvas's Apply/save flow on the output node
+  // can call the same function before persisting the new label — a single
+  // source of truth for "is this a deploy-safe name?".
+  static readonly OUTPUT_DATASET_NAME_MAX = 255;
+  static validateOutputDatasetName(label: unknown): void {
+    if (typeof label !== 'string') {
+      throw new AppError(
+        'Output node label must be a string.',
+        400,
+        'OUTPUT_NAME_INVALID',
+      );
+    }
+    const trimmed = label.trim();
+    if (trimmed.length === 0) {
+      throw new AppError(
+        'Output node label cannot be empty. Open the output node and give it a name.',
+        400,
+        'OUTPUT_NAME_EMPTY',
+      );
+    }
+    if (label.length > DeploymentService.OUTPUT_DATASET_NAME_MAX) {
+      throw new AppError(
+        `Output node label is ${label.length} characters; the maximum is ` +
+          `${DeploymentService.OUTPUT_DATASET_NAME_MAX}. Shorten the name on the canvas before deploying.`,
+        400,
+        'OUTPUT_NAME_TOO_LONG',
+      );
+    }
+    // U+0000 + C0 controls + U+007F + C1 controls. Newlines and tabs are
+    // included because a name that wraps a file-tree row is almost never
+    // intentional and is a footgun for downstream consumers (CSV exports,
+    // shell scripts, S3 keys).
+    if (/[\u0000-\u001F\u007F-\u009F]/.test(label)) {
+      throw new AppError(
+        'Output node label contains control characters. Use printable characters only.',
+        400,
+        'OUTPUT_NAME_CONTROL_CHARS',
+      );
+    }
+  }
 
   /**
    * Start a deployment — PB-B1 supervised path.
@@ -610,13 +726,71 @@ export class DeploymentService {
     );
   }
 
+  /**
+   * Resolve a streaming pipeline's dataset source nodes into FlinkDatasetNodes.
+   * A dataset with `format='stream'` becomes a Kafka source (`kind:'stream'`,
+   * `source`=topic from `file_path`, bootstrap servers from the env); every
+   * other format is a `batch` source (Iceberg/Parquet/CSV). Shared by the
+   * initial deploy and restart so the topology (esp. the Kafka topic) is never
+   * lost on restart.
+   */
+  private async resolveStreamingSources(
+    pipelineId: string,
+  ): Promise<FlinkDatasetNode[]> {
+    const datasetNodes = await this.knex('pipeline_nodes as pn')
+      .leftJoin('foundry_datasets as fd', 'pn.dataset_id', 'fd.id')
+      .where({ 'pn.pipeline_id': pipelineId, 'pn.node_type': 'dataset' })
+      .select(
+        'pn.id as id',
+        'pn.label as label',
+        'fd.file_path as file_path',
+        'fd.format as format',
+      );
+
+    return Promise.all(
+      datasetNodes.map(
+        async (
+          n: { id: string; label: string; file_path?: string | null; format?: string | null },
+          i: number,
+        ): Promise<FlinkDatasetNode> => {
+          const cols = n.file_path
+            ? await this.knex('dataset_columns as dc')
+                .join('pipeline_nodes as pn', 'pn.dataset_id', 'dc.dataset_id')
+                .where({ 'pn.id': n.id })
+                .select('dc.column_name as name', 'dc.column_type as type')
+                .orderBy('dc.ordinal_position', 'asc')
+            : [];
+          const isStream = n.format === 'stream';
+          return {
+            id: n.id,
+            label: n.label ?? `src_${i}`,
+            kind: isStream ? 'stream' : 'batch',
+            source: n.file_path ?? '',
+            columns: cols.map((c: { name: string; type: string }) => ({
+              name: c.name,
+              type: c.type,
+            })),
+            // Kafka sources read JSON by default and inherit the deployment's
+            // broker address from the env (per-source override is future work).
+            ...(isStream
+              ? {
+                  format: 'json',
+                  bootstrapServers: process.env.KAFKA_BOOTSTRAP_SERVERS,
+                }
+              : {}),
+          };
+        },
+      ),
+    );
+  }
+
   private async executeStreamingBuild(
     projectId: string,
     pipelineId: string,
     deploymentId: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     outputNodes: any[],
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     pipeline: any,
   ): Promise<void> {
     // 1. Validate streaming caps via ThroughputGuard (acceptance f).
@@ -642,44 +816,10 @@ export class DeploymentService {
       }
     }
 
-    // 2. Gather source dataset nodes + their columns. The output node
-    // carries the final schema; other dataset nodes are the sources.
-    const datasetNodes = await this.knex('pipeline_nodes as pn')
-      .leftJoin('foundry_datasets as fd', 'pn.dataset_id', 'fd.id')
-      .where({ 'pn.pipeline_id': pipelineId, 'pn.node_type': 'dataset' })
-      .select(
-        'pn.id as id',
-        'pn.label as label',
-        'fd.file_path as file_path',
-        'fd.format as format',
-      );
-
-    const sourceCols = await Promise.all(
-      datasetNodes.map(async (n: { id: string; file_path?: string | null }) => {
-        if (!n.file_path) return [];
-        const cols = await this.knex('dataset_columns as dc')
-          .join('pipeline_nodes as pn', 'pn.dataset_id', 'dc.dataset_id')
-          .where({ 'pn.id': n.id })
-          .select('dc.column_name as name', 'dc.column_type as type')
-          .orderBy('dc.ordinal_position', 'asc');
-        return cols.map((c: { name: string; type: string }) => ({ name: c.name, type: c.type }));
-      }),
-    );
-
-    const sources: FlinkDatasetNode[] = datasetNodes.map(
-      (
-        n: { id: string; label: string; file_path?: string | null; format?: string | null },
-        i: number,
-      ) => ({
-        id: n.id,
-        label: n.label ?? `src_${i}`,
-        // 'stream' when the dataset is explicitly a kafka stream; all
-        // other formats are 'batch' sources (Iceberg/Parquet/CSV).
-        kind: (n.format === 'stream' ? 'stream' : 'batch') as 'stream' | 'batch',
-        source: n.file_path ?? '',
-        columns: sourceCols[i] ?? [],
-      }),
-    );
+    // 2. Gather source dataset nodes + their columns via the shared resolver
+    //    (also used by restartStreamingDeploy so a restart never loses the
+    //    Kafka topic / source metadata).
+    const sources = await this.resolveStreamingSources(pipelineId);
 
     if (sources.length === 0) {
       await this.finaliseFailed(
@@ -854,9 +994,6 @@ export class DeploymentService {
     // have tweaked transforms between stop and restart; savepoint
     // recovery handles state, NOT topology).
     const adapter = getFlinkAdapter();
-    const datasetNodes = await this.knex('pipeline_nodes as pn')
-      .where({ 'pn.pipeline_id': pipelineId, 'pn.node_type': 'dataset' })
-      .select('pn.id', 'pn.label', 'pn.dataset_id');
     const outNodes = await this.knex('pipeline_nodes')
       .where({ pipeline_id: pipelineId, node_type: 'output' });
     const out = outNodes[0];
@@ -867,15 +1004,10 @@ export class DeploymentService {
       ? outCfg.columns.map((c: { name: string; type: string }) => ({ name: c.name, type: c.type }))
       : [];
 
-    const sources: FlinkDatasetNode[] = datasetNodes.map(
-      (n: { id: string; label: string }, i: number) => ({
-        id: n.id,
-        label: n.label ?? `src_${i}`,
-        kind: 'stream' as const,
-        source: '',
-        columns: [],
-      }),
-    );
+    // Resolve sources via the shared resolver — preserves the real Kafka
+    // topic / columns / format across restart (the old code hardcoded empty
+    // stream sources, which compiled to an invalid job).
+    const sources = await this.resolveStreamingSources(pipelineId);
 
     const projectSlug = `proj_${projectId.replace(/-/g, '').slice(0, 12)}`;
     const pipelineSlug = `${(pipeline.name ?? 'pipe').toString()}_${pipelineId.replace(/-/g, '').slice(0, 8)}`;
@@ -1230,7 +1362,7 @@ export class DeploymentService {
    */
   private async collectPreviewPinning(
     _pipelineId: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     nodes: any[],
     flags: { force: boolean; ignorePreviewSnapshot: boolean },
   ): Promise<{
@@ -1539,7 +1671,7 @@ export class DeploymentService {
    * override flags.
    */
   private async computeSchemaEvolutionForOutputs(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     outputNodes: any[],
   ): Promise<{
     changed: boolean;
@@ -1762,12 +1894,22 @@ export class DeploymentService {
             Number(process.env.PB_B6_S3_ROW_CAP ?? 10_000_000),
           );
           let truncated = false;
+          // Dynamic import so this hot path stays out of the deploy
+          // service's cold start cost when the chain has no pinned
+          // S3 inputs. Hoisted out of the Promise executor because that
+          // executor is a sync callback — `await` is not legal there.
+          const { sanitizeCsvHeader } = await import('../utils/csvHeader');
           const rows = await new Promise<Array<Record<string, string>>>(
             (resolve, reject) => {
               const acc: Array<Record<string, string>> = [];
               const parser = parse({
                 delimiter: node.file_path.endsWith('.tsv') ? '\t' : ',',
-                columns: true,
+                // See `src/utils/csvHeader.ts` — prevents silent column
+                // drop when the pinned-version CSV has duplicate or blank
+                // header cells. Matches the sanitizer used at preview
+                // time so deploy reads the same schema.
+                columns: (h: string[]) =>
+                  sanitizeCsvHeader(h, { source: node.file_path }),
                 skip_empty_lines: true,
                 trim: true,
                 relax_column_count: true,
@@ -1879,12 +2021,17 @@ export class DeploymentService {
         100_000,
         Number(process.env.PB_B6_S3_ROW_CAP ?? 10_000_000),
       );
+      const { sanitizeCsvHeader } = await import('../utils/csvHeader');
       const rows = await new Promise<Array<Record<string, string>>>(
         (resolve, reject) => {
           const acc: Array<Record<string, string>> = [];
           const parser = parse({
             delimiter: entry.file_path.endsWith('.tsv') ? '\t' : ',',
-            columns: true,
+            // See `src/utils/csvHeader.ts` — prevents silent column drop
+            // when the pinned transitive-input CSV has duplicate or blank
+            // header cells.
+            columns: (h: string[]) =>
+              sanitizeCsvHeader(h, { source: entry.file_path }),
             skip_empty_lines: true,
             trim: true,
             relax_column_count: true,
@@ -1939,6 +2086,386 @@ export class DeploymentService {
   }
 
   /**
+   * FOUNDRY-GAPS §1 — engine-eligible build path (strangler-fig branch).
+   *
+   * Compiles a LINEAR output chain (dataset → transform* → output) whose
+   * source dataset already lives in Iceberg to a Trino SQL plan and
+   * dispatches it through the ComputeEngine contract. The engine writes the
+   * sink table directly via the Lakekeeper REST catalog, so:
+   *   - rows never materialize in the Node heap (the scaling wall at
+   *     transformService.materializeForDeploy);
+   *   - the snapshot commit gets catalog OCC for free (no manual retry);
+   *   - the PyIceberg write-sidecar is bypassed;
+   *   - reads are pinned to the input's recorded snapshot (time travel)
+   *     for reproducible builds.
+   *
+   * Returns null on ANY ineligibility or failure — the caller then runs the
+   * legacy in-process path unchanged. Eligibility: TELLUS_BATCH_ENGINE=trino,
+   * output_format=iceberg, linear chain (join/union NODES stay in-process in
+   * v1), Iceberg-format source dataset, and input rows ≥
+   * TELLUS_BATCH_ENGINE_MIN_ROWS.
+   */
+  private async tryEngineBuild(args: {
+    projectId: string;
+    pipelineId: string;
+    deploymentId: string;
+     
+    outputNode: any;
+     
+    cfg: any;
+     
+    pipeline: any;
+    triggeredBy: string;
+  }): Promise<{
+    datasetId: string;
+    filePath: string;
+    rowCount: number;
+    columnCount: number;
+  } | null> {
+    // Engine path is the default ("auto"): used wherever a real Trino
+    // coordinator is configured, else we fall through to the in-process +
+    // PyIceberg-sidecar path. Forced "in-process" opts out entirely; forced
+    // "trino" always attempts it (tests inject an in-memory engine).
+    const engineMode = selectedBatchEngine();
+    if (engineMode === 'in-process') return null;
+    if (engineMode === 'auto' && !trinoCoordinatorConfigured()) return null;
+    if ((args.pipeline.output_format ?? 'csv') !== 'iceberg') return null;
+
+    try {
+      // 1. Peek the output's source node to choose the plan shape.
+      const outputSrcId = args.cfg.sourceNodeId as string | undefined;
+      if (!outputSrcId) return null;
+      const srcNode = await this.knex('pipeline_nodes')
+        .where({ id: outputSrcId, pipeline_id: args.pipelineId })
+        .select('id', 'node_type', 'config')
+        .first();
+      if (!srcNode) return null;
+      const catalog = trinoConfigFromEnv().catalog;
+
+      // 2a. FUSION: the output's source is a join/union NODE. Resolve BOTH
+      // arms to Iceberg tables and compile a multi-input Trino plan — this is
+      // what retires the in-process executeJoin/union arrays for large data.
+      if (srcNode.node_type === 'join' || srcNode.node_type === 'union') {
+        const nCfg =
+          typeof srcNode.config === 'string'
+            ? JSON.parse(srcNode.config)
+            : (srcNode.config ?? {});
+        const leftArm = await this.resolveIcebergArm(
+          args.pipelineId,
+          nCfg.sourceNodeId as string | undefined,
+        );
+        const rightArm = await this.resolveIcebergArm(
+          args.pipelineId,
+          nCfg.rightNodeId as string | undefined,
+        );
+        if (!leftArm || !rightArm) return null;
+        // Strangler threshold: fuse only when either arm is large enough to
+        // matter (small joins are cheap in-process and avoid engine latency).
+        if (Math.max(leftArm.rowEstimate, rightArm.rowEstimate) < batchEngineMinRows()) {
+          return null;
+        }
+        const fusion: FusedJoinSpec | { kind: 'union' } | null =
+          srcNode.node_type === 'join'
+            ? joinFusionSpecFromConfig(nCfg)
+            : { kind: 'union' };
+        if (!fusion) return null;
+
+        const engine = getTrinoEngine();
+        if (!(await engine.available())) {
+          console.warn(
+            '[deploy] engine path selected but Trino coordinator unavailable — falling back to in-process build.',
+          );
+          return null;
+        }
+        const target = await this.buildEngineTarget(args);
+        const plan = compileFusedJob({
+          catalog,
+          left: leftArm,
+          right: rightArm,
+          fusion,
+          output: target,
+        });
+        const result = await engine.executePlan(plan, target);
+        return await this.recordEngineBuild({ args, plan, result, target });
+      }
+
+      // 2b. LINEAR: a transform chain over a single Iceberg table.
+      const arm = await this.resolveIcebergArm(args.pipelineId, outputSrcId);
+      if (!arm) return null;
+      if (arm.rowEstimate < batchEngineMinRows()) return null;
+
+      const engine = getTrinoEngine();
+      if (!(await engine.available())) {
+        console.warn(
+          '[deploy] engine path selected but Trino coordinator unavailable — falling back to in-process build.',
+        );
+        return null;
+      }
+      const target = await this.buildEngineTarget(args);
+      const plan = compileBatchJob({
+        catalog,
+        inputs: [arm.source],
+        transforms: arm.transforms,
+        output: target,
+      });
+      const result = await engine.executePlan(plan, target);
+      return await this.recordEngineBuild({ args, plan, result, target });
+    } catch (err) {
+      // Strangler-fig safety: engine problems NEVER fail the deploy — the
+      // in-process path is the fallback of record.
+      console.warn(
+        `[deploy] engine build fell back to in-process: ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Resolve a single pipeline arm — a linear transform chain rooted at one
+   * Iceberg dataset — to a Trino source table + folded transforms. Returns
+   * null on any non-linear node (nested join/union), a Join/Union transform
+   * STEP (needs multi-input planning), a non-Iceberg leaf, or missing columns,
+   * so the caller falls back to the in-process path. Shared by the linear and
+   * fused (join/union node) engine builds.
+   */
+  private async resolveIcebergArm(
+    pipelineId: string,
+    startNodeId: string | undefined,
+  ): Promise<{
+    source: BatchSourceTable;
+    transforms: TransformStep[];
+    rowEstimate: number;
+  } | null> {
+    if (!startNodeId) return null;
+    const transforms: TransformStep[] = [];
+    let cursor: string | undefined = startNodeId;
+    const seen = new Set<string>();
+     
+    let datasetNode: any = null;
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const n = await this.knex('pipeline_nodes')
+        .where({ id: cursor, pipeline_id: pipelineId })
+        .select('id', 'node_type', 'dataset_id', 'config')
+        .first();
+      if (!n) return null;
+      const nCfg =
+        typeof n.config === 'string' ? JSON.parse(n.config) : (n.config ?? {});
+      const own: TransformStep[] = Array.isArray(nCfg.transforms)
+        ? nCfg.transforms
+        : [];
+      // An arm folds linear ops only; a Join/Union STEP would need a second
+      // registered input — out of scope for a single arm.
+      if (own.some((t) => t.function === 'Join' || t.function === 'Union')) {
+        return null;
+      }
+      transforms.unshift(...own);
+      if (n.node_type === 'dataset') {
+        datasetNode = n;
+        break;
+      }
+      // A nested join/union NODE inside an arm needs recursive fusion — not
+      // supported yet; fall back to in-process for that pipeline.
+      if (n.node_type !== 'transform') return null;
+      cursor = nCfg.sourceNodeId as string | undefined;
+    }
+    if (!datasetNode?.dataset_id) return null;
+
+    const ds = await this.knex('foundry_datasets')
+      .where({ id: datasetNode.dataset_id })
+      .first();
+    if (!ds || ds.format !== 'iceberg' || !ds.file_path) return null;
+    const loc = parseIcebergLocation(String(ds.file_path));
+    if (!loc) return null;
+
+    const srcCols = await this.knex('dataset_columns')
+      .where({ dataset_id: ds.id })
+      .orderBy('ordinal_position', 'asc')
+      .select('column_name', 'column_type');
+    if (srcCols.length === 0) return null;
+
+    return {
+      source: {
+        id: datasetNode.id,
+        label: ds.name ?? 'input',
+        namespace: loc.namespace,
+        table: loc.table,
+        snapshotId: loc.snapshotId,
+        columns: srcCols.map(
+          (c: { column_name: string; column_type: string }) => ({
+            name: c.column_name,
+            type: c.column_type ?? 'string',
+          }),
+        ),
+      },
+      transforms,
+      rowEstimate: Number(ds.row_count_exact ?? ds.row_count ?? 0),
+    };
+  }
+
+  /**
+   * Resolve the pipeline's Iceberg sink target (warehouse/namespace/leaf),
+   * ensuring the namespace exists. Shared by the linear and fused builds so
+   * downstream readers see one location format regardless of plan shape.
+   */
+  private async buildEngineTarget(args: {
+    projectId: string;
+    pipelineId: string;
+     
+    pipeline: any;
+  }): Promise<IcebergTarget> {
+    const projectSlug = slugForNamespace(
+      `proj_${args.projectId.replace(/-/g, '').slice(0, 12)}`,
+    );
+    const pipelineSlug = slugForNamespace(
+      `${(args.pipeline.name ?? 'pipe').toString()}_${args.pipelineId.replace(/-/g, '').slice(0, 8)}`,
+    );
+    const { ensurePipelineNamespace, pipelineWarehouseName } = await import(
+      './pipelines/lakekeeperBootstrap'
+    );
+    const warehouse = pipelineWarehouseName();
+    const namespace = await ensurePipelineNamespace(projectSlug, pipelineSlug);
+    return {
+      warehouse,
+      namespace,
+      table: PIPELINE_LEAF_TABLE,
+      catalogUri: process.env.LAKEKEEPER_URL ?? 'http://localhost:8181',
+    };
+  }
+
+  /**
+   * Persist the engine build's output — mirrors the sidecar path's dataset /
+   * column / lineage / marking records so the rest of the platform (Funnel,
+   * lineage graph, FE) can't tell which engine wrote. Shared by linear + fused
+   * builds (they differ only in how `plan` was compiled).
+   */
+  private async recordEngineBuild(p: {
+    args: {
+      projectId: string;
+      pipelineId: string;
+      deploymentId: string;
+       
+      outputNode: any;
+       
+      cfg: any;
+      triggeredBy: string;
+    };
+    plan: CompiledBatchJob;
+    result: EngineExecutionResult;
+    target: IcebergTarget;
+  }): Promise<{
+    datasetId: string;
+    filePath: string;
+    rowCount: number;
+    columnCount: number;
+  }> {
+    const { args, plan, result, target } = p;
+    const filePath = `${target.warehouse}/${target.namespace}/${target.table}`;
+    await this.knex('pipeline_deployments')
+      .where({ id: args.deploymentId })
+      .update({
+        output_table_location: `${target.warehouse}:${target.namespace}.${target.table}`,
+      });
+
+    let datasetId: string;
+    const existingDatasetId = args.cfg.outputDatasetId as string | undefined;
+    const datasetPatch = {
+      name: args.outputNode.label,
+      file_path: filePath,
+      row_count: result.rowCount,
+      row_count_exact: result.rowCount,
+      column_count: plan.outputSchema.length,
+      file_size_bytes: 0,
+      mime_type: 'application/vnd.apache.iceberg',
+      format: 'iceberg',
+      original_filename: `${args.outputNode.label
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .toLowerCase()}.iceberg`,
+      status: 'ready',
+      updated_by: args.triggeredBy,
+    };
+    if (existingDatasetId) {
+      await this.knex('foundry_datasets')
+        .where({ id: existingDatasetId })
+        .update(datasetPatch);
+      datasetId = existingDatasetId;
+      await this.knex('dataset_columns').where({ dataset_id: datasetId }).del();
+    } else {
+      const [newDataset] = await this.knex('foundry_datasets')
+        .insert({
+          ...datasetPatch,
+          project_id: args.projectId,
+          created_by: args.triggeredBy,
+        })
+        .returning('*');
+      datasetId = newDataset.id;
+      await this.knex('pipeline_nodes')
+        .where({ id: args.outputNode.id })
+        .update({
+          dataset_id: datasetId,
+          config: JSON.stringify({ ...args.cfg, outputDatasetId: datasetId }),
+        });
+    }
+    await this.knex('dataset_columns').insert(
+      plan.outputSchema.map((col, idx) => ({
+        dataset_id: datasetId,
+        column_name: col.name,
+        column_type: col.type || 'string',
+        ordinal_position: idx + 1,
+        nullable: true,
+        logical_type: pipelineTypeToParquetLogicalType(col.type ?? 'string'),
+      })),
+    );
+
+    const pipeMarkings = await this.knex('pipelines')
+      .where({ id: args.pipelineId })
+      .first('input_markings');
+    const unionOutput = Array.isArray(pipeMarkings?.input_markings)
+      ? (pipeMarkings!.input_markings as string[])
+      : [];
+    if (unionOutput.length > 0) {
+      await this.knex('foundry_datasets')
+        .where({ id: datasetId })
+        .update({ markings: unionOutput });
+    }
+    try {
+      await this.applyDeployLineageAndSignals({
+        pipelineId: args.pipelineId,
+        deploymentId: args.deploymentId,
+        outputDatasetId: datasetId,
+        sourceTransactionId: String(result.rowCount || args.deploymentId),
+      });
+    } catch (err) {
+      console.warn(
+        `[deploy] lineage/auto-fire failed (engine path): ${(err as Error).message}`,
+      );
+    }
+    try {
+      await this.applySchemaEvolutionPostDeploy({
+        pipelineId: args.pipelineId,
+        deploymentId: args.deploymentId,
+        outputDatasetId: datasetId,
+        currentColumns: plan.outputSchema,
+      });
+    } catch (err) {
+      console.warn(
+        `[deploy] schema evolution post-deploy failed (engine path): ${(err as Error).message}`,
+      );
+    }
+
+    console.log(
+      `[deploy] output "${args.outputNode.label}" built by ${result.engine}: ` +
+        `${result.rowCount} rows in ${result.elapsedMs}ms (queries: ${result.queryIds.join(', ')})`,
+    );
+    return {
+      datasetId,
+      filePath,
+      rowCount: result.rowCount,
+      columnCount: plan.outputSchema.length,
+    };
+  }
+
+  /**
    * Background build execution — runs after startDeployment returns.
    * Updates the deployment record as builds complete.
    */
@@ -1947,9 +2474,9 @@ export class DeploymentService {
     pipelineId: string,
     deploymentId: string,
     triggeredBy: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     outputNodes: any[],
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     pipeline: any,
   ): Promise<void> {
     const startedAt = Date.now();
@@ -2009,14 +2536,83 @@ export class DeploymentService {
         : (outputNode.config ?? {});
 
       try {
+        // ── Output-name boundary validation ──────────────────────
+        // We MUST validate the display name before the S3 upload —
+        // otherwise an over-length or empty label would orphan bytes
+        // in object storage (PUT succeeds, foundry_datasets UPDATE
+        // fails with `value too long for type character varying(255)`
+        // and the deploy marks failed). Fail fast, before any side
+        // effects, with a typed error the FE can render.
+        DeploymentService.validateOutputDatasetName(outputNode.label);
+
+        // ── FOUNDRY-GAPS §1 — engine branch (strangler-fig) ───────
+        // When TELLUS_BATCH_ENGINE=trino and this output's chain is
+        // engine-eligible (linear DAG, Iceberg input above the row
+        // threshold), compile the pipeline_nodes DAG to Trino SQL and
+        // dispatch — rows never transit the Node heap; the engine's
+        // Iceberg connector commits the snapshot via the Lakekeeper
+        // REST catalog (catalog OCC, no manual retry, no PyIceberg
+        // sidecar). Any ineligibility or engine failure returns null
+        // and the legacy in-process path below runs unchanged.
+        const engineBuild = await this.tryEngineBuild({
+          projectId,
+          pipelineId,
+          deploymentId,
+          outputNode,
+          cfg,
+          pipeline,
+          triggeredBy,
+        });
+        if (engineBuild) {
+          buildResults.push({
+            nodeId: outputNode.id,
+            nodeLabel: outputNode.label,
+            datasetId: engineBuild.datasetId,
+            datasetName: outputNode.label,
+            filePath: engineBuild.filePath,
+            rowCount: engineBuild.rowCount,
+            columnCount: engineBuild.columnCount,
+            status: 'succeeded',
+            durationMs: Date.now() - buildStart,
+          });
+          await this.knex('pipeline_deployments')
+            .where({ id: deploymentId })
+            .update({ build_results: JSON.stringify(buildResults) });
+          continue;
+        }
+
         // Resolve upstream data
         let data: { columns: Array<{ name: string; type: string }>; rows: Array<Record<string, unknown>>; totalRows: number };
         try {
-          data = await this.transformService.outputPreview(
-            projectId, pipelineId, outputNode.id, 100_000,
+          // PB-deploy-fix — full DAG re-execution, unbounded. The legacy
+          // outputPreview path resolved each output via resolveNodeData →
+          // previewSnapshot.rows, and join/union nodes HARD-REQUIRE the
+          // snapshot (they can't be linearly composed). The canvas persists
+          // those snapshots capped at ~500 rows for instant feedback, so
+          // any pipeline whose terminal output passed through a join or
+          // union silently dropped every row past 500 — independent of
+          // the 100k cap on the outputPreview slice itself. The deploy
+          // path now re-reads every CSV unbounded and re-executes every
+          // transform / join / union from raw inputs (Foundry semantics:
+          // preview is bounded; deploy is unbounded).
+          data = await this.transformService.materializeForDeploy(
+            projectId, pipelineId, outputNode.id,
           );
         } catch (resolveErr) {
           const msg = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+          const code = (resolveErr as { code?: string })?.code;
+          if (
+            code === 'SNAPSHOT_REQUIRED' ||
+            msg.includes('SNAPSHOT_REQUIRED') ||
+            msg.includes('no preview snapshot has been captured')
+          ) {
+            throw new Error(
+              `Cannot build "${outputNode.label}": an upstream join/union node has ` +
+                `no preview snapshot. Open the node and click "Apply" before deploying. ` +
+                `Deploys must replay the snapshot — they cannot re-execute joins/unions ` +
+                `from the linear transform chain (would silently drop one branch).`,
+            );
+          }
           if (msg.includes('NO_DATASET') || msg.includes('no associated dataset')) {
             throw new Error(
               `Cannot build "${outputNode.label}": upstream join/union node hasn't been applied. ` +
@@ -2028,6 +2624,61 @@ export class DeploymentService {
 
         if (data.rows.length === 0) {
           throw new Error('Upstream chain produced zero rows');
+        }
+
+        // ── Defense-in-depth: deploy-output schema invariant ──────
+        // If the output node's immediate upstream is a join or union,
+        // its previewSnapshot.columns IS the contractual output schema.
+        // Hard-fail when what we're about to write disagrees — this
+        // catches any future resolveNodeData regression at the LAST
+        // possible point before bytes hit S3.
+        try {
+          const cfgForInvariant =
+            typeof outputNode.config === 'string'
+              ? JSON.parse(outputNode.config)
+              : (outputNode.config ?? {});
+          const srcId = (cfgForInvariant?.sourceNodeId ?? null) as string | null;
+          if (srcId) {
+            const upstream = await this.knex('pipeline_nodes')
+              .where({ id: srcId, pipeline_id: pipelineId })
+              .select('node_type', 'config')
+              .first();
+            const isAggregating =
+              upstream?.node_type === 'join' || upstream?.node_type === 'union';
+            if (isAggregating) {
+              const upCfg =
+                typeof upstream.config === 'string'
+                  ? JSON.parse(upstream.config)
+                  : (upstream.config ?? {});
+              const expected: Array<{ name: string; type: string }> =
+                upCfg?.previewSnapshot?.columns ?? [];
+              if (expected.length > 0 && expected.length !== data.columns.length) {
+                const expectedNames = expected.map((c) => c.name);
+                const actualNames = data.columns.map((c) => c.name);
+                const missing = expectedNames.filter((n) => !actualNames.includes(n));
+                const extra = actualNames.filter((n) => !expectedNames.includes(n));
+                throw new AppError(
+                  `Deploy schema invariant violated for "${outputNode.label}": ` +
+                    `upstream ${upstream.node_type} (${srcId}) snapshot has ` +
+                    `${expected.length} columns but resolved data has ` +
+                    `${data.columns.length}. ` +
+                    (missing.length ? `Missing: ${missing.join(', ')}. ` : '') +
+                    (extra.length ? `Extra: ${extra.join(', ')}. ` : '') +
+                    `Refusing to write a corrupted dataset.`,
+                  500,
+                  'DEPLOY_SCHEMA_DRIFT',
+                );
+              }
+            }
+          }
+        } catch (invariantErr) {
+          if (invariantErr instanceof AppError) throw invariantErr;
+          // Non-fatal invariant lookup failure — log and proceed; the
+          // primary correctness gate is resolveNodeData itself.
+          console.warn(
+            `[deploy] schema invariant check failed (non-fatal): ` +
+              `${(invariantErr as Error).message}`,
+          );
         }
 
         // PB-B3 — branch on the pipeline's output_format. CSV path is
@@ -2325,9 +2976,19 @@ export class DeploymentService {
             : `${safeName}.csv`;
 
         if (existingDatasetId) {
+          // Keep the dataset's display name in lock-step with the
+          // output node's label. Without this, renaming the output
+          // node on the canvas would write a new CSV at the new
+          // sanitized filename but leave the project's file listing
+          // showing the stale name from the first deploy — the user
+          // sees the rename in the canvas but never in the file tree.
+          // `original_filename` is already refreshed from `safeName`
+          // below; pairing `name` with it keeps the two columns in
+          // a consistent state across renames.
           await this.knex('foundry_datasets')
             .where({ id: existingDatasetId })
             .update({
+              name: outputNode.label,
               file_path: s3Key,
               row_count: data.rows.length,
               row_count_exact: rowCountExact,
