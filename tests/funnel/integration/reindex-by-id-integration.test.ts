@@ -18,18 +18,18 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { api } from "../../helpers/api";
 import { query } from "../../../src/db";
 
+// Singleton-ontology adaptation: the deployment enforces a single canonical
+// ontology (ONTOLOGY_SINGLETON) with a UNIQUE constraint (uq_ontology_singleton).
+// Tests MUST NOT insert into / delete from the ontology table; instead they
+// reference the canonical ontology_id and only manage their own fixture rows.
 const STAMP = Date.now();
-const ONTOLOGY_ID = `55555555-aaaa-aaaa-aaaa-${STAMP.toString(16).padStart(12, "0").slice(-12)}`;
+const ONTOLOGY_ID = "00000000-0000-0000-0000-000000000001"; // canonical ontology
 const OT_API_NAME = `ReindexByIdProbe${STAMP}`;
 let OT_ID = "";
 
 beforeAll(async () => {
-  await query(
-    `INSERT INTO ontology (ontology_id, display_name, description, created_by)
-     VALUES ($1, $2, 'reindexById integration fixture', 'vitest')
-     ON CONFLICT DO NOTHING`,
-    [ONTOLOGY_ID, `ReindexById Fixture ${STAMP}`],
-  );
+  // No INSERT INTO ontology — the canonical ontology already exists (singleton).
+  // object_type FK is satisfied by the canonical ontology_id.
   const ot = await query(
     `INSERT INTO object_type (ontology_id, api_name, display_name, status)
      VALUES ($1, $2, $3, 'experimental')
@@ -41,13 +41,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Cleanup ONLY this test's fixture rows — never the canonical ontology row.
   await query(`DELETE FROM funnel_signal WHERE object_type_api_name = $1`, [
     OT_API_NAME,
   ]);
   if (OT_ID) {
     await query(`DELETE FROM object_type WHERE object_type_id = $1`, [OT_ID]);
   }
-  await query(`DELETE FROM ontology WHERE ontology_id = $1`, [ONTOLOGY_ID]);
 });
 
 describe("POST /api/v1/ontology/:ontologyId/objectTypeId/:objectTypeId", () => {

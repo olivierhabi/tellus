@@ -74,8 +74,11 @@ describe("Sunday Integration Tests", async () => {
         if (ctx.interfaceApiName) {
           await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/interfaces/${ctx.interfaceApiName}`);
         }
-        // Delete ontology (cascades OTs)
-        await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
+        // Singleton: ontology delete is frozen (409), so delete the object
+        // types this suite created explicitly (cascade no longer fires).
+        for (const ot of [ctx.objectType1ApiName, ctx.objectType2ApiName]) {
+          if (ot) await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/${ot}`);
+        }
       }
     } catch { /* ignore */ }
     stopServer();
@@ -86,23 +89,18 @@ describe("Sunday Integration Tests", async () => {
     const bf = runner.failed;
 
     await runner.test("Create ontology", async () => {
-      const { status, body } = await api("POST", "/api/v1/ontology", {
-        displayName: "Sunday Integration Test",
-        description: "Testing interface system",
-      });
-      if (status === 201) {
-        ctx.ontologyId = body.data?.ontologyId || body.ontologyId;
-      } else if (status === 409) {
-        // Ontology already exists from a prior run — look up its ID
-        const listRes = await api("GET", "/api/v1/ontology");
-        const existing = (listRes.body?.data || []).find(
-          (o: any) => o.displayName === "Sunday Integration Test"
-        );
-        ctx.ontologyId = existing?.ontologyId || "";
-      } else {
-        runner.assert(false, `Expected 201 or 409, got ${status}`);
+      // Singleton deployment: POST /api/v1/ontology is frozen (ONTOLOGY_SINGLETON).
+      // Resolve the single canonical enterprise ontology instead of creating one.
+      const listRes = await api("GET", "/api/v1/ontology");
+      ctx.ontologyId = listRes.body?.data?.[0]?.ontologyId || "";
+      runner.assert(!!ctx.ontologyId, "ontologyId present (canonical)");
+
+      // Pre-clean leftovers from a prior interrupted run (the ontology delete
+      // cascade no longer fires under the singleton model).
+      for (const ot of ["SunAirport", "SunWarehouse"]) {
+        try { await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/${ot}`); } catch { /* ignore */ }
       }
-      runner.assert(!!ctx.ontologyId, "ontologyId present");
+      try { await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/interfaces/SunHasLocation`); } catch { /* ignore */ }
     });
 
     await runner.test("Create Airport object type", async () => {
@@ -385,8 +383,9 @@ describe("Sunday Integration Tests", async () => {
 
     await runner.test("Delete ontology (cascade)", async () => {
       const { status } = await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
-      runner.assert(status === 204, `Expected 204, got ${status}`);
-      ctx.ontologyId = ""; // Prevent afterAll cleanup
+      // Singleton deployment: deleting the canonical ontology is frozen → 409.
+      runner.assert(status === 204 || status === 409, `Expected 204 or 409 (frozen), got ${status}`);
+      ctx.ontologyId = ctx.ontologyId; // keep id so afterAll cleans up the OTs we created
     });
 
     expect(runner.failed).toBe(bf);

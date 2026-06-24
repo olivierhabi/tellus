@@ -163,6 +163,18 @@ main() {
     log "pulling newer base images…"; "${COMPOSE[@]}" pull --ignore-buildable || warn "pull had issues; continuing"
   fi
 
+  # Unpause any paused containers before `up`. Docker refuses to start or
+  # recreate a paused container ("cannot start a paused container"), which makes
+  # the whole `up` fail. Containers get paused by Docker Desktop's resource
+  # saver (auto-pause when idle) or by a manual `docker pause`; resume them so
+  # the stack can come up cleanly. No-op (and non-fatal) when nothing is paused.
+  if [[ -n "$("${COMPOSE[@]}" ps -q --filter status=paused 2>/dev/null)" ]]; then
+    log "unpausing paused containers…"
+    "${COMPOSE[@]}" unpause -q >/dev/null 2>&1 \
+      || docker ps --filter status=paused --format '{{.Names}}' | xargs -r docker unpause >/dev/null 2>&1 \
+      || warn "could not unpause all containers — run: docker ps --filter status=paused"
+  fi
+
   local up=(up -d --remove-orphans)
   [[ "$DO_BUILD"  -eq 1 ]] && up+=(--build)
   [[ "$RECREATE"  -eq 1 ]] && up+=(--force-recreate)

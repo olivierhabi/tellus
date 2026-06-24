@@ -26,6 +26,70 @@ let outputNodeId = "";
 let outputDatasetId = "";
 let deploy: DeploymentService;
 
+// ---------------------------------------------------------------------------
+// Reachability probes for the PB-B10 sidecar test. The Iceberg sidecar
+// round-trips through a live Lakekeeper REST catalog (warehouse) + a
+// MinIO/S3 object store (data files). The integration CI job provisions
+// postgres/opensearch/keycloak only — Lakekeeper, MinIO, and Temporal are
+// absent. S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY may still be set (shared
+// secret) so a bare env-presence check is insufficient; we probe the actual
+// endpoints. Mirrors the pb-b4 lakekeeperReachable() guard and the tuesday
+// isPostgresAvailable()/isOpenSearchAvailable() skip pattern.
+// ---------------------------------------------------------------------------
+
+async function lakekeeperReachable(): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `${process.env.LAKEKEEPER_URL ?? "http://localhost:8181"}/management/v1/info`,
+      { signal: AbortSignal.timeout(2_000) },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function s3ProbeUrl(): string {
+  const endpoint =
+    process.env.ICEBERG_S3_ENDPOINT ??
+    process.env.S3_ENDPOINT ??
+    "http://localhost:9000";
+  // The dev DNS override (PB_B4_LOCAL_DNS_OVERRIDE) rewrites the docker-
+  // internal `minio` host to `localhost` inside the python sidecar; mirror
+  // that here so the probe targets the same address the sidecar hits.
+  return endpoint.replace(/:\/\/minio\b/, "://localhost");
+}
+
+async function minioReachable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${s3ProbeUrl()}/minio/health/live`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Lakekeeper's /management/v1/info answers 2xx even when no warehouse is
+// provisioned; the REST catalog's config fetch is what actually fails
+// (NoSuchWarehouseException). Probe it so a server-up-but-warehouse-missing
+// environment skips instead of crashing.
+async function warehouseReachable(): Promise<boolean> {
+  try {
+    const base = process.env.LAKEKEEPER_URL ?? "http://localhost:8181";
+    const warehouse =
+      process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ??
+      process.env.LAKEKEEPER_WAREHOUSE ??
+      "tellus-pipeline";
+    const url = `${base}/catalog/v1/config?warehouse=${encodeURIComponent(warehouse)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+    return r.ok; // 200 = warehouse provisioned; 404 = NoSuchWarehouse
+  } catch {
+    return false;
+  }
+}
+
 beforeAll(async () => {
   try {
     await foundryDb.raw("SELECT 1");
@@ -226,13 +290,21 @@ describe("PB-B10 sidecar update_schema (live Lakekeeper)", () => {
       pipelineNamespace,
       slugForNamespace,
     } = await import("../../../src/services/pipelines/icebergNamespace");
+    // Reachability guard: the sidecar writes Iceberg snapshots through a live
+    // Lakekeeper REST catalog + MinIO/S3 object store. CI's integration job
+    // provisions neither, and S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY may be set
+    // (shared secret) so env-presence alone is not enough. Skip gracefully
+    // unless pyiceberg, Lakekeeper, the S3/MinIO backend are all reachable
+    // with credentials configured.
     const sidecarUp = await icebergSidecarAvailable();
-    const lkUp = await fetch("http://localhost:8181/management/v1/info", {
-      signal: AbortSignal.timeout(2000),
-    }).then((r) => r.ok).catch(() => false);
-    if (!sidecarUp || !lkUp) {
+    const lkUp = await lakekeeperReachable();
+    const minioUp = await minioReachable();
+    const warehouseUp = await warehouseReachable();
+    const s3CredsConfigured =
+      !!process.env.S3_ACCESS_KEY_ID && !!process.env.S3_SECRET_ACCESS_KEY;
+    if (!sidecarUp || !lkUp || !minioUp || !warehouseUp || !s3CredsConfigured) {
       console.warn(
-        `[pb-b10] skipping sidecar test — sidecar=${sidecarUp} lakekeeper=${lkUp}`,
+        `[pb-b10] skipping sidecar test — sidecar=${sidecarUp} lakekeeper=${lkUp} minio=${minioUp} warehouse=${warehouseUp} s3creds=${s3CredsConfigured}`,
       );
       return;
     }

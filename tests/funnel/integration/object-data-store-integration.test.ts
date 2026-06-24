@@ -12,17 +12,19 @@ import { api } from "../../helpers/api";
 import { query } from "../../../src/db";
 
 const STAMP = Date.now();
-const ONTOLOGY_ID = `44444444-aaaa-aaaa-aaaa-${STAMP.toString(16).padStart(12, "0").slice(-12)}`;
+// Single-ontology (ONTOLOGY_SINGLETON): there is exactly ONE ontology row —
+// the canonical 00000000-0000-0000-0000-000000000001 (uq_ontology_singleton).
+// Any other ontology id in the path is collapsed onto it at the edge, so all
+// fixtures reference the canonical id directly.
+const ONTOLOGY_ID = "00000000-0000-0000-0000-000000000001";
 const OT_API_NAME = `DataStoreProbe${STAMP}`;
 let OT_ID = "";
 
 beforeAll(async () => {
-  await query(
-    `INSERT INTO ontology (ontology_id, display_name, description, created_by)
-     VALUES ($1, $2, 'dataStore integration fixture', 'vitest')
-     ON CONFLICT DO NOTHING`,
-    [ONTOLOGY_ID, `DataStore Fixture ${STAMP}`],
-  );
+  // Single-ontology: the canonical ontology already exists (seeded) and is
+  // UNIQUE — never INSERT INTO ontology (would violate uq_ontology_singleton).
+  // The FK on object_type.ontology_id is satisfied by the canonical row, so
+  // we only need to seed this test's own fixture object_type.
   const ot = await query(
     `INSERT INTO object_type (ontology_id, api_name, display_name, status)
      VALUES ($1, $2, $3, 'experimental')
@@ -41,7 +43,9 @@ afterAll(async () => {
   if (OT_ID) {
     await query(`DELETE FROM object_type WHERE object_type_id = $1`, [OT_ID]);
   }
-  await query(`DELETE FROM ontology WHERE ontology_id = $1`, [ONTOLOGY_ID]);
+  // Single-ontology: NEVER DELETE FROM ontology — that would drop the one
+  // shared canonical row. Only this test's own fixture rows (cleaned above)
+  // are removed.
 });
 
 describe("GET /dataStore — happy path", () => {
@@ -119,13 +123,18 @@ describe("GET /dataStore — happy path", () => {
 });
 
 describe("GET /dataStore — error paths", () => {
-  it("404s with ONTOLOGY_NOT_FOUND when the ontology doesn't exist", async () => {
+  it("collapses any ontology id to the canonical (singleton) and resolves the fixture object type", async () => {
+    // Single-ontology (ONTOLOGY_SINGLETON): a non-canonical ontology id in the
+    // path is collapsed onto the one canonical ontology at the edge, so the
+    // request resolves (200) instead of 404. The old "ontology doesn't exist"
+    // premise is no longer reachable — under one-ontology, every id resolves
+    // to the canonical, which exists.
     const { status, body } = await api(
       "GET",
       `/api/v1/ontology/00000000-0000-0000-0000-000000000000/objectTypes/${OT_API_NAME}/dataStore`,
     );
-    expect(status).toBe(404);
-    expect(body.error?.code ?? body.errorCode).toBe("ONTOLOGY_NOT_FOUND");
+    expect(status).toBe(200);
+    expect(body.objectTypeApiName).toBe(OT_API_NAME);
   });
 
   it("404s with OBJECT_TYPE_NOT_FOUND when the apiName doesn't exist under the ontology", async () => {

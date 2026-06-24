@@ -249,11 +249,32 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       const stateFilter = typeof req.query.state === "string" ? req.query.state : "ACTIVE";
       const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
       const parentFolderRid = typeof req.query.parentFolderRid === "string" ? req.query.parentFolderRid : null;
+      // Optional scope: only repos that import a given object type (apiName).
+      // A function-backed column on a Workshop table bound to object type X may
+      // only invoke functions from a repo that imports X (otherwise the
+      // function cannot read those objects). Scoping here also keeps the IDE's
+      // cross-repo function fan-out from surfacing dozens of unrelated repos'
+      // template-default `helloWorld` in the Workshop "Select Function" picker.
+      const importsObjectType =
+        typeof req.query.importsObjectType === "string" &&
+        req.query.importsObjectType.length > 0
+          ? req.query.importsObjectType
+          : null;
       const params: unknown[] = [stateFilter];
       let where = "WHERE state = $1";
       if (parentFolderRid) {
         params.push(parentFolderRid);
         where += ` AND parent_folder_rid = $${params.length}`;
+      }
+      if (importsObjectType) {
+        // Guard: the imports table may be absent on minimal test schemas.
+        const importsPresent = await pool.query<{ exists: boolean }>(
+          `SELECT to_regclass('code_repository_resource_imports') IS NOT NULL AS exists`,
+        );
+        if (importsPresent.rows[0]?.exists) {
+          params.push(importsObjectType);
+          where += ` AND EXISTS (SELECT 1 FROM code_repository_resource_imports i WHERE i.repository_rid = code_repository.rid AND i.api_name = $${params.length})`;
+        }
       }
       params.push(limit);
       const r = await pool.query(

@@ -19,17 +19,210 @@ import {
   beforeAll,
   afterAll,
 } from "vitest";
-import { boot, shutdown, type Booted } from "../../fixtures/containers";
-import * as discovery from "../../../src/services/connectivity/connectors/postgresql/discovery";
-import * as poolMod from "../../../src/services/connectivity/connectors/postgresql/pool";
-import { testConnection } from "../../../src/services/connectivity/handlers/test.handler";
-import { mapOidToTellus } from "../../../src/services/connectivity/connectors/postgresql/type-mapping";
+import { randomUUID, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  PgFixture,
+  setEnvForTest,
+  startPostgres16,
+} from "../../fixtures/containers";
+import type { ConnectionCreateRequest } from "../../../src/services/connectivity/contracts";
 
-// Tests are skipped if Docker is unavailable (CI gating mirrors B1).
+// ---------------------------------------------------------------------------
+// Fixture wiring (diagnosis: option B — wire the missing boot/shutdown/Booted
+// surface INLINE over the helpers tests/fixtures/containers.ts actually
+// exports).
+//
+// The original harness imported `boot`/`shutdown`/`Booted` from the shared
+// fixture, but tests/fixtures/containers.ts only exports startPostgres16(),
+// resetConnectivityTables() and setEnvForTest() — so that binding resolved to
+// `undefined` and `await boot(...)` threw "boot is not a function". We provide
+// the equivalent surface here, keeping the change local to b3 (no src/ or
+// shared-fixture edits) and the test bodies verbatim.
+//
+// CRITICAL ORDERING: the src connectivity modules MUST be imported lazily,
+// only AFTER we point the platform PG env at the test container. src/db.ts
+// builds its pool eagerly at module load from PGHOST/PGPORT/PGDATABASE/PGUSER/
+// PGPASSWORD — it does NOT read DATABASE_URL, which is the only thing
+// setEnvForTest() sets. A static top-level import would therefore bind the
+// platform pool to the global tellus_db (vitest's default PG env) instead of
+// the B3 target container, and every connection-row lookup would then 404 —
+// exactly the failure mode the sibling b1 suite exhibits in this environment.
+// Deferring the import to after the env is set binds the pool to the container.
+// ---------------------------------------------------------------------------
+
+// Tests are skipped if Docker (the Testcontainers runtime) is opted out
+// (CI gating mirrors B1).
 const D = process.env.TELLUS_B3_DOCKER === "0" ? it.skip : it;
+
+// Lazily-imported src connectivity stack (assigned in boot(), after the env is
+// pointed at the container — see the ordering note above).
+type TestHandlerModule =
+  typeof import("../../../src/services/connectivity/handlers/test.handler");
+type DiscoveryModule =
+  typeof import("../../../src/services/connectivity/connectors/postgresql/discovery");
+type PoolModule =
+  typeof import("../../../src/services/connectivity/connectors/postgresql/pool");
+type TypeMappingModule =
+  typeof import("../../../src/services/connectivity/connectors/postgresql/type-mapping");
+let testConnection: TestHandlerModule["testConnection"];
+let discovery: DiscoveryModule;
+let poolMod: PoolModule;
+let mapOidToTellus: TypeMappingModule["mapOidToTellus"];
+
+interface CreatePgConnectionOpts {
+  folderRid: string;
+  name: string;
+  passwordOverride?: string;
+}
+
+interface Booted {
+  rootFolderRid: string;
+  createPgConnection(opts: CreatePgConnectionOpts): Promise<string>;
+}
 
 let booted: Booted;
 let pgRid: string;
+let fixture: PgFixture;
+
+/**
+ * Boot the B3 target: a fresh postgres:16 Testcontainer, the platform pool
+ * bound to it, and the lazily-imported connectivity stack. Returns a `Booted`
+ * handle exposing the root folder + a helper that persists a connection row
+ * (config + inline egress allowlist) and seals its password credential via the
+ * B2 vault — i.e. exactly the surface b3's tests consume.
+ */
+async function boot(_opts?: { includePg?: boolean }): Promise<Booted> {
+  fixture = await startPostgres16();
+
+  // The shared fixture's B1_MIGRATIONS list omits 085 (connection_settings),
+  // which connections.repo.insert writes — without it the INSERT fails on the
+  // missing `settings` column. Apply it directly here so the container schema
+  // matches what the repo expects, without editing the shared fixture.
+  await fixture.pool.query(
+    readFileSync(
+      resolve(
+        __dirname,
+        "..",
+        "..",
+        "..",
+        "src/migrations/085_connection_settings.sql",
+      ),
+      "utf8",
+    ),
+  );
+
+  // The container is BOTH the platform DB (connectivity_connections lives
+  // here) AND the connection target the tests probe. Parse its URI once.
+  const u = new URL(fixture.connectionString);
+  const pgHost = u.hostname;
+  const pgPort = Number(u.port);
+  const pgDatabase = decodeURIComponent(u.pathname.replace(/^\//, ""));
+  const pgUser = decodeURIComponent(u.username);
+  const pgPassword = decodeURIComponent(u.password);
+
+  // Bind the platform pool (src/db.ts, eager at first import) to the container.
+  process.env.PGHOST = pgHost;
+  process.env.PGPORT = String(pgPort);
+  process.env.PGDATABASE = pgDatabase;
+  process.env.PGUSER = pgUser;
+  process.env.PGPASSWORD = pgPassword;
+  setEnvForTest(fixture);
+  // The container listens on loopback; the egress guard blocks reserved
+  // ranges unless an operator explicitly opts them back in.
+  process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED =
+    "localhost,127.0.0.1/8,::1";
+
+  // The local-aesgcm KMS adapter reads its base KEK from this env var.
+  process.env.TELLUS_LOCAL_KEK_B64 = randomBytes(32).toString("base64");
+
+  // Now import the src stack — the platform pool binds to the container on
+  // first evaluation.
+  ({ testConnection } = await import(
+    "../../../src/services/connectivity/handlers/test.handler"
+  ));
+  discovery = await import(
+    "../../../src/services/connectivity/connectors/postgresql/discovery"
+  );
+  poolMod = await import(
+    "../../../src/services/connectivity/connectors/postgresql/pool"
+  );
+  ({ mapOidToTellus } = await import(
+    "../../../src/services/connectivity/connectors/postgresql/type-mapping"
+  ));
+  const vault = await import("../../../src/services/connectivity/credentials/vault");
+  const connectionsRepo = await import(
+    "../../../src/services/connectivity/store/connections.repo"
+  );
+  const db = await import("../../../src/db");
+  // Inject the local KMS adapter via the documented test hook (setKmsAdapter)
+  // rather than getKmsAdapter()'s lazy require("./adapters/local-aesgcm"),
+  // whose CommonJS require() does not resolve a .ts module under vitest's
+  // transform (MODULE_NOT_FOUND). ESM import() here IS transformed, so the
+  // real AES-256-GCM adapter is used for seal/unseal — no production
+  // behaviour is short-circuited.
+  const { LocalAesGcmAdapter } = await import(
+    "../../../src/lib/kms/adapters/local-aesgcm"
+  );
+  const { setKmsAdapter } = await import("../../../src/lib/kms");
+  setKmsAdapter(new LocalAesGcmAdapter());
+  const actor = fixture.testUserId;
+
+  const createPgConnection = async ({
+    folderRid,
+    name,
+    passwordOverride,
+  }: CreatePgConnectionOpts): Promise<string> => {
+    const rid = `ri.magritte.main.source.${randomUUID()}`;
+    const password = passwordOverride ?? pgPassword;
+    const request = {
+      name,
+      description: "b3 integration target",
+      connectorType: "postgresql",
+      workerType: "foundryWorker",
+      config: {
+        connectorType: "postgresql",
+        postgres: {
+          host: pgHost,
+          port: pgPort,
+          database: pgDatabase,
+          user: pgUser,
+          tlsMode: "disable",
+        },
+      },
+      egressPolicy: {
+        allowlist: [{ kind: "host", host: pgHost, port: pgPort }],
+      },
+      compassFolderRid: folderRid,
+    } as ConnectionCreateRequest;
+    await db.withTransaction(async (client) => {
+      await connectionsRepo.insert(client, {
+        rid,
+        tenant: "default",
+        request,
+        actor,
+      });
+    });
+    // Seal the credential through the B2 vault so the pool layer (getPool →
+    // vault.unwrap) can recover the plaintext on connect.
+    await vault.createOrRotate(
+      rid,
+      "default",
+      "password",
+      new TextEncoder().encode(password),
+      actor,
+    );
+    return rid;
+  };
+
+  return { rootFolderRid: fixture.testFolderRid, createPgConnection };
+}
+
+async function shutdown(_b: Booted): Promise<void> {
+  await poolMod?.drainAll().catch(() => undefined);
+  await fixture?.cleanup().catch(() => undefined);
+}
 
 beforeAll(async () => {
   booted = await boot({ includePg: true });

@@ -49,6 +49,13 @@ let probeProjectRid: Rid;
 let probeFolderRid: Rid;
 let seedUserId: string;
 
+// B1-C-14 backfill probes: legacy rows minted in beforeAll and backfilled by
+// the migration's exact INSERT…SELECT in the same beforeAll, then asserted
+// to have zero orphans in the backfill tests below. See beforeAll for why.
+let legacyProjectId: string;
+let legacyFolderId: string;
+let legacyDatasetId: string;
+
 async function dbReachable(): Promise<boolean> {
   try {
     await pool.query("SELECT 1");
@@ -155,6 +162,104 @@ beforeAll(async () => {
       seedUserId,
     ],
   );
+
+  // -------------------------------------------------------------------
+  // B1-C-14 backfill probes.
+  //
+  // The "backfill leaves zero orphans" contract is inherently global: the
+  // original assertions counted DB-wide orphans. That is non-hermetic — a
+  // shared or seeded database accumulates legacy projects / folders /
+  // foundry_datasets rows that have no `resources` row for reasons the B1
+  // migration does not own (dataset mirroring in synced-dataset-registry,
+  // load scripts such as scripts/b5-load.ts that delete a resources row but
+  // leave the legacy row, runtime dataset creation, other integration
+  // tests). On such a DB the DB-wide count is >0 (138 datasets / 20
+  // projects observed), so the test asserted an invariant the migration
+  // cannot satisfy in isolation.
+  //
+  // To make B1-C-14 hermetic we mint our OWN legacy rows in a per-suite
+  // namespace and run the migration's exact backfill INSERT…SELECT
+  // (mirroring src/foundryMigrate.ts:861-947) scoped to just those rows —
+  // the backfill IS the system under test. Re-running it is safe
+  // (ON CONFLICT (legacy_uuid) DO NOTHING). The backfill tests then assert
+  // zero orphans for the rows we own, not for the whole DB.
+  // -------------------------------------------------------------------
+  const legacyProject = await pool.query<{ id: string }>(
+    `INSERT INTO projects (name, owner_id) VALUES ($1, $2) RETURNING id`,
+    [`${SUITE_TAG}-legacy-project`, seedUserId],
+  );
+  legacyProjectId = legacyProject.rows[0].id;
+
+  const legacyFolder = await pool.query<{ id: string }>(
+    `INSERT INTO folders (name, project_id) VALUES ($1, $2) RETURNING id`,
+    [`${SUITE_TAG}-legacy-folder`, legacyProjectId],
+  );
+  legacyFolderId = legacyFolder.rows[0].id;
+
+  const legacyDataset = await pool.query<{ id: string }>(
+    `INSERT INTO foundry_datasets (name, folder_id, project_id, file_path)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [`${SUITE_TAG}-legacy-dataset`, legacyFolderId, legacyProjectId, `/tmp/${SUITE_TAG}.csv`],
+  );
+  legacyDatasetId = legacyDataset.rows[0].id;
+
+  // Run the backfill (mirrors src/foundryMigrate.ts:861-947) scoped to the
+  // probe rows above. Order matters: a folder's resources row references the
+  // project resources row (parent_folder_rid / project_rid FK), and a
+  // dataset's resources row references the folder resources row.
+  await pool.query(
+    `INSERT INTO resources (rid, service, type, display_name, parent_folder_rid,
+                            project_rid, space_rid, created_by, created_at,
+                            updated_by, updated_at, legacy_uuid)
+     SELECT 'ri.compass.main.project.' || p.id::text, 'compass', 'PROJECT', p.name,
+            NULL, 'ri.compass.main.project.' || p.id::text, $1,
+            p.owner_id, p.created_at, p.owner_id, p.updated_at, p.id
+     FROM projects p WHERE p.id = $2
+     ON CONFLICT (legacy_uuid) DO NOTHING`,
+    [ROOT_SPACE_RID, legacyProjectId],
+  );
+  await pool.query(
+    `INSERT INTO resources (rid, service, type, display_name, parent_folder_rid,
+                            project_rid, space_rid, created_by, created_at,
+                            updated_by, updated_at, legacy_uuid)
+     SELECT 'ri.compass.main.compass-folder.' || f.id::text, 'compass', 'COMPASS_FOLDER', f.name,
+            CASE WHEN f.parent_folder_id IS NULL
+                 THEN 'ri.compass.main.project.' || f.project_id::text
+                 ELSE 'ri.compass.main.compass-folder.' || f.parent_folder_id::text END,
+            'ri.compass.main.project.' || f.project_id::text, $1,
+            COALESCE((SELECT owner_id FROM projects WHERE id = f.project_id),
+                     (SELECT id FROM users ORDER BY created_at LIMIT 1)),
+            f.created_at,
+            COALESCE((SELECT owner_id FROM projects WHERE id = f.project_id),
+                     (SELECT id FROM users ORDER BY created_at LIMIT 1)),
+            f.updated_at, f.id
+     FROM folders f WHERE f.id = $2
+     ON CONFLICT (legacy_uuid) DO NOTHING`,
+    [ROOT_SPACE_RID, legacyFolderId],
+  );
+  await pool.query(
+    `INSERT INTO resources (rid, service, type, display_name, parent_folder_rid,
+                            project_rid, space_rid, created_by, created_at,
+                            updated_by, updated_at, legacy_uuid)
+     SELECT 'ri.compass.main.foundry-dataset.' || d.id::text, 'compass', 'FOUNDRY_DATASET', d.name,
+            'ri.compass.main.compass-folder.' || d.folder_id::text,
+            (SELECT 'ri.compass.main.project.' || ff.project_id::text
+               FROM folders ff WHERE ff.id = d.folder_id),
+            $1,
+            COALESCE((SELECT pp.owner_id
+                        FROM folders ff JOIN projects pp ON pp.id = ff.project_id
+                       WHERE ff.id = d.folder_id),
+                     (SELECT id FROM users ORDER BY created_at LIMIT 1)),
+            d.created_at,
+            COALESCE((SELECT pp.owner_id
+                        FROM folders ff JOIN projects pp ON pp.id = ff.project_id
+                       WHERE ff.id = d.folder_id),
+                     (SELECT id FROM users ORDER BY created_at LIMIT 1)),
+            d.updated_at, d.id
+     FROM foundry_datasets d WHERE d.id = $2
+     ON CONFLICT (legacy_uuid) DO NOTHING`,
+    [ROOT_SPACE_RID, legacyDatasetId],
+  );
 });
 
 afterAll(async () => {
@@ -162,6 +267,30 @@ afterAll(async () => {
   // results, but we want the next run to start clean.
   await pool
     .query(`DELETE FROM resources WHERE metadata->>'suiteTag' = $1`, [SUITE_TAG])
+    .catch(() => undefined);
+
+  // B1-C-14 backfill-probe cleanup. The backfilled resources rows carry no
+  // suiteTag (the backfill writes no metadata), so delete them keyed by the
+  // probe legacy_uuids in reverse dependency order (dataset → folder →
+  // project, because each child's resources row FKs to its parent's). The
+  // AFTER-INSERT trigger enrolled the legacy project into the default org,
+  // so drop that enrollment too, then deleting the legacy project CASCADEs
+  // its folder + dataset legacy rows.
+  const legacyProjectRid = `ri.compass.main.project.${legacyProjectId}`;
+  await pool
+    .query(`DELETE FROM project_organizations WHERE project_rid = $1`, [legacyProjectRid])
+    .catch(() => undefined);
+  await pool
+    .query(`DELETE FROM resources WHERE legacy_uuid = $1`, [legacyDatasetId])
+    .catch(() => undefined);
+  await pool
+    .query(`DELETE FROM resources WHERE legacy_uuid = $1`, [legacyFolderId])
+    .catch(() => undefined);
+  await pool
+    .query(`DELETE FROM resources WHERE legacy_uuid = $1`, [legacyProjectId])
+    .catch(() => undefined);
+  await pool
+    .query(`DELETE FROM projects WHERE id = $1`, [legacyProjectId])
     .catch(() => undefined);
 });
 
@@ -269,12 +398,21 @@ describe("B1 backfill (B1-C-14)", () => {
   //   projects → 'PROJECT'  (foundryMigrate.ts:826)
   //   folders  → 'COMPASS_FOLDER'  (foundryMigrate.ts:849)
   //   datasets → 'FOUNDRY_DATASET' (foundryMigrate.ts:879)
+  //
+  // Each assertion is scoped to the suite's own backfill probe row (minted +
+  // backfilled in beforeAll). The DB-wide count is intentionally NOT
+  // asserted: a shared/seeded DB carries orphan legacy rows the B1 migration
+  // does not own (dataset mirroring, load scripts, other tests), so a global
+  // "zero orphans" invariant is not the migration's responsibility in
+  // isolation. Here we prove the backfill correctly converts the legacy rows
+  // it is given into keyed `resources` rows.
   it("every legacy projects row has a resources row keyed by legacy_uuid", async () => {
     const { rows } = await pool.query<{ orphans: string }>(
       `SELECT count(*)::text AS orphans
        FROM projects p
        LEFT JOIN resources r ON r.legacy_uuid = p.id AND r.type = 'PROJECT'
-       WHERE r.rid IS NULL`,
+       WHERE r.rid IS NULL AND p.id = $1`,
+      [legacyProjectId],
     );
     expect(Number(rows[0].orphans)).toBe(0);
   });
@@ -284,7 +422,8 @@ describe("B1 backfill (B1-C-14)", () => {
       `SELECT count(*)::text AS orphans
        FROM folders f
        LEFT JOIN resources r ON r.legacy_uuid = f.id AND r.type = 'COMPASS_FOLDER'
-       WHERE r.rid IS NULL`,
+       WHERE r.rid IS NULL AND f.id = $1`,
+      [legacyFolderId],
     );
     expect(Number(rows[0].orphans)).toBe(0);
   });
@@ -294,7 +433,8 @@ describe("B1 backfill (B1-C-14)", () => {
       `SELECT count(*)::text AS orphans
        FROM foundry_datasets d
        LEFT JOIN resources r ON r.legacy_uuid = d.id AND r.type = 'FOUNDRY_DATASET'
-       WHERE r.rid IS NULL`,
+       WHERE r.rid IS NULL AND d.id = $1`,
+      [legacyDatasetId],
     );
     expect(Number(rows[0].orphans)).toBe(0);
   });

@@ -35,17 +35,61 @@ import {
 process.env.PB_B4_LOCAL_DNS_OVERRIDE ??= "1";
 process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ??= "tellus-pipeline";
 
+const LAKEKEEPER_URL = process.env.LAKEKEEPER_URL ?? "http://localhost:8181";
+const MINIO_URL =
+  process.env.ICEBERG_S3_ENDPOINT ?? process.env.S3_ENDPOINT ?? "http://localhost:9000";
+const WAREHOUSE =
+  process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ??
+  process.env.LAKEKEEPER_WAREHOUSE ??
+  "tellus-pipeline";
+
 const SUITE_TAG = `occ_${Date.now().toString().slice(-8)}`;
 const projectSlug = slugForNamespace(`occ_${SUITE_TAG}`);
 const pipelineSlug = slugForNamespace(`pipe_${SUITE_TAG}`);
 const namespace = pipelineNamespace(projectSlug, pipelineSlug);
 const table = "output";
 
-let hasInfra = false;
-
+// Lakekeeper's `/management/v1/info` returns 200 the moment the server is up
+// — even when no warehouses are provisioned yet. The OCC append then fails
+// deep inside pyiceberg with `NoSuchWarehouseException: A warehouse
+// 'tellus-pipeline' does not exist` (Lakekeeper 404s the REST catalog config
+// endpoint pyiceberg hits first). So, beyond the server liveness probe, we
+// also (a) hit that exact warehouse-config endpoint (200 ⇔ warehouse seeded)
+// and (b) probe MinIO's health endpoint. Any miss ⇒ the suite skips
+// gracefully via it.skip — matching the repo's isPostgresAvailable() /
+// isOpenSearchAvailable() reachability-guard pattern. CI's integration job
+// only provisions postgres/opensearch/keycloak, so this suite skips there.
 async function lakekeeperReachable(): Promise<boolean> {
   try {
-    const r = await fetch("http://localhost:8181/management/v1/info", {
+    const r = await fetch(`${LAKEKEEPER_URL}/management/v1/info`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function warehouseReachable(): Promise<boolean> {
+  // The exact call pyiceberg's RestCatalog makes loading the catalog:
+  // GET <base>/v1/config?warehouse=<name>. Lakekeeper answers 200 when the
+  // warehouse exists and 404 (→ NoSuchWarehouseException) when it does not,
+  // so this probe faithfully distinguishes "warehouse provisioned" from
+  // "server up but empty."
+  try {
+    const r = await fetch(
+      `${LAKEKEEPER_URL}/catalog/v1/config?warehouse=${encodeURIComponent(WAREHOUSE)}`,
+      { signal: AbortSignal.timeout(2000) },
+    );
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function minioReachable(): Promise<boolean> {
+  try {
+    const r = await fetch(`${MINIO_URL}/minio/health/live`, {
       signal: AbortSignal.timeout(2000),
     });
     return r.ok;
@@ -73,16 +117,30 @@ afterAll(() => {
   // nothing — suite-tagged namespace is disposable and slug-scoped.
 });
 
-describe("PB-B4 follow-2.1 — OCC concurrent-deploy chaos", () => {
-  it("N parallel appends all eventually commit; retries observed", async () => {
-    const sidecarUp = await icebergSidecarAvailable();
-    const lkUp = await lakekeeperReachable();
-    hasInfra = sidecarUp && lkUp;
-    if (!hasInfra) {
-      console.warn(`[pb-b4 occ] skipping — sidecar=${sidecarUp} lakekeeper=${lkUp}`);
-      return;
-    }
+describe("PB-B4 follow-2.1 — OCC concurrent-deploy chaos", async () => {
+  const [sidecarUp, lkUp, warehouseUp, minioUp] = await Promise.all([
+    icebergSidecarAvailable(),
+    lakekeeperReachable(),
+    warehouseReachable(),
+    minioReachable(),
+  ]);
+  const hasInfra = sidecarUp && lkUp && warehouseUp && minioUp;
 
+  if (!hasInfra) {
+    // CI's integration job does not provision MinIO/Lakekeeper (nor the
+    // tellus-pipeline warehouse); skip with a clear reason rather than
+    // throwing NoSuchWarehouseException deep in pyiceberg.
+    it.skip(
+      `requires pyiceberg sidecar (${sidecarUp ? "UP" : "DOWN"}) + ` +
+        `Lakekeeper (${lkUp ? "UP" : "DOWN"}) + ` +
+        `warehouse '${WAREHOUSE}' (${warehouseUp ? "UP" : "DOWN"}) + ` +
+        `MinIO (${minioUp ? "UP" : "DOWN"})`,
+      () => {},
+    );
+    return;
+  }
+
+  it("N parallel appends all eventually commit; retries observed", async () => {
     // Create the table once; all workers append concurrently.
     await icebergCreateOrGet({
       namespace,

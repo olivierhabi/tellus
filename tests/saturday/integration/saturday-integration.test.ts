@@ -110,6 +110,11 @@ describe("Saturday Integration Tests", async () => {
     // Cleanup test data
     try {
       if (ctx.ontologyId) {
+        // Singleton: ontology delete is frozen (409), so clean up the object
+        // types this suite created instead of relying on the ontology cascade.
+        for (const ot of ["SatEmployee", "SatCompany"]) {
+          await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/${ot}`);
+        }
         await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}`);
       }
       if (ctx.datasetId) {
@@ -131,23 +136,18 @@ describe("Saturday Integration Tests", async () => {
     const beforeFailed = runner.failed;
 
     await runner.test("Create ontology", async () => {
-      const { status, body } = await api("POST", "/api/v1/ontology", {
-        displayName: "Saturday Integration Test",
-        description: "Testing dataset integration",
-      });
-      if (status === 201) {
-        ctx.ontologyId = body.data?.ontologyId || body.ontologyId;
-      } else if (status === 409) {
-        // Ontology already exists from a prior run — look up its ID
-        const listRes = await api("GET", "/api/v1/ontology");
-        const existing = (listRes.body?.data || []).find(
-          (o: any) => o.displayName === "Saturday Integration Test"
-        );
-        ctx.ontologyId = existing?.ontologyId || "";
-      } else {
-        runner.assert(false, `Expected 201 or 409, got ${status}`);
+      // Singleton deployment: POST /api/v1/ontology is frozen (ONTOLOGY_SINGLETON).
+      // Resolve the single canonical enterprise ontology instead of creating one.
+      const listRes = await api("GET", "/api/v1/ontology");
+      ctx.ontologyId = listRes.body?.data?.[0]?.ontologyId || "";
+      runner.assert(!!ctx.ontologyId, "ontologyId present (canonical)");
+
+      // Pre-clean any leftover SatEmployee/SatCompany from a prior interrupted
+      // run so the creates below don't 409 (the ontology delete cascade no
+      // longer fires under the singleton model).
+      for (const ot of ["SatEmployee", "SatCompany"]) {
+        try { await api("DELETE", `/api/v1/ontology/${ctx.ontologyId}/objectTypes/${ot}`); } catch { /* ignore */ }
       }
-      runner.assert(!!ctx.ontologyId, "ontologyId present");
     });
 
     await runner.test("Create Employee object type", async () => {

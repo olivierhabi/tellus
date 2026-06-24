@@ -49,6 +49,53 @@ async function lakekeeperReachable(): Promise<boolean> {
   }
 }
 
+// The load-bearing probe. Lakekeeper's /management/v1/info answers 2xx
+// even when no warehouse is provisioned, and the MinIO liveness probe
+// answers 2xx even when the warehouse config points at storage that
+// isn't wired up. The operation that actually fails is the REST
+// catalog's config fetch: GET /catalog/v1/config?warehouse=<wh> returns
+// 404 → pyiceberg raises NoSuchWarehouseException ("A warehouse '<wh>'
+// does not exist"), and every subsequent create_or_get / append /
+// compact dies there. Hitting this endpoint from the test is the only
+// way to tell "warehouse usable" from "servers answer pings", which is
+// exactly the false-positive that let the old guard run the tests into
+// a NoSuchWarehouseException crash.
+async function warehouseReachable(): Promise<boolean> {
+  try {
+    const base =
+      process.env.LAKEKEEPER_URL ?? "http://localhost:8181";
+    const warehouse =
+      process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ??
+      process.env.LAKEKEEPER_WAREHOUSE ??
+      "tellus-pipeline";
+    const url = `${base}/catalog/v1/config?warehouse=${encodeURIComponent(warehouse)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    return r.ok; // 200 = warehouse provisioned; 404 = NoSuchWarehouse
+  } catch {
+    return false; // Lakekeeper unreachable entirely
+  }
+}
+
+// MinIO / S3 is the warehouse's backing object store: icebergCreateOrGet
+// / icebergAppend write data files to it. A warehouse can be registered
+// with the catalog (config endpoint 200) while its object store is
+// unreachable, in which case commits fail with an S3-unreachable error.
+// Probing the MinIO liveness endpoint is what distinguishes "warehouse
+// usable" from "warehouse configured but storage down".
+async function minioReachable(): Promise<boolean> {
+  try {
+    const endpoint =
+      process.env.S3_ENDPOINT ??
+      process.env.ICEBERG_S3_ENDPOINT ??
+      "http://localhost:9000";
+    const url = new URL("/minio/health/live", endpoint).toString();
+    const r = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 function writeParquet(rows: Array<{ id: number; tag: string }>): string {
   const p = path.join(os.tmpdir(), `pb-b4-compact-${randomUUID()}.parquet`);
   const script = `
@@ -68,14 +115,42 @@ afterAll(() => {
   /* suite-tagged namespace is disposable */
 });
 
-describe("PB-B4 follow-3.2 — compaction reduces small-file count", () => {
+describe("PB-B4 follow-3.2 — compaction reduces small-file count", async () => {
+  // Probe the full warehouse stack once at registration time: pyiceberg
+  // sidecar + Lakekeeper catalog + MinIO/S3 object store. The previous
+  // guard only checked the Lakekeeper management endpoint and the
+  // pyiceberg import, so a catalog whose backing object store (MinIO)
+  // was down — or a warehouse that hadn't been provisioned — slipped
+  // through and the tests blew up at commit time with
+  // NoSuchWarehouseException / S3-unreachable. Probing all three here
+  // lets CI (which provisions none of them) skip cleanly with an
+  // explicit UP/DOWN reason instead of erroring.
+  const [sidecarUp, lkUp, minioUp, warehouseUp] = await Promise.all([
+    icebergSidecarAvailable(),
+    lakekeeperReachable(),
+    minioReachable(),
+    warehouseReachable(),
+  ]);
+  const hasInfra = sidecarUp && lkUp && minioUp && warehouseUp;
+  const reason =
+    `pyiceberg sidecar=${sidecarUp ? "UP" : "DOWN"}, ` +
+    `Lakekeeper=${lkUp ? "UP" : "DOWN"}, ` +
+    `MinIO/S3=${minioUp ? "UP" : "DOWN"}, ` +
+    `warehouse=${warehouseUp ? "UP" : "DOWN"}`;
+
+  if (!hasInfra) {
+    it.skip(
+      `1000-file soak — skipped: requires warehouse (${reason})`,
+      () => {},
+    );
+    it.skip(
+      `compact() collapses N single-row snapshots — skipped: requires warehouse (${reason})`,
+      () => {},
+    );
+    return;
+  }
+
   it("1000-file soak — compact() reduces count meaningfully + row-preserve", async () => {
-    const sidecarUp = await icebergSidecarAvailable();
-    const lkUp = await lakekeeperReachable();
-    if (!sidecarUp || !lkUp) {
-      console.warn(`[pb-b4 compact 1000] skipping — sidecar=${sidecarUp} lakekeeper=${lkUp}`);
-      return;
-    }
     // Skip the 1000-file soak by default — it takes ~2min against a
     // single-node Lakekeeper. CI opt-in via PB_B4_COMPACTION_SOAK=1.
     if (process.env.PB_B4_COMPACTION_SOAK !== "1") {
@@ -141,13 +216,6 @@ describe("PB-B4 follow-3.2 — compaction reduces small-file count", () => {
   }, 30 * 60 * 1000);
 
   it("compact() collapses N single-row snapshots into ≤N/2 data files", async () => {
-    const sidecarUp = await icebergSidecarAvailable();
-    const lkUp = await lakekeeperReachable();
-    if (!sidecarUp || !lkUp) {
-      console.warn(`[pb-b4 compact] skipping — sidecar=${sidecarUp} lakekeeper=${lkUp}`);
-      return;
-    }
-
     // Create table and append N single-row Parquet files, each landing
     // a new snapshot with one data file. This is the worst-case Iceberg
     // table shape: many tiny files, each with their own manifest entry.
