@@ -185,9 +185,18 @@ export async function reindexObjectType(
     }
 
     // Map CSV columns to property api_names
+    // Defensiveness: Ensure mapped column exists in the row to prevent 
+    // silent null values from schema drift or misconfiguration
     const mapped: Record<string, unknown> = {};
     for (const [propName, colName] of Object.entries(columnMapping)) {
-      mapped[propName] = row[colName];
+      if (!(colName in row)) {
+        console.error(
+          `[indexer] WARNING: Column '${colName}' mapped to property '${propName}' does not exist ` +
+          `in datasource row for PK '${pk}'. Property will be null. ` +
+          `This indicates schema drift - run datasource validation immediately.`
+        );
+      }
+      mapped[propName] = row[colName] ?? null;
     }
 
     datasourceMap.set(pk, mapped);

@@ -22,6 +22,8 @@ import { query } from "../db";
 import {
   createActionType,
   getActionType,
+  getActionTypeByRid,
+  getActionTypesByRidBatch,
   listActionTypes,
   updateActionType,
   deleteActionType,
@@ -117,7 +119,7 @@ const KNOWN_CODES = new Set([
 /** Format an action type DB row for API response (snake_case -> camelCase). */
 function formatActionType(row: Record<string, any>): Record<string, unknown> {
   return {
-    actionTypeId: row.action_type_id,
+    rid: row.action_type_id,
     apiName: row.api_name,
     displayName: row.display_name,
     description: row.description,
@@ -127,6 +129,7 @@ function formatActionType(row: Record<string, any>): Record<string, unknown> {
     sideEffects: row.side_effects ?? null,
     maxAffectedObjects: row.max_affected_objects,
     isEnabled: row.is_enabled,
+    status: row.is_enabled ? "ACTIVE" : "EXPERIMENTAL",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     createdBy: row.created_by,
@@ -526,7 +529,83 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// Endpoint 3: GET /:actionApiName (Get Single Action Type)
+// Endpoint 3: GET /by-rid/:rid (Get Action Type by RID)
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/by-rid/:rid",
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { rid } = req.params;
+
+      if (!rid || typeof rid !== "string") {
+        sendError(res, "INVALID_PARAMETER", "rid is required and must be a string");
+        return;
+      }
+
+      const row = await getActionTypeByRid(rid);
+      if (!row) {
+        throw new OntologyError(
+          `Action type with RID '${rid}' not found`,
+          "ACTION_TYPE_NOT_FOUND",
+          undefined,
+          { rid }
+        );
+      }
+
+      sendSuccess(res, formatActionType(row));
+    } catch (err: any) {
+      if (err instanceof OntologyError) return next(err);
+      if (KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Endpoint 4: POST /by-rid/batch (Get Action Types by RIDs Batch)
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/by-rid/batch",
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const body = req.body;
+      const rids: string[] = body.rids ?? body;
+
+      if (!Array.isArray(rids)) {
+        sendError(res, "INVALID_PARAMETER", "rids must be an array of RID strings");
+        return;
+      }
+
+      if (rids.length === 0) {
+        sendSuccess(res, { data: [] });
+        return;
+      }
+
+      if (rids.length > 500) {
+        sendError(res, "INVALID_PARAMETER", "Maximum 500 RIDs allowed per batch request");
+        return;
+      }
+
+      const rows = await getActionTypesByRidBatch(rids);
+      const data = rows.map((row) => formatActionType(row));
+
+      sendSuccess(res, { data });
+    } catch (err: any) {
+      if (err instanceof OntologyError) return next(err);
+      if (KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Endpoint 5: GET /:actionApiName (Get Single Action Type)
 // ---------------------------------------------------------------------------
 
 router.get(
@@ -557,7 +636,7 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// Endpoint 4: PUT /:actionApiName (Update Action Type)
+// Endpoint 6: PUT /:actionApiName (Update Action Type)
 // ---------------------------------------------------------------------------
 
 router.put(

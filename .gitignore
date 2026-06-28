@@ -38,6 +38,12 @@ data/
 # Legacy local uploads (now stored in MinIO/S3)
 uploads/
 
+# Local code-repository working copies — runtime data, never committed.
+# Code repositories persist to Postgres (coderepo_stemma_*); the on-disk
+# var/tellus/repositories/ tree backed the removed DiskStemma adapter and
+# is no longer read or written by any live code path.
+var/
+
 # Local DB backups (never commit dumps)
 backups/
 

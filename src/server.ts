@@ -629,6 +629,101 @@ app.use(
 app.use("/api/v1/actions", validateRouter);
 app.use("/api/v1/actions", batchRouter);
 app.use("/api/v1/audit", globalAuditRouter);
+
+// Global action type RID endpoints (Palantir Foundry style)
+// Mounted at /api/v1/actionTypes (not under /ontology) to avoid route conflicts
+// These allow looking up action types by RID without knowing the ontologyId
+// NOTE: /by-rid/batch must be registered BEFORE /by-rid/:rid to avoid route conflicts
+app.post(
+  "/api/v1/actionTypes/by-rid/batch",
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const body = req.body;
+      const rids: string[] = body.rids ?? body;
+
+      if (!Array.isArray(rids)) {
+        res.status(400).json({ errorCode: "INVALID_PARAMETER", message: "rids must be an array" });
+        return;
+      }
+
+      if (rids.length === 0) {
+        res.status(200).json({ data: [] });
+        return;
+      }
+
+      if (rids.length > 500) {
+        res.status(400).json({ errorCode: "INVALID_PARAMETER", message: "Maximum 500 RIDs allowed per batch request" });
+        return;
+      }
+
+      const result = await query(
+        "SELECT * FROM action_type WHERE action_type_id = ANY($1::uuid[])",
+        [rids]
+      );
+
+      const data = result.rows.map((row: Record<string, any>) => ({
+        rid: row.action_type_id,
+        apiName: row.api_name,
+        displayName: row.display_name,
+        description: row.description,
+        parameters: row.parameters,
+        rules: row.rules,
+        submissionCriteria: row.submission_criteria ?? null,
+        sideEffects: row.side_effects ?? null,
+        maxAffectedObjects: row.max_affected_objects,
+        isEnabled: row.is_enabled,
+        status: row.is_enabled ? "ACTIVE" : "EXPERIMENTAL",
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        createdBy: row.created_by,
+      }));
+
+      res.status(200).json({ data });
+    } catch (err: any) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  "/api/v1/actionTypes/by-rid/:rid",
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { rid } = req.params;
+      if (!rid || typeof rid !== "string") {
+        res.status(400).json({ errorCode: "INVALID_PARAMETER", message: "rid is required" });
+        return;
+      }
+      const row = await query(
+        "SELECT * FROM action_type WHERE action_type_id = $1",
+        [rid]
+      );
+      if (row.rows.length === 0) {
+        res.status(404).json({ errorCode: "ACTION_TYPE_NOT_FOUND", message: `Action type with RID '${rid}' not found` });
+        return;
+      }
+      const result = row.rows[0];
+      res.status(200).json({
+        rid: result.action_type_id,
+        apiName: result.api_name,
+        displayName: result.display_name,
+        description: result.description,
+        parameters: result.parameters,
+        rules: result.rules,
+        submissionCriteria: result.submission_criteria ?? null,
+        sideEffects: result.side_effects ?? null,
+        maxAffectedObjects: result.max_affected_objects,
+        isEnabled: result.is_enabled,
+        status: result.is_enabled ? "ACTIVE" : "EXPERIMENTAL",
+        createdAt: result.created_at,
+        updatedAt: result.updated_at,
+        createdBy: result.created_by,
+      });
+    } catch (err: any) {
+      next(err);
+    }
+  }
+);
 // Edits feed — mounted at two paths so callers can address the parent
 // object type by either its mutable apiName (legacy) or its stable
 // UUID. Both mounts share the same router (`mergeParams: true`) and

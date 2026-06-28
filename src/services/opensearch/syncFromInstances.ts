@@ -132,6 +132,39 @@ export async function syncObjectInstancesToOpenSearch(
     }
   }
 
+  // 1c. Seed the backing-datasource column_mapping (raw CSV column ->
+  // property api_name). object_instances.properties for a foundry/CSV
+  // backed OT is keyed by the RAW source column headers (e.g. order_id,
+  // customer_id), NOT by property api_name - the funnel merge stage
+  // writes the source row bag verbatim and never renames via the mapping.
+  // The api-name/snake/lower aliases above do NOT cover a raw column like
+  // order_id (it is neither customerName, customer_name, nor
+  // customername), so without this block toCanonicalProperties treats
+  // it as "unmapped - preserve verbatim" and the OS doc keeps order_id
+  // while the FE asks for customerName -> "No value" in the Object Table.
+  // column_mapping is stored as { propApiName: sourceColumn }; we invert
+  // it to { sourceColumn: propApiName } and seed each entry. When several
+  // properties map to the same source column (e.g. all four OliverOrder
+  // properties -> order_id) every property resolves to the same value.
+  const colMapRes = await query(
+    `SELECT column_mapping
+       FROM backing_datasource
+      WHERE object_type_id = (
+        SELECT object_type_id FROM object_type WHERE api_name = $1
+      )`,
+    [objectTypeApiName]
+  );
+  if (colMapRes.rows.length > 0) {
+    const raw = colMapRes.rows[0].column_mapping;
+    const colMapping: Record<string, string> =
+      typeof raw === "string" ? JSON.parse(raw) : raw || {};
+    for (const [propApiName, sourceColumn] of Object.entries(colMapping)) {
+      if (sourceColumn && !propertyAliases.has(sourceColumn)) {
+        propertyAliases.set(sourceColumn, propApiName);
+      }
+    }
+  }
+
   // ---- 2. Page through `object_instances` and bulk-index ----------------
   let rowsRead = 0;
   let rowsIndexed = 0;

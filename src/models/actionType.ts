@@ -167,6 +167,35 @@ async function getActionType(
 }
 
 /**
+ * Get a single action type by its RID (action_type_id).
+ * Returns null if not found.
+ */
+async function getActionTypeByRid(
+  rid: string
+): Promise<ActionTypeRow | null> {
+  const result = await query(
+    "SELECT * FROM action_type WHERE action_type_id = $1",
+    [rid]
+  );
+  return result.rows.length > 0 ? (result.rows[0] as ActionTypeRow) : null;
+}
+
+/**
+ * Get multiple action types by their RIDs (action_type_id).
+ * Returns array of found action types (may be fewer than requested if some RIDs don't exist).
+ */
+async function getActionTypesByRidBatch(
+  rids: string[]
+): Promise<ActionTypeRow[]> {
+  if (rids.length === 0) return [];
+  const result = await query(
+    `SELECT * FROM action_type WHERE action_type_id = ANY($1::uuid[])`,
+    [rids]
+  );
+  return result.rows as ActionTypeRow[];
+}
+
+/**
  * List all action types for a given ontology, ordered by created_at ascending.
  */
 async function listActionTypes(
@@ -268,6 +297,8 @@ async function deleteActionType(
 export default {
   createActionType,
   getActionType,
+  getActionTypeByRid,
+  getActionTypesByRidBatch,
   listActionTypes,
   updateActionType,
   deleteActionType,
@@ -276,6 +307,8 @@ export default {
 export {
   createActionType,
   getActionType,
+  getActionTypeByRid,
+  getActionTypesByRidBatch,
   listActionTypes,
   updateActionType,
   deleteActionType,

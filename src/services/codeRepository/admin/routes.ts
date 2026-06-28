@@ -454,6 +454,18 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           currentVersion: ex.rows[0].resource_version,
         }));
       }
+
+      // GC: free Stemma content (branches + blobs) now that metadata is TRASHED.
+      // Best-effort; a failure here must not undo the trash. tombstone() deletes
+      // branch rows, which ON DELETE CASCADE the blobs (migration 086). Without
+      // this the coderepo_stemma_* content lingers forever (unbounded growth).
+      try {
+        await deps.stemma.tombstone({ repositoryRid: rid });
+      } catch (e) {
+        console.error(
+          `code-repos.delete.tombstone-failed rid=${rid} err=${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
       res.status(204).end();
     } catch (err) {
       next(err);

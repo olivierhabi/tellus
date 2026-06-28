@@ -32,6 +32,7 @@ import { compileRules } from "./ruleCompiler";
 import { applyEdits } from "./editApplicator";
 import { evaluateSubmissionCriteria } from "./submissionCriteria";
 import { fireActionWebhooks } from "./actionWebhooks";
+import { sendNotifications } from "./sideEffectNotifier";
 import {
   appendAuditRow,
   logStandaloneFailureAudit,
@@ -559,14 +560,15 @@ export async function executeAction(
     }
 
     // -----------------------------------------------------------------
-    // STAGE 5/7 (FOUNDRY-GAPS §5): side-effect webhooks. Fired POST-COMMIT
-    // (edits are durable) so a webhook failure can never roll back a
+    // STAGE 5/7 (FOUNDRY-GAPS §5): side-effect webhooks and notifications.
+    // Fired POST-COMMIT (edits are durable) so a failure can never roll back a
     // committed action; delivery is best-effort with an SSRF egress guard.
     // null/empty side_effects ⇒ no-op. Awaited so the audit/return reflect
     // that delivery was attempted, but failures are swallowed inside.
     // -----------------------------------------------------------------
     if (application.success && actionType.side_effects != null) {
       try {
+        // Fire webhooks
         await fireActionWebhooks(actionType.side_effects, {
           executionId,
           actionTypeApiName,
@@ -577,9 +579,20 @@ export async function executeAction(
           affectedObjects: result.affectedObjects,
           firedAt: new Date().toISOString(),
         });
+        
+        // Send notifications (email, push, etc.)
+        await sendNotifications(actionType.side_effects, {
+          executionId,
+          actionTypeApiName,
+          ontologyId,
+          result: result.result,
+          executedBy: context.executedBy || "system",
+          affectedObjects: result.affectedObjects,
+          timestamp: new Date().toISOString(),
+        });
       } catch (whErr) {
         console.warn(
-          `[action:${actionTypeApiName}] webhook dispatch error (non-fatal): ${(whErr as Error).message}`,
+          `[action:${actionTypeApiName}] side effect dispatch error (non-fatal): ${(whErr as Error).message}`,
         );
       }
     }

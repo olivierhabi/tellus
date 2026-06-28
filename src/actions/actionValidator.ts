@@ -12,7 +12,7 @@
 //
 //   Stage 1: Load the action type definition
 //   Stage 2: Validate parameters
-//   Stage 3: Submission criteria (TODO — not yet implemented in week 1)
+//   Stage 3: Submission criteria (evaluateSubmissionCriteria)
 //   Stage 4: Compile rules into edits
 //
 // Stage 6 (edit application), Stage 7 (side effects), and Stage 8 (audit
@@ -27,6 +27,7 @@ import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import type { CompiledEdit } from "./ruleCompiler";
+import { evaluateSubmissionCriteria, type SubmissionSubject } from "./submissionCriteria";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 
@@ -137,7 +138,7 @@ export async function validateAction(
   ontologyId: string,
   actionTypeApiName: string,
   parameters: Record<string, unknown>,
-  context?: { executedBy?: string }
+  context?: { executedBy?: string; roles?: string[]; groups?: string[] }
 ): Promise<ValidationResult> {
   // -----------------------------------------------------------------
   // STAGE 1: Load the action type definition
@@ -175,8 +176,25 @@ export async function validateAction(
 
   // -----------------------------------------------------------------
   // STAGE 3: Submission criteria
-  // TODO: Add submission criteria check here when implemented
   // -----------------------------------------------------------------
+  const subject: SubmissionSubject = {
+    username: context?.executedBy ?? undefined,
+    roles: [],
+    groups: [],
+  };
+
+  const submission = evaluateSubmissionCriteria(
+    actionType.submission_criteria,
+    resolvedParameters as Record<string, unknown>,
+    subject,
+  );
+
+  if (!submission.ok) {
+    return {
+      valid: false,
+      errors: [`Submission criteria not met: ${submission.failures.join("; ")}`],
+    } as ValidationFailure;
+  }
 
   // -----------------------------------------------------------------
   // STAGE 4: Compile rules into edits

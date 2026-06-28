@@ -112,6 +112,8 @@ router.post(
           null,
         branchId: req.body?.branchId || null,
         expectedVersion,
+        roles: (req as any).user?.roles || [],
+        groups: (req as any).user?.groups || [],
       };
 
       // Core execute+store closure. Runs EITHER bare (no idempotency key)
@@ -467,6 +469,8 @@ router.post(
       const { parameters = {} } = req.body || {};
       const context = {
         executedBy: (req as any).user?.id || "system",
+        roles: (req as any).user?.roles || [],
+        groups: (req as any).user?.groups || [],
       };
 
       const result = await validateAction(
@@ -540,6 +544,8 @@ validateRouter.post(
       const { parameters = {} } = req.body || {};
       const context = {
         executedBy: (req as any).user?.id || "system",
+        roles: (req as any).user?.roles || [],
+        groups: (req as any).user?.groups || [],
       };
 
       const result = await validateAction(

@@ -104,7 +104,11 @@ export function validateColumnMapping(
     );
   }
 
-  // ---- Rule 5: Duplicate column values → warning ------------------------
+  // ---- Rule 5: Duplicate column values → ERROR (Palantir Foundry standard)
+  // Multiple properties mapping to the same column is semantically invalid
+  // for distinct entity relationships (foreign keys, identifiers, names).
+  // This prevents the corrupt data scenario where bureauCustomerId, 
+  // officegoodsCustomerId, etc. all get the same order_id value.
   const columnToProps = new Map<string, string[]>();
   for (const [propName, colName] of Object.entries(mapping)) {
     if (!columnToProps.has(colName)) {
@@ -114,14 +118,11 @@ export function validateColumnMapping(
   }
   for (const [colName, props] of columnToProps) {
     if (props.length > 1) {
-      // Generate pairwise warnings
-      for (let i = 0; i < props.length - 1; i++) {
-        for (let j = i + 1; j < props.length; j++) {
-          warnings.push(
-            `Warning: Properties '${props[i]}' and '${props[j]}' both map to column '${colName}'. Both properties will have the same value.`
-          );
-        }
-      }
+      errors.push(
+        `Invalid mapping: Properties [${props.map(p => `'${p}'`).join(', ')}] all map to column '${colName}'. ` +
+        `Each property must map to a unique column to maintain data semantic integrity. ` +
+        `If you intend the same value for multiple properties, create separate columns in your datasource.`
+      );
     }
   }
 
@@ -286,8 +287,8 @@ export function runSelfTests(): void {
     "Error mentions PK property name"
   );
 
-  // === 5. Duplicate column values → warning ===
-  console.log("\n=== 5. Duplicate column mapping ===");
+  // === 5. Duplicate column values → ERROR (Foundry standard) ===
+  console.log("\n=== 5. Duplicate column mapping (now an error) ===");
   const r5 = validateColumnMapping(
     { empId: "emp_id", fullName: "emp_id", salary: "salary" },
     props,
@@ -295,13 +296,14 @@ export function runSelfTests(): void {
     pkProp,
     []
   );
-  assert(r5.valid === true, "Duplicate column → still valid (warning only)");
-  assert(r5.warnings.length > 0, "Has warnings");
+  assert(r5.valid === false, "Duplicate column → invalid (prevents corruption)");
+  assert(r5.errors.length > 0, "Has errors");
   assert(
-    r5.warnings.some((w) =>
-      w.includes("both map to column 'emp_id'")
+    r5.errors.some((e) =>
+      e.includes("all map to column 'emp_id'") && 
+      e.includes("Each property must map to a unique column")
     ),
-    "Warning mentions duplicate column"
+    "Error mentions duplicate column and semantic integrity"
   );
 
   // === 6. Required property not mapped ===
