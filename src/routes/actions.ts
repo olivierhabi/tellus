@@ -32,6 +32,7 @@ import {
   withIdempotencyLock,
 } from "../actions/idempotency";
 import { actionRateLimiter, batchRateLimiter } from "../middleware/rateLimiter";
+import { eventBus } from "../websocket/eventBus";
 
 // ---------------------------------------------------------------------------
 // Router
@@ -156,6 +157,47 @@ router.post(
             affectedObjects: result.affectedObjects,
             durationMs: result.durationMs,
           };
+
+          // #24: broadcast `object_set.changed` so subscribed FE widgets (Vega
+          // Chart / Object Table / Object List with Auto-refresh enabled) refetch
+          // their object-search / object-aggregate queries with sub-second
+          // latency. Routed by `objectTopic` (`<ontologyId>:<objectTypeApiName>`)
+          // so only clients watching the affected type receive it — no broadcast
+          // spam (see websocket/server.ts shouldDeliver). One event per distinct
+          // affected objectType (a modify-objects Action can touch >1 type via
+          // its rules). Fire-and-forget: emission must never fail the action.
+          try {
+            const affectedTypes = Array.from(
+              new Set(
+                result.affectedObjects
+                  .map((o) => o.objectType)
+                  .filter((t): t is string => typeof t === "string" && !!t),
+              ),
+            );
+            for (const objectTypeApiName of affectedTypes) {
+              eventBus.emit("ws:event", {
+                event: "object_set.changed",
+                projectId: null,
+                objectTopic: `${ontologyId}:${objectTypeApiName}`,
+                payload: {
+                  ontologyId,
+                  objectTypeApiName,
+                  operation: "applyAction",
+                  actionTypeApiName,
+                  affectedCount: result.affectedObjects.filter(
+                    (o) => o.objectType === objectTypeApiName,
+                  ).length,
+                  executionId: result.executionId,
+                  emittedAt: new Date().toISOString(),
+                },
+              });
+            }
+          } catch (emitErr: unknown) {
+            console.error(
+              "[actions] object_set.changed emit error:",
+              emitErr instanceof Error ? emitErr.message : emitErr,
+            );
+          }
 
           // Step 4a: cache success
           if (idempotencyKey) {
