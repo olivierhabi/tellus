@@ -353,17 +353,33 @@ export interface BuiltSdk {
   readonly sdk: OntologySdk;
   /** The edits collected during execution (read after the function returns). */
   getEdits(): OntologyEdit[];
+  /**
+   * The object types the function QUERIED via `Objects.search`/`Objects.get`
+   * during execution — read after the function returns. The invoke route
+   * diffs this against the repo's imported object types to surface an
+   * actionable "accessed but not imported" warning (the runtime enforces
+   * imports fail-silently: a non-imported type yields an empty `ObjectSet`,
+   * so without this record the user sees an unexplained empty result).
+   * `Objects.types()` is NOT recorded — it lists loaded types, not a request.
+   */
+  getRequestedTypes(): string[];
 }
 
 export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
   const edits: OntologyEdit[] = [];
+  // Every object type the function asked `Objects.search`/`Objects.get` for.
+  // Insertion-ordered; duplicates collapse (a Set). Read post-run by the
+  // worker and threaded back to the invoke route for the import diff.
+  const requestedTypes = new Set<string>();
   const sdk: OntologySdk = {
     Objects: {
       search(objectType: string): ObjectSet {
+        requestedTypes.add(String(objectType));
         const bucket = snapshot.byType.get(objectType);
         return new ObjectSet(bucket ? [...bucket.values()] : []);
       },
       get(objectType: string, primaryKey: string): OntologyObject | undefined {
+        requestedTypes.add(String(objectType));
         return snapshot.byType.get(objectType)?.get(String(primaryKey));
       },
       types(): string[] {
@@ -390,7 +406,7 @@ export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
       snapshot.objectTypes.map((t) => [t, { apiName: t }]),
     ),
   };
-  return { sdk, getEdits: () => edits.slice() };
+  return { sdk, getEdits: () => edits.slice(), getRequestedTypes: () => [...requestedTypes] };
 }
 
 function cryptoRandomId(): string {

@@ -1176,6 +1176,23 @@ async function migrate(): Promise<void> {
 
     logTableStatus("object_type_interface", objectTypeInterfaceExisted);
 
+    // ------------------------------------------------------------------
+    // P0 authz: persist the build principal so the boot-recovery path
+    // (rerunQueuedBuild) can re-authorize inputs/outputs without a request.
+    // transform_build is created by migrations/103_create_transforms.sql; this
+    // ALTER is idempotent + backfills pre-existing rows from `actor`.
+    // ------------------------------------------------------------------
+    if (await tableExists(client, "transform_build")) {
+      await client.query(
+        `ALTER TABLE transform_build ADD COLUMN IF NOT EXISTS principal JSONB`,
+      );
+      await client.query(
+        `UPDATE transform_build
+            SET principal = COALESCE(principal, jsonb_build_object('userId', actor, 'roles', '[]'::jsonb))
+          WHERE principal IS NULL`,
+      );
+    }
+
     await client.query("COMMIT");
     console.log(
       "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface"

@@ -64,6 +64,12 @@ import {
 import { validateDepth, validateRelativePath } from "../stemma/path";
 import { detectBinary } from "../stemma/binary";
 import { mimeForPath } from "../stemma/mime";
+import {
+  clearDrafts,
+  listDrafts,
+  replaceDrafts,
+  validateDraftsBody,
+} from "../drafts/draftStore";
 
 import type {
   CompassAdapter,
@@ -543,6 +549,110 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       branches.sort((a, b) => a.name.localeCompare(b.name));
 
       res.status(200).json({ branches });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Uncommitted drafts (migration 104). Per-user, per-branch, pre-commit
+  // file drafts persisted backend-side so they survive across browsers/
+  // sessions — but NOT a git commit; the frontend clears them on commit.
+  //   GET    /:rid/branches/:branch/drafts  — list the caller's drafts
+  //   PUT    /:rid/branches/:branch/drafts  — replace the caller's draft set
+  //   DELETE /:rid/branches/:branch/drafts  — clear all (after a commit)
+  // Keyed by `principal_sub` (derived UUID) so each user's drafts are private.
+  // -------------------------------------------------------------------------
+  router.get("/:rid/branches/:branch/drafts", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const branch = req.params.branch;
+      if (!isLegalBranchName(branch)) {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+      }
+      const exists = await pool.query(
+        `SELECT 1 FROM code_repository WHERE rid = $1 AND state IN ('ACTIVE','ARCHIVED')`,
+        [rid],
+      );
+      if (exists.rowCount === 0) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const drafts = await listDrafts(pool, { principalSub, repositoryRid: rid, branch });
+      res.status(200).json({ drafts });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/:rid/branches/:branch/drafts", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const branch = req.params.branch;
+      if (!isLegalBranchName(branch)) {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+      }
+      const exists = await pool.query(
+        `SELECT 1 FROM code_repository WHERE rid = $1 AND state IN ('ACTIVE','ARCHIVED')`,
+        [rid],
+      );
+      if (exists.rowCount === 0) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const validation = validateDraftsBody(req.body);
+      if (validation.kind === "invalid") {
+        return sendError(res, codeReposError(validation.errorName, validation.parameters));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const drafts = await replaceDrafts(pool, {
+        principalSub,
+        repositoryRid: rid,
+        branch,
+        drafts: validation.drafts,
+      });
+      res.status(200).json({ drafts });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/:rid/branches/:branch/drafts", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const branch = req.params.branch;
+      if (!isLegalBranchName(branch)) {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      await clearDrafts(pool, { principalSub, repositoryRid: rid, branch });
+      res.status(204).end();
     } catch (err) {
       next(err);
     }
@@ -2293,6 +2403,19 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // sync execution if the pool is unavailable. Edits are collected by
       // the SDK during execution and returned with the result.
       const result = await runSandboxedWithSdkAsync(transpiled, input, resolvedSnapshot);
+      // Resource-imports scoping is enforced fail-silently above (only imported
+      // object types are loaded into the snapshot, so Objects.search on a
+      // non-imported type returns an empty ObjectSet). To turn that silent empty
+      // into an actionable UX, diff the types the function actually queried
+      // (recorded by the SDK) against the repo's imported object types and
+      // surface the difference as a warning field on the response. The FE renders
+      // an amber "accessed but not imported" banner with an "Open Resource
+      // imports" action. Computed regardless of run status so a function that
+      // queried a non-imported type then threw/timeout still surfaces it.
+      const importedTypeSet = new Set(importedTypes);
+      const unimportedAccessedTypes = (result.requestedTypes ?? []).filter(
+        (t) => !importedTypeSet.has(t),
+      );
       // Foundry TS v2: an edit function RETURNS `batch.getEdits()`. Prefer the
       // returned edit array; fall back to the ambient `Edits` side-channel
       // (v1-style functions that mutate via Edits.update and return a value).
@@ -2349,6 +2472,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 (result.errorMessage ?? "Execution exceeded 5 s cap.") +
                 (stderrLines.length > 0 ? "\n" + stderrLines.join("\n") : ""),
               status: "timeout",
+              unimportedAccessedTypes,
             }),
           );
       }
@@ -2367,6 +2491,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 (result.errorMessage ?? "") +
                 (stderrLines.length > 0 ? "\n" + stderrLines.join("\n") : ""),
               status: "error",
+              unimportedAccessedTypes,
             }),
           );
       }
@@ -2399,6 +2524,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
               objectsLoaded: resolvedSnapshot.objectCount,
               objectTypes: resolvedSnapshot.objectTypes,
             },
+            unimportedAccessedTypes,
           }),
         );
     } catch (err) {

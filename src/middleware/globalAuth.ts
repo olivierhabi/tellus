@@ -183,6 +183,14 @@ function isAllowlisted(req: Request): boolean {
   // enforcement layers.
   if (p === "/api/v1/code-repositories" || p.startsWith("/api/v1/code-repositories/")) return true;
 
+  // Code Assistant (AI coding agent for TypeScript Functions v2) — same
+  // two-layer pattern as code-repositories above: `createCodeAssistantRouter`
+  // mounts `requireCodeAssistantAuth` internally (which honours the
+  // CODE_ASSISTANT_TEST_AUTH=1 X-Tellus-Test-Principal bypass used by
+  // Cypress), so this allowlist entry only sidesteps the global Tellus auth
+  // gate. In production the per-router JWT/PAT validation still runs.
+  if (p === "/api/v1/code-assistant" || p.startsWith("/api/v1/code-assistant/")) return true;
+
   // Functions Registry (B8) — same two-layer pattern as code-repositories.
   // `createFunctionsRouter` mounts `requireCodeReposAuth` internally (which
   // honours the CODE_REPOS_TEST_AUTH=1 header bypass), so this allowlist entry

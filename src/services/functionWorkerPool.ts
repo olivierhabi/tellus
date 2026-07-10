@@ -32,6 +32,7 @@ import { Worker } from "worker_threads";
 import {
   FUNCTION_TIMEOUT_MS,
   runSandboxedWithSdk,
+  awaitSandboxPromise,
   type SandboxResult,
 } from "./functionRuntime";
 import {
@@ -42,6 +43,8 @@ import {
 
 export interface SandboxAsyncResult extends SandboxResult {
   readonly edits: OntologyEdit[];
+  /** Object types the function queried via Objects.search/get (post-run). */
+  readonly requestedTypes: string[];
 }
 
 // ---- Worker file resolution + dev/prod execArgv ---------------------------
@@ -93,14 +96,14 @@ function spawnSlot(): Slot | null {
     const worker = new Worker(workerFile, { execArgv: workerExecArgv });
     const slot: Slot = { worker, busy: false, current: null, dead: false };
 
-    worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[] }) => {
+    worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[]; requestedTypes?: string[] }) => {
       if (msg?.type === "__ready__") return;
       const pending = slot.current;
       slot.current = null;
       slot.busy = false;
       if (pending && msg && typeof msg.id === "number" && msg.result) {
         clearTimeout(pending.timer);
-        pending.resolve({ ...msg.result, edits: msg.edits ?? [] });
+        pending.resolve({ ...msg.result, edits: msg.edits ?? [], requestedTypes: msg.requestedTypes ?? [] });
       } else if (pending) {
         // Malformed worker response — fail this ONE task, keep the worker.
         clearTimeout(pending.timer);
@@ -166,6 +169,7 @@ function errorResult(message: string): SandboxAsyncResult {
     errorMessage: message,
     logs: [],
     edits: [],
+    requestedTypes: [],
   };
 }
 
@@ -259,6 +263,7 @@ function timeoutResult(): SandboxAsyncResult {
     errorMessage: `Function worker exceeded the ${WORKER_WALL_BUDGET_MS}ms wall budget.`,
     logs: [],
     edits: [],
+    requestedTypes: [],
   };
 }
 
@@ -284,19 +289,32 @@ export async function runSandboxedWithSdkAsync(
  * Inline (main-thread) execution — the structural fallback, used only when the
  * worker pool is unavailable. Exported for direct unit testing.
  */
-export function runSandboxedWithSdkSync(
+export async function runSandboxedWithSdkSync(
   transpiled: string,
   input: unknown,
   snapshot: OntologySnapshot,
-): SandboxAsyncResult {
-  const { sdk, getEdits } = buildOntologySdk(snapshot);
-  const result = runSandboxedWithSdk(transpiled, input, {
+): Promise<SandboxAsyncResult> {
+  const { sdk, getEdits, getRequestedTypes } = buildOntologySdk(snapshot);
+  let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
     Objects: sdk.Objects,
     Edits: sdk.Edits,
     createEditBatch: sdk.createEditBatch,
     __ontologyTypes: sdk.objectTypeDescriptors,
   });
-  return { ...result, edits: result.status === "ok" ? getEdits() : [] };
+  // Async function: the sandbox returned a Promise (vm can't await). Resolve it
+  // here under the timeout — the sync fallback is the structural path (pool
+  // unavailable), and it should still honor async Foundry functions.
+  if (result.pendingPromise) {
+    const settled = await awaitSandboxPromise(result.pendingPromise);
+    result = {
+      ...result,
+      output: settled.output,
+      status: settled.status,
+      errorMessage: settled.errorMessage,
+      pendingPromise: undefined,
+    };
+  }
+  return { ...result, edits: result.status === "ok" ? getEdits() : [], requestedTypes: getRequestedTypes() };
 }
 
 // Test-only: reset pool state.

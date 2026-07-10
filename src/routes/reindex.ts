@@ -224,6 +224,41 @@ router.post(
       // ---------------------------------------------------------------
       // Step 6: Execute reindex
       // ---------------------------------------------------------------
+      // Phase 5 cutover (feature flag FUNNEL_OPENSEARCH_PIPELINE=1):
+      // route CSV backings through the async, bounded-memory, checkpointed,
+      // resumable OpenSearch pipeline instead of the synchronous
+      // reindexObjectType. Returns 202 + run_id immediately. CSV-only —
+      // non-CSV (Iceberg/Parquet) backings stay on reindexObjectType / the
+      // funnel dispatcher (do not set the flag for those).
+      if (process.env.FUNNEL_OPENSEARCH_PIPELINE === "1") {
+        try {
+          const { startOsReindexRun } = await import(
+            "../services/indexing/osReindexRun"
+          );
+          const runId = await startOsReindexRun(
+            ontologyId,
+            apiName,
+            force ? "force" : "manual",
+          );
+          return res.status(202).json({
+            success: true,
+            data: {
+              status: "accepted",
+              runId,
+              objectType: apiName,
+              pipeline: "opensearch-async",
+            },
+          });
+        } catch (err: any) {
+          return sendError(
+            res,
+            "REINDEX_FAILED",
+            `Failed to start async reindex: ${err.message}`,
+            {},
+          );
+        }
+      }
+
       try {
         const result = await reindexObjectType(ontologyId, apiName);
 

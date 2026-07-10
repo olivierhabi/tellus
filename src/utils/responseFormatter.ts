@@ -474,6 +474,11 @@ export const ERROR_CODES: Record<string, number> = {
   PK_UNIQUENESS_VIOLATION: 409,
   MISSING_REQUIRED_PARAMETER: 400,
   FUNCTION_TIMEOUT: 504,
+  // AI engine (telos-AIE-agent) proxy — /api/v1/code-assistant/typescript-v2.
+  AI_ENGINE_UNAVAILABLE: 502,
+  AI_ENGINE_TIMEOUT: 504,
+  AI_ENGINE_BAD_REQUEST: 400,
+  AI_ENGINE_ERROR: 502,
   RULE_EXECUTION_FAILED: 500,
   TIMESERIES_WINDOW_TOO_LARGE: 400,
   QUERY_TIMEOUT: 504,
@@ -755,7 +760,7 @@ export function runSelfTests(): void {
     "formatError retains legacy envelope"
   );
 
-  // Additional: ERROR_CODES has exactly 19 entries
+  // Additional: ERROR_CODES has at least 23 entries (incl. AI_ENGINE_* etc.)
   const errorCodeCount = Object.keys(ERROR_CODES).length;
   assert(
     errorCodeCount >= 23,

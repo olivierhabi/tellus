@@ -38,6 +38,19 @@ import { ChangelogRow } from "./changelogStage";
 import { commitSnapshot, ManifestEntry } from "./icebergCatalog";
 import { markEditsAppliedToMerge, OntologyEditRow } from "../../models/ontologyEdit";
 import { unionMarkings } from "../markingUnion";
+import {
+  MERGED_PARQUET_COLUMNS,
+  CHANGELOG_PARQUET_COLUMNS,
+  changelogParquetKey,
+  mergedParquetKey,
+  deleteOrphanParquetRef,
+  parquetRefToUri,
+  parseJsonColumn,
+  parseJsonArrayColumn,
+  readParquetRows,
+  writeParquetRef,
+  type ParquetRef,
+} from "./funnelParquetStore";
 
 export type EditStrategy = "user_edit_wins" | "latest_wins";
 
@@ -95,6 +108,11 @@ export interface MergeResult {
     source_datasource_id: string | null;
     source_transaction_id: string | null;
   }>;
+  /** Reference to the Parquet object in MinIO holding the merged rows,
+   *  or `null` for a zero-row merge. The merged snapshot's `summary_json`
+   *  carries this ref (NOT the rows); `loadMergedRowsFromSnapshot`
+   *  resolves it back to rows. */
+  parquetRef?: ParquetRef | null;
 }
 
 export const MAX_DATASOURCES_PER_OBJECT_TYPE = 70;
@@ -362,26 +380,76 @@ export async function mergeChanges(input: MergeInput): Promise<MergeResult> {
     client.release();
   }
 
-  const manifest: ManifestEntry[] = [
-    {
-      file_path: input.mergedOutputFileLocation,
-      file_size_bytes: 0,
-      row_count: mergedRows.length,
-      operation: "added",
-    },
-  ];
-  const snapshot = await commitSnapshot({
-    tableId: input.mergedTableId,
-    operation: "overwrite",
-    manifest,
-    summary: {
-      upserts: upserts.length,
-      deletes: deletes.length,
-      edits_consumed: editIdsToStamp.length,
-      edit_strategy: input.editStrategy,
-      contributions: input.contributions.map((c) => c.datasource_id),
-    },
-  });
+  // PASS-BY-REFERENCE (Option 2): persist merged rows to a Parquet object
+  // in MinIO; the merged snapshot's `summary_json` carries only a small
+  // `parquet_ref` (NOT the rows inline). The previous `inline_rows` jsonb
+  // INSERT crashed the Postgres backend at ~573 MB for 1M rows; the
+  // Parquet object is N-independent on the Postgres side. The Indexing
+  // stage re-reads via `loadMergedRowsFromSnapshot(mergedSnapshotId)`.
+  const parquetKey = mergedParquetKey(input.objectTypeApiName);
+  const mergedRowIterable = (async function* () {
+    for (const r of mergedRows) {
+      yield {
+        primary_key: r.primary_key,
+        properties: JSON.stringify(r.properties),
+        markings: JSON.stringify(r.markings),
+        operation: r.operation,
+        source_datasource_id: r.source_datasource_id ?? "",
+        source_transaction_id: r.source_transaction_id ?? "",
+      };
+    }
+  })();
+  let mergedParquetRef: ParquetRef | null = null;
+  try {
+    mergedParquetRef = await writeParquetRef({
+      columns: MERGED_PARQUET_COLUMNS,
+      rows: mergedRowIterable,
+      key: parquetKey,
+    });
+  } catch (err) {
+    await deleteOrphanParquetRef(mergedParquetRef);
+    throw err;
+  }
+
+  const manifest: ManifestEntry[] = mergedParquetRef
+    ? [
+        {
+          file_path: parquetRefToUri(mergedParquetRef),
+          file_size_bytes: mergedParquetRef.sizeBytes,
+          row_count: mergedParquetRef.rowCount,
+          operation: "added",
+        },
+      ]
+    : [
+        {
+          file_path: input.mergedOutputFileLocation,
+          file_size_bytes: 0,
+          row_count: 0,
+          operation: "added",
+        },
+      ];
+
+  let snapshot;
+  try {
+    snapshot = await commitSnapshot({
+      tableId: input.mergedTableId,
+      operation: "overwrite",
+      manifest,
+      summary: {
+        upserts: upserts.length,
+        deletes: deletes.length,
+        edits_consumed: editIdsToStamp.length,
+        edit_strategy: input.editStrategy,
+        contributions: input.contributions.map((c) => c.datasource_id),
+        // Small, N-independent reference — replaces the old `inline_rows`.
+        // `loadMergedRowsFromSnapshot` resolves it back to rows.
+        parquet_ref: mergedParquetRef,
+      },
+    });
+  } catch (err) {
+    await deleteOrphanParquetRef(mergedParquetRef);
+    throw err;
+  }
 
   // AFTER the snapshot commits, stamp the edits. Per the spec this must
   // be an activity call, not a workflow call, because activities are
@@ -395,6 +463,7 @@ export async function mergeChanges(input: MergeInput): Promise<MergeResult> {
     deletes: deletes.length,
     editsConsumed: editIdsToStamp.length,
     mergedRows,
+    parquetRef: mergedParquetRef,
   };
 }
 
@@ -445,15 +514,14 @@ export async function mergeChangesFromSnapshots(args: {
   });
 }
 
-async function loadChangelogRowsFromSnapshot(
+export async function loadChangelogRowsFromSnapshot(
   snapshotId: string
 ): Promise<ChangelogRow[]> {
-  // The B4 activity writes the emitted rows into the snapshot's
-  // manifest summary under `rows_emitted` and persists the rows in
-  // Parquet at the manifest's `file_path`. For the Postgres-modelled
-  // Iceberg layer we keep the rows in-band on the manifest for small
-  // batches; production bulk flows read the Parquet via DuckDB
-  // `iceberg_scan`.
+  // PASS-BY-REFERENCE (Option 2): `computeChangelog` persists the emitted
+  // rows as a Parquet object in MinIO; the snapshot's `summary_json`
+  // carries a small `parquet_ref`. Resolve it back to rows here. Legacy
+  // snapshots (pre-fix) still carry `summary_json.inline_rows` — handle
+  // both without a data migration.
   const res = await query(
     `SELECT manifest_json, summary_json FROM funnel_snapshot WHERE snapshot_id = $1`,
     [snapshotId]
@@ -462,7 +530,64 @@ async function loadChangelogRowsFromSnapshot(
     | { manifest_json: unknown; summary_json: Record<string, unknown> }
     | undefined;
   if (!row) return [];
-  const inline = (row.summary_json?.inline_rows ?? []) as ChangelogRow[];
+  const summary = row.summary_json ?? {};
+  const ref = summary.parquet_ref as ParquetRef | null | undefined;
+  if (ref && typeof ref === "object" && ref.key) {
+    return readParquetRows<ChangelogRow>(ref, (r) => {
+      const op = String(r.operation ?? "INSERT").toUpperCase();
+      return {
+        primary_key: String(r.primary_key ?? ""),
+        operation:
+          op === "DELETE" ? "DELETE" : op === "UPDATE" ? "UPDATE" : "INSERT",
+        properties: parseJsonColumn(r.properties),
+        source_transaction_id: String(r.source_transaction_id ?? ""),
+        source_commit_timestamp: String(r.source_commit_timestamp ?? ""),
+      };
+    });
+  }
+  // LEGACY: pre-fix snapshots inlined the rows into summary_json.inline_rows.
+  const inline = (summary.inline_rows ?? []) as ChangelogRow[];
+  return Array.isArray(inline) ? inline : [];
+}
+
+/**
+ * PASS-BY-REFERENCE re-read for the Indexing stage. `mergeChanges`
+ * persists its `mergedRows` as a Parquet object (small `parquet_ref` in
+ * `summary_json`); the Indexing activity re-reads them here (by
+ * `snapshotId`) only when Quickwit is actually reachable. Legacy
+ * snapshots fall back to `summary_json.inline_rows`.
+ */
+export async function loadMergedRowsFromSnapshot(
+  snapshotId: string
+): Promise<MergeResult["mergedRows"]> {
+  const res = await query(
+    `SELECT summary_json FROM funnel_snapshot WHERE snapshot_id = $1`,
+    [snapshotId]
+  );
+  const row = res.rows[0] as
+    | { summary_json: Record<string, unknown> }
+    | undefined;
+  if (!row) return [];
+  const summary = row.summary_json ?? {};
+  const ref = summary.parquet_ref as ParquetRef | null | undefined;
+  if (ref && typeof ref === "object" && ref.key) {
+    return readParquetRows<MergeResult["mergedRows"][number]>(ref, (r) => ({
+      primary_key: String(r.primary_key ?? ""),
+      properties: parseJsonColumn(r.properties),
+      markings: parseJsonArrayColumn(r.markings),
+      operation: r.operation === "delete" ? "delete" : "upsert",
+      source_datasource_id:
+        r.source_datasource_id != null && r.source_datasource_id !== ""
+          ? String(r.source_datasource_id)
+          : null,
+      source_transaction_id:
+        r.source_transaction_id != null && r.source_transaction_id !== ""
+          ? String(r.source_transaction_id)
+          : null,
+    }));
+  }
+  // LEGACY: pre-fix snapshots inlined the merged rows.
+  const inline = (summary.inline_rows ?? []) as MergeResult["mergedRows"];
   return Array.isArray(inline) ? inline : [];
 }
 

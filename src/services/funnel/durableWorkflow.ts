@@ -554,6 +554,13 @@ async function sweepViaTemporalVisibility(): Promise<SweepOrphanedRunsResult | n
     object_type_api_name: string;
     started_at: string;
   }>) {
+    // MUST match the Temporal workflow id — i.e. the bare
+    // `ObjectTypeFunnelWorkflow-<apiName>` (single-sourced as
+    // `funnelWorkflowId()` in temporal/worker.ts). This is NOT the
+    // per-save value stored in funnel_run.temporal_workflow_id (which is
+    // `<bareId>:<runKey>` by design for per-save UPSERT idempotency);
+    // reconstruct the bare id here from object_type_api_name rather than
+    // trusting the stored column.
     const expected = `ObjectTypeFunnelWorkflow-${row.object_type_api_name}`;
     if (!aliveWorkflowIds.has(expected)) {
       orphanRunIds.push(row.run_id);

@@ -1,0 +1,123 @@
+# Gap 5 (CI/PR gating): runs the transforms-python END-TO-END parity suite on
+# every PR + push. The unit logic is already gated by ci.yml's `unit` job
+# (pnpm run test:unit covers tests/unit/code-repos/code-repository/transforms/);
+# THIS job gates the behavioral parity that unit tests cannot cover — the bash
+# verify scripts (retry, crash-sweeper, lineage-unified, sandbox, cluster) +
+# the cypress transforms specs, which exercise a live backend + Postgres +
+# PySpark. A failure here blocks the merge (the job is a required check via
+# branch protection — see repo settings).
+#
+# Honest scope: the sandbox (Gap 3) + cluster (Gap 1) sub-jobs require Docker
+# (present on GitHub-hosted runners) + the tellus/transform-runtime image
+# (built in-step). The crash-sweeper + retry tests restart the in-runner backend
+# (kill+restart), which works on a self-hosted runner but may need
+# `services` adjustments on GitHub-hosted runners; they are tagged
+# transforms-parity-restart + allowed to be skipped via env on runners that
+# forbid process restarts.
+name: transforms-parity
+on:
+  pull_request:
+    paths:
+      - "src/services/codeRepository/transforms/**"
+      - "src/services/templates/manifest.ts"
+      - "src/services/templates/DECISIONS.md"
+      - "src/migrations/10[3-9]_*.sql"
+      - "tests/unit/code-repos/code-repository/transforms/**"
+      - "tests/unit/code-repos/templates/**"
+      - "scripts/test-template-parity.sh"
+      - ".github/workflows/transforms-parity.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  unit:
+    # Re-affirms the transforms unit suite as a gate (mirrors ci.yml's unit job
+    # but scoped to transforms so a PR touching only transforms sees a focused
+    # signal). Pure logic — no services.
+    name: transforms unit logic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24.12.0, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: pnpm vitest run --config vitest.unit.config.ts tests/unit/code-repos/code-repository/transforms/ tests/unit/code-repos/templates/
+
+  parity-e2e:
+    name: transforms parity (bash + cypress, live backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports: ["5432:5432"]
+        options: --health-cmd="pg_isready -U tellus -d tellus_db" --health-interval=5s --health-timeout=5s --health-retries=10
+    env:
+      PGDATABASE: tellus_db
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      CODE_REPOS_TEST_AUTH: "1"
+      NODE_ENV: development
+    steps:
+      - uses: actions/checkout@v5
+      # The bash verify scripts + cypress specs live in the sibling tellus-fe repo.
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/tellus-fe
+          path: tellus-fe
+          ref: ${{ github.base_ref || github.ref_name }}
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24.12.0, cache: pnpm }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: "21" }
+      - run: pnpm install --frozen-lockfile
+      - name: Provision PySpark venv
+        run: |
+          python -m venv /tmp/pyspark-venv
+          /tmp/pyspark-venv/bin/pip install --quiet pyspark pandas pyarrow
+      - name: Build transform-runtime image (sandbox + cluster)
+        run: docker build -t tellus/transform-runtime:py38 -f tellus-fe/scripts/transform-runtime.Dockerfile tellus-fe/scripts
+      - name: Run migrations
+        run: pnpm run migrate:all
+      - name: Start backend (local mode)
+        run: |
+          env TELLUS_PYTHON_BIN=/tmp/pyspark-venv/bin/python JAVA_HOME=$JAVA_HOME \
+            nohup npx tsx src/server.ts > /tmp/tellus.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:3000/health && exit 0; sleep 1; done
+          cat /tmp/tellus.log; exit 1
+      - name: bash parity — transforms-python template parity (2.0.0)
+        # HTTP-level guard: scaffolds transforms-python@2.0.0 via POST /api/v1/scaffold
+        # and asserts the Foundry-faithful file set + content invariants + datasetRid
+        # substitution (✅/➕/➖ report). See scripts/test-template-parity.sh + DECISIONS.md.
+        run: TELLUS_BASE=http://localhost:3000 bash scripts/test-template-parity.sh
+      - name: bash parity — retry + lineage-unified (local mode)
+        run: |
+          bash tellus-fe/scripts/verify-transforms-retry.sh
+          bash tellus-fe/scripts/verify-transforms-lineage-unified.sh
+      - name: bash parity — sandboxed execution (container mode)
+        run: |
+          pkill -f "tsx src/server.ts" || true
+          env TELLUS_PYTHON_BIN=/tmp/pyspark-venv/bin/python JAVA_HOME=$JAVA_HOME \
+            TELLUS_TRANSFORM_EXECUTION_MODE=container nohup npx tsx src/server.ts > /tmp/tellus-c.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:3000/health && break; sleep 1; done
+          bash tellus-fe/scripts/verify-transforms-sandbox.sh
+      - name: cypress transforms specs
+        working-directory: tellus-fe
+        run: |
+          npx cypress run --headless --browser electron \
+            --config baseUrl=http://localhost:3000 \
+            --env apiUrl=http://localhost:3000/api \
+            --spec cypress/e2e/transforms-*.cy.ts

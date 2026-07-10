@@ -205,7 +205,11 @@ export async function ObjectTypeFunnelWorkflow(
           completedPrevious: "changelog",
           runKey,
         });
-        const merge = await runMergeActivity({ ...input, changelogRows: changelog.rows });
+        const merge = await runMergeActivity({
+          ...input,
+          changelogSnapshotId: changelog.snapshotId,
+          changelogOwnedProperties: changelog.ownedProperties,
+        });
 
         // Sync the freshly-merged rows into OpenSearch so the FE search
         // panel can see them in the same round-trip. Runs BEFORE the
@@ -229,8 +233,8 @@ export async function ObjectTypeFunnelWorkflow(
         });
         const indexing = await runIndexingActivityProxy({
           ...input,
-          mergedRows: merge.mergedRows,
-          editIds: merge.editIds,
+          mergedSnapshotId: merge.mergedSnapshotId,
+          mergedRowCount: merge.mergedRowCount,
         });
 
         await projectStageToPostgres({

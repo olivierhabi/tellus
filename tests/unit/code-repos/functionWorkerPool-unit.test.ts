@@ -7,7 +7,7 @@
 // the main event loop" proof lives in scripts/verify-function-worker.ts (run
 // under tsx, where the worker is guaranteed to load).
 // ---------------------------------------------------------------------------
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   runSandboxedWithSdkSync,
   runSandboxedWithSdkAsync,
@@ -48,47 +48,67 @@ const EMPTY: OntologySnapshot = {
 };
 
 describe("runSandboxedWithSdkSync (fallback / inline)", () => {
-  it("returns the function's output", () => {
+  it("returns the function's output", async () => {
     const src = `module.exports = function(input){ return input.x + 1; };`;
-    const r = runSandboxedWithSdkSync(src, { x: 41 }, EMPTY);
+    const r = await runSandboxedWithSdkSync(src, { x: 41 }, EMPTY);
     expect(r.status).toBe("ok");
     expect(r.output).toBe(42);
     expect(r.edits).toEqual([]);
   });
 
-  it("exposes the Objects SDK (ambient + via @ontology/sdk)", () => {
+  it("exposes the Objects SDK (ambient + via @ontology/sdk)", async () => {
     const snap = snapshotWith([
       { type: "Order", pk: "o1", props: { status: "open", amount: 10 } },
       { type: "Order", pk: "o2", props: { status: "open", amount: 20 } },
     ]);
     const src = `module.exports = function(){ return Objects.search("Order").count(); };`;
-    const r = runSandboxedWithSdkSync(src, {}, snap);
+    const r = await runSandboxedWithSdkSync(src, {}, snap);
     expect(r.status).toBe("ok");
     expect(r.output).toBe(2);
   });
 
-  it("collects side-channel edits via the Edits API", () => {
+  it("collects side-channel edits via the Edits API", async () => {
     const src = `module.exports = function(){ Edits.update("Order","o1",{status:"closed"}); return "done"; };`;
-    const r = runSandboxedWithSdkSync(src, {}, EMPTY);
+    const r = await runSandboxedWithSdkSync(src, {}, EMPTY);
     expect(r.status).toBe("ok");
     expect(r.output).toBe("done");
     expect(r.edits).toHaveLength(1);
     expect(r.edits[0]).toMatchObject({ op: "update", objectType: "Order", primaryKey: "o1" });
   });
 
-  it("surfaces a thrown error as status=error", () => {
+  it("surfaces a thrown error as status=error", async () => {
     const src = `module.exports = function(){ throw new Error("boom"); };`;
-    const r = runSandboxedWithSdkSync(src, {}, EMPTY);
+    const r = await runSandboxedWithSdkSync(src, {}, EMPTY);
     expect(r.status).toBe("error");
     expect(r.errorMessage).toContain("boom");
     expect(r.edits).toEqual([]);
   });
 
-  it("rejects async functions", () => {
+  it("resolves async functions (Foundry v2 returns Promise<T>)", async () => {
     const src = `module.exports = async function(){ return 1; };`;
-    const r = runSandboxedWithSdkSync(src, {}, EMPTY);
+    const r = await runSandboxedWithSdkSync(src, {}, EMPTY);
+    expect(r.status).toBe("ok");
+    expect(r.output).toBe(1);
+  });
+
+  it("surfaces an async rejection as status=error", async () => {
+    const src = `module.exports = async function(){ throw new Error("async-boom"); };`;
+    const r = await runSandboxedWithSdkSync(src, {}, EMPTY);
     expect(r.status).toBe("error");
-    expect(r.errorMessage).toMatch(/async/i);
+    expect(r.errorMessage).toContain("async-boom");
+  });
+
+  it("times out a never-resolving async function", async () => {
+    vi.useFakeTimers();
+    try {
+      const src = `module.exports = function(){ return new Promise(() => {}); };`;
+      const pending = runSandboxedWithSdkSync(src, {}, EMPTY);
+      await vi.advanceTimersByTimeAsync(6000);
+      const r = await pending;
+      expect(r.status).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -110,5 +130,13 @@ describe("runSandboxedWithSdkAsync (worker pool or fallback)", () => {
     expect(r.output).toBe(7);
     expect(r.edits).toHaveLength(1);
     expect(r.edits[0]).toMatchObject({ op: "update", objectType: "Order", primaryKey: "o9" });
+  });
+
+  it("resolves async functions via the worker pool", async () => {
+    __resetPoolForTests();
+    const src = `module.exports = async function(input){ return input.x * 3; };`;
+    const r = await runSandboxedWithSdkAsync(src, { x: 14 }, EMPTY);
+    expect(r.status).toBe("ok");
+    expect(r.output).toBe(42);
   });
 });

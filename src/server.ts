@@ -4,12 +4,12 @@ import "dotenv/config";
 // module graph on first require.
 import "./services/otelBootstrap";
 import { assertQuiverTestAuthSafe } from "./routes/quiver/testAuth";
+import { createCompressionMiddleware } from "./middleware/compression";
 import crypto from "crypto";
 import http from "http";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
-import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { pool, query } from "./db";
 import {
@@ -22,7 +22,7 @@ import {
 } from "./db/schemaContract";
 import requestLogger from "./middleware/requestLogger";
 import { idempotencyKeyMiddleware } from "./middleware/idempotencyKey";
-import { inputSanitizer } from "./middleware/inputSanitizer";
+import { createInputSanitizer } from "./middleware/inputSanitizer";
 import { notFoundHandler } from "./middleware/notFoundHandler";
 import errorHandler from "./middleware/errorHandler";
 import ontologyRouter from "./routes/ontology";
@@ -126,6 +126,7 @@ import compassChildrenRouter from "./routes/compassChildren";
 import foundryFoldersRouter from "./routes/folders";
 import foundryUploadsRouter from "./routes/uploads";
 import foundryProjectUploadsRouter from "./routes/projectUploads";
+import foundryUploadProgressRouter from "./routes/uploadProgress";
 import projectWorkspaceRouter, { resourceLifecycleRouter } from "./routes/projectWorkspace";
 import { autosaveProjectRouter, autosaveResourceRouter } from "./routes/autosaveSnapshots";
 import { folderDatasetsRouter as foundryFolderDatasetsRouter, datasetRouter as foundryDatasetRouter } from "./routes/foundryDatasets";
@@ -215,8 +216,9 @@ app.use(traceContextMiddleware);
 app.use(serverTiming);
 app.use(contentLanguage);
 
-// Compress responses (gzip/brotli)
-app.use(compression());
+// Compress responses (gzip/brotli) — but NEVER text/event-stream. See
+// src/middleware/compression.ts for why (zlib buffers SSE → "comes at once").
+app.use(createCompressionMiddleware());
 
 // Rate limiting — configurable requests per minute per IP.
 //
@@ -324,6 +326,11 @@ const corsAllowedHeaders = [
   "X-Deadline",
   "x-branch-id",
   "X-Tellus-Reauth",
+  // X-Upload-Id — upload progress channel; the FE sends this on multipart
+  // upload POSTs so it can poll /v1/uploads/:id/progress. Without it in the
+  // allow-list the browser blocks the POST at the preflight ("Network error")
+  // and the upload never reaches the handler.
+  "X-Upload-Id",
   ...(isProduction
     ? []
     : ["X-Tellus-Test-Principal", "X-Tellus-Test-Role", "X-Tellus-Test-Roles"]),
@@ -372,8 +379,15 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
   next();
 });
 
-// Input sanitization — trim, strip null bytes, normalize Unicode, XSS prevention
-app.use(inputSanitizer);
+// Input sanitization — trim, strip null bytes, normalize Unicode, XSS prevention.
+// shouldSkipBody: Workshop module saves carry a Vega spec JSON string that can exceed
+// the 10k char cap; silently truncating it corrupts the spec. Skip body string
+// mutation for /api/v1/workshop routes (depth guard still applies for DoS protection).
+app.use(
+  createInputSanitizer({
+    shouldSkipBody: (req) => (req.path || "").startsWith("/api/v1/workshop"),
+  }),
+);
 
 // F-P4-08 / Block F — per-request wall-clock budget. Attaches
 // `req.timeoutSignal: AbortSignal` and arms a 504 on expiry. Must be
@@ -397,8 +411,24 @@ import { requestTimeoutMiddleware } from "./middleware/requestTimeout";
 // blow the 5s budget and 504 even though its own work is ~ms. The longer
 // ceiling lets it complete once the sandbox yields; the root-cause fix (the
 // sandbox moved to a worker thread) is in functionRuntime/functionWorkerPool.
+// Multipart uploads (POST .../upload + the .../transactions append route)
+// move bytes: their duration scales with file size and client throughput, not
+// handler work, so the 5s data-plane budget would 504 a legitimate large
+// upload mid-stream. Give those POSTs a longer ceiling (default 10 min — well
+// above the frontend's 5-min axios timeout and enough for a 1 GB upload on a
+// decent link). Reads and other writes stay on the 5s budget.
+const UPLOAD_REQUEST_TIMEOUT_MS = Number(
+  process.env.UPLOAD_REQUEST_TIMEOUT_MS ?? 10 * 60 * 1000,
+);
 app.use(requestTimeoutMiddleware({
-  exemptPaths: ["/api/v1/code-repositories", "/api/v1/objects"],
+  exemptPaths: [
+    "/api/v1/code-repositories",
+    "/api/v1/objects",
+    "/api/v1/code-assistant",
+  ],
+  extendedBudgetFor: (req) =>
+    req.method === "POST" && /\/(upload|transactions)$/.test(req.path),
+  extendedTimeoutMs: UPLOAD_REQUEST_TIMEOUT_MS,
 }));
 {
   const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
@@ -776,9 +806,22 @@ const codeRepoMount = mountCodeRepository({ pool, stemma: new PostgresStemma({ p
 const CODE_REPOS_REQUEST_TIMEOUT_MS = Number(
   process.env.CODE_REPOS_REQUEST_TIMEOUT_MS ?? 30_000,
 );
+// Sync transform-execution routes (POST .../transforms/preview + .../transforms/test)
+// run real PySpark in the request — the JVM cold-start can exceed the 30s
+// code-repos budget. Give just those paths an extended ceiling (default 120s)
+// so they don't 504 + orphan the child; the executor's own timeoutMs (100s for
+// preview) SIGKILLs the transform before this fires. Other code-repos routes
+// stay on the tight 30s budget.
+const CODE_REPOS_EXTENDED_TIMEOUT_MS = Number(
+  process.env.CODE_REPOS_EXTENDED_TIMEOUT_MS ?? 120_000,
+);
 app.use(
   "/api/v1/code-repositories",
-  requestTimeoutMiddleware({ timeoutMs: CODE_REPOS_REQUEST_TIMEOUT_MS }),
+  requestTimeoutMiddleware({
+    timeoutMs: CODE_REPOS_REQUEST_TIMEOUT_MS,
+    extendedTimeoutMs: CODE_REPOS_EXTENDED_TIMEOUT_MS,
+    extendedBudgetFor: (req) => /\/transforms\/(preview|test)$/.test(req.path),
+  }),
 );
 app.use("/api/v1/code-repositories", codeRepoMount.router);
 
@@ -823,8 +866,31 @@ app.use(
 // persist job_spec rows.
 import { createTransformsRouter } from "./services/codeRepository/transforms/routes";
 import { createJobSpecRouter } from "./services/jobSpec/admin/routes";
-app.use("/api/v1", createTransformsRouter({ stemma: new PostgresStemma({ pool }) }));
+import { sweepStaleTransformBuilds } from "./services/codeRepository/transforms/crashSweeper";
+import { requeueQueuedBuilds } from "./services/codeRepository/transforms/buildService";
+const transformsStemma = new PostgresStemma({ pool });
+app.use("/api/v1", createTransformsRouter({ stemma: transformsStemma }));
 app.use("/api/v1", createJobSpecRouter({ pool }));
+
+// Crash-recovery (Gap 2): on boot, reconcile transform_build rows left in a
+// non-terminal state by a prior crash/restart.
+//   - 'running' -> the process was MID-EXECUTION; resuming is unsafe (partial
+//     output). Mark 'failed' (sweepStaleTransformBuilds). The user retries
+//     explicitly via POST /builds/:rid/retry.
+//   - 'queued'  -> enqueued but execution never began; no partial state, so
+//     it is safe to re-run (requeueQueuedBuilds = idempotent recovery).
+// Both best-effort, logged, non-blocking.
+void (async () => {
+  try {
+    if (isShuttingDown) return;
+    const swept = await sweepStaleTransformBuilds();
+    if (swept > 0) console.log(`[transforms] crash-recovery sweeper: marked ${swept} stale 'running' build(s) failed (lost on restart).`);
+    const requeued = await requeueQueuedBuilds({ stemma: transformsStemma });
+    if (requeued > 0) console.log(`[transforms] crash-recovery: re-queued ${requeued} 'queued' build(s) (idempotent recovery).`);
+  } catch (e) {
+    console.error("[transforms] crash-recovery failed:", String(e));
+  }
+})();
 
 // Boot-time rehydrator. No-op against a real Stemma client (production); a
 // best-effort re-seed against the in-memory adapter (dev / e2e). Awaited
@@ -903,6 +969,29 @@ app.use("/api/v1/workshop", workshopModulesRouter);
 // Mounted at /quiver/api/v1 to mirror the spec's base-path verbatim.
 import { buildQuiverRouter } from "./routes/quiver";
 app.use("/quiver/api/v1", buildQuiverRouter());
+
+// Code Assistant — secure proxy to the telos-AIE-agent AI engine for the
+// TypeScript Functions v2 coding assistant. Frontend posts to
+// /api/v1/code-assistant/typescript-v2; this route forwards to
+// {TELOS_AIE_AGENT_URL}/api/code-repositories-typescript-v2 and wraps the
+// engine's {response, _metadata} in the {success, data} envelope. The
+// frontend never learns the AI engine URL. Two-layer auth (same pattern as
+// /api/v1/code-repositories): globalAuth allowlists the prefix so the
+// CODE_ASSISTANT_TEST_AUTH test-principal bypass works in CI; the router's
+// own requireCodeAssistantAuth enforces real JWT/PAT in production.
+import { createCodeAssistantRouter } from "./routes/codeAssistant";
+// Exempt from the global 5s data-plane budget (above) and give the streaming
+// LLM call its own longer ceiling (default 5 min) so a slow agentic loop does
+// not 504. The engine fetch is separately bounded by AI_ENGINE_TIMEOUT_MS.
+app.use(
+  "/api/v1/code-assistant",
+  requestTimeoutMiddleware({
+    timeoutMs: Number(
+      process.env.CODE_ASSISTANT_REQUEST_TIMEOUT_MS ?? 300000,
+    ),
+  }),
+);
+app.use("/api/v1/code-assistant", createCodeAssistantRouter());
 
 // Wire the production-default Workshop OSS adapter to read from the seeded
 // `workshop_demo_order` Postgres table (migration 061). Tests that exercise
@@ -1021,6 +1110,10 @@ app.use("/api/v1/datasets", datasetDeduplicateRouter);
 app.use("/api/v1/projects", projectDuplicatesRouter);
 app.use("/api/v1/search", foundrySearchRouter);
 app.use("/api/v1/breadcrumb", foundryBreadcrumbRouter);
+// Advisory upload-progress poll endpoint (polled by the FE while a multipart
+// upload POST is in flight, to show the server→S3 streaming phase). See
+// src/routes/uploadProgress.ts + src/services/uploadProgress.ts.
+app.use("/api/v1/uploads", foundryUploadProgressRouter);
 // Palantir Multipass-equivalent auth surface (see ontology/tellus-auth.md).
 // The legacy /api/auth/{register,login,refresh,logout} router was retired
 // in Phase 3; /api/v1/auth is the only supported authentication entry point.
@@ -1364,6 +1457,27 @@ async function start(): Promise<void> {
       );
     }
 
+    // Phase 3: resume opensearch_reindex_run rows orphaned by a prior
+    // worker restart. Unlike funnel_run (which is swept to 'failed'),
+    // these are RESUMED — the executor's resume-skip continues from the
+    // last `indexed_count` checkpoint instead of restarting from zero
+    // (the whole point of gap 2). Only active when the pipeline is enabled.
+    try {
+      const { resumeOrphanedOsReindexRuns } = await import(
+        "./services/indexing/osReindexRun"
+      );
+      const resumed = await resumeOrphanedOsReindexRuns();
+      if (resumed > 0) {
+        console.log(
+          `Resumed ${resumed} orphaned opensearch_reindex_run row(s) from last checkpoint`
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: orphaned opensearch_reindex_run resume failed: ${(err as Error).message}`
+      );
+    }
+
     // B3: Temporal worker. When Temporal is reachable this is the
     // authoritative execution path; the PG-backed dispatcher above
     // becomes a fallback used only when `isTemporalConnected()` is
@@ -1531,6 +1645,13 @@ async function start(): Promise<void> {
           const userId = await kc.createUser({
             username: email,
             email,
+            // The realm requires non-blank firstName/lastName for direct-grant
+            // (see keycloakAdminService.createUser). The bootstrap has no real
+            // name, so default to a role label the operator personalizes via
+            // /settings/profile; allow env override for deployments that know
+            // the operator's name.
+            firstName: process.env.TELLUS_SUPERADMIN_FIRST_NAME || 'Tellus',
+            lastName: process.env.TELLUS_SUPERADMIN_LAST_NAME || 'Administrator',
             password,
             enabled: true,
             emailVerified: true,

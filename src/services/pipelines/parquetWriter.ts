@@ -43,6 +43,26 @@ export interface WriteParquetInput {
   rows: Array<Record<string, unknown>>;
 }
 
+/**
+ * Streaming variant: rows are pulled from an async iterable and inserted
+ * into the DuckDB temp table in 500-row batches — the full row set is
+ * NEVER materialised as a single Node array. This is what lets the
+ * Funnel changelog/merge stages persist 1M+ rows to Parquet without
+ * blowing the API pod's heap (the rows are read from a streaming
+ * `SnapshotDiffReader`, handed to DuckDB in batches, and the DuckDB temp
+ * table spills to `/tmp/duckdb_spill` when it exceeds `memory_limit`).
+ *
+ * Returns `null` for a zero-row iterable (Parquet cannot represent an
+ * empty row group; callers commit a snapshot with `parquet_ref: null`
+ * instead). The non-streaming {@link writeRowsToParquet} throws on
+ * empty input — the streaming variant cannot pre-check the count, so it
+ * returns null.
+ */
+export interface WriteParquetStreamInput {
+  columns: ParquetColumn[];
+  rows: AsyncIterable<Record<string, unknown>>;
+}
+
 export interface WriteParquetResult {
   /** Local path of the staged .parquet file. Caller uploads + deletes. */
   localPath: string;
@@ -146,6 +166,110 @@ export async function writeRowsToParquet(
     return { localPath: outPath, sizeBytes, rowCountExact, columnLogicalTypes };
   } catch (err) {
     // Clean up on failure so we don't accumulate staging dirs.
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+    throw err;
+  } finally {
+    try {
+      await runAll(conn, `DROP TABLE IF EXISTS ${tempTable}`);
+    } catch {
+      /* ignore — connection is being released anyway */
+    }
+    releaseConnection(conn);
+  }
+}
+
+/**
+ * Streaming sibling of {@link writeRowsToParquet}: pulls rows from an
+ * async iterable and inserts them into the DuckDB temp table in 500-row
+ * batches, then COPYs to a local Parquet file with the same PB-B3
+ * settings. The full row set is never resident in Node memory — the
+ * iterable yields one batch at a time and DuckDB's temp table spills to
+ * disk past `memory_limit`. This is the write path the Funnel changelog
+ * and merge stages use to persist 1M+ rows by reference.
+ *
+ * Returns `null` when the iterable yields zero rows (Parquet cannot
+ * represent an empty row group); the caller commits a snapshot with
+ * `parquet_ref: null` in that case.
+ */
+export async function writeRowsToParquetStream(
+  input: WriteParquetStreamInput,
+): Promise<WriteParquetResult | null> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-b3-parquet-"));
+  const outPath = path.join(dir, "part-00000.parquet");
+  const conn = await acquireConnection({ skipHttpfs: true });
+  const tempTable = `pb_b3_stage_${randomUUID().replace(/-/g, "_")}`;
+  let inserted = 0;
+  try {
+    const columnsDdl = input.columns
+      .map((c) => `${quoteIdent(c.name)} ${mapToDuckDBType(c.type)}`)
+      .join(", ");
+    await runAll(conn, `CREATE TEMP TABLE ${tempTable} (${columnsDdl})`);
+
+    const BATCH = 500;
+    let batch: Array<Record<string, unknown>> = [];
+    const flush = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      const values = batch
+        .map(
+          (row) =>
+            `(${input.columns
+              .map((c) => toSqlLiteral(row[c.name], c.type))
+              .join(", ")})`,
+        )
+        .join(", ");
+      await runAll(conn, `INSERT INTO ${tempTable} VALUES ${values}`);
+      inserted += batch.length;
+      batch = [];
+    };
+    for await (const row of input.rows) {
+      batch.push(row);
+      if (batch.length >= BATCH) await flush();
+    }
+    await flush(); // final partial batch
+
+    if (inserted === 0) {
+      // Empty source — Parquet cannot represent a zero-row file. Caller
+      // commits a snapshot with `parquet_ref: null`.
+      return null;
+    }
+
+    await runAll(
+      conn,
+      `COPY (SELECT * FROM ${tempTable}) TO '${outPath.replace(/'/g, "''")}' ` +
+        `(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)`,
+    );
+
+    const rc = await queryAll<{ c: bigint | number }>(
+      conn,
+      `SELECT COUNT(*) AS c FROM parquet_scan('${outPath.replace(/'/g, "''")}')`,
+    );
+    const rowCountExact = Number(rc[0]?.c ?? 0);
+
+    const schemaRows = await queryAll<{
+      name: string;
+      type: string;
+      logical_type: string | null;
+    }>(
+      conn,
+      `SELECT name, type, logical_type FROM parquet_schema('${outPath.replace(
+        /'/g,
+        "''",
+      )}')`,
+    );
+    const columnLogicalTypes = schemaRows
+      .filter((r) => r.name && r.name !== "schema")
+      .map((r) => ({
+        name: r.name,
+        logicalType: r.logical_type ?? r.type ?? "UNKNOWN",
+      }));
+
+    const sizeBytes = fs.statSync(outPath).size;
+    return { localPath: outPath, sizeBytes, rowCountExact, columnLogicalTypes };
+  } catch (err) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

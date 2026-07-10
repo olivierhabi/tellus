@@ -28,6 +28,7 @@ import {
   getTotpService,
   saveMfaChallenge,
   loadMfaChallenge,
+  peekMfaChallenge,
   consumeMfaChallenge,
   newMfaChallengeId,
   registerMfaFailure,
@@ -47,6 +48,7 @@ import { validatePatScopes, TELLUS_PAT_SCOPES, requirePatScope } from '../servic
 import { getPatScopeManifest } from '../services/patScopeMap';
 import { AppError } from '../utils/foundryAppError';
 import { requireTellusAuth } from '../middleware/tellusAuth';
+import { csrfSameOrigin } from '../middleware/csrfSameOrigin';
 import { requireSuperAdmin, TELLUS_SUPERADMIN_ROLE } from '../middleware/requireSuperAdmin';
 import { ensureLocalUserForClaims } from '../services/userProvisioning';
 import {
@@ -63,6 +65,10 @@ import { SESSION_MAX_AGE_SECONDS, SESSION_IDLE_TIMEOUT_SECONDS } from '../config
 
 const TELLUS_COOKIE = 'TELLUS_TOKEN';
 const TELLUS_REFRESH_COOKIE = 'TELLUS_REFRESH';
+// Non-httpOnly, Path=/, value=epoch-ms. Server-issued at every interactive
+// boundary (P0-1) — the FE absolute cap + the edge middleware liveness gate
+// read it. Non-secret (a timestamp); forging it only skips the edge redirect.
+const TELLUS_SESSION_EXPIRES_COOKIE = 'TELLUS_SESSION_EXPIRES';
 
 const router = Router();
 
@@ -117,22 +123,25 @@ const loginLimiter = rateLimit({
     res.status(429).json(envelope('AUTH_RATE_LIMIT', 429, 'Too many authentication attempts', req)),
 });
 
-function setSessionCookies(res: Response, accessToken: string, refreshToken?: string) {
+function setSessionCookies(
+  res: Response,
+  accessToken: string,
+  refreshToken: string | undefined,
+  // Absolute session expiry (epoch ms). The marker cookie value AND the Max-Age
+  // of both token cookies are derived from this so all three EXPIRE TOGETHER.
+  // /login + /login/mfa + /enroll/passkey/verify pass Date.now()+SESSION_MAX_AGE_SECONDS*1000
+  // (fresh window); /refresh reads the value from the INCOMING marker cookie so
+  // refresh ROTATES the token but does NOT extend the absolute window — kills
+  // the rolling-backend-vs-absolute-FE divergence (plan P0-1).
+  absoluteExpiryMs: number,
+) {
   const isProd = process.env.NODE_ENV === 'production';
-  // Both cookies share the single configured session window
-  // (TELLUS_SESSION_MAX_AGE). The access cookie is the edge gate's
-  // liveness signal and the refresh cookie is what silentRefresh()
-  // rotates against — keeping their Max-Age identical (and matched to
-  // the FE marker via the `sessionMaxAgeSeconds` we echo back) means a
-  // tab opened any time inside the window always finds a cookie to act
-  // on, instead of the gate lapsing while the session is still
-  // refreshable. See src/config/sessionConfig.ts.
-  const maxAgeMs = SESSION_MAX_AGE_SECONDS * 1000;
+  const remainingMs = Math.max(0, absoluteExpiryMs - Date.now());
   res.cookie(TELLUS_COOKIE, accessToken, {
     httpOnly: true,
     secure: isProd,
     sameSite: isProd ? 'strict' : 'lax',
-    maxAge: maxAgeMs,
+    maxAge: remainingMs,
     path: '/',
   });
   if (refreshToken) {
@@ -140,10 +149,21 @@ function setSessionCookies(res: Response, accessToken: string, refreshToken?: st
       httpOnly: true,
       secure: isProd,
       sameSite: isProd ? 'strict' : 'lax',
-      maxAge: maxAgeMs,
+      maxAge: remainingMs,
       path: '/api/v1/auth',
     });
   }
+  // Server-issued marker — single source of truth for the FE absolute cap +
+  // the edge middleware liveness gate. Non-httpOnly (AuthGuard, middleware,
+  // Cypress read it); non-secret (a timestamp). Max-Age matches the token
+  // cookies so the browser evicts all three together.
+  res.cookie(TELLUS_SESSION_EXPIRES_COOKIE, String(absoluteExpiryMs), {
+    httpOnly: false,
+    secure: isProd,
+    sameSite: isProd ? 'strict' : 'lax',
+    maxAge: remainingMs,
+    path: '/',
+  });
 }
 
 function clearSessionCookies(res: Response) {
@@ -154,6 +174,7 @@ function clearSessionCookies(res: Response) {
   if (res.headersSent || res.writableEnded) return;
   res.clearCookie(TELLUS_COOKIE, { path: '/' });
   res.clearCookie(TELLUS_REFRESH_COOKIE, { path: '/api/v1/auth' });
+  res.clearCookie(TELLUS_SESSION_EXPIRES_COOKIE, { path: '/' });
 }
 
 // ----- POST /login — two-step MFA-aware ------------------------------------
@@ -169,7 +190,7 @@ const LoginSchema = z.object({
   password: z.string().min(1),
 }).refine((v) => v.username || v.email, { message: 'username or email required' });
 
-router.post('/login', loginLimiter, async (req: Request, res: Response) => {
+router.post('/login', loginLimiter, csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const parsed = LoginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -277,7 +298,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
       return;
     }
 
-    setSessionCookies(res, result.accessToken, result.refreshToken);
+    setSessionCookies(res, result.accessToken, result.refreshToken, Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
     await resetMfaBudget(foundryDb as unknown as Knex, result.claims.sub);
     await emitAuditEvent({
       keycloakSub: result.claims.sub,
@@ -305,6 +326,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
         sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        sessionExpiresAt: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
         idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
         hasPasskey,
         requiresPasskeyEnrollment: !hasPasskey,
@@ -328,7 +350,7 @@ const LoginMfaWebauthnSchema = z.object({
   assertionResponse: z.any(),
 });
 
-router.post('/login/mfa', loginLimiter, async (req: Request, res: Response) => {
+router.post('/login/mfa', loginLimiter, csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const body = req.body as { method?: string };
     const knex = foundryDb as unknown as Knex;
@@ -449,7 +471,7 @@ router.post('/login/mfa', loginLimiter, async (req: Request, res: Response) => {
 // sync. If the refresh cookie is missing, invalid, or expired the
 // caller gets a clean 401 REFRESH_TOKEN_INVALID envelope and should
 // redirect to /login.
-router.post('/refresh', async (req: Request, res: Response) => {
+router.post('/refresh', csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const refresh = (req.cookies && (req.cookies as Record<string, string>)[TELLUS_REFRESH_COOKIE]) as
       | string
@@ -458,7 +480,17 @@ router.post('/refresh', async (req: Request, res: Response) => {
       throw new AppError('No refresh token cookie', 401, 'REFRESH_TOKEN_MISSING');
     }
     const result = await tellusAuthService.refreshSession(refresh);
-    setSessionCookies(res, result.accessToken, result.refreshToken);
+    // Absolute cap is anchored at the ORIGINAL interactive login (the marker).
+    // Refresh ROTATES the access/refresh tokens but must NOT extend the window
+    // — the cookies' Max-Age is the REMAINING time so they expire exactly when
+    // the marker does. No/invalid marker → cookies expire now (fail-closed).
+    const markerRaw = (req.cookies && (req.cookies as Record<string, string>)[TELLUS_SESSION_EXPIRES_COOKIE]) as
+      | string
+      | undefined;
+    const markerMs = markerRaw ? Number(markerRaw) : NaN;
+    const absoluteExpiryMs =
+      Number.isFinite(markerMs) && markerMs > Date.now() ? markerMs : Date.now();
+    setSessionCookies(res, result.accessToken, result.refreshToken, absoluteExpiryMs);
     res.json({
       success: true,
       data: {
@@ -467,6 +499,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
         sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        sessionExpiresAt: absoluteExpiryMs,
         idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
       },
     });
@@ -479,11 +512,19 @@ router.post('/refresh', async (req: Request, res: Response) => {
 });
 
 // Build the WebAuthn authentication options for an in-flight MFA challenge.
+//
+// Uses peekMfaChallenge() (read-only) — NOT loadMfaChallenge(). Fetching
+// WebAuthn options is a prerequisite to the ceremony, not an auth attempt,
+// so it must not burn one of the 5 brute-force slots on auth_mfa_challenges.
+// Burning a slot here meant every passkey retry AND every dismissed OS
+// prompt (options fetched, ceremony cancelled) ate into MFA_MAX_ATTEMPTS,
+// so a user who dismissed the prompt a few times was wrongly told to
+// "Start over from the sign-in screen" before ever submitting an assertion.
 router.post('/login/mfa/webauthn-options', async (req: Request, res: Response) => {
   try {
     const id = (req.body?.mfaChallenge as string | undefined) || '';
     if (!id) throw new AppError('mfaChallenge required', 400, 'VALIDATION_ERROR');
-    const challenge = await loadMfaChallenge(foundryDb as unknown as Knex, id);
+    const challenge = await peekMfaChallenge(foundryDb as unknown as Knex, id);
     if (!challenge) throw new AppError('MFA challenge expired', 401, 'MFA_CHALLENGE_INVALID');
     const options = await getWebauthnService(
       foundryDb as unknown as Knex,
@@ -616,6 +657,7 @@ router.post('/enroll/passkey/verify', loginLimiter, async (req: Request, res: Re
       res,
       resolved.stashedAccessToken,
       resolved.stashedRefreshToken ?? undefined,
+      Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
     );
 
     let claims: TellusClaims;
@@ -658,6 +700,7 @@ router.post('/enroll/passkey/verify', loginLimiter, async (req: Request, res: Re
         accessToken: resolved.stashedAccessToken,
         tokenInfo: tellusAuthService.toTokenInfo(claims),
         sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        sessionExpiresAt: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
         idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
         credential: {
           credentialId: registerResult.credentialId,
@@ -676,7 +719,7 @@ async function completeMfaLogin(
   req?: Request,
 ) {
   const claims = await tellusAuthService.verifyAccessToken(challenge.accessToken);
-  setSessionCookies(res, challenge.accessToken, challenge.refreshToken ?? undefined);
+  setSessionCookies(res, challenge.accessToken, challenge.refreshToken ?? undefined, Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
   // Re-probe passkey enrollment AFTER the second factor succeeds so the
   // FE soft-prompt decision survives the MFA detour. A user who passed
   // /login with TOTP but has no passkey will still see the soft prompt
@@ -698,6 +741,7 @@ async function completeMfaLogin(
       accessToken: challenge.accessToken,
       tokenInfo: tellusAuthService.toTokenInfo(claims),
       sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+      sessionExpiresAt: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
       idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
       hasPasskey,
       requiresPasskeyEnrollment: !hasPasskey,
@@ -706,7 +750,7 @@ async function completeMfaLogin(
 }
 
 // ----- POST /logout ----------------------------------------------------------
-router.post('/logout', requireTellusAuth({ allowPat: false }), async (req: Request, res: Response) => {
+router.post('/logout', requireTellusAuth({ allowPat: false }), csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const claims = (req as Request & { tellusClaims?: TellusClaims }).tellusClaims;
     const refresh = (req.cookies && req.cookies[TELLUS_REFRESH_COOKIE]) as string | undefined;
@@ -1858,8 +1902,13 @@ router.get(
 const CreateUserSchema = z.object({
   email: z.string().email().max(320),
   username: z.string().min(1).max(255).optional(),
-  firstName: z.string().max(128).optional(),
-  lastName: z.string().max(128).optional(),
+  // firstName/lastName are REQUIRED: the Keycloak realm requires non-blank
+  // names for direct-grant (Keycloak blocks the password grant with
+  // "Account is not fully set up" when either is blank), and fabricating a
+  // placeholder leaks a fake `name` claim into the greeting. The admin UI
+  // form collects both; reject early here so the operator sees the reason.
+  firstName: z.string().min(1).max(128),
+  lastName: z.string().min(1).max(128),
   // The realm's password policy enforces 12+ chars, one upper, one
   // lower, one digit, one symbol — KC will 400 the create call if
   // the password violates that, and we surface the KC error straight

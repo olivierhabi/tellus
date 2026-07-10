@@ -13,21 +13,22 @@
 //   transactionId  — Optional: preview data from a specific transaction
 //
 // Returns raw string values (no type conversion). Column statistics are
-// computed from ALL rows in the dataset: nullCount, uniqueCount (capped
-// at 1000), sampleValues, min/max/avg for numeric/date types.
+// computed over the returned preview SAMPLE (nullCount, uniqueCount capped
+// at 1000, sampleValues, min/max/avg for numeric/date types) — scanning all
+// rows for stats would re-introduce the multi-million-row 504 the streaming
+// read was built to avoid. `totalRows` is the authoritative DB row_count
+// when available (else the parsed/capped count).
 //
 // Merged view uses the same logic as the reindex engine but WITHOUT the
 // edit overlay — datasource data only.
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";
-import fs from "fs";
-import os from "os";
-import path from "path";
 import { query } from "../db";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { readCSV } from "../services/indexing/csvReader";
-import { getObjectBuffer } from "../services/storageService";
+import { getObjectStream } from "../services/storageService";
+import { parseCsvReadable } from "../services/indexing/streamingCsv";
 
 const router = Router({ mergeParams: true });
 
@@ -345,18 +346,31 @@ router.get(
       }
 
       // -----------------------------------------------------------------
-      // Read ALL rows for statistics, but only return first N for preview
+      // Read rows. Both paths are bounded by `rowLimit` so a preview of an
+      // 854 MB / 5.6 M-row backing file streams only the rows it returns.
+      // The old path downloaded the whole S3 object into a Buffer, wrote it
+      // to a temp file, then `readCSV`-collected EVERY row just to slice 50
+      // — which blew the global 5 s request budget and 504'd the preview.
       // -----------------------------------------------------------------
-      // For foundry datasets, the file is in S3 — download to a temp file first
-      let localFilePath = filePath;
-      let tempFile: string | null = null;
+      let columns: string[] = [];
+      let previewRows: Array<Record<string, string>> = [];
+      let totalRows: number | null = null;
 
       if (isFoundryDataset) {
+        // Stream the S3 object straight through csv-parse, stopping after
+        // `rowLimit` data rows (parseCsvReadable tears down the GET on
+        // early stop, so we don't pull the whole 854 MB for a 50-row peek).
         try {
-          const buffer = await getObjectBuffer(filePath);
-          tempFile = path.join(os.tmpdir(), `tellus-preview-${datasetId}-${Date.now()}.csv`);
-          fs.writeFileSync(tempFile, buffer);
-          localFilePath = tempFile;
+          const stream = await getObjectStream(filePath);
+          const { rows } = await parseCsvReadable(stream, {
+            source: filePath,
+            maxRows: rowLimit,
+            normalizeNulls: false,
+          });
+          for await (const row of rows) {
+            if (columns.length === 0) columns = Object.keys(row);
+            previewRows.push(row as Record<string, string>);
+          }
         } catch (s3Err: unknown) {
           const s3Msg = s3Err instanceof Error ? s3Err.message : String(s3Err);
           return sendError(
@@ -365,32 +379,51 @@ router.get(
             `Failed to read dataset file from storage: ${s3Msg}`
           );
         }
+        // `foundry_datasets.row_count` (aliased to total_rows) is the
+        // authoritative count set at scan time — use it instead of scanning
+        // the whole file just to count rows. It's NULL for datasets that
+        // haven't finished parsing (status 'pending'/'error'); fall back to
+        // the streamed sample size so the FE never gets null (which would
+        // crash its `totalRows.toLocaleString()`). `!= null` + Number()
+        // also coerces a future BIGINT-string (row_count_exact) safely.
+        totalRows =
+          dataset.total_rows != null
+            ? Number(dataset.total_rows)
+            : previewRows.length;
+      } else {
+        // Local disk path (committed dataset_transaction or storage_path).
+        // `readCSV`'s maxRows stops after `rowLimit` rows so a large disk
+        // file can't hang the preview either.
+        const csvResult = await readCSV(filePath, { maxRows: rowLimit });
+        if (!csvResult.success) {
+          return sendError(
+            res,
+            "DATASOURCE_FILE_NOT_FOUND",
+            `Failed to read dataset file: ${csvResult.error.message}`
+          );
+        }
+        columns = csvResult.columns;
+        previewRows = csvResult.rows as Array<Record<string, string>>;
+        // Prefer the dataset table's authoritative total_rows when the DB
+        // has it; fall back to csvResult.rowCount, which is the true count
+        // for files that fit in the preview window and capped at rowLimit
+        // for larger ones (readCSV's maxRows stops early). Same null/BigInt
+        // coercion as the foundry branch.
+        totalRows =
+          dataset.total_rows != null
+            ? Number(dataset.total_rows)
+            : csvResult.rowCount;
       }
-
-      const csvResult = await readCSV(localFilePath);
-
-      // Clean up temp file
-      if (tempFile) {
-        try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
-      }
-
-      if (!csvResult.success) {
-        return sendError(
-          res,
-          "DATASOURCE_FILE_NOT_FOUND",
-          `Failed to read dataset file: ${csvResult.error.message}`
-        );
-      }
-
-      const allRows = csvResult.rows;
-      const columns = csvResult.columns;
-      const previewRows = allRows.slice(0, rowLimit);
 
       // -----------------------------------------------------------------
-      // Compute column statistics from ALL rows (not just preview)
+      // Compute column statistics over the returned preview sample. The
+      // legacy path scanned ALL rows for stats; for a multi-million-row
+      // foundry file that is exactly the 504 trigger. Sample-stats are a
+      // deliberate trade — accurate enough for a preview, and the ontology
+      // manager's backing-preview consumer reads only `rows`.
       // -----------------------------------------------------------------
       const columnStats = columns.map((col) =>
-        computeColumnStats(allRows, col)
+        computeColumnStats(previewRows, col)
       );
 
       // -----------------------------------------------------------------
@@ -402,7 +435,7 @@ router.get(
         fileFormat: dataset.file_format || filePath.split('.').pop() || 'csv',
         filePath,
         transactionId: transactionId || null,
-        totalRows: allRows.length,
+        totalRows,
         previewRowCount: previewRows.length,
         requestedRows: rowLimit,
         columns,

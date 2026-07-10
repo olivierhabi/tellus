@@ -22,6 +22,27 @@ let workerInstance: Worker | null = null;
 let temporalClient: Client | null = null;
 
 /**
+ * The canonical Temporal workflow id for an Object Type's long-running
+ * parent workflow: `ObjectTypeFunnelWorkflow-<apiName>`. Single-sourced
+ * here so every call site that starts, cancels, terminates, or reconciles
+ * a workflow derives the SAME id Temporal actually uses.
+ *
+ * NOTE on the `funnel_run.temporal_workflow_id` column: it is NOT this
+ * bare id. `projectStageToPostgres` (activities.ts) deliberately stores a
+ * PER-SAVE id of the form `<bareWorkflowId>:<runKey>` so the
+ * `ON CONFLICT (temporal_workflow_id)` upsert gives each save its own
+ * `funnel_run` row (without the `:runKey` suffix, every save for an OT
+ * would collapse into one row and the UI would lose per-save distinction).
+ * Reconcilers MUST recover the Temporal workflow id from
+ * `object_type_api_name` via THIS helper (the orphan-sweep does exactly
+ * that) — they must NOT assume the stored `temporal_workflow_id` column
+ * equals the Temporal id. See `durableWorkflow.sweepViaTemporalVisibility`.
+ */
+export function funnelWorkflowId(objectTypeApiName: string): string {
+  return `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
+}
+
+/**
  * Is Temporal actually reachable? Return null (not throw) so server
  * startup never hard-fails on a down cluster.
  */
@@ -122,7 +143,7 @@ export async function signalTemporalWorkflow(
   if (!temporalClient) return false;
   try {
     const taskQueue = process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
-    const workflowId = `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
+    const workflowId = funnelWorkflowId(objectTypeApiName);
 
     // Determine conflict policy — prod-safe default `USE_EXISTING` keeps
     // the spec's "one long-running parent workflow per OT" invariant.

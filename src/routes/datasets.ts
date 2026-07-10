@@ -66,7 +66,7 @@ if (!fs.existsSync(TMP_DIR)) {
 import multer from "multer";
 const legacyUpload = multer({
   dest: TMP_DIR,
-  limits: { fileSize: 500 * 1024 * 1024 },
+  limits: { fileSize: 1024 * 1024 * 1024 },
 });
 
 // ---------------------------------------------------------------------------
@@ -382,7 +382,7 @@ router.post(
         return sendError(
           res,
           "VALIDATION_FAILED",
-          "File exceeds the maximum upload size of 500 MB."
+          "File exceeds the maximum upload size of 1 GB."
         );
       }
 

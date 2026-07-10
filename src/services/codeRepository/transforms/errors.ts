@@ -14,10 +14,13 @@ export const TRANSFORM_ERROR_NAMES = [
   "Transform:BuildNotFound",
   "Transform:DatasetNotFound",
   "Transform:BuildFailed",
+  "Transform:RuntimeNotConfigured",
   "Transform:Unauthenticated",
   "Transform:PermissionDenied",
   "Transform:InvalidArgument",
   "Transform:Internal",
+  "Transform:TooManyRetries",
+  "Transform:BuildConflict",
 ] as const;
 export type TransformErrorName = (typeof TRANSFORM_ERROR_NAMES)[number];
 
@@ -33,10 +36,13 @@ const STATUS: Readonly<
   "Transform:BuildNotFound": "NOT_FOUND",
   "Transform:DatasetNotFound": "NOT_FOUND",
   "Transform:BuildFailed": "INTERNAL",
+  "Transform:RuntimeNotConfigured": "UNAVAILABLE",
   "Transform:Unauthenticated": "UNAUTHENTICATED",
   "Transform:PermissionDenied": "PERMISSION_DENIED",
   "Transform:InvalidArgument": "INVALID_ARGUMENT",
   "Transform:Internal": "INTERNAL",
+  "Transform:TooManyRetries": "RESOURCE_EXHAUSTED",
+  "Transform:BuildConflict": "CONFLICT",
 });
 
 const HTTP: Readonly<Record<keyof typeof ERROR_CODES, number>> = Object.freeze({

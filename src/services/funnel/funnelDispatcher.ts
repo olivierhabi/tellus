@@ -24,11 +24,11 @@ import {
   computeChangelog,
   SnapshotDiffReader,
   SourceChangeRow,
-  ChangelogRow,
 } from "./changelogStage";
 import {
   DatasourceContribution,
   EditStrategy,
+  loadChangelogRowsFromSnapshot,
 } from "./mergeStage";
 import {
   createTable,
@@ -317,15 +317,22 @@ async function objectTypeFunnelWorkflow(
   const mergeOut = await ctx.runActivity({
     name: `mergeChanges(${ctx.objectTypeApiName})`,
     stage: "merge",
-    input: { objectTypeApiName: ctx.objectTypeApiName, rowsFromChangelog: changelogOut.rows.length },
+    input: { objectTypeApiName: ctx.objectTypeApiName, rowsFromChangelog: changelogOut.rowsEmitted },
     activity: async () => {
       await sleepForStageDelay();
       const pending = await getPendingMergeEdits(ctx.objectTypeApiName);
+      // PASS-BY-REFERENCE (Option 2): re-read the committed changelog rows
+      // from the snapshot (Parquet object in MinIO via parquet_ref) instead
+      // of using the by-value array — rows never travel through the
+      // activity boundary nor through a jsonb INSERT param at scale.
+      const changelogRows = await loadChangelogRowsFromSnapshot(
+        changelogOut.snapshotId,
+      );
       const contributions: DatasourceContribution[] = [
         {
           datasource_id: zeroUuid(),
-          owned_properties: uniqueProps(changelogOut.rows),
-          changelog_rows: changelogOut.rows,
+          owned_properties: changelogOut.ownedProperties,
+          changelog_rows: changelogRows,
           markings: [],
         },
       ];
@@ -468,12 +475,6 @@ async function ensureFunnelTable(
     schema: {},
     location: `s3://_funnel/${objectTypeApiName}/${kind}/${tableName}`,
   });
-}
-
-function uniqueProps(rows: ChangelogRow[]): string[] {
-  const set = new Set<string>();
-  for (const r of rows) for (const k of Object.keys(r.properties)) set.add(k);
-  return Array.from(set);
 }
 
 interface DatasourceMeta {

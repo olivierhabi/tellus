@@ -11,6 +11,7 @@ import { client, injectSecurityFilter } from "./opensearch/client";
 import { getIndexName } from "./opensearch/indexLifecycleManager";
 import { translateFilter, buildSortClause } from "./queryTranslator";
 import { resolveAllProperties } from "./propertyResolver";
+import { MAX_TERMS_BUCKET_SIZE } from "../utils/constants";
 import {
   createPageToken,
   decodePageToken,
@@ -297,7 +298,7 @@ export function buildAggClause(def: AggregateParams["aggregations"][0]): Record<
       return { max: { field: fieldName } };
     case "terms": {
       const clause: Record<string, unknown> = {
-        terms: { field: `${fieldName}.keyword`, size: def.size || 100 },
+        terms: { field: `${fieldName}.keyword`, size: Math.min(def.size || 100, MAX_TERMS_BUCKET_SIZE) },
       };
       const hasMetric = !!def.metric && def.metric.type !== "count";
       const sub: Record<string, unknown> = {};
@@ -308,7 +309,7 @@ export function buildAggClause(def: AggregateParams["aggregations"][0]): Record<
         const seriesAgg: Record<string, unknown> = {
           terms: {
             field: `${def.groupBy.field}.keyword`,
-            size: def.groupBy.size || 50,
+            size: Math.min(def.groupBy.size || 50, MAX_TERMS_BUCKET_SIZE),
           },
         };
         if (hasMetric) seriesAgg.aggs = { metric: buildMetricClause(def.metric!) };

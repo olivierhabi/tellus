@@ -96,7 +96,10 @@ export type AuditAction =
   | 'link.delete'
   | 'search.execute'
   | 'action.execute'
-  | 'action.validate';
+  | 'action.validate'
+  // P0 build/materialize-path dataset access (deny + check-error outcomes).
+  | 'transform.dataset.read'
+  | 'transform.dataset.write';
 
 export interface EmitAuditOpts {
   keycloakSub: string;

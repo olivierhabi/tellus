@@ -14,7 +14,7 @@ import { idempotencyMiddleware } from "../../codeRepos/middleware/idempotency.js
 import { templatesError, type TemplatesError } from "../errors.js";
 import {
   getTemplateManifest,
-  listTemplateManifests,
+  listLatestTemplateManifests,
   type TemplateManifest,
 } from "../manifest.js";
 import { scaffold, type ScaffoldResult } from "../scaffold.js";
@@ -133,7 +133,10 @@ export function createTemplatesRouter(deps: TemplatesRouterDeps): Router {
       });
       const cacheKey = new Set(cacheRows.map((r) => `${r.templateId}@${r.version}`));
       // Cross-reference with manifest catalog to surface anything not yet hydrated.
-      const all = listTemplateManifests().filter((m) => {
+      // listLatestTemplateManifests dedupes to the newest version per templateId
+      // (Foundry-faithful: "bootstrapped with the latest version") so the picker
+      // shows one row per template — required once transforms-python ships 2.0.0.
+      const all = listLatestTemplateManifests().filter((m) => {
         if (category === "functions" && m.category !== "functions") return false;
         if (category === "transforms" && m.category !== "transforms") return false;
         return true;

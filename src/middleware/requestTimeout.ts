@@ -37,11 +37,21 @@ const EXEMPT_PATHS = [
 export interface RequestTimeoutOptions {
   timeoutMs?: number;
   exemptPaths?: string[];
+  /**
+   * Predicate identifying requests that need a longer wall-clock budget than
+   * the default data-plane limit — e.g. multipart file uploads, whose duration
+   * scales with file size and network throughput rather than handler work.
+   * Matched requests get `extendedTimeoutMs` instead of `timeoutMs`; everything
+   * else stays on the tight data-plane budget.
+   */
+  extendedBudgetFor?: (req: Request) => boolean;
+  extendedTimeoutMs?: number;
 }
 
 /** Attach `req.timeoutSignal: AbortSignal` and arm a 504 on expiry. */
 export function requestTimeoutMiddleware(opts: RequestTimeoutOptions = {}) {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const extendedTimeoutMs = opts.extendedTimeoutMs ?? timeoutMs;
   const exemptSet = new Set([...EXEMPT_PATHS, ...(opts.exemptPaths ?? [])]);
 
   return function requestTimeoutMw(req: Request, res: Response, next: NextFunction) {
@@ -56,6 +66,13 @@ export function requestTimeoutMiddleware(opts: RequestTimeoutOptions = {}) {
       }
     }
 
+    // Multipart uploads (POST .../upload and the .../transactions append
+    // route) move bytes — their wall-clock duration is dominated by file size
+    // and client throughput, not handler work, so the 5s data-plane budget
+    // would 504 a legitimate large upload mid-stream. Give those requests the
+    // extended budget; reads and other writes stay on the tight limit.
+    const budget = opts.extendedBudgetFor?.(req) ? extendedTimeoutMs : timeoutMs;
+
     const controller = new AbortController();
     (req as unknown as { timeoutSignal: AbortSignal }).timeoutSignal = controller.signal;
 
@@ -69,12 +86,12 @@ export function requestTimeoutMiddleware(opts: RequestTimeoutOptions = {}) {
       res.status(504).json({
         errorCode: "REQUEST_TIMEOUT",
         errorName: "RequestTimeout",
-        message: `Request exceeded ${timeoutMs}ms budget`,
+        message: `Request exceeded ${budget}ms budget`,
         statusCode: 504,
         retryHint: "narrower_filter",
         requestId: (req as any).requestId,
       });
-    }, timeoutMs);
+    }, budget);
 
     const clear = () => {
       clearTimeout(timer);

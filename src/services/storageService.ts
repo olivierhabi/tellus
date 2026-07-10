@@ -245,14 +245,28 @@ export function buildObjectKey(
 }
 
 /**
- * Upload a file buffer to object storage.
- * Uses multipart upload for large files (> 5MB) automatically via @aws-sdk/lib-storage.
+ * Upload a file to object storage, streaming the body to S3 via multipart
+ * upload (@aws-sdk/lib-storage).
+ *
+ * Accepts either an in-memory `Buffer` (small files) or a `Readable` stream
+ * (large files staged on disk) so a multi-GB upload never has to be resident
+ * in the API process's heap: the SDK reads the stream in `partSize` chunks and
+ * uploads each part independently, retrying transient failures. This is the
+ * single chokepoint that keeps foundry/dataset uploads off the memory-storage
+ * OOM path — see `foundryMulter.ts` (diskStorage) + `foundryUploadService.ts`
+ * (streams `file.path` here) + `uploadService.configureMulter` (diskStorage).
+ *
+ * Pass `contentLength` when streaming so the returned `size` is accurate; a
+ * stream's length isn't known up front. For a `Buffer` it defaults to
+ * `body.length`.
  */
 export async function uploadObject(
   key: string,
-  body: Buffer,
+  body: Buffer | Readable,
   contentType: string,
-  metadata?: Record<string, string>
+  metadata?: Record<string, string>,
+  contentLength?: number,
+  onProgress?: (loaded: number, total: number) => void,
 ): Promise<{ key: string; bucket: string; size: number }> {
   const config = getConfig();
   const client = getClient();
@@ -266,14 +280,32 @@ export async function uploadObject(
       ContentType: contentType,
       Metadata: metadata,
     },
-    // Multipart threshold: 5 MB (files larger than this are split)
+    // Multipart threshold: 5 MB (files larger than this are split).
     partSize: 5 * 1024 * 1024,
     queueSize: 4,
   });
 
+  // lib-storage's Upload is an EventEmitter; it emits `httpUploadProgress` with
+  // { loaded, total, part, Key, Bucket } as each part streams to S3. Surfacing
+  // it via onProgress lets callers (foundryUploadService) report real
+  // server→S3 progress to the client. total is accurate here because the body
+  // is a fs.ReadStream of a staged file of known size.
+  if (onProgress) {
+    upload.on('httpUploadProgress', (p: { loaded?: number; total?: number }) => {
+      onProgress(p.loaded ?? 0, p.total ?? 0);
+    });
+  }
+
   await upload.done();
 
-  return { key, bucket: config.bucket, size: body.length };
+  const size =
+    typeof contentLength === 'number'
+      ? contentLength
+      : Buffer.isBuffer(body)
+        ? body.length
+        : 0;
+
+  return { key, bucket: config.bucket, size };
 }
 
 /**

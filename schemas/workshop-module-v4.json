@@ -221,7 +221,31 @@
             "collapsible": { "type": "boolean" },
             "initiallyCollapsed": { "type": "boolean" },
             "collapsedIcon": { "type": "string" },
-            "expandedIcon": { "type": "string" }
+            "expandedIcon": { "type": "string" },
+            "description": { "type": ["string", "null"], "maxLength": 2000 },
+            "style": { "type": "string", "enum": ["default", "subheader"] },
+            "bold": { "type": "boolean" },
+            "align": { "type": "string", "enum": ["left", "distribute"] },
+            "titleVariableId": { "$ref": "#/$defs/variableId" },
+            "visibilityVariableId": { "$ref": "#/$defs/variableId" },
+            "collapsedVariableId": { "$ref": "#/$defs/variableId" },
+            "textMaxWidth": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "value": { "type": "number", "minimum": 0 },
+                "unit": { "type": "string", "enum": ["percent", "px"] }
+              }
+            },
+            "customHeight": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "value": { "type": "number", "minimum": 0 }
+              }
+            }
           }
         },
         "sizing": {
@@ -267,6 +291,14 @@
             "embeddedModuleRid": { "type": "string" },
             "interfaceMapping": { "type": "object" },
             "iterationVariableId": { "$ref": "#/$defs/variableId" }
+          }
+        },
+        "innerSectionStyle": { "type": "string" },
+        "tabs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "selectedTabVariableId": { "$ref": "#/$defs/variableId" }
           }
         },
         "children": {

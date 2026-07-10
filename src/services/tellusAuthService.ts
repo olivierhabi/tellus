@@ -38,6 +38,17 @@ export interface TellusClaims {
   org: string;
   email?: string;
   preferred_username?: string;
+  /**
+   * Human-readable full name, built by Keycloak from the user's
+   * firstName + lastName via the default `profile` client scope.
+   * Optional because PAT principals and tokens minted by realms
+   * without the profile mapper omit it.
+   */
+  name?: string;
+  /** Keycloak given_name (firstName). See `name`. */
+  given_name?: string;
+  /** Keycloak family_name (lastName). See `name`. */
+  family_name?: string;
   realm_access?: { roles: string[] };
   resource_access?: Record<string, { roles: string[] }>;
   iss: string;
@@ -259,6 +270,13 @@ export class TellusAuthService {
       org: c.org ?? c.azp ?? this.config.kcRealm,
       email: c.email,
       preferredUsername: c.preferred_username,
+      // Surface the Keycloak profile claims so the FE can greet the
+      // user by name rather than by email-shaped preferred_username.
+      // All optional — absent for PAT principals / realms without the
+      // profile mapper; the FE falls back gracefully (see tokenInfoToUser).
+      name: c.name,
+      givenName: c.given_name,
+      familyName: c.family_name,
       realmRoles: c.realm_access?.roles ?? [],
       markings: [] as string[], // Task 6 — stubbed until CBAC ships
       orgs: [c.org ?? this.config.kcRealm],

@@ -272,6 +272,26 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 412,
     errorCode: ERROR_CODES.FAILED_PRECONDITION,
   },
+  // -------------------------------------------------------------------------
+  // Uncommitted drafts (104). Per-user, per-branch, pre-commit file drafts
+  // (the Code Assistant propose_file flow + Monaco dirty buffers), persisted
+  // backend-side so they survive across browsers — but NOT a git commit.
+  //
+  // DraftTooLarge — a single draft's content (or base_content snapshot)
+  // exceeds the per-file 5 MiB cap. 413 RESOURCE_EXHAUSTED so the client can
+  // tell "your file is too big" apart from a shape error.
+  //
+  // DraftLimitExceeded — a single PUT carries more than MAX_DRAFTS entries.
+  // 400 — the request is shape-valid but semantically over the limit.
+  // -------------------------------------------------------------------------
+  "CodeRepos:DraftTooLarge": {
+    status: 413,
+    errorCode: ERROR_CODES.RESOURCE_EXHAUSTED,
+  },
+  "CodeRepos:DraftLimitExceeded": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
 });
 
 export type CodeReposErrorName = keyof typeof CODE_REPOS_ERROR_STATUS;

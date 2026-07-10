@@ -1,12 +1,18 @@
 // ===========================================================================
 // Transform discovery — parses committed Python source for @transform /
-// @transform_df / @transform_pandas / @incremental decorators and extracts the
-// input->output dataset contract. This is the first link of the build loop
-// (closes the FN_RE ".ts-only" discovery gap from the parity review).
+// @transform_df / @transform_pandas / @incremental / @configure decorators and
+// extracts the input->output dataset contract. This is the first link of the
+// build loop.
 //
-// The parser is decorator-aware and balances parentheses across lines so it
-// correctly reads multi-line decorators with nested Output(...)/Input(...).
+// Parser: PRIMARY is a real Python `ast.parse` (via the transforms runtime
+// python), which correctly handles multi-line decorators, aliased imports,
+// f-string RIDs, and nested defs — the line-scanner missed the first three.
+// The line-scanner is kept as a FALLBACK (if python3 is unavailable, e.g. a
+// unit test without the runtime).
 // ===========================================================================
+
+import { spawnSync } from "child_process";
+import { resolveTransformPython, resolveJavaHome } from "./runtimeConfig.js";
 
 export type TransformKind = "transform" | "transform_df" | "transform_pandas";
 
@@ -28,6 +34,8 @@ export interface DiscoveredTransform {
   readonly inputs: readonly DiscoveredInput[];
   /** True when an @incremental decorator is present. */
   readonly incremental: boolean;
+  /** Resource profile names from @configure(profile=[...]), or null. */
+  readonly profile: string[] | null;
 }
 
 export interface DiscoveryError {
@@ -99,8 +107,62 @@ interface DefWithDecorators {
   readonly line: number;
 }
 
-/** Walk a module, returning every `def` together with its attached decorators. */
+/** Python AST script: parse the module (read from stdin), return each top-level
+ * FunctionDef + its decorator source segments (the text after `@`). ast.parse
+ * handles multi-line decorators, f-strings, and aliased imports that the
+ * line-scanner missed. */
+const AST_PARSE_SCRIPT = `import ast, json, sys
+src = sys.stdin.read()
+out = []
+try:
+    tree = ast.parse(src)
+except SyntaxError as e:
+    print(json.dumps({"error": str(e)})); sys.exit(0)
+for node in tree.body:
+    if not isinstance(node, ast.FunctionDef):
+        continue
+    decos = []
+    for d in node.decorator_list:
+        seg = ast.get_source_segment(src, d)
+        if seg is not None:
+            decos.append(seg)
+    if decos:
+        out.append({"fn": node.name, "line": node.lineno, "decorators": decos})
+print(json.dumps(out))
+`;
+
+/** Walk a module, returning every `def` together with its attached decorators.
+ * PRIMARY: real Python `ast.parse` (handles multi-line decorators, f-strings,
+ * aliased imports). FALLBACK: the line-scanner (if python3 is unavailable). */
 function scanModule(source: string): DefWithDecorators[] {
+  try {
+    const py = resolveTransformPython();
+    const r = spawnSync(py, ["-c", AST_PARSE_SCRIPT], {
+      input: source,
+      encoding: "utf8",
+      env: { ...process.env, JAVA_HOME: resolveJavaHome() ?? "" },
+      timeout: 15_000,
+    });
+    if (r.status === 0 && r.stdout) {
+      const parsed = JSON.parse(r.stdout.trim());
+      if (Array.isArray(parsed)) {
+        return parsed.map((d: { fn: string; line: number; decorators: string[] }) => ({
+          fn: d.fn,
+          line: d.line,
+          decorators: d.decorators.map((t) => parseDecorator(t)),
+        }));
+      }
+    }
+  } catch {
+    /* fall through to the line-scanner */
+  }
+  return scanModuleLineScan(source);
+}
+
+/** Fallback line-scanner (used if the AST parse is unavailable). Decorator-
+ * aware, paren-balanced for multi-line decorators — but misses f-string RIDs,
+ * aliased imports, and same-line def+decorator. */
+function scanModuleLineScan(source: string): DefWithDecorators[] {
   const lines = source.split(/\r?\n/);
   const out: DefWithDecorators[] = [];
   let pending: RawDecorator[] = [];
@@ -167,6 +229,21 @@ function extractInputs(args: string): DiscoveredInput[] {
   return inputs;
 }
 
+/** Extract the profile=[...] list from a @configure decorator's args. Returns
+ * null when no profile kwarg is present. Handles "..." and '...' quoted names. */
+export function extractProfile(args: string): string[] | null {
+  const m = /profile\s*=\s*\[([^\]]*)\]/.exec(args);
+  if (!m) return null;
+  const list = m[1];
+  const names: string[] = [];
+  const re = /["']([^"']+)["']/g;
+  let mm: RegExpExecArray | null;
+  while ((mm = re.exec(list)) !== null) {
+    names.push(mm[1]);
+  }
+  return names.length > 0 ? names : null;
+}
+
 function looksLikeRid(rid: string): boolean {
   // Reject unsubstituted template placeholders and obvious non-RIDs.
   if (rid.includes("{{") || rid.includes("}}")) return false;
@@ -199,6 +276,8 @@ export function discoverTransforms(
       if (!kindDec) continue;
 
       const incremental = def.decorators.some((d) => d.name === "incremental");
+      const configureDec = def.decorators.find((d) => d.name === "configure");
+      const profile = configureDec ? extractProfile(configureDec.args) : null;
       const outputRid = extractOutputRid(kindDec.args);
       const inputs = extractInputs(kindDec.args);
 
@@ -241,6 +320,7 @@ export function discoverTransforms(
         outputRid,
         inputs,
         incremental,
+        profile,
       });
     }
   }

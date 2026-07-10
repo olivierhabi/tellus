@@ -17,15 +17,16 @@ import {
   computeChangelog,
   SnapshotDiffReader,
   SourceChangeRow,
-  ChangelogRow,
 } from "../changelogStage";
-import { DatasourceContribution } from "../mergeStage";
 import {
   duckdbIcebergDiffReader,
   isDuckDBAvailable,
-  mergeChangesMaybeDuckDB,
 } from "../duckdbIceberg";
-import { createTable, funnelNamespace, getTable } from "../icebergCatalog";
+import { createTable, funnelNamespace, getTable, ManifestEntry } from "../icebergCatalog";
+import {
+  mergeChangesFromSnapshots,
+  loadMergedRowsFromSnapshot,
+} from "../mergeStage";
 import {
   getPendingMergeEdits,
   getPendingIndexEdits,
@@ -120,7 +121,15 @@ export interface ObjectTypeCtx {
 
 export async function runChangelogActivity(
   input: ObjectTypeCtx
-): Promise<{ snapshotId: string; rowsEmitted: number; rows: ChangelogRow[] }> {
+): Promise<{
+  snapshotId: string;
+  rowsEmitted: number;
+  manifest: ManifestEntry[];
+  /** Property names the Merge stage must overlay for this datasource
+   *  (column-wise MDO). Carried in the small activity return instead of
+   *  the full row array so the Temporal completion payload stays bounded. */
+  ownedProperties: string[];
+}> {
   return withStageInstrumentation("changelog", input.objectTypeApiName, async () =>
     runChangelogActivityImpl(input)
   );
@@ -128,7 +137,12 @@ export async function runChangelogActivity(
 
 async function runChangelogActivityImpl(
   input: ObjectTypeCtx
-): Promise<{ snapshotId: string; rowsEmitted: number; rows: ChangelogRow[] }> {
+): Promise<{
+  snapshotId: string;
+  rowsEmitted: number;
+  manifest: ManifestEntry[];
+  ownedProperties: string[];
+}> {
   // Optional dev/demo pacing — no-op in production (env default 0).
   await sleepForStageDelay();
   const table = await ensureTable(input.objectTypeApiName, "changelog", "default");
@@ -185,7 +199,22 @@ async function runChangelogActivityImpl(
     },
     reader
   );
-  return { snapshotId: result.snapshotId, rowsEmitted: result.rowsEmitted, rows: result.rows };
+  // PASS-BY-REFERENCE (Option 2): the emitted rows are persisted as a
+  // Parquet object in MinIO; the committed snapshot's `summary_json`
+  // carries only a small `parquet_ref` (computeChangelog does the write).
+  // Downstream re-reads via `loadChangelogRowsFromSnapshot(snapshotId)`.
+  // We do NOT return the row array here — a ~42 MB Temporal completion
+  // payload exceeds the activity-result limit (the original 83k "stuck at
+  // changelog" symptom), and inlining rows into `summary_json` jsonb
+  // crashed the Postgres backend at ~573 MB for 1M rows (the 1M incident).
+  // `ownedProperties` is the small property-name set the Merge stage needs
+  // for column-wise MDO; `computeChangelog` collects it during the stream.
+  return {
+    snapshotId: result.snapshotId,
+    rowsEmitted: result.rowsEmitted,
+    manifest: result.manifest,
+    ownedProperties: result.ownedProperties,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,19 +222,25 @@ async function runChangelogActivityImpl(
 // ---------------------------------------------------------------------------
 
 export async function runMergeActivity(
-  input: ObjectTypeCtx & { changelogRows: ChangelogRow[] }
+  input: ObjectTypeCtx & {
+    /** PASS-BY-REFERENCE: the changelog snapshot id (not the row array).
+     *  The Merge stage re-reads the committed rows from
+     *  `funnel_snapshot.summary_json.inline_rows` via
+     *  `mergeChangesFromSnapshots` so they never cross the Temporal
+     *  activity-boundary payload limit. */
+    changelogSnapshotId: string;
+    changelogOwnedProperties: string[];
+  }
 ): Promise<{
-  snapshotId: string;
+  mergedSnapshotId: string;
   upserts: number;
   deletes: number;
   editIds: string[];
-  mergedRows: Array<{
-    primary_key: string;
-    properties: Record<string, unknown>;
-    markings: string[];
-    operation: "upsert" | "delete";
-    source_transaction_id: string | null;
-  }>;
+  /** Count of merged rows (upserts + deletes). Carried instead of the
+   *  full `mergedRows` array — the Indexing stage re-reads merged rows
+   *  from the merged snapshot by `mergedSnapshotId` only when Quickwit
+   *  is reachable. */
+  mergedRowCount: number;
 }> {
   return withStageInstrumentation("merge", input.objectTypeApiName, async () =>
     runMergeActivityImpl(input)
@@ -213,52 +248,48 @@ export async function runMergeActivity(
 }
 
 async function runMergeActivityImpl(
-  input: ObjectTypeCtx & { changelogRows: ChangelogRow[] }
+  input: ObjectTypeCtx & {
+    changelogSnapshotId: string;
+    changelogOwnedProperties: string[];
+  }
 ): Promise<{
-  snapshotId: string;
+  mergedSnapshotId: string;
   upserts: number;
   deletes: number;
   editIds: string[];
-  mergedRows: Array<{
-    primary_key: string;
-    properties: Record<string, unknown>;
-    markings: string[];
-    operation: "upsert" | "delete";
-    source_transaction_id: string | null;
-  }>;
+  mergedRowCount: number;
 }> {
   await sleepForStageDelay();
   const mergedTable = await ensureTable(input.objectTypeApiName, "merged", "state");
   const pending = await getPendingMergeEdits(input.objectTypeApiName);
-  const contributions: DatasourceContribution[] = [
-    {
-      datasource_id: ZERO_UUID,
-      owned_properties: uniqueProps(input.changelogRows),
-      changelog_rows: input.changelogRows,
-      markings: [],
-    },
-  ];
-  const out = await mergeChangesMaybeDuckDB({
+  // PASS-BY-REFERENCE: `mergeChangesFromSnapshots` re-reads the changelog
+  // rows for `changelogSnapshotId` from the committed snapshot
+  // (`summary_json.inline_rows`) — they do NOT arrive by value through a
+  // Temporal activity return. The merged result rows are themselves
+  // persisted as `inline_rows` on the freshly-committed merged snapshot
+  // (see mergeStage.mergeChanges), so the Indexing stage can re-read them
+  // by `mergedSnapshotId` without a by-value hop.
+  const out = await mergeChangesFromSnapshots({
     ontologyId: input.ontologyId,
     objectTypeApiName: input.objectTypeApiName,
-    contributions,
-    pendingEdits: pending,
+    changelogSnapshots: [
+      {
+        datasource_id: ZERO_UUID,
+        snapshot_id: input.changelogSnapshotId,
+        owned_properties: input.changelogOwnedProperties,
+      },
+    ],
+    editsBatch: pending,
     editStrategy: "user_edit_wins",
     mergedTableId: mergedTable.dataset_table_id,
     mergedOutputFileLocation: `${mergedTable.location}/data/${new Date().toISOString()}.parquet`,
   });
   return {
-    snapshotId: out.snapshotId,
+    mergedSnapshotId: out.snapshotId,
     upserts: out.upserts,
     deletes: out.deletes,
     editIds: pending.map((e) => e.edit_id),
-    mergedRows: out.mergedRows.map((r) => ({
-      primary_key: r.primary_key,
-      properties: r.properties,
-      markings: r.markings,
-      operation: r.operation,
-      source_transaction_id: r.source_transaction_id ?? null,
-    })),
+    mergedRowCount: out.mergedRows.length,
   };
 }
 
@@ -268,14 +299,12 @@ async function runMergeActivityImpl(
 
 export async function runIndexingActivityProxy(
   input: ObjectTypeCtx & {
-    mergedRows: Array<{
-      primary_key: string;
-      properties: Record<string, unknown>;
-      markings: string[];
-      operation: "upsert" | "delete";
-      source_transaction_id: string | null;
-    }>;
-    editIds: string[];
+    /** PASS-BY-REFERENCE: the merged snapshot id (not the row array).
+     *  Merged rows are re-read from `funnel_snapshot.summary_json.inline_rows`
+     *  via `loadMergedRowsFromSnapshot` ONLY when Quickwit is reachable
+     *  — they never cross the Temporal activity-boundary payload limit. */
+    mergedSnapshotId: string;
+    mergedRowCount: number;
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
   return withStageInstrumentation("indexing", input.objectTypeApiName, async () =>
@@ -285,14 +314,8 @@ export async function runIndexingActivityProxy(
 
 async function runIndexingActivityProxyImpl(
   input: ObjectTypeCtx & {
-    mergedRows: Array<{
-      primary_key: string;
-      properties: Record<string, unknown>;
-      markings: string[];
-      operation: "upsert" | "delete";
-      source_transaction_id: string | null;
-    }>;
-    editIds: string[];
+    mergedSnapshotId: string;
+    mergedRowCount: number;
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
   await sleepForStageDelay();
@@ -300,14 +323,23 @@ async function runIndexingActivityProxyImpl(
   const editIds = pending.map((e) => e.edit_id);
 
   const reachable = await isQuickwitReachable();
-  if (!reachable || input.mergedRows.length === 0) {
+  // Quickwit unreachable (the dev default) OR nothing to index → mark the
+  // pending edits applied and return. Crucially we do NOT re-read the
+  // merged rows here: the count alone is enough, so the (potentially
+  // large) merged snapshot is never touched on this path.
+  if (!reachable || input.mergedRowCount === 0) {
     await markEditsAppliedToIndex(editIds);
     return { editsIndexed: editIds.length, publishedSplitIds: [], quickwit: false };
   }
 
   try {
     await ensureIndex({ objectTypeApiName: input.objectTypeApiName });
-    const mergedRows: MergedRow[] = input.mergedRows.map((r, i) => ({
+    // PASS-BY-REFERENCE: re-read the merged rows from the committed
+    // merged snapshot by id (NOT from a Temporal activity return value).
+    // This only runs when Quickwit is actually reachable; on the dev
+    // (Quickwit-down) path the early-return above avoids the re-read.
+    const mergedRowsSource = await loadMergedRowsFromSnapshot(input.mergedSnapshotId);
+    const mergedRows: MergedRow[] = mergedRowsSource.map((r, i) => ({
       primary_key: r.primary_key,
       properties: r.properties,
       operation: r.operation === "delete" ? "DELETE" : "UPDATE",
@@ -417,6 +449,16 @@ export async function projectStageToPostgres(input: {
     } catch {
       baseWorkflowId = `non-temporal-${objectTypeApiName}`;
     }
+    // NOTE: the value stored in funnel_run.temporal_workflow_id is a
+    // PER-SAVE UPSERT key (`<bareWorkflowId>:<runKey>`), NOT the Temporal
+    // workflow id. The `:runKey` suffix is load-bearing: without it, the
+    // `ON CONFLICT (temporal_workflow_id)` upsert collapses every save
+    // for an Object Type into a single funnel_run row and the UI loses
+    // per-save distinction. The actual Temporal workflow id is the bare
+    // `baseWorkflowId` (== funnelWorkflowId(objectTypeApiName) — see
+    // temporal/worker.ts); reconcilers recover it from
+    // object_type_api_name, NOT from this stored column. (See the
+    // PASS-BY-REFERENCE notes + durableWorkflow.sweepViaTemporalVisibility.)
     const workflowId = runKey ? `${baseWorkflowId}:${runKey}` : baseWorkflowId;
 
     if (currentStage === null) {
@@ -509,12 +551,6 @@ async function ensureTable(
     schema: {},
     location: `s3://_funnel/${objectTypeApiName}/${kind}/${tableName}`,
   });
-}
-
-function uniqueProps(rows: ChangelogRow[]): string[] {
-  const set = new Set<string>();
-  for (const r of rows) for (const k of Object.keys(r.properties)) set.add(k);
-  return Array.from(set);
 }
 
 async function loadIcebergSource(

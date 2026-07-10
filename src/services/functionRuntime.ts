@@ -23,6 +23,14 @@ export interface SandboxResult {
   status: "ok" | "error" | "timeout";
   errorMessage?: string;
   logs: string[];
+  /**
+   * Set when the function returned a Promise (async). `vm.runInContext` is
+   * synchronous and cannot await it, so the sandbox hands the pending Promise
+   * to the caller (the worker, or the sync fallback) which resolves it under
+   * the timeout via `awaitSandboxPromise`. Always undefined once settled / on
+   * the wire (Promises can't cross postMessage).
+   */
+  pendingPromise?: Promise<unknown>;
 }
 
 /**
@@ -258,12 +266,55 @@ export function runSandboxedWithSdk(
 
   const out = context.__result;
   if (out && typeof (out as { then?: unknown }).then === "function") {
+    // Foundry Functions v2 are async (Promise<T>). vm.runInContext is sync and
+    // can't await — hand the pending Promise to the caller via `pendingPromise`;
+    // the worker / sync fallback resolves it under the timeout (awaitSandboxPromise).
     return {
-      output: null, durationMs: Date.now() - start, status: "error", logs,
-      errorMessage: "Async functions are not supported in the sandbox runtime.",
+      output: undefined,
+      pendingPromise: out as Promise<unknown>,
+      durationMs: Date.now() - start,
+      status: "ok",
+      logs,
     };
   }
   return { output: out, durationMs: Date.now() - start, status: "ok", logs };
+}
+
+/**
+ * Resolve a Promise returned by an async sandbox function, with a hard timeout.
+ * `vm` can't time a Promise, so the consumer (worker / sync fallback) calls this
+ * after `runSandboxedWithSdk` returns a `pendingPromise`. Always resolves (never
+ * rejects) to { output, status, errorMessage? }: ok / error (rejection) / timeout.
+ */
+export async function awaitSandboxPromise(
+  p: Promise<unknown>,
+  timeoutMs: number = FUNCTION_TIMEOUT_MS,
+): Promise<{
+  output: unknown;
+  status: "ok" | "error" | "timeout";
+  errorMessage?: string;
+}> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Function exceeded the ${timeoutMs}ms budget.`)),
+      timeoutMs,
+    );
+  });
+  try {
+    const output = await Promise.race([p, timeout]);
+    return { output, status: "ok" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = msg.includes("exceeded the");
+    return {
+      output: undefined,
+      status: isTimeout ? "timeout" : "error",
+      errorMessage: msg,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function stringify(v: unknown): string {

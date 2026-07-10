@@ -446,27 +446,32 @@ export class KeycloakAdminService {
   async createUser(body: {
     username: string;
     email: string;
-    firstName?: string;
-    lastName?: string;
+    firstName: string;
+    lastName: string;
     password: string;
     enabled?: boolean;
     emailVerified?: boolean;
   }): Promise<string> {
-    // The tellus realm has KC's `Verify Profile` authenticator
-    // enabled, which inspects `firstName` + `lastName` at token
-    // time and short-circuits direct-grant with "Account is not
-    // fully set up" when either is blank. The operator creating a
-    // user through /admin/users may not know to supply both, so we
-    // default them from the email local-part. These are just
-    // placeholders the user can edit from /settings/profile after
-    // enrolling a passkey on first login.
-    const localPart = body.email.split('@')[0] || body.username;
-    const defaultedFirst =
-      body.firstName && body.firstName.trim().length > 0
-        ? body.firstName
-        : localPart;
-    const defaultedLast =
-      body.lastName && body.lastName.trim().length > 0 ? body.lastName : 'User';
+    // The tellus realm requires non-blank firstName + lastName for
+    // direct-grant: Keycloak short-circuits the password grant with
+    // `Account is not fully set up` when either is blank (the realm's
+    // user-profile config marks both required). We therefore REQUIRE
+    // the caller to supply real names rather than fabricate a
+    // misleading placeholder — the old default of `<email-local-part>`
+    // / `User` leaked into the JWT `name` claim and rendered as
+    // "foo User" in the greeting. Callers without a known real name
+    // (e.g. the superadmin bootstrap) pass a role-default the operator
+    // personalizes via /settings/profile. Validate BEFORE the KC POST
+    // so a missing name fails fast with no partial user created.
+    const first = body.firstName?.trim();
+    const last = body.lastName?.trim();
+    if (!first || !last) {
+      throw new AppError(
+        'firstName and lastName are required (the Keycloak realm requires both for direct-grant login)',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
 
     // Step 1 — create the user without a credential. We deliberately
     // do NOT pass `credentials` inline here: Keycloak's REST endpoint
@@ -479,8 +484,8 @@ export class KeycloakAdminService {
       body: {
         username: body.username,
         email: body.email,
-        firstName: defaultedFirst,
-        lastName: defaultedLast,
+        firstName: first,
+        lastName: last,
         enabled: body.enabled ?? true,
         emailVerified: body.emailVerified ?? true,
         // Explicitly clear default required-actions. Without this,
