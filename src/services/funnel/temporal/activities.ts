@@ -267,12 +267,16 @@ async function runChangelogActivityImpl(
 export async function runMergeActivity(
   input: ObjectTypeCtx & {
     /** PASS-BY-REFERENCE: the changelog snapshot id (not the row array).
-     *  The Merge stage re-reads the committed rows from
-     *  `funnel_snapshot.summary_json.inline_rows` via
-     *  `mergeChangesFromSnapshots` so they never cross the Temporal
-     *  activity-boundary payload limit. */
+     *  The Merge stage re-resolves the snapshot's `parquet_ref` (NOT a row
+     *  load) via `mergeChangesFromSnapshots` → `mergeChangesSQL` so the
+     *  rows never cross the Temporal activity-boundary payload limit. */
     changelogSnapshotId: string;
     changelogOwnedProperties: string[];
+    /** The driving signal's id — threads through to `mergeChangesSQL` as
+     *  the Redis checkpoint key (`merge:progress:<runKey>`). Lets a retry
+     *  that crashed AFTER the PG COMMIT skip the re-upsert of the merged
+     *  tail (the committed rows are already in object_instances). */
+    runKey?: string;
   }
 ): Promise<{
   mergedSnapshotId: string;
@@ -280,9 +284,10 @@ export async function runMergeActivity(
   deletes: number;
   editIds: string[];
   /** Count of merged rows (upserts + deletes). Carried instead of the
-   *  full `mergedRows` array — the Indexing stage re-reads merged rows
-   *  from the merged snapshot by `mergedSnapshotId` only when Quickwit
-   *  is reachable. */
+   *  full `mergedRows` array — the SQL merge path does NOT materialise
+   *  mergedRows (they live in the merged parquet_ref); the Indexing stage
+   *  re-reads them from the merged snapshot by `mergedSnapshotId` only
+   *  when Quickwit is reachable. */
   mergedRowCount: number;
 }> {
   return withStageInstrumentation("merge", input.objectTypeApiName, async () =>
@@ -294,6 +299,7 @@ async function runMergeActivityImpl(
   input: ObjectTypeCtx & {
     changelogSnapshotId: string;
     changelogOwnedProperties: string[];
+    runKey?: string;
   }
 ): Promise<{
   mergedSnapshotId: string;
@@ -305,13 +311,13 @@ async function runMergeActivityImpl(
   await sleepForStageDelay();
   const mergedTable = await ensureTable(input.objectTypeApiName, "merged", "state");
   const pending = await getPendingMergeEdits(input.objectTypeApiName);
-  // PASS-BY-REFERENCE: `mergeChangesFromSnapshots` re-reads the changelog
-  // rows for `changelogSnapshotId` from the committed snapshot
-  // (`summary_json.inline_rows`) — they do NOT arrive by value through a
-  // Temporal activity return. The merged result rows are themselves
-  // persisted as `inline_rows` on the freshly-committed merged snapshot
-  // (see mergeStage.mergeChanges), so the Indexing stage can re-read them
-  // by `mergedSnapshotId` without a by-value hop.
+  // PASS-BY-REFERENCE: `mergeChangesFromSnapshots` resolves the changelog
+  // snapshot's `parquet_ref` (a small PG read — NOT the full row array that
+  // was the OO7 wall) and delegates to `mergeChangesSQL` (DuckDB SQL k-way
+  // merge + COPY to parquet + stream to batched PG upserts/deletes). The
+  // merged result rows are persisted as a parquet object on the freshly-
+  // committed merged snapshot, so the Indexing stage re-reads them by
+  // `mergedSnapshotId` without a by-value hop.
   const out = await mergeChangesFromSnapshots({
     ontologyId: input.ontologyId,
     objectTypeApiName: input.objectTypeApiName,
@@ -326,13 +332,16 @@ async function runMergeActivityImpl(
     editStrategy: "user_edit_wins",
     mergedTableId: mergedTable.dataset_table_id,
     mergedOutputFileLocation: `${mergedTable.location}/data/${new Date().toISOString()}.parquet`,
+    runKey: input.runKey,
   });
   return {
     mergedSnapshotId: out.snapshotId,
     upserts: out.upserts,
     deletes: out.deletes,
     editIds: pending.map((e) => e.edit_id),
-    mergedRowCount: out.mergedRows.length,
+    // The SQL path does NOT materialise mergedRows (pass-by-reference); the
+    // count is upserts + deletes.
+    mergedRowCount: out.upserts + out.deletes,
   };
 }
 
