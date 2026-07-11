@@ -66,6 +66,13 @@ export interface ProjectFunnelTerminalOptions {
    * `runId`, which is required for the `indexed` branch.
    */
   objectsIndexed?: number;
+  /** Driving signal id (Temporal path only). When present on a `failed`
+   *  projection, `funnel_run` is also marked failed by `temporal_workflow_id`
+   *  — without this, funnel_run stays "running/<current_stage>" while
+   *  Temporal is terminal FAILED (the OO7 bookkeeping divergence that made
+   *  the UI read "stuck at changelog"). The PG dispatcher path omits this
+   *  (durableWorkflow.ts already marks funnel_run failed there). */
+  runKey?: string;
 }
 
 export async function projectFunnelTerminalToState(
@@ -160,6 +167,37 @@ export async function projectFunnelTerminalToState(
         [objectTypeId, options.errorMessage ?? null]
       );
       errorMessageForEmit = options.errorMessage ?? null;
+      // Mark funnel_run failed too — keyed by the per-save
+      // `temporal_workflow_id` (`ObjectTypeFunnelWorkflow-<apiName>:<runKey>`)
+      // that `projectStageToPostgres` upserted. Without this, funnel_run stays
+      // "running/<current_stage>" while Temporal is terminal FAILED (the OO7
+      // bookkeeping divergence that made the UI read "stuck at changelog"
+      // instead of "failed"). Only the Temporal path passes runKey; the PG
+      // dispatcher path is already marked failed by durableWorkflow.ts.
+      if (options.runKey) {
+        const temporalWorkflowId = `ObjectTypeFunnelWorkflow-${objectTypeApiName}:${options.runKey}`;
+        try {
+          await query(
+            `UPDATE funnel_run
+                SET status = 'failed', completed_at = now(), error_message = $1
+              WHERE temporal_workflow_id = $2`,
+            [options.errorMessage ?? null, temporalWorkflowId]
+          );
+        } catch (runErr) {
+          // Best-effort — the funnel_state update above is the authoritative
+          // UI badge; a funnel_run update failure must not fail the projection.
+          // eslint-disable-next-line no-console
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              type: "funnel_run_failure_projection_failed",
+              objectTypeApiName,
+              runKey: options.runKey,
+              error: (runErr as Error).message,
+            })
+          );
+        }
+      }
       funnelProjectionTotal.inc({ status, outcome: "ok", path });
       observeDuration("ok");
     } else {

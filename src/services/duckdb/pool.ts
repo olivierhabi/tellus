@@ -32,6 +32,13 @@ interface DuckDBDatabase {
 export interface DuckDBConnection {
   run(sql: string, cb: (err: Error | null) => void): void;
   all<T>(sql: string, cb: (err: Error | null, rows: T[]) => void): void;
+  /** Stream rows lazily (DuckDB node binding). Unlike `all` — which
+   *  materializes the FULL result into one JS array — `stream` returns an
+   *  async-iterable drained with native backpressure, so memory stays flat
+   *  regardless of result size. Used by the changelog DuckDB-dedup and the
+   *  streaming parquet read-back so a 5.6M-row result never OOMs the pod
+   *  the way `queryAll` would. */
+  stream<T>(sql: string): AsyncIterable<T>;
 }
 
 let DatabaseCtor: DuckDBDatabaseCtor | null = null;
@@ -73,6 +80,29 @@ export function queryAll<T>(conn: DuckDBConnection, sql: string): Promise<T[]> {
   return new Promise<T[]>((resolve, reject) => {
     conn.all<T>(sql, (err, rows) => (err ? reject(err) : resolve(rows)));
   });
+}
+
+/**
+ * Lazily stream a query's rows as an async generator (flat memory). The
+ * DuckDB node binding's `conn.stream(sql)` returns an async-iterable; this
+ * wraps it so callers can `for await (const row of streamQuery(conn, sql))`.
+ *
+ * Prefer this over `queryAll` for unbounded results — e.g. reading a 5.6M-row
+ * deduped-changelog temp table back out, or streaming a large parquet
+ * read_parquet scan. `queryAll` would materialize all rows into one JS array
+ * (the O(N) heap wall that OOMed OlivierOrder7's changelog); `streamQuery`
+ * holds one row at a time, bounded by the binding's internal buffering.
+ *
+ * Params are inlined into `sql` by the caller (same raw-SQL convention as
+ * `runAll`/`queryAll` — escape single quotes via the standard `''` doubling).
+ */
+export async function* streamQuery<T>(
+  conn: DuckDBConnection,
+  sql: string,
+): AsyncGenerator<T> {
+  for await (const row of conn.stream<T>(sql)) {
+    yield row;
+  }
 }
 
 export interface PoolOptions {

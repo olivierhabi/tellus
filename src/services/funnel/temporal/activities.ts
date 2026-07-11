@@ -41,7 +41,20 @@ import {
   projectFunnelTerminalToState,
   type FunnelStateStatus,
 } from "../funnelStateProjection";
-import { getObjectBuffer } from "../../storageService";
+import { getObjectBuffer, getObjectStream, headObject } from "../../storageService";
+import { parseCsvReadable } from "../../indexing/streamingCsv";
+import {
+  acquireConnection,
+  runAll,
+  streamQuery,
+  releaseConnection,
+} from "../../duckdb/pool";
+import { randomUUID } from "node:crypto";
+import * as readline from "node:readline";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import { pipeline } from "stream/promises";
 
 // Heartbeat + stage-duration helper. Every long-running activity wraps
 // its body in `withStageInstrumentation(stage, obj, async () => ...)`.
@@ -168,6 +181,36 @@ async function runChangelogActivityImpl(
   } else {
     const foundry = await loadFoundryBridgedDatasource(input.objectTypeApiName);
     if (foundry) {
+      // Option D — fail-fast circuit-breaker. HEAD the backing object BEFORE
+      // attempting to stream it. Default ceiling is NONE (streaming has no
+      // size ceiling — the old 512 MiB MAX_STRING_LENGTH wall is gone); a
+      // configurable TELLUS_FOUNDRY_SOURCE_MAX_BYTES catches an oversized
+      // source with a clear, actionable error instead of the generic
+      // "Activity task failed" that masked the OO7 root cause. If the HEAD
+      // itself fails (object missing / MinIO down), fail fast too — that's
+      // "stream setup can't be established", surfaced as a real message.
+      const guardKey = stripFoundryTags(foundry.filePath);
+      if (guardKey) {
+        let foundryHead: { contentLength: number } | null = null;
+        try {
+          foundryHead = await headObject(guardKey);
+        } catch (headErr) {
+          throw new Error(
+            `foundry-bridged backing source '${guardKey}' is not reachable ` +
+              `(HEAD failed — stream setup could not be established): ` +
+              `${(headErr as Error).message}`,
+          );
+        }
+        const maxBytes = Number(process.env.TELLUS_FOUNDRY_SOURCE_MAX_BYTES ?? "") || 0;
+        if (maxBytes > 0 && foundryHead.contentLength > maxBytes) {
+          throw new Error(
+            `foundry-bridged backing source '${guardKey}' is ${foundryHead.contentLength} ` +
+              `bytes which exceeds the configured ceiling ` +
+              `TELLUS_FOUNDRY_SOURCE_MAX_BYTES=${maxBytes}. Re-upload in smaller ` +
+              `parts or raise the ceiling.`,
+          );
+        }
+      }
       reader = await buildFoundryBridgedReader(foundry);
     } else {
       const pending = await getPendingMergeEdits(input.objectTypeApiName);
@@ -670,7 +713,9 @@ function extractFoundryDatasetUuid(filePath: string): string | null {
   return m ? m[1] : null;
 }
 
-async function buildFoundryBridgedReader(
+/** Exported for the streaming-dedup unit test (scripts/test-foundry-dedup.ts);
+ *  not called outside this module in production. */
+export async function buildFoundryBridgedReader(
   ds: FoundryBridgedDatasource
 ): Promise<SnapshotDiffReader> {
   const s3Key = stripFoundryTags(ds.filePath);
@@ -680,16 +725,6 @@ async function buildFoundryBridgedReader(
     // throwing — the projection activity will surface this as an empty run.
     return { async *read() { /* no rows */ } };
   }
-  const buffer = await getObjectBuffer(s3Key);
-  let content = buffer.toString("utf-8");
-  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
-
-  // Parse once, eagerly, so we don't keep the MinIO buffer alive during
-  // the (potentially long) stream-yield. The reader yields synchronously
-  // from an in-memory array; for >100k-row datasources we should swap
-  // this for a streaming parser, but the foundry CSV upload path already
-  // caps at the multer max (50 MiB) so the eager path is bounded.
-  const rows = await parseFoundryRows(content, ds.fileFormat, ds.filePath);
   const pkCol = ds.primaryKeyColumn ?? "primary_key";
   // `source_transaction_id` lands in `object_instances.source_transaction_id`
   // which is a `uuid` column — passing a path-string here trips
@@ -701,72 +736,274 @@ async function buildFoundryBridgedReader(
   const txnId = extractFoundryDatasetUuid(ds.filePath) ?? ZERO_UUID;
   const ts = new Date().toISOString();
 
-  // The funnel's `computeChangelog` rejects duplicate primary keys within
-  // a single source transaction (see `seenInTxn` in changelogStage.ts).
-  // De-dupe with last-wins semantics — matches the SNAPSHOT transaction
-  // behaviour of `reindexService.ts` and avoids a "duplicate primary key"
-  // error that would otherwise abort the entire funnel run on dirty CSVs.
-  const dedup = new Map<string, SourceChangeRow>();
-  for (const row of rows) {
-    const pk = row[pkCol];
-    if (pk == null || pk === "") continue; // skip null-PK rows, mirror reindexService
-    const key = String(pk);
-    dedup.set(key, {
-      primary_key: key,
-      operation: "INSERT",
-      properties: row,
-      source_transaction_id: txnId,
-      source_commit_timestamp: ts,
-    });
-  }
-  const out = Array.from(dedup.values());
+  // STREAMING + DuckDB dedup (Option B). This replaces the old eager
+  // `getObjectBuffer` + `buffer.toString("utf-8")` + sync `parseFoundryRows`
+  // + in-memory `Map<string, SourceChangeRow>` dedup, which:
+  //   (A) threw Node's Buffer.toString MAX_STRING_LENGTH (0x1fffffe8 =
+  //       512 MiB) on ANY foundry-bridged CSV > 512 MiB — OO7's 895 MiB /
+  //       5.6M-row test04.csv, with 949,181 duplicate order_ids — failing
+  //       the changelog activity with the generic "Activity task failed"
+  //       and leaving funnel_run stuck at "changelog".
+  //   (B) materialised ALL rows into one JS array (~8-11 GiB at 5.6M),
+  //   (C) held a `Map` of ALL deduped rows (~1.6-3.4 GiB).
+  // The new path streams the S3 object through `parseCsvReadable` (csv-parse,
+  // native backpressure, flat memory) into a DuckDB TEMP table staged in
+  // BATCH=500, then dedups with `SELECT DISTINCT ON (primary_key) ... ORDER
+  // BY primary_key, __seq DESC` (last-wins by file order — Q1 proved ON
+  // CONFLICT is first-wins within a multi-row INSERT, unusable for last-wins;
+  // DISTINCT ON over the disk-spilled temp table is the reliable path). The
+  // deduped rows stream back out via `streamQuery` (one row at a time). The
+  // full row set NEVER materialises in Node heap; the DuckDB TEMP table
+  // spills to `/tmp/duckdb_spill` past the memory_limit. `readerKind:
+  // "foundry-bridged"` lets computeChangelog skip its own `seenInTxn` O(N)
+  // Map (redundant + would re-introduce the heap wall). Iceberg + pending-
+  // edit readers keep the hard-throw (they don't pre-dedupe).
   return {
+    readerKind: "foundry-bridged",
     async *read() {
-      for (const r of out) yield r;
+      // CSV/TSV (the large-foundry-CSV case — OO7's 895 MiB / 5.6M-row
+      // test04.csv) take the FAST path: DuckDB reads the file natively +
+      // dedups in SQL (no per-row JS, no 11k multi-row INSERT statements).
+      // JSONL/JSON stay on the general INSERT path (smaller volumes;
+      // read_csv_auto is CSV-only).
+      if (ds.fileFormat === "csv" || ds.fileFormat === "tsv") {
+        yield* dedupFoundryCsvViaDuckDB(ds, s3Key, pkCol, txnId, ts);
+      } else {
+        yield* dedupFoundryRows(streamFoundryRows(ds, s3Key), pkCol, txnId, ts);
+      }
     },
   };
 }
 
-async function parseFoundryRows(
-  content: string,
-  format: string,
-  rawFilePath: string,
-): Promise<Record<string, unknown>[]> {
-  if (format === "csv" || format === "tsv") {
-    const { parse } = await import("csv-parse/sync");
-    const { sanitizeCsvHeader } = await import("../../../utils/csvHeader");
-    const records: Record<string, string>[] = parse(content, {
-      columns: (h: string[]) => sanitizeCsvHeader(h, { source: rawFilePath }),
-      skip_empty_lines: true,
-      relax_column_count: true,
-      trim: true,
-      delimiter: format === "tsv" ? "\t" : ",",
+/**
+ * FAST path for CSV/TSV foundry sources: stream the S3 object to a local
+ * temp file, then let DuckDB read + dedup it NATIVELY (read_csv_auto +
+ * DISTINCT ON). This replaces the per-row JS of `dedupFoundryRows`
+ * (JSON.stringify + sqlStr + ~11k multi-row INSERTs) that made OO7's 5.6M-
+ * row changelog take ~22 min on Attempt 1. DuckDB's vectorized CSV reader +
+ * in-engine DISTINCT ON do the same work in ~seconds.
+ *
+ * `all_varchar=true` forces string types — matches parseCsvReadable (csv-parse
+ * returns strings) and avoids BigInt type-inference that would break the
+ * `JSON.stringify(r.properties)` in computeChangelog's rowIterable. `PARALLEL=
+ * false` makes `row_number() OVER ()` deterministic file order so DISTINCT ON
+ * (pk) ... ORDER BY pk, rn DESC is genuine last-wins-by-file-order (proven by
+ * scripts/duckdb-all-varchar-test.js + scripts/duckdb-csv-order-test.js).
+ */
+async function* dedupFoundryCsvViaDuckDB(
+  ds: FoundryBridgedDatasource,
+  s3Key: string,
+  pkCol: string,
+  txnId: string,
+  ts: string,
+): AsyncGenerator<SourceChangeRow> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fb-csv-"));
+  const localPath = path.join(dir, "source.csv");
+  const conn = await acquireConnection({ skipHttpfs: true });
+  try {
+    // Stream S3 → local file (disk, bounded; getObjectStream backpressure
+    // keeps memory flat during the download — the 895 MiB object never
+    // materialises as a JS Buffer/string, unlike the old getObjectBuffer path).
+    const stream = await getObjectStream(s3Key);
+    await pipeline(stream, fs.createWriteStream(localPath));
+
+    const pkQ = `"${pkCol.replace(/"/g, '""')}"`;
+    const lp = localPath.replace(/'/g, "''");
+    // Explicit delim matches the old parseFoundryRows/parseCsvReadable behavior
+    // (CSV ',', TSV literal tab).
+    const delim = ds.fileFormat === "tsv" ? "\t" : ",";
+    const sql =
+      `SELECT DISTINCT ON (${pkQ}) * FROM (` +
+      `SELECT *, row_number() OVER () AS rn FROM read_csv_auto('${lp}', delim='${delim}', PARALLEL=false, all_varchar=true)` +
+      `) ORDER BY ${pkQ}, rn DESC`;
+    for await (const row of streamQuery<Record<string, unknown> & { rn?: unknown }>(conn, sql)) {
+      const pkVal = row[pkCol];
+      if (pkVal == null || pkVal === "") continue; // skip null-PK rows, mirror reindexService
+      // properties = all columns EXCEPT the internal `rn` tiebreaker.
+      const { rn: _rn, ...properties } = row;
+      void _rn;
+      yield {
+        primary_key: String(pkVal),
+        operation: "INSERT" as SourceChangeRow["operation"],
+        properties: properties as Record<string, unknown>,
+        source_transaction_id: txnId,
+        source_commit_timestamp: ts,
+      };
+    }
+  } finally {
+    releaseConnection(conn);
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Lazily stream raw (un-deduped) source rows from the foundry-bridged MinIO
+ * object. CSV/TSV stream through `parseCsvReadable` (the SAME helper
+ * reindexService/dataPreview use — no second CSV parser, BOM + header
+ * sanitization + null-norm handled in its columns callback); JSONL streams
+ * line-by-line through `readline` + per-line `JSON.parse`; top-level bracket
+ * -array JSON is the ONE bounded path (`getObjectBuffer` + `JSON.parse`)
+ * and is only safe for small objects — a >512 MiB bracket JSON throws at
+ * `buffer.toString` (the same MAX_STRING_LENGTH wall). That bracket-JSON
+ * case is a known, flagged limitation; OO7 is CSV.
+ */
+async function* streamFoundryRows(
+  ds: FoundryBridgedDatasource,
+  s3Key: string,
+): AsyncGenerator<Record<string, unknown>> {
+  const fmt = ds.fileFormat;
+  if (fmt === "csv" || fmt === "tsv") {
+    const stream = await getObjectStream(s3Key);
+    const delimiter = fmt === "tsv" ? "\t" : ",";
+    const { rows } = await parseCsvReadable(stream, {
+      delimiter,
+      normalizeNulls: true,
+      source: ds.filePath,
     });
-    for (const record of records) {
-      for (const key of Object.keys(record)) {
-        const v = (record as Record<string, unknown>)[key];
-        if (typeof v === "string") {
-          const n = v.trim().toLowerCase();
-          if (n === "" || n === "null" || n === "na" || n === "n/a") {
-            (record as Record<string, unknown>)[key] = null;
+    for await (const r of rows) yield r as Record<string, unknown>;
+    return;
+  }
+  if (fmt === "jsonl") {
+    const stream = await getObjectStream(s3Key);
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of rl) {
+        const t = line.trim();
+        if (!t) continue;
+        yield JSON.parse(t) as Record<string, unknown>;
+      }
+    } finally {
+      rl.close();
+      stream.destroy();
+    }
+    return;
+  }
+  if (fmt === "json") {
+    // Bounded path — small top-level bracket-array JSON only. parseCsvReadable
+    // is CSV-only; a streaming bracket-JSON parser would need a new dep. The
+    // Option D guard's configurable ceiling (TELLUS_FOUNDRY_SOURCE_MAX_BYTES)
+    // catches the >512 MiB case before this read; otherwise a giant bracket
+    // JSON throws at buffer.toString (known limitation — flagged in writeup).
+    const buffer = await getObjectBuffer(s3Key);
+    const trimmed = buffer.toString("utf-8").trim();
+    const parsed = trimmed.startsWith("[")
+      ? (JSON.parse(trimmed) as unknown[])
+      : [JSON.parse(trimmed)];
+    for (const r of parsed) yield r as Record<string, unknown>;
+    return;
+  }
+  throw new Error(`Unsupported foundry-bridge file format: '${fmt}'`);
+}
+
+/**
+ * De-duplicate a stream of raw source rows by `pkCol` with LAST-WINS-by-file
+ * -order, yielding `SourceChangeRow`s, in O(1) JS heap via a disk-spilled
+ * DuckDB TEMP table. See `buildFoundryBridgedReader` for the O(N) walls this
+ * replaces (the old `Map<string, SourceChangeRow>`).
+ */
+async function* dedupFoundryRows(
+  rows: AsyncIterable<Record<string, unknown>>,
+  pkCol: string,
+  txnId: string,
+  ts: string,
+): AsyncGenerator<SourceChangeRow> {
+  const conn = await acquireConnection({ skipHttpfs: true });
+  const tempTable = `fb_dedup_${randomUUID().replace(/-/g, "_")}`;
+  try {
+    await runAll(
+      conn,
+      `CREATE TEMP TABLE ${tempTable} (` +
+        `primary_key VARCHAR, operation VARCHAR, properties VARCHAR, ` +
+        `source_transaction_id VARCHAR, source_commit_timestamp VARCHAR, ` +
+        `__seq BIGINT)`,
+    );
+    let seq = 0;
+    const BATCH = 500;
+    let batch: string[] = [];
+    const flush = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      await runAll(conn, `INSERT INTO ${tempTable} VALUES ${batch.join(", ")}`);
+      batch = [];
+    };
+    for await (const row of rows) {
+      const pk = row[pkCol];
+      if (pk == null || pk === "") continue; // skip null-PK rows, mirror reindexService
+      const key = String(pk);
+      // `properties` is stored as a JSON string in the temp table and
+      // JSON.parsed back to an object on the deduped read-out (computeChangelog
+      // re-stringifies it for the parquet). sqlStr doubles single quotes so a
+      // value like "O'Brien" stays a valid DuckDB string literal.
+      const propsJson = sqlStr(JSON.stringify(row));
+      batch.push(
+        `(${sqlStr(key)},'INSERT',${propsJson},${sqlStr(txnId)},${sqlStr(ts)},${seq})`,
+      );
+      seq++;
+      if (batch.length >= BATCH) await flush();
+    }
+    await flush(); // final partial batch
+    if (seq === 0) return; // empty source — Parquet cannot represent zero rows
+
+    // DISTINCT ON last-wins by file order (__seq DESC). Q1 proved ON CONFLICT
+    // is first-wins within a multi-row INSERT — unusable here. DISTINCT ON
+    // over the disk-spilled TEMP table (temp_directory=/tmp/duckdb_spill)
+    // sorts + dedups in O(N log N) on disk, never in JS heap.
+    const dedupSql =
+      `SELECT DISTINCT ON (primary_key) primary_key, operation, properties, ` +
+      `source_transaction_id, source_commit_timestamp FROM ${tempTable} ` +
+      `ORDER BY primary_key, __seq DESC`;
+    for await (const r of streamQuery<{
+      primary_key: string;
+      operation: string;
+      properties: string;
+      source_transaction_id: string;
+      source_commit_timestamp: string;
+    }>(conn, dedupSql)) {
+      let properties: Record<string, unknown> = {};
+      if (r.properties) {
+        try {
+          const p = JSON.parse(r.properties);
+          if (p && typeof p === "object" && !Array.isArray(p)) {
+            properties = p as Record<string, unknown>;
           }
+        } catch {
+          /* keep {} — shouldn't happen (we JSON.stringify'd on insert) */
         }
       }
+      yield {
+        primary_key: r.primary_key,
+        operation: r.operation as SourceChangeRow["operation"],
+        properties,
+        source_transaction_id: r.source_transaction_id,
+        source_commit_timestamp: r.source_commit_timestamp,
+      };
     }
-    return records;
-  }
-  if (format === "json" || format === "jsonl") {
-    const trimmed = content.trim();
-    if (trimmed.startsWith("[")) {
-      return JSON.parse(trimmed) as Record<string, unknown>[];
+  } finally {
+    try {
+      await runAll(conn, `DROP TABLE IF EXISTS ${tempTable}`);
+    } catch {
+      /* ignore — connection is released anyway */
     }
-    return trimmed
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    releaseConnection(conn);
   }
-  throw new Error(`Unsupported foundry-bridge file format: '${format}'`);
 }
+
+/** SQL string literal: single-quote-doubling (DuckDB standard SQL strings). */
+function sqlStr(s: string): string {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+// NOTE: the old eager `parseFoundryRows(content, format, path)` (csv-parse
+// SYNC over a whole-file string + a JSON whole-doc parse) was removed when
+// `buildFoundryBridgedReader` switched to streaming. CSV/TSV now stream
+// through `parseCsvReadable` (csv-parse stream-mode) and JSONL through
+// `readline`; only the small bracket-array JSON path still does a bounded
+// `getObjectBuffer` + `JSON.parse` (see `streamFoundryRows`). The whole-file
+// `buffer.toString("utf-8")` that threw Node's 512 MiB MAX_STRING_LENGTH is
+// gone for every streaming format.
 
 // ---------------------------------------------------------------------------
 // projectFunnelTerminalActivity
@@ -789,6 +1026,11 @@ export async function projectFunnelTerminalActivity(input: {
   status: FunnelStateStatus;
   objectsIndexed?: number;
   errorMessage?: string;
+  /** The driving signal's id — passed through so the failed path can mark
+   *  `funnel_run` failed by `temporal_workflow_id` (not just `funnel_state`),
+   *  closing the bookkeeping divergence that left `funnel_run` stuck at
+   *  "changelog" while Temporal was terminal FAILED. */
+  runKey?: string;
 }): Promise<void> {
   await projectFunnelTerminalToState(
     input.ontologyId,
@@ -797,6 +1039,7 @@ export async function projectFunnelTerminalActivity(input: {
     {
       objectsIndexed: input.objectsIndexed,
       errorMessage: input.errorMessage,
+      runKey: input.runKey,
       path: "post",
     },
   );

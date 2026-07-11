@@ -37,6 +37,7 @@ import {
   CHANGELOG_PARQUET_COLUMNS,
   changelogParquetKey,
   deleteOrphanParquetRef,
+  newSnapshotId,
   parquetRefToUri,
   writeParquetRef,
   type ParquetRef,
@@ -82,6 +83,16 @@ export interface SnapshotDiffReader {
     fromSnapshotId: string | null;
     toSnapshotId: string;
   }): AsyncIterable<SourceChangeRow>;
+  /** Provenance flag that lets `computeChangelog` SKIP the per-PK
+   *  duplicate-throw (`seenInTxn`) when the reader ALREADY deduplicates.
+   *  Today only the foundry-bridged CSV reader sets this — it dedupes
+   *  last-wins in a disk-spilled DuckDB temp table (DISTINCT ON) before
+   *  yielding, so the O(N) `seenInTxn` Map would be both redundant AND
+   *  (for a 5.6M-row / 949k-duplicate-PK source) a re-introduced O(N)
+   *  heap allocation. Iceberg + pending-edit readers do NOT set this and
+   *  keep the Palantir hard-throw (they don't pre-dedupe). Explicit + named
+   *  rather than a boolean so a future reader kind is self-documenting. */
+  readerKind?: "foundry-bridged";
 }
 
 export interface ComputeChangelogInput {
@@ -142,11 +153,16 @@ export async function computeChangelog(
   );
 
   // Palantir rule: duplicate PKs within a single source transaction fail
-  // the build. We track (source_transaction_id, primary_key) → first seen
-  // index to give a clear error pointing at both occurrences. `seenInTxn`
-  // is O(distinct PKs) — bounded by the source size but far smaller than
-  // materialising the full row array.
-  const seenInTxn = new Map<string, Map<string, number>>();
+  // the build — UNLESS the reader pre-deduplicates (foundry-bridged CSV,
+  // which dedupes last-wins in a disk-spilled DuckDB temp table; see
+  // `SnapshotDiffReader.readerKind`). For those readers the seenInTxn Map
+  // would be both redundant AND a re-introduced O(N) heap allocation on a
+  // 5.6M-row / 949k-duplicate-PK source, so we skip it and track only the
+  // tiny O(distinct-txns) txn-id set for the summary. Iceberg + pending-
+  // edit readers do NOT pre-dedupe and keep the hard-throw.
+  const skipDupCheck = reader.readerKind === "foundry-bridged";
+  const seenInTxn = skipDupCheck ? null : new Map<string, Map<string, number>>();
+  const distinctTxns = skipDupCheck ? new Set<string>() : null;
   const ownedProperties = new Set<string>();
   let idx = 0;
 
@@ -161,7 +177,13 @@ export async function computeChangelog(
   // re-reads the rows from MinIO by `snapshotId`. Rows never travel
   // through a Temporal activity return value NOR through a jsonb INSERT
   // param — both walls are removed.
-  const parquetKey = changelogParquetKey(input.objectTypeApiName);
+  // Pre-generate the snapshot id so the MinIO Parquet object can be keyed
+  // by it BEFORE the Postgres row commits (write-parquet-first). The key
+  // is deterministic per snapshot; a failed-retry attempt (this id pre-gen'd
+  // but the row never committed) leaves a GC-able orphan at
+  // `changelogs/<apiName>/<this-snapshotId>.parquet`.
+  const preSnapshotId = newSnapshotId();
+  const parquetKey = changelogParquetKey(input.objectTypeApiName, preSnapshotId);
   const rowIterable = (async function* () {
     for await (const r of reader.read({
       sourceTableId: input.sourceTableId,
@@ -169,16 +191,20 @@ export async function computeChangelog(
       toSnapshotId: input.toSnapshotId,
     })) {
       const txn = r.source_transaction_id;
-      if (!seenInTxn.has(txn)) seenInTxn.set(txn, new Map());
-      const txnMap = seenInTxn.get(txn)!;
-      if (txnMap.has(r.primary_key)) {
-        const firstIdx = txnMap.get(r.primary_key)!;
-        throw new Error(
-          `duplicate primary key '${r.primary_key}' within source transaction ` +
-            `'${txn}' (first seen at row ${firstIdx}, duplicate at row ${idx})`
-        );
+      if (skipDupCheck) {
+        distinctTxns!.add(txn);
+      } else {
+        if (!seenInTxn!.has(txn)) seenInTxn!.set(txn, new Map());
+        const txnMap = seenInTxn!.get(txn)!;
+        if (txnMap.has(r.primary_key)) {
+          const firstIdx = txnMap.get(r.primary_key)!;
+          throw new Error(
+            `duplicate primary key '${r.primary_key}' within source transaction ` +
+              `'${txn}' (first seen at row ${firstIdx}, duplicate at row ${idx})`
+          );
+        }
+        txnMap.set(r.primary_key, idx);
       }
-      txnMap.set(r.primary_key, idx);
 
       if (r.byte_size && r.byte_size > 0) {
         await throughput.consume(r.byte_size);
@@ -208,6 +234,8 @@ export async function computeChangelog(
       columns: CHANGELOG_PARQUET_COLUMNS,
       rows: rowIterable,
       key: parquetKey,
+      objectTypeApiName: input.objectTypeApiName,
+      stage: "changelog",
     });
   } catch (err) {
     await deleteOrphanParquetRef(parquetRef);
@@ -241,12 +269,13 @@ export async function computeChangelog(
       tableId: input.changelogTableId,
       operation: "append" as SnapshotOperation,
       manifest,
+      snapshotId: preSnapshotId,
       summary: {
         source_datasource_id: input.datasourceId,
         source_from_snapshot: input.fromSnapshotId,
         source_to_snapshot: input.toSnapshotId,
         rows_emitted: rowsEmitted,
-        distinct_source_transactions: seenInTxn.size,
+        distinct_source_transactions: skipDupCheck ? distinctTxns!.size : seenInTxn!.size,
         // Small, N-independent reference — replaces the old `inline_rows`
         // array. `loadChangelogRowsFromSnapshot` resolves it back to rows.
         parquet_ref: parquetRef,

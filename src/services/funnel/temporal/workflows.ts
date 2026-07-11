@@ -139,6 +139,32 @@ function resolveContinueAsNewThreshold(input: ObjectTypeFunnelInput): number {
 }
 
 /**
+ * Walk the Temporal failure `.cause` chain to the root ApplicationFailure so
+ * `funnel_state.error_message` carries the REAL error (e.g. "Cannot create a
+ * string longer than 0x1fffffe8 characters") instead of the generic wrapper
+ * "Activity task failed" that Temporal wraps activity failures in. Without
+ * this unwrap, the OO7 root cause was masked by the ActivityFailure's own
+ * `.message` and the UI badge showed a useless "Activity task failed".
+ *
+ * Pure property access — deterministic, safe inside the workflow sandbox.
+ * Falls back to the top-level `.message` if no cause chain is present.
+ */
+function rootCauseMessage(err: unknown): string {
+  let cur = err as { message?: string; cause?: unknown } | undefined;
+  let msg = cur instanceof Error ? cur.message : "Funnel pipeline failed";
+  let depth = 0;
+  while (cur?.cause && depth < 16) {
+    const c = cur.cause as { message?: string; cause?: unknown } | undefined;
+    if (c && typeof c.message === "string" && c.message.length > 0) {
+      msg = c.message;
+    }
+    cur = c;
+    depth++;
+  }
+  return msg;
+}
+
+/**
  * Parent workflow per Object Type. FNL-H1 — once the workflow has
  * completed `CONTINUE_AS_NEW_DEFAULT_THRESHOLD` signals it calls
  * `continueAsNew(...)` with the rolling counters so Temporal's history
@@ -273,8 +299,13 @@ export async function ObjectTypeFunnelWorkflow(
         // eternal 'Indexing' spinner — then re-throw so Temporal applies
         // its activity-level retry policy and writes the workflow failure
         // to history.
-        const message =
-          err instanceof Error ? err.message : "Funnel pipeline failed";
+        // Unwrap the Temporal ActivityFailure `.cause` chain to the REAL
+        // root message — otherwise the badge shows the generic "Activity task
+        // failed" wrapper instead of e.g. "Cannot create a string longer than
+        // 0x1fffffe8 characters" (the OO7 symptom). Also pass `runKey` so the
+        // projection marks funnel_run failed (not just funnel_state) — closing
+        // the divergence that left funnel_run stuck at "changelog".
+        const message = rootCauseMessage(err);
         // Best-effort — if projection itself throws (e.g. PG down), the
         // outer rethrow still surfaces the original pipeline error.
         try {
@@ -283,6 +314,7 @@ export async function ObjectTypeFunnelWorkflow(
             objectTypeApiName: input.objectTypeApiName,
             status: "failed",
             errorMessage: message,
+            runKey,
           });
         } catch {
           /* projection is best-effort; original error wins below */
