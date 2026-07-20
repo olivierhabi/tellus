@@ -28,6 +28,7 @@ vi.mock("../../../../../src/services/codeRepository/transforms/executor.js", () 
 }));
 vi.mock("../../../../../src/services/codeRepository/transforms/datasetStore.js", () => ({
   resolveTransformInput: vi.fn(),
+  lookupDatasetName: vi.fn().mockResolvedValue(null),
 }));
 vi.mock("../../../../../src/services/codeRepository/transforms/testHarness.js", () => ({
   readRepoPyFiles: vi.fn(),

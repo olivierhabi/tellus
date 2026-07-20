@@ -137,6 +137,23 @@ function formatActionType(row: Record<string, any>): Record<string, unknown> {
 }
 
 /**
+ * Stamp create/update actor from the authenticated principal.
+ * Mirrors purposes.actorOf / branches createdBy: prefer local users.id
+ * (globalAuth/tellusAuth), then email, then system.
+ */
+function actorOf(req: Request): string {
+  const anyReq = req as any;
+  return (
+    anyReq.tellusPrincipal?.userId ||
+    anyReq.user?.id ||
+    anyReq.user?.email ||
+    anyReq.auth?.preferred_username ||
+    anyReq.auth?.sub ||
+    "system"
+  );
+}
+
+/**
  * Resolve an object type API name to its object_type_id.
  * Returns { objectTypeId, properties } or throws VALIDATION_FAILED.
  */
@@ -491,6 +508,7 @@ router.post(
         sideEffects: body.sideEffects ?? null,
         maxAffectedObjects: maxAffected,
         isEnabled: body.isEnabled ?? true,
+        createdBy: actorOf(req),
       });
 
       sendCreated(res, formatActionType(row));
@@ -901,6 +919,7 @@ router.post(
           : null,
         maxAffectedObjects: source.max_affected_objects,
         isEnabled: source.is_enabled,
+        createdBy: actorOf(req),
       });
 
       sendCreated(res, formatActionType(clonedRow));

@@ -101,14 +101,14 @@ describe("resolveDatasetByRid (latest committed + storage_path fallback)", () =>
     q.mockResolvedValueOnce({ rowCount: 1, rows: [{ dataset_id: "d1", file_format: "csv", storage_path: null }] });
     q.mockResolvedValueOnce({ rowCount: 1, rows: [{ file_path: "/abs/latest.csv" }] });
     const r = await resolveDatasetByRid("ri.foundry.main.dataset.in");
-    expect(r).toEqual({ datasetId: "d1", filePath: "/abs/latest.csv", fileFormat: "csv" });
+    expect(r).toEqual({ datasetId: "d1", filePath: "/abs/latest.csv", fileFormat: "csv", name: null });
   });
 
   it("falls back to dataset.storage_path when no committed transaction exists", async () => {
     q.mockResolvedValueOnce({ rowCount: 1, rows: [{ dataset_id: "d1", file_format: "csv", storage_path: "/abs/legacy.csv" }] });
     q.mockResolvedValueOnce({ rowCount: 0, rows: [] }); // no committed tx
     const r = await resolveDatasetByRid("ri.foundry.main.dataset.in");
-    expect(r).toEqual({ datasetId: "d1", filePath: "/abs/legacy.csv", fileFormat: "csv" });
+    expect(r).toEqual({ datasetId: "d1", filePath: "/abs/legacy.csv", fileFormat: "csv", name: null });
   });
 
   it("returns null when the dataset RID does not exist", async () => {

@@ -480,4 +480,158 @@ export default {
   bulkDelete,
   indexSingleDocument,
   deleteSingleDocument,
+  bulkIndexBounded,
+  approxDocBytes,
 };
+
+/**
+ * Rough byte-size estimate for a document, used to bound bulk request
+ * bodies by bytes (not just doc count). Uses the JSON-string length of
+ * the doc (UTF-8 bytes ≈ JS string length for the ASCII-heavy canonical
+ * property bags we index). Deliberately cheap — this is a bound, not an
+ * accounting.
+ */
+export function approxDocBytes(doc: Record<string, unknown>): number {
+  try {
+    // Array.isArray would double-count; the canonical doc is a flat object.
+    return Buffer.byteLength(JSON.stringify(doc), "utf8");
+  } catch {
+    return 1024; // fallback
+  }
+}
+
+/** Options for {@link bulkIndexBounded}. */
+export interface BulkBoundedOptions {
+  /** Max documents per _bulk request. */
+  maxDocsPerBulk?: number;
+  /** Max payload bytes per _bulk request (whichever limit is hit first). */
+  maxBytesPerBulk?: number;
+}
+
+/** Structured result of one bounded bulk send (a page's worth of docs). */
+export interface BulkBoundedResult {
+  /** Documents the bulk API reported as indexed (status < 400). */
+  ok: number;
+  /** Per-document failures (HTTP 200 overall but item-level errors). */
+  failed: FailedDocument[];
+  /** True if any item/error signalled OpenSearch write-queue backpressure
+   *  (`es_rejected_execution_exception` / HTTP 429). The caller MUST back
+   *  off (exp+jitter) and shrink the batch rather than immediately
+   *  retrying the same oversized request — burning through Temporal's
+   *  attempt budget is the exact failure mode this prevents. */
+  backpressure: boolean;
+  /** Whole-request error (network / non-backpressure). If set without
+   *  backpressure, the cluster is unreachable or rejected the whole
+   *  request — the caller throws (vs. backing off). */
+  unreachableError?: string;
+  /** Sum of approx bytes sent across the batches in this call. */
+  bytesSent: number;
+  /** Number of _bulk requests issued. */
+  bulks: number;
+}
+
+/**
+ * Index `docs` into `indexName` using the _bulk API, chunked by BOTH a
+ * document-count bound AND a byte-size bound (whichever is hit first),
+ * with `refresh: false` on every request (the caller refreshes once at
+ * the end — per-batch refresh is what made the previous sync too slow to
+ * fit the Temporal timeout). Inspects per-item results so a HTTP 200 with
+ * `errors: true` is NOT treated as success.
+ *
+ * Distinguishes **backpressure** (`es_rejected_execution_exception` /
+ * 429) from a hard error: on backpressure, returns immediately with the
+ * unprocessed remainder left in `docs` for the caller to retry after
+ * backing off + shrinking — instead of throwing into Temporal's retry.
+ */
+export async function bulkIndexBounded(
+  indexName: string,
+  docs: Array<Record<string, unknown>>,
+  opts?: BulkBoundedOptions
+): Promise<BulkBoundedResult> {
+  const maxDocs = opts?.maxDocsPerBulk ?? 500;
+  const maxBytes = opts?.maxBytesPerBulk ?? 10 * 1024 * 1024;
+  let ok = 0;
+  let bytesSent = 0;
+  let bulks = 0;
+  let backpressure = false;
+  let unreachableError: string | undefined;
+  const failed: FailedDocument[] = [];
+
+  let i = 0;
+  while (i < docs.length) {
+    const batch: Array<Record<string, unknown>> = [];
+    let batchBytes = 0;
+    while (i < docs.length && batch.length < maxDocs) {
+      const doc = docs[i];
+      const docBytes = approxDocBytes(doc);
+      if (batch.length > 0 && batchBytes + docBytes > maxBytes) break;
+      batch.push(doc);
+      batchBytes += docBytes;
+      i++;
+    }
+    if (batch.length === 0) break;
+
+    const bulkBody: Array<Record<string, unknown>> = [];
+    for (const doc of batch) {
+      bulkBody.push({ index: { _index: indexName, _id: String(doc.__pk) } });
+      bulkBody.push(ensureDocumentSecurity(doc));
+    }
+    bytesSent += batchBytes;
+    bulks++;
+
+    try {
+      const { body } = await client.bulk({ body: bulkBody, refresh: false });
+      const resp = body as unknown as {
+        errors: boolean;
+        items: Array<
+          Record<
+            string,
+            { _id: string; status: number; error?: { type: string; reason: string } }
+          >
+        >;
+      };
+      for (const it of resp.items) {
+        const action = it.index;
+        if (!action) continue;
+        if (action.status >= 400) {
+          const errType = action.error?.type ?? "";
+          if (/es_rejected|rejected_execution/i.test(errType) || action.status === 429) {
+            backpressure = true;
+          }
+          failed.push({
+            primaryKey: action._id,
+            status: action.status,
+            error: action.error
+              ? `${action.error.type}: ${action.error.reason}`
+              : `HTTP ${action.status}`,
+          });
+        } else {
+          ok++;
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/es_rejected|rejected_execution|429/i.test(msg)) {
+        backpressure = true;
+      }
+      unreachableError = msg;
+      // Whole-request failure: we don't know which items the server saw,
+      // so mark the whole batch failed for the caller's item-level retry.
+      for (const doc of batch) {
+        failed.push({ primaryKey: String(doc.__pk), status: 0, error: msg });
+      }
+    }
+
+    if (backpressure) {
+      // Stop sending more for this call; the caller backs off + retries the
+      // remainder (including this batch's failed docs) with a smaller bound.
+      break;
+    }
+    if (unreachableError && !backpressure) {
+      // Hard failure — don't keep going; let the caller throw into Temporal.
+      break;
+    }
+  }
+
+  return { ok, failed, backpressure, unreachableError, bytesSent, bulks };
+}

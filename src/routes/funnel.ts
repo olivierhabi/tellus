@@ -240,7 +240,20 @@ router.get("/snapshots", async (req: Request, res: Response) => {
         ORDER BY s.committed_at ASC`,
       [namespace, tableName]
     );
-    res.json({ snapshots: result.rows });
+    // Redact internal row-storage metadata before exposing summary_json to
+    // clients: `parquet_ref` (bucket/key — internal MinIO addressing) and
+    // legacy `inline_rows` (the actual row payload) are NOT for direct
+    // client consumption. Clients that need rows go through the authorized
+    // API surface, never the raw MinIO object. (Access-control parity for
+    // the by-reference path — Point 3 of the parquet-ref production bar.)
+    const snapshots = result.rows.map((r: { summary_json?: Record<string, unknown> }) => {
+      if (r.summary_json && typeof r.summary_json === "object") {
+        const { parquet_ref: _pr, inline_rows: _ir, ...rest } = r.summary_json;
+        r.summary_json = rest;
+      }
+      return r;
+    });
+    res.json({ snapshots });
   } catch (err) {
     res.status(500).json({ error: "INTERNAL", message: (err as Error).message });
   }

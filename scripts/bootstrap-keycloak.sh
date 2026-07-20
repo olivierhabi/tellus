@@ -102,8 +102,8 @@ REALM_UPDATE=$(cat <<JSON
   "minimumQuickLoginWaitSeconds": 60,
   "quickLoginCheckMilliSeconds": 1000,
   "waitIncrementSeconds": 60,
-  "ssoSessionMaxLifespan": 57600,
-  "ssoSessionIdleTimeout": 57600,
+  "ssoSessionMaxLifespan": 86400,
+  "ssoSessionIdleTimeout": 86400,
   "offlineSessionIdleTimeout": 2592000,
   "accessTokenLifespan": 3600,
   "accessTokenLifespanForImplicitFlow": 900,
@@ -205,7 +205,7 @@ FRONTEND_BODY=$(cat <<JSON
   "webOrigins": ["http://localhost:3000", "http://localhost:3001", "+"],
   "attributes": {
     "pkce.code.challenge.method": "S256",
-    "access.token.lifespan": "300",
+    "access.token.lifespan": "3600",
     "client_credentials.use_refresh_token": "false",
     "post.logout.redirect.uris": "http://localhost:3000/*##http://localhost:3001/*",
     "oauth2.device.authorization.grant.enabled": "false"
@@ -241,7 +241,7 @@ CONF_BODY=$(cat <<JSON
   "redirectUris": ["http://localhost:3000/*", "http://localhost:3001/*"],
   "attributes": {
     "pkce.code.challenge.method": "S256",
-    "access.token.lifespan": "300"
+    "access.token.lifespan": "3600"
   }
 }
 JSON

@@ -109,4 +109,77 @@ describe("buildOntologySdk — requestedTypes instrumentation", () => {
     const { getRequestedTypes } = buildOntologySdk(snap);
     expect(getRequestedTypes()).toEqual([]);
   });
+
+  // ---- Fix B: objectTypeDescriptors keyed off DECLARED imports, not rows ---
+  // Mirrors the orderInsights regression: a code repository imports
+  // `OlivierOrderJune` (code_repository_resource_imports, kind='object_type')
+  // but Postgres `object_instances` has ZERO rows for it. The function does
+  // `import { OlivierOrderJune } from "@ontology/sdk"` then reads
+  // `OlivierOrderJune.apiName`. The descriptor MUST resolve (it is a TYPE
+  // descriptor, not data) or `.apiName` throws
+  // `Cannot read properties of undefined (reading 'apiName')`.
+  it("an imported type with ZERO rows still resolves a descriptor (no undefined.apiName)", () => {
+    const snap: OntologySnapshot = {
+      byType: new Map(),
+      ontologyId: "ont-1",
+      objectCount: 0,
+      objectTypes: [],
+      importedTypes: ["OlivierOrderJune"],
+    };
+    const { sdk } = buildOntologySdk(snap);
+
+    expect(sdk.objectTypeDescriptors.OlivierOrderJune).toEqual({
+      apiName: "OlivierOrderJune",
+    });
+    // Objects.search on the zero-rows type returns an empty ObjectSet, not a
+    // throw — the function returns a well-defined empty result.
+    const set = sdk.Objects.search("OlivierOrderJune");
+    expect(set.count()).toBe(0);
+    expect(set.all()).toEqual([]);
+  });
+
+  it("declared imports and rows coexist: imported type with rows keeps data, imported type without rows keeps descriptor", () => {
+    // Repo imports ["OlivierOrder", "OlivierOrderJune"]; only OlivierOrder has rows.
+    const byType = new Map<string, Map<string, OntologyObject>>();
+    const bucket = new Map<string, OntologyObject>();
+    bucket.set("ord-1", {
+      $apiName: "OlivierOrder",
+      $primaryKey: "ord-1",
+      $title: "ord-1",
+      total: 100,
+    });
+    byType.set("OlivierOrder", bucket);
+    const snap: OntologySnapshot = {
+      byType,
+      ontologyId: "ont-1",
+      objectCount: 1,
+      objectTypes: ["OlivierOrder"],
+      importedTypes: ["OlivierOrder", "OlivierOrderJune"],
+    };
+    const { sdk } = buildOntologySdk(snap);
+
+    // Both imported types resolve descriptors (one has rows, one doesn't).
+    expect(sdk.objectTypeDescriptors.OlivierOrder).toEqual({
+      apiName: "OlivierOrder",
+    });
+    expect(sdk.objectTypeDescriptors.OlivierOrderJune).toEqual({
+      apiName: "OlivierOrderJune",
+    });
+    // Type WITH rows returns its data (unchanged pre-fix behaviour).
+    expect(sdk.Objects.search("OlivierOrder").count()).toBe(1);
+    expect(sdk.Objects.get("OlivierOrder", "ord-1")?.$primaryKey).toBe("ord-1");
+    // Type WITHOUT rows returns empty, no throw.
+    expect(sdk.Objects.search("OlivierOrderJune").count()).toBe(0);
+  });
+
+  it("fallback: no importedTypes set → descriptors from objectTypes (pre-fix behaviour, no regression)", () => {
+    // makeSnapshot does not set importedTypes → buildOntologySdk falls back
+    // to snapshot.objectTypes (the loaded rows), preserving old behaviour for
+    // callers that load without an import filter.
+    const snap = makeSnapshot({ A: { a1: {} }, B: { b1: {} } });
+    const { sdk } = buildOntologySdk(snap);
+
+    expect(sdk.objectTypeDescriptors.A).toEqual({ apiName: "A" });
+    expect(sdk.objectTypeDescriptors.B).toEqual({ apiName: "B" });
+  });
 });

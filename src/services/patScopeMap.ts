@@ -83,6 +83,10 @@ const RULES: ScopeRule[] = [
 
   // --- Administrative --------------------------------------------
   { prefix: '/api/v1/auth/admin/applications', scope: 'api:write' },
+
+  // --- Developer Console (third-party applications / OSDK) --------
+  { method: 'GET', prefix: '/api/v1/developer-console', scope: 'api:read' },
+  { prefix: '/api/v1/developer-console', scope: 'api:write' },
 ];
 
 /**

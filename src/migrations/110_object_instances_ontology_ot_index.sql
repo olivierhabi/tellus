@@ -1,0 +1,35 @@
+-- ---------------------------------------------------------------------------
+-- 110: existence-check index for mergeStage.ts hasExisting probe
+--
+-- The merge stage (mergeStage.ts ~line 922) checks whether ANY existing
+-- `object_instances` rows exist for an OT before deciding to load them for
+-- the unionMarkings/existing-overlay pass. The prior code used
+-- `SELECT count(*) ... WHERE ontology_id=$1 AND object_type_api_name=$2`,
+-- which did a full Parallel Seq Scan of the table (~6.35M rows, 6.8GB) taking
+-- 43-55s — exceeding the 60s `PG_STATEMENT_TIMEOUT_MS` (db.ts:76) under merge
+-- load, causing the re-merge of OlivierOrder2 (4.66M existing rows) to fail
+-- with a statement timeout.
+--
+-- Step 4b replaced `count(*)` with `EXISTS (SELECT 1 ... LIMIT 1)`, which
+-- stops at the first match. But the planner still chose a Seq Scan because
+-- the existing indexes could not efficiently serve a query filtering on
+-- `(ontology_id, object_type_api_name)`:
+--   - `object_instances_pkey` is (ontology_id, branch_id, object_type_api_name,
+--     primary_key) — `branch_id` in position 2 means a query that omits
+--     `branch_id` cannot use the index efficiently (middle-column problem).
+--   - `idx_object_instances_ot` is (object_type_api_name) only — does not
+--     cover `ontology_id`.
+--
+-- This index on `(ontology_id, object_type_api_name)` gives the planner a
+-- viable index-only path for the EXISTS probe.
+--
+-- EXPLAIN ANALYZE (after ANALYZE):
+--   count(*) = 55s (Parallel Seq Scan, exceeds 60s statement_timeout)
+--   EXISTS   = 4ms (Seq Scan with cached buffers; index available for cold cache)
+--
+-- Revertible: `DROP INDEX IF EXISTS idx_object_instances_ontology_ot;`
+-- Idempotent: `CREATE INDEX IF NOT EXISTS`.
+-- ---------------------------------------------------------------------------
+
+CREATE INDEX IF NOT EXISTS idx_object_instances_ontology_ot
+  ON object_instances (ontology_id, object_type_api_name);

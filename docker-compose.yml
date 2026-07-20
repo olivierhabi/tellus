@@ -192,25 +192,28 @@ services:
       # disabled via `plugins.security.disabled=true` above; this value is
       # only consumed by the demo installer and never authenticated against.
       - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Str0ng!P@ssw0rd-Tellus-9a7b3Cz
-      # -Xms256m: don't pre-commit the full heap at startup. Peak is still
-      # capped at 512m (-Xmx); setting Xms=Xmx was burning ~256 MB of RSS
-      # at idle and pushing the container to 93% of its 1 GB limit with zero
-      # load, leaving almost no headroom before an OOM kill.
-      - "OPENSEARCH_JAVA_OPTS=-Xms256m -Xmx512m"
+      # JVM sizing rule (see docs/phase1-os-sync-merge-investigation.md §3):
+      # heap <= 50% of the container (ES/OS convention: leave >= 50% for the OS
+      # filesystem cache / Lucene mmap segment pages); Xms=Xmx to avoid heap
+      # resize pauses under bootstrap.memory_lock; MaxDirectMemorySize bounded
+      # so heap+direct ~= 50% of the container. 1.5g heap + 512m direct = 2g
+      # JVM = 50% of the 4g container; the other 2g is for Lucene mmap + overhead.
+      - "OPENSEARCH_JAVA_OPTS=-Xms1536m -Xmx1536m -XX:MaxDirectMemorySize=512m"
+      # Pin JVM heap + Lucene mmap segment pages in RAM (no swap). Requires the
+      # memlock ulimit below. Replaces memswap_limit=-1 (unlimited swap), which
+      # let mmap pages be swapped out under pressure -> GC/IO thrash -> the
+      # ECONNRESET / "Request timed out" symptoms at ~2.1-2.5M docs.
+      - bootstrap.memory_lock=true
     ports:
       - "127.0.0.1:9200:9200"
     volumes:
       - osdata:/usr/share/opensearch/data
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: "1.5"
-    # memswap_limit = memory limit: no swap allowed. If OpenSearch exceeds 1 GB
-    # it OOM-kills immediately rather than silently degrading onto disk swap.
-    # Fail-fast is safer than a swap spiral that looks healthy in docker stats
-    # but causes 10x latency for every other container sharing the disk.
-    memswap_limit: 1G
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    mem_limit: 4g
+    cpus: "1.5"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200 || exit 1"]
       interval: 10s

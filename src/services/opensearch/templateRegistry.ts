@@ -55,8 +55,18 @@ const SYSTEM_FIELD_MAPPINGS = {
  * These match the settings in indexMappingGenerator.ts.
  */
 const DEFAULT_TEMPLATE_SETTINGS = {
-  number_of_shards: 1,
-  number_of_replicas: 0,
+  // Env-tunable: a single shard caps OpenSearch indexing at one thread, which
+  // made the 5.6M-row OlivierOrder2 bulk-sync crawl (~8 s / 5000-doc page,
+  // ~2 hr). 4 shards parallelise indexing on multi-core dev boxes (~4×). Prod
+  // defaults to 1 (one OT index is small; shard overhead isn't worth it there).
+  number_of_shards: Number(process.env.OS_INDEX_SHARDS ?? "1"),
+  // Env-tunable: 0 replicas for single-node dev (no HA). Prod must set
+  // OS_INDEX_REPLICAS >= 1 once a multi-node cluster topology exists; do NOT
+  // hardcode a prod value here (we don't have that topology yet). Both this
+  // file and indexMappingGenerator.ts read the SAME env var — keep them in
+  // sync (drift would make template-created vs explicitly-created indices
+  // diverge on replica count).
+  number_of_replicas: Number(process.env.OS_INDEX_REPLICAS ?? "0"),
   refresh_interval: "1s",
   max_result_window: 100000,
 };

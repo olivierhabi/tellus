@@ -40,8 +40,8 @@
  * logout this module exists to remove.
  */
 
-/** Default when the env var is unset or malformed: 8 hours. */
-export const DEFAULT_SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
+/** Default when the env var is unset or malformed: 24 hours. */
+export const DEFAULT_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 
 /** Floor — a session shorter than a minute is almost certainly a typo. */
 export const MIN_SESSION_MAX_AGE_SECONDS = 60;

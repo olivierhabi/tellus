@@ -315,6 +315,21 @@ export class KeycloakAdminService {
     return res.value;
   }
 
+  /**
+   * Atomically creates a new Keycloak client secret and invalidates the old
+   * credential. Reading the current secret is not rotation and must never be
+   * used as a successful rotate response.
+   */
+  async regenerateClientSecret(clientUuid: string): Promise<string> {
+    const res = await this.call<{ value: string }>(
+      'POST',
+      `/clients/${clientUuid}/client-secret`,
+      { body: {} },
+    );
+    if (!res?.value) throw new Error('Keycloak returned no regenerated client secret');
+    return res.value;
+  }
+
   // --- Users ---------------------------------------------------------------
 
   async findUserByEmail(email: string): Promise<{ id: string; email?: string; username: string } | null> {

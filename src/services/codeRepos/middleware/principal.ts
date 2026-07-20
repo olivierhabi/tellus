@@ -55,6 +55,54 @@ function extractUa(req: Request): string | null {
   return ua.length > 512 ? ua.slice(0, 512) : ua;
 }
 
+/** True when the request's TCP peer is the loopback interface. Uses
+ * `req.socket.remoteAddress` (the actual connection peer, NOT `req.ip` which
+ * honors X-Forwarded-For under trust-proxy) so the localhost determination
+ * can't be spoofed by a forwarded header. */
+function isLocalhost(req: Request): boolean {
+  const ip = req.socket?.remoteAddress ?? "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+/** The fabricated dev principal used when no X-Tellus-Test-Principal header is
+ * supplied in dev mode. Uses cypress-admin@tellus.local's REAL Keycloak `sub`
+ * (a UUID — addressable by the UUID-keyed dataset_acl.principal_id /
+ * project_members.user_id columns, unlike an email userId which crashes the
+ * Postgres UUID cast) + the tellus-superadmin dev bypass (consistent with the
+ * platform-wide bypass). Dev-only: CODE_REPOS_TEST_AUTH=1 && NODE_ENV !=
+ * production && localhost. */
+const DEV_FALLBACK_PRINCIPAL =
+  "53cf9bcf-4c20-4aed-83f4-3c7e405453b4/OWNER,EDITOR,READER,tellus-superadmin";
+
+/** Build a synthetic `test`-source principal from a
+ * `<userId>[/<role1>,<role2>...]` header string + call next(). Shared by the
+ * X-Tellus-Test-Principal override + the localhost dev fallback. */
+function applyHeaderPrincipal(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  header: string,
+): void {
+  const [userId, rolesCsv] = header.split("/");
+  if (!userId) {
+    sendUnauthenticated(res, req, "X-Tellus-Test-Principal missing userId");
+    return;
+  }
+  const roles = (rolesCsv ?? "")
+    .split(",")
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0);
+  req.codeReposPrincipal = {
+    userId,
+    source: "test",
+    roles,
+    scopes: [],
+    sourceIp: extractIp(req),
+    userAgent: extractUa(req),
+  };
+  next();
+}
+
 /**
  * Required-auth middleware for Code Repositories endpoints.
  *
@@ -84,41 +132,37 @@ export function requireCodeReposAuth() {
   })();
 
   return (req: Request, res: Response, next: NextFunction): void => {
-    // Test-mode fake principal — only honoured when env opt-in is set.
-    // Test mode is TERMINAL: when CODE_REPOS_TEST_AUTH=1, the header
-    // either succeeds (sets a synthetic principal) or fails (returns our
-    // §1.3 envelope). We do NOT fall through to upstream because the
-    // upstream `requireTellusAuth` middleware has its own envelope shape
-    // (errorName: "AuthenticationError") which would violate G-C-08's
-    // requirement of `Stemma:Unauthenticated`.
+    // Test/dev mode — only honoured when the env opt-in is set.
+    // Test mode is TERMINAL: when CODE_REPOS_TEST_AUTH=1, we either set a
+    // synthetic principal (from the X-Tellus-Test-Principal header, or the
+    // localhost dev fallback) or return our §1.3 envelope. We do NOT fall
+    // through to upstream because the upstream `requireTellusAuth` middleware
+    // has its own envelope shape (errorName: "AuthenticationError") which would
+    // violate G-C-08's requirement of `Stemma:Unauthenticated`.
     if (
       process.env.CODE_REPOS_TEST_AUTH === "1" &&
       process.env.NODE_ENV !== "production"
     ) {
-      let header = req.header("X-Tellus-Test-Principal");
-      if (typeof header !== "string" || header.length === 0) {
-        // Dev Mode Default: Fall back to a valid superadmin principal with OWNER/EDITOR roles
-        // so local browser loads successfully even if Keycloak tokens are expired or missing.
-        header = "cypress-admin@tellus.local/OWNER,EDITOR,READER";
-      }
-      const [userId, rolesCsv] = header.split("/");
-      if (!userId) {
-        sendUnauthenticated(res, req, "X-Tellus-Test-Principal missing userId");
+      // 1. Explicit test-principal override (G-C-11). Always honoured in dev
+      //    so integration tests can pin a specific principal (alice/bob/carol)
+      //    regardless of the caller's address.
+      const header = req.header("X-Tellus-Test-Principal");
+      if (typeof header === "string" && header.length > 0) {
+        applyHeaderPrincipal(req, res, next, header);
         return;
       }
-      const roles = (rolesCsv ?? "")
-        .split(",")
-        .map((r) => r.trim())
-        .filter((r) => r.length > 0);
-      req.codeReposPrincipal = {
-        userId,
-        source: "test",
-        roles,
-        scopes: [],
-        sourceIp: extractIp(req),
-        userAgent: extractUa(req),
-      };
-      next();
+      // 2. Localhost dev fallback — fabricate a principal so the local browser
+      //    works even when Keycloak tokens are expired/missing. Uses a REAL
+      //    UUID userId (cypress-admin's Keycloak sub — addressable, won't crash
+      //    the UUID-cast in effectiveRole the way an email userId does) + the
+      //    tellus-superadmin dev bypass. Localhost-gated: a leaked
+      //    CODE_REPOS_TEST_AUTH=1 in a remote non-prod env can't grant the dev
+      //    bypass to remote callers — fail-closed to 401 off-localhost.
+      if (!isLocalhost(req)) {
+        sendUnauthenticated(res, req, "Dev principal fallback is localhost-only");
+        return;
+      }
+      applyHeaderPrincipal(req, res, next, DEV_FALLBACK_PRINCIPAL);
       return;
     }
 

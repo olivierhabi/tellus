@@ -69,6 +69,14 @@ import {
   clearMergeProgress,
 } from "./mergeProgress";
 
+// Delta PG tail: diff the freshly-built merged parquet against the PREVIOUS
+// merged snapshot's parquet (same producer — DuckDB — so plain string
+// comparison is exact; no jsonb-canonicalisation pitfalls) and ship ONLY
+// changed/new/deleted rows to PG. Steady-state re-merges go from O(dataset)
+// writes to O(changes). Set MERGE_DELTA=0 to force the full-rewrite tail
+// (e.g. to self-heal out-of-band PG drift).
+const MERGE_DELTA = (process.env.MERGE_DELTA ?? "1") !== "0";
+
 export type EditStrategy = "user_edit_wins" | "latest_wins";
 
 /** A single backing datasource contributing to this Object Type. */
@@ -718,8 +726,14 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
                  source_transaction_id, primary_key
       ) AS BIGINT) AS glob_seq FROM changes`,
     );
-
-    // 5. last DELETE per PK (-1 if none) — the "clear everything before me"
+    // changes_seq holds glob_seq; the bare `changes` table is no longer
+    // referenced (per_pk_last_delete, effective_rows, source_state all read
+    // changes_seq). DROP it now to free ~1GB of pinned-in-memory temp-table
+    // pages — without this, `changes`+`changes_seq`+`effective_rows`+
+    // `source_state` coexist during source_state creation and OOM at 4GB
+    // (DuckDB does NOT spill materialized TEMP tables while a query that
+    // references their siblings runs, so the coexisting set is the peak).
+    await runAll(conn, `DROP TABLE changes;`);
     //    watermark.
     await runAll(
       conn,
@@ -824,6 +838,14 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       LEFT JOIN eff_props epp ON epp.primary_key = s.primary_key
       LEFT JOIN src_markings mk ON mk.primary_key = s.primary_key`,
     );
+    // source_state is materialized from changes_seq + effective_rows; neither
+    // is referenced again (edit_* come from JS arrays; the existing-block COPY
+    // reads source_state + edit_bucket; merged_result reads source_state +
+    // edit_bucket + edit_props_latest). DROP them now so the existing-block +
+    // merged_result stages don't carry ~2GB of dead pinned temp-table pages.
+    await runAll(conn, `DROP TABLE changes_seq;`);
+    await runAll(conn, `DROP TABLE per_pk_last_delete;`);
+    await runAll(conn, `DROP TABLE effective_rows;`);
 
     // 8. edits temp tables (BEFORE the existing-load — the existing PK stream
     //    below references edit_bucket). edit_ops: one row per edit; edit_props:
@@ -896,13 +918,21 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
     } else if (!input.existingInstances) {
       // Production: batched load. Stream the touched PK set from DuckDB (flat
       // memory), chunk into PG WHERE primary_key = ANY($chunk). An EXISTS check
-      // short-circuits OO7's first merge (object_instances=0 for the OT).
+      // short-circuits the first merge (object_instances=0 for the OT).
+      // EXISTS (LIMIT 1) — O(1) early-row probe vs count(*)'s O(N) full seq
+      // scan. The hasExisting check only needs >0, not the exact count.
+      // EXPLAIN ANALYZE on OO2 (4.66M existing rows): count(*) = 43,400ms
+      // (Parallel Seq Scan, 6.8GB read — exceeded the 60s statement_timeout
+      // under merge load); EXISTS = 0.103ms (LIMIT 1 stops at the first match).
+      // The filter is high-selectivity (4.66M/6.35M rows) so the planner
+      // correctly prefers a seq scan over an index either way — an index would
+      // NOT fix count(*); only avoiding the full count does.
       const hasExisting = await query(
-        `SELECT count(*)::text AS count FROM object_instances
-          WHERE ontology_id = $1 AND object_type_api_name = $2`,
+        `SELECT EXISTS (SELECT 1 FROM object_instances
+          WHERE ontology_id = $1 AND object_type_api_name = $2 LIMIT 1) AS exists`,
         [input.ontologyId, input.objectTypeApiName],
       );
-      if (Number(hasExisting.rows[0]?.count ?? 0) > 0) {
+      if (hasExisting.rows[0]?.exists) {
         // COPY the touched PK set to a local pk-sorted parquet ONCE, then keyset
         // queryAll. NO DuckDB stream — a streamQuery here + the per-batch
         // `await query` (PG loadExistingInstances) interleaves a DuckDB pending
@@ -927,44 +957,85 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
               ) ORDER BY primary_key
             ) TO '${pkf}' (FORMAT PARQUET, CODEC 'ZSTD')`,
           );
+          // NDJSON spool + ONE read_json insert. The prior path re-inserted
+          // PG rows into DuckDB as 500-row VALUES literals — ~9,300 statement
+          // parses of ~1MB SQL each on a 4.66M-row OT (minutes of pure SQL
+          // parsing). Spooling to newline-delimited JSON and loading with a
+          // single read_json is one parse and one columnar ingest.
+          const tExisting = Date.now();
+          const existingNdjson = path.join(pkDir, "existing.ndjson");
+          let existingRows = 0;
+          // Dedicated client with a raised statement_timeout: a cold-cache
+          // ANY(20k) fetch on a multi-million-row OT can exceed the global
+          // 60s statement_timeout (observed: two merge attempts cancelled at
+          // ~60s each before the buffer cache warmed). RESET before release
+          // so the pooled session doesn't leak the looser budget.
+          const loadClient = await getClient();
+          await loadClient.query("SET statement_timeout = '300s'");
           const pkBuf: string[] = [];
           const flushExisting = async (): Promise<void> => {
             if (pkBuf.length === 0) return;
-            const res = await query(
+            const res = await loadClient.query(
               `SELECT primary_key, properties, markings, source_datasource_id, source_transaction_id
                  FROM object_instances
                 WHERE ontology_id = $1 AND object_type_api_name = $2
                   AND primary_key = ANY($3::text[])`,
               [input.ontologyId, input.objectTypeApiName, pkBuf.splice(0)],
             );
-            for (let j = 0; j < res.rows.length; j += 500) {
-              const chunk = res.rows.slice(j, j + 500);
-              const vals = chunk
-                .map((r) =>
-                  `(${sqlStr(r.primary_key as string)},${sqlStr(
-                    JSON.stringify(r.properties ?? {}),
-                  )},${sqlVarcharArray((r.markings ?? []) as string[])},${sqlStr(
-                    (r.source_datasource_id as string | null) ?? "",
-                  )},${sqlStr((r.source_transaction_id as string | null) ?? "")})`,
-                )
-                .join(",");
-              if (vals) await runAll(conn, `INSERT INTO existing VALUES ${vals}`);
-            }
-          };
-          let pkAfter = "";
-          for (;;) {
-            const batch = await queryAll<{ primary_key: string }>(
-              conn,
-              `SELECT primary_key FROM read_parquet('${pkf}')
-               ${pkAfter ? `WHERE primary_key > ${sqlStr(pkAfter)}` : ""}
-               ORDER BY primary_key LIMIT 5000`,
+            if (res.rows.length === 0) return;
+            const lines = res.rows.map((r) =>
+              JSON.stringify({
+                primary_key: String(r.primary_key),
+                properties: JSON.stringify(r.properties ?? {}),
+                markings: (r.markings ?? []) as string[],
+                source_datasource_id:
+                  (r.source_datasource_id as string | null) ?? "",
+                source_transaction_id:
+                  (r.source_transaction_id as string | null) ?? "",
+              }),
             );
-            if (batch.length === 0) break;
-            for (const row of batch) pkBuf.push(String(row.primary_key));
-            if (pkBuf.length >= 5000) await flushExisting();
-            pkAfter = String(batch[batch.length - 1].primary_key);
+            fs.appendFileSync(existingNdjson, lines.join("\n") + "\n");
+            existingRows += res.rows.length;
+          };
+          try {
+            let pkAfter = "";
+            for (;;) {
+              const batch = await queryAll<{ primary_key: string }>(
+                conn,
+                `SELECT primary_key FROM read_parquet('${pkf}')
+                 ${pkAfter ? `WHERE primary_key > ${sqlStr(pkAfter)}` : ""}
+                 ORDER BY primary_key LIMIT 20000`,
+              );
+              if (batch.length === 0) break;
+              for (const row of batch) pkBuf.push(String(row.primary_key));
+              if (pkBuf.length >= 20000) await flushExisting();
+              pkAfter = String(batch[batch.length - 1].primary_key);
+            }
+            await flushExisting();
+          } finally {
+            try {
+              await loadClient.query("RESET statement_timeout");
+            } finally {
+              loadClient.release();
+            }
           }
-          await flushExisting();
+          if (existingRows > 0) {
+            const nd = existingNdjson.replace(/'/g, "''");
+            await runAll(
+              conn,
+              `INSERT INTO existing
+               SELECT primary_key, properties, markings,
+                      source_datasource_id, source_transaction_id
+               FROM read_json('${nd}', format = 'newline_delimited',
+                 columns = {primary_key: 'VARCHAR', properties: 'VARCHAR',
+                            markings: 'VARCHAR[]',
+                            source_datasource_id: 'VARCHAR',
+                            source_transaction_id: 'VARCHAR'})`,
+            );
+          }
+          console.log(
+            `[merge-sql] ${input.objectTypeApiName} existing-load rows=${existingRows} durMs=${Date.now() - tExisting}`,
+          );
         } finally {
           try {
             fs.rmSync(pkDir, { recursive: true, force: true });
@@ -1051,6 +1122,9 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       `SELECT CAST(count(*) AS VARCHAR) AS c FROM merged_result`,
     );
     mergedRowCount = Number(countRes[0]?.c ?? 0);
+    console.log(
+      `[merge-sql] ${input.objectTypeApiName} merged_result rows=${mergedRowCount}`,
+    );
 
     // 12. COPY the merged result straight to a local parquet (flat memory —
     //     DuckDB streams the write). ORDER BY primary_key so the resume query is
@@ -1118,6 +1192,97 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
           rowsProcessed: 0,
         });
       }
+
+      // Delta vs the previous merged snapshot. Both parquets were produced by
+      // THIS DuckDB pipeline (identical serialisation), so plain string
+      // comparison is exact. Rows present in prev but absent from the new
+      // merged_result were untouched this run and need no action. Any failure
+      // here falls back to the full-rewrite tail — correctness is never gated
+      // on the delta (and bulkUpsertInstances' IS DISTINCT FROM guard is the
+      // PG-side safety net against false positives).
+      let tailFile = localMergedFile;
+      let tailRowCount = mergedRowCount;
+      if (MERGE_DELTA) {
+        try {
+          const tDelta = Date.now();
+          const prevRes = await query(
+            `SELECT snapshot_id, summary_json FROM funnel_snapshot
+              WHERE dataset_table_id = $1
+                AND jsonb_typeof(summary_json->'parquet_ref') = 'object'
+              ORDER BY committed_at DESC LIMIT 1`,
+            [input.mergedTableId],
+          );
+          const prevRow = prevRes.rows[0] as
+            | { snapshot_id: string; summary_json: Record<string, unknown> }
+            | undefined;
+          const prevRef = prevRow
+            ? resolveParquetRef(prevRow.summary_json?.parquet_ref)
+            : null;
+          if (prevRef) {
+            const prevDl = await downloadParquetRefToLocal(prevRef);
+            downloads.push(prevDl); // freed by the existing finally
+            const deltaFile = path.join(mergedDir, "delta.parquet");
+            const np = localMergedFile.replace(/'/g, "''");
+            const pp = prevDl.localPath.replace(/'/g, "''");
+            const dp = deltaFile.replace(/'/g, "''");
+            await runAll(
+              conn,
+              `COPY (
+                SELECT m.primary_key, m.properties, m.markings, m.operation,
+                       m.source_datasource_id, m.source_transaction_id
+                FROM read_parquet('${np}') m
+                LEFT JOIN read_parquet('${pp}') p
+                  ON p.primary_key = m.primary_key
+                WHERE p.primary_key IS NULL
+                   OR m.operation             IS DISTINCT FROM p.operation
+                   OR m.properties            IS DISTINCT FROM p.properties
+                   OR m.markings              IS DISTINCT FROM p.markings
+                   OR m.source_datasource_id  IS DISTINCT FROM p.source_datasource_id
+                   OR m.source_transaction_id IS DISTINCT FROM p.source_transaction_id
+                ORDER BY m.primary_key
+              ) TO '${dp}' (FORMAT PARQUET, CODEC 'ZSTD', ROW_GROUP_SIZE 100000)`,
+            );
+            const dc = await queryAll<{ c: string }>(
+              conn,
+              `SELECT CAST(count(*) AS VARCHAR) AS c FROM read_parquet('${dp}')`,
+            );
+            tailRowCount = Number(dc[0]?.c ?? 0);
+            tailFile = deltaFile;
+            console.log(
+              `[merge-sql] ${input.objectTypeApiName} delta merged=${mergedRowCount} ` +
+                `changed=${tailRowCount} prevSnapshot=${prevRow!.snapshot_id} ` +
+                `durMs=${Date.now() - tDelta}`,
+            );
+          } else {
+            console.log(
+              `[merge-sql] ${input.objectTypeApiName} no previous merged snapshot — full PG tail`,
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[merge-sql] ${input.objectTypeApiName} delta failed (non-fatal — ` +
+              `falling back to full PG tail): ${(err as Error).message}`,
+          );
+          tailFile = localMergedFile;
+          tailRowCount = mergedRowCount;
+        }
+      }
+
+      if (tailRowCount === 0) {
+        console.log(
+          `[merge-sql] ${input.objectTypeApiName} delta=0 — PG tail skipped`,
+        );
+        if (input.runKey) {
+          await recordMergeProgress(input.runKey, {
+            committed: true,
+            lastPk: null,
+            rowsProcessed: 0,
+            upserts: 0,
+            deletes: 0,
+          });
+        }
+      } else {
+      const tTail = Date.now();
       const client = await getClient();
       const upsertBuf: UpsertInstanceInput[] = [];
       const deleteBuf: string[] = [];
@@ -1136,7 +1301,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         // scan over a pk-sorted parquet is O(batch) per page (merged_result has
         // exactly 1 row per PK — the merge dedups — so no duplicate-PK keyset
         // skip). read_parquet on a local file needs no httpfs.
-        const lp = localMergedFile.replace(/'/g, "''");
+        const lp = tailFile.replace(/'/g, "''");
         const batchSelect = (after: string) =>
           `SELECT primary_key, CAST(properties AS VARCHAR) AS properties,
              to_json(markings) AS markings, operation,
@@ -1206,6 +1371,10 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
           );
         }
         await client.query("COMMIT");
+        console.log(
+          `[merge-sql] ${input.objectTypeApiName} pg-tail rows=${rowsProcessed} ` +
+            `upserts=${upserts} deletes=${deletes} durMs=${Date.now() - tTail}`,
+        );
         if (input.runKey) {
           await recordMergeProgress(input.runKey, {
             committed: true,
@@ -1221,6 +1390,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       } finally {
         client.release();
       }
+      } // end tailRowCount > 0
     } else if (skipPgTail) {
       // Post-commit crash on a prior attempt — PG tail already durable. The
       // merged parquet_ref was re-built above; commitSnapshot will point at the

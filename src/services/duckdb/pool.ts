@@ -168,9 +168,35 @@ export async function __resetPoolForTests(): Promise<void> {
     sharedDb = null;
   }
   bootstrapApplied = new WeakSet();
+  // The Database instance was closed — its instance-level settings
+  // (temp_directory / memory_limit / threads) don't carry over to the next
+  // `:memory:` Database, so the next acquire must re-apply them.
+  instanceSettingsApplied = false;
 }
 
+// Per-connection guard: `LOAD httpfs` + S3 creds are per-SESSION, so they
+// must run on every freshly `db.connect()`-ed connection. (Each
+// `acquireConnection` calls `db.connect()`, which returns a NEW connection
+// object — so this WeakSet rarely short-circuits in practice; it exists for
+// the theoretical same-conn re-acquire.)
 let bootstrapApplied = new WeakSet<DuckDBConnection>();
+
+// Instance-level guard. `PRAGMA temp_directory`, `SET memory_limit`, and
+// `SET threads` are DATABASE-instance settings (they apply to every
+// connection on the shared `:memory:` Database, not just the session that
+// ran them). `temp_directory` in particular is set-ONCE-before-spill: after
+// ANY query spills to the temp dir, re-running `PRAGMA temp_directory` on ANY
+// connection throws
+//   "Cannot switch temporary directory after the current one has been used".
+//
+// The OlivierOrder2 (5.6M) pipeline hit exactly this: the changelog's 5.6M
+// DISTINCT-ON dedup spilled → temp dir "used" → the merge stage's next
+// `acquireConnection` re-ran `PRAGMA temp_directory` (per-connection guard
+// didn't help — new connection object) → throw → workflow FAILED in 2 min.
+// Guarding these three with an instance-level flag (set synchronously before
+// the first `await`, so Node's single-threaded loop makes the check-and-set
+// atomic) makes them run exactly once per Database lifetime.
+let instanceSettingsApplied = false;
 
 async function applyBootstrap(
   conn: DuckDBConnection,
@@ -179,12 +205,33 @@ async function applyBootstrap(
   if (bootstrapApplied.has(conn)) return;
   bootstrapApplied.add(conn);
 
+  // (f) bounded spill — instance-level, ONCE. DuckDB spills hashtables, sort
+  // runs, and aggregate state to this directory when the in-memory limit is
+  // reached. Without the pragma, a big JOIN on a small pod OOMs. See the
+  // `instanceSettingsApplied` comment for why this is guarded at the
+  // instance level (not per-connection like httpfs).
+  await applyInstanceSettings(conn, options);
+
+  // Per-session: httpfs + S3 creds. LOAD is per-session even though INSTALL
+  // is process-wide, so every new connection must re-LOAD.
+  if (!options.skipHttpfs) {
+    await installAndLoad(conn, "httpfs");
+    await applyS3Credentials(conn);
+  }
+}
+
+async function applyInstanceSettings(
+  conn: DuckDBConnection,
+  options: PoolOptions,
+): Promise<void> {
+  if (instanceSettingsApplied) return;
+  // Set BEFORE the first await so a concurrent acquireConnection (queued
+  // behind this one's first await in Node's single-threaded loop) sees
+  // `true` and skips — no double `PRAGMA temp_directory`.
+  instanceSettingsApplied = true;
+
   const memoryLimit = options.memoryLimit ?? process.env.DUCKDB_MEMORY_LIMIT ?? "12GB";
   const tempDir = options.tempDirectory ?? process.env.DUCKDB_TEMP_DIR ?? "/tmp/duckdb_spill";
-
-  // (f) bounded spill: DuckDB will spill hashtables, sort runs, and
-  // aggregate state to this directory when the in-memory limit is
-  // reached. Without the pragma, a big JOIN on a small pod OOMs.
   await runAll(conn, `SET memory_limit='${memoryLimit}'`);
   await runAll(conn, `PRAGMA temp_directory='${tempDir}'`);
   // Default thread count — tuned so a 4-vCPU pod doesn't oversubscribe.
@@ -192,11 +239,14 @@ async function applyBootstrap(
   if (threads > 0) {
     await runAll(conn, `SET threads=${threads}`);
   }
-
-  if (!options.skipHttpfs) {
-    await installAndLoad(conn, "httpfs");
-    await applyS3Credentials(conn);
-  }
+  // preserve_insertion_order=false — DuckDB's default (true) keeps result
+  // ordering, which inflates memory for big aggregates/sorts. The funnel's
+  // merge SQL uses EXPLICIT `ORDER BY` wherever order matters (the glob_seq
+  // row_number(), the final `COPY ... ORDER BY primary_key`), so disabling
+  // the implicit order-preservation is correctness-neutral + cuts the peak
+  // memory that OOMed the 5.6M OlivierOrder2 merge at the 2GB limit.
+  // Also recommended by DuckDB's own OOM error message.
+  await runAll(conn, `SET preserve_insertion_order=false`);
 }
 
 /**

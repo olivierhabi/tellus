@@ -7,7 +7,7 @@
 // before any orchestration layer runs them.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   validateColumnwiseMDO,
   resolveProperty,
@@ -22,6 +22,25 @@ import {
   SnapshotDiffReader,
 } from "../../../src/services/funnel/changelogStage";
 import { funnelNamespace } from "../../../src/services/funnel/icebergCatalog";
+
+// computeChangelog now persists rows to a MinIO parquet (Option 2). In the
+// pure-unit env there are no S3 creds + no live Postgres, so stub the
+// storage service (in-memory no-op) + the db so the B4 duplicate-PK tests
+// exercise the dedup logic cleanly without spamming S3-creds errors.
+vi.mock("../../../src/services/storageService", () => ({
+  uploadObject: vi.fn(async (key: string) => ({
+    key,
+    bucket: "tellus-uploads",
+    size: 0,
+  })),
+  getObjectStream: vi.fn(),
+  deleteObject: vi.fn(),
+  buildDuckDbReadUri: vi.fn((b: string, k: string) => `s3://${b}/${k}`),
+}));
+vi.mock("../../../src/db", () => ({
+  query: vi.fn().mockResolvedValue({ rows: [] }),
+  getClient: vi.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // B5: Column-wise Multi-Datasource Overlay (MDO) enforcement

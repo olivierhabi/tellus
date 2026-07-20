@@ -47,6 +47,17 @@ export interface OntologySnapshot {
   readonly ontologyId: string;
   readonly objectCount: number;
   readonly objectTypes: readonly string[];
+  /**
+   * The object types the code repository DECLARES as imports
+   * (`code_repository_resource_imports`, `kind='object_type'`) — sourced from
+   * `loadOntologySnapshot`'s `objectTypes` filter arg. This is the set a
+   * generated `@ontology/sdk` would expose: a function may
+   * `import { SomeType } from "@ontology/sdk"` for a type that has ZERO rows
+   * in this snapshot. `objectTypeDescriptors` is keyed off this list (falling
+   * back to `objectTypes` only when a caller didn't pass a filter), so
+   * `SomeType.apiName` always resolves regardless of instance count.
+   */
+  readonly importedTypes?: readonly string[];
 }
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -130,7 +141,18 @@ export async function loadOntologySnapshot(
     });
     count += 1;
   }
-  return { byType, ontologyId: args.ontologyId, objectCount: count, objectTypes: [...byType.keys()] };
+  // `importedTypes` mirrors the caller's `objectTypes` filter (the repo's
+  // declared imports) so `buildOntologySdk` can build `objectTypeDescriptors`
+  // from DECLARED imports — not just types that happen to have rows. Undefined
+  // when the caller passed no filter (buildOntologySdk then falls back to the
+  // loaded `objectTypes`, preserving the pre-fix behaviour for unfiltered loads).
+  return {
+    byType,
+    ontologyId: args.ontologyId,
+    objectCount: count,
+    objectTypes: [...byType.keys()],
+    importedTypes: args.objectTypes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -402,8 +424,26 @@ export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
       getEdits() { return edits.slice(); },
     },
     createEditBatch: () => createEditBatchImpl(),
+    // Descriptors are keyed off the repo's DECLARED imports
+    // (`snapshot.importedTypes`), NOT the types that happen to have rows
+    // (`snapshot.objectTypes`). A generated `@ontology/sdk` exposes every
+    // imported type regardless of instance count, so a function may read
+    // `SomeType.apiName` for a type with zero rows in this snapshot — that
+    // must resolve to `{ apiName }` (it is a TYPE descriptor, not data), else
+    // `import { SomeType } from "@ontology/sdk"` is `undefined` in the sandbox
+    // and `SomeType.apiName` throws `Cannot read properties of undefined`.
+    //
+    // Use DECLARED imports only when NON-EMPTY (not `??`): an empty
+    // `importedTypes: []` must NOT shadow real rows loaded by an unfiltered
+    // `loadOntologySnapshot` call — `[]` is non-nullish, so `??` would wrongly
+    // pick it and yield an empty descriptor map. The non-empty guard preserves
+    // the pre-fix behaviour (descriptors = loaded types) for that edge case +
+    // for callers that load without an import filter.
     objectTypeDescriptors: Object.fromEntries(
-      snapshot.objectTypes.map((t) => [t, { apiName: t }]),
+      (snapshot.importedTypes && snapshot.importedTypes.length > 0
+        ? snapshot.importedTypes
+        : snapshot.objectTypes
+      ).map((t) => [t, { apiName: t }]),
     ),
   };
   return { sdk, getEdits: () => edits.slice(), getRequestedTypes: () => [...requestedTypes] };

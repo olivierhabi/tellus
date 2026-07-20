@@ -483,13 +483,24 @@ router.post('/refresh', csrfSameOrigin, async (req: Request, res: Response) => {
     // Absolute cap is anchored at the ORIGINAL interactive login (the marker).
     // Refresh ROTATES the access/refresh tokens but must NOT extend the window
     // — the cookies' Max-Age is the REMAINING time so they expire exactly when
-    // the marker does. No/invalid marker → cookies expire now (fail-closed).
+    // the marker does.
+    //
+    // Missing/invalid marker: re-anchor to a full SESSION_MAX_AGE window
+    // rather than fail-closed with Max-Age=0. Fail-closed wiped a live
+    // session whenever the non-httpOnly marker was dropped (ITP, cookie
+    // jar partial clear, older clients) while the httpOnly refresh cookie
+    // was still valid — the user was bounced to re-auth despite a
+    // perfectly refreshable session. Re-anchoring preserves the product
+    // invariant "a valid refresh cookie keeps you signed in" and still
+    // caps the new window at SESSION_MAX_AGE.
     const markerRaw = (req.cookies && (req.cookies as Record<string, string>)[TELLUS_SESSION_EXPIRES_COOKIE]) as
       | string
       | undefined;
     const markerMs = markerRaw ? Number(markerRaw) : NaN;
     const absoluteExpiryMs =
-      Number.isFinite(markerMs) && markerMs > Date.now() ? markerMs : Date.now();
+      Number.isFinite(markerMs) && markerMs > Date.now()
+        ? markerMs
+        : Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
     setSessionCookies(res, result.accessToken, result.refreshToken, absoluteExpiryMs);
     res.json({
       success: true,

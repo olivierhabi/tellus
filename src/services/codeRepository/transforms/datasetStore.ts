@@ -29,6 +29,8 @@ export interface ResolvedInput {
   readonly datasetId: string;
   readonly filePath: string;
   readonly fileFormat: string;
+  /** The dataset's display name (`dataset.name`). Null when absent. */
+  readonly name: string | null;
 }
 
 export interface MaterializeResult {
@@ -51,8 +53,9 @@ export async function resolveDatasetByRid(
     dataset_id: string;
     file_format: string;
     storage_path: string | null;
+    name: string | null;
   }>(
-    `SELECT dataset_id, file_format, storage_path FROM dataset WHERE rid = $1`,
+    `SELECT dataset_id, file_format, storage_path, name FROM dataset WHERE rid = $1`,
     [rid],
   );
   if (ds.rowCount === 0) return null;
@@ -74,7 +77,7 @@ export async function resolveDatasetByRid(
   // Resolve relative paths (legacy rows) against the server CWD.
   const filePath = path.isAbsolute(rawPath) ? rawPath : path.resolve(rawPath);
 
-  return { datasetId: row.dataset_id, filePath, fileFormat: row.file_format };
+  return { datasetId: row.dataset_id, filePath, fileFormat: row.file_format, name: row.name ?? null };
 }
 
 /**
@@ -155,6 +158,9 @@ export interface ResolvedTransformInput {
    * bridge"` = a Foundry catalog file (UUID rid, NOT in `dataset` → its
    * datasetId is NOT a valid `dataset.dataset_id` for `transform_lineage`). */
   readonly origin: "dataset-table" | "foundry-bridge";
+  /** The dataset's display name (`dataset.name` or `foundry_datasets.name`).
+   * Null when absent (e.g. a dataset with no name column set). */
+  readonly name: string | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -200,6 +206,7 @@ export async function resolveTransformInput(
       fileFormat: ds.fileFormat,
       stagedPath: null,
       origin: "dataset-table",
+      name: ds.name,
     };
   }
 
@@ -215,8 +222,9 @@ export async function resolveTransformInput(
     format: string | null;
     mime_type: string | null;
     status: string | null;
+    name: string | null;
   }>(
-    `SELECT file_path, format, mime_type, status FROM foundry_datasets WHERE id = $1`,
+    `SELECT file_path, format, mime_type, status, name FROM foundry_datasets WHERE id = $1`,
     [uuid],
   );
   if (fr.rowCount === 0) return null;
@@ -242,7 +250,34 @@ export async function resolveTransformInput(
     fileFormat: "csv",
     stagedPath,
     origin: "foundry-bridge",
+    name: row.name ?? null,
   };
+}
+
+/** Best-effort dataset NAME lookup by rid — for display in the preview UI (the
+ * OutputNode shows "{name} - {compute}" instead of a bare UUID rid). For a
+ * Foundry-catalog dataset (UUID-suffix rid) the CATALOG name
+ * (`foundry_datasets.name`) is the user-facing dataset name (what the dataset
+ * page shows) — preferred over a build's `dataset`-table row (which carries
+ * the transform name, not the dataset name). Falls back to the `dataset` table
+ * (slug rids, or a build row when the catalog lookup misses). Returns null when
+ * the dataset doesn't exist yet (a transform targeting a fresh Output rid) —
+ * the caller falls back to the entryPoint. */
+export async function lookupDatasetName(rid: string): Promise<string | null> {
+  const uuid = ridSuffix(rid);
+  if (UUID_RE.test(uuid)) {
+    const fr = await pool.query<{ name: string | null }>(
+      `SELECT name FROM foundry_datasets WHERE id = $1`,
+      [uuid],
+    );
+    if ((fr.rowCount ?? 0) > 0 && fr.rows[0].name) return fr.rows[0].name;
+  }
+  const slug = await pool.query<{ name: string | null }>(
+    `SELECT name FROM dataset WHERE rid = $1`,
+    [rid],
+  );
+  if ((slug.rowCount ?? 0) > 0 && slug.rows[0].name) return slug.rows[0].name;
+  return null;
 }
 
 /** Stream a foundry-catalog object (S3/MinIO) to a temp CSV file the python

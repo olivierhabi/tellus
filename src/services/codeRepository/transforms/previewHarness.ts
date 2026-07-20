@@ -26,7 +26,7 @@ import type { StemmaAdapter } from "../adapters/types.js";
 import { discoverTransforms } from "./discovery.js";
 import { executeTransform, type ExecuteResult, type ExecutorInputBinding } from "./executor.js";
 import { preflightTransformRuntime } from "./runtimeConfig.js";
-import { resolveTransformInput } from "./datasetStore.js";
+import { lookupDatasetName, resolveTransformInput } from "./datasetStore.js";
 import { type TransformPrincipal } from "./authz.js";
 import { readCSV } from "../../indexing/csvReader.js";
 import { readRepoPyFiles } from "./testHarness.js";
@@ -43,6 +43,11 @@ export interface PreviewArgs {
    * before it's staged. (Preview never writes an output, so there's no write
    * check here — only input read-access.) */
   readonly principal: TransformPrincipal;
+  /** AbortSignal — aborted by the route handler on client disconnect (FE Stop /
+   * connection close) so the in-flight preview child is killed server-side
+   * instead of running to the 100s exec timeout. Threaded to executeTransform →
+   * runChild/runChildContainer. */
+  readonly signal?: AbortSignal;
 }
 
 export interface PreviewSample {
@@ -54,6 +59,9 @@ export interface PreviewSample {
 export interface PreviewInput extends PreviewSample {
   readonly param: string;
   readonly rid: string;
+  /** The dataset's display name (`dataset.name` or `foundry_datasets.name`).
+   * Null when absent. */
+  readonly name: string | null;
 }
 
 export interface PreviewResult {
@@ -61,7 +69,7 @@ export interface PreviewResult {
   readonly entryPoint: string;
   readonly engine: "pandas" | "spark" | null;
   readonly inputs: PreviewInput[];
-  readonly output: ({ readonly rid: string } & PreviewSample) | null;
+  readonly output: ({ readonly rid: string; readonly name: string | null } & PreviewSample) | null;
   readonly stdout: string;
   readonly stderr: string;
   readonly error: string | null;
@@ -201,7 +209,7 @@ export async function runTransformPreview(args: PreviewArgs): Promise<PreviewRes
           return fail(args, `input dataset not found: ${inp.rid} (param '${inp.param}')`, { inputs: inputSamples, engine });
         }
         if (resolved.stagedPath) stagedPaths.push(resolved.stagedPath);
-        inputSamples.push({ param: inp.param, rid: inp.rid, ...(await readSample(resolved.filePath)) });
+        inputSamples.push({ param: inp.param, rid: inp.rid, name: resolved.name ?? null, ...(await readSample(resolved.filePath)) });
         bindings.push({ param: inp.param, rid: inp.rid, path: resolved.filePath, format: resolved.fileFormat ?? "csv", previousPath: null });
       }
     } catch (e) {
@@ -219,6 +227,7 @@ export async function runTransformPreview(args: PreviewArgs): Promise<PreviewRes
       inputs: bindings,
       isIncremental: false,
       timeoutMs: PREVIEW_EXEC_TIMEOUT_MS,
+      signal: args.signal,
     });
     if (!exec.ok || !exec.outputPath) {
       return {
@@ -240,7 +249,7 @@ export async function runTransformPreview(args: PreviewArgs): Promise<PreviewRes
       entryPoint: args.entryPoint,
       engine,
       inputs: inputSamples,
-      output: { rid: t.outputRid, ...outputSample },
+      output: { rid: t.outputRid, name: await lookupDatasetName(t.outputRid), ...outputSample },
       stdout: exec.stdout,
       stderr: exec.stderr,
       error: null,

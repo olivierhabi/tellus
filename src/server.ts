@@ -97,6 +97,14 @@ import {
 import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
 import { stopHealthProber } from "./services/connectivity/health/prober";
 import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
+import {
+  startDeveloperConsoleReconciliationWorker,
+  stopDeveloperConsoleReconciliationWorker,
+} from "./services/developerConsole/reconciliationWorker";
+import {
+  startDeveloperConsoleArtifactBuildWorker,
+  stopDeveloperConsoleArtifactBuildWorker,
+} from "./services/developerConsole/artifactBuildWorker";
 
 // Background boot tasks (Lakekeeper, ClickHouse, superadmin seed, …) are
 // fire-and-forget so they don't delay serving /health. shutdown() races
@@ -134,6 +142,7 @@ import foundrySearchRouter from "./routes/search";
 import foundryBreadcrumbRouter from "./routes/breadcrumb";
 import tellusAuthV1Router from "./routes/tellusAuthV1";
 import tellusAuthTestHooksRouter from "./routes/tellusAuthTestHooks";
+import developerConsoleRouter from "./routes/developerConsole";
 import { purgeExpiredAuthChallenges } from "./services/totpService";
 import { purgeExpiredReauthTokens } from "./services/reauthService";
 import { flushEmailOutbox } from "./services/emailOutboxService";
@@ -792,12 +801,20 @@ app.use("/api/v1/datasets", dataPreviewRouter);
 import { mountCodeRepository } from "./services/codeRepository/mount";
 import { rehydrateInMemoryStemma } from "./services/codeRepository/rehydrate";
 import { PostgresStemma } from "./services/codeRepository/adapters/postgres";
+import { FunctionsPublishService } from "./services/functionsPublish/service";
+import { functionsPublishRunsRouter } from "./services/functionsPublish/routes";
 // DURABLE Stemma (migration 086): persist branches/blobs/HEADs to Postgres so
 // committed code survives restarts. Previously the in-memory adapter lost all
 // git content on every reload, leaving repos showing only the template scaffold
 // and drifting branch_cache (→ 412 on commit). The template adapter scaffolds
 // through this same instance, so new repos materialise into Postgres too.
-const codeRepoMount = mountCodeRepository({ pool, stemma: new PostgresStemma({ pool }) });
+const codeRepoStemma = new PostgresStemma({ pool });
+const functionsPublishService = new FunctionsPublishService({ pool, stemma: codeRepoStemma });
+const codeRepoMount = mountCodeRepository({
+  pool,
+  stemma: codeRepoStemma,
+  functionsPublisher: functionsPublishService,
+});
 // Dedicated wall budget for code-repositories routes (the function-invoke
 // path transpiles + loads an ontology snapshot + runs a sandboxed function).
 // The global 5s middleware exempted this prefix above; this longer ceiling
@@ -824,6 +841,7 @@ app.use(
   }),
 );
 app.use("/api/v1/code-repositories", codeRepoMount.router);
+app.use("/api/v1/jemma", functionsPublishRunsRouter({ pool, service: functionsPublishService }));
 
 // Longer ceiling for the object read path (search/get/aggregate) so a request
 // queued behind a synchronous function-sandbox block completes instead of
@@ -1119,6 +1137,10 @@ app.use("/api/v1/uploads", foundryUploadProgressRouter);
 // in Phase 3; /api/v1/auth is the only supported authentication entry point.
 app.use("/api/v1/auth", tellusAuthV1Router);
 
+// Palantir Foundry Developer Console (third-party applications / OSDK apps).
+// See tellus-fe/docs/developer-console/BACKEND_PALANTIR_PARITY.md
+app.use("/api/v1/developer-console", developerConsoleRouter);
+
 // Dev-only: Cypress's MFA cleanup hooks live under /api/v1/auth/_test.
 // Mount conditionally so production bundles never expose the router at all.
 if (process.env.NODE_ENV !== "production") {
@@ -1364,6 +1386,10 @@ async function start(): Promise<void> {
         `Ontology Engine started on port ${PORT} | PostgreSQL connected`
       );
     });
+    functionsPublishService.start();
+
+    startDeveloperConsoleReconciliationWorker(foundryDb as unknown as import('knex').Knex);
+    startDeveloperConsoleArtifactBuildWorker(foundryDb as unknown as import('knex').Knex);
 
     // Object Data Funnel background workers.
     //
@@ -1747,6 +1773,7 @@ async function shutdown(signal: string): Promise<void> {
   // The auth-maintenance sweep queries the foundry pool on a 60s timer; clear
   // it before the drain so it can't fire against an ended pool.
   clearInterval(authMaintenanceSweeper);
+  functionsPublishService.stop();
 
   // Quiesce background workers / timers BEFORE draining the DB pools. Each of
   // these runs a self-scheduling loop (FOR UPDATE SKIP LOCKED claimers, sweep
@@ -1756,6 +1783,8 @@ async function shutdown(signal: string): Promise<void> {
   // hang on one misbehaving worker. The connectivity health prober is included
   // because its recordStatus() writes to the foundry pool every tick.
   const workerStops: Array<[string, () => unknown]> = [
+    ["developerConsoleArtifactBuilder", stopDeveloperConsoleArtifactBuildWorker],
+    ["developerConsoleReconciler", stopDeveloperConsoleReconciliationWorker],
     ["funnelDispatcher", stopFunnelDispatcher],
     ["pipelineDispatcher", stopPipelineDispatcher],
     ["overlaySweeper", stopOverlaySweeper],

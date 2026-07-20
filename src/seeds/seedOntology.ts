@@ -50,6 +50,31 @@ export async function resetEnterpriseOntologyForSeed(): Promise<string> {
   await query("DELETE FROM link_type WHERE ontology_id = $1", [ontologyId]);
   await query("DELETE FROM object_type WHERE ontology_id = $1", [ontologyId]);
 
+  // LOUD, actionable notice: this reset wiped Postgres `object_instances`
+  // AND every `object_type` definition (incl. user-created ones not in the
+  // seed). The seed only re-creates the seed object-TYPE definitions — it
+  // does NOT re-materialize any `object_instances` rows and does NOT re-run
+  // the funnel/materializer for CSV-backed types. Consequence for the
+  // code-repository TS function runtime: a repo that imports an object type
+  // which has zero rows now gets an empty Ontology snapshot for it. Fix B
+  // (objectTypeDescriptors keyed off DECLARED imports) keeps the type
+  // descriptor resolving (so `SomeType.apiName` no longer throws), but
+  // `Objects.search(SomeType.apiName)` returns an empty ObjectSet until
+  // `object_instances` is repopulated. Repopulate per type via the runtime
+  // reindex/funnel entry point:
+  //   POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex
+  // (reindexObjectType — materializes the backing datasource into
+  // `object_instances` + OpenSearch). Do NOT expect imported types to carry
+  // data after a seed without this step.
+  console.warn(
+    `[seedOntology] resetEnterpriseOntologyForSeed cleared object_instances + ` +
+      `object_type definitions for ontology ${ontologyId}. ` +
+      `Code-repository function runtime: imported types resolve descriptors ` +
+      `(no undefined.apiName crash) but Objects.search returns empty until ` +
+      `object_instances is repopulated — re-run ` +
+      `POST /api/v1/ontology/:ontologyId/objectTypes/:apiName/reindex per type.`
+  );
+
   return ontologyId;
 }
 

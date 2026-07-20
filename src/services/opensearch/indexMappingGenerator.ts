@@ -111,8 +111,14 @@ const SYSTEM_FIELD_MAPPINGS: SystemFields = {
 
 /** Default index settings for development. */
 const DEFAULT_INDEX_SETTINGS: IndexSettings = {
-  number_of_shards: 1,
-  number_of_replicas: 0,
+  // Env-tunable (see templateRegistry.ts DEFAULT_TEMPLATE_SETTINGS): 4 shards
+  // parallelise bulk indexing for large OTs (OlivierOrder2 5.6M). Prod = 1.
+  number_of_shards: Number(process.env.OS_INDEX_SHARDS ?? "1"),
+  // Env-tunable (see templateRegistry.ts DEFAULT_TEMPLATE_SETTINGS): 0 replicas
+  // for single-node dev. Prod must set OS_INDEX_REPLICAS >= 1 once a multi-node
+  // cluster exists. MUST match templateRegistry.ts (same env var) — drift
+  // diverges template-created vs explicitly-created indices.
+  number_of_replicas: Number(process.env.OS_INDEX_REPLICAS ?? "0"),
   refresh_interval: "1s",
   max_result_window: 100000,
   analysis: {
@@ -123,6 +129,62 @@ const DEFAULT_INDEX_SETTINGS: IndexSettings = {
     },
   },
 };
+
+// ---------------------------------------------------------------------------
+// Size-aware shard resolution
+//
+// A single-shard index is a single indexing pipeline — it caps bulk
+// throughput regardless of client-side concurrency. For large OTs (multi-
+// million rows) we want OS_INDEX_SHARDS_LARGE (default 4) shards so
+// concurrent _bulk requests actually parallelise across indexing threads.
+// Small OTs stay at OS_INDEX_SHARDS (default 1) — sharding a 746-row OT
+// only adds per-shard overhead.
+//
+// The row count comes from `backing_datasource.row_count` (stamped at
+// registration) with a fallback to a live `object_instances` count. Both
+// `generateIndexMapping` (create path) and `verifyIndexShardCount`
+// (existing-index guard) resolve through the SAME function so the guard
+// can never disagree with the creator.
+// ---------------------------------------------------------------------------
+
+const LARGE_OT_ROW_THRESHOLD = Number(
+  process.env.OS_LARGE_OT_ROWS ?? "1000000",
+);
+
+/** Pure: shard count for a given expected row count. */
+export function resolveShardCount(rowCount: number): number {
+  const small = Number(process.env.OS_INDEX_SHARDS ?? "1");
+  const large = Number(process.env.OS_INDEX_SHARDS_LARGE ?? "4");
+  return rowCount >= LARGE_OT_ROW_THRESHOLD ? large : small;
+}
+
+/**
+ * Expected shard count for an object type, resolved from its backing
+ * datasource row_count (fallback: live object_instances count; fallback: 0
+ * → small). Best-effort — on any lookup error returns the small default so
+ * index creation never fails on a metadata hiccup.
+ */
+export async function expectedShardCountForObjectType(
+  objectTypeApiName: string,
+): Promise<number> {
+  try {
+    const res = await query(
+      `SELECT COALESCE(
+         (SELECT bd.row_count
+            FROM backing_datasource bd
+            JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+           WHERE ot.api_name = $1
+           ORDER BY bd.registered_at DESC LIMIT 1),
+         (SELECT count(*) FROM object_instances
+           WHERE object_type_api_name = $1)
+       ) AS row_count`,
+      [objectTypeApiName],
+    );
+    return resolveShardCount(Number(res.rows[0]?.row_count ?? 0));
+  } catch {
+    return resolveShardCount(0);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // getIndexName()
@@ -286,8 +348,14 @@ export async function generateIndexMapping(
   // -----------------------------------------------------------------------
   const indexName = getIndexName(objectTypeApiName);
 
+  // Size-aware shards: large OTs get OS_INDEX_SHARDS_LARGE so bulk
+  // indexing parallelises across shards (see resolveShardCount above).
+  const numberOfShards = await expectedShardCountForObjectType(
+    objectTypeApiName,
+  );
+
   const mapping: IndexMappingDocument = {
-    settings: { ...DEFAULT_INDEX_SETTINGS },
+    settings: { ...DEFAULT_INDEX_SETTINGS, number_of_shards: numberOfShards },
     mappings: {
       properties: fieldMappings,
     },

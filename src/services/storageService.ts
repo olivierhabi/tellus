@@ -267,6 +267,10 @@ export async function uploadObject(
   metadata?: Record<string, string>,
   contentLength?: number,
   onProgress?: (loaded: number, total: number) => void,
+  encryption?: {
+    serverSideEncryption: 'AES256' | 'aws:kms';
+    ssekmsKeyId?: string;
+  },
 ): Promise<{ key: string; bucket: string; size: number }> {
   const config = getConfig();
   const client = getClient();
@@ -279,6 +283,8 @@ export async function uploadObject(
       Body: body,
       ContentType: contentType,
       Metadata: metadata,
+      ServerSideEncryption: encryption?.serverSideEncryption,
+      SSEKMSKeyId: encryption?.ssekmsKeyId,
     },
     // Multipart threshold: 5 MB (files larger than this are split).
     partSize: 5 * 1024 * 1024,

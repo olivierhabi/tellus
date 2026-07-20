@@ -25,7 +25,7 @@
 // ---------------------------------------------------------------------------
 
 import { Router, type Request, type Response, type NextFunction } from "express";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 
 import { isRid, isStructurallyRid, mintFunctionVersionRid } from "../../codeRepos/contracts/rid";
@@ -35,6 +35,7 @@ import { ERROR_CODES } from "../../codeRepos/contracts/errors";
 import { requireCodeReposAuth } from "../../codeRepos/middleware/principal";
 import { idempotencyMiddleware } from "../../codeRepos/middleware/idempotency";
 import { codeReposError, type CodeReposErrorName } from "../errors";
+import { inferFunctionObjectType } from "../functionObjectType";
 import {
   applyEdits,
   loadOntologySnapshot,
@@ -76,6 +77,7 @@ import type {
   StemmaAdapter,
   TemplateAdapter,
 } from "../adapters/types";
+import { FunctionsPublishError, type FunctionsPublishService } from "../../functionsPublish/service";
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -86,6 +88,7 @@ export interface CodeRepositoryRoutesDeps {
   readonly compass: CompassAdapter;
   readonly stemma: StemmaAdapter;
   readonly template: TemplateAdapter;
+  readonly functionsPublisher?: FunctionsPublishService;
 }
 
 interface CreateRepoBody {
@@ -266,6 +269,15 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         req.query.importsObjectType.length > 0
           ? req.query.importsObjectType
           : null;
+      // Optional filter: only repos whose template_id contains this substring
+      // (ILIKE). Used by the ActionTypeDialog's unscoped function picker to
+      // fetch ONLY typescript-function repos without paginating through every
+      // transforms-python repo in the deployment.
+      const templateIdContains =
+        typeof req.query.templateIdContains === "string" &&
+        req.query.templateIdContains.length > 0
+          ? req.query.templateIdContains
+          : null;
       const params: unknown[] = [stateFilter];
       let where = "WHERE state = $1";
       if (parentFolderRid) {
@@ -281,6 +293,10 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           params.push(importsObjectType);
           where += ` AND EXISTS (SELECT 1 FROM code_repository_resource_imports i WHERE i.repository_rid = code_repository.rid AND i.api_name = $${params.length})`;
         }
+      }
+      if (templateIdContains) {
+        params.push(`%${templateIdContains}%`);
+        where += ` AND template_id ILIKE $${params.length}`;
       }
       params.push(limit);
       const r = await pool.query(
@@ -1749,6 +1765,47 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // SemVer (1.2.3-rc1), is a preview build (never resolves on default).
       const isPreview = branch !== defaultBranch || parsedSemver.preRelease.length > 0;
 
+      // TypeScript v2 uses the durable functions-publish pipeline. Keep the
+      // legacy synchronous implementation below as a compatibility fallback
+      // for standalone route tests that do not inject the worker service.
+      if (deps.functionsPublisher) {
+        const principal = req.codeReposPrincipal;
+        if (!principal) {
+          return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+        }
+        try {
+          const run = await deps.functionsPublisher.enqueue({
+            repositoryRid: rid,
+            branch,
+            defaultBranch,
+            semver,
+            message: typeof b.message === "string" ? b.message.slice(0, 1024) : null,
+            triggeredBy: derivePrincipalSubUuid(principal.userId),
+            idempotencyKey: (req.header("Idempotency-Key") ?? randomUUID()).trim(),
+          });
+          res.setHeader("Location", `/api/v1/jemma/runs/${encodeURIComponent(run.runRid)}`);
+          return res.status(run.replayed ? 200 : 202).json({
+            run,
+            status: run.state,
+            deduplicated: run.replayed,
+          });
+        } catch (error) {
+          if (error instanceof FunctionsPublishError) {
+            if (error.code === "BRANCH_NOT_FOUND") {
+              return sendError(res, codeReposError("CodeRepos:BranchNotFound", { branch }));
+            }
+            if (error.code === "NO_FUNCTIONS") {
+              return sendError(res, codeReposError("CodeRepos:NoFunctionsToPublish", { branch }));
+            }
+            return sendError(res, codeReposError("CodeRepos:VersionConflict", {
+              reason: error.message,
+              ...error.details,
+            }));
+          }
+          throw error;
+        }
+      }
+
       // 1 + 2 — tree + function discovery.
       const tree = await deps.stemma.listTree({ repositoryRid: rid, branch, path: "", depth: 6 });
       if (tree.kind === "branch-not-found") {
@@ -1939,6 +1996,11 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         publishedAt: string | null;
         source: "published" | "working_tree";
         path: string | null;
+        /** Object-type apiName the function binds to (from `@ontology/sdk`
+         *  import / `ObjectSet<X>`), or null for a pure utility. The FE
+         *  overlays the ontology display name + icon + colour. */
+        objectTypeName: string | null;
+        objectTypeIcon: string | null;
       };
       const byApiName = new Map<string, MergedFunctionRow>();
 
@@ -1994,6 +2056,11 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                     : new Date(r.published_at).toISOString(),
                 source: "published",
                 path: null,
+                // Stamped from the working-tree source below (published
+                // versions share their apiName's `src/functions/<name>.ts`
+                // file on the branch); stays null for published-only fns.
+                objectTypeName: null,
+                objectTypeIcon: null,
               });
             }
           }
@@ -2018,6 +2085,11 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // exists — the exact symptom users hit after Tag & Release.
       const workingTree: MergedFunctionRow[] = [];
       const wtSeen = new Set<string>();
+      // apiName → bound object-type apiName, inferred from each function's
+      // source (`@ontology/sdk` import / `ObjectSet<X>`). Used to stamp BOTH
+      // the working-tree row and the published row (the FE dedupes
+      // published-first, so the published row must carry the type too).
+      const objectTypeByApi = new Map<string, string | null>();
       try {
         const tree = await deps.stemma.listTree({
           repositoryRid: rid,
@@ -2039,6 +2111,27 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             if (apiName.endsWith("Test") || entry.name.includes(".test.")) continue;
             if (wtSeen.has(apiName)) continue; // one working-tree entry per apiName
             wtSeen.add(apiName);
+            // Infer the bound object type from the source. TS only — Python
+            // functions use a different convention and surface null (utility)
+            // for now. Per-file try/catch so one unreadable file can't blank
+            // detection for the rest.
+            let objectTypeName: string | null = null;
+            if (ext === "ts") {
+              try {
+                const blob = await deps.stemma.readBlob({
+                  repositoryRid: rid,
+                  branch,
+                  path: entry.path,
+                });
+                if (blob.kind === "ok") {
+                  const src = new TextDecoder("utf-8").decode(blob.content);
+                  objectTypeName = inferFunctionObjectType(src);
+                }
+              } catch {
+                // Best-effort: a read failure leaves this fn untyped (utility).
+              }
+            }
+            objectTypeByApi.set(apiName, objectTypeName);
             workingTree.push({
               apiName,
               versionRid: null,
@@ -2050,12 +2143,23 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
               publishedAt: null,
               source: "working_tree",
               path: entry.path,
+              objectTypeName,
+              objectTypeIcon: null, // FE overlays icon/colour from the ontology
             });
           }
         }
       } catch {
         // Discovery is best-effort. A Stemma fault must not break the
         // published-versions response.
+      }
+
+      // Stamp the bound object type onto published rows too (by apiName), so
+      // the FE's published-first dedup keeps the type. Published-only functions
+      // with no working-tree file stay null.
+      for (const row of byApiName.values()) {
+        if (objectTypeByApi.has(row.apiName)) {
+          row.objectTypeName = objectTypeByApi.get(row.apiName) ?? null;
+        }
       }
 
       const data = [...byApiName.values(), ...workingTree].sort((a, b) =>
@@ -2396,6 +2500,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         ontologyId: "",
         objectCount: 0,
         objectTypes: [] as string[],
+        // No imports → no declared types → empty descriptor map (a function
+        // in a repo that imports nothing has no `@ontology/sdk` types).
+        importedTypes: [] as readonly string[],
       };
       // Execute the sandboxed function OFF the main event loop (a worker
       // pool) so a long-running function cannot starve concurrent request

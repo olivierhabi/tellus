@@ -227,7 +227,12 @@ helm template tenant-acme "$CHART" --set tenant=acme | grep -q "kind: Namespace"
 helm uninstall tenant-acme -n tenant-acme >/dev/null 2>&1 || true
 helm install tenant-acme "$CHART" --set tenant=acme \
   --set image.repository=nginxinc/nginx-unprivileged --set image.tag=1.27-alpine \
-  --set containerPort=8080 --set podSecurity.runAsUser=101 --set service.port=80 \
+  --set containerPort=8080 --set podSecurity.runAsUser=101 \
+  --set podSecurity.runAsGroup=101 --set podSecurity.fsGroup=101 \
+  --set service.port=80 \
+  --set probes.startup.path=/ --set probes.liveness.path=/ --set probes.readiness.path=/ \
+  --set persistence.data.enabled=false \
+  --set lifecycle.preStopSleepSeconds=0 \
   --wait --timeout 180s >/dev/null || fail "helm install did not converge"
 AVAIL=$(kubectl -n tenant-acme get deploy tellus-acme -o jsonpath='{.status.availableReplicas}' 2>/dev/null)
 PSS=$(kubectl get ns tenant-acme -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)

@@ -135,6 +135,17 @@ function isAllowlisted(req: Request): boolean {
   // Duplicate health router under /api/v1/health (healthRouter mount).
   if (p === "/api/v1/health" || p.startsWith("/api/v1/health/")) return true;
 
+  // Kubernetes-style system probes (src/routes/health.ts).
+  // Must stay unauthenticated so kubelet probes never need a JWT.
+  if (
+    p === "/api/v1/system/liveness" ||
+    p === "/api/v1/system/readiness" ||
+    p === "/api/v1/system/health" ||
+    p === "/api/v1/ready"
+  ) {
+    return true;
+  }
+
   // Prometheus scrape targets.
   if (p === "/api/metrics") return true;
   if (p === "/api/v1/pipelines/metrics") return true;

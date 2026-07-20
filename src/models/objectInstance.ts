@@ -138,7 +138,19 @@ export async function bulkUpsertInstances(
            source_datasource_id  = EXCLUDED.source_datasource_id,
            source_transaction_id = EXCLUDED.source_transaction_id,
            last_modified_at      = now(),
-           version               = object_instances.version + 1`,
+           version               = object_instances.version + 1
+         -- No-op guard: skip the UPDATE when the row content is identical.
+         -- Without this, a re-merge of unchanged data creates a dead tuple,
+         -- rewrites the JSONB into TOAST, touches every index, and spuriously
+         -- bumps version/last_modified_at for ALL rows (observed: 4.66M dead
+         -- tuples on a no-change re-merge). jsonb/array comparison here is
+         -- semantic, so formatting differences cannot force writes.
+         WHERE (object_instances.properties, object_instances.markings,
+                object_instances.source_datasource_id,
+                object_instances.source_transaction_id)
+           IS DISTINCT FROM
+               (EXCLUDED.properties, EXCLUDED.markings,
+                EXCLUDED.source_datasource_id, EXCLUDED.source_transaction_id)`,
         [
           chunk.map((r) => r.ontology_id),
           chunk.map((r) => r.object_type_api_name),

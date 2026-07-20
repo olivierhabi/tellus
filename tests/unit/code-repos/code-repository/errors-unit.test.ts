@@ -60,7 +60,7 @@ describe("B2 — error catalog completeness", () => {
     expect(CODE_REPOS_ERROR_STATUS["CodeRepos:Internal"]?.status).toBe(500);
   });
 
-  it("CODE_REPOS_ERROR_NAMES enumerates exactly 34 names", () => {
+  it("CODE_REPOS_ERROR_NAMES enumerates exactly 36 names", () => {
     // 6 spec-mandated (B2-C-30..35) + 4 cross-cutting (G-C-08/09/13)
     // + 6 read-path (B2-C-10/11: InvalidPath, InvalidDepth, BranchNotFound,
     // FileNotFound, InvalidPathType, RateLimited)
@@ -69,7 +69,9 @@ describe("B2 — error catalog completeness", () => {
     // + 4 Tag & Release (NoFunctionsToPublish, BackwardIncompatible,
     //   VersionConflict, ReleaseCompileError)
     // + 2 branch lifecycle (BranchExists, CannotModifyDefaultBranch)
-    expect(CODE_REPOS_ERROR_NAMES.length).toBe(34);
+    // + 2 uncommitted-drafts (DraftTooLarge 413, DraftLimitExceeded 400 — the
+    //   Code Assistant propose_file / Monaco dirty-buffer draft store)
+    expect(CODE_REPOS_ERROR_NAMES.length).toBe(36);
   });
 
   it("every error name matches the §1.6 ERROR_NAME_REGEX", () => {

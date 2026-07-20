@@ -87,6 +87,12 @@ export interface ExecuteArgs {
    * <workdir>/libs/<name>/ + put on PYTHONPATH for the driver. */
   readonly libs?: ReadonlyArray<{ name: string; files: ReadonlyArray<{ path: string; content: string }> }>;
   readonly timeoutMs?: number;
+  /** AbortSignal — on abort (FE Stop / connection close), the spawned child is
+   * killed (the process group for local mode incl. the Spark JVM; `docker kill`
+   * for container mode) so a cancelled preview doesn't run to the 100s exec
+   * timeout after the FE already gave up. Null/undefined = no cancel wiring
+   * (builds/tests). */
+  readonly signal?: AbortSignal;
 }
 
 export interface ExecuteResult {
@@ -257,8 +263,8 @@ export async function executeTransform(args: ExecuteArgs): Promise<ExecuteResult
       : { sdkRoot: path.join(workdir, "sdk"), repoRoot, modulePath, outputPath });
 
     const result = isContainer
-      ? await runChildContainer(workdir, outDir, JSON.stringify(job), args.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasReqs, hasLibs)
-      : await runChild(driverPath, workdir, JSON.stringify(job), args.timeoutMs ?? DEFAULT_TIMEOUT_MS, localPythonPath);
+      ? await runChildContainer(workdir, outDir, JSON.stringify(job), args.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasReqs, hasLibs, args.signal)
+      : await runChild(driverPath, workdir, JSON.stringify(job), args.timeoutMs ?? DEFAULT_TIMEOUT_MS, localPythonPath, args.signal);
 
     if (result.timedOut) {
       return {
@@ -376,12 +382,13 @@ interface ChildResult {
   timedOut: boolean;
 }
 
-function runChild(
+export function runChild(
   driverPath: string,
   cwd: string,
   jobJson: string,
   timeoutMs: number,
   pythonPath: string[] = [],
+  abortSignal?: AbortSignal,
 ): Promise<ChildResult> {
   return new Promise((resolve) => {
     const baseEnv: NodeJS.ProcessEnv = { ...filterEnv(), TELLUS_TRANSFORM_JOB: jobJson };
@@ -393,10 +400,16 @@ function runChild(
       const extra = pythonPath.join(":");
       baseEnv.PYTHONPATH = baseEnv.PYTHONPATH ? `${extra}:${baseEnv.PYTHONPATH}` : extra;
     }
+    // detached: the child becomes its own process-group leader so
+    // process.kill(-child.pid) reaches the Spark JVM (a child of the python
+    // driver) too — a plain child.kill() would orphan the JVM on cancel. The
+    // 100s exec timeout (Node's `timeout`→SIGKILL on the direct PID) is
+    // UNCHANGED; only the cancel path below uses the group kill.
     const child = spawn(resolveTransformPython(), [driverPath], {
       cwd,
       env: baseEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
       timeout: timeoutMs,
       killSignal: "SIGKILL",
     });
@@ -417,7 +430,31 @@ function runChild(
         errLen += b.length;
       }
     });
+    // Cancel-on-abort (FE Stop / connection close): SIGTERM the whole process
+    // group so the driver can flush, then SIGKILL after a 5s grace if still
+    // alive. detached makes -child.pid target only this child's group, NOT the
+    // parent Node process. Idempotent + best-effort (kill on a dead PID throws
+    // ESRCH -> swallowed).
+    let cancelTimer: NodeJS.Timeout | null = null;
+    const onCancel = () => {
+      const pid = child.pid;
+      if (pid === undefined) return; // spawn failed or not yet spawned
+      try { process.kill(-pid, "SIGTERM"); } catch { /* already dead */ }
+      cancelTimer = setTimeout(() => {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* already dead */ }
+      }, 5_000);
+      if (cancelTimer && typeof cancelTimer.unref === "function") cancelTimer.unref();
+    };
+    if (abortSignal) {
+      if (abortSignal.aborted) onCancel();
+      else abortSignal.addEventListener("abort", onCancel, { once: true });
+    }
+    const cleanup = () => {
+      if (cancelTimer) clearTimeout(cancelTimer);
+      if (abortSignal) abortSignal.removeEventListener("abort", onCancel);
+    };
     child.on("error", (e) => {
+      cleanup();
       resolve({
         stdout: Buffer.concat(out).toString("utf8"),
         stderr: (Buffer.concat(err).toString("utf8") + `\nspawn error: ${String(e)}`).trim(),
@@ -426,6 +463,7 @@ function runChild(
       });
     });
     child.on("close", (code, signal) => {
+      cleanup();
       resolve({
         stdout: Buffer.concat(out).toString("utf8"),
         stderr: Buffer.concat(err).toString("utf8"),
@@ -452,6 +490,7 @@ function runChildContainer(
   timeoutMs: number,
   hasReqs: boolean = false,
   hasLibs: boolean = false,
+  abortSignal?: AbortSignal,
 ): Promise<ChildResult> {
   return new Promise((resolve) => {
     const containerName = `tellus-transform-${crypto.randomUUID()}`;
@@ -529,10 +568,34 @@ function runChildContainer(
       try { spawnSync("docker", ["kill", containerName], { timeout: 5_000 }); } catch { /* best-effort */ }
       try { child.kill("SIGKILL"); } catch { /* best-effort */ }
     }, timeoutMs);
+    // Cancel-on-abort (FE Stop / connection close): SIGTERM the container (lets
+    // the driver flush), then SIGKILL after a 5s grace (docker kill default =
+    // SIGKILL, kills the whole cgroup — no JVM orphan). Shares the `killed` flag
+    // with the timeout so they don't double-kill; the timeout (100s) only fires
+    // if no cancel arrived, so they don't race in practice.
+    let cancelTimer: NodeJS.Timeout | null = null;
+    const onCancel = () => {
+      if (killed) return;
+      killed = true;
+      try { spawnSync("docker", ["kill", "--signal=SIGTERM", containerName], { timeout: 5_000 }); } catch { /* best-effort */ }
+      cancelTimer = setTimeout(() => {
+        try { spawnSync("docker", ["kill", containerName], { timeout: 5_000 }); } catch { /* best-effort */ }
+      }, 5_000);
+      if (cancelTimer && typeof cancelTimer.unref === "function") cancelTimer.unref();
+    };
+    if (abortSignal) {
+      if (abortSignal.aborted) onCancel();
+      else abortSignal.addEventListener("abort", onCancel, { once: true });
+    }
+    const cleanup = () => {
+      if (cancelTimer) clearTimeout(cancelTimer);
+      if (abortSignal) abortSignal.removeEventListener("abort", onCancel);
+    };
     child.stdout.on("data", (b: Buffer) => { if (outLen < CAP) { out.push(b); outLen += b.length; } });
     child.stderr.on("data", (b: Buffer) => { if (errLen < CAP) { err.push(b); errLen += b.length; } });
     child.on("error", (e) => {
       clearTimeout(timer);
+      cleanup();
       resolve({
         stdout: Buffer.concat(out).toString("utf8"),
         stderr: (Buffer.concat(err).toString("utf8") + `\nspawn error: ${String(e)}`).trim(),
@@ -542,6 +605,7 @@ function runChildContainer(
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      cleanup();
       resolve({
         stdout: Buffer.concat(out).toString("utf8"),
         stderr: Buffer.concat(err).toString("utf8"),

@@ -40,23 +40,32 @@ const BACKOFF = {
   backoffCoefficient: 2,
 } as const;
 
+// heartbeatTimeout: every stage activity runs startHeartbeatLoop (5s ticks),
+// so 120s of silence means the worker is GONE (crash/SIGKILL/deploy). Without
+// this, Temporal cannot detect worker death and a stage stalls for the FULL
+// startToCloseTimeout before retrying (observed: a merge sat "Started" for
+// 90+ minutes after the worker was SIGTERMed mid-activity).
 const { runChangelogActivity } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "1 hour",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 5 },
 });
 
 const { runMergeActivity } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "2 hours",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 5 },
 });
 
 const { runIndexingActivityProxy } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "4 hours",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 3 },
 });
 
 const { runHydrationActivityProxy } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "30 minutes",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 10 },
 });
 
@@ -83,7 +92,18 @@ const { projectFunnelTerminalActivity } = proxyActivities<typeof Activities>({
 // the "500 objects pending index" empty-state fires. 10 min is generous
 // for a 1M-row index; bulkIndex pages internally.
 const { syncOpenSearchActivity } = proxyActivities<typeof Activities>({
-  startToCloseTimeout: "10 minutes",
+  // 60 min + heartbeatTimeout: a 5.6M-row OT (OlivierOrder2) bulk-indexes
+  // ~4.66M docs into a fresh OpenSearch index. On the dev single-box cluster
+  // that is ~8 s / 5000-doc page (~2 hr total) — far beyond the prior 10-min
+  // startToCloseTimeout, which exhausted the 5-attempt retry budget mid-sync
+  // (the resume cursor is durable, but each attempt only covered ~75 pages).
+  // 60 min lets one attempt cover ~450 pages; 5 attempts × 60 min = 5 hr
+  // budget for a ~2 hr sync. heartbeatTimeout=120 s makes a worker death
+  // (OOM/SIGTERM) auto-retry from the heartbeat cursor instead of orphaning
+  // the activity (no heartbeatTimeout → stuck until startToClose). The sync
+  // heartbeats after every page (pages run <60 s), so 120 s is false-retry-safe.
+  startToCloseTimeout: "60 minutes",
+  heartbeatTimeout: "120 seconds",
   retry: { ...BACKOFF, maximumAttempts: 5 },
 });
 
@@ -235,6 +255,7 @@ export async function ObjectTypeFunnelWorkflow(
           ...input,
           changelogSnapshotId: changelog.snapshotId,
           changelogOwnedProperties: changelog.ownedProperties,
+          runKey,
         });
 
         // Sync the freshly-merged rows into OpenSearch so the FE search

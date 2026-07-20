@@ -124,6 +124,18 @@ export function createTransformsRouter(deps: TransformRoutesDeps): Router {
           return sendErr(res, transformError("Transform:InvalidArgument", { message: "entryPoint (string) required" }));
         }
         const fileOverrides = sanitizeFileOverrides(req.body?.fileOverrides);
+        // Server-side cancel: the FE Stop button aborts the HTTP (its own
+        // AbortController) — the socket closes, this fires (res 'close' fires on
+        // client disconnect BEFORE the response is sent, unlike req 'close' which
+        // fires when the body is read, before this handler attaches the listener),
+        // runTransformPreview's child is killed (process group for local incl. the
+        // Spark JVM; docker kill for container) instead of running to the 100s exec
+        // timeout. Aborting after the preview already completed is a no-op (the
+        // child is dead + runTransformPreview already resolved).
+        const cancel = new AbortController();
+        res.on("close", () => {
+          cancel.abort();
+        });
         const result = await runTransformPreview({
           stemma: deps.stemma,
           repositoryRid: rid,
@@ -131,6 +143,7 @@ export function createTransformsRouter(deps: TransformRoutesDeps): Router {
           entryPoint,
           fileOverrides,
           principal: principalOf(req),
+          signal: cancel.signal,
         });
         return res.status(200).json(result);
       } catch (e) {

@@ -133,7 +133,17 @@ beforeEach(() => {
         operation: "added",
       },
     ],
-    rows: hoisted.bigRows,
+    // The by-value fix (Option 2): computeChangelog persists rows to a
+    // MinIO parquet (parquet_ref in summary_json) and returns ONLY the
+    // small ownedProperties set — never the row array.
+    ownedProperties: [
+      "orderId",
+      "customerId",
+      "itemName",
+      "quantity",
+      "unitPrice",
+      "status",
+    ],
   });
 });
 
@@ -194,23 +204,21 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
       objectTypeApiName: "Order",
     });
 
-    // computeChangelog WAS called with a large internal row set — the
-    // activity had the rows in hand and deliberately dropped them.
+    // computeChangelog was called. Under Option 2 it streams the rows to a
+    // MinIO parquet and returns only {snapshotId, rowsEmitted, manifest,
+    // ownedProperties} — the large row set NEVER enters the activity return.
     expect(hoisted.computeChangelogMock).toHaveBeenCalledTimes(1);
-    const internalResult = await hoisted.computeChangelogMock.mock
-      .results[0].value;
-    const internalRows = (internalResult as { rows: unknown[] }).rows;
-    expect(internalRows).toHaveLength(REPRESENTATIVE_ROW_COUNT);
 
-    // Reconstruct what the OLD (buggy) return would have looked like:
-    // the small fields PLUS the row array. That serialization MUST exceed
-    // the 1 MB budget — otherwise the row set isn't representative and the
-    // regression guard isn't proving anything.
+    // Reconstruct what the OLD (buggy) by-value return would have looked
+    // like: the small fields PLUS the 83k-row array. That serialization
+    // MUST exceed the 1 MB budget — otherwise the row set isn't
+    // representative and the regression guard isn't proving anything.
+    expect(hoisted.bigRows).toHaveLength(REPRESENTATIVE_ROW_COUNT);
     const oldStyleReturn = {
       snapshotId: "snap-83k",
       rowsEmitted: REPRESENTATIVE_ROW_COUNT,
       manifest: [{ file_path: "x", file_size_bytes: 0, row_count: REPRESENTATIVE_ROW_COUNT, operation: "added" }],
-      rows: internalRows,
+      rows: hoisted.bigRows,
     };
     const oldStyleSerialized = JSON.stringify(oldStyleReturn);
     expect(oldStyleSerialized.length).toBeGreaterThan(PAYLOAD_BUDGET_BYTES);
