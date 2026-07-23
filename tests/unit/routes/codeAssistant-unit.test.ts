@@ -20,6 +20,7 @@ import {
   type AiEnginePort,
   type AiEnginePayload,
   type AiEngineResult,
+  type VegaChartAgentPayload,
 } from "../../../src/services/aiEngine/client";
 import { AppError } from "../../../src/utils/foundryAppError";
 
@@ -30,8 +31,16 @@ import { AppError } from "../../../src/utils/foundryAppError";
 function makeFakeEngine(): {
   port: AiEnginePort;
   calls: Array<{ payload: AiEnginePayload; principalUserId?: string }>;
+  vegaCalls: Array<{
+    payload: VegaChartAgentPayload;
+    principalUserId?: string;
+  }>;
 } {
   const calls: Array<{ payload: AiEnginePayload; principalUserId?: string }> = [];
+  const vegaCalls: Array<{
+    payload: VegaChartAgentPayload;
+    principalUserId?: string;
+  }> = [];
   const port: AiEnginePort = {
     typescriptV2: vi.fn(async (payload, principalUserId) => {
       calls.push({ payload, principalUserId });
@@ -42,6 +51,20 @@ function makeFakeEngine(): {
     }),
     typescriptV2Stream: vi.fn(async () => {
       throw new Error("stream not supported by the non-streaming fake");
+    }),
+    vegaChart: vi.fn(async (payload, principalUserId) => {
+      vegaCalls.push({ payload, principalUserId });
+      return {
+        response: {
+          data: { name: "objects", values: [{ state: "Open" }] },
+          mark: "bar",
+          encoding: {
+            x: { field: "state_bucket", type: "nominal" },
+            y: { field: "order_count", type: "quantitative" },
+          },
+          _metadata: { model: "fake-vega" },
+        },
+      };
     }),
     getModels: vi.fn(async () => ({
       models: [
@@ -56,7 +79,7 @@ function makeFakeEngine(): {
     })),
     isReachable: vi.fn(async () => true),
   };
-  return { port, calls };
+  return { port, calls, vegaCalls };
 }
 
 /** A fake engine whose typescriptV2Stream returns a ReadableStream of SSE frames. */
@@ -78,6 +101,7 @@ function fakeStreamEngine(frames: string[]): AiEnginePort {
         headers: { "Content-Type": "text/event-stream" },
       }),
     ),
+    vegaChart: vi.fn(async () => ({ response: { mark: "bar" } })),
     getModels: vi.fn(async () => ({
       models: [
         {
@@ -166,6 +190,55 @@ describe("createCodeAssistantRouter", () => {
       .post("/api/v1/code-assistant/typescript-v2")
       .send({ message: "hi" });
     expect(calls[0].payload.mode).toBe("generate");
+  });
+
+  it("POST /vega-chart forwards Workshop context through the AI engine port", async () => {
+    const { port, vegaCalls } = makeFakeEngine();
+    const res = await request(buildApp(port))
+      .post("/api/v1/code-assistant/vega-chart")
+      .send({
+        prompt: "horizontal bars sorted descending",
+        objectTypeApiName: "Order",
+        dataName: "order_metrics",
+        dataInputs: [
+          { name: "order_metrics", dataSource: "aggregation" },
+        ],
+        groupByProperties: [
+          {
+            id: "state",
+            identifier: "state_bucket",
+            propertyApiName: "status",
+          },
+        ],
+        dataSource: "aggregation",
+        aggregation: "count",
+        aggregationName: "order_count",
+        currentSpec: '{"mark":"point"}',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(vegaCalls[0].principalUserId).toBe("alice");
+    expect(vegaCalls[0].payload.user_request).toContain(
+      'named data input "order_metrics"',
+    );
+    expect(vegaCalls[0].payload.user_request).toContain(
+      'output field "state_bucket" from property "status"',
+    );
+    expect(vegaCalls[0].payload.current_json).toBe('{"mark":"point"}');
+    const spec = JSON.parse(res.body.data.spec);
+    expect(spec.data).toEqual({ name: "order_metrics" });
+    expect(spec).not.toHaveProperty("_metadata");
+    expect(res.body.data._metadata.model).toBe("fake-vega");
+  });
+
+  it("POST /vega-chart rejects an empty Data Input Name", async () => {
+    const { port } = makeFakeEngine();
+    const res = await request(buildApp(port))
+      .post("/api/v1/code-assistant/vega-chart")
+      .send({ prompt: "bar chart", dataName: "" });
+    expect(res.status).toBe(400);
+    expect(res.body.errorCode).toBe("AI_ENGINE_BAD_REQUEST");
   });
 
   it("propagates AppError from the client as the engine error code", async () => {
@@ -283,6 +356,39 @@ describe("AiEngineClient error mapping", () => {
     const out = await c.getModels();
     expect(out.default).toBe("glm-5");
     expect(out.models[0].key).toBe("glm-5");
+  });
+
+  it("vegaChart calls the engine's /api/vega-chart route", async () => {
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedInit = init;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ response: { mark: "bar" } }),
+      } as unknown as Response;
+    }) as unknown as typeof global.fetch;
+    const client = new AiEngineClient({
+      baseUrl: "http://engine:5000",
+      timeoutMs: 1000,
+    });
+    await client.vegaChart(
+      {
+        user_request: "bar chart",
+        data_fields: "state_bucket (nominal)",
+      },
+      "alice",
+    );
+    expect(capturedUrl).toBe("http://engine:5000/api/vega-chart");
+    expect(JSON.parse(String(capturedInit?.body))).toEqual({
+      user_request: "bar chart",
+      data_fields: "state_bucket (nominal)",
+    });
+    expect(
+      (capturedInit?.headers as Record<string, string>)["X-Tellus-Principal"],
+    ).toBe("alice");
   });
 
   it("getModels maps a 502 {error} to AI_ENGINE_ERROR", async () => {

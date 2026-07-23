@@ -88,6 +88,8 @@ interface Condition {
   anyRole?: string[];
   group?: string;
   anyGroup?: string[];
+  username?: string;
+  anyUsername?: string[];
   description?: string;
 }
 
@@ -113,6 +115,14 @@ function evalCondition(
   // Subject role / group predicates.
   const roles = subject.roles ?? [];
   const groups = subject.groups ?? [];
+  if (cond.username) {
+    const ok = subject.username === cond.username;
+    return { ok, reason: ok ? "" : `subject is not required user '${cond.username}'` };
+  }
+  if (cond.anyUsername && cond.anyUsername.length) {
+    const ok = subject.username != null && cond.anyUsername.includes(subject.username);
+    return { ok, reason: ok ? "" : `subject is not one of required users ${JSON.stringify(cond.anyUsername)}` };
+  }
   if (cond.role) {
     const ok = roles.includes(cond.role);
     return { ok, reason: ok ? "" : `subject lacks required role '${cond.role}'` };

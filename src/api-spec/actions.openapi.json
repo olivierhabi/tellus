@@ -911,17 +911,21 @@
         "properties": {
           "type": {
             "type": "string",
-            "enum": ["createObject", "modifyObject", "deleteObject", "addLink", "removeLink"],
+            "enum": ["createObject", "modifyObject", "modifyOrCreateObject", "deleteObject", "addLink", "removeLink"],
             "description": "The type of side effect this rule describes"
           },
           "objectType": {
             "type": "string",
-            "description": "Target object type API name. Required for createObject, modifyObject, and deleteObject rules."
+            "description": "Target object type API name. Required for createObject, modifyObject, modifyOrCreateObject, and deleteObject rules."
           },
           "properties": {
             "type": "object",
             "additionalProperties": { "$ref": "#/components/schemas/PropertyMapping" },
-            "description": "Map of property API names to their value sources. Valid for createObject and modifyObject rules."
+            "description": "Map of property API names to their value sources. Valid for createObject, modifyObject, and modifyOrCreateObject rules."
+          },
+          "objectReference": {
+            "$ref": "#/components/schemas/PropertyMapping",
+            "description": "Value source identifying the existing object. For modifyOrCreateObject this also supplies the primary key when a new object is created."
           },
           "linkTypeApiName": {
             "type": "string",
@@ -953,6 +957,22 @@
             "type": "string",
             "nullable": true,
             "description": "Optional description of the action type's purpose"
+          },
+          "icon": {
+            "type": "string",
+            "nullable": true,
+            "description": "Blueprint icon name used to display the action type"
+          },
+          "iconColor": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "nullable": true,
+            "description": "Six-digit hexadecimal action icon color"
+          },
+          "saveLocationRid": {
+            "type": "string",
+            "nullable": true,
+            "description": "Compass project or folder RID in which the action type is organized"
           },
           "parameters": {
             "type": "array",
@@ -1016,6 +1036,19 @@
             "type": "string",
             "description": "Optional description"
           },
+          "icon": {
+            "type": "string",
+            "description": "Blueprint icon name"
+          },
+          "iconColor": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "description": "Six-digit hexadecimal icon color"
+          },
+          "saveLocationRid": {
+            "type": "string",
+            "description": "Compass project or folder RID"
+          },
           "parameters": {
             "type": "array",
             "items": { "$ref": "#/components/schemas/ActionParameter" },
@@ -1062,6 +1095,22 @@
           "description": {
             "type": "string",
             "description": "Updated description"
+          },
+          "icon": {
+            "type": "string",
+            "nullable": true,
+            "description": "Updated Blueprint icon name"
+          },
+          "iconColor": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "nullable": true,
+            "description": "Updated six-digit hexadecimal icon color"
+          },
+          "saveLocationRid": {
+            "type": "string",
+            "nullable": true,
+            "description": "Updated Compass project or folder RID"
           },
           "parameters": {
             "type": "array",

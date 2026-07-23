@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
 // Code Assistant proxy route — the secure intermediary between tellus-fe
 // and the telos-AIE-agent AI engine for the TypeScript Functions v2 coding
-// assistant.
+// assistant and Workshop Vega charts.
 //
-// Flow:  Frontend  --POST /api/v1/code-assistant/typescript-v2-->  this route
-//        this route  --POST {TELOS_AIE_AGENT_URL}/api/code-repositories-typescript-v2-->  AI engine
+// Flow:  Frontend  --POST /api/v1/code-assistant/{typescript-v2|vega-chart}-->  this route
+//        this route  --POST {TELOS_AIE_AGENT_URL}/api/{code-repositories-typescript-v2|vega-chart}-->  AI engine
 //        this route  <--{response, _metadata}--  AI engine
 //        Frontend  <--{success, data}--  this route
 //
@@ -23,6 +23,11 @@ import {
   type AiEnginePayload,
   type AiEnginePort,
 } from "../services/aiEngine/client";
+import {
+  buildVegaChartAgentPayload,
+  normalizeVegaChartAgentResult,
+  type VegaChartGenerationRequest,
+} from "../services/aiEngine/vegaChart";
 
 // ---------------------------------------------------------------------------
 // Principal
@@ -150,6 +155,50 @@ const BodySchema = z.object({
   stream: z.boolean().optional(),
 });
 
+const VegaChartBodySchema = z.object({
+  prompt: z.string().trim().min(1).max(2000),
+  objectTypeApiName: z.string().trim().max(200).optional(),
+  properties: z
+    .array(
+      z.object({
+        apiName: z.string().trim().min(1).max(200),
+        displayName: z.string().trim().max(500).optional(),
+        baseType: z.string().trim().min(1).max(100),
+      }),
+    )
+    .max(200)
+    .optional(),
+  dataName: z.string().trim().min(1).max(200),
+  dataInputs: z
+    .array(
+      z.object({
+        name: z.string().max(200),
+        dataSource: z.enum(["aggregation", "object-set", "function"]),
+      }),
+    )
+    .max(20)
+    .optional(),
+  groupByProperties: z
+    .array(
+      z.object({
+        id: z.string().max(200),
+        identifier: z.string().max(200),
+        propertyApiName: z.string().max(200).nullable(),
+      }),
+    )
+    .max(10)
+    .optional(),
+  dataSource: z.enum(["aggregation", "object-set", "function"]).optional(),
+  aggregation: z
+    .enum(["count", "sum", "avg", "min", "max", "cardinality"])
+    .optional(),
+  aggregationProperty: z.string().max(200).nullable().optional(),
+  aggregationName: z.string().max(200).optional(),
+  specLanguage: z.enum(["vega-lite", "vega"]).optional(),
+  currentSpec: z.string().max(10000).optional(),
+  model: z.string().max(50).optional(),
+});
+
 // ---------------------------------------------------------------------------
 // Router factory
 // ---------------------------------------------------------------------------
@@ -235,6 +284,47 @@ export function createCodeAssistantRouter(
         principal?.userId,
         cancelCtl.signal,
       );
+      res.status(200).json({ success: true, data: result });
+    } catch (err) {
+      next(err);
+    } finally {
+      res.off("close", onClose);
+    }
+  });
+
+  router.post("/vega-chart", async (req, res, next) => {
+    const cancelCtl = new AbortController();
+    const onClose = () => cancelCtl.abort();
+    res.on("close", onClose);
+    try {
+      const parsed = VegaChartBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(
+          `Invalid Vega chart request: ${parsed.error.issues
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; ")}`,
+          400,
+          "AI_ENGINE_BAD_REQUEST",
+        );
+      }
+      const input = parsed.data as VegaChartGenerationRequest;
+      const rawResult = await client.vegaChart(
+        buildVegaChartAgentPayload(input),
+        req.codeAssistantPrincipal?.userId,
+        cancelCtl.signal,
+      );
+      let result;
+      try {
+        result = normalizeVegaChartAgentResult(rawResult, input.dataName);
+      } catch (error) {
+        throw new AppError(
+          error instanceof Error
+            ? error.message
+            : "AI engine returned an invalid Vega chart",
+          502,
+          "AI_ENGINE_ERROR",
+        );
+      }
       res.status(200).json({ success: true, data: result });
     } catch (err) {
       next(err);

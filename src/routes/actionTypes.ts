@@ -65,30 +65,45 @@ const VALID_PARAM_TYPES = new Set([
   "boolean",
   "integer",
   "long",
+  "byte",
+  "short",
   "double",
   "float",
+  "decimal",
   "date",
   "timestamp",
+  "geopoint",
+  "geoshape",
   "object_reference",
   "object_set",
   "string_array",
   "integer_array",
   "double_array",
+  "boolean_array",
+  "timestamp_array",
   "struct",
+  "attachment",
+  "marking",
+  "media_reference",
+  "timeseries",
 ]);
 
 /** Numeric parameter types (for min/max constraints). */
 const NUMERIC_PARAM_TYPES = new Set([
   "integer",
   "long",
+  "byte",
+  "short",
   "double",
   "float",
+  "decimal",
 ]);
 
 /** Valid rule types. */
 const VALID_RULE_TYPES = new Set([
   "createObject",
   "modifyObject",
+  "modifyOrCreateObject",
   "deleteObject",
   "addLink",
   "removeLink",
@@ -116,13 +131,16 @@ const KNOWN_CODES = new Set([
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Format an action type DB row for API response (snake_case -> camelCase). */
-function formatActionType(row: Record<string, any>): Record<string, unknown> {
+/** Canonical action-type DB-row presenter used by every API read surface. */
+export function formatActionType(row: Record<string, any>): Record<string, unknown> {
   return {
     rid: row.action_type_id,
     apiName: row.api_name,
     displayName: row.display_name,
     description: row.description,
+    icon: row.icon_name ?? null,
+    iconColor: row.icon_color ?? null,
+    saveLocationRid: row.save_location_rid ?? null,
     parameters: row.parameters,
     rules: row.rules,
     submissionCriteria: row.submission_criteria ?? null,
@@ -161,9 +179,14 @@ async function resolveObjectType(
   ontologyId: string,
   objectTypeApiName: string,
   contextMsg: string
-): Promise<{ objectTypeId: string; properties: Set<string> }> {
+): Promise<{
+  objectTypeId: string;
+  properties: Set<string>;
+  primaryKeyProperty?: string;
+  requiredProperties: Set<string>;
+}> {
   const otResult = await query(
-    "SELECT object_type_id FROM object_type WHERE ontology_id = $1 AND api_name = $2",
+    "SELECT object_type_id, primary_key_property_id FROM object_type WHERE ontology_id = $1 AND api_name = $2",
     [ontologyId, objectTypeApiName]
   );
   if (otResult.rows.length === 0) {
@@ -176,14 +199,71 @@ async function resolveObjectType(
 
   // Fetch all property api_names for this object type
   const propResult = await query(
-    "SELECT api_name FROM property WHERE object_type_id = $1",
+    "SELECT property_id, api_name, is_required FROM property WHERE object_type_id = $1",
     [objectTypeId]
   );
   const properties = new Set<string>(
     propResult.rows.map((r: Record<string, unknown>) => r.api_name as string)
   );
 
-  return { objectTypeId, properties };
+  return {
+    objectTypeId,
+    properties,
+    primaryKeyProperty: propResult.rows.find(
+      (row: Record<string, unknown>) => row.property_id === otResult.rows[0].primary_key_property_id,
+    )?.api_name as string | undefined,
+    requiredProperties: new Set<string>(
+      propResult.rows
+        .filter((row: Record<string, unknown>) => row.is_required === true)
+        .map((row: Record<string, unknown>) => row.api_name as string),
+    ),
+  };
+}
+
+function validateOptionalMetadata(body: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  if (body.icon !== undefined && body.icon !== null) {
+    if (typeof body.icon !== "string" || !/^[a-z][a-z0-9-]{0,99}$/.test(body.icon)) {
+      errors.push("icon must be a valid lowercase Blueprint icon name.");
+    }
+  }
+  if (body.iconColor !== undefined && body.iconColor !== null) {
+    if (typeof body.iconColor !== "string" || !/^#[0-9a-fA-F]{6}$/.test(body.iconColor)) {
+      errors.push("iconColor must be a six-digit hexadecimal color (for example #1A2230).");
+    }
+  }
+  if (body.saveLocationRid !== undefined && body.saveLocationRid !== null) {
+    if (
+      typeof body.saveLocationRid !== "string" ||
+      !/^ri\.compass\.main\.(?:project|folder)\.[A-Za-z0-9-]+$/.test(body.saveLocationRid)
+    ) {
+      errors.push("saveLocationRid must be a Compass project or folder RID.");
+    }
+  }
+  return errors;
+}
+
+function validateValueSource(
+  value: unknown,
+  path: string,
+  paramNames: Set<string>,
+): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [`${path} must be a value source object.`];
+  }
+  const source = value as Record<string, unknown>;
+  if (!VALID_SOURCES.has(source.source as string)) {
+    return [`${path}.source must be one of: ${Array.from(VALID_SOURCES).join(", ")}`];
+  }
+  if (source.source === "parameter") {
+    if (typeof source.param !== "string" || !source.param) {
+      return [`${path}: source 'parameter' requires a 'param' field.`];
+    }
+    if (!paramNames.has(source.param)) {
+      return [`${path} references non-existent parameter '${source.param}'.`];
+    }
+  }
+  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -330,13 +410,20 @@ async function validateRules(
     const ruleType = rule.type as string;
 
     // For createObject, modifyObject, deleteObject: validate objectType reference
-    if (ruleType === "createObject" || ruleType === "modifyObject" || ruleType === "deleteObject") {
+    if (
+      ruleType === "createObject" ||
+      ruleType === "modifyObject" ||
+      ruleType === "modifyOrCreateObject" ||
+      ruleType === "deleteObject"
+    ) {
       if (!rule.objectType || typeof rule.objectType !== "string") {
         errors.push(`${idx}.objectType is required for '${ruleType}' rules.`);
         continue;
       }
 
       let objTypeProps: Set<string> | null = null;
+      let primaryKeyProperty: string | undefined;
+      let requiredProperties = new Set<string>();
       try {
         const resolved = await resolveObjectType(
           ontologyId,
@@ -344,19 +431,45 @@ async function validateRules(
           `Rule ${idx}`
         );
         objTypeProps = resolved.properties;
+        primaryKeyProperty = resolved.primaryKeyProperty;
+        requiredProperties = resolved.requiredProperties;
       } catch (err: any) {
         errors.push(err.message);
         continue;
       }
 
       // Validate properties for createObject and modifyObject
-      if ((ruleType === "createObject" || ruleType === "modifyObject") && rule.properties) {
+      if (ruleType !== "createObject") {
+        errors.push(...validateValueSource(rule.objectReference, `${idx}.objectReference`, paramNames));
+      }
+
+      if (
+        (ruleType === "createObject" || ruleType === "modifyObject" || ruleType === "modifyOrCreateObject") &&
+        rule.properties
+      ) {
         if (typeof rule.properties !== "object" || Array.isArray(rule.properties)) {
           errors.push(`${idx}.properties must be an object.`);
           continue;
         }
 
         const props = rule.properties as Record<string, unknown>;
+        if ((ruleType === "createObject" || ruleType === "modifyOrCreateObject") && !primaryKeyProperty) {
+          errors.push(`${idx}: object type '${rule.objectType}' does not define a primary key.`);
+        }
+        if (
+          (ruleType === "createObject" || ruleType === "modifyOrCreateObject") &&
+          primaryKeyProperty &&
+          !Object.prototype.hasOwnProperty.call(props, primaryKeyProperty)
+        ) {
+          errors.push(`${idx}.properties must map primary key property '${primaryKeyProperty}'.`);
+        }
+        if (ruleType === "createObject" || ruleType === "modifyOrCreateObject") {
+          for (const requiredProperty of requiredProperties) {
+            if (!Object.prototype.hasOwnProperty.call(props, requiredProperty)) {
+              errors.push(`${idx}.properties must map required property '${requiredProperty}'.`);
+            }
+          }
+        }
         for (const [propName, mapping] of Object.entries(props)) {
           // Validate the property exists on the object type
           if (!objTypeProps.has(propName)) {
@@ -366,30 +479,10 @@ async function validateRules(
           }
 
           // Validate the mapping source
-          if (mapping && typeof mapping === "object" && !Array.isArray(mapping)) {
-            const m = mapping as Record<string, unknown>;
-            if (m.source) {
-              if (!VALID_SOURCES.has(m.source as string)) {
-                errors.push(
-                  `${idx}.properties.${propName}.source '${m.source}' is invalid. ` +
-                    `Must be one of: ${Array.from(VALID_SOURCES).join(", ")}`
-                );
-              }
-              // If source is 'parameter', validate param reference
-              if (m.source === "parameter") {
-                if (!m.param || typeof m.param !== "string") {
-                  errors.push(
-                    `${idx}.properties.${propName}: source 'parameter' requires a 'param' field.`
-                  );
-                } else if (!paramNames.has(m.param as string)) {
-                  errors.push(
-                    `${idx}.properties.${propName}: references non-existent parameter '${m.param}'`
-                  );
-                }
-              }
-            }
-          }
+          errors.push(...validateValueSource(mapping, `${idx}.properties.${propName}`, paramNames));
         }
+      } else if (ruleType === "createObject" || ruleType === "modifyOrCreateObject") {
+        errors.push(`${idx}.properties is required for '${ruleType}' rules.`);
       }
     }
 
@@ -444,6 +537,12 @@ router.post(
       // description
       if (body.description !== undefined && typeof body.description !== "string") {
         sendError(res, "VALIDATION_FAILED", "description must be a string.");
+        return;
+      }
+
+      const metadataErrors = validateOptionalMetadata(body);
+      if (metadataErrors.length > 0) {
+        sendError(res, "VALIDATION_FAILED", metadataErrors.join(" "), { validationErrors: metadataErrors });
         return;
       }
 
@@ -502,6 +601,9 @@ router.post(
         apiName: body.apiName,
         displayName: body.displayName,
         description: body.description,
+        iconName: body.icon ?? null,
+        iconColor: body.iconColor ?? null,
+        saveLocationRid: body.saveLocationRid ?? null,
         parameters: params,
         rules,
         submissionCriteria: body.submissionCriteria ?? null,
@@ -654,12 +756,14 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
-// Endpoint 6: PUT /:actionApiName (Update Action Type)
+// Endpoint 6: PUT/PATCH /:actionApiName (Update Action Type)
 // ---------------------------------------------------------------------------
 
-router.put(
-  "/:actionApiName",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+const updateActionTypeHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
     try {
       const { ontologyId, actionApiName } = req.params;
       const body = req.body;
@@ -692,6 +796,12 @@ router.put(
       // description
       if (body.description !== undefined && typeof body.description !== "string") {
         sendError(res, "VALIDATION_FAILED", "description must be a string.");
+        return;
+      }
+
+      const metadataErrors = validateOptionalMetadata(body);
+      if (metadataErrors.length > 0) {
+        sendError(res, "VALIDATION_FAILED", metadataErrors.join(" "), { validationErrors: metadataErrors });
         return;
       }
 
@@ -776,6 +886,9 @@ router.put(
 
       if (body.displayName !== undefined) updates.display_name = body.displayName;
       if (body.description !== undefined) updates.description = body.description;
+      if (body.icon !== undefined) updates.icon_name = body.icon;
+      if (body.iconColor !== undefined) updates.icon_color = body.iconColor;
+      if (body.saveLocationRid !== undefined) updates.save_location_rid = body.saveLocationRid;
       if (body.parameters !== undefined) updates.parameters = body.parameters;
       if (body.rules !== undefined) updates.rules = body.rules;
       if (body.submissionCriteria !== undefined) updates.submission_criteria = body.submissionCriteria;
@@ -846,8 +959,15 @@ router.put(
       }
       next(err);
     }
-  }
-);
+};
+
+// PUT is the established Tellus route. PATCH is intentionally supported as
+// an equivalent partial-update alias so clients that follow the OpenAPI-style
+// update convention do not fail at routing before validation/persistence.
+router
+  .route("/:actionApiName")
+  .put(updateActionTypeHandler)
+  .patch(updateActionTypeHandler);
 
 // ---------------------------------------------------------------------------
 // Endpoint 5: POST /:actionApiName/clone (Clone Action Type) — Task 23
@@ -909,6 +1029,9 @@ router.post(
         apiName: body.newApiName,
         displayName: newDisplayName,
         description: source.description,
+        iconName: source.icon_name,
+        iconColor: source.icon_color,
+        saveLocationRid: source.save_location_rid,
         parameters: JSON.parse(JSON.stringify(source.parameters)), // deep copy
         rules: JSON.parse(JSON.stringify(source.rules)),           // deep copy
         submissionCriteria: source.submission_criteria != null

@@ -49,6 +49,14 @@ interface ModifyObjectRule {
   properties: Record<string, ValueSource>;
 }
 
+/** A Foundry-style create-or-modify rule (upsert by object reference/PK). */
+interface ModifyOrCreateObjectRule {
+  type: "modifyOrCreateObject";
+  objectType: string;
+  objectReference: ValueSource;
+  properties: Record<string, ValueSource>;
+}
+
 /** A deleteObject rule. */
 interface DeleteObjectRule {
   type: "deleteObject";
@@ -73,7 +81,13 @@ interface RemoveLinkRule {
 }
 
 /** Union of all supported rule types. */
-type Rule = CreateObjectRule | ModifyObjectRule | DeleteObjectRule | AddLinkRule | RemoveLinkRule;
+type Rule =
+  | CreateObjectRule
+  | ModifyObjectRule
+  | ModifyOrCreateObjectRule
+  | DeleteObjectRule
+  | AddLinkRule
+  | RemoveLinkRule;
 
 /** A single link edit entry appended to an object's edit. */
 export interface LinkEdit {
@@ -165,6 +179,12 @@ export async function compileRules(
 
       case "modifyObject":
         await compileModifyObject(
+          rule, resolvedParameters, objectFetcher, executionContext, i, preliminaryEdits, errors
+        );
+        break;
+
+      case "modifyOrCreateObject":
+        await compileModifyOrCreateObject(
           rule, resolvedParameters, objectFetcher, executionContext, i, preliminaryEdits, errors
         );
         break;
@@ -353,6 +373,79 @@ async function compileModifyObject(
     objectType: rule.objectType,
     primaryKey,
     operation: "update",
+    propertyValues,
+    linkEdits: [],
+    ruleIndex,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// modifyOrCreateObject compiler
+// ---------------------------------------------------------------------------
+
+/**
+ * Foundry's "Create or modify object(s)" behavior: resolve the configured
+ * object reference/primary key, update when it exists, otherwise create a new
+ * object with that same key. The decision is made once during compilation so
+ * the resulting action remains a single atomic ontology edit transaction.
+ */
+async function compileModifyOrCreateObject(
+  rule: ModifyOrCreateObjectRule,
+  resolvedParameters: Record<string, unknown>,
+  objectFetcher: ObjectFetcher,
+  executionContext: ExecutionContext,
+  ruleIndex: number,
+  edits: PreliminaryEdit[],
+  errors: string[]
+): Promise<void> {
+  const reference = resolveValue(rule.objectReference, resolvedParameters, executionContext);
+  if (reference === undefined || reference === null) {
+    errors.push(
+      `modifyOrCreateObject rule at index ${ruleIndex} could not resolve object reference`
+    );
+    return;
+  }
+
+  const primaryKey = String(reference);
+  const propertyValues: Record<string, unknown> = {};
+  for (const [propertyName, source] of Object.entries(rule.properties ?? {})) {
+    const value = resolveValue(source, resolvedParameters, executionContext);
+    if (value !== undefined) propertyValues[propertyName] = value;
+  }
+
+  const primaryKeyProperty = await getPrimaryKeyPropertyName(
+    executionContext.ontologyId,
+    rule.objectType,
+    errors,
+  );
+  if (!primaryKeyProperty) return;
+
+  const existing = await objectFetcher(rule.objectType, primaryKey);
+  if (existing) {
+    // Primary keys are immutable on update. The reference parameter selects
+    // the object; all other mappings become the partial update payload.
+    delete propertyValues[primaryKeyProperty];
+    edits.push({
+      objectType: rule.objectType,
+      primaryKey,
+      operation: "update",
+      propertyValues,
+      linkEdits: [],
+      ruleIndex,
+    });
+    return;
+  }
+
+  // For the create branch, the object reference is also the user-entered PK.
+  // This mirrors the creation wizard's "User-entered primary key" mode and
+  // keeps imported rule definitions safe if they omit an explicit PK mapping.
+  if (propertyValues[primaryKeyProperty] === undefined) {
+    propertyValues[primaryKeyProperty] = reference;
+  }
+  edits.push({
+    objectType: rule.objectType,
+    primaryKey,
+    operation: "create",
     propertyValues,
     linkEdits: [],
     ruleIndex,

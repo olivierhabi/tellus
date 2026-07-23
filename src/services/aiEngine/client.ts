@@ -3,8 +3,8 @@
 //
 // The tellus backend is the ONLY component allowed to talk to the AI engine.
 // The frontend never sees this URL. This client is the outbound half of the
-// Frontend -> Backend -> AI Engine flow for the TypeScript Functions v2
-// coding assistant.
+// Frontend -> Backend -> AI Engine flow for both the TypeScript Functions v2
+// coding assistant and Workshop Vega chart generation.
 //
 // Pattern mirrors src/services/funnel/lakekeeperClient.ts: a thin fetch
 // wrapper with an AbortController timeout, config-from-env, and typed errors
@@ -31,6 +31,20 @@ export interface AiEnginePayload {
 /** Successful AI engine result. */
 export interface AiEngineResult {
   response: string;
+  _metadata?: Record<string, unknown>;
+}
+
+/** Payload accepted by telos-AIE-agent POST /api/vega-chart. */
+export interface VegaChartAgentPayload {
+  user_request: string;
+  data_fields: string;
+  current_json?: string;
+  model?: string;
+}
+
+/** Raw result returned by telos-AIE-agent POST /api/vega-chart. */
+export interface VegaChartAgentResult {
+  response: unknown;
   _metadata?: Record<string, unknown>;
 }
 
@@ -62,6 +76,11 @@ export interface AiEnginePort {
   ): Promise<Response>;
   /** Fetch the engine's supported-models catalog + its default (GET /api/models). */
   getModels(signal?: AbortSignal): Promise<AiEngineModelsResult>;
+  vegaChart(
+    payload: VegaChartAgentPayload,
+    principalUserId?: string,
+    signal?: AbortSignal,
+  ): Promise<VegaChartAgentResult>;
   isReachable(): Promise<boolean>;
 }
 
@@ -75,12 +94,12 @@ export class AiEngineClient implements AiEnginePort {
   private readonly timeoutMs: number;
 
   constructor(opts: AiEngineClientOptions = {}) {
-    // TELOS_AIE_AGENT_URL is the AI engine origin (e.g. http://localhost:5002).
+    // TELOS_AIE_AGENT_URL is the AI engine origin (e.g. http://127.0.0.1:5000).
     // Trailing slashes are stripped so `${baseUrl}/api/...` is always clean.
     this.baseUrl = (
       opts.baseUrl ??
       process.env.TELOS_AIE_AGENT_URL ??
-      "http://localhost:5002"
+      "http://127.0.0.1:5000"
     ).replace(/\/+$/, "");
     // LLM calls are slow — give them a generous ceiling (default 2 min).
     this.timeoutMs =
@@ -282,6 +301,95 @@ export class AiEngineClient implements AiEnginePort {
       );
     }
     return body as AiEngineResult;
+  }
+
+  async vegaChart(
+    payload: VegaChartAgentPayload,
+    principalUserId?: string,
+    signal?: AbortSignal,
+  ): Promise<VegaChartAgentResult> {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}/api/vega-chart`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...(principalUserId
+            ? { "X-Tellus-Principal": principalUserId }
+            : {}),
+          ...(process.env.TELOS_AIE_AGENT_TOKEN
+            ? { "X-Tellus-Engine-Token": process.env.TELOS_AIE_AGENT_TOKEN }
+            : {}),
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.any(
+          [ctrl.signal, signal].filter(Boolean) as AbortSignal[],
+        ),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new AppError(
+          "AI engine Vega request timed out",
+          504,
+          "AI_ENGINE_TIMEOUT",
+        );
+      }
+      throw new AppError(
+        `AI engine unreachable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        502,
+        "AI_ENGINE_UNAVAILABLE",
+      );
+    } finally {
+      clearTimeout(tid);
+    }
+
+    if (!res.ok) {
+      let engineError = "";
+      try {
+        const errorBody = (await res.json()) as { error?: unknown } | null;
+        if (errorBody && typeof errorBody.error === "string") {
+          engineError = errorBody.error;
+        }
+      } catch {
+        // Non-JSON engine error; use the status below.
+      }
+      if (res.status === 400) {
+        throw new AppError(
+          engineError || "AI engine rejected the Vega request",
+          400,
+          "AI_ENGINE_BAD_REQUEST",
+        );
+      }
+      throw new AppError(
+        engineError
+          ? `AI engine error: ${engineError}`
+          : `AI engine returned HTTP ${res.status}`,
+        502,
+        "AI_ENGINE_ERROR",
+      );
+    }
+
+    const body = (await res.json()) as
+      | VegaChartAgentResult
+      | { error?: string };
+    if (
+      body &&
+      typeof body === "object" &&
+      "error" in body &&
+      typeof body.error === "string"
+    ) {
+      throw new AppError(
+        `AI engine error: ${body.error}`,
+        502,
+        "AI_ENGINE_ERROR",
+      );
+    }
+    return body as VegaChartAgentResult;
   }
 
   /**

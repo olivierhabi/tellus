@@ -60,6 +60,7 @@ function drippingStreamEngine(frames: string[], delayMs: number): AiEnginePort {
           headers: { "Content-Type": "text/event-stream" },
         }),
     ),
+    vegaChart: vi.fn(async () => ({ response: { mark: "bar" } })),
     getModels: vi.fn(async () => ({
       models: [],
       default: "gemini-2.5-flash",

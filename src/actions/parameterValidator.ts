@@ -247,11 +247,18 @@ async function validateAndCoerceType(
     case "integer":
       return coerceInteger(apiName, value, errors);
 
+    case "byte":
+      return coerceBoundedInteger(apiName, value, -128, 127, "byte", errors);
+
+    case "short":
+      return coerceBoundedInteger(apiName, value, -32768, 32767, "short", errors);
+
     case "long":
       return coerceLong(apiName, value, errors);
 
     case "double":
     case "float":
+    case "decimal":
       return coerceDouble(apiName, value, paramType, errors);
 
     case "date":
@@ -275,8 +282,26 @@ async function validateAndCoerceType(
     case "double_array":
       return coerceTypedArray(apiName, value, "double", errors);
 
+    case "boolean_array":
+      return coerceTypedArray(apiName, value, "boolean", errors);
+
+    case "timestamp_array":
+      return coerceTypedArray(apiName, value, "timestamp", errors);
+
+    case "geopoint":
+      return coerceGeopoint(apiName, value, errors);
+
+    case "geoshape":
+      return coerceGeoshape(apiName, value, errors);
+
     case "struct":
       return coerceStruct(apiName, value, errors);
+
+    case "attachment":
+    case "marking":
+    case "media_reference":
+    case "timeseries":
+      return value;
 
     default:
       errors.push(
@@ -365,6 +390,27 @@ function coerceInteger(
     return undefined;
   }
   return num;
+}
+
+function coerceBoundedInteger(
+  apiName: string,
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  typeName: string,
+  errors: string[],
+): number | undefined {
+  const localErrors: string[] = [];
+  const coerced = coerceInteger(apiName, value, localErrors);
+  if (coerced === undefined) {
+    errors.push(...localErrors);
+    return undefined;
+  }
+  if (coerced < minimum || coerced > maximum) {
+    errors.push(`Parameter '${apiName}' must be a ${typeName} (${minimum} to ${maximum}), received: ${coerced}`);
+    return undefined;
+  }
+  return coerced;
 }
 
 // --- Long (64-bit signed) ---
@@ -586,7 +632,7 @@ function coerceObjectSet(
 function coerceTypedArray(
   apiName: string,
   value: unknown,
-  baseType: "string" | "integer" | "double",
+  baseType: "string" | "integer" | "double" | "boolean" | "timestamp",
   errors: string[]
 ): unknown[] | undefined {
   if (!Array.isArray(value)) {
@@ -608,9 +654,13 @@ function coerceTypedArray(
       coerced = coerceString(`${apiName}[${i}]`, elem, elemErrors);
     } else if (baseType === "integer") {
       coerced = coerceInteger(`${apiName}[${i}]`, elem, elemErrors);
-    } else {
+    } else if (baseType === "double") {
       // double
       coerced = coerceDouble(`${apiName}[${i}]`, elem, "double", elemErrors);
+    } else if (baseType === "boolean") {
+      coerced = coerceBoolean(`${apiName}[${i}]`, elem, elemErrors);
+    } else {
+      coerced = coerceTimestamp(`${apiName}[${i}]`, elem, elemErrors);
     }
 
     if (elemErrors.length > 0) {
@@ -626,6 +676,38 @@ function coerceTypedArray(
   }
 
   return hasError ? undefined : result;
+}
+
+function coerceGeopoint(
+  apiName: string,
+  value: unknown,
+  errors: string[],
+): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`Parameter '${apiName}' must be a geopoint object with lat/lon.`);
+    return undefined;
+  }
+  const point = value as Record<string, unknown>;
+  if (
+    typeof point.lat !== "number" || point.lat < -90 || point.lat > 90 ||
+    typeof point.lon !== "number" || point.lon < -180 || point.lon > 180
+  ) {
+    errors.push(`Parameter '${apiName}' must contain lat -90..90 and lon -180..180.`);
+    return undefined;
+  }
+  return point as Record<string, number>;
+}
+
+function coerceGeoshape(
+  apiName: string,
+  value: unknown,
+  errors: string[],
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as Record<string, unknown>).type !== "string") {
+    errors.push(`Parameter '${apiName}' must be a GeoJSON object with a type field.`);
+    return undefined;
+  }
+  return value as Record<string, unknown>;
 }
 
 // --- Struct ---

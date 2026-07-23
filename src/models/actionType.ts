@@ -26,6 +26,9 @@ export interface ActionTypeRow {
   api_name: string;
   display_name: string;
   description: string;
+  icon_name: string | null;
+  icon_color: string | null;
+  save_location_rid: string | null;
   parameters: unknown[];
   rules: unknown[];
   submission_criteria: unknown | null;
@@ -41,6 +44,9 @@ export interface CreateActionTypeInput {
   apiName: string;
   displayName: string;
   description?: string;
+  iconName?: string | null;
+  iconColor?: string | null;
+  saveLocationRid?: string | null;
   parameters?: unknown[];
   rules?: unknown[];
   submissionCriteria?: unknown | null;
@@ -53,6 +59,9 @@ export interface CreateActionTypeInput {
 export interface UpdateActionTypeInput {
   display_name?: string;
   description?: string;
+  icon_name?: string | null;
+  icon_color?: string | null;
+  save_location_rid?: string | null;
   parameters?: unknown[];
   rules?: unknown[];
   submission_criteria?: unknown | null;
@@ -68,6 +77,9 @@ export interface UpdateActionTypeInput {
 const UPDATABLE_FIELDS: ReadonlySet<string> = new Set([
   "display_name",
   "description",
+  "icon_name",
+  "icon_color",
+  "save_location_rid",
   "parameters",
   "rules",
   "submission_criteria",
@@ -116,15 +128,19 @@ async function createActionType(
     const result = await query(
       `INSERT INTO action_type
          (ontology_id, api_name, display_name, description,
+          icon_name, icon_color, save_location_rid,
           parameters, rules, submission_criteria, side_effects,
           max_affected_objects, is_enabled, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         ontologyId,
         actionTypeDef.apiName,
         actionTypeDef.displayName,
         actionTypeDef.description ?? "",
+        actionTypeDef.iconName ?? "manually-entered-data",
+        actionTypeDef.iconColor ?? "#1A2230",
+        actionTypeDef.saveLocationRid ?? null,
         JSON.stringify(actionTypeDef.parameters ?? []),
         JSON.stringify(actionTypeDef.rules ?? []),
         actionTypeDef.submissionCriteria != null

@@ -46,7 +46,7 @@ import datasourceRouter, { suggestMappingRouter } from "./routes/datasources";
 import indexingRouter from "./routes/indexing";
 import objectDataStoreRouter from "./routes/objectDataStore";
 import linkRouter from "./routes/links";
-import actionTypeRouter from "./routes/actionTypes";
+import actionTypeRouter, { formatActionType } from "./routes/actionTypes";
 import actionsRouter, { validateRouter, batchRouter } from "./routes/actions";
 import { actionAuditRouter, globalAuditRouter } from "./routes/auditLog";
 import objectsRouter from "./routes/objects";
@@ -700,22 +700,9 @@ app.post(
         [rids]
       );
 
-      const data = result.rows.map((row: Record<string, any>) => ({
-        rid: row.action_type_id,
-        apiName: row.api_name,
-        displayName: row.display_name,
-        description: row.description,
-        parameters: row.parameters,
-        rules: row.rules,
-        submissionCriteria: row.submission_criteria ?? null,
-        sideEffects: row.side_effects ?? null,
-        maxAffectedObjects: row.max_affected_objects,
-        isEnabled: row.is_enabled,
-        status: row.is_enabled ? "ACTIVE" : "EXPERIMENTAL",
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        createdBy: row.created_by,
-      }));
+      const data = result.rows.map((row: Record<string, any>) =>
+        formatActionType(row),
+      );
 
       res.status(200).json({ data });
     } catch (err: any) {
@@ -741,23 +728,7 @@ app.get(
         res.status(404).json({ errorCode: "ACTION_TYPE_NOT_FOUND", message: `Action type with RID '${rid}' not found` });
         return;
       }
-      const result = row.rows[0];
-      res.status(200).json({
-        rid: result.action_type_id,
-        apiName: result.api_name,
-        displayName: result.display_name,
-        description: result.description,
-        parameters: result.parameters,
-        rules: result.rules,
-        submissionCriteria: result.submission_criteria ?? null,
-        sideEffects: result.side_effects ?? null,
-        maxAffectedObjects: result.max_affected_objects,
-        isEnabled: result.is_enabled,
-        status: result.is_enabled ? "ACTIVE" : "EXPERIMENTAL",
-        createdAt: result.created_at,
-        updatedAt: result.updated_at,
-        createdBy: result.created_by,
-      });
+      res.status(200).json(formatActionType(row.rows[0]));
     } catch (err: any) {
       next(err);
     }
@@ -989,10 +960,10 @@ import { buildQuiverRouter } from "./routes/quiver";
 app.use("/quiver/api/v1", buildQuiverRouter());
 
 // Code Assistant — secure proxy to the telos-AIE-agent AI engine for the
-// TypeScript Functions v2 coding assistant. Frontend posts to
-// /api/v1/code-assistant/typescript-v2; this route forwards to
-// {TELOS_AIE_AGENT_URL}/api/code-repositories-typescript-v2 and wraps the
-// engine's {response, _metadata} in the {success, data} envelope. The
+// TypeScript Functions v2 coding assistant and Workshop Vega generation.
+// Frontend posts to /api/v1/code-assistant/{typescript-v2|vega-chart}; this
+// route forwards to the matching telos-AIE-agent route and wraps the engine's
+// {response, _metadata} in the {success, data} envelope. The
 // frontend never learns the AI engine URL. Two-layer auth (same pattern as
 // /api/v1/code-repositories): globalAuth allowlists the prefix so the
 // CODE_ASSISTANT_TEST_AUTH test-principal bypass works in CI; the router's

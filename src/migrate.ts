@@ -583,6 +583,9 @@ async function migrate(): Promise<void> {
         api_name TEXT NOT NULL,
         display_name TEXT NOT NULL,
         description TEXT DEFAULT '',
+        icon_name TEXT DEFAULT 'manually-entered-data',
+        icon_color TEXT DEFAULT '#1A2230',
+        save_location_rid TEXT DEFAULT NULL,
 
         -- Parameters: defines the inputs the caller must provide when executing this action.
         -- This is a JSON array of parameter definition objects. Each parameter has:
