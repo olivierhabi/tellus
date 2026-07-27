@@ -31,8 +31,30 @@ describe("formatActionType", () => {
   });
 
   it("returns explicit nulls for legacy rows without metadata", () => {
-    expect(formatActionType({}).icon).toBeNull();
-    expect(formatActionType({}).iconColor).toBeNull();
-    expect(formatActionType({}).saveLocationRid).toBeNull();
+    expect(formatActionType({} as any).icon).toBeNull();
+    expect(formatActionType({} as any).iconColor).toBeNull();
+    expect(formatActionType({} as any).saveLocationRid).toBeNull();
+  });
+
+  // Phase 6.2 — versioned definition surface (migration 132 backfill).
+  it("surfaces definitionVersion + definitionHash when the column is set", () => {
+    const formatted = formatActionType({
+      action_type_id: "x",
+      api_name: "x",
+      display_name: "x",
+      definition_version: 7,
+      definition_hash: "sha256:abc",
+    } as any);
+    expect(formatted).toMatchObject({
+      definitionVersion: 7,
+      definitionHash: "sha256:abc",
+    });
+  });
+
+  it("falls back to definitionVersion=1 + null hash when the column is missing (pre-132 legacy)", () => {
+    expect(formatActionType({} as any)).toMatchObject({
+      definitionVersion: 1,
+      definitionHash: null,
+    });
   });
 });

@@ -46,6 +46,8 @@ export type FailureType =
   | "scale_limit"
   | "permission_denied"
   | "concurrency_conflict"
+  // Phase 4 — writeback pre-edit stage rejection.
+  | "writeback_rejected"
   | "unclassified"
   | null;
 
@@ -69,6 +71,10 @@ export interface AuditLogEntry {
   source_ip?: string | null;
   branch_id?: string | null;
   metadata?: Record<string, unknown>;
+  // Phase 8 — semantics audit fields (migration 121).
+  semantics_version?: number | null;
+  execution_mode?: string | null;
+  correlation_id?: string | null;
 }
 
 /**
@@ -103,6 +109,9 @@ function toRowBody(entry: AuditLogEntry): AuditRowBody {
     branch_id: entry.branch_id ?? null,
     source_ip: entry.source_ip ?? null,
     metadata: entry.metadata ?? {},
+    semantics_version: (entry as any).semantics_version ?? null,
+    execution_mode: (entry as any).execution_mode ?? null,
+    correlation_id: (entry as any).correlation_id ?? null,
   };
 }
 

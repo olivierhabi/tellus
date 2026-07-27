@@ -29,10 +29,20 @@ import type { ActionTypeRow } from "../models/actionType";
 import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
+import { executeWriteback, type WritebackConfig, type WritebackResult, type HttpRequestFn, type HttpResponseSimulated } from "./writebackExecutor";
+import { runWritebackStage } from "./runWritebackStage";
+import { DEFAULT_EGRESS_POLICY } from "../services/webhookSafeTransport";
+import * as https from "https";
+import * as http from "http";
 import { applyEdits } from "./editApplicator";
 import { evaluateSubmissionCriteria } from "./submissionCriteria";
 import { fireActionWebhooks } from "./actionWebhooks";
 import { sendNotifications } from "./sideEffectNotifier";
+import {
+  extractSideEffectJobs,
+  type SideEffectExecutionContext,
+} from "./sideEffectJobExtractor";
+import { enqueueSideEffectJobsInTransaction } from "../models/actionSideEffectJob";
 import {
   appendAuditRow,
   logStandaloneFailureAudit,
@@ -41,6 +51,11 @@ import {
   type FailureType,
   type AuditResult,
 } from "../models/actionAuditLog";
+import {
+  runActionCbacGate,
+  cbacDenyMessage,
+  type CbacGateResult,
+} from "./actionCbac";
 import { incCounter } from "../services/funnel/metrics";
 import { eventBus } from "../websocket/eventBus";
 import { resolveBranchIdOrMain } from "../services/branchContext";
@@ -48,6 +63,18 @@ import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
 import { query as pgQuery } from "../db";
+import { resolveSemanticsForRow } from "../models/actionType";
+import {
+  getActionSemanticsExecutionAvailability,
+  isV2ExecutionEnabled,
+} from "./actionSemanticsFlags";
+import type { ActionError } from "./actionErrors";
+import { defaultSchemaLookup } from "./objectReferenceResolver";
+import { buildPlannedStepsFromRules } from "./actionV2PlanBuilder";
+import { buildActionPlan, objectKey, type ObjectIdentity } from "./actionPlanner";
+import { loadPersistedState, toLockIdentities } from "./actionV2StateLoader";
+import type { LockIdentity } from "./actionLockManager";
+import { withBoundedRetry } from "./actionRetry";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,11 +85,37 @@ export interface ExecutionContext {
   executedBy: string;
   sourceIp?: string | null;
   branchId?: string | null;
+  /** Tenant scope for data-connection webhook resolution during the
+   * writeback pre-edit stage (the connectivity store is
+   * tenant-scoped). Threaded from the route's authenticated
+   * principal; the writeback executor falls back to "default" when
+   * absent (tests, internal callers). */
+  tenant?: string;
   /** Optimistic concurrency: expected __version of the target object (Task 22). */
   expectedVersion?: number;
   /** Subject roles/groups for §5 submission-criteria evaluation (Stage 3). */
   roles?: string[];
   groups?: string[];
+  /** Phase 6.1 — CBAC subject + markings/cbac from `req.security`.
+   * Threaded through from the route's `securityContext` middleware so
+   * the Stage 1c CBAC gate (action-type-level allow/deny +
+   * required_markings) can evaluate the actor against the
+   * action_type row's `allowed_principals` / `denied_principals` /
+   * `required_markings` columns (migration 037).
+   *
+   * When `subjectKind` is undefined → the CBAC gate is **skipped**
+   * (preserves backward compatibility with any caller that didn't
+   * thread security context — typically test-only).
+   */
+  subjectKind?: "user" | "service" | "token" | "anonymous";
+  /** Stable subject identifier — username / service-account / token-id / "anonymous". */
+  subjectIdentifier?: string;
+  /** Markings the subject is cleared for. Empty when none. */
+  subjectMarkings?: string[];
+  /** CBAC tags the subject is cleared for. Permissive-on-absent at the predicate layer. */
+  subjectCbac?: string[];
+  /** When true, the subject is a superadmin with `markingBypass` — the CBAC gate is an automatic ALLOW. */
+  markBypass?: boolean;
 }
 
 /** A single affected object in the result. */
@@ -202,6 +255,11 @@ export async function executeAction(
   const startTime = Date.now();
   const executionId = crypto.randomUUID();
 
+  // Phase 8 — observability: action_execution_total, partitioned by semantics version.
+  try {
+    incCounter("tellus_action_execution_total", { result: "started" });
+  } catch { /* metrics non-blocking */ }
+
   // Pre-declare result and actionType so `finally` block can access them
   const result: ExecutionResult = {
     success: false,
@@ -225,6 +283,13 @@ export async function executeAction(
   // logStandaloneFailureAudit — failure-path events (stages 1-5) and
   // mid-apply-edits exceptions both reach audit durability this way.
   let auditCommitted = false;
+  // Phase 6/8 — semantics resolved in Stage 1b (inside the try). Hoisted to
+  // the outer scope so the audit-entry builder + finally counters can read it.
+  let semantics: { semanticsVersion: number; executionMode: string; deletePolicy: string } = {
+    semanticsVersion: 1,
+    executionMode: "declarative",
+    deletePolicy: "legacy_unchecked",
+  };
 
   const buildAuditEntry = (): AuditLogEntry => ({
     action_type_api_name: actionTypeApiName,
@@ -242,7 +307,11 @@ export async function executeAction(
     source_ip: context.sourceIp || null,
     branch_id: context.branchId || null,
     metadata: {},
-  });
+    // Phase 8 — thread semantics + correlation id into the audit row.
+    semantics_version: semantics?.semanticsVersion ?? null,
+    execution_mode: semantics?.executionMode ?? null,
+    correlation_id: executionId,
+  } as AuditLogEntry & { semantics_version: number | null; execution_mode: string | null; correlation_id: string });
 
   try {
     // -----------------------------------------------------------------
@@ -272,6 +341,124 @@ export async function executeAction(
         { actionTypeApiName, executionId }
       );
       return result;
+    }
+
+    // -----------------------------------------------------------------
+    // STAGE 1b: Action Semantics Enforcement (Phase 6)
+    //
+    // Resolve the persisted semantics triple (NULL → v1 read fallback). v1
+    // continues unchanged. v2 is enforced ONLY when the version-2 execution
+    // feature flag is on; otherwise fail closed with
+    // UNSUPPORTED_SEMANTICS_VERSION. Unknown stored versions (shouldn't
+    // persist) also fail closed. Never silently downgrade v2 to v1.
+    // -----------------------------------------------------------------
+    const resolvedSemantics = resolveSemanticsForRow({
+      semantics_version: (actionType as any).semantics_version ?? null,
+      execution_mode: (actionType as any).execution_mode ?? null,
+      delete_policy: (actionType as any).delete_policy ?? null,
+    });
+    semantics = resolvedSemantics;
+    const semanticsAvailability =
+      getActionSemanticsExecutionAvailability(semantics.semanticsVersion);
+    if (!semanticsAvailability.available) {
+      result.failureType = "unclassified";
+      result.errorMessage =
+        semanticsAvailability.message ??
+        `Unsupported action semantics version '${semantics.semanticsVersion}'.`;
+      pendingError = new OntologyError(
+        result.errorMessage,
+        semanticsAvailability.code ?? "UNSUPPORTED_SEMANTICS_VERSION",
+        422,
+        {
+          executionId,
+          ...semanticsAvailability.details,
+        },
+      );
+      return result;
+    }
+
+    // -----------------------------------------------------------------
+    // STAGE 1c (Phase 6.1): CBAC authorization gate (action-type-level
+    // allowed_principals / denied_principals / required_markings).
+    //
+    // The CBAC layer was built in F-P3-18 (cbacPolicy.ts +
+    // cbacPolicyLoader.ts + cbacDecisionLog.ts) but did NOT ship a
+    // wiring on /actions/.../apply — the JSDoc example at
+    // middleware/cbac.ts:10-19 prescribes the surface but no route
+    // mounts it. Phase 6.1 wires the same evaluator INSIDE the
+    // executor (rather than as a route middleware) so the gate is
+    // authoritative across all action-exec entry points —
+    // /actions/:api/apply, /applyBatch, the bulk-action runner, and
+    // future programmatic dispatch paths.
+    //
+    // Default-allow for callers that don't thread a security context
+    // (subjectKind=undefined) — preserves test + integration
+    // backward-compat. Once a security context is threaded, the
+    // policy MUST evaluate to ALLOW or the action aborts at Stage 1c
+    // (no edits, no emulation, no audit row beyond the failure audit).
+    //
+    // Default-allow also for the action_type row with NULL policy
+    // columns (the v1.0 baseline across all existing rows). The
+    // loader returns a Policy with allowedPrincipals=null (no
+    // allowlist gate), requiredMarkings=[] (no marking gate), and
+    // deniedPrincipals=null (no denylist gate) — so for any
+    // authenticated non-anonymous subject it ALLOWs. This is the
+    // backward-compat guarantee: switching the flag on never breaks
+    // existing action types.
+    // -----------------------------------------------------------------
+    if (context.subjectKind !== undefined) {
+      const policyCtx = {
+        resourceKind: "action_type",
+        resourceId: actionTypeApiName,
+        ontologyId,
+        sourceIp: context.sourceIp ?? null,
+        requestId: executionId,
+      };
+      const cbacResult: CbacGateResult = await runActionCbacGate(
+        ontologyId,
+        actionTypeApiName,
+        {
+          subjectKind: context.subjectKind,
+          subjectIdentifier: context.subjectIdentifier,
+          roles: context.roles,
+          groups: context.groups,
+          subjectMarkings: context.subjectMarkings,
+          markBypass: context.markBypass,
+        },
+        policyCtx,
+      );
+      // Loader failure (e.g. transient PG drop). Fail-closed per F-P3-18 §4.
+      // Phase 6.1 emits AUTHORIZATION_UNAVAILABLE (503) — same semantics
+      // as the existing requireCbac middleware's catch branch.
+      if (cbacResult.internalError) {
+        result.failureType = "unclassified";
+        result.errorMessage = "Authorization service temporarily unavailable.";
+        pendingError = new OntologyError(
+          "Authorization service temporarily unavailable.",
+          "AUTHORIZATION_UNAVAILABLE",
+          503,
+          { executionId, actionTypeApiName, detail: cbacResult.internalError.detail },
+        );
+        return result;
+      }
+      if (cbacResult.decision === "deny") {
+        const userMessage = cbacDenyMessage(cbacResult);
+        result.failureType = "unclassified";
+        result.errorMessage = userMessage;
+        pendingError = new OntologyError(
+          userMessage,
+          "PERMISSION_DENIED",
+          403,
+          {
+            executionId,
+            actionTypeApiName,
+            cbacReason: cbacResult.reason,
+            subject: context.subjectIdentifier ?? "anonymous",
+            matchedRule: cbacResult.matchedRule,
+          },
+        );
+        return result;
+      }
     }
 
     // -----------------------------------------------------------------
@@ -330,6 +517,58 @@ export async function executeAction(
     }
 
     // -----------------------------------------------------------------
+    // STAGE 3.5 (Phase 6.3): Writeback pre-edit hook (Phase 4-origin,
+    // re-ordered from Stage 5 to Stage 3.5 in Phase 6.3).
+    //
+    // Runs the writeback webhook BEFORE compileRules so the typed
+    // outputs map produced by a successful writeback is available as
+    // the `ExecutionContext.writebackOutputs` value source for rule
+    // bodies that declare `ValueSource.source === "writebackResponse"`.
+    //
+    // Phase 4 wire-up kept intact: failures abort the entire action —
+    // no edits are committed, the user sees a sanitized error, and
+    // the structured BE log captures the full request/response
+    // diagnostic. Phase 6 will ship the durable reconciliation state
+    // for the unavoidable external-success/local-commit-failure
+    // window (the gap when the external side acknowledges but the
+    // local apply-edits COMMIT rolls back).
+    // -----------------------------------------------------------------
+    let writebackOutputs: Record<string, unknown> | undefined;
+    if (actionType.writeback_config != null) {
+      try {
+        const wbRes = await runWritebackStage({
+          actionType,
+          resolvedParameters,
+          executedBy: context.executedBy || "system",
+          ontologyId,
+          actionTypeApiName,
+          executionId,
+          tenant: context.tenant,
+        });
+        if (wbRes.kind === "ok") {
+          writebackOutputs = wbRes.outputs;
+        }
+      } catch (wbErr) {
+        // runWritebackStage throws an OntologyError with the canonical
+        // status mapping (404/409/504/502/422 by code). Surface it
+        // verbatim + mark the result so the audit-finally block records
+        // the structured failureType.
+        result.result = "failed";
+        result.failureType = "writeback_rejected";
+        result.errorMessage = wbErr instanceof Error ? wbErr.message : String(wbErr);
+        pendingError = wbErr instanceof OntologyError
+          ? wbErr
+          : new OntologyError(
+              `Writeback execution error: ${result.errorMessage}`,
+              "WRITEBACK_REJECTED",
+              502,
+              { executionId, actionTypeApiName },
+            );
+        return result;
+      }
+    }
+
+    // -----------------------------------------------------------------
     // STAGE 4: Compile rules into edits
     // -----------------------------------------------------------------
     // F-P3-12: thread the (possibly unresolved) caller-supplied branchId
@@ -339,6 +578,10 @@ export async function executeAction(
     // boundary further down the function resolves an unset branch to
     // `main`; rule compilation still sees `undefined` for that case
     // and its readers comment on the cross-branch fallback.
+    //
+    // Phase 6.3 — also thread the writeback's typed outputs map when
+    // present so rule bodies that declare `ValueSource.source === "writebackResponse"`
+    // resolve against the live webhook response via `localJsonPointer` (ruleCompiler.ts).
     const compilation = await compileRules(
       actionType.rules as any[],
       resolvedParameters,
@@ -347,6 +590,7 @@ export async function executeAction(
         executedBy: context.executedBy || "system",
         ontologyId,
         branchId: context.branchId ?? undefined,
+        ...(writebackOutputs ? { writebackOutputs } : {}),
       }
     );
 
@@ -397,6 +641,102 @@ export async function executeAction(
     }
 
     // -----------------------------------------------------------------
+    // STAGE 4a (Phase 6): Version-2 plan + final-state validation.
+    //
+    // For version 2 (and only when the v2 execution flag is on), build the
+    // action plan directly from the rules + resolved parameters (not the
+    // merged compiled edits) so the same-invocation restriction and the
+    // final-state validator see faithful per-rule ordering. The pre-lock
+    // plan fails fast on static v2 violations (string refs, create→modify/
+    // delete of the same identity, dangling final state). The
+    // authoritative revalidation runs inside the apply transaction after
+    // advisory + row locks are acquired (v2RevalidateAfterLock below) so a
+    // concurrent writer cannot slip a violation between plan and commit.
+    //
+    // v1 is completely unchanged: it skips this stage and proceeds straight
+    // to the existing applyEdits path.
+    // -----------------------------------------------------------------
+    let v2PlannedLocks: LockIdentity[] | undefined;
+    let v2Revalidate: ((client: import("pg").PoolClient) => Promise<ActionError[]>) | undefined;
+    if (semantics.semanticsVersion === 2 && isV2ExecutionEnabled()) {
+      const planCtx = {
+        ontologyId,
+        branchId: context.branchId ?? (await resolveBranchIdOrMain(ontologyId, context.branchId)),
+        semanticsVersion: semantics.semanticsVersion as 1 | 2,
+        schemaLookup: defaultSchemaLookup,
+      };
+      const rules = (actionType.rules ?? []) as Array<Record<string, unknown>> as any[];
+      const params = (actionType.parameters ?? []) as any[];
+      // Phase 1: build with an empty persisted snapshot to derive identities
+      // and fail fast on static v2 violations (the post-lock revalidation is
+      // authoritative for persisted-dependent invariants).
+      const preBuild = await buildPlannedStepsFromRules(
+        rules, params, resolvedParameters,
+        { existingObjects: new Set<string>(), activeEdges: new Set<string>() },
+        planCtx, context.executedBy || "system",
+      );
+      if (!preBuild.ok || !preBuild.steps) {
+        result.failureType = "unclassified";
+        result.errorMessage = preBuild.errors.map((e) => e.message).join("; ");
+        pendingError = new OntologyError(
+          result.errorMessage, preBuild.errors[0]?.code ?? "VALIDATION_ERROR", 400,
+          { errors: preBuild.errors.map((e) => ({ code: e.code, path: e.path })), executionId },
+        );
+        return result;
+      }
+      // Phase 2: pre-lock authoritative plan — reload persisted state for the
+      // plan's identities, rebuild, run the planner/final-state validator.
+      const planIdentities: ObjectIdentity[] = [
+        ...preBuild.steps.objectDeltas.map((d) => d.identity),
+        ...preBuild.steps.relationshipDeltas.flatMap((r) => [r.source, r.target]),
+      ];
+      const persisted = await loadPersistedState(planIdentities);
+      const planBuild = await buildPlannedStepsFromRules(
+        rules, params, resolvedParameters, persisted, planCtx, context.executedBy || "system",
+      );
+      if (!planBuild.ok || !planBuild.steps) {
+        result.failureType = "unclassified";
+        result.errorMessage = planBuild.errors.map((e) => e.message).join("; ");
+        pendingError = new OntologyError(
+          result.errorMessage, planBuild.errors[0]?.code ?? "VALIDATION_ERROR", 400,
+          { errors: planBuild.errors.map((e) => ({ code: e.code, path: e.path })), executionId },
+        );
+        return result;
+      }
+      const plan = buildActionPlan(semantics.semanticsVersion as 1 | 2, planBuild.steps, {
+        executionId, correlationId: executionId,
+      });
+      if (!plan.plan || !plan.plan.valid) {
+        const errs = plan.errors.length ? plan.errors : plan.plan?.errors ?? [];
+        result.failureType = "unclassified";
+        result.errorMessage = errs.map((e) => e.message).join("; ");
+        pendingError = new OntologyError(
+          result.errorMessage, errs[0]?.code ?? "FINAL_STATE_INVALID", 422,
+          { errors: errs.map((e) => ({ code: e.code, path: e.path })), executionId },
+        );
+        return result;
+      }
+      v2PlannedLocks = plan.plan.requiredLocks.map((l) => ({
+        ontologyId: l.ontologyId, branchId: l.branchId, objectType: l.objectType, primaryKey: l.primaryKey,
+      }));
+      // Authoritative transaction-time revalidation: after locks, reload
+      // canonical state from the (now locked) tables and re-run the
+      // planner + final-state validator. Non-empty errors → applyEdits
+      // rolls back the whole transaction (no partial edits).
+      v2Revalidate = async (client) => {
+        const reloaded = await loadPersistedState(planIdentities, client);
+        const reBuild = await buildPlannedStepsFromRules(
+          rules, params, resolvedParameters, reloaded, planCtx, context.executedBy || "system",
+        );
+        if (!reBuild.ok || !reBuild.steps) return reBuild.errors;
+        const rePlan = buildActionPlan(semantics.semanticsVersion as 1 | 2, reBuild.steps, {
+          executionId, correlationId: executionId,
+        });
+        return (rePlan.errors.length ? rePlan.errors : rePlan.plan?.errors ?? []);
+      };
+    }
+
+    // -----------------------------------------------------------------
     // STAGE 4b: Optimistic Concurrency Check (Task 22)
     //
     // Pre-flight validation only: reject unsupported configurations.
@@ -443,7 +783,18 @@ export async function executeAction(
     }
 
     // -----------------------------------------------------------------
-    // STAGE 5: Writeback webhooks (SKIP in week 1)
+    // -----------------------------------------------------------------
+    // STAGE 5: Writeback webhook pre-edit stage (Phase 4 → Phase 6.3)
+    //
+    // Phase 6.3 lifts the writeback from AFTER compileRules (Phase 4) to
+    // BEFORE compileRules (Stage 3.5 above) so the typed outputs map
+    // returned by a successful writeback is available as the
+    // `ExecutionContext.writebackOutputs` value source for rules whose
+    // ValueSource.source === "writebackResponse". The block above (Stage
+    // 3.5 → `runWritebackStage`) computes it; the now-empty Stage 5 site
+    // is left as a single no-op marker so the audit-log stage numbers
+    // remain stable for operators reading the code or stage-graph
+    // dashboards. (Phase 6.6 ships the runtime-graph trace.)
     // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
@@ -472,6 +823,40 @@ export async function executeAction(
       const entry = buildAuditEntry();
       await appendAuditRow(pg, entry);
       auditCommitted = true;
+      // Phase 5 — durable side-effect outbox. When
+      // ACTION_SIDE_EFFECT_WORKER_ENABLED=1, enqueue per-side-effect
+      // rows IN THIS SAME PG TRANSACTION so the side effects are
+      // atomic with the audit row + the ontology edits. A subsequent
+      // worker drains the outbox post-commit. The legacy fire-and-forget
+      // path (Stage 7 below) is suppressed in this mode.
+      const at = actionType;
+      if (at && process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED === "1" && at.side_effects != null) {
+        const execCtx: SideEffectExecutionContext = {
+          executionId,
+          actionTypeApiName,
+          actionTypeId: at.action_type_id,
+          actionTypeVersion: at.definition_version ?? 1,
+          ontologyId,
+          executedBy: context.executedBy || "system",
+          result: result.result,
+          affectedObjects: result.affectedObjects,
+          firedAt: new Date().toISOString(),
+        };
+        const jobs = extractSideEffectJobs(at.side_effects, execCtx);
+        if (jobs.length > 0) {
+          await enqueueSideEffectJobsInTransaction(pg, {
+            executionId,
+            actionTypeId: at.action_type_id,
+            actionTypeVersion: at.definition_version ?? 1,
+            jobs: jobs.map((job, idx) => ({
+              sideEffectIndex: idx,
+              kind: job.kind,
+              payload: job.payload,
+              ...(job.idempotencySeed ? { idempotencyKey: `${executionId}:${job.idempotencySeed}` } : {}),
+            })),
+          });
+        }
+      }
     };
 
     // F-P3-12: resolve branch at the single executor boundary. The
@@ -485,7 +870,7 @@ export async function executeAction(
       context.branchId,
     );
 
-    const application = await applyEdits(compilation.edits, {
+    const applyContext = {
       executionId,
       actionTypeApiName,
       parameters: resolvedParameters,
@@ -495,7 +880,50 @@ export async function executeAction(
       preCommitHook,
       ontologyId,
       branchId: resolvedBranchId,
-    });
+      semanticsVersion: semantics.semanticsVersion,
+      plannedLockIdentities: v2PlannedLocks,
+      v2RevalidateAfterLock: v2Revalidate,
+    };
+
+    // Phase 6 — v2 only: wrap applyEdits in bounded deadlock/serialization
+    // retry. v1 calls applyEdits directly (unchanged). Domain validation
+    // errors from the v2 revalidation are NOT retried (actionRetry only
+    // retries PG 40P01/40001/40P02).
+    let application: import("./editApplicator").ApplyResult;
+    if (semantics.semanticsVersion === 2 && isV2ExecutionEnabled()) {
+      const retryOutcome = await withBoundedRetry<import("./editApplicator").ApplyResult>(
+        () => applyEdits(compilation.edits, applyContext),
+        {
+          onRetry: (attempt, err) => {
+            const code = (err as { code?: string }).code;
+            try {
+              incCounter(
+                code === "40001"
+                  ? "tellus_action_serialization_retry_total"
+                  : "tellus_action_deadlock_retry_total",
+                { attempt: String(attempt + 1), actionType: actionTypeApiName },
+              );
+            } catch { /* metrics non-blocking */ }
+          },
+        },
+      );
+      if (!retryOutcome.ok || !retryOutcome.result) {
+        const e = retryOutcome.error!;
+        incCounter(
+          e.code === "CONCURRENCY_CONFLICT"
+            ? "tellus_action_concurrency_conflict_total"
+            : "tellus_action_deadlock_retry_total",
+          { actionType: actionTypeApiName, exhausted: "true" },
+        );
+        result.failureType = "unclassified";
+        result.errorMessage = e.message;
+        pendingError = new OntologyError(e.message, e.code, 500, { attempts: e.attempts, executionId });
+        return result;
+      }
+      application = retryOutcome.result;
+    } else {
+      application = await applyEdits(compilation.edits, applyContext);
+    }
 
     result.success = application.success;
 
@@ -566,7 +994,7 @@ export async function executeAction(
     // null/empty side_effects ⇒ no-op. Awaited so the audit/return reflect
     // that delivery was attempted, but failures are swallowed inside.
     // -----------------------------------------------------------------
-    if (application.success && actionType.side_effects != null) {
+    if (application.success && actionType.side_effects != null && process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED !== "1") {
       try {
         // Fire webhooks
         await fireActionWebhooks(actionType.side_effects, {
@@ -653,6 +1081,23 @@ export async function executeAction(
     // STAGE 8: ALWAYS write audit log (even for failures)
     // -----------------------------------------------------------------
     result.durationMs = Date.now() - startTime;
+
+    // Phase 8 — observability: outcome counters + duration. Non-blocking.
+    try {
+      const ver = String(semantics?.semanticsVersion ?? 1);
+      if (result.result === "success") {
+        incCounter("tellus_action_execution_total", { semantics_version: ver, result: "success" });
+      } else {
+        incCounter("tellus_action_execution_total", { semantics_version: ver, result: "failed" });
+        incCounter("tellus_action_execution_failure_total", {
+          semantics_version: ver,
+          failure_type: result.failureType ?? "unclassified",
+        });
+      }
+      if (result.errorMessage && /DELETE_BLOCKED_BY_RELATIONSHIPS/i.test(result.errorMessage)) {
+        incCounter("tellus_action_delete_blocked_total", { semantics_version: ver });
+      }
+    } catch { /* metrics non-blocking */ }
 
     // F-P3-11: if the hash-chain append succeeded inside the applyEdits
     // PG transaction, the audit row is already committed — skip the

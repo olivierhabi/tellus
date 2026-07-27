@@ -34,6 +34,7 @@ import * as cdcHandler from "./cdc/handlers";
 import * as connectorTypesHandler from "./handlers/connector-types.handler";
 import * as foldersHandler from "./handlers/folders.handler";
 import * as egressPoliciesHandler from "./handlers/egress-policies.handler";
+import * as webhooksHandler from "./webhooks/handlers";
 import * as outbox from "./store/outbox";
 import {
   startRotationWorker,
@@ -146,6 +147,40 @@ export function createConnectivityRouter(): Router {
   router.post(
     "/connections/:rid/credentials/issue",
     secretsHandler.issueCredential,
+  );
+
+  // Source-linked webhooks inherit domains, egress policy, and credentials
+  // from their REST API connection while retaining an immutable version
+  // history and an independently managed activation lifecycle.
+  router.get("/connections/:rid/webhooks", webhooksHandler.listWebhooks);
+  router.post(
+    "/connections/:rid/webhooks",
+    idempotencyKeyMiddleware(pool, "connectivity.createWebhook"),
+    webhooksHandler.createWebhook,
+  );
+  router.get("/webhooks/:webhookRid", webhooksHandler.getWebhook);
+  router.put("/webhooks/:webhookRid", webhooksHandler.updateWebhook);
+  router.post("/webhooks/:webhookRid/ready", webhooksHandler.markWebhookReady);
+  router.post("/webhooks/:webhookRid/activate", webhooksHandler.activateWebhook);
+  router.post("/webhooks/:webhookRid/disable", webhooksHandler.disableWebhook);
+  router.delete("/webhooks/:webhookRid", webhooksHandler.archiveWebhook);
+  router.post(
+    "/webhooks/:webhookRid/test",
+    idempotencyKeyMiddleware(pool, "connectivity.testWebhook"),
+    webhooksHandler.testWebhook,
+  );
+  router.post(
+    "/webhooks/:webhookRid/execute",
+    idempotencyKeyMiddleware(pool, "connectivity.executeWebhook"),
+    webhooksHandler.executeProductionWebhook,
+  );
+  router.get(
+    "/webhooks/:webhookRid/executions",
+    webhooksHandler.listExecutions,
+  );
+  router.get(
+    "/webhook-executions/:executionRid",
+    webhooksHandler.getExecution,
   );
 
   // Worker credential unwrap — the foundry-worker child posts here with a
@@ -324,3 +359,8 @@ export type {
   VirtualTable,
   Driver,
 } from "./contracts";
+export type {
+  ConnectivityWebhook,
+  WebhookExecutionSummary,
+  WebhookVersionConfiguration as WebhookVersionConfigurationValue,
+} from "./webhooks/contracts";

@@ -13,11 +13,19 @@ import fs from "fs";
 import path from "path";
 import { pool } from "../../../db.js";
 import type { StemmaAdapter } from "../adapters/types.js";
-import { discoverTransforms, type DiscoveredTransform } from "./discovery.js";
+import { discoverTransforms, runtimeForDiscoveredBatch, type DiscoveredTransform, type TransformRuntime } from "./discovery.js";
 import { validateProfile } from "./profileCatalog.js";
 import { executeTransform, preflightTransformRuntime, executionMode, containerImageAvailable } from "./executor.js";
 import { resolveRepoDeps } from "./runtimeConfig.js";
 import { resolveDatasetByRid, resolvePreviousTransaction, resolveTransformInput, materializeOutput } from "./datasetStore.js";
+import { resolveDatasetRef, isCatalogPath } from "./catalogPathResolver.js";
+import {
+  computeTransformIdentity,
+  loadIncrementalState,
+  resolveOutputDatasetId,
+  upsertIncrementalState,
+  type IncrementalStateRow,
+} from "./transformIncrementalState.js";
 import { type TransformPrincipal } from "./authz.js";
 import { transformError, type TransformError } from "./errors.js";
 import { publishJobSpecs } from "../../jobSpec/store.js";
@@ -379,6 +387,15 @@ async function prepareBuild(
   // misconfigured backend fails the build LOUDLY with a 503
   // Transform:RuntimeNotConfigured carrying the exact reason + the fix
   // command — not the cryptic "No module named 'pyspark'" from the child.
+  //
+  // Track 1 (lightweight): every @transform still goes through the PySpark
+  // shim today — the @lightweight decorator (transforms-python v3.0.0) uses
+  // the same shared python venv + executor path; the lightweight runtime tag
+  // is recorded on the build row (runtime='lightweight' when ALL discovered
+  // transforms are @lightweight) for downstream tooling/FE/AIE; a future
+  // iteration may swap in a no-JVM sidecar keyed on this tag (runtimeForBatch
+  // + preflightLightweightRuntime in runtimeConfig.ts) without breaking
+  // existing repos.
   const rt = preflightTransformRuntime();
   if (!rt.ok) {
     return {
@@ -439,6 +456,16 @@ async function prepareBuild(
     return { ok: false, error: transformError("Transform:NoTransformsToBuild", { branch }) };
   }
 
+  // Track 1 (lightweight runtime selection): compute the build's runtime tag
+  // from the discovered transforms' kinds. ALL-@lightweight → 'lightweight';
+  // any Spark-backed decorator → 'spark' (the superset runtime — historical
+  // builds are spark per migration 120's backfill). Recorded on
+  // transform_build.runtime for downstream routing (FE, AIE, future no-JVM
+  // executor swap-in). runtimeForDiscoveredBatch is the safe superset-by-default;
+  // it honors transform.runtimeOverride (set by @transform.using / .spark.using /
+  // stacked @lightweight) before falling back to runtimeFor(kind).
+  const buildRuntime: TransformRuntime = runtimeForDiscoveredBatch(discovery.transforms);
+
   // @configure enforcement (gap 6): validate every transform's profile
   // against the catalog. Foundry rejects unknown profile names at scheduling
   // time — a real gate, pure logic, no cluster needed. (Mapping a validated
@@ -459,19 +486,63 @@ async function prepareBuild(
     }
   }
 
-  // Build job_spec payloads + validate + cycle-check.
-  const specs = discovery.transforms.map((t) => ({
-    outputDatasetRid: t.outputRid,
-    sourcePath: t.sourcePath,
-    entryPoint: t.name,
-    inputs: t.inputs.map((i) => ({
-      datasetRid: i.rid,
-      branch,
-      view: (t.incremental ? "incremental" : "snapshot") as "incremental" | "snapshot",
-    })),
-    parameters: {},
-    computeProfile: "default",
-  }));
+  // Build job_spec payloads + validate + cycle-check. Phase 3 — resolve any
+  // catalog-path /Project/Folder/Dataset references to canonical dataset RIDs
+  // BEFORE the JobSpec validation (the validation regex requires a rid
+  // literal). The original reference stays on DiscoveredTransform.outputs /
+  // inputs for diagnostics/UI; the resolved RID flows through the job-spec.
+  const specs: any[] = [];
+  for (const t of discovery.transforms) {
+    let outRid: string = t.outputRid;
+      if (isCatalogPath(t.outputRid)) {
+      const ref = await resolveDatasetRef(pool, t.outputRid, { branch });
+      if (!ref.ok) {
+        return {
+          ok: false,
+          error: transformError("Transform:InvalidTransform", {
+            outputDatasetRid: t.outputRid,
+            transform: t.name,
+            catalogPath: t.outputRid,
+            error: ref.error.error,
+          }),
+        };
+      }
+      outRid = ref.ref.rid;
+    }
+    const resolvedInputs: { datasetRid: string; branch: string; view: "incremental" | "snapshot" }[] = [];
+    for (const i of t.inputs) {
+      let iRid: string = i.rid;
+        if (isCatalogPath(i.rid)) {
+        const ref = await resolveDatasetRef(pool, i.rid, { branch });
+        if (!ref.ok) {
+          return {
+            ok: false,
+            error: transformError("Transform:InputDatasetNotFound", {
+              inputRid: i.rid,
+              transform: t.name,
+              binding: i.param,
+              catalogPath: i.rid,
+              error: ref.error.error,
+            }),
+          };
+        }
+        iRid = ref.ref.rid;
+      }
+      resolvedInputs.push({
+        datasetRid: iRid,
+        branch,
+        view: (t.incremental ? "incremental" : "snapshot") as "incremental" | "snapshot",
+      });
+    }
+    specs.push({
+      outputDatasetRid: outRid,
+      sourcePath: t.sourcePath,
+      entryPoint: t.name,
+      inputs: resolvedInputs,
+      parameters: {},
+      computeProfile: "default",
+    });
+  }
 
   for (const spec of specs) {
     const v = validateJobSpec(spec);
@@ -542,12 +613,14 @@ async function prepareBuild(
   // Create the build row (with retry metadata + idempotency key for Gap 2).
   // P0 authz: persist the principal so the boot-recovery path
   // (rerunQueuedBuild) can re-authorize inputs/outputs without a request.
+  // Track 1: persist the runtime tag (transform_build.runtime, migration 120)
+  // so the FE / AIE / future no-JVM executor can route on lightweight vs spark.
   const buildRid = newBuildRid();
   await pool.query(
     `INSERT INTO transform_build
        (rid, repository_rid, branch, commit_sha, actor, status, transform_count,
-        retry_of, retry_count, max_retries, idempotency_key, principal)
-     VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11)`,
+        retry_of, retry_count, max_retries, idempotency_key, principal, runtime)
+     VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11, $12)`,
     [
       buildRid,
       repositoryRid,
@@ -560,6 +633,7 @@ async function prepareBuild(
       opts.maxRetries ?? 3,
       opts.idempotencyKey ?? null,
       JSON.stringify(principal),
+      buildRuntime,
     ],
   );
   if (jobSpecRejected.length > 0) {
@@ -567,7 +641,7 @@ async function prepareBuild(
   }
 
   // Run asynchronously; the route returns immediately and the client polls.
-  void runBuild(buildRid, repositoryRid, branch, actor, principal, read.files, [...discovery.transforms], read.requirements, libsRes.libs).catch(
+  void runBuild(buildRid, repositoryRid, branch, read.commitSha, actor, principal, read.files, [...discovery.transforms], read.requirements, libsRes.libs).catch(
     async (e) => {
       await setTerminal(buildRid, "failed", `internal error: ${String(e)}`, []).catch(() => undefined);
     },
@@ -583,6 +657,7 @@ async function runBuild(
   buildRid: string,
   repositoryRid: string,
   branch: string,
+  commitSha: string | null,
   actor: string,
   principal: TransformPrincipal,
   files: RepoFile[],
@@ -599,14 +674,33 @@ async function runBuild(
   await appendEvent(buildRid, "started", { transforms: transforms.length });
 
   const ordered = topoOrder(transforms);
+  // Each entry carries BOTH the entry-point function name (`transform`) AND the
+  // source-file basename (`sourceFile`) + repo-relative path (`sourcePath`).
+  // The FE sidebar stage label prefers `sourceFile` so two transforms that
+  // SHARE an entry-point name (e.g. two `def compute`) across files remain
+  // distinguishable in the Build UI by their source file (the historical
+  // disambiguator — pre-rename the function names also matched the file name,
+  // so legacy builds look the same). Storing these in the build row's `outputs`
+  // JSON preserves the names AT BUILD TIME — old rows aren't retroactively
+  // renamed if the user later renames a function in a newer commit.
   const outputs: Array<{
     transform: string;
+    sourcePath: string;
+    sourceFile: string;
     outputRid: string;
     outputDatasetId: string;
     rowCount: number;
     columns: string[];
   }> = [];
-  const failures: Array<{ transform: string; error: string }> = [];
+  // Per-entry sourceFile derived from `t.sourcePath == path.basename(... '.py')`
+  // — disambiguates failures when two transforms share an entry-point name.
+  const failures: Array<{ transform: string; sourceFile: string; error: string }> = [];
+  // Phase 6 — ctx.abort_job() whole-job abort records the per-transform
+  // aborted name here; unlike `failures`, an abort does NOT advance to a
+  // failed build — the build status records 'succeeded' with reason
+  // 'aborted' (per Palantir Foundry's "Aborting transactions" reference:
+  // aborted transactions show as grayed-out successful jobs).
+  const abortedTransforms: string[] = [];
 
   // Each transform builds as its own unit (Foundry models each dataset as a
   // separate job): a failure in one is recorded and does not abort siblings.
@@ -620,26 +714,44 @@ async function runBuild(
       const bindings: Array<{ param: string; rid: string; path: string; datasetId: string; origin: "dataset-table" | "foundry-bridge"; previousPath: string | null }> = [];
       let missingInput: string | null = null;
       for (const inp of t.inputs) {
+        // Phase 3 — Catalog path → RID. If the discovered reference is a
+        // catalog path (Input("/Project/Folder/Dataset")), resolve it to the
+        // canonical dataset RID via the resources tree BEFORE calling
+        // resolveTransformInput (which expects a RID). RID refs are
+        // unchanged (the dataset table's identity column). Resolution
+        // preserves the original path on the binding for diagnostics/UI.
+        let datasetRid = inp.rid;
+        if (isCatalogPath(inp.rid)) {
+          const ref = await resolveDatasetRef(pool, inp.rid, { branch });
+          if (!ref.ok) {
+            missingInput =
+              `input catalog path '${inp.rid}' (param '${inp.param}') could not ` +
+              `be resolved: ${ref.error.error}`;
+            break;
+          }
+          datasetRid = ref.ref.rid;
+        }
         // resolveTransformInput bridges the `dataset` table (transform/upload
         // datasets, on-disk) AND the Foundry catalog `foundry_datasets` (UUID
         // rids, object storage — staged to a temp CSV the driver reads). This is
         // what lets a build consume a catalog CSV Input("ri.foundry.main.dataset.
         // <uuid>") — the same bridge the dataset-preview UI already uses.
-        const resolved = await resolveTransformInput(inp.rid, branch, principal);
+        const resolved = await resolveTransformInput(datasetRid, branch, principal);
         if (!resolved) {
-          missingInput = `input dataset not found: ${inp.rid} (param '${inp.param}')`;
+          missingInput = `input dataset not found: ${datasetRid} (param '${inp.param}'; original ref '${inp.rid}')`;
           break;
         }
         if (resolved.stagedPath) stagedPaths.push(resolved.stagedPath);
         // Previous committed transaction (for Input.dataframe(mode='previous')).
         // Foundry-bridge inputs are single-version catalog files → no previous
         // transaction (resolvePreviousTransaction is dataset-table-only → null).
-        const previous = await resolvePreviousTransaction(inp.rid, branch);
-        bindings.push({ param: inp.param, rid: inp.rid, path: resolved.filePath, datasetId: resolved.datasetId, origin: resolved.origin, previousPath: previous?.filePath ?? null });
+        const previous = await resolvePreviousTransaction(datasetRid, branch);
+        bindings.push({ param: inp.param, rid: datasetRid, path: resolved.filePath, datasetId: resolved.datasetId, origin: resolved.origin, previousPath: previous?.filePath ?? null });
       }
       if (missingInput) {
-        failures.push({ transform: t.name, error: missingInput });
-        await appendEvent(buildRid, "log", { phase: "skipped", transform: t.name, error: missingInput });
+        const f = t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name;
+        failures.push({ transform: t.name, sourceFile: f, error: missingInput });
+        await appendEvent(buildRid, "log", { phase: "skipped", transform: t.name, sourceFile: f, error: missingInput });
         continue;
       }
 
@@ -652,7 +764,72 @@ async function runBuild(
       // second-newest (resolvePreviousTransaction, OFFSET 1) is only for
       // Input.dataframe(mode='previous') — the input's *prior version* — which
       // is a different question (previousPath on each input binding below).
-      const isIncremental = !!(await resolveDatasetByRid(t.outputRid, branch));
+      //
+      // Phase 3 — output RID resolution: catalog paths (Output("/path...")) are
+      // resolved to canonical RIDs via the resources tree. The original
+      // reference is preserved on the DiscoveredTransform.outputs[].rid for
+      // diagnostics/UI; only the canonical RID flows to resolveDatasetByRid
+      // + materializeOutput.
+      let outputDatasetRid: string = t.outputRid;
+      if (isCatalogPath(t.outputRid)) {
+        const ref = await resolveDatasetRef(pool, t.outputRid, { branch });
+        if (!ref.ok) {
+          failures.push({
+            transform: t.name,
+            sourceFile: t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name,
+            error: `output catalog path '${t.outputRid}' could not be resolved: ${ref.error.error}`,
+          });
+          await appendEvent(buildRid, "log", {
+            phase: "failed",
+            transform: t.name,
+            sourceFile: t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name,
+            error: `output catalog path '${t.outputRid}' could not be resolved: ${ref.error.error}`,
+          });
+          continue;
+        }
+        outputDatasetRid = ref.ref.rid;
+      }
+      const isIncremental = !!(await resolveDatasetByRid(outputDatasetRid, branch));
+
+      // ---------------------------------------------------------------------
+      // Phase 4 — incremental state machine (buildService.ts ↔
+      // transform_incremental_state via transformIncrementalState.ts):
+      //
+      // For the FIRST build (no prior `dataset` row for the output RID), there
+      // is no `output_dataset_id` to seed the state row, so the state machine
+      // is skipped — the materializeOutput below creates the dataset_row, and
+      // the post-commit upsert inserts a fresh state row with the discovered
+      // @incremental config snapshot + last_semantic_version=current.
+      //
+      // For subsequent builds: load the prior row, compare the discovered
+      // `@incremental(semantic_version=N)` to the persisted
+      // `last_semantic_version`. A mismatch (semantic_version bump) forces
+      // SNAPSHOT recompute: `exec.isIncremental=false` AND every input is
+      // flagged 'view=snapshot' (pad of the snapshot_inputs override). After a
+      // committed commit, the row's last_semantic_version is advanced to
+      // semantic_version (matches the Palantir one-shot reset behavior).
+      //
+      // Aborts/failures leave the row UNCHANGED (per Palantir §6) — the next
+      // build reprocesses the same uncommitted input changes; the high-water
+      // mark (`last_committed_output_transaction_id` +
+      // `input_transaction_state`) only advances on a real committed build.
+      // ---------------------------------------------------------------------
+      const transformIdentity = computeTransformIdentity(t.sourcePath, t.name);
+      const currentSemanticVersion = t.incrementalSemanticVersion ?? 1;
+      const prevOutputDatasetId = await resolveOutputDatasetId(outputDatasetRid, branch);
+      let prevState: IncrementalStateRow | null = null;
+      if (prevOutputDatasetId) {
+        prevState = await loadIncrementalState({
+          transformIdentity,
+          repositoryRid,
+          branch,
+          outputDatasetId: prevOutputDatasetId,
+        });
+      }
+      // forceSnapshot flips when the persisted last_semantic_version differs
+      // from the discovered semantic_version (a deliberate bump).
+      const forceSnapshot = !!prevState && prevState.last_semantic_version !== currentSemanticVersion;
+      const effectiveIsIncremental = isIncremental && !forceSnapshot;
 
       await appendEvent(buildRid, "progress", { phase: "executing", transform: t.name });
 
@@ -660,15 +837,38 @@ async function runBuild(
         transform: t,
         files,
         inputs: bindings.map((b) => ({ param: b.param, rid: b.rid, path: b.path, format: "csv", previousPath: b.previousPath })),
-        isIncremental,
+        isIncremental: effectiveIsIncremental,
         requirementsContent: requirements,
         libs,
       });
+      // Phase 6 — ctx.abort_job() whole-job abort: a SUCCESSFUL-but-aborted
+      // transform commits NO output transaction and is NOT propagated as a
+      // runtime failure. The Python driver returned ok=true + aborted=true
+      // (caught AbortJobError in driver.py); the executor surfaced both
+      // flags to ExecuteResult. We record an "aborted" build-phase event and
+      // SKIP materializeOutput + the lineage-edge insert entirely. Downstream
+      // datasets are not marked stale (no new transaction was committed), and
+      // the previous committed output's incremental checkpoint is preserved
+      // (Phase 4 state machine leaf — the input_transaction_state pointer is
+      // NOT advanced on an aborted build, so the next build reprocesses the
+      // same uncommitted input changes per Palantir §6).
+      if (exec.aborted) {
+        abortedTransforms.push(t.name);
+        await appendEvent(buildRid, "log", {
+          phase: "aborted",
+          transform: t.name,
+          sourceFile: t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name,
+          message: "transform called ctx.abort_job(); no output transaction committed",
+        });
+        continue;
+      }
       if (!exec.ok || !exec.outputPath) {
-        failures.push({ transform: t.name, error: exec.error ?? "execution failed" });
+        const f = t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name;
+        failures.push({ transform: t.name, sourceFile: f, error: exec.error ?? "execution failed" });
         await appendEvent(buildRid, "log", {
           phase: "failed",
           transform: t.name,
+          sourceFile: f,
           error: exec.error,
           stderr: exec.stderr.slice(0, 4000),
           traceback: exec.traceback?.slice(0, 4000),
@@ -678,9 +878,11 @@ async function runBuild(
 
       // Materialize the OUTPUT dataset. The transform's set_mode/write_dataframe
       // mode drives the transaction type: 'replace' -> SNAPSHOT, 'modify'/'append'
-      // -> APPEND (Foundry incremental write semantics).
+      // -> APPEND (Foundry incremental write semantics). Phase 3 routes the
+      // canonical RID (resolved above for catalog paths) into materializeOutput
+      // — the function delegates to resolveDatasetByRid internally too.
       const mat = await materializeOutput({
-        rid: t.outputRid,
+        rid: outputDatasetRid,
         name: t.name,
         description: `Output of transform '${t.name}' in ${repositoryRid}`,
         csvFilePath: exec.outputPath,
@@ -711,6 +913,8 @@ async function runBuild(
 
       outputs.push({
         transform: t.name,
+        sourcePath: t.sourcePath,
+        sourceFile: t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name,
         outputRid: t.outputRid,
         outputDatasetId: mat.datasetId,
         rowCount: mat.rowCount,
@@ -719,11 +923,92 @@ async function runBuild(
       await appendEvent(buildRid, "progress", {
         phase: "materialized",
         transform: t.name,
+        sourcePath: t.sourcePath,
+        sourceFile: t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name,
         outputDatasetId: mat.datasetId,
         rowCount: mat.rowCount,
       });
+
+      // -------------------------------------------------------------------
+      // Phase 4 — post-commit upsert of transform_incremental_state.
+      //
+      // After a successful commit, advance the persisted pointers:
+      //   - last_semantic_version  ← currentSemanticVersion (clamps even if
+      //     unchanged — matches Palantir "post-snapshot, last_semantic_version
+      //     catches up").
+      //   - last_build_rid          ← buildRid
+      //   - last_build_status       ← 'committed'
+      //   - input_transaction_state ← { "<input_dataset_id>": "<latest tx_id>" }
+      //     for each BINDING (dataset-table inputs only; foundry-bridge inputs
+      //     have no `dataset_transaction` history and are skipped).
+      //   - last_committed_output_transaction_id ← mat.transactionId
+      //   - last_commit_sha         ← commitSha (passed through runBuild from
+      //     the build row's input ref).
+      //
+      // Failures/aborts above `continue` BEFORE reaching this block, leaving
+      // the prior state row's high-water marks untouched → next build
+      // reprocesses the same uncommitted input changes (Palantir §6).
+      // -------------------------------------------------------------------
+      const inputTxState: Record<string, string> = {};
+      for (const b of bindings) {
+        if (b.origin === "foundry-bridge") continue;
+        // Skip self-write (transform outputting itself / no input) —
+        // `b.datasetId === mat.datasetId` doesn't appear here because lineage
+        // skip covers that, but defensively don't pollute state with the
+        // self-output as input.
+        if (b.datasetId === mat.datasetId) continue;
+        const latestTx = await pool.query<{ transaction_id: string }>(
+          `SELECT transaction_id
+             FROM dataset_transaction
+            WHERE dataset_id = $1
+              AND branch IS NOT DISTINCT FROM $2
+              AND status = 'committed'
+            ORDER BY committed_at DESC NULLS LAST
+            LIMIT 1`,
+          [b.datasetId, branch],
+        );
+        if (latestTx.rows.length > 0) {
+          inputTxState[b.datasetId] = latestTx.rows[0].transaction_id;
+        }
+      }
+      try {
+        await upsertIncrementalState({
+          transformIdentity,
+          repositoryRid,
+          branch,
+          outputDatasetId: mat.datasetId,
+          entryPoint: t.name,
+          sourcePath: t.sourcePath,
+          requireIncremental: t.incrementalRequireIncremental ?? false,
+          semanticVersion: currentSemanticVersion,
+          snapshotInputs: t.incrementalSnapshotInputs ?? [],
+          allowRetention: t.incrementalAllowRetention ?? false,
+          strictAppend: t.incrementalStrictAppend ?? false,
+          v2Semantics: t.incrementalV2Semantics ?? false,
+          lastSemanticVersion: currentSemanticVersion,
+          lastBuildRid: buildRid,
+          lastBuildStatus: "committed",
+          inputTransactionState: inputTxState,
+          lastCommittedOutputTransactionId: mat.transactionId,
+          lastCommitSha: commitSha,
+        });
+      } catch (stateErr) {
+        // A state-row write failure MUST NOT mark a successful commit as
+        // failed — the output transaction is already committed; the user
+        // sees a successful build. Log + carry on; the next build re-tries
+        // the upsert (ON CONFLICT DO UPDATE is idempotent).
+        await appendEvent(buildRid, "log", {
+          phase: "warning",
+          transform: t.name,
+          message: `transform_incremental_state upsert failed: ${String(stateErr)}`,
+        });
+      }
     } catch (e) {
-      failures.push({ transform: t.name, error: String(e) });
+      failures.push({
+        transform: t.name,
+        sourceFile: t.sourcePath ? path.basename(t.sourcePath, ".py") : t.name,
+        error: String(e),
+      });
       await appendEvent(buildRid, "log", { phase: "failed", transform: t.name, error: String(e) });
     } finally {
       // Clean any staged foundry-bridge input temp files for THIS transform
@@ -737,13 +1022,29 @@ async function runBuild(
   }
 
   if (failures.length === 0) {
-    await setTerminal(buildRid, "succeeded", null, outputs);
+    // Phase 6 — when at least one transform aborted and none failed, the
+    // build status is SUCCEEDED with `reason='aborted'` (per Palantir's
+    // "Aborting transactions" reference). The outputs array stays empty
+    // since the abort path skips materializeOutput AND lineage-edge
+    // insertion; downstreams are NOT marked stale (no transaction committed).
+    // Some builds may have ALL transforms aborted (a clean no-op day) — that
+    // is `reason='aborted'` with an empty outputs array. Other builds may
+    // have a mix of aborted-with-OK-materialized transforms; the OK ones pass
+    // through the normal materialize path and show in `outputs`.
+    if (abortedTransforms.length > 0) {
+      const reason = abortedTransforms.length === outputs.length
+        ? `all ${abortedTransforms.length} transform(s) aborted via ctx.abort_job() (no output committed)`
+        : `${outputs.length} transform(s) committed; ${abortedTransforms.length} aborted via ctx.abort_job() (${abortedTransforms.join(", ")})`;
+      await setTerminal(buildRid, "succeeded", reason, outputs);
+    } else {
+      await setTerminal(buildRid, "succeeded", null, outputs);
+    }
   } else {
     const reason =
-      outputs.length > 0
-        ? `${outputs.length} transform(s) succeeded, ${failures.length} failed: ` +
-          failures.map((f) => `${f.transform} (${f.error})`).join("; ")
-        : failures.map((f) => `${f.transform} (${f.error})`).join("; ");
+      outputs.length + abortedTransforms.length > 0
+        ? `${outputs.length} transform(s) succeeded, ${abortedTransforms.length} aborted, ${failures.length} failed: ` +
+          failures.map((f) => `${f.sourceFile ?? f.transform} (${f.error})`).join("; ")
+        : failures.map((f) => `${f.sourceFile ?? f.transform} (${f.error})`).join("; ");
     await setTerminalWithFailures(buildRid, reason, outputs, failures);
   }
 }
@@ -786,11 +1087,12 @@ export async function rerunQueuedBuild(
   const row = await pool.query<{
     repository_rid: string;
     branch: string;
+    commit_sha: string | null;
     actor: string;
     status: string;
     principal: unknown;
   }>(
-    `SELECT repository_rid, branch, actor, status, principal FROM transform_build WHERE rid = $1`,
+    `SELECT repository_rid, branch, commit_sha, actor, status, principal FROM transform_build WHERE rid = $1`,
     [buildRid],
   );
   if (row.rowCount === 0) return false;
@@ -833,7 +1135,7 @@ export async function rerunQueuedBuild(
     await setTerminal(buildRid, "failed", `requeue failed: ${libsRes.error}`, []).catch(() => undefined);
     return false;
   }
-  void runBuild(buildRid, b.repository_rid, b.branch, b.actor, principal, read.files, [...discovery.transforms], read.requirements, libsRes.libs).catch(
+  void runBuild(buildRid, b.repository_rid, b.branch, b.commit_sha, b.actor, principal, read.files, [...discovery.transforms], read.requirements, libsRes.libs).catch(
     async (e) => {
       await setTerminal(buildRid, "failed", `internal error: ${String(e)}`, []).catch(() => undefined);
     },

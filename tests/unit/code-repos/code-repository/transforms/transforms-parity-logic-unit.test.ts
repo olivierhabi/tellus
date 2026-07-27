@@ -28,7 +28,7 @@ import {
   DATASET_RID_REGEX,
   validateDatasetRid,
 } from "../../../../../src/services/jobSpec/validation";
-import { extractProfile, discoverTransforms } from "../../../../../src/services/codeRepository/transforms/discovery";
+import { extractProfile, discoverTransforms, runtimeFor, runtimeForBatch } from "../../../../../src/services/codeRepository/transforms/discovery";
 import { validateProfile, PROFILE_CATALOG } from "../../../../../src/services/codeRepository/transforms/profileCatalog";
 
 // ---- helpers ----
@@ -41,8 +41,17 @@ const tf = (
   sourcePath: `transforms/${name}.py`,
   kind: "transform",
   outputRid,
+  // Single-output backward-compat: the legacy @transform(output=Output(...))
+  // form has exactly one Output named "output". The new multi-output
+  // DiscoveredTransform.outputs array carries this entry as its sole element.
+  outputs: [{ param: "output", rid: outputRid }],
   inputs: inputs.map((i) => ({ param: i.param, rid: i.rid })),
   incremental: false,
+  profile: null,
+  // Default: the legacy single-Output Tellus @transform(...) form is NOT the
+  // @transform.using(...) Palantir form; runtimeOverride is unset so
+  // runtimeFor(kind) (spark for kind = 'transform') applies.
+  using: false,
 });
 
 // ===========================================================================
@@ -349,5 +358,302 @@ def f(output):
     expect(r.errors).toEqual([]);
     expect(r.transforms).toHaveLength(1);
     expect(r.transforms[0].outputRid).toBe("ri.foundry.main.dataset.ast-simple");
+  });
+});
+
+// ===========================================================================
+// Track 1 — @lightweight discovery + runtime tag selection (transform_build.runtime
+// migration 120; runtimeFor / runtimeForBatch in discovery.ts). The @lightweight
+// decorator (transforms-python v3.0.0) is a parallel-of-@transform entry that
+// the discovery walker recognizes by kind='lightweight'; the runtime FOR THE
+// BUILD is selected from the discovered kinds at scheduling time:
+//   * ALL transforms are @lightweight -> runtime = 'lightweight'
+//   * ANY transform is Spark-backed (@transform/@transform_df/@transform_pandas) -> 'spark'
+//   * Empty batch -> 'lightweight' (safe default for an empty repo's first build)
+// ===========================================================================
+describe("@lightweight discovery + runtimeFor/runtimeForBatch (Track 1)", () => {
+  it("discovers an @lightweight transform with kind='lightweight' (parallel-of-@transform I/O extraction)", () => {
+    const py = `from transforms.api import lightweight, Output, Input
+@lightweight(
+    output=Output("ri.foundry.main.dataset.light-out"),
+    src=Input("ri.foundry.main.dataset.light-in"),
+)
+def f(output, src):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/light.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    expect(r.transforms[0].name).toBe("f");
+    expect(r.transforms[0].kind).toBe("lightweight");
+    expect(r.transforms[0].outputRid).toBe("ri.foundry.main.dataset.light-out");
+    expect(r.transforms[0].inputs[0].param).toBe("src");
+    expect(r.transforms[0].inputs[0].rid).toBe("ri.foundry.main.dataset.light-in");
+  });
+
+  it("runtimeFor maps kind → runtime (lightweight only; everything else spark)", () => {
+    expect(runtimeFor("lightweight")).toBe("lightweight");
+    expect(runtimeFor("transform")).toBe("spark");
+    expect(runtimeFor("transform_df")).toBe("spark");
+    expect(runtimeFor("transform_pandas")).toBe("spark");
+  });
+
+  it("runtimeForBatch returns 'lightweight' only when ALL transforms are @lightweight", () => {
+    const lw = (n: string, rid: string): DiscoveredTransform => ({
+      ...(tf(n, rid) as DiscoveredTransform),
+      kind: "lightweight",
+      profile: null,
+    });
+    const spark = (n: string, rid: string): DiscoveredTransform => ({
+      ...(tf(n, rid) as DiscoveredTransform),
+      profile: null,
+    });
+    // runtimeForBatch accepts TransformKind[], so project the kinds here.
+    const lwKinds = [lw("t1", "ri.foundry.main.dataset.x"), lw("t2", "ri.foundry.main.dataset.y")].map((t) => t.kind);
+    // All-lightweight -> lightweight
+    expect(runtimeForBatch(lwKinds)).toBe("lightweight");
+    // Any spark -> spark (superset runtime)
+    const mixedKinds = [lw("t1", "ri.foundry.main.dataset.x"), spark("s", "ri.foundry.main.dataset.y")].map((t) => t.kind);
+    expect(runtimeForBatch(mixedKinds)).toBe("spark");
+    // Empty batch -> lightweight (safe default for a brand-new repo's first build)
+    expect(runtimeForBatch([])).toBe("lightweight");
+  });
+
+  it("a source-only @lightweight (no Input) is discovered legibly (mirrors the v3.0.0 template's lightweight_seed.py)", () => {
+    const py = `from transforms.api import lightweight, Output, DataFrame
+@lightweight(output=Output("ri.foundry.main.dataset.seed"))
+def leaked_lightweight_seed(output):
+    output.write_dataframe(DataFrame([{"id": 1, "value": 10}]))
+`;
+    const r = discoverTransforms([{ path: "transforms/lightweight_seed.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    expect(r.transforms[0].kind).toBe("lightweight");
+    expect(r.transforms[0].inputs).toHaveLength(0);
+  });
+});
+
+// ===========================================================================
+// Phase 2 — @transform.using(...) (Palantir Foundry v3.68.0+), @transform.spark.using(...)
+// (v3.95.0+), stacked @lightweight @transform(...) legacy form, multi-output,
+// catalog-path references, cycle rejection, and runtimeOverride plumbing.
+//
+// These tests exercise the discovery.ts changes that ADDED the dotted-decorator
+// classifier (transform.using / transform.spark.using / transform.lightweight),
+// the new outputs[] / using / runtimeOverride fields on DiscoveredTransform,
+// the looksLikeDatasetReference /catalog-path acceptance, and the within-
+// transform Input==Output cycle guard. They are pure-logic tests (no DB) that
+// lean on the AST parser ONLY when python3 is on PATH; the line-scanner
+// fallback handles paren-balanced multi-line decorators correctly for the
+// fixture styles used here.
+// ===========================================================================
+describe("@transform.using + multi-output + catalog-path discovery (Phase 2)", () => {
+  it("discovers @transform.using with using=true + runtimeOverride=lightweight", () => {
+    const py = `from transforms.api import transform, Input, Output
+@transform.using(
+    students=Input("/examples/students_hair_eye_color"),
+    processed=Output("/examples/processed"),
+)
+def filter_hair_color(students, processed):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/f.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    const t = r.transforms[0];
+    expect(t.name).toBe("filter_hair_color");
+    expect(t.kind).toBe("transform");
+    expect(t.using).toBe(true);
+    expect(t.runtimeOverride).toBe("lightweight");
+    expect(t.outputRid).toBe("/examples/processed");
+    expect(t.outputs).toHaveLength(1);
+    expect(t.outputs[0].param).toBe("processed");
+    expect(t.outputs[0].rid).toBe("/examples/processed");
+    expect(t.inputs[0].param).toBe("students");
+    expect(t.inputs[0].rid).toBe("/examples/students_hair_eye_color");
+  });
+
+  it("discovers @transform.spark.using with runtimeOverride=spark", () => {
+    const py = `from transforms.api import transform, Input, Output
+@transform.spark.using(
+    src=Input("ri.foundry.main.dataset.in"),
+    out=Output("ri.foundry.main.dataset.out"),
+)
+def big(src, out):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/big.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    expect(r.transforms[0].kind).toBe("transform");
+    expect(r.transforms[0].using).toBe(true);
+    expect(r.transforms[0].runtimeOverride).toBe("spark");
+  });
+
+  it("discovers the legacy stacked @lightweight @transform(...) form (Palantir legacy, portable)", () => {
+    const py = `from transforms.api import transform, lightweight, Input, Output
+@lightweight
+@transform(
+    output=Output("ri.foundry.main.dataset.out"),
+    source=Input("ri.foundry.main.dataset.in"),
+)
+def legacy(output, source):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/legacy.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    // The kind stays 'transform' (NOT 'lightweight'); only the runtime flips
+    // to 'lightweight' via the stacked @lightweight (no parens) override.
+    expect(r.transforms[0].kind).toBe("transform");
+    expect(r.transforms[0].using).toBe(false);
+    expect(r.transforms[0].runtimeOverride).toBe("lightweight");
+    expect(r.transforms[0].outputRid).toBe("ri.foundry.main.dataset.out");
+  });
+
+  it("discovers a multi-output @transform.using with N Input + M Output bindings", () => {
+    const py = `from transforms.api import transform, Input, Output
+@transform.using(
+    hair_color=Input("/examples/students_hair_color"),
+    eye_color=Input("/examples/students_eye_color"),
+    males=Output("/examples/hair_eye_color_males"),
+    females=Output("/examples/hair_eye_color_females"),
+)
+def split(hair_color, eye_color, males, females):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/split.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    const t = r.transforms[0];
+    expect(t.inputs).toHaveLength(2);
+    expect(t.outputs).toHaveLength(2);
+    expect(t.outputs.map((o) => o.param).sort()).toEqual(["females", "males"]);
+    // outputRid keeps the FIRST output's rid (backward-compat) so existing
+    // buildService code paths still work for single-output transforms.
+    expect(t.outputRid).toBe("/examples/hair_eye_color_males");
+  });
+
+  it("accepts a catalog path (Input /Project/Folder/Dataset) without an RID rejections", () => {
+    const py = `from transforms.api import transform, Input, Output
+@transform.using(
+    orders=Input("/Manual Tests/Orders"),
+    output=Output("/Manual Tests/Filtered Orders"),
+)
+def f(orders, output):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/f.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    expect(r.transforms[0].inputs[0].rid).toBe("/Manual Tests/Orders");
+    expect(r.transforms[0].outputs[0].rid).toBe("/Manual Tests/Filtered Orders");
+  });
+
+  it("rejects a placeholder {{datasetRid}} template", () => {
+    const py = `from transforms.api import transform, Input, Output
+@transform.using(
+    orders=Input("ri.foundry.main.dataset.in"),
+    output=Output("{{datasetRid}}"),
+)
+def f(orders, output):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/f.py", content: py }]);
+    expect(r.transforms).toHaveLength(0);
+    expect(r.errors[0].message).toMatch(/invalid\/placeholder Output reference/);
+  });
+
+  it("rejects a within-transform Input==Output cycle (same dataset reference on both sides)", () => {
+    const py = `from transforms.api import transform, Input, Output
+@transform.using(
+    src=Input("ri.foundry.main.dataset.same"),
+    out=Output("ri.foundry.main.dataset.same"),
+)
+def cyclic(src, out):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/cyc.py", content: py }]);
+    expect(r.transforms).toHaveLength(0);
+    expect(r.errors[0].message).toMatch(/cyclic input\/output dependency/);
+  });
+
+  it("effectiveRuntime + runtimeForDiscoveredBatch honor runtimeOverride (all-@transform.using batch → lightweight)", () => {
+    // Reuse the production-faced helpers via the discovered objects above.
+    const py = `from transforms.api import transform, Input, Output
+@transform.using(
+    src=Input("ri.foundry.main.dataset.in1"),
+    out=Output("ri.foundry.main.dataset.out1"),
+)
+def a(src, out):
+    pass
+@transform.using(
+    src=Input("ri.foundry.main.dataset.in2"),
+    out=Output("ri.foundry.main.dataset.out2"),
+)
+def b(src, out):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/ab.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(2);
+    // @transform.using → kind 'transform' but runtimeOverride 'lightweight' on
+    // every transform → effectiveRuntime 'lightweight' for each, batch 'lightweight'.
+    for (const t of r.transforms) {
+      expect(t.kind).toBe("transform");
+      expect(t.runtimeOverride).toBe("lightweight");
+    }
+  });
+
+  it("legacy Tellus @lightweight(output=, source=) extension still discovered as kind 'lightweight' (backward compat)", () => {
+    const py = `from transforms.api import lightweight, Output, Input
+@lightweight(
+    output=Output("ri.foundry.main.dataset.out"),
+    source=Input("ri.foundry.main.dataset.in"),
+)
+def ext(output, source):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/ext.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    // The Tellus extension form keeps kind 'lightweight' (legacy); the
+    // runtimeOverride is 'lightweight' too (per classifyDecoratorName).
+    expect(r.transforms[0].kind).toBe("lightweight");
+    expect(r.transforms[0].runtimeOverride).toBe("lightweight");
+    expect(r.transforms[0].using).toBe(false);
+  });
+
+  it("Phase 5 — captures @incremental(snapshot_inputs=['binding']) on a @transform.using transform", () => {
+    const py = `from transforms.api import transform, incremental, Input, Output
+@incremental(snapshot_inputs=["country_codes"], v2_semantics=True)
+@transform.using(
+    phone_numbers=Input("/Data/Phone Numbers"),
+    country_codes=Input("/Reference/Country Codes"),
+    output=Output("/Data/Phone Countries"),
+)
+def compute(phone_numbers, country_codes, output):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/snap.py", content: py }]);
+    expect(r.errors, JSON.stringify(r.errors)).toEqual([]);
+    expect(r.transforms).toHaveLength(1);
+    expect(r.transforms[0].incremental).toBe(true);
+    expect(r.transforms[0].incrementalSnapshotInputs).toEqual(["country_codes"]);
+  });
+
+  it("Phase 5 — rejects an @incremental(snapshot_inputs=['unknown_binding']) whose name does not match any binding", () => {
+    const py = `from transforms.api import transform, incremental, Input, Output
+@incremental(snapshot_inputs=["does_not_exist"], v2_semantics=True)
+@transform.using(
+    phone_numbers=Input("/Data/Phone Numbers"),
+    output=Output("/Data/Phone Countries"),
+)
+def compute(phone_numbers, output):
+    pass
+`;
+    const r = discoverTransforms([{ path: "transforms/bad.snap.py", content: py }]);
+    expect(r.transforms).toHaveLength(0);
+    expect(r.errors[0].message).toMatch(/unknown binding name.*'does_not_exist'/);
   });
 });

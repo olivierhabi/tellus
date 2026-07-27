@@ -303,7 +303,22 @@ router.post(
   },
 );
 
-// ---- B03: GET /api/v1/workshop/modules/{rid}/versions/{semver} -------------
+// ---- B03: GET /api/v1/workshop/modules/{rid}/versions ----------------------
+
+router.get(
+  "/modules/:rid/versions",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { listVersions } = await import(
+        "../services/workshop/versionService"
+      );
+      const versions = await listVersions(req.params.rid);
+      res.status(200).json({ versions });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 router.get(
   "/modules/:rid/versions/:semver",

@@ -480,6 +480,51 @@ export const ERROR_CODES: Record<string, number> = {
   AI_ENGINE_BAD_REQUEST: 400,
   AI_ENGINE_ERROR: 502,
   RULE_EXECUTION_FAILED: 500,
+  // Action Semantics v2 — http status mapping per the §8 directive.
+  INVALID_OBJECT_REFERENCE: 400,
+  INVALID_PRIMARY_KEY: 400,
+  OBJECT_TYPE_MISMATCH: 400,
+  OBJECT_ALREADY_EXISTS: 400,
+  SAME_INVOCATION_REFERENCE_FORBIDDEN: 422,
+  DELETE_BLOCKED_BY_RELATIONSHIPS: 422,
+  DANGLING_RELATIONSHIP: 422,
+  FINAL_STATE_INVALID: 422,
+  INVALID_RULE_PARAMETER_TYPE: 400,
+  UNSUPPORTED_SEMANTICS_VERSION: 422,
+  INCOMPATIBLE_ACTION_SEMANTICS: 422,
+  INVALID_EXECUTION_MODE: 422,
+  INVALID_DELETE_POLICY: 422,
+   // Action Semantics v2 — migration workflow audit + concurrency controls.
+   MIGRATION_ACKNOWLEDGEMENT_REQUIRED: 422,
+   MIGRATION_STALE_DEFINITION: 409,
+   MIGRATION_ROLLBACK_NOT_AVAILABLE: 409,
+   MIGRATION_INCOMPATIBLE: 422,
+   // Action rule validation — link / interface-link / webhook / writeback / side effect.
+   // Phase 1: link-rule shape errors + interface-link Phase-2 gate.
+   // Phase 2-5: the remaining structured codes light up alongside their runtime.
+   // NOTE: `LINK_TYPE_NOT_FOUND` is deliberately NOT added here — it already
+   // exists at line ~401 with HTTP 404 (used by routes/links.ts). Action-rule
+   // validation that needs to surface a missing-link-type reference reuses
+   // `VALIDATION_FAILED` + a structured `validationErrors[]` array rather
+   // than overwriting the existing code's HTTP status.
+   INVALID_LINK_MAPPING: 422,
+   UNSUPPORTED_RULE_TYPE: 422,
+   AMBIGUOUS_INTERFACE_LINK_IMPLEMENTATION: 422,
+   MISSING_INTERFACE_LINK_IMPLEMENTATION: 422,
+   CARDINALITY_VIOLATION: 422,
+   DUPLICATE_LINK: 409,
+   CONFLICTING_FOREIGN_KEY_EDITS: 409,
+   INVALID_WEBHOOK_INPUT_MAPPING: 422,
+   INVALID_WEBHOOK_OUTPUT_MAPPING: 422,
+   WEBHOOK_NOT_FOUND: 404,
+   WEBHOOK_ALREADY_EXISTS: 409,
+   WEBHOOK_VERSION_DISABLED: 409,
+   WRITEBACK_TIMEOUT: 504,
+   WRITEBACK_REJECTED: 502,
+   WRITEBACK_OUTPUT_SCHEMA_MISMATCH: 422,
+   WRITEBACK_CONFIG_INVALID: 422,
+   SIDE_EFFECT_CONFIGURATION_INVALID: 422,
+  DEADLOCK_RETRY_EXHAUSTED: 500,
   TIMESERIES_WINDOW_TOO_LARGE: 400,
   QUERY_TIMEOUT: 504,
   UNDO_WINDOW_EXPIRED: 410,

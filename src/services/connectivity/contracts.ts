@@ -65,7 +65,7 @@ export const AgentGroupRid = z
   .brand<"AgentGroupRid">();
 export type AgentGroupRid = z.infer<typeof AgentGroupRid>;
 
-export const ConnectorType = z.enum(["postgresql"]);
+export const ConnectorType = z.enum(["postgresql", "rest-api"]);
 export type ConnectorType = z.infer<typeof ConnectorType>;
 
 export const WorkerType = z.enum(["foundryWorker", "agentProxy"]);
@@ -109,8 +109,66 @@ export const PostgresConfig = z.object({
 });
 export type PostgresConfig = z.infer<typeof PostgresConfig>;
 
+export const RestApiAuthentication = z.enum(["none", "basic", "bearer"]);
+export type RestApiAuthentication = z.infer<typeof RestApiAuthentication>;
+
+export const RestApiDomainConfig = z.object({
+  baseUrl: z
+    .string()
+    .url()
+    .max(2048)
+    .refine((value) => new URL(value).protocol === "https:", {
+      message: "REST API domains must use HTTPS",
+    }),
+  port: z.number().int().min(1).max(65535).default(443),
+  authentication: RestApiAuthentication.default("none"),
+});
+export type RestApiDomainConfig = z.infer<typeof RestApiDomainConfig>;
+
+const RestApiSecretName = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-zA-Z][a-zA-Z0-9_]{0,127}$/);
+
+export const RestApiConfig = z
+  .object({
+    domains: z.array(RestApiDomainConfig).min(1).max(100),
+    additionalSecretNames: z.array(RestApiSecretName).max(100).default([]),
+    apiName: z
+      .string()
+      .regex(/^[A-Z][A-Za-z0-9]{0,99}$/)
+      .nullable()
+      .optional(),
+  })
+  .superRefine((value, ctx) => {
+    const domainKeys = value.domains.map((domain) => {
+      const url = new URL(domain.baseUrl);
+      return `${url.hostname.toLowerCase()}:${domain.port}${url.pathname}`;
+    });
+    if (new Set(domainKeys).size !== domainKeys.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["domains"],
+        message: "REST API domains must be unique",
+      });
+    }
+    if (
+      new Set(value.additionalSecretNames).size !==
+      value.additionalSecretNames.length
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["additionalSecretNames"],
+        message: "REST API additional secret names must be unique",
+      });
+    }
+  });
+export type RestApiConfig = z.infer<typeof RestApiConfig>;
+
 export const ConnectionConfig = z.discriminatedUnion("connectorType", [
   z.object({ connectorType: z.literal("postgresql"), postgres: PostgresConfig }),
+  z.object({ connectorType: z.literal("rest-api"), restApi: RestApiConfig }),
 ]);
 export type ConnectionConfig = z.infer<typeof ConnectionConfig>;
 
@@ -347,6 +405,13 @@ export const ConnectionCreateRequest = z.object({
       code: z.ZodIssueCode.custom,
       path: ["config", "connectorType"],
       message: "config.connectorType must match top-level connectorType",
+    });
+  }
+  if (v.clientKeyPem && v.connectorType !== "postgresql") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["clientKeyPem"],
+      message: "clientKeyPem is only supported for PostgreSQL connections",
     });
   }
 });

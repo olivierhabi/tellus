@@ -73,6 +73,21 @@ export function parseWebhookSpecs(sideEffects: unknown): ActionWebhookSpec[] {
   return specs;
 }
 
+/**
+ * Phase 5 — single-webhook delivery. Exported separately so the durable
+ * outbox worker can dispatch a per-job webhook spec through the exact
+ * same transport path the legacy fire-and-forget `fireActionWebhooks`
+ * uses (same SSRF guard + same timeout + same fetch). Identical semantics
+ * preserve backward compatibility for existing tests + reduce the Phase 5
+ * implementation scope to a refactor, not a rewrite.
+ */
+export async function deliverOneWebhook(
+  spec: ActionWebhookSpec,
+  payload: ActionWebhookPayload,
+): Promise<{ url: string; ok: boolean; status?: number; error?: string; receiptId?: string }> {
+  return deliverOne(spec, payload);
+}
+
 async function deliverOne(
   spec: ActionWebhookSpec,
   payload: ActionWebhookPayload,

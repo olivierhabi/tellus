@@ -28,6 +28,7 @@ import { query } from "../db";
 import { executeAction } from "../actions/actionExecutor";
 import { getDefaultOntologyId } from "../actions/actionValidator";
 import { OntologyError } from "../utils/queryErrors";
+import { resolveRequestTenant } from "../utils/requestTenant";
 import { sendError } from "../utils/responseFormatter";
 import { indexObjectType } from "../services/indexing/indexingOrchestrator";
 
@@ -166,8 +167,22 @@ router.post(
         const parameters = item.parameters || {};
 
         // Build execution context
+        //
+        // Phase 6.1 — thread `req.security` so the per-iteration
+        // `executeAction` runs Stage 1c against the same CBAC policy
+        // as the single-action route.
+        const secBulk = (req as any).security as
+          | {
+              userId: string;
+              markings: string[];
+              cbac: string[];
+              systemPrincipal: boolean;
+              markingBypass: boolean;
+            }
+          | undefined;
         const context = {
           executedBy: (req as any).user?.id || "system",
+          tenant: resolveRequestTenant(req),
           sourceIp:
             (req.headers["x-forwarded-for"] as string)
               ?.split(",")[0]
@@ -175,6 +190,20 @@ router.post(
             req.socket.remoteAddress ||
             null,
           branchId: item.branchId || body.branchId || null,
+          roles: (req as any).user?.roles || [],
+          groups: (req as any).user?.groups || [],
+          ...(secBulk
+            ? {
+                subjectKind: (secBulk.systemPrincipal
+                  ? "service"
+                  : "user") as "user" | "service" | "token" | "anonymous",
+                subjectIdentifier:
+                  secBulk.userId || (req as any).user?.id || "anonymous",
+                subjectMarkings: secBulk.markings ?? [],
+                subjectCbac: secBulk.cbac ?? [],
+                markBypass: secBulk.markingBypass === true,
+              }
+            : {}),
         };
 
         try {

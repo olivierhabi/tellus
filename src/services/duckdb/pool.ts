@@ -10,7 +10,7 @@
 //
 // The bootstrap runs exactly once per connection (LOAD is per-session on
 // the DuckDB side, even though INSTALL is process-wide). We apply the
-// PB-B2 (f) resource caps there — `memory_limit=12GB`,
+// PB-B2 (f) resource caps there — `memory_limit=1GB` by default,
 // `temp_directory=/tmp/duckdb_spill` — so a runaway chain spills to disk
 // instead of OOMing the API pod.
 //
@@ -106,7 +106,7 @@ export async function* streamQuery<T>(
 }
 
 export interface PoolOptions {
-  /** Override memory_limit (default 12GB per PB-B2 (f)). */
+  /** Override memory_limit (safe default 1GB; large jobs must opt in). */
   memoryLimit?: string;
   /** Override PRAGMA temp_directory for spills. */
   tempDirectory?: string;
@@ -230,7 +230,10 @@ async function applyInstanceSettings(
   // `true` and skips — no double `PRAGMA temp_directory`.
   instanceSettingsApplied = true;
 
-  const memoryLimit = options.memoryLimit ?? process.env.DUCKDB_MEMORY_LIMIT ?? "12GB";
+  // Never default to the host's entire memory allocation. The former 12 GB
+  // fallback could starve a 16 GB developer laptop and made an unconfigured
+  // container rely on the OOM killer for isolation.
+  const memoryLimit = options.memoryLimit ?? process.env.DUCKDB_MEMORY_LIMIT ?? "1GB";
   const tempDir = options.tempDirectory ?? process.env.DUCKDB_TEMP_DIR ?? "/tmp/duckdb_spill";
   await runAll(conn, `SET memory_limit='${memoryLimit}'`);
   await runAll(conn, `PRAGMA temp_directory='${tempDir}'`);

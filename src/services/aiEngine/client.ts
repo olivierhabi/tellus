@@ -62,6 +62,22 @@ export interface AiEngineModelsResult {
   default: string;
 }
 
+/**
+ * Payload the AI engine accepts at POST /api/code-repositories-python-transform.
+ *
+ * Same shape as AiEnginePayload (the engine's typescript-v2 path) so the FE
+ * and the proxy wiring stay uniform; the path is the discriminator. Track 1
+ * adds the python transform authoring/validating/executing entry — the agent
+ * uses the same `message | model | mode | context | history | stream` surface
+ * that the typescript-v2 agent uses, against the backend code-repository
+ * transforms routes (test/preview/builds) plus the new AIE-side route.
+ */
+export interface AiEnginePayloadPython extends AiEnginePayload {
+  /** Optional runtime hint so the agent can offer lightweight vs spark
+   * guidance. Mirrors transform_build.runtime. */
+  runtime?: "lightweight" | "spark";
+}
+
 /** Port the route depends on — injectable for tests. */
 export interface AiEnginePort {
   typescriptV2(
@@ -81,6 +97,18 @@ export interface AiEnginePort {
     principalUserId?: string,
     signal?: AbortSignal,
   ): Promise<VegaChartAgentResult>;
+  /** Python transform agent (Track 1). POST /api/code-repositories-python-transform. */
+  pythonTransform(
+    payload: AiEnginePayloadPython,
+    principalUserId?: string,
+    signal?: AbortSignal,
+  ): Promise<AiEngineResult>;
+  /** Streaming variant of pythonTransform — returns the engine SSE Response. */
+  pythonTransformStream(
+    payload: AiEnginePayloadPython,
+    principalUserId?: string,
+    signal?: AbortSignal,
+  ): Promise<Response>;
   isReachable(): Promise<boolean>;
 }
 
@@ -454,6 +482,178 @@ export class AiEngineClient implements AiEnginePort {
       if (res.status === 400)
         throw new AppError(
           "AI engine rejected the request",
+          400,
+          "AI_ENGINE_BAD_REQUEST",
+        );
+      throw new AppError(
+        engineError
+          ? `AI engine error: ${engineError}`
+          : `AI engine returned HTTP ${res.status}`,
+        502,
+        "AI_ENGINE_ERROR",
+      );
+    }
+    return res;
+  }
+
+  // --------------------------------------------------------------------------
+  // Python transform agent (Track 1). Mirrors typescriptV2 / typescriptV2Stream
+  // against POST /api/code-repositories-python-transform so the engine keeps a
+  // uniform message-mode|stream contract; the AIE-side route picks the python
+  // tool set. Same timeout (this.timeoutMs, default 2 min) and AppError mapping
+  // (AI_ENGINE_TIMEOUT / AI_ENGINE_UNAVAILABLE / AI_ENGINE_BAD_REQUEST /
+  // AI_ENGINE_ERROR) so the FE receives the same envelope shape as the TS v2
+  // route — the python route is purely ADDITIVE (no-touch boundary: the
+  // existing /typescript-v2 + /vega-chart routes are unchanged).
+  // --------------------------------------------------------------------------
+  async pythonTransform(
+    payload: AiEnginePayloadPython,
+    principalUserId?: string,
+    signal?: AbortSignal,
+  ): Promise<AiEngineResult> {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(
+        `${this.baseUrl}/api/code-repositories-python-transform`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            ...(principalUserId
+              ? { "X-Tellus-Principal": principalUserId }
+              : {}),
+            ...(process.env.TELOS_AIE_AGENT_TOKEN
+              ? { "X-Tellus-Engine-Token": process.env.TELOS_AIE_AGENT_TOKEN }
+              : {}),
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.any(
+            [ctrl.signal, signal].filter(Boolean) as AbortSignal[],
+          ),
+        },
+      );
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new AppError(
+          "AI engine python-transform request timed out",
+          504,
+          "AI_ENGINE_TIMEOUT",
+        );
+      }
+      throw new AppError(
+        `AI engine unreachable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        502,
+        "AI_ENGINE_UNAVAILABLE",
+      );
+    } finally {
+      clearTimeout(tid);
+    }
+
+    if (!res.ok) {
+      let engineError = "";
+      try {
+        const errBody = (await res.json()) as { error?: unknown } | null;
+        if (errBody && typeof errBody.error === "string") {
+          engineError = errBody.error;
+        }
+      } catch {
+        // non-JSON / empty body — leave engineError empty
+      }
+      if (res.status === 400) {
+        throw new AppError(
+          "AI engine rejected the python-transform request",
+          400,
+          "AI_ENGINE_BAD_REQUEST",
+        );
+      }
+      throw new AppError(
+        engineError
+          ? `AI engine error: ${engineError}`
+          : `AI engine returned HTTP ${res.status}`,
+        502,
+        "AI_ENGINE_ERROR",
+      );
+    }
+
+    const body = (await res.json()) as AiEngineResult | { error?: string };
+    if (
+      body &&
+      typeof body === "object" &&
+      "error" in body &&
+      typeof (body as { error?: unknown }).error === "string"
+    ) {
+      throw new AppError(
+        `AI engine error: ${(body as { error: string }).error}`,
+        502,
+        "AI_ENGINE_ERROR",
+      );
+    }
+    return body as AiEngineResult;
+  }
+
+  async pythonTransformStream(
+    payload: AiEnginePayloadPython,
+    principalUserId?: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(
+        `${this.baseUrl}/api/code-repositories-python-transform`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+            ...(principalUserId
+              ? { "X-Tellus-Principal": principalUserId }
+              : {}),
+            ...(process.env.TELOS_AIE_AGENT_TOKEN
+              ? { "X-Tellus-Engine-Token": process.env.TELOS_AIE_AGENT_TOKEN }
+              : {}),
+          },
+          body: JSON.stringify({ ...payload, stream: true }),
+          signal: AbortSignal.any(
+            [ctrl.signal, signal].filter(Boolean) as AbortSignal[],
+          ),
+        },
+      );
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError")
+        throw new AppError(
+          "AI engine python-transform stream timed out",
+          504,
+          "AI_ENGINE_TIMEOUT",
+        );
+      throw new AppError(
+        `AI engine unreachable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        502,
+        "AI_ENGINE_UNAVAILABLE",
+      );
+    } finally {
+      clearTimeout(tid);
+    }
+    if (!res.ok) {
+      let engineError = "";
+      try {
+        const errBody = (await res.json()) as { error?: unknown } | null;
+        if (errBody && typeof errBody.error === "string")
+          engineError = errBody.error;
+      } catch {
+        // non-JSON / empty
+      }
+      if (res.status === 400)
+        throw new AppError(
+          "AI engine rejected the python-transform request",
           400,
           "AI_ENGINE_BAD_REQUEST",
         );

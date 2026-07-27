@@ -105,6 +105,10 @@ export interface AuditRowBody {
   branch_id: string | null;
   source_ip: string | null;
   metadata: Record<string, unknown>;
+  // Phase 8 — semantics + correlation-id on the audit row (migration 121).
+  semantics_version?: number | null;
+  execution_mode?: string | null;
+  correlation_id?: string | null;
 }
 
 /**
@@ -169,11 +173,14 @@ export async function insertAuditRowWithHashChain(
        branch_id,
        source_ip,
        metadata,
+       semantics_version,
+       execution_mode,
+       correlation_id,
        prev_hash,
        row_hash
-     ) VALUES (
-       $1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18
-     )`,
+      ) VALUES (
+        $1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18,$19,$20,$21
+      )`,
     [
       rowBody.audit_id,
       rowBody.action_type_api_name,
@@ -191,6 +198,9 @@ export async function insertAuditRowWithHashChain(
       rowBody.branch_id,
       rowBody.source_ip,
       JSON.stringify(rowBody.metadata),
+      rowBody.semantics_version ?? null,
+      rowBody.execution_mode ?? null,
+      rowBody.correlation_id ?? null,
       prevHash,
       rowHash,
     ],

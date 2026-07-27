@@ -836,6 +836,177 @@ check: lint test build
   ],
 };
 
+// ---------------------------------------------------------------------------
+// TR_PYTHON_3_0_0 — transforms-python v3.0.0 (Track 1: Lightweight runtime).
+//
+// Foundry-Foundry parity: ships a `@lightweight` example alongside the
+// existing `@transform` example. `@lightweight` (transforms.api) runs
+// single-process (no SparkSession) — pandas-only — for small datasets where
+// the JVM startup of a SparkSession dominates. The transforms discovery
+// walker (`discovery.ts` TRANSFORM_KINDS) recognizes `lightweight` as a new
+// `TransformKind`; `runtimeForBatch` (discovery.ts) selects the build's
+// `runtime` tag from the discovered kinds (all-@lightweight = `lightweight`;
+// any Spark-backed = `spark`) which is persisted on `transform_build.runtime`
+// (migration 120). See docs/transforms-architecture.md §lightweight for the
+// full contract.
+//
+// Backwards compatibility: this is the SAME `templateId` ("transforms-python")
+// as v1.0.0 / v2.0.0 — pinning per-version still scaffolds the older layout,
+// and `listLatestTemplateManifests` returns this 3.0.0 row as the latest for
+// the picker. The existing v1.0.0 / v2.0.0 manifests are untouched (no-touch
+// boundary #8).
+//
+// Deviation from Foundry's literal default:
+//   - The `@lightweight` example uses a synthetic seed (no Input) so a
+//     freshly-created v3.0.0 repo builds GREEN out of the box (a brand-new
+//     repo cannot reference a real dataset RID before its first commit).
+//   - The `@transform` example parity-mirrors v1.0.0's `example.py` with the
+//     Spark-backed `DataFrame([...])` shim so existing users upgrading to
+//     3.0.0 keep the workflow — `@lightweight` is shipped ADDITIVE, not as
+//     a replacement.
+// ---------------------------------------------------------------------------
+const TR_PYTHON_3_0_0: TemplateManifest = {
+  templateId: "transforms-python",
+  version: "3.0.0",
+  displayName: "Python Transforms (Lightweight + Spark)",
+  language: "python",
+  category: "transforms",
+  description: "Datasets transformed by @transform-decorated Python. Adds @lightweight — a single-process pandas-only runtime for small datasets (no SparkSession).",
+  parameters: [
+    {
+      name: "datasetRid",
+      regex: "^ri\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-zA-Z0-9_-]{1,128}$",
+      default: "ri.foundry.main.dataset.placeholder",
+      description: "Output dataset RID for the example seed transform. Edit per repo.",
+      required: true,
+    },
+  ],
+  deprecated: false,
+  files: [
+    {
+      // @lightweight seed: pandas-only, no Input, builds green out of the box.
+      // Demonstrates the Track-1 lightweight contract: read Input.pandas(),
+      // write Output.write_dataframe(pandas_df). For a real transform, add
+      // inputs as Input("ri.foundry.main.dataset.<in>") and call input.pandas().
+      path: "transforms/lightweight_seed.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import lightweight, Output, DataFrame
+
+# An @lightweight source transform: pandas/DF-only — NO SparkSession is
+# started. Reserved for datasets where the JVM startup cost of a SparkSession
+# dominates the work. To consume an existing dataset, add inputs and call
+# input.pandas() (NOT input.dataframe() — that lazily creates a SparkSession,
+# violating the lightweight contract).
+#
+#     @lightweight(
+#         output=Output("{{datasetRid}}"),
+#         source=Input("ri.foundry.main.dataset.<your-input>"),
+#     )
+#     def my_lightweight(output, source):
+#         df = source.pandas()
+#         output.write_dataframe(df[df["amount"] > 0])
+
+
+@lightweight(output=Output("{{datasetRid}}"))
+def leaked_lightweight_seed(output):
+    output.write_dataframe(
+        DataFrame(
+            [
+                {"id": 1, "category": "a", "value": 10},
+                {"id": 2, "category": "b", "value": 20},
+                {"id": 3, "category": "a", "value": 30},
+            ]
+        )
+    )
+`,
+    },
+    {
+      // @transform example parity-mirrors v1.0.0's example.py — the
+      // PySpark-backed path is preserved (kind = 'spark'). The discovery
+      // walker reports BOTH decorators; runtimeForBatch selects 'lightweight'
+      // for this repo since this file's seed transform happens to use only
+      // `DataFrame([...])` (no Input) — the SparkSession is not started by
+      // the driver when the user code never touches .dataframe()/.spark_session.
+      // To opt into the spark runtime, swap Output to a real Input dataset
+      // and call input.dataframe() — the runtime tag flips to 'spark'.
+      path: "transforms/example.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import transform, Output, DataFrame
+
+
+@transform(output=Output("{{datasetRid}}-transform"))
+def example_seed(output):
+    output.write_dataframe(
+        DataFrame(
+            [
+                {"id": 1, "category": "a", "value": 10},
+                {"id": 2, "category": "b", "value": 20},
+                {"id": 3, "category": "a", "value": 30},
+            ]
+        )
+    )
+`,
+    },
+    {
+      // An @incremental @lightweight example (incremental write semantics work
+      // across both runtimes — the ctx.is_incremental flag is symmetric). Disabled
+      // by default (rename to .py / remove the leading underscore to enable).
+      path: "transforms/_lightweight_incremental_example.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import lightweight, incremental, Output, Input
+
+
+# @incremental on an @lightweight transform: same ctx-first injection rule as
+# @incremental on @transform — the entry signature is (ctx, output, **inputs),
+# matching the @incremental+@transform combination. Set the write mode to
+# 'modify'/'append' for incremental APPEND semantics (vs 'replace' = SNAPSHOT).
+# The lightweight runtime is a no-JVM path; an incremental write under it is the
+# pandas-append equivalent of an append transaction.
+@incremental()
+@lightweight(
+    output=Output("{{datasetRid}}-events"),
+    source=Input("{{datasetRid}}"),
+)
+def append_events(ctx, output, source):
+    df = source.pandas()
+    output.write_dataframe(df, mode="modify")
+`,
+    },
+    {
+      path: "ci.yml",
+      mode: "100644",
+      isBinary: false,
+      content: `# Stemma/Jemma CI pipeline for transforms-python (v3.0.0 lightweight + spark).
+stages:
+  - name: lint
+    command: python -m pyflakes transforms/
+  - name: discover
+    command: tellus transforms discover
+  - name: build
+    command: tellus transforms build
+  - name: test
+    command: python -m pytest -q
+`,
+    },
+    {
+      path: "repoSettings.json",
+      mode: "100644",
+      isBinary: false,
+      content: `{
+  "defaultBranch": "main",
+  "tagNameValidation": "semver",
+  "branchProtection": [
+    { "branch": "main", "requiredStatusChecks": ["jemma:build"] }
+  ]
+}
+`,
+    },
+  ],
+};
+
 const TR_JAVA_1_0_0: TemplateManifest = {
   templateId: "transforms-java",
   version: "1.0.0",
@@ -946,6 +1117,7 @@ const CATALOG: ReadonlyMap<string, ReadonlyMap<string, TemplateManifest>> = (() 
     PY_FUNCTIONS_1_0_0,
     TR_PYTHON_1_0_0,
     TR_PYTHON_2_0_0,
+    TR_PYTHON_3_0_0,
     TR_JAVA_1_0_0,
     TR_SQL_1_0_0,
   ];

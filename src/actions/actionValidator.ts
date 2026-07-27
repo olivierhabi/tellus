@@ -21,7 +21,7 @@
 
 import { query } from "../db";
 import { getOntologyId } from "../services/ontology/canonicalOntology";
-import { getActionType } from "../models/actionType";
+import { getActionType, resolveSemanticsForRow } from "../models/actionType";
 import type { ActionTypeRow } from "../models/actionType";
 import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
@@ -30,6 +30,8 @@ import type { CompiledEdit } from "./ruleCompiler";
 import { evaluateSubmissionCriteria, type SubmissionSubject } from "./submissionCriteria";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
+import { OntologyError } from "../utils/queryErrors";
+import { getActionSemanticsExecutionAvailability } from "./actionSemanticsFlags";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -157,6 +159,32 @@ export async function validateAction(
       valid: false,
       errors: [`Action type '${actionTypeApiName}' is disabled`],
     };
+  }
+
+  // -----------------------------------------------------------------
+  // STAGE 1b: Action semantics availability
+  //
+  // Validation and execution intentionally share the same rollout decision.
+  // Returning a successful preview for an action that apply must reject is a
+  // broken API contract and causes late, confusing submission failures.
+  // -----------------------------------------------------------------
+  const semantics = resolveSemanticsForRow({
+    semantics_version: actionType.semantics_version,
+    execution_mode: actionType.execution_mode,
+    delete_policy: actionType.delete_policy,
+  });
+  const semanticsAvailability =
+    getActionSemanticsExecutionAvailability(semantics.semanticsVersion);
+  if (!semanticsAvailability.available) {
+    throw new OntologyError(
+      semanticsAvailability.message ??
+        `Unsupported action semantics version '${semantics.semanticsVersion}'.`,
+      semanticsAvailability.code ?? "UNSUPPORTED_SEMANTICS_VERSION",
+      422,
+      semanticsAvailability.details ?? {
+        semanticsVersion: semantics.semanticsVersion,
+      },
+    );
   }
 
   // -----------------------------------------------------------------

@@ -62,6 +62,8 @@ import {
   saveToOntology,
 } from "./routes/reindexById";
 import interfaceRouter from "./routes/interfaces";
+import interfaceLinkConstraintRouter from "./routes/interfaceLinkConstraints";
+import webhookRouter from "./routes/webhooks";
 import objectTypeInterfacesRouter from "./routes/objectTypeInterfaces";
 import objectViewsRouter, { objectViewsByTypeRouter } from "./routes/objectViews";
 import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
@@ -669,6 +671,13 @@ app.use("/api/v1/actions", validateRouter);
 app.use("/api/v1/actions", batchRouter);
 app.use("/api/v1/audit", globalAuditRouter);
 
+// Phase 6.4 — per-user notification inbox. Mounted globally (not under
+// /ontology/:ontologyId) because the inbox is user-scoped, not ontology-
+// scoped. AuthN comes from globalAuth(); the route additionally reads
+// `req.user.id` to scope list/mark-read to the authenticated principal.
+import { notificationsRouter } from "./routes/notifications";
+app.use("/api/v1/notifications", notificationsRouter);
+
 // Global action type RID endpoints (Palantir Foundry style)
 // Mounted at /api/v1/actionTypes (not under /ontology) to avoid route conflicts
 // These allow looking up action types by RID without knowing the ontologyId
@@ -1029,6 +1038,14 @@ app.use(
 app.use(
   "/api/v1/ontology/:ontologyId/interfaces",
   interfaceRouter
+);
+app.use(
+  "/api/v1/ontology/:ontologyId/interfaceLinkConstraints",
+  interfaceLinkConstraintRouter
+);
+app.use(
+  "/api/v1/ontology/:ontologyId/webhooks",
+  webhookRouter
 );
 app.use(
   "/api/v1/ontology/:ontologyId/objectTypes/:objectTypeApiName/implements",
@@ -1537,6 +1554,30 @@ async function start(): Promise<void> {
     } catch (err) {
       console.warn(
         `WARNING: could not start replacement scheduler: ${(err as Error).message}`
+      );
+    }
+
+    // Phase 5 — durable side-effect outbox worker. Action types with
+    // `side_effects` produce rows in `action_side_effect_job` inside
+    // the audit transaction; this background worker drains the queue
+    // via webhookSafeTransport + the registered NotificationProviders.
+    // Gated by `ACTION_SIDE_EFFECT_WORKER_ENABLED=1` so the legacy
+    // fire-and-forget Stage 7 path remains the default for existing
+    // deployments + integration tests.
+    try {
+      if (process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED === "1") {
+        const { runWorkerLoop } = await import("./services/workers/sideEffectWorker");
+        const controller = new AbortController();
+        void runWorkerLoop({
+          intervalMs: parseInt(process.env.ACTION_SIDE_EFFECT_WORKER_INTERVAL_MS ?? "2000", 10),
+          limit: parseInt(process.env.ACTION_SIDE_EFFECT_WORKER_BATCH ?? "16", 10),
+          signal: controller.signal,
+        });
+        console.log("Side-effect outbox worker started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start side-effect outbox worker: ${(err as Error).message}`,
       );
     }
 

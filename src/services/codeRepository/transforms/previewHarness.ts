@@ -36,6 +36,13 @@ export interface PreviewArgs {
   readonly repositoryRid: string;
   readonly branch: string;
   readonly entryPoint: string;
+  /** Repo-relative path of the file being previewed. Optional but STRONGLY
+   * recommended: when the entry-point function name is ambiguous across files
+   * (e.g. two `def compute` in two source files), the lookup prefers the
+   * sourcePath-matched transform; without it, the FIRST discovered transform
+   * with the matching name wins — which silently runs the WRONG function's
+   * output and surfaces it in the Preview UI. Pass the active file path. */
+  readonly sourcePath?: string;
   /** Repo-relative path -> draft content, merged over the committed tree so the
    * user can preview unsaved editor changes (no commit required). */
   readonly fileOverrides?: Readonly<Record<string, string>>;
@@ -179,7 +186,17 @@ export async function runTransformPreview(args: PreviewArgs): Promise<PreviewRes
   }
 
   const discovery = discoverTransforms(merged);
-  const t = discovery.transforms.find((x) => x.name === args.entryPoint);
+  // Source-path-aware lookup: prefer the transform whose sourcePath matches when
+  // supplied (the active file in the editor). Fall back to the first name match
+  // only when sourcePath is absent (preserves legacy behavior for callers that
+  // pass only the entry point name). Without this disambiguation, two transforms
+  // sharing an entry-point name (e.g. two `def compute` in two source files) are
+  // indistinguishable + the FIRST discovered one silently wins — surfacing the
+  // wrong function's output in the Preview UI.
+  const t = args.sourcePath
+    ? discovery.transforms.find((x) => x.name === args.entryPoint && x.sourcePath === args.sourcePath)
+      ?? discovery.transforms.find((x) => x.name === args.entryPoint)
+    : discovery.transforms.find((x) => x.name === args.entryPoint);
   if (!t) {
     return fail(
       args,

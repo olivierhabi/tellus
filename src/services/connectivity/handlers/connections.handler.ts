@@ -34,7 +34,6 @@ import {
   CompassFolderNotFound,
   ConnectionNameAlreadyExists,
   ConnectionNotFound,
-  ConnectorNotSupported,
   HasActiveDependencies,
   InvalidConfiguration,
   ScopeRequired,
@@ -52,6 +51,7 @@ import {
   ConnectionRid,
   ConnectionUpdateRequest,
   PostgresConfig,
+  RestApiConfig,
 } from "../contracts";
 import * as repo from "../store/connections.repo";
 import * as outbox from "../store/outbox";
@@ -294,11 +294,6 @@ export const postConnection = instrument("/api/v1/connectivity/connections", "PO
     }
     const request = parsed.data;
 
-    if (request.connectorType !== "postgresql") {
-      throw new TellusError(ConnectorNotSupported, {
-        connectorType: request.connectorType,
-      });
-    }
     if (request.workerType === "agentProxy" && !request.agentGroupRid) {
       throw new TellusError(AgentGroupRequired, {});
     }
@@ -306,8 +301,21 @@ export const postConnection = instrument("/api/v1/connectivity/connections", "PO
     if ((request.workerType as string) === "agentWorker") {
       throw new TellusError(AgentWorkerRejected, {});
     }
-    if (request.connectorType === "postgresql") {
+    if (
+      request.connectorType === "postgresql" &&
+      request.config.connectorType === "postgresql"
+    ) {
       const cfg = PostgresConfig.safeParse(request.config.postgres);
+      if (!cfg.success) {
+        throw new TellusError(InvalidConfiguration, {
+          issues: cfg.error.issues,
+        });
+      }
+    } else if (
+      request.connectorType === "rest-api" &&
+      request.config.connectorType === "rest-api"
+    ) {
+      const cfg = RestApiConfig.safeParse(request.config.restApi);
       if (!cfg.success) {
         throw new TellusError(InvalidConfiguration, {
           issues: cfg.error.issues,

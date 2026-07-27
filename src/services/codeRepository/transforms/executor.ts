@@ -108,6 +108,21 @@ export interface ExecuteResult {
   readonly traceback: string | null;
   readonly timedOut: boolean;
   readonly durationMs: number;
+  /** Phase 6 — true when the compute function called ctx.abort_job() to
+   * short-circuit the build without committing ANY output transaction. The
+   * Python driver returns ``{"ok": True, "aborted": True, "result": {...}}``
+   * in that case (caught AbortJobError in driver.py). The build service uses
+   * this flag to mark the build as status='succeeded' + reason='aborted' and
+   * SKIP materializeOutput — leaving the output dataset unchanged, downstreams
+   * NOT marked stale, the last incremental checkpoint preserved. Distinct
+   * from ok=false (a runtime failure). */
+  readonly aborted: boolean;
+  /** Multi-output result: when the transform's decorator declares >1 Output,
+   * the Python driver emits ``{"ok": True, "result": {"outputs": [...]}}``
+   * instead of a single materialize dict. When present, buildService must
+   * materialize EACH output by name; when absent, the single-Output result
+   * is on parsed.result directly. */
+  readonly outputs: readonly { rid: string; rowCount: number; columns: string[]; mode: string }[] | null;
 }
 
 /** Preflight: is a usable python3 on PATH? (Shim; buildService uses
@@ -279,12 +294,17 @@ export async function executeTransform(args: ExecuteArgs): Promise<ExecuteResult
         traceback: null,
         timedOut: true,
         durationMs: Date.now() - startedAt,
+        aborted: false,
+        outputs: null,
       };
     }
 
     let parsed: {
       ok: boolean;
-      result?: { rowCount: number; columns: string[]; mode: string };
+      aborted?: boolean;
+      result?:
+        | { rowCount: number; columns: string[]; mode: string; aborted?: boolean }
+        | { outputs: Array<{ rid: string; rowCount: number; columns: string[]; mode: string; noWrite?: boolean }> };
       error?: string;
       traceback?: string;
     } | null = null;
@@ -310,6 +330,8 @@ export async function executeTransform(args: ExecuteArgs): Promise<ExecuteResult
         traceback: null,
         timedOut: false,
         durationMs: Date.now() - startedAt,
+        aborted: false,
+        outputs: null,
       };
     }
 
@@ -326,23 +348,90 @@ export async function executeTransform(args: ExecuteArgs): Promise<ExecuteResult
         traceback: parsed.traceback ?? null,
         timedOut: false,
         durationMs: Date.now() - startedAt,
+        aborted: false,
+        outputs: null,
+      };
+    }
+
+    // Phase 6 — ctx.abort_job() returns ok=true + aborted=true. The driver
+    // commits no output transaction; buildService records status=succeeded +
+    // reason=aborted + skips materializeOutput. The output CSV on disk (if
+    // any partial write) is discarded by the finally block since the
+    // succeeded=true branch usually leaves the output dir for the caller —
+    // but on abort we DO want the cleanup below to rm the dir (the staged
+    // outputs are NEVER materialized).
+    if (parsed.aborted === true) {
+      succeeded = false;  // force the finally block to clean up the output dir
+      return {
+        ok: true,
+        outputPath: null,
+        rowCount: 0,
+        columns: [],
+        writeMode: "replace",
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: null,
+        traceback: null,
+        timedOut: false,
+        durationMs: Date.now() - startedAt,
+        aborted: true,
+        outputs: [],
+      };
+    }
+
+    // Multi-output: parsed.result is { "outputs": [...] }. Surface each one
+    // on ExecuteResult.outputs for buildService to materialize by name.
+    if (parsed.result && Array.isArray((parsed.result as any).outputs)) {
+      const outputsArr = (parsed.result as any).outputs as Array<{ rid: string; rowCount: number; columns: string[]; mode: string; noWrite?: boolean }>;
+      // outputPath stays null for multi-output → caller iterates .outputs
+      // and materializes each via datasetStore.materializeOutput. The driver
+      // left the per-output CSVs at <workdir>/<outputName>.csv; the caller
+      // would need the workdir to persist. For now (Phase 1b) the driver
+      // writes a single combined CSV at outputPath for single-output builds
+      // only; multi-output execution requires the buildService to read from
+      // the parsed result's per-output paths, which the driver maps onto
+      // outputs[].path (TODO Phase 2b/6). The ExecuteResult carries the
+      // parsed rows for diagnostics.
+      succeeded = true;
+      return {
+        ok: true,
+        outputPath: null,
+        rowCount: 0,
+        columns: [],
+        writeMode: "replace",
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: null,
+        traceback: null,
+        timedOut: false,
+        durationMs: Date.now() - startedAt,
+        aborted: false,
+        outputs: outputsArr,
       };
     }
 
     succeeded = true;
-    return {
-      ok: true,
-      outputPath,
-      rowCount: parsed.result?.rowCount ?? 0,
-      columns: parsed.result?.columns ?? [],
-      writeMode: parsed.result?.mode ?? "replace",
-      stdout: result.stdout,
-      stderr: result.stderr,
-      error: null,
-      traceback: null,
-      timedOut: false,
-      durationMs: Date.now() - startedAt,
-    };
+    {
+      // Single-output success branch — TS narrowing can't see that the
+      // multi-output branch returned above, so cast parsed.result to the
+      // single-output shape explicitly.
+      const r = parsed.result as { rowCount?: number; columns?: string[]; mode?: string } | undefined;
+      return {
+        ok: true,
+        outputPath,
+        rowCount: r?.rowCount ?? 0,
+        columns: r?.columns ?? [],
+        writeMode: r?.mode ?? "replace",
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: null,
+        traceback: null,
+        timedOut: false,
+        durationMs: Date.now() - startedAt,
+        aborted: false,
+        outputs: null,
+      };
+    }
   } finally {
     // Always remove the workdir. The output dir (tellus-transform-out-*) is
     // removed by the caller on success (it reads exec.outputPath); on failure
@@ -372,6 +461,8 @@ function failure(outputPath: string, startedAt: number, error: string): ExecuteR
     traceback: null,
     timedOut: false,
     durationMs: Date.now() - startedAt,
+    aborted: false,
+    outputs: null,
   };
 }
 

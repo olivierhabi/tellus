@@ -26,6 +26,7 @@ import {
 } from "../actions/actionValidator";
 // FailureType import removed — executor now throws OntologyError directly
 import { OntologyError } from "../utils/queryErrors";
+import { resolveRequestTenant } from "../utils/requestTenant";
 import {
   checkIdempotencyKey,
   storeIdempotencyKey,
@@ -105,8 +106,26 @@ router.post(
       }
 
       // Extract execution context from request
+      //
+      // Phase 6.1 — thread the `req.security` (markings / cbac /
+      // systemPrincipal / markingBypass) populated by the global
+      // `securityContext` middleware into the executor so Stage 1c
+      // can evaluate the CBAC policy on the action_type row's
+      // allowed_principals / denied_principals / required_markings
+      // columns (migration 037). Missing req.security → backward-compat
+      // (gate skipped; matches pre-Phase-6.1 behaviour).
+      const sec = (req as any).security as
+        | {
+            userId: string;
+            markings: string[];
+            cbac: string[];
+            systemPrincipal: boolean;
+            markingBypass: boolean;
+          }
+        | undefined;
       const context = {
         executedBy: (req as any).user?.id || "system",
+        tenant: resolveRequestTenant(req),
         sourceIp:
           (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
           req.socket.remoteAddress ||
@@ -115,6 +134,19 @@ router.post(
         expectedVersion,
         roles: (req as any).user?.roles || [],
         groups: (req as any).user?.groups || [],
+        ...(sec
+          ? {
+              subjectKind: (sec.systemPrincipal ? "service" : "user") as
+                | "user"
+                | "service"
+                | "token"
+                | "anonymous",
+              subjectIdentifier: sec.userId || (req as any).user?.id || "anonymous",
+              subjectMarkings: sec.markings ?? [],
+              subjectCbac: sec.cbac ?? [],
+              markBypass: sec.markingBypass === true,
+            }
+          : {}),
       };
 
       // Core execute+store closure. Runs EITHER bare (no idempotency key)
@@ -353,6 +385,7 @@ router.post(
         // Build execution context for this individual request
         const context = {
           executedBy: (req as any).user?.id || "system",
+          tenant: resolveRequestTenant(req),
           sourceIp:
             (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
             req.socket.remoteAddress ||
@@ -727,13 +760,39 @@ batchRouter.post(
         const item = body.requests[i];
         const parameters = item.parameters || {};
 
+        // Phase 6.1 — thread req.security into the batch context too
+        // so the per-iteration executeAction call runs Stage 1c against
+        // the same CBAC policy.
+        const secBatch = (req as any).security as
+          | {
+              userId: string;
+              markings: string[];
+              cbac: string[];
+              systemPrincipal: boolean;
+              markingBypass: boolean;
+            }
+          | undefined;
         const context = {
           executedBy: (req as any).user?.id || "system",
+          tenant: resolveRequestTenant(req),
           sourceIp:
             (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
             req.socket.remoteAddress ||
             null,
           branchId: item.branchId || body.branchId || null,
+          roles: (req as any).user?.roles || [],
+          groups: (req as any).user?.groups || [],
+          ...(secBatch
+            ? {
+                subjectKind: (secBatch.systemPrincipal
+                  ? "service"
+                  : "user") as "user" | "service" | "token" | "anonymous",
+                subjectIdentifier: secBatch.userId || (req as any).user?.id || "anonymous",
+                subjectMarkings: secBatch.markings ?? [],
+                subjectCbac: secBatch.cbac ?? [],
+                markBypass: secBatch.markingBypass === true,
+              }
+            : {}),
         };
 
         try {

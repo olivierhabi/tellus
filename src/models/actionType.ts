@@ -12,9 +12,31 @@
 //   - side_effects: webhooks/notifications after execution (null = none)
 // ---------------------------------------------------------------------------
 
-import { query } from "../db";
+import { query, withTransaction } from "../db";
 import { appError } from "../utils/appError";
 import { validateActionTypeName } from "../utils/apiNameValidator";
+import {
+  V1_DEFAULT_SEMANTICS,
+  V2_DEFAULT_SEMANTICS,
+  type ActionSemanticsVersion,
+  type ActionExecutionMode,
+  type DeletePolicy,
+} from "../actions/actionSemantics";
+import {
+  analyzeActionTypeMigration,
+  ACKNOWLEDGEMENT_REQUIRED_FINDING_CODES,
+  type MigrationFinding,
+  type ParameterMigration,
+  type MigrationReport,
+} from "../actions/actionMigrationAnalysis";
+import { hashActionDefinition } from "../actions/actionDefinitionHash";
+import { defaultSchemaLookup } from "../actions/objectReferenceResolver";
+import {
+  recordMigration,
+  latestForwardMigration,
+  type ActionMigrationLogRow,
+} from "./actionMigrationLog";
+import type { PoolClient } from "pg";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,11 +55,28 @@ export interface ActionTypeRow {
   rules: unknown[];
   submission_criteria: unknown | null;
   side_effects: unknown | null;
+  /**
+   * Phase 4 — single ActionWritebackConfig JSONB or NULL. The pre-edit
+   * writeback webhook (Phase 4) executes BEFORE ontology edits; on
+   * failure, no edits are applied (failurePolicy:'abort' is the only
+   * supported policy). At most one writeback per action type, enforced
+   * at the structural level by migration 130's CHECK constraint.
+   */
+  writeback_config: unknown | null;
   max_affected_objects: number;
   is_enabled: boolean;
   created_at: string;
   updated_at: string;
   created_by: string;
+  // Action Semantics v2 (migration 121). NULL → read-time fallback to v1
+  // (see resolveSemanticsFromRow). Persisted explicitly on every create.
+  semantics_version: number | null;
+  execution_mode: string | null;
+  delete_policy: string | null;
+  /** Phase 1 migration 132 — versioned action-type definitions. The
+   * BEFORE UPDATE trigger bumps this on every material change. */
+  definition_version?: number;
+  definition_hash?: string | null;
 }
 
 export interface CreateActionTypeInput {
@@ -51,9 +90,17 @@ export interface CreateActionTypeInput {
   rules?: unknown[];
   submissionCriteria?: unknown | null;
   sideEffects?: unknown | null;
+  /** Phase 4 — pre-edit writeback config (null = no writeback). One-writeback-per-action structural invariant is enforced by migration 130 CHECK. */
+  writebackConfig?: unknown | null;
   maxAffectedObjects?: number;
   isEnabled?: boolean;
   createdBy?: string;
+  // Action Semantics v2. Omitted semanticsVersion on the legacy create
+  // endpoint → persisted as version 1 + legacy_unchecked + declarative,
+  // with deprecation telemetry emitted by the route layer.
+  semanticsVersion?: ActionSemanticsVersion;
+  executionMode?: ActionExecutionMode;
+  deletePolicy?: DeletePolicy;
 }
 
 export interface UpdateActionTypeInput {
@@ -66,6 +113,8 @@ export interface UpdateActionTypeInput {
   rules?: unknown[];
   submission_criteria?: unknown | null;
   side_effects?: unknown | null;
+  /** Phase 4 — pre-edit writeback config (NULL = no writeback). One-writeback-per-action enforced by CHECK constraint from migration 130. */
+  writeback_config?: unknown | null;
   max_affected_objects?: number;
   is_enabled?: boolean;
 }
@@ -84,6 +133,7 @@ const UPDATABLE_FIELDS: ReadonlySet<string> = new Set([
   "rules",
   "submission_criteria",
   "side_effects",
+  "writeback_config",
   "max_affected_objects",
   "is_enabled",
 ]);
@@ -123,15 +173,38 @@ async function createActionType(
     throw appError("INVALID_API_NAME", nameValidation.error!);
   }
 
-  // 3. Insert the action type
+  // 3. Resolve semantics triple. Omitted semanticsVersion on the legacy
+  // create endpoint is persisted as version 1 (default + deprecation
+  // telemetry emitted by the route). An explicit version 2 carries the
+  // v2 defaults server-side when executionMode/deletePolicy are omitted.
+  const semanticsVersion: number | null =
+    actionTypeDef.semanticsVersion !== undefined
+      ? actionTypeDef.semanticsVersion
+      : null; // null persisted for legacy-v1-omit; read-time fallback to 1
+  let executionMode: string | null =
+    actionTypeDef.executionMode ?? null;
+  let deletePolicy: string | null =
+    actionTypeDef.deletePolicy ?? null;
+  if (actionTypeDef.semanticsVersion === 2) {
+    const v2 = V2_DEFAULT_SEMANTICS;
+    executionMode = actionTypeDef.executionMode ?? v2.executionMode;
+    deletePolicy = actionTypeDef.deletePolicy ?? v2.deletePolicy;
+  } else if (actionTypeDef.semanticsVersion === 1) {
+    const v1 = V1_DEFAULT_SEMANTICS;
+    executionMode = actionTypeDef.executionMode ?? v1.executionMode;
+    deletePolicy = actionTypeDef.deletePolicy ?? v1.deletePolicy;
+  }
+
+  // 4. Insert the action type
   try {
     const result = await query(
       `INSERT INTO action_type
          (ontology_id, api_name, display_name, description,
           icon_name, icon_color, save_location_rid,
           parameters, rules, submission_criteria, side_effects,
-          max_affected_objects, is_enabled, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          max_affected_objects, is_enabled, created_by,
+          semantics_version, execution_mode, delete_policy, writeback_config)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING *`,
       [
         ontologyId,
@@ -152,6 +225,14 @@ async function createActionType(
         actionTypeDef.maxAffectedObjects ?? 10000,
         actionTypeDef.isEnabled ?? true,
         actionTypeDef.createdBy ?? "system",
+        semanticsVersion,
+        executionMode,
+        deletePolicy,
+        // Phase 4 — writeback_config. The route layer's
+        // validateWritebackConfig() validates the shape before this INSERT.
+        actionTypeDef.writebackConfig != null
+          ? JSON.stringify(actionTypeDef.writebackConfig)
+          : null,
       ]
     );
     return result.rows[0] as ActionTypeRow;
@@ -165,6 +246,36 @@ async function createActionType(
     }
     throw err;
   }
+}
+
+/**
+ * Read-time semantics fallback (Stage B): NULL columns → version 1.
+ * Returns the resolved semantics triple for a row. The route formatter
+ * uses this so existing action types keep their v1 behaviour even though
+ * their semantics columns are NULL before the Stage C backfill.
+ */
+export function resolveSemanticsForRow(
+  row: Pick<
+    ActionTypeRow,
+    "semantics_version" | "execution_mode" | "delete_policy"
+  >,
+): {
+  semanticsVersion: number;
+  executionMode: string;
+  deletePolicy: string;
+} {
+  if (row.semantics_version == null) {
+    return { ...V1_DEFAULT_SEMANTICS } as {
+      semanticsVersion: number;
+      executionMode: string;
+      deletePolicy: string;
+    };
+  }
+  return {
+    semanticsVersion: row.semantics_version,
+    executionMode: row.execution_mode ?? "declarative",
+    deletePolicy: row.delete_policy ?? "legacy_unchecked",
+  };
 }
 
 /**
@@ -254,7 +365,8 @@ async function updateActionType(
       key === "parameters" ||
       key === "rules" ||
       key === "submission_criteria" ||
-      key === "side_effects"
+      key === "side_effects" ||
+      key === "writeback_config"
     ) {
       values.push(value != null ? JSON.stringify(value) : null);
     } else {
@@ -289,6 +401,432 @@ async function updateActionType(
   }
 
   return result.rows[0] as ActionTypeRow;
+}
+
+/**
+ * Dedicated v1→v2 semantics migration (§12). Not exposed through the
+ * generic update path; the route layer requires explicit operator
+ * confirmation and re-runs compatibility analysis server-side before
+ * calling this. Records the migration actor via the standard
+ * `updated_at`/`updated_by`? (created_by is immutable; we bump updated_at).
+ *
+ * Never silently downgrades: target must be 2. Never migrates
+ * automatically: the route calls this only after analysis + confirmation.
+ */
+export async function migrateActionTypeSemantics(
+  ontologyId: string,
+  apiName: string,
+  targetVersion: ActionSemanticsVersion,
+): Promise<ActionTypeRow | null> {
+  if (targetVersion !== 2) {
+    throw appError(
+      "INCOMPATIBLE_ACTION_SEMANTICS",
+      `Migration target version must be 2; received '${targetVersion}'.`,
+    );
+  }
+  const defaults = targetVersion === 2 ? V2_DEFAULT_SEMANTICS : V1_DEFAULT_SEMANTICS;
+  const result = await query(
+    `UPDATE action_type
+        SET semantics_version = $3,
+            execution_mode = $4,
+            delete_policy = $5,
+            updated_at = now()
+      WHERE ontology_id = $1 AND api_name = $2
+      RETURNING *`,
+    [
+      ontologyId,
+      apiName,
+      targetVersion,
+      defaults.executionMode,
+      defaults.deletePolicy,
+    ],
+  );
+  return result.rows.length > 0 ? (result.rows[0] as ActionTypeRow) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Atomic, optimistic-concurrency-safe v1→v2 migration that ALSO persists a
+// proposed definition (typed object_reference parameters, repointed rules)
+// in the same UPDATE. Re-runs analysis immediately before the transaction,
+// verifies the definition hash matches the analysis the operator saw, and
+// writes an immutable action_migration_log ledger row inside the same
+// transaction. Caller-supplied `expectedDefinitionHash` is the concurrency
+// token returned by the GET /migrationAnalysis endpoint.
+// ---------------------------------------------------------------------------
+
+export interface MigrateWithDefinitionInput {
+  /** The hash the client received from the analysis response. */
+  expectedDefinitionHash: string;
+  /** The proposed v2 parameters/rules produced by the analyzer. They must
+   *  match what the server-side re-analysis produces from the CURRENT row;
+   *  the server re-derives the proposal rather than trusting the client. */
+  proposedDefinition: { parameters: unknown[]; rules: unknown[] };
+  /** Finding codes the operator acknowledged (review-required findings). */
+  acknowledgedFindingCodes: string[];
+  /** Whether a compatibility adapter was enabled for this migration. */
+  adapterEnabled: boolean;
+  /** Operator that triggered the migration. */
+  actor: string;
+  /** Optional correlation id propagated to the audit row. */
+  correlationId?: string | null;
+}
+
+export interface MigrateWithDefinitionResult {
+  /** The newly persisted action-type row (semantics version 2). */
+  migrated: ActionTypeRow;
+  /** The audit ledger row written inside the same transaction. */
+  log: ActionMigrationLogRow;
+  /** The server-side analysis run immediately before the transaction. */
+  analysis: MigrationReport;
+}
+
+export async function migrateActionTypeWithDefinition(
+  ontologyId: string,
+  apiName: string,
+  input: MigrateWithDefinitionInput,
+): Promise<MigrateWithDefinitionResult> {
+  // 1. Load the current row and re-derive a server-side analysis. Never trust
+  //    the client's proposed definition — re-derive it from the live row.
+  const current = await getActionType(ontologyId, apiName);
+  if (!current) {
+    throw appError(
+      "ACTION_TYPE_NOT_FOUND",
+      `Action type '${apiName}' not found in ontology '${ontologyId}'.`,
+    );
+  }
+  const currentSemantics = resolveSemanticsForRow({
+    semantics_version: (current as any).semantics_version ?? null,
+    execution_mode: (current as any).execution_mode ?? null,
+    delete_policy: (current as any).delete_policy ?? null,
+  });
+  if (currentSemantics.semanticsVersion !== 1) {
+    throw appError(
+      "INCOMPATIBLE_ACTION_SEMANTICS",
+      `Action type is already semantics version ${currentSemantics.semanticsVersion}; migration is v1→v2 only.`,
+      { currentVersion: currentSemantics.semanticsVersion },
+    );
+  }
+  const currentHash = hashActionDefinition({
+    parameters: current.parameters,
+    rules: current.rules,
+    semanticsVersion: currentSemantics.semanticsVersion,
+    executionMode: currentSemantics.executionMode,
+    deletePolicy: currentSemantics.deletePolicy,
+  });
+  if (input.expectedDefinitionHash !== currentHash) {
+    throw appError(
+      "MIGRATION_STALE_DEFINITION",
+      `Migration rejected: the action definition changed since the analysis was generated. Re-run migration analysis and retry.`,
+      {
+        expectedHash: input.expectedDefinitionHash,
+        currentHash,
+        actionTypeApiName: apiName,
+      },
+    );
+  }
+  const analysis = await analyzeActionTypeMigration(
+    {
+      rules: (current.rules ?? []) as any[],
+      parameters: (current.parameters ?? []) as any[],
+    },
+    { schemaLookup: defaultSchemaLookup, ontologyId },
+  );
+  const proposedDef = analysis.proposedDefinition;
+  if (!proposedDef) {
+    throw appError(
+      "INCOMPATIBLE_ACTION_SEMANTICS",
+      `Migration rejected: analysis produced no proposed definition (classification '${analysis.classification}'). Resolve blocking findings before migrating.`,
+      { classification: analysis.classification, findings: analysis.findings },
+    );
+  }
+  // 2. Acknowledgement enforcement: every code in ACKNOWLEDGEMENT_REQUIRED
+  //    that appears among the analysis findings must be acknowledged.
+  const presentRequired = analysis.findings
+    .filter(
+      (f) =>
+        (f.code as string) &&
+        ACKNOWLEDGEMENT_REQUIRED_FINDING_CODES.has(f.code as MigrationFinding["code"]),
+    )
+    .map((f) => f.code as string);
+  const acked = new Set(input.acknowledgedFindingCodes ?? []);
+  const missing = presentRequired.filter((c) => !acked.has(c));
+  if (missing.length > 0) {
+    throw appError(
+      "MIGRATION_ACKNOWLEDGEMENT_REQUIRED",
+      `Migration rejected: missing acknowledgements for review-required findings: ${missing.join(", ")}.`,
+      { missingAcknowledgements: missing, presentRequired },
+    );
+  }
+  // 3. Atomic persist + audit inside one transaction.
+  return withTransaction(
+    async (pg: PoolClient): Promise<MigrateWithDefinitionResult> => {
+      // Re-read FOR UPDATE to serialize against concurrent migrations.
+      const locked = await pg.query(
+        "SELECT * FROM action_type WHERE ontology_id = $1 AND api_name = $2 FOR UPDATE",
+        [ontologyId, apiName],
+      );
+      if (locked.rows.length === 0) {
+        throw appError(
+          "ACTION_TYPE_NOT_FOUND",
+          `Action type '${apiName}' disappeared between analysis and migration.`,
+        );
+      }
+      const lockedRow = locked.rows[0];
+      const lockedSemantics = resolveSemanticsForRow({
+        semantics_version: lockedRow.semantics_version ?? null,
+        execution_mode: lockedRow.execution_mode ?? null,
+        delete_policy: lockedRow.delete_policy ?? null,
+      });
+      if (lockedSemantics.semanticsVersion !== 1) {
+        throw appError(
+          "INCOMPATIBLE_ACTION_SEMANTICS",
+          `Concurrent migration detected: action type is now version ${lockedSemantics.semanticsVersion}.`,
+          { currentVersion: lockedSemantics.semanticsVersion },
+        );
+      }
+      const lockedHash = hashActionDefinition({
+        parameters: lockedRow.parameters,
+        rules: lockedRow.rules,
+        semanticsVersion: lockedSemantics.semanticsVersion,
+        executionMode: lockedSemantics.executionMode,
+        deletePolicy: lockedSemantics.deletePolicy,
+      });
+      if (lockedHash !== input.expectedDefinitionHash) {
+        throw appError(
+          "MIGRATION_STALE_DEFINITION",
+          `Migration rejected inside transaction: the action definition was edited while migration was in flight. Re-run migration analysis and retry.`,
+          { expectedHash: input.expectedDefinitionHash, currentHash: lockedHash },
+        );
+      }
+
+      // Persist the proposed v2 definition + semantics in one UPDATE.
+      const updated = await pg.query(
+        `UPDATE action_type
+            SET parameters = $3,
+                rules = $4,
+                semantics_version = $5,
+                execution_mode = $6,
+                delete_policy = $7,
+                updated_at = now()
+          WHERE ontology_id = $1 AND api_name = $2
+          RETURNING *`,
+        [
+          ontologyId,
+          apiName,
+          JSON.stringify(proposedDef.parameters),
+          JSON.stringify(proposedDef.rules),
+          2,
+          V2_DEFAULT_SEMANTICS.executionMode,
+          V2_DEFAULT_SEMANTICS.deletePolicy,
+        ],
+      );
+      if (updated.rows.length === 0) {
+        throw appError(
+          "ACTION_TYPE_NOT_FOUND",
+          `Action type '${apiName}' disappeared during migration UPDATE.`,
+        );
+      }
+      const migrated = updated.rows[0] as ActionTypeRow;
+      const resultingSemantics = resolveSemanticsForRow({
+        semantics_version: migrated.semantics_version ?? null,
+        execution_mode: migrated.execution_mode ?? null,
+        delete_policy: migrated.delete_policy ?? null,
+      });
+      const resultingHash = hashActionDefinition({
+        parameters: migrated.parameters,
+        rules: migrated.rules,
+        semanticsVersion: resultingSemantics.semanticsVersion,
+        executionMode: resultingSemantics.executionMode,
+        deletePolicy: resultingSemantics.deletePolicy,
+      });
+
+      const logRow = await recordMigration(
+        {
+          ontologyId,
+          actionApiName: apiName,
+          migrationKind: "migrate",
+          previousSemanticsVersion: 1,
+          resultingSemanticsVersion: 2,
+          previousDeletePolicy: currentSemantics.deletePolicy,
+          resultingDeletePolicy: resultingSemantics.deletePolicy,
+          previousDefinitionHash: currentHash,
+          resultingDefinitionHash: resultingHash,
+          previousDefinitionSnapshot: {
+            parameters: current.parameters,
+            rules: current.rules,
+            semanticsVersion: currentSemantics.semanticsVersion,
+            executionMode: currentSemantics.executionMode,
+            deletePolicy: currentSemantics.deletePolicy,
+          },
+          resultingDefinitionSnapshot: {
+            parameters: migrated.parameters,
+            rules: migrated.rules,
+            semanticsVersion: resultingSemantics.semanticsVersion,
+            executionMode: resultingSemantics.executionMode,
+            deletePolicy: resultingSemantics.deletePolicy,
+          },
+          parameterChanges: analysis.parameterMigrations as ParameterMigration[],
+          acknowledgedFindingCodes: input.acknowledgedFindingCodes ?? [],
+          adapterEnabled: input.adapterEnabled ?? false,
+          actor: input.actor,
+          correlationId: input.correlationId ?? null,
+        },
+        pg,
+      );
+      return { migrated, log: logRow, analysis };
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Rollback — restore the previous v1 definition from the latest forward
+// migration's `previous_definition_snapshot`. Append-only: writes a NEW
+// ledger row with migration_kind='rollback'. The action_type UPDATE goes
+// through the same domain path (parameters/rules/semantics columns in a
+// single transactional UPDATE) — never a raw row patch.
+// ---------------------------------------------------------------------------
+
+export interface RollbackResult {
+  rolledBack: ActionTypeRow;
+  log: ActionMigrationLogRow;
+}
+
+export async function rollbackActionTypeMigration(
+  ontologyId: string,
+  apiName: string,
+  actor: string,
+  correlationId?: string | null,
+): Promise<RollbackResult> {
+  const latest = await latestForwardMigration(ontologyId, apiName);
+  if (!latest) {
+    throw appError(
+      "MIGRATION_ROLLBACK_NOT_AVAILABLE",
+      `No forward migration recorded for action type '${apiName}' in ontology '${ontologyId}'. Rollback is not available.`,
+      { actionTypeApiName: apiName, ontologyId },
+    );
+  }
+  const previousDef = (latest.previous_definition_snapshot ?? null) as {
+    parameters?: unknown[];
+    rules?: unknown[];
+    semanticsVersion?: number;
+    executionMode?: string;
+    deletePolicy?: string;
+  } | null;
+  if (!previousDef) {
+    throw appError(
+      "MIGRATION_ROLLBACK_NOT_AVAILABLE",
+      `Latest forward migration for '${apiName}' has no previous definition snapshot; rollback cannot be performed.`,
+      { migrationId: latest.migration_id },
+    );
+  }
+  const targetVersion = previousDef.semanticsVersion ?? 1;
+  return withTransaction(
+    async (pg: PoolClient): Promise<RollbackResult> => {
+      const locked = await pg.query(
+        "SELECT * FROM action_type WHERE ontology_id = $1 AND api_name = $2 FOR UPDATE",
+        [ontologyId, apiName],
+      );
+      if (locked.rows.length === 0) {
+        throw appError(
+          "ACTION_TYPE_NOT_FOUND",
+          `Action type '${apiName}' not found during rollback.`,
+        );
+      }
+      const lockedRow = locked.rows[0] as ActionTypeRow;
+      const lockedSemantics = resolveSemanticsForRow({
+        semantics_version: lockedRow.semantics_version ?? null,
+        execution_mode: lockedRow.execution_mode ?? null,
+        delete_policy: lockedRow.delete_policy ?? null,
+      });
+      if (lockedSemantics.semanticsVersion !== 2) {
+        throw appError(
+          "INCOMPATIBLE_ACTION_SEMANTICS",
+          `Rollback is only available for v2 action types; current version is ${lockedSemantics.semanticsVersion}.`,
+          { currentVersion: lockedSemantics.semanticsVersion },
+        );
+      }
+      const previousV2Hash = hashActionDefinition({
+        parameters: lockedRow.parameters,
+        rules: lockedRow.rules,
+        semanticsVersion: lockedSemantics.semanticsVersion,
+        executionMode: lockedSemantics.executionMode,
+        deletePolicy: lockedSemantics.deletePolicy,
+      });
+      const restored = await pg.query(
+        `UPDATE action_type
+            SET parameters = $3,
+                rules = $4,
+                semantics_version = $5,
+                execution_mode = $6,
+                delete_policy = $7,
+                updated_at = now()
+          WHERE ontology_id = $1 AND api_name = $2
+          RETURNING *`,
+        [
+          ontologyId,
+          apiName,
+          JSON.stringify(previousDef.parameters ?? []),
+          JSON.stringify(previousDef.rules ?? []),
+          targetVersion,
+          previousDef.executionMode ?? "declarative",
+          previousDef.deletePolicy ?? "legacy_unchecked",
+        ],
+      );
+      if (restored.rows.length === 0) {
+        throw appError(
+          "ACTION_TYPE_NOT_FOUND",
+          `Action type '${apiName}' disappeared during rollback UPDATE.`,
+        );
+      }
+      const restoredRow = restored.rows[0] as ActionTypeRow;
+      const restoredSemantics = resolveSemanticsForRow({
+        semantics_version: restoredRow.semantics_version ?? null,
+        execution_mode: restoredRow.execution_mode ?? null,
+        delete_policy: restoredRow.delete_policy ?? null,
+      });
+      const restoredHash = hashActionDefinition({
+        parameters: restoredRow.parameters,
+        rules: restoredRow.rules,
+        semanticsVersion: restoredSemantics.semanticsVersion,
+        executionMode: restoredSemantics.executionMode,
+        deletePolicy: restoredSemantics.deletePolicy,
+      });
+      const logRow = await recordMigration(
+        {
+          ontologyId,
+          actionApiName: apiName,
+          migrationKind: "rollback",
+          previousSemanticsVersion: 2,
+          resultingSemanticsVersion: targetVersion,
+          previousDeletePolicy: lockedSemantics.deletePolicy,
+          resultingDeletePolicy: restoredSemantics.deletePolicy,
+          previousDefinitionHash: previousV2Hash,
+          resultingDefinitionHash: restoredHash,
+          previousDefinitionSnapshot: {
+            parameters: lockedRow.parameters,
+            rules: lockedRow.rules,
+            semanticsVersion: lockedSemantics.semanticsVersion,
+            executionMode: lockedSemantics.executionMode,
+            deletePolicy: lockedSemantics.deletePolicy,
+          },
+          resultingDefinitionSnapshot: {
+            parameters: restoredRow.parameters,
+            rules: restoredRow.rules,
+            semanticsVersion: restoredSemantics.semanticsVersion,
+            executionMode: restoredSemantics.executionMode,
+            deletePolicy: restoredSemantics.deletePolicy,
+          },
+          parameterChanges: [],
+          acknowledgedFindingCodes: [],
+          adapterEnabled: false,
+          actor,
+          correlationId: correlationId ?? null,
+        },
+        pg,
+      );
+      return { rolledBack: restoredRow, log: logRow };
+    },
+  );
 }
 
 /**

@@ -13,6 +13,8 @@
 // ---------------------------------------------------------------------------
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import fs from "fs";
+import os from "os";
+import path from "path";
 
 import {
   resolveTransformPython,
@@ -20,8 +22,20 @@ import {
   preflightTransformRuntime,
 } from "../../../../../src/services/codeRepository/transforms/runtimeConfig";
 
-const SPIKE_VENV = "/tmp/pyspark-spike-venv/bin/python";
-const HAS_VENV = fs.existsSync(SPIKE_VENV);
+// The runtimeConfig's candidatePythons() walks, in order:
+//   TELLUS_PYTHON_BIN, PB_B4_PYTHON, ~/.tellus/transform-runtime-venv/bin/python,
+//   /tmp/pyspark-spike-venv/bin/python, python3
+// A test environment on a Tellus dev machine has the canonical
+// ~/.tellus/transform-runtime-venv installed; a CI container may have only
+// /tmp/pyspark-spike-venv. HAS_VENV is true when EITHER exists — matches the
+// production candidate-list contract (any one of these makes the venv win
+// over the bare /usr/bin/python3 fallback).
+const VENV_CANDIDATES = [
+  path.join(os.homedir(), ".tellus", "transform-runtime-venv", "bin", "python"),
+  "/tmp/pyspark-spike-venv/bin/python",
+];
+const SPIKE_VENV = VENV_CANDIDATES.find((p) => fs.existsSync(p)) ?? VENV_CANDIDATES[0];
+const HAS_VENV = VENV_CANDIDATES.some((p) => fs.existsSync(p));
 const orig = { ...process.env };
 
 beforeEach(() => {

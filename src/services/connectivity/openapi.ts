@@ -36,6 +36,8 @@ import {
   EgressPolicy,
   ErrorEnvelopeSchema,
   PostgresConfig,
+  RestApiConfig,
+  RestApiDomainConfig,
   TableImport,
   TlsMode,
   VirtualTable,
@@ -58,6 +60,8 @@ export function buildOpenApiDocument(): ReturnType<
   registry.register("WorkerType", WorkerType);
   registry.register("TlsMode", TlsMode);
   registry.register("PostgresConfig", PostgresConfig);
+  registry.register("RestApiDomainConfig", RestApiDomainConfig);
+  registry.register("RestApiConfig", RestApiConfig);
   registry.register("ConnectionConfig", ConnectionConfig);
   registry.register("EgressPolicy", EgressPolicy);
   registry.register("ConnectionStatus", ConnectionStatus);

@@ -29,9 +29,12 @@ import type { LinkTypeRow } from "../models/linkType";
 
 /** Source descriptor for resolving property values and object references. */
 interface ValueSource {
-  source: "parameter" | "static" | "currentTimestamp" | "currentUser";
+  source: "parameter" | "static" | "currentTimestamp" | "currentUser" | "writebackResponse";
   param?: string;
   value?: unknown;
+  // Phase 4 — writebackResponse value source fields.
+  outputId?: string;
+  path?: string;
 }
 
 /** A createObject rule. */
@@ -87,7 +90,30 @@ type Rule =
   | ModifyOrCreateObjectRule
   | DeleteObjectRule
   | AddLinkRule
-  | RemoveLinkRule;
+  | RemoveLinkRule
+  | CreateInterfaceLinkRuleRuntime
+  | DeleteInterfaceLinkRuleRuntime;
+
+// Interface-link rules (Phase 2) — runtime-resolved into concrete
+// addLink/removeLink rules by `interfaceLinkRules.resolveInterfaceLinkRule`
+// before the existing `compileLinkRule` path applies them. The runtime
+// types declared here mirror `actionRules.types.ts` but kept local to
+// keep the rule compiler independent of the actionTypes route layer.
+interface CreateInterfaceLinkRuleRuntime {
+  type: "createInterfaceLink";
+  interfaceLinkConstraint: string;
+  interfaceId: string;
+  source: { source: "parameter"; param: string; objectType?: string };
+  target: { source: "parameter"; param: string; objectType?: string };
+}
+interface DeleteInterfaceLinkRuleRuntime {
+  type: "deleteInterfaceLink";
+  interfaceLinkConstraint: string;
+  interfaceId: string;
+  source: { source: "parameter"; param: string; objectType?: string };
+  target: { source: "parameter"; param: string; objectType?: string };
+}
+type InterfaceLinkRuleRuntimeUnion = CreateInterfaceLinkRuleRuntime | DeleteInterfaceLinkRuleRuntime;
 
 /** A single link edit entry appended to an object's edit. */
 export interface LinkEdit {
@@ -129,6 +155,20 @@ export interface ExecutionContext {
    * rule handlers and read-path helpers that need branch scoping.
    */
   branchId?: string;
+  /**
+   * Phase 4 — typed outputs map from the writeback pre-edit stage.
+   * When an action type's `writeback_config` declares `outputBindings`,
+   * the actionExecutor Stage 5 calls `executeWriteback` before the
+   * compileRules path runs (for actions whose rule bodies use
+   * `writebackResponse` value sources). The outputs map is keyed by
+   * the binding's `outputId` and carries the JSONPointer-extracted
+   * raw value from the validated response body.
+   *
+   * Phase 4 ships the abort-on-failure wire-up at the actionExecutor
+   * stage; the typed outputs map propagated into `compileRules` here
+   * lifts the `writebackResponse` ValueSource resolution next.
+   */
+  writebackOutputs?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +247,14 @@ export async function compileRules(
         );
         break;
 
+      case "createInterfaceLink":
+      case "deleteInterfaceLink":
+        await compileInterfaceLinkRule(
+          rule as InterfaceLinkRuleRuntimeUnion,
+          resolvedParameters, objectFetcher, executionContext, i, preliminaryEdits, errors
+        );
+        break;
+
       default:
         errors.push(`Unknown rule type '${(rule as any).type}' at index ${i}`);
     }
@@ -255,6 +303,29 @@ function resolveValue(
 
     case "currentUser":
       return executionContext.executedBy;
+
+    case "writebackResponse": {
+      // Phase 4 — read the typed outputs map from the writeback pre-edit
+      // stage. The executor populates `executionContext.writebackOutputs`
+      // key = outputId (per the action_type.writeback_config.outputBindings
+      // JSONPointer extraction). The optional `path` field is a
+      // JSONPointer into the per-output value (rare; most bindings
+      // are 1:1). When the outputs map is absent (no writeback configured
+      // — the canonical case for the existing 277 action types), we
+      // return undefined — the compileRules-caller surfaces a "could
+      // not resolve" structured error rather than crashing.
+      const ws = source as unknown as { outputId?: string; path?: string };
+      const outputs = executionContext.writebackOutputs;
+      if (!outputs) return undefined;
+      if (typeof ws.outputId !== "string") return undefined;
+      const raw = outputs[ws.outputId];
+      if (raw === undefined || raw === null) return undefined;
+      if (!ws.path || ws.path === "" || ws.path === "/") return raw;
+      // Local JSONPointer walk into the per-output raw value. Mirrors
+      // the executor's lift path so save-time validation guarantees the
+      // shape.
+      return localJsonPointer(raw, ws.path);
+    }
 
     default:
       return undefined;
@@ -512,6 +583,97 @@ async function compileDeleteObject(
 // addLink / removeLink compiler
 // ---------------------------------------------------------------------------
 
+/**
+ * Interface-link rule compiler (Phase 2). Defers resolution of the
+ * concrete link_type(s) implementing the interface contract to
+ * `interfaceLinkRules.resolveInterfaceLinkRule`, then maps each returned
+ * candidate into a concrete addLink or removeLink rule body and feeds it
+ * back through the existing `compileLinkRule` path.
+ *
+ * Ambiguity (>1 candidate) on createInterfaceLink is a hard fail BEFORE
+ * any edit is added — no ontology edit is applied to a non-deterministically-
+ * resolved create. For deleteInterfaceLink, every candidate becomes a
+ * removeLink, deterministic by link_type.api_name order (enforced inside
+ * `interfaceLinkRules.buildConcreteLinkEditsFromCandidates`).
+ */
+async function compileInterfaceLinkRule(
+  rule: InterfaceLinkRuleRuntimeUnion,
+  resolvedParameters: Record<string, unknown>,
+  objectFetcher: ObjectFetcher,
+  executionContext: ExecutionContext,
+  ruleIndex: number,
+  edits: PreliminaryEdit[],
+  errors: string[],
+): Promise<void> {
+  // The runtime source/target objects are resolved the SAME way as for
+  // concrete link rules — they must point at object_reference parameters
+  // whose object type the user declared on the action type. The interface-
+  // link resolver then checks the source/target object types implement the
+  // constraint's owning interface + the target interface (or fixed target
+  // object type).
+  const sourceVs = rule.source as unknown as ValueSource;
+  const targetVs = rule.target as unknown as ValueSource;
+
+  const sourcePkValue = resolveValue(sourceVs, resolvedParameters, executionContext);
+  const targetPkValue = resolveValue(targetVs, resolvedParameters, executionContext);
+  if (sourcePkValue === undefined || sourcePkValue === null) {
+    errors.push(`${rule.type} rule at index ${ruleIndex} could not resolve source object reference.`);
+    return;
+  }
+  if (targetPkValue === undefined || targetPkValue === null) {
+    errors.push(`${rule.type} rule at index ${ruleIndex} could not resolve target object reference.`);
+    return;
+  }
+
+  const { resolveInterfaceLinkRule, buildConcreteLinkEditsFromCandidates } = await import("./rules/interfaceLinkRules");
+  const result = await resolveInterfaceLinkRule(executionContext.ontologyId, rule as any);
+
+  switch (result.kind) {
+    case "missing":
+      errors.push(`${rule.type} rule at index ${ruleIndex}: interface_link_constraint '${result.constraintApiName}' not found.`);
+      return;
+    case "no_match":
+      errors.push(`${rule.type} rule at index ${ruleIndex}: no concrete link_type implements the interface_link_constraint '${result.constraintApiName}' for the resolved source/target object types.`);
+      return;
+    case "invalid":
+      for (const e of result.errors) errors.push(`${rule.type} rule at index ${ruleIndex}: ${e}`);
+      return;
+    case "ambiguous":
+      errors.push(
+        `${rule.type} rule at index ${ruleIndex}: ambiguous interface-link resolution. ` +
+        `More than one concrete link_type satisfies the constraint '${rule.interfaceLinkConstraint}'. ` +
+        `Failing before any edit is applied per the public behavioural spec. ` +
+        `Candidates: ${result.candidates.map((c) => `${c.api_name} (${c.cardinality})`).join(", ")}.`,
+      );
+      return;
+    case "ok":
+      // Map each candidate to a concrete addLink/removeLink rule and feed
+      // it back through compileLinkRule. The candidate edit bodies use
+      // the runtime source/target pk values via the same parameter value
+      // source as the original rule, so the existing compileLinkRule
+      // path resolves them to the right PreliminaryEdit unchanged.
+      const candidates = result.candidates;
+      const concreteEdits = buildConcreteLinkEditsFromCandidates(rule, candidates);
+      for (const edit of concreteEdits) {
+        await compileLinkRule(
+          edit as unknown as AddLinkRule | RemoveLinkRule,
+          edit.type === "addLink" ? "add" : "remove",
+          resolvedParameters,
+          objectFetcher,
+          executionContext,
+          ruleIndex,
+          edits,
+          errors,
+        );
+      }
+      return;
+    default: {
+      const _exhaustive: never = result;
+      throw new Error(`Internal: unhandled interface-link resolver kind ${JSON.stringify(_exhaustive)}`);
+    }
+  }
+}
+
 async function compileLinkRule(
   rule: AddLinkRule | RemoveLinkRule,
   linkOperation: "add" | "remove",
@@ -759,6 +921,34 @@ function mergeEdits(
   }
 
   return merged;
+}
+
+// ---------------------------------------------------------------------------
+// Local JSONPointer (RFC 6901) walk for the writebackResponse value-source
+// optional `path` field. Mirrors the per-binding extraction in
+// `writebackExecutor.extractJsonPointer`.
+// ---------------------------------------------------------------------------
+
+function localJsonPointer(rootObj: unknown, pointer: string): unknown {
+  if (!pointer || pointer === "" || pointer === "/") return rootObj;
+  if (!pointer.startsWith("/")) {
+    throw new Error(`JSONPointer '${pointer}' must start with '/'.`);
+  }
+  const segments = pointer.split("/").slice(1).map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+  let current: any = rootObj;
+  for (const seg of segments) {
+    if (current == null) return undefined;
+    if (Array.isArray(current)) {
+      const idx = Number.parseInt(seg, 10);
+      if (Number.isNaN(idx) || idx < 0 || idx >= current.length) return undefined;
+      current = current[idx];
+    } else if (typeof current === "object") {
+      current = current[seg];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
 }
 
 // ---------------------------------------------------------------------------

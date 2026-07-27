@@ -163,12 +163,92 @@ export function resolveRepoDeps(requirementsContent: string | null | undefined):
   }
 }
 
+// Candidate PYTHON binaries for the lightweight runtime, in priority order.
+// The lightweight path does NOT require pyspark/pandas/pyarrow (the spark
+// preflight forbids that — track 1 split). By default the same venv python as
+// the spark path is reused (which already has pandas+pyarrow); refusing
+// pyspark on a system python3 is a real lightweight path on a host without
+// the provisioned venv (e.g. a unit test machine), so we accept `python3`.
+function candidateLightweightPythons(): string[] {
+  const out: string[] = [
+    process.env.TELLUS_LIGHTWEIGHT_PYTHON_BIN,
+    process.env.TELLUS_PYTHON_BIN,
+    process.env.PB_B4_PYTHON,
+    path.join(os.homedir(), ".tellus", "transform-runtime-venv", "bin", "python"),
+    "/tmp/pyspark-spike-venv/bin/python",
+  ].filter((p): p is string => typeof p === "string" && p.length > 0);
+  out.push("python3"); // last resort
+  return out;
+}
+
+/** Resolve the python binary to use for the LIGHTWEIGHT transform runtime.
+ * Same venv preference as resolveTransformPython, but with a dedicated env
+ * (TELLUS_LIGHTWEIGHT_PYTHON_BIN) — operators can pin a lightweight runtime to
+ * a cheaper venv that omits pyspark/java (e.g. an in-cluster sidecar). */
+export function resolveLightweightPython(): string {
+  for (const c of candidateLightweightPythons()) {
+    if (c === "python3") return c;
+    if (fs.existsSync(c)) return c;
+  }
+  return "python3";
+}
+
+/**
+ * Preflight the LIGHTWEIGHT runtime (Track 1): the resolved python must run,
+ * and import pandas (the shim reads Input.pandas via pandas; pyarrow is
+ * optional but emit a CRIPPLING preflight warning if absent since some pandas
+ * CSV I/O paths use it). PySpark + Java are NOT required — the @lightweight
+ * contract prohibits Input.dataframe() so no JVM is started. Returns a clear,
+ * actionable error if any check fails so an all-@lightweight build fails
+ * LOUDLY at scheduling time (503 Transform:RuntimeNotConfigured) instead of
+ * the cryptic 'cannot import pandas' from the child.
+ */
+export function preflightLightweightRuntime(): RuntimePreflight {
+  const python = resolveLightweightPython();
+  const javaHome = resolveJavaHome();
+
+  // (a) python runs.
+  const ver = spawnSync(python, ["--version"], { timeout: 5_000, encoding: "utf8" });
+  if (ver.status !== 0) {
+    return {
+      ok: false,
+      python,
+      javaHome,
+      error: `lightweight runtime '${python}' is not runnable (${ver.error ? String(ver.error) : `exit ${ver.status}`}). Set TELLUS_LIGHTWEIGHT_PYTHON_BIN to a venv with pandas (no pyspark needed).`,
+    };
+  }
+  const version = (ver.stdout || ver.stderr || "").trim();
+
+  // (b) import pandas (the shim's Input.pandas + Output.write_dataframe both
+  // go through pandas). PySpark is intentionally NOT required for lightweight.
+  const imp = spawnSync(python, ["-c", "import pandas"], {
+    timeout: 15_000,
+    encoding: "utf8",
+  });
+  if (imp.status !== 0) {
+    const errTail = (imp.stderr || imp.stdout || "").trim().split("\n").pop() || "(no output)";
+    return {
+      ok: false,
+      python,
+      javaHome,
+      version,
+      error: `lightweight runtime not configured (python='${python}'): ${errTail}. The transforms.api shim's Input.pandas() requires pandas (NO pyspark / Java needed). Install: pip install pandas`,
+    };
+  }
+
+  return { ok: true, python, javaHome, version };
+}
+
 /**
  * Preflight the PySpark runtime: the resolved python must run, import
  * pyspark + pandas + pyarrow (with JAVA_HOME set), and the resolved java must
  * run. Returns a clear, actionable error if any step fails — so the build
  * fails loudly at preflight (503 Transform:RuntimeNotConfigured) instead of
  * the cryptic "No module named 'pyspark'" from the child process.
+ *
+ * Used when at least one discovered transform is Spark-backed (kind in
+ * transform | transform_df | transform_pandas). An all-@lightweight repo
+ * uses preflightLightweightRuntime() instead — avoiding requiring the JVM.
  */
 export function preflightTransformRuntime(): RuntimePreflight {
   const python = resolveTransformPython();

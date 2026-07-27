@@ -448,7 +448,7 @@ export function quoteIdent(name: string): string {
 // ---------------------------------------------------------------------------
 
 export interface ExecuteOptions extends CompileOptions {
-  /** Hard memory cap for this connection. Defaults per the pool (12GB). */
+  /** Hard memory cap for this connection. Defaults per the pool (1GB). */
   memoryLimit?: string;
 }
 

@@ -89,11 +89,15 @@ export function createTransformsRouter(deps: TransformRoutesDeps): Router {
         if (typeof entryPoint !== "string" || entryPoint.length === 0) {
           return sendErr(res, transformError("Transform:InvalidArgument", { message: "entryPoint (string) required" }));
         }
+        // Optional repo-relative path of the active file — disambiguate the
+        // preview-test lookup when two transforms share an entry-point name.
+        const sourcePath = typeof req.body?.sourcePath === "string" && req.body.sourcePath.length > 0 ? req.body.sourcePath : undefined;
         const result = await runTransformDryRun({
           stemma: deps.stemma,
           repositoryRid: rid,
           branch,
           entryPoint,
+          sourcePath,
           fixtures,
         });
         return res.status(200).json(result);
@@ -123,6 +127,11 @@ export function createTransformsRouter(deps: TransformRoutesDeps): Router {
         if (typeof entryPoint !== "string" || entryPoint.length === 0) {
           return sendErr(res, transformError("Transform:InvalidArgument", { message: "entryPoint (string) required" }));
         }
+        // Optional repo-relative path of the active file. Used to disambiguate
+        // the preview lookup when two transforms share an entry-point name
+        // across files (e.g. two `def compute` in two source files). When
+        // absent the FIRST discovered match wins (legacy behavior).
+        const sourcePath = typeof req.body?.sourcePath === "string" && req.body.sourcePath.length > 0 ? req.body.sourcePath : undefined;
         const fileOverrides = sanitizeFileOverrides(req.body?.fileOverrides);
         // Server-side cancel: the FE Stop button aborts the HTTP (its own
         // AbortController) — the socket closes, this fires (res 'close' fires on
@@ -141,6 +150,7 @@ export function createTransformsRouter(deps: TransformRoutesDeps): Router {
           repositoryRid: rid,
           branch,
           entryPoint,
+          sourcePath,
           fileOverrides,
           principal: principalOf(req),
           signal: cancel.signal,
@@ -234,7 +244,8 @@ export function createTransformsRouter(deps: TransformRoutesDeps): Router {
         const rid = req.params.rid;
         const rows = await pool.query(
           `SELECT rid, repository_rid, branch, commit_sha, actor, status,
-                  transform_count, outputs, reason, enqueued_at, started_at, ended_at
+                  transform_count, outputs, reason, enqueued_at, started_at, ended_at,
+                  runtime
              FROM transform_build
             WHERE repository_rid = $1
             ORDER BY enqueued_at DESC
@@ -258,7 +269,8 @@ export function createTransformsRouter(deps: TransformRoutesDeps): Router {
         const { rid, buildId } = req.params;
         const b = await pool.query(
           `SELECT rid, repository_rid, branch, commit_sha, actor, status,
-                  transform_count, outputs, reason, enqueued_at, started_at, ended_at
+                  transform_count, outputs, reason, enqueued_at, started_at, ended_at,
+                  runtime
              FROM transform_build WHERE rid = $1 AND repository_rid = $2`,
           [buildId, rid],
         );
@@ -533,5 +545,11 @@ function serializeBuild(r: Record<string, unknown>): Record<string, unknown> {
     enqueuedAt: r.enqueued_at,
     startedAt: r.started_at,
     endedAt: r.ended_at,
+    // Track 1: surface the build's runtime tag (transform_build.runtime,
+    // migration 120) so the FE can render the lightweight/spark label and the
+    // AIE agent can route build/test accordingly. Falls back to 'spark' when
+    // the column is null on a historical row that pre-dates the migration's
+    // backfill.
+    runtime: r.runtime ?? "spark",
   };
 }

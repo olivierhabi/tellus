@@ -8,6 +8,12 @@
 # chatty or crash-looping service can't fill the host disk (a top cause of
 # "everything went down at once" incidents). Merge into each service with
 # `logging: *default-logging`.
+#
+# Memory defaults are intentionally sized for a single-user development
+# workstation. The previous limits added up to ~15.6 GiB and OpenSearch
+# locked its heap/mmap pages, so a 12 GiB Docker Desktop VM could consume its
+# entire allocation. Every TELLUS_*_MEMORY_LIMIT remains overridable for
+# large-data verification runs.
 x-logging: &default-logging
   driver: json-file
   options:
@@ -44,19 +50,18 @@ services:
         limits:
           memory: 64M
           cpus: "0.25"
+    memswap_limit: 64M
 
   # -------------------------------------------------------------------------
   # mem-monitor — memory pressure early-warning system.
   #
   # Polls `docker stats` every 60 s and writes structured log lines when any
   # container crosses the WARNING (80 %) or CRITICAL (90 %) threshold.
-  # At CRITICAL it also triggers a graceful `docker restart` so the container
-  # reclaims its heap before Docker's OOM-killer forces a hard kill — a hard
-  # kill restarts the container too, but leaves no log trail and can corrupt
-  # in-flight writes (Kafka log segments, ClickHouse merges, etc.).
-  #
-  # Cooldown: a container that was restarted is skipped for the next 5 minutes
-  # so a genuinely busy service isn't restart-looped.
+  # CRITICAL is alert-only. `docker stats` includes reclaimable filesystem
+  # cache, so restarting stateful databases at an arbitrary percentage can
+  # interrupt WAL recovery, Kafka writes, or ClickHouse merges even though the
+  # kernel could reclaim that cache. Hard cgroup limits below remain the actual
+  # safety boundary and restart policies handle a real OOM exit.
   #
   # Log lines are emitted to stdout (visible via `docker compose logs
   # mem-monitor`). In a deployed environment, ship these logs to your
@@ -72,24 +77,14 @@ services:
       - |
         WARN_PCT=80
         CRIT_PCT=90
-        COOLDOWN=300
-        declare_cooldowns() { :; }
-        echo "[mem-monitor] started — warn=$${WARN_PCT}% crit=$${CRIT_PCT}% cooldown=$${COOLDOWN}s"
+        echo "[mem-monitor] started — warn=$${WARN_PCT}% crit=$${CRIT_PCT}% (alert-only)"
         while true; do
-          NOW=$$(date +%s)
           docker stats --no-stream --format '{{.Name}} {{.MemPerc}} {{.MemUsage}}' 2>/dev/null \
           | while read -r name raw_pct usage; do
               pct=$$(printf '%.0f' "$${raw_pct%%%*}" 2>/dev/null) || continue
               [ -z "$$pct" ] && continue
-              cooldown_key="/tmp/cooldown_$${name}"
-              if [ -f "$$cooldown_key" ]; then
-                last=$$(cat "$$cooldown_key")
-                [ $$(( NOW - last )) -lt $$COOLDOWN ] && continue
-              fi
               if [ "$$pct" -ge "$$CRIT_PCT" ]; then
-                echo "[CRITICAL $$(date -Iseconds)] $$name at $${raw_pct} ($$usage) — restarting to reclaim heap before OOM kill"
-                echo "$$NOW" > "$$cooldown_key"
-                docker restart "$$name" >/dev/null 2>&1 || true
+                echo "[CRITICAL $$(date -Iseconds)] $$name at $${raw_pct} ($$usage)"
               elif [ "$$pct" -ge "$$WARN_PCT" ]; then
                 echo "[WARN    $$(date -Iseconds)] $$name at $${raw_pct} ($$usage)"
               fi
@@ -102,6 +97,7 @@ services:
         limits:
           memory: 64M
           cpus: "0.10"
+    memswap_limit: 64M
 
   postgres:
     image: postgres:16-alpine
@@ -122,13 +118,18 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: ${TELLUS_POSTGRES_MEMORY_LIMIT:-512M}
           cpus: "1.5"
+    memswap_limit: ${TELLUS_POSTGRES_MEMORY_LIMIT:-512M}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tellus -d tellus_db"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      # Existing dev databases can need a minute of WAL replay after Docker
+      # Desktop or the laptop is killed under memory pressure. Without a start
+      # period, autoheal restarted Postgres mid-recovery every ~25 seconds.
+      retries: 12
+      start_period: 90s
 
   # -------------------------------------------------------------------------
   # pg-backup — scheduled logical backups of the APP Postgres.
@@ -167,8 +168,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: ${TELLUS_PG_BACKUP_MEMORY_LIMIT:-256M}
           cpus: "0.5"
+    memswap_limit: ${TELLUS_PG_BACKUP_MEMORY_LIMIT:-256M}
     # The image's built-in healthcheck uses a 5-minute interval, which keeps the
     # container "starting" for ~5 min and needlessly stalls orchestration
     # readiness. Override with a fast probe against the same status endpoint
@@ -192,18 +194,14 @@ services:
       # disabled via `plugins.security.disabled=true` above; this value is
       # only consumed by the demo installer and never authenticated against.
       - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Str0ng!P@ssw0rd-Tellus-9a7b3Cz
-      # JVM sizing rule (see docs/phase1-os-sync-merge-investigation.md §3):
-      # heap <= 50% of the container (ES/OS convention: leave >= 50% for the OS
-      # filesystem cache / Lucene mmap segment pages); Xms=Xmx to avoid heap
-      # resize pauses under bootstrap.memory_lock; MaxDirectMemorySize bounded
-      # so heap+direct ~= 50% of the container. 1.5g heap + 512m direct = 2g
-      # JVM = 50% of the 4g container; the other 2g is for Lucene mmap + overhead.
-      - "OPENSEARCH_JAVA_OPTS=-Xms1536m -Xmx1536m -XX:MaxDirectMemorySize=512m"
-      # Pin JVM heap + Lucene mmap segment pages in RAM (no swap). Requires the
-      # memlock ulimit below. Replaces memswap_limit=-1 (unlimited swap), which
-      # let mmap pages be swapped out under pressure -> GC/IO thrash -> the
-      # ECONNRESET / "Request timed out" symptoms at ~2.1-2.5M docs.
-      - bootstrap.memory_lock=true
+      # Single-user dev default: 512 MiB heap + 256 MiB direct memory inside a
+      # 1.5 GiB container. Large reindex/load tests can restore the old sizing:
+      # TELLUS_OPENSEARCH_JAVA_OPTS="-Xms1536m -Xmx1536m -XX:MaxDirectMemorySize=512m"
+      # TELLUS_OPENSEARCH_MEMORY_LIMIT=4g
+      - "OPENSEARCH_JAVA_OPTS=${TELLUS_OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m}"
+      # Locking heap + Lucene mmap pages made Docker's VM unable to reclaim RAM
+      # on a 16 GiB laptop. It remains an explicit opt-in for large load tests.
+      - "bootstrap.memory_lock=${TELLUS_OPENSEARCH_MEMORY_LOCK:-false}"
     ports:
       - "127.0.0.1:9200:9200"
     volumes:
@@ -212,13 +210,17 @@ services:
       memlock:
         soft: -1
         hard: -1
-    mem_limit: 4g
+    mem_limit: ${TELLUS_OPENSEARCH_MEMORY_LIMIT:-1536M}
+    memswap_limit: ${TELLUS_OPENSEARCH_MEMORY_LIMIT:-1536M}
     cpus: "1.5"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      # The smaller dev heap trades startup speed for a much lower footprint,
+      # especially on Apple Silicon where this image may run under emulation.
+      retries: 12
+      start_period: 90s
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
@@ -232,16 +234,17 @@ services:
       # cleanly but the healthcheck always fails, which then blocks
       # `kafka:` from starting via depends_on.
       KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat,mntr,conf,cons,dirs,dump,envi,gtmk,hash,isro,wchc,wchp,wchs"
-      # cp-zookeeper uses KAFKA_HEAP_OPTS for its JVM. Cap at 256 MB max;
+      # cp-zookeeper uses KAFKA_HEAP_OPTS for its JVM. Cap at 128 MB max;
       # start at 64 MB so the JVM only grabs memory it actually needs at idle.
-      KAFKA_HEAP_OPTS: "-Xmx256m -Xms64m"
+      KAFKA_HEAP_OPTS: "${TELLUS_ZOOKEEPER_HEAP_OPTS:--Xmx128m -Xms64m}"
     ports:
       - "127.0.0.1:2181:2181"
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${TELLUS_ZOOKEEPER_MEMORY_LIMIT:-256M}
           cpus: "0.5"
+    memswap_limit: ${TELLUS_ZOOKEEPER_MEMORY_LIMIT:-256M}
     healthcheck:
       test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok || exit 1"]
       interval: 10s
@@ -269,11 +272,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      # Start the JVM heap at 256 MB and let it grow up to 1 GB on demand.
-      # The previous implicit default was -Xms1G -Xmx1G: the JVM pre-committed
-      # the full gigabyte at process start regardless of load, burning ~700 MB
-      # of RSS for a broker with no active producers or consumers.
-      KAFKA_HEAP_OPTS: "-Xmx1G -Xms256M"
+      # A single-broker dev stack needs only a small heap at idle. Override
+      # TELLUS_KAFKA_HEAP_OPTS for high-throughput/load-test runs.
+      KAFKA_HEAP_OPTS: "${TELLUS_KAFKA_HEAP_OPTS:--Xmx384m -Xms128m}"
       # Disable the Confluent telemetry phone-home reporter. This is the root
       # cause of the zombie process accumulation: the reporter forks a child JVM
       # every few minutes to ship usage metrics to Confluent. init:true above
@@ -285,9 +286,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: ${TELLUS_KAFKA_MEMORY_LIMIT:-768M}
           cpus: "2.0"
-    memswap_limit: 1536M
+    memswap_limit: ${TELLUS_KAFKA_MEMORY_LIMIT:-768M}
     healthcheck:
       test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -304,17 +305,16 @@ services:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-      # Cap heap at 256 MB; start at 128 MB. Schema Registry is a thin proxy
-      # layer — 256 MB max heap is comfortable for hundreds of schemas.
-      # Drops the idle footprint from ~312 MB to ~200 MB.
-      SCHEMA_REGISTRY_HEAP_OPTS: "-Xmx256m -Xms128m"
+      # Schema Registry is a thin proxy in local development.
+      SCHEMA_REGISTRY_HEAP_OPTS: "${TELLUS_SCHEMA_REGISTRY_HEAP_OPTS:--Xmx192m -Xms96m}"
     ports:
       - "127.0.0.1:8081:8081"
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${TELLUS_SCHEMA_REGISTRY_MEMORY_LIMIT:-384M}
           cpus: "1.0"
+    memswap_limit: ${TELLUS_SCHEMA_REGISTRY_MEMORY_LIMIT:-384M}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects || exit 1"]
       interval: 10s
@@ -335,10 +335,8 @@ services:
       # Keycloak ships no explicit heap cap — without this the JVM applies its
       # ergonomic default (~25% of container limit = 192 MB max) but ignores
       # cgroup memory limits on some JDK versions and grabs far more. Setting
-      # both bounds explicitly: 128 MB initial keeps startup lean; 384 MB max
-      # leaves ~384 MB for Quarkus native memory, metaspace, and OS within the
-      # 768 MB container limit.
-      JAVA_OPTS_APPEND: "-Xms128m -Xmx384m"
+      # both bounds explicitly and keep the single-user dev default modest.
+      JAVA_OPTS_APPEND: "${TELLUS_KEYCLOAK_JAVA_OPTS:--Xms96m -Xmx256m}"
     ports:
       - "127.0.0.1:8086:8086"
     volumes:
@@ -346,8 +344,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: ${TELLUS_KEYCLOAK_MEMORY_LIMIT:-512M}
           cpus: "1.5"
+    memswap_limit: ${TELLUS_KEYCLOAK_MEMORY_LIMIT:-512M}
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -394,8 +393,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${TELLUS_MINIO_MEMORY_LIMIT:-384M}
           cpus: "1.0"
+    memswap_limit: ${TELLUS_MINIO_MEMORY_LIMIT:-384M}
     healthcheck:
       # `mc ready local` is preferred but requires the mc client which
       # this image doesn't ship — the `/minio/health/live` endpoint is
@@ -454,7 +454,7 @@ services:
       - "--appendonly"
       - "yes"
       - "--maxmemory"
-      - "384mb"
+      - "${TELLUS_REDIS_MAXMEMORY:-192mb}"
       - "--maxmemory-policy"
       - "allkeys-lru"
     ports:
@@ -465,8 +465,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${TELLUS_REDIS_MEMORY_LIMIT:-256M}
           cpus: "0.5"
+    memswap_limit: ${TELLUS_REDIS_MEMORY_LIMIT:-256M}
     healthcheck:
       test: ["CMD-SHELL", "redis-cli --no-auth-warning -a tellus_overlay_pw ping | grep -q PONG"]
       interval: 5s
@@ -503,9 +504,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: ${TELLUS_CLICKHOUSE_MEMORY_LIMIT:-1G}
           cpus: "2.0"
-    memswap_limit: 2G
+    memswap_limit: ${TELLUS_CLICKHOUSE_MEMORY_LIMIT:-1G}
     healthcheck:
       # `localhost` resolves to IPv6 ::1 inside this image, where ClickHouse
       # isn't listening — use the IPv4 loopback explicitly.
@@ -542,8 +543,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${TELLUS_TEMPORAL_POSTGRES_MEMORY_LIMIT:-256M}
           cpus: "0.5"
+    memswap_limit: ${TELLUS_TEMPORAL_POSTGRES_MEMORY_LIMIT:-256M}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
       interval: 5s
@@ -568,8 +570,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: ${TELLUS_TEMPORAL_MEMORY_LIMIT:-512M}
           cpus: "1.0"
+    memswap_limit: ${TELLUS_TEMPORAL_MEMORY_LIMIT:-512M}
     healthcheck:
       # The frontend binds to the container address, not loopback, so probe
       # via the service alias. SERVING ⇒ healthy; anything else exits non-zero.
@@ -629,8 +632,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${TELLUS_LAKEKEEPER_POSTGRES_MEMORY_LIMIT:-256M}
           cpus: "0.5"
+    memswap_limit: ${TELLUS_LAKEKEEPER_POSTGRES_MEMORY_LIMIT:-256M}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lakekeeper -d lakekeeper"]
       interval: 5s
@@ -666,8 +670,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: ${TELLUS_LAKEKEEPER_MEMORY_LIMIT:-384M}
           cpus: "1.0"
+    memswap_limit: ${TELLUS_LAKEKEEPER_MEMORY_LIMIT:-384M}
     healthcheck:
       # Distroless image — no shell/curl. The binary ships its own probe.
       test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
@@ -757,6 +762,20 @@ services:
       # endpoint must be reachable from the Lakekeeper container, hence minio:9000.
       LAKEKEEPER_URL: http://lakekeeper:8181
       ICEBERG_S3_ENDPOINT: http://minio:9000
+      # Bound all in-process compute for the single-user container. DuckDB's
+      # old 12 GB default alone equalled the whole Docker Desktop allocation.
+      NODE_OPTIONS: "${TELLUS_APP_NODE_OPTIONS:---max-old-space-size=512}"
+      DUCKDB_MEMORY_LIMIT: ${DUCKDB_MEMORY_LIMIT:-384MB}
+      DUCKDB_THREADS: ${DUCKDB_THREADS:-2}
+      TELLUS_WORKER_MAX_OLD_SPACE_MB: ${TELLUS_WORKER_MAX_OLD_SPACE_MB:-384}
+      FUNCTION_WORKER_POOL_SIZE: ${FUNCTION_WORKER_POOL_SIZE:-2}
+      # Action semantics v2 remains default-off in every new environment.
+      # Enable only after the projection bootstrap runbook reports zero
+      # mismatches; the kill switch always wins.
+      ACTION_SEMANTICS_V2_ENABLED: ${ACTION_SEMANTICS_V2_ENABLED:-false}
+      ACTION_SEMANTICS_V2_PROJECTION_READY: ${ACTION_SEMANTICS_V2_PROJECTION_READY:-false}
+      ACTION_SEMANTICS_V2_CREATION_ENABLED: ${ACTION_SEMANTICS_V2_CREATION_ENABLED:-false}
+      ACTION_SEMANTICS_V2_KILL_SWITCH: ${ACTION_SEMANTICS_V2_KILL_SWITCH:-false}
       PORT: 3000
       NODE_ENV: production
     ports:
@@ -766,8 +785,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: ${TELLUS_APP_MEMORY_LIMIT:-1G}
           cpus: "2.0"
+    memswap_limit: ${TELLUS_APP_MEMORY_LIMIT:-1G}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/v1/health || exit 1"]
       interval: 10s

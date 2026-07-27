@@ -88,6 +88,14 @@ export interface ModuleVersionResponse {
   etag: string;
 }
 
+export interface ModuleVersionSummary {
+  rid: string;
+  semver: string;
+  schemaVersion: number;
+  publishedAt: string;
+  publishedBy: string;
+}
+
 export interface ResolvedModule {
   rid: string;
   semver: string | null;
@@ -369,6 +377,57 @@ export async function rollback(
 // ---------------------------------------------------------------------------
 // getVersion / resolveLatest / resolveDev
 // ---------------------------------------------------------------------------
+
+/**
+ * List the latest immutable row for every published semver on a module.
+ *
+ * Republishing an older tag appends another audit row by design. The
+ * Changelog selector addresses versions by semver, and `getVersion()` resolves
+ * the newest row for that tag, so this projection uses the same semantics and
+ * returns each tag once in reverse publication order.
+ */
+export async function listVersions(
+  rid: string,
+): Promise<ModuleVersionSummary[]> {
+  const db = getWorkshopDb();
+  const moduleResult = await db.query(
+    `SELECT 1
+       FROM workshop_module
+      WHERE rid = $1
+        AND deleted_at IS NULL`,
+    [rid],
+  );
+  if (moduleResult.rows.length === 0) throw moduleNotFound(rid);
+
+  const result = await db.query(
+    `SELECT rid, semver, schema_version,
+            published_at::text, published_by
+       FROM (
+         SELECT DISTINCT ON (semver)
+                rid, semver, schema_version,
+                published_at, published_by
+           FROM workshop_module_version
+          WHERE rid = $1
+       ORDER BY semver, published_at DESC
+       ) latest_by_semver
+   ORDER BY published_at DESC`,
+    [rid],
+  );
+
+  return result.rows.map((row: {
+    rid: string;
+    semver: string;
+    schema_version: number;
+    published_at: string;
+    published_by: string;
+  }) => ({
+    rid: row.rid,
+    semver: row.semver,
+    schemaVersion: row.schema_version,
+    publishedAt: row.published_at,
+    publishedBy: row.published_by,
+  }));
+}
 
 export async function getVersion(
   rid: string,

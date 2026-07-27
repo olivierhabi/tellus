@@ -208,10 +208,25 @@ const COUNTER_HELP: Record<string, string> = {
   // T-09 — full-text spec syntax usage.
   tellus_full_text_spec_syntax_total:
     "Count of full-text queries by whether spec syntax (operators, wildcards, quotes) was detected.",
+  // P5 — durable side-effect outbox counters.
+  tellus_side_effect_claim_total:
+    "Count of jobs claimed by the side-effect worker per cycle, partitioned by kind.",
+  tellus_side_effect_succeeded_total:
+    "Count of dispatches that succeeded, partitioned by kind.",
+  tellus_side_effect_retry_total:
+    "Count of dispatch retries triggered by infra failure, partitioned by kind and error_code.",
+  tellus_side_effect_dead_total:
+    "Count of jobs dead-lettered after exhausting the retry policy, partitioned by kind and error_code.",
+  // P5.6.1 — notification recipient data filter counters.
+  tellus_side_effect_notification_dropped_total:
+    "Count of notification jobs the Phase 6.1 recipient data filter refused to dispatch, partitioned by reason (insufficient_visibility / user_not_resolved / lookup_error).",
 };
 const GAUGE_HELP: Record<string, string> = {
   funnel_run_in_flight:
     "Current number of running funnel_run rows per object_type.",
+  // P5 — outbox queue depth by status.
+  tellus_side_effect_queue_size:
+    "Current depth of the action_side_effect_job queue partitioned by status (pending/running/retrying/dead).",
 };
 const HISTOGRAM_HELP: Record<string, string> = {
   funnel_stage_duration_seconds:
@@ -234,4 +249,7 @@ const HISTOGRAM_HELP: Record<string, string> = {
   // T-10 — per-route latency.
   tellus_route_duration_seconds:
     "Per-route end-to-end duration in seconds, partitioned by route and status_class.",
+  // P5 — per-dispatch latency.
+  tellus_side_effect_dispatch_duration_seconds:
+    "Per-dispatch latency in seconds for the side-effect worker, partitioned by kind and outcome (ok/retry/dead).",
 };

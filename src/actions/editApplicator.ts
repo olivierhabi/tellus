@@ -37,6 +37,17 @@ import { markEditsAsIndexed } from "../models/ontologyEdit";
 import { writeOverlayForEdit, writeOverlayForLinkEdit } from "../services/overlay/writebackOverlay";
 import { isB1Ready } from "../services/funnel/b1Readiness";
 import { ensureDocumentSecurity } from "../services/security/documentSecurity";
+import {
+  getByApiName as getLinkType,
+  resolveObjectTypeApiName,
+} from "../models/linkType";
+import {
+  upsertActive,
+  removeActive,
+} from "./relationshipStateRepository";
+import { isV2ExecutionEnabled } from "./actionSemanticsFlags";
+import { acquireActionLocks, type LockIdentity } from "./actionLockManager";
+import type { ActionError } from "./actionErrors";
 import type { CompiledEdit, LinkEdit } from "./ruleCompiler";
 
 // ---------------------------------------------------------------------------
@@ -104,6 +115,37 @@ export interface ApplyExecutionContext {
    * path; no other branch of the code may skip or defer it.
    */
   preCommitHook?: (client: PoolClient) => Promise<void>;
+  /**
+   * Action Semantics version of the executing action type (Phase 6).
+   * v1: link_instances projection is NOT dual-written (legacy behaviour
+   * unchanged — the projection is bootstrapped separately, never
+   * incrementally maintained for v1 streams). v2: each M2M link edit
+   * also upserts/removes the matching link_instances row inside the same
+   * transaction, gated on the version-2 execution feature flag so the
+   * projection stays consistent with v2 restrict-delete checks. v1
+   * behaviour is preserved exactly when semanticsVersion !== 2 or the
+   * flag is off.
+   */
+  semanticsVersion?: number;
+  /**
+   * Phase 6 — version-2 transaction invariant. When `semanticsVersion===2`
+   * and the v2 execution flag is on, `applyEdits` calls this hook AFTER
+   * `BEGIN` + OCC check + advisory/row lock acquisition, but BEFORE any
+   * ontology_edit/link_edit insert. The hook reloads canonical active
+   * relationship state from `link_instances` (now locked) and re-runs the
+   * final-state validator against the reloaded plan. Returns the list of
+   * structured errors; non-empty ⇒ the whole action transaction is rolled
+   * back (no partial edits) and the first error is thrown to the caller.
+   * The v1 path never sets this hook, so v1 behaviour is unchanged.
+   */
+  v2RevalidateAfterLock?: (client: PoolClient) => Promise<ActionError[]>;
+  /**
+   * Phase 6 — version-2 lock identities produced by the action planner.
+   * Advisory + row locks are acquired for these inside the transaction
+   * (deterministic order), before the reload/revalidate step. Only used
+   * when `semanticsVersion===2` and the v2 execution flag is on.
+   */
+  plannedLockIdentities?: LockIdentity[];
 }
 
 /** A single successfully applied edit. */
@@ -262,6 +304,35 @@ export async function applyEdits(
       }
     }
 
+    // -----------------------------------------------------------------
+    // Phase 6 — version-2 transaction invariants (advisory + row locks,
+    // reload, revalidate final state). Gated on semanticsVersion===2 AND
+    // the v2 execution feature flag; the v1 path is unchanged. This runs
+    // AFTER BEGIN + OCC, BEFORE any edit insert, so a failed invariant
+    // leaves the transaction empty and is rolled back with no partial
+    // edits.
+    // -----------------------------------------------------------------
+    const runV2Invariants =
+      executionContext.semanticsVersion === 2 && isV2ExecutionEnabled();
+    if (runV2Invariants) {
+      if (executionContext.plannedLockIdentities && executionContext.plannedLockIdentities.length > 0) {
+        await acquireActionLocks(pgClient, executionContext.plannedLockIdentities);
+      }
+      if (executionContext.v2RevalidateAfterLock) {
+        const revalErrors = await executionContext.v2RevalidateAfterLock(pgClient);
+        if (revalErrors.length > 0) {
+          await pgClient.query("ROLLBACK");
+          const first = revalErrors[0];
+          throw new OntologyError(
+            first.message,
+            first.code,
+            undefined,
+            { errors: revalErrors.map((e) => ({ code: e.code, path: e.path })), executionId: executionContext.executionId },
+          );
+        }
+      }
+    }
+
     // Step 2: Insert ontology_edit rows
     for (const edit of edits) {
       // F-P3-12 / migration 039+040: resolve the owning ontology BEFORE
@@ -384,14 +455,66 @@ export async function applyEdits(
             ]
           );
 
-          // F-P3-12: Prometheus counter per link_edit write, partitioned
-          // by branch so ops can see per-branch write traffic and spot
-          // unexpected cross-branch bleed at ingest time.
           incCounter("tellus_link_edit_writes_total", {
             branch_id: executionContext.branchId,
             link_type: linkEdit.linkTypeApiName,
             operation: linkEdit.operation,
           });
+
+          // Phase 6 — link_instances dual-write (v2 only, feature-flagged).
+          // The active-state projection must stay consistent with v2
+          // restrict-delete EXISTS checks. v1 behaviour is unchanged: no
+          // incremental projection. Wrapped in a savepoint so a projection
+          // failure (transitional/deferred dependency) never aborts the
+          // committed edit — v2 restrict-delete itself stays disabled until
+          // the projection bootstrap has been verified (see §6).
+          if (
+            executionContext.semanticsVersion === 2 &&
+            isV2ExecutionEnabled()
+          ) {
+            await pgClient.query("SAVEPOINT link_instances_dw");
+            try {
+              const lt = await getLinkType(
+                executionContext.ontologyId ?? "",
+                linkEdit.linkTypeApiName,
+              );
+              if (lt) {
+                const srcOt = edit.objectType;
+                const tgtOt = await resolveObjectTypeApiName(lt.target_object_type).catch(() => null);
+                if (tgtOt) {
+                  if (linkEdit.operation === "add") {
+                    await upsertActive(pgClient, {
+                      ontologyId: executionContext.ontologyId ?? "",
+                      branchId: executionContext.branchId,
+                      linkTypeApiName: linkEdit.linkTypeApiName,
+                      sourceObjectType: srcOt,
+                      sourcePrimaryKey: edit.primaryKey,
+                      targetObjectType: tgtOt,
+                      targetPrimaryKey: linkEdit.targetPrimaryKey,
+                      executionId: executionContext.executionId,
+                    });
+                  } else {
+                    await removeActive(pgClient, {
+                      ontologyId: executionContext.ontologyId ?? "",
+                      branchId: executionContext.branchId,
+                      linkTypeApiName: linkEdit.linkTypeApiName,
+                      sourcePrimaryKey: edit.primaryKey,
+                      targetPrimaryKey: linkEdit.targetPrimaryKey,
+                    });
+                  }
+                }
+              }
+              await pgClient.query("RELEASE SAVEPOINT link_instances_dw");
+            } catch (dwErr) {
+              await pgClient.query("ROLLBACK TO SAVEPOINT link_instances_dw");
+              const dwMsg = dwErr instanceof Error ? dwErr.message : String(dwErr);
+              console.warn(
+                `[editApplicator] link_instances dual-write skipped for ` +
+                  `${linkEdit.linkTypeApiName} ${edit.primaryKey}->` +
+                  `${linkEdit.targetPrimaryKey}: ${dwMsg}`,
+              );
+            }
+          }
         }
       }
     }

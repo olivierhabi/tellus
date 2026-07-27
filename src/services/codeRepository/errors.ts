@@ -292,6 +292,35 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 400,
     errorCode: ERROR_CODES.INVALID_ARGUMENT,
   },
+  // -------------------------------------------------------------------------
+  // Chat sessions (126). Per-user, per-repo persistent transcripts for the
+  // Code Assistant panel. Errors mirror the drafts family:
+  //
+  // ChatSessionNotFound — GET/PUT/DELETE on a sessionId that does not exist
+  // OR exists but belongs to a different principal (IDOR-as-404). 404.
+  //
+  // ChatSessionTooLarge — the request body (a session + its messages) exceeds
+  // the soft cap; a single message's content exceeds the per-message cap; OR
+  // the serialized metadata blob exceeds the per-message metadata cap. 413
+  // RESOURCE_EXHAUSTED so the client can tell "your transcript is too big"
+  // apart from a shape error.
+  //
+  // ChatSessionLimitExceeded — a user already has MAX_SESSIONS_PER_REPO saved
+  // for this repo. 400 — the request is shape-valid but semantically over the
+  // per-repo cap.
+  // -------------------------------------------------------------------------
+  "CodeRepos:ChatSessionNotFound": {
+    status: 404,
+    errorCode: ERROR_CODES.NOT_FOUND,
+  },
+  "CodeRepos:ChatSessionTooLarge": {
+    status: 413,
+    errorCode: ERROR_CODES.RESOURCE_EXHAUSTED,
+  },
+  "CodeRepos:ChatSessionLimitExceeded": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
 });
 
 export type CodeReposErrorName = keyof typeof CODE_REPOS_ERROR_STATUS;

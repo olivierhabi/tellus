@@ -21,6 +21,7 @@ import { AppError } from "../utils/foundryAppError";
 import {
   aiEngineClient,
   type AiEnginePayload,
+  type AiEnginePayloadPython,
   type AiEnginePort,
 } from "../services/aiEngine/client";
 import {
@@ -125,6 +126,16 @@ export function requireCodeAssistantAuth(): AuthMiddleware {
 
 // ---------------------------------------------------------------------------
 // Request schema (zod)
+//
+// BodySchema is shared by the TypeScript Functions v2 ingress and the
+// Python transform ingress (Track 1) — same surface (message | model | mode |
+// context | history | stream). The discriminator is the path on the wire
+// (POST /api/v1/code-assistant/typescript-v2 vs /python-transform), not a body
+// field — so changing the ingress path in the FE picker swaps agent runtime
+// without touching the request shape. The python route accepts an extra
+// optional `runtime` field (lightweight | spark) so the FE can carry the
+// transform_build.runtime tag onto the agent request for context hints
+// (building a lightweight transform vs a spark transform).
 // ---------------------------------------------------------------------------
 
 const BodySchema = z.object({
@@ -153,6 +164,10 @@ const BodySchema = z.object({
     .max(50)
     .optional(),
   stream: z.boolean().optional(),
+});
+
+const PythonBodySchema = BodySchema.extend({
+  runtime: z.enum(["lightweight", "spark"]).optional(),
 });
 
 const VegaChartBodySchema = z.object({
@@ -344,6 +359,86 @@ export function createCodeAssistantRouter(
       res.status(200).json({ success: true, data: result });
     } catch (err) {
       next(err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Python transform agent ingress (Track 1) — POST /python-transform.
+  //
+  // Functionally a clone of /typescript-v2 that calls client.pythonTransform /
+  // client.pythonTransformStream against the AIE-side
+  // POST /api/code-repositories-python-transform. Same SSE / cancel-on-close
+  // semantics; the only difference is the body schema accepts an optional
+  // `runtime` field (lightweight | spark). Mirrored here so the FE editor for a
+  // transforms-python repo can offer an AI authoring assistant that runs the
+  // python tool set (transform_runner, python_analyze, propose_file).
+  //
+  // No-touch boundary: the existing /typescript-v2 and /vega-chart routes are
+  // unchanged; this is purely additive — register at the same prefix under
+  // the same `auth` middleware that the router already mounts router.use(auth)
+  // above.
+  // ---------------------------------------------------------------------------
+  router.post("/python-transform", async (req, res, next) => {
+    const cancelCtl = new AbortController();
+    const onClose = () => cancelCtl.abort();
+    res.on("close", onClose);
+    try {
+      const parsed = PythonBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(
+          `Invalid python-transform request: ${parsed.error.issues
+            .map((i) => `${i.path.join(".")}: ${i.message}`)
+            .join("; ")}`,
+          400,
+          "AI_ENGINE_BAD_REQUEST",
+        );
+      }
+      const principal = req.codeAssistantPrincipal;
+      const payload = parsed.data as AiEnginePayloadPython;
+      if (parsed.data.stream) {
+        const upstream = await client.pythonTransformStream(
+          payload,
+          principal?.userId,
+          cancelCtl.signal,
+        );
+        if (!upstream.body)
+          throw new AppError(
+            "AI engine returned no stream",
+            502,
+            "AI_ENGINE_ERROR",
+          );
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("X-Accel-Buffering", "no");
+        try {
+          const reader = upstream.body.getReader();
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) {
+              res.write(value);
+              const r = res as Response & { flush?: () => void };
+              if (typeof r.flush === "function") r.flush();
+            }
+          }
+        } catch {
+          // FE cancelled or stream interrupted — end the response quietly.
+        } finally {
+          res.end();
+        }
+        return;
+      }
+      const result = await client.pythonTransform(
+        payload,
+        principal?.userId,
+        cancelCtl.signal,
+      );
+      res.status(200).json({ success: true, data: result });
+    } catch (err) {
+      next(err);
+    } finally {
+      res.off("close", onClose);
     }
   });
 

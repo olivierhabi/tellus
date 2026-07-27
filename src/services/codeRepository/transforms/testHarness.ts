@@ -88,7 +88,14 @@ export async function runTransformDryRun(args: DryRunArgs): Promise<DryRunResult
   }
 
   const discovery = discoverTransforms(files);
-  const t = discovery.transforms.find((x) => x.name === args.entryPoint);
+  // Source-path-aware lookup: prefer the active file's match when sourcePath is
+  // supplied (mirrors the preview route — avoids an entry-point-name collision
+  // silently running the WRONG function across files). Falls back to the first
+  // name-only match when sourcePath is absent.
+  const t = args.sourcePath
+    ? discovery.transforms.find((x) => x.name === args.entryPoint && x.sourcePath === args.sourcePath)
+      ?? discovery.transforms.find((x) => x.name === args.entryPoint)
+    : discovery.transforms.find((x) => x.name === args.entryPoint);
   if (!t) {
     return {
       ok: false, rowCount: 0, columns: [], stdout: "", stderr: "",
