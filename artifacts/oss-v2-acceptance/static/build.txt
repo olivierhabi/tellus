@@ -1,0 +1,13 @@
+
+> ontology-engine@0.3.0 build /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-rc
+> tsc && npm run build:copy-assets
+
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 build:copy-assets
+> bash scripts/copy-assets.sh
+
+[build] copied src/templates -> dist/templates
+[build] copied src/migrations/*.sql -> dist/migrations (202 files)

@@ -1,0 +1,5 @@
+
+> ontology-engine@0.3.0 contract:check-oss-v2 /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-rc
+> tsx src/scripts/checkOssV2Contract.ts
+
+{"event":"oss_v2_contract.check_passed","sdkVersion":"2.70.0","objectSetNodeTypes":15,"searchJsonQueryV2Types":28,"bodyFields":12,"queryFields":6,"actionModes":2,"actionReturnEdits":3,"batchMaximum":20}

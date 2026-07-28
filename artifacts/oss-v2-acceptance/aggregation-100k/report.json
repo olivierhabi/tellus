@@ -1,0 +1,51 @@
+{
+  "releaseCommit": "cdda17100f484a6690a241d316ce4f6b64d04efc",
+  "source": {
+    "source_rows": 100001,
+    "distinct_non_null_groups": 100000,
+    "null_rows": 1
+  },
+  "implementationRequest": {
+    "group_value": {
+      "terms": {
+        "field": "group_value",
+        "size": 10000,
+        "missing": "__NULL__"
+      },
+      "aggs": {
+        "count_objects_0": {
+          "value_count": {
+            "field": "__pk"
+          }
+        },
+        "_dc": {
+          "value_count": {
+            "field": "__pk"
+          }
+        }
+      }
+    }
+  },
+  "implementationResult": {
+    "returnedGroups": 10000,
+    "excludedItems": 90001,
+    "allowApproximate": "APPROXIMATE",
+    "requireAccurate": {
+      "errorName": "AggregationAccuracyNotSupported",
+      "message": "Accurate aggregation cannot be guaranteed: the result set has more distinct group values than the allowed group count."
+    },
+    "compositePaginationExposedByTellus": false
+  },
+  "backendControl": {
+    "compositePages": 102,
+    "compositeGroups": 100001,
+    "duplicateGroups": 0,
+    "missingGroups": 0
+  },
+  "latencyMs": {
+    "samples": 20,
+    "p50": 204.4152920000015,
+    "p95": 888.155834000001,
+    "p99": 1355.4982090000012
+  }
+}

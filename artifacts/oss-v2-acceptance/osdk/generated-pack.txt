@@ -1,0 +1,31 @@
+
+> @tellus/telluslive@0.1.0 prepack
+> npm run build
+
+
+> @tellus/telluslive@0.1.0 build
+> tsc -p tsconfig.json
+
+npm notice
+npm notice 📦  @tellus/telluslive@0.1.0
+npm notice Tarball Contents
+npm notice 3.6kB dist/client.d.ts
+npm notice 6.0kB dist/client.js
+npm notice 7.5kB dist/clientV2.d.ts
+npm notice 7.3kB dist/clientV2.js
+npm notice 88B dist/index.d.ts
+npm notice 1.1kB dist/index.js
+npm notice 595B dist/types.d.ts
+npm notice 529B dist/types.js
+npm notice 520B package.json
+npm notice Tarball Details
+npm notice name: @tellus/telluslive
+npm notice version: 0.1.0
+npm notice filename: tellus-telluslive-0.1.0.tgz
+npm notice package size: 6.1 kB
+npm notice unpacked size: 27.3 kB
+npm notice shasum: 3e861c162a3ed57ca1b38f04f82e7b56996de950
+npm notice integrity: sha512-I0VEJOOW6GY/U[...]N1Os/T1xSQxQQ==
+npm notice total files: 9
+npm notice
+tellus-telluslive-0.1.0.tgz

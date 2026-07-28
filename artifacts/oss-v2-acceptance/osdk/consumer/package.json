@@ -1,0 +1,15 @@
+{
+  "name": "tellus-osdk-rc-consumer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tellus/telluslive": "file:../tellus-telluslive-0.1.0.tgz"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

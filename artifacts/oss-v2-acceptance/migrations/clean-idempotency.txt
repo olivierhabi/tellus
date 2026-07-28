@@ -1,0 +1,54 @@
+
+> ontology-engine@0.3.0 migrate /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-rc
+> tsx src/migrate.ts
+
+New PostgreSQL client connected to pool
+Table already exists: ontology
+Table already exists: object_type
+Table already exists: property
+FK constraint already exists: fk_ot_primary_key
+FK constraint already exists: fk_ot_title_prop
+Table already exists: backing_datasource
+Table already exists: funnel_state
+Table already exists: funnel_pipeline_state
+Table already exists: link_type
+Table already exists: ontology_edit
+Table already exists: action_type
+Table already exists: action_audit_log
+Table already exists: link_edit
+Table already exists: idempotency_key
+Table already exists: dataset
+Table already exists: dataset_transaction
+Ensured backing_datasource has dataset_id column
+Ensured object_type has curatorial metadata columns
+Ensured funnel_pipeline_state has stage tracking columns
+Table already exists: reindex_history
+Table already exists: interface
+Table already exists: interface_property
+Table already exists: object_type_interface
+Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface
+Revoked UPDATE/DELETE on action_audit_log (immutable audit log)
+Could not create usage_event_daily matview: relation "usage_event" does not exist
+Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)
+Table already exists: object_instances
+Table already exists: funnel_dataset
+Table already exists: funnel_snapshot
+Table already exists: funnel_run
+Table already exists: funnel_stage_run
+Table already exists: funnel_signal
+Table already exists: funnel_changelog_watermark
+Created Funnel pipeline tables (object_instances, funnel_dataset, funnel_snapshot, funnel_run, funnel_stage_run, funnel_signal, funnel_changelog_watermark)
+Table already exists: object_type_active_index_version
+Table already exists: replacement_diff_log
+Created B9 replacement pipeline tables (object_type_active_index_version, replacement_diff_log)
+Ensured backing_datasource has iceberg_location column (B4)
+Ensured funnel_run has temporal_workflow_id UPSERT key (B3)
+Applied 012_funnel_object_edits.sql
+Applied 013_replacement_pipeline.sql
+Applied 014_funnel_runs.sql
+Applied 015_funnel_signal_idempotency.sql
+Applied 016_iceberg_metadata_retry.sql
+Applied 017_link_type_extensions.sql (LT-B1..B10)
+Applied 018_funnel_hardening.sql (FNL-H2/H3/H4)
+Applied 026_fnl_h3_pipeline_deploy_signal.sql (FNL-H3 signal enum)
+Applied 032_migration_ledger.sql

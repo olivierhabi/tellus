@@ -1,0 +1,2 @@
+New PostgreSQL client connected to pool
+{"outputDirectory":"/Users/olivierhabimana/Desktop/projects/tellus-oss-v2-rc/artifacts/oss-v2-acceptance/osdk/generated","files":["types.ts","client.ts","clientV2.ts","index.ts","package.json","tsconfig.json"],"objectTypes":1,"linkTypes":0,"actionTypes":0}

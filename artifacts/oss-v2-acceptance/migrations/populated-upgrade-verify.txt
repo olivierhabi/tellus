@@ -1,0 +1,3 @@
+10000|10000|10000
+idx_object_instances_rid
+0

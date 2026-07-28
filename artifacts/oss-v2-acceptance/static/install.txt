@@ -1,0 +1,5 @@
+corepack pnpm install --frozen-lockfile
+FAIL: pnpm 11.13.1 lockfile settings mismatch; repository has no packageManager pin.
+
+npx pnpm@10.28.2 install --frozen-lockfile
+PASS: 1160 packages installed; native build scripts were skipped by pnpm policy.
