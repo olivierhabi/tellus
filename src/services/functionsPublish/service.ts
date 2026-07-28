@@ -453,14 +453,28 @@ export class FunctionsPublishService {
 
   private async pump(): Promise<void> {
     if (this.stopped) return;
-    while (this.running.size < this.concurrency) {
-      const runRid = await this.claim();
-      if (!runRid) return;
-      this.running.add(runRid);
-      void this.execute(runRid).finally(() => {
-        this.running.delete(runRid);
-        void this.pump();
-      });
+    try {
+      while (this.running.size < this.concurrency) {
+        const runRid = await this.claim();
+        if (!runRid) return;
+        this.running.add(runRid);
+        void this.execute(runRid).finally(() => {
+          this.running.delete(runRid);
+          void this.pump();
+        });
+      }
+    } catch (error) {
+      // This pump is intentionally launched from timers and fire-and-forget
+      // submission paths. Dependency failures must leave the queued record
+      // durable for the next tick, not escape as an unhandled rejection that
+      // can terminate the API process under strict Node settings.
+      console.error(
+        JSON.stringify({
+          type: "functions_publish.pump_error",
+          owner: this.owner,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     }
   }
 

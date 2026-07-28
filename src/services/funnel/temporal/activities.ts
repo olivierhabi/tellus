@@ -1088,8 +1088,11 @@ export async function syncOpenSearchActivity(input: {
   // whole workflow with it. Treat a deleted type as a no-op so the workflow
   // completes cleanly instead of error-looping.
   const exists = await query(
-    "SELECT 1 FROM object_type WHERE api_name = $1 LIMIT 1",
-    [input.objectTypeApiName]
+    `SELECT 1
+       FROM object_type
+      WHERE ontology_id = $1 AND api_name = $2
+      LIMIT 1`,
+    [input.ontologyId, input.objectTypeApiName]
   );
   if (exists.rows.length === 0) {
     console.warn(
@@ -1112,5 +1115,8 @@ export async function syncOpenSearchActivity(input: {
   const { syncObjectInstancesToOpenSearch } = await import(
     "../../opensearch/syncFromInstances"
   );
-  return syncObjectInstancesToOpenSearch(input.objectTypeApiName);
+  return syncObjectInstancesToOpenSearch(
+    input.objectTypeApiName,
+    input.ontologyId,
+  );
 }

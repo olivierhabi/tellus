@@ -17,6 +17,9 @@ import type { Request, Response, NextFunction } from "express";
 import { incCounter } from "../services/funnel/metrics";
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 5_000);
+const DEFAULT_EXACT_AGGREGATION_TIMEOUT_MS = Number(
+  process.env.OBJECTSET_EXACT_AGGREGATION_TIMEOUT_MS ?? 30_000,
+);
 
 const EXEMPT_PATHS = [
   "/health",
@@ -46,12 +49,21 @@ export interface RequestTimeoutOptions {
    */
   extendedBudgetFor?: (req: Request) => boolean;
   extendedTimeoutMs?: number;
+  /**
+   * Exact composite ObjectSet aggregations may page through more than
+   * 100,000 groups. They retain the normal per-OpenSearch-call timeout and
+   * complexity budget, but need a larger end-to-end envelope.
+   */
+  exactAggregationTimeoutMs?: number;
 }
 
 /** Attach `req.timeoutSignal: AbortSignal` and arm a 504 on expiry. */
 export function requestTimeoutMiddleware(opts: RequestTimeoutOptions = {}) {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const extendedTimeoutMs = opts.extendedTimeoutMs ?? timeoutMs;
+  const exactAggregationTimeoutMs =
+    opts.exactAggregationTimeoutMs ??
+    DEFAULT_EXACT_AGGREGATION_TIMEOUT_MS;
   const exemptSet = new Set([...EXEMPT_PATHS, ...(opts.exemptPaths ?? [])]);
 
   return function requestTimeoutMw(req: Request, res: Response, next: NextFunction) {
@@ -71,7 +83,14 @@ export function requestTimeoutMiddleware(opts: RequestTimeoutOptions = {}) {
     // and client throughput, not handler work, so the 5s data-plane budget
     // would 504 a legitimate large upload mid-stream. Give those requests the
     // extended budget; reads and other writes stay on the tight limit.
-    const budget = opts.extendedBudgetFor?.(req) ? extendedTimeoutMs : timeoutMs;
+    const isObjectSetAggregate =
+      req.method === "POST" &&
+      /^\/api\/v2\/ontologies\/[^/]+\/objectSets\/aggregate$/.test(req.path);
+    const budget = isObjectSetAggregate
+      ? exactAggregationTimeoutMs
+      : opts.extendedBudgetFor?.(req)
+        ? extendedTimeoutMs
+        : timeoutMs;
 
     const controller = new AbortController();
     (req as unknown as { timeoutSignal: AbortSignal }).timeoutSignal = controller.signal;

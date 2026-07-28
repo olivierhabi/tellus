@@ -79,7 +79,10 @@ function executorFor(req: Request, ontologyId: string, snapshot: boolean) {
 // GET list objects — base set over the object type.
 router.get("/objects/:objectType", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     const pageSize = req.query.pageSize
       ? Number(req.query.pageSize)
       : undefined;
@@ -129,7 +132,10 @@ router.post(
   "/objects/:objectType/search",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const where = SearchJsonQueryV2Schema.safeParse(req.body?.where);
       if (req.body?.where !== undefined && !where.success) {
         throw Object.assign(new Error("Invalid search query"), {
@@ -183,7 +189,10 @@ router.get(
   "/objects/:objectType/:primaryKey",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       // Object-type existence is validated by the executor path.
       const obj = await executeGetObject(
         req.params.objectType,

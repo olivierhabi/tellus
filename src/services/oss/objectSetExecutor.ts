@@ -62,6 +62,12 @@ export interface OsSearchResponse {
 }
 
 export interface ExecutorDeps {
+  /** Fail closed before a property can influence filters, ordering or aggs. */
+  authorizeProperties?: (
+    objectType: string,
+    fields: string[],
+    usage: "filter" | "order" | "aggregation" | "knn",
+  ) => Promise<void>;
   /** property apiName → OS keyword field (bucketing). */
   keywordOf: (objectType: string, field: string) => Promise<string>;
   /** internal where-DSL → OpenSearch query clause. */
@@ -153,6 +159,9 @@ export interface ExecutionContext {
   ontologyRid: string;
   branchRid: string | null;
   tenant: string;
+  /** Authenticated principal and authorization-state binding for page tokens. */
+  userId?: string;
+  securityFingerprint?: string;
   transactionId: string | null;
   transactionVersion?: number | null;
   scenarioRid: string | null;
@@ -333,6 +342,8 @@ export async function loadObjectSet(
     includeComputeUsage: req.includeComputeUsage === true,
     referenceSigningOptions: req.referenceSigningOptions ?? null,
     tenant: ctx.tenant,
+    userId: ctx.userId ?? null,
+    securityFingerprint: ctx.securityFingerprint ?? null,
     transactionId: ctx.transactionId,
     scenarioRid: ctx.scenarioRid,
   });
@@ -369,6 +380,16 @@ export async function loadObjectSet(
       totalCount: "0",
       propertySecurities: [],
     };
+  }
+  if (deps.authorizeProperties && orderBy.length > 0) {
+    const fields = orderBy
+      .map((entry) => entry.field)
+      .filter((field): field is string => typeof field === "string");
+    await Promise.all(
+      plans.map((plan) =>
+        deps.authorizeProperties!(plan.objectType, fields, "order"),
+      ),
+    );
   }
   const concreteObjectTypes = [
     ...new Set(plans.map((plan) => plan.objectType)),
@@ -1010,6 +1031,29 @@ export async function aggregateObjectSet(
   const plans = await fulfilPlans(compiled, deps);
   if (plans.length === 0) {
     return { accuracy: "ACCURATE", data: [] };
+  }
+  if (deps.authorizeProperties) {
+    const fields = [
+      ...req.aggregation.flatMap((aggregation) =>
+        "field" in aggregation && typeof aggregation.field === "string"
+          ? [aggregation.field]
+          : [],
+      ),
+      ...req.groupBy.flatMap((group) =>
+        "field" in group && typeof group.field === "string"
+          ? [group.field]
+          : [],
+      ),
+    ];
+    await Promise.all(
+      plans.map((plan) =>
+        deps.authorizeProperties!(
+          plan.objectType,
+          [...new Set(fields)],
+          "aggregation",
+        ),
+      ),
+    );
   }
   // Transaction/scenario overlays are composed after the base index query.
   // Aggregating the index directly would therefore miss created objects and

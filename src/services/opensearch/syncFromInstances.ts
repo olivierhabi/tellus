@@ -287,16 +287,38 @@ async function bulkIndexConcurrent(
  * arg should be plumbed through here in the same commit.
  */
 export async function syncObjectInstancesToOpenSearch(
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  ontologyId?: string,
 ): Promise<SyncResult> {
   const startedAt = Date.now();
   const indexName = getIndexName(objectTypeApiName);
+
+  // The legacy entry point accepted only apiName even though apiName is
+  // unique inside an ontology, not globally. Resolve it only when the result
+  // is unambiguous; production workflow callers must pass ontologyId.
+  let resolvedOntologyId = ontologyId;
+  if (!resolvedOntologyId) {
+    const matches = await query(
+      `SELECT DISTINCT ontology_id
+         FROM object_type
+        WHERE api_name = $1
+        ORDER BY ontology_id`,
+      [objectTypeApiName],
+    );
+    if (matches.rows.length !== 1) {
+      throw new Error(
+        `OpenSearch sync requires ontologyId for '${objectTypeApiName}' ` +
+          `(matched ${matches.rows.length} ontologies)`,
+      );
+    }
+    resolvedOntologyId = String(matches.rows[0].ontology_id);
+  }
 
   // ---- 1. Ensure the index exists --------------------------------------
   let indexCreated = false;
   const existsRes = await indexExists(objectTypeApiName);
   if (!existsRes.exists) {
-    await createIndex(objectTypeApiName);
+    await createIndex(objectTypeApiName, resolvedOntologyId);
     indexCreated = true;
   } else {
     // Existing index — refuse to silently upsert into one whose shard count
@@ -335,8 +357,8 @@ export async function syncObjectInstancesToOpenSearch(
     `SELECT p.api_name
        FROM property p
        JOIN object_type ot ON ot.object_type_id = p.object_type_id
-      WHERE ot.api_name = $1`,
-    [objectTypeApiName]
+      WHERE ot.api_name = $1 AND ot.ontology_id = $2`,
+    [objectTypeApiName, resolvedOntologyId]
   );
   const canonicalApiNames: string[] = propsRes.rows.map(
     (r) => r.api_name as string
@@ -376,9 +398,11 @@ export async function syncObjectInstancesToOpenSearch(
     `SELECT column_mapping
        FROM backing_datasource
       WHERE object_type_id = (
-        SELECT object_type_id FROM object_type WHERE api_name = $1
+        SELECT object_type_id
+          FROM object_type
+         WHERE api_name = $1 AND ontology_id = $2
       )`,
-    [objectTypeApiName]
+    [objectTypeApiName, resolvedOntologyId]
   );
   if (colMapRes.rows.length > 0) {
     const raw = colMapRes.rows[0].column_mapping;
@@ -457,12 +481,14 @@ export async function syncObjectInstancesToOpenSearch(
 
   const fetchPage = (afterKey: string) =>
     query(
-      `SELECT primary_key, properties, markings, last_modified_at, version
+      `SELECT primary_key, properties, markings, last_modified_at, version, rid
          FROM object_instances
-        WHERE object_type_api_name = $1 AND primary_key > $2
+        WHERE ontology_id = $1
+          AND object_type_api_name = $2
+          AND primary_key > $3
         ORDER BY primary_key
-        LIMIT $3`,
-      [objectTypeApiName, afterKey, PAGE_SIZE],
+        LIMIT $4`,
+      [resolvedOntologyId, objectTypeApiName, afterKey, PAGE_SIZE],
     );
 
   try {
@@ -497,6 +523,8 @@ export async function syncObjectInstancesToOpenSearch(
       return {
         __pk: row.primary_key,
         __objectType: objectTypeApiName,
+        __ontology: resolvedOntologyId,
+        __rid: row.rid,
         __lastModified: new Date(row.last_modified_at).toISOString(),
         __version: Number(row.version ?? 1),
         // Re-keyed property bag — every key is the canonical
@@ -698,7 +726,12 @@ export async function syncObjectInstancesToOpenSearch(
     // (the genuine shrink case).
     let osCount = 0;
     try {
-      const cnt = await client.count({ index: indexName });
+      const cnt = await client.count({
+        index: indexName,
+        body: {
+          query: { term: { __ontology: resolvedOntologyId } },
+        },
+      });
       osCount = Number((cnt.body as { count: number }).count);
     } catch {
       osCount = livePks.size + 1; // count failed → fall through to scroll
@@ -719,7 +752,7 @@ export async function syncObjectInstancesToOpenSearch(
           index: indexName,
           scroll: "1m",
           body: {
-            query: { match_all: {} },
+            query: { term: { __ontology: resolvedOntologyId } },
             _source: false,
             size: SCROLL_PAGE,
           },

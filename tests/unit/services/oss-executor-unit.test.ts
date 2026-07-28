@@ -239,11 +239,16 @@ describe("loadObjectSet", () => {
     const rows = Array.from({ length: 5 }, (_, i) => ({ __pk: `P-${i}` }));
     const deps = baseDeps({ T: rows });
     const compiled = await compileObjectSet(os, { now: () => NOW });
+    const boundCtx = {
+      ...ctx,
+      userId: "user-a",
+      securityFingerprint: "security-v1",
+    };
 
     const p1 = await loadObjectSet(
       compiled,
       { objectSet: os, select: [], pageSize: 2 },
-      ctx,
+      boundCtx,
       deps,
     );
     expect(p1.data.map((d) => d.__primaryKey)).toEqual(["P-0", "P-1"]);
@@ -252,7 +257,7 @@ describe("loadObjectSet", () => {
     const p2 = await loadObjectSet(
       compiled,
       { objectSet: os, select: [], pageSize: 2, pageToken: p1.nextPageToken! },
-      ctx,
+      boundCtx,
       deps,
     );
     expect(p2.data.map((d) => d.__primaryKey)).toEqual(["P-2", "P-3"]);
@@ -266,7 +271,35 @@ describe("loadObjectSet", () => {
           pageSize: 2,
           pageToken: p1.nextPageToken!,
         },
-        ctx,
+        boundCtx,
+        deps,
+      ),
+    ).rejects.toThrowError(/different request options/);
+
+    await expect(
+      loadObjectSet(
+        compiled,
+        {
+          objectSet: os,
+          select: [],
+          pageSize: 2,
+          pageToken: p1.nextPageToken!,
+        },
+        { ...boundCtx, userId: "user-b" },
+        deps,
+      ),
+    ).rejects.toThrowError(/different request options/);
+
+    await expect(
+      loadObjectSet(
+        compiled,
+        {
+          objectSet: os,
+          select: [],
+          pageSize: 2,
+          pageToken: p1.nextPageToken!,
+        },
+        { ...boundCtx, securityFingerprint: "security-v2" },
         deps,
       ),
     ).rejects.toThrowError(/different request options/);
@@ -280,7 +313,7 @@ describe("loadObjectSet", () => {
       loadObjectSet(
         other,
         { objectSet: { type: "base", objectType: "U" }, select: [], pageToken: p1.nextPageToken! },
-        ctx,
+        boundCtx,
         baseDeps({ U: [] }),
       ),
     ).rejects.toThrowError(/different object set/);

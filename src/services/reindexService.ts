@@ -34,9 +34,8 @@ import { convertValue } from "./indexing/typeConverter";
 import { client } from "./opensearch/client";
 import {
   getIndexName,
-  deleteIndex,
-  createIndex,
 } from "./opensearch/indexLifecycleManager";
+import { generateIndexMapping } from "./opensearch/indexMappingGenerator";
 import { getObjectBuffer, getObjectStream } from "./storageService";
 import { parseCsvReadable } from "./indexing/streamingCsv";
 import { ensureDocumentSecurity } from "./security/documentSecurity";
@@ -382,6 +381,9 @@ export async function reindexObjectType(
 
   let objectTypeId: string;
   let lastTransactionId: string | null = null;
+  let replacementIndexName: string | null = null;
+  let replacementCutoverComplete = false;
+  let rollbackIndexName: string | null = null;
 
   try {
     // =================================================================
@@ -756,29 +758,32 @@ export async function reindexObjectType(
     await setPipelineStage(objectTypeApiName, "indexing");
 
     const indexName = getIndexName(objectTypeApiName);
+    replacementIndexName =
+      `${indexName}-replacement-${Date.now().toString(36)}`;
 
     // =================================================================
-    // Step 8: Delete/recreate index
+    // Step 8: Create an isolated sibling index. The serving index/alias is
+    // left untouched until every replacement document has landed.
     // =================================================================
-
     try {
-      await deleteIndex(objectTypeApiName);
-    } catch {
-      // Index might not exist yet — that's fine
-    }
-
-    try {
-      await createIndex(objectTypeApiName);
+      const generated = await generateIndexMapping(
+        objectTypeApiName,
+        ontologyId,
+      );
+      await client.indices.create({
+        index: replacementIndexName,
+        body: generated.mapping as unknown as Record<string, unknown>,
+      });
     } catch (err: any) {
       throw appError(
         "REINDEX_FAILED",
-        `Failed to create OpenSearch index '${indexName}': ${err.message}`,
+        `Failed to create replacement OpenSearch index '${replacementIndexName}': ${err.message}`,
         { failedAtStep: "opensearch_indexing" }
       );
     }
 
     console.log(
-      `[Reindex] Step 8: Index '${indexName}' recreated`
+      `[Reindex] Step 8: Replacement index '${replacementIndexName}' created; serving '${indexName}' remains online`
     );
 
     // =================================================================
@@ -870,7 +875,7 @@ export async function reindexObjectType(
       // so reindexed docs are visible to marking-constrained users. The
       // helper is idempotent: if the source doc already carries
       // `_security`, its classification is preserved.
-      batch.push({ index: { _index: indexName, _id: pk } });
+      batch.push({ index: { _index: replacementIndexName, _id: pk } });
       batch.push(
         ensureDocumentSecurity({
           __pk: pk,
@@ -904,7 +909,111 @@ export async function reindexObjectType(
     }
 
     console.log(
-      `[Reindex] Step 7+9: Indexed ${indexedCount} of ${totalDocs} objects into '${indexName}'`
+      `[Reindex] Step 7+9: Indexed ${indexedCount} of ${totalDocs} objects into '${replacementIndexName}'`
+    );
+
+    // Confirm the replacement is complete before cutover. A mismatch means
+    // the sibling is discarded and the serving generation remains intact.
+    const replacementCount = await client.count({
+      index: replacementIndexName,
+    });
+    const actualReplacementCount = Number(
+      (replacementCount as any)?.body?.count ?? 0,
+    );
+    if (actualReplacementCount !== totalDocs) {
+      throw appError(
+        "REINDEX_FAILED",
+        `Replacement index count mismatch: expected ${totalDocs}, got ${actualReplacementCount}.`,
+        { failedAtStep: "opensearch_validation" },
+      );
+    }
+
+    // Resolve the current serving generation. Older installations may still
+    // have a concrete index at the canonical name. Since OpenSearch cannot
+    // create an alias with the same name as a concrete index, copy that
+    // generation to a retained rollback sibling before the atomic
+    // remove-index/add-alias transition.
+    let servingIndices: string[] = [];
+    let canonicalIsAlias = false;
+    try {
+      const aliases = await client.indices.getAlias({ name: indexName });
+      const aliasBody = (aliases as any)?.body ?? {};
+      servingIndices = Object.keys(aliasBody);
+      canonicalIsAlias = servingIndices.length > 0;
+      rollbackIndexName =
+        servingIndices.find(
+          (candidate) =>
+            aliasBody[candidate]?.aliases?.[indexName]?.is_write_index === true,
+        ) ??
+        servingIndices[0] ??
+        null;
+    } catch {
+      const exists = await client.indices.exists({ index: indexName });
+      if ((exists as any)?.body === true) servingIndices = [indexName];
+    }
+
+    if (!canonicalIsAlias && servingIndices.includes(indexName)) {
+      rollbackIndexName =
+        `${indexName}-rollback-${Date.now().toString(36)}`;
+      const generated = await generateIndexMapping(
+        objectTypeApiName,
+        ontologyId,
+      );
+      await client.indices.create({
+        index: rollbackIndexName,
+        body: generated.mapping as unknown as Record<string, unknown>,
+      });
+      await client.reindex({
+        body: {
+          source: { index: indexName },
+          dest: { index: rollbackIndexName },
+        },
+        wait_for_completion: true,
+        refresh: true,
+      } as any);
+      const rollbackCount = await client.count({ index: rollbackIndexName });
+      const actualRollbackCount = Number(
+        (rollbackCount as any)?.body?.count ?? 0,
+      );
+      const servingCount = await client.count({ index: indexName });
+      const expectedRollbackCount = Number(
+        (servingCount as any)?.body?.count ?? 0,
+      );
+      if (actualRollbackCount !== expectedRollbackCount) {
+        throw appError(
+          "REINDEX_FAILED",
+          `Rollback copy count mismatch: expected ${expectedRollbackCount}, got ${actualRollbackCount}.`,
+          { failedAtStep: "opensearch_rollback_copy" },
+        );
+      }
+    }
+
+    const aliasActions: Array<Record<string, unknown>> = [];
+    if (canonicalIsAlias) {
+      for (const oldIndex of servingIndices) {
+        aliasActions.push({
+          remove: { index: oldIndex, alias: indexName },
+        });
+      }
+    } else if (servingIndices.includes(indexName)) {
+      aliasActions.push({ remove_index: { index: indexName } });
+    }
+    aliasActions.push({
+      add: {
+        index: replacementIndexName,
+        alias: indexName,
+        is_write_index: true,
+      },
+    });
+    await client.indices.updateAliases({
+      body: { actions: aliasActions },
+    });
+    replacementCutoverComplete = true;
+    console.log(
+      `[Reindex] Cutover: alias '${indexName}' now serves '${replacementIndexName}'` +
+        (rollbackIndexName
+          ? `; rollback generation retained as '${rollbackIndexName}'`
+          : ""),
     );
 
     // =================================================================
@@ -1000,6 +1109,8 @@ export async function reindexObjectType(
         indexedCount,
         JSON.stringify({
           lastTransactionId,
+          replacementIndexName,
+          rollbackIndexName,
           skippedNullPk: stats.skippedNullPk,
           duplicatePkInTransaction: stats.duplicatePkInTransaction,
           editsBreakdown: {
@@ -1039,6 +1150,16 @@ export async function reindexObjectType(
     // Error handling: update funnel_state to 'failed'
     // =================================================================
     const durationMs = Date.now() - startTime;
+
+    // Before cutover, a failed sibling is never allowed to affect the live
+    // alias. Best-effort cleanup keeps retries idempotent.
+    if (replacementIndexName && !replacementCutoverComplete) {
+      try {
+        await client.indices.delete({ index: replacementIndexName });
+      } catch {
+        // The sibling may not have been created, or OpenSearch may be down.
+      }
+    }
 
     // Try to update funnel_state with failure info
     try {

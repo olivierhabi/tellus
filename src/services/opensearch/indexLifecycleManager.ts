@@ -121,11 +121,12 @@ function extractErrorMessage(err: unknown): string {
  *         or the OpenSearch create call fails.
  */
 async function createIndex(
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  ontologyId?: string,
 ): Promise<CreateIndexResult> {
   // Generate the full mapping from PostgreSQL metadata
   const mappingResult: IndexMappingResult =
-    await generateIndexMapping(objectTypeApiName);
+    await generateIndexMapping(objectTypeApiName, ontologyId);
   const { indexName, mapping, propertyCount } = mappingResult;
 
   // Check if the index already exists

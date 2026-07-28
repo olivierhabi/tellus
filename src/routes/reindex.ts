@@ -27,6 +27,8 @@ import {
   decodePageToken,
   encodePageToken,
 } from "../utils/responseFormatter";
+import { requireOntologyAdmin } from "../middleware/requireRole";
+import { resolveRequestTenant } from "../utils/requestTenant";
 
 const router = Router({ mergeParams: true });
 
@@ -46,10 +48,15 @@ const KNOWN_CODES = new Set([
 // Helper: validate ontology exists
 // ---------------------------------------------------------------------------
 
-async function ontologyExists(ontologyId: string): Promise<boolean> {
+async function ontologyExists(
+  ontologyId: string,
+  tenant: string,
+): Promise<boolean> {
   const result = await query(
-    "SELECT ontology_id FROM ontology WHERE ontology_id = $1",
-    [ontologyId]
+    `SELECT ontology_id
+       FROM ontology
+      WHERE ontology_id = $1 AND tenant_id = $2`,
+    [ontologyId, tenant],
   );
   return result.rows.length > 0;
 }
@@ -66,13 +73,17 @@ interface ObjectTypeInfo {
 
 async function resolveObjectType(
   ontologyId: string,
-  apiName: string
+  apiName: string,
+  tenant: string,
 ): Promise<ObjectTypeInfo | null> {
   const result = await query(
-    `SELECT object_type_id, api_name, primary_key_property_id
-     FROM object_type
-     WHERE ontology_id = $1 AND api_name = $2`,
-    [ontologyId, apiName]
+    `SELECT ot.object_type_id, ot.api_name, ot.primary_key_property_id
+       FROM object_type ot
+       JOIN ontology o ON o.ontology_id = ot.ontology_id
+      WHERE ot.ontology_id = $1
+        AND ot.api_name = $2
+        AND o.tenant_id = $3`,
+    [ontologyId, apiName, tenant]
   );
   return result.rows.length > 0 ? (result.rows[0] as ObjectTypeInfo) : null;
 }
@@ -103,6 +114,7 @@ async function getDatasource(
 
 router.post(
   "/",
+  requireOntologyAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     const { ontologyId } = req.params;
     // Prefer `req.params.apiName` (legacy `/objectTypes/:apiName/reindex`
@@ -113,12 +125,13 @@ router.post(
     const apiName =
       req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
     const force = req.query.force === "true" || req.body?.force === true;
+    const tenant = resolveRequestTenant(req);
 
     try {
       // ---------------------------------------------------------------
       // Step 1: Validate ontology
       // ---------------------------------------------------------------
-      if (!(await ontologyExists(ontologyId))) {
+      if (!(await ontologyExists(ontologyId, tenant))) {
         return sendError(
           res,
           "ONTOLOGY_NOT_FOUND",
@@ -129,7 +142,7 @@ router.post(
       // ---------------------------------------------------------------
       // Step 2: Validate object type
       // ---------------------------------------------------------------
-      const objectType = await resolveObjectType(ontologyId, apiName);
+      const objectType = await resolveObjectType(ontologyId, apiName, tenant);
       if (!objectType) {
         return sendError(
           res,
@@ -332,10 +345,11 @@ router.get(
     // See POST / above for why we also accept `res.locals.apiName`.
     const apiName =
       req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
+    const tenant = resolveRequestTenant(req);
 
     try {
       // Validation
-      if (!(await ontologyExists(ontologyId))) {
+      if (!(await ontologyExists(ontologyId, tenant))) {
         return sendError(
           res,
           "ONTOLOGY_NOT_FOUND",
@@ -343,7 +357,7 @@ router.get(
         );
       }
 
-      const objectType = await resolveObjectType(ontologyId, apiName);
+      const objectType = await resolveObjectType(ontologyId, apiName, tenant);
       if (!objectType) {
         return sendError(
           res,
@@ -477,10 +491,11 @@ router.get(
     // See POST / above for why we also accept `res.locals.apiName`.
     const apiName =
       req.params.apiName ?? ((res.locals as { apiName?: string }).apiName ?? "");
+    const tenant = resolveRequestTenant(req);
 
     try {
       // Validation
-      if (!(await ontologyExists(ontologyId))) {
+      if (!(await ontologyExists(ontologyId, tenant))) {
         return sendError(
           res,
           "ONTOLOGY_NOT_FOUND",
@@ -488,7 +503,7 @@ router.get(
         );
       }
 
-      const objectType = await resolveObjectType(ontologyId, apiName);
+      const objectType = await resolveObjectType(ontologyId, apiName, tenant);
       if (!objectType) {
         return sendError(
           res,

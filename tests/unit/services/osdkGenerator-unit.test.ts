@@ -254,6 +254,19 @@ describe("osdk generator — index.ts barrel", () => {
   });
 });
 
+describe("osdk generator — durable subscription recovery", () => {
+  it("refreshes once when a resume cursor has expired", () => {
+    const files = generateOsdk(fixture);
+    const client = fileContent(files, "clientV2.ts");
+    expect(client).toContain(
+      'protocolError?.error === "SubscriptionCursorExpired"',
+    );
+    expect(client).toContain(
+      'ws.send(JSON.stringify({ type: "subscribeRequests", ...request }))',
+    );
+  });
+});
+
 describe("osdk generator — generated sources transpile", () => {
   it("every generated file passes ts.transpileModule without syntax diagnostics", () => {
     const files = generateOsdk(fixture);

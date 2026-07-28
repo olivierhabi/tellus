@@ -189,7 +189,10 @@ router.post(
   "/actions/:actionType/apply",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const query = parseQuery(req);
       const parsed = ApplyRequest.safeParse(req.body);
       if (!parsed.success) {
@@ -270,7 +273,10 @@ router.post(
   "/actions/:actionType/applyBatch",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const query = parseQuery(req);
       const parsed = ApplyBatchRequest.safeParse(req.body);
       if (!parsed.success) {

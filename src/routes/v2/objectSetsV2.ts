@@ -21,6 +21,7 @@ import {
   parseLoadObjectSetQuery,
   parseCreateTemporaryObjectSetQuery,
   parseAggregateObjectSetRequest,
+  objectSetFingerprint,
   CreateTemporaryObjectSetRequestV2,
   type LoadObjectSetQueryV2,
 } from "../../services/oss/objectSetDefinition";
@@ -432,6 +433,13 @@ async function makeCtx(
       ontologyRid: ontologyId,
       branchRid: branchId,
       tenant,
+      userId: security.userId,
+      securityFingerprint: objectSetFingerprint({
+        markings: [...security.markings].sort(),
+        cbac: [...security.cbac].sort(),
+        organizations: [...security.organizations].sort(),
+        markingBypass: security.markingBypass,
+      }),
       transactionId: query.transactionId ?? null,
       transactionVersion: readContexts.transaction?.version ?? null,
       scenarioRid: query.scenarioRid ?? null,
@@ -447,7 +455,10 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const started = process.hrtime.bigint();
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const parsed = parseLoadObjectSetRequest(req.body);
       const query = parseLoadObjectSetQuery(req.query);
       assertSupportedLoadObjectSetRequest(parsed, query);
@@ -494,7 +505,10 @@ router.post(
     // this delegates to the same execution path.
     try {
       const started = process.hrtime.bigint();
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const parsed = parseLoadObjectSetRequest(req.body);
       const query = parsePreviewQuery(req);
       assertSupportedLoadObjectSetRequest(parsed, query);
@@ -537,7 +551,10 @@ router.post(
   "/objectSets/loadObjectsOrInterfaces",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const parsed = parseLoadObjectSetRequest(req.body);
       if (
         Object.prototype.hasOwnProperty.call(
@@ -625,7 +642,10 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const started = process.hrtime.bigint();
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const parsed = LoadLinksRequest.safeParse(req.body);
       if (!parsed.success) {
         throw Object.assign(new Error("Invalid load-links request"), {
@@ -755,8 +775,14 @@ router.post(
             for (const target of linked.linkedObjects as Array<
               Record<string, unknown>
             >) {
-              if (target.__primaryKey != null) {
-                baseTargetPks.push(String(target.__primaryKey));
+              // The canonical resolver returns raw OpenSearch documents
+              // (`__pk`); overlay/context resolvers may already return the
+              // public formatter name (`__primaryKey`). Accept both at this
+              // boundary and normalize before composing context link edits.
+              const targetPrimaryKey =
+                target.__primaryKey ?? target.__pk;
+              if (targetPrimaryKey != null) {
+                baseTargetPks.push(String(targetPrimaryKey));
               }
             }
             linkPageToken = linked.nextPageToken ?? null;
@@ -856,7 +882,10 @@ router.post(
   "/objectSets/aggregate",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const query = parseLoadObjectSetQuery(req.query);
       if (
         query.transactionId ||
@@ -907,7 +936,10 @@ router.post(
   "/objectSets/createTemporary",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const query = parseCreateTemporaryObjectSetQuery(req.query);
       if (query.preview !== true) {
         throw Object.assign(
@@ -961,7 +993,10 @@ router.get(
   async (req: Request, res: Response) => {
     try {
       parseObjectSetGetPreview(req);
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const tenant = resolveRequestTenant(req);
       const branchRid = readBranchHeader(req);
       const rid = req.params.objectSetRid;

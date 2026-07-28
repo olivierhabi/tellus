@@ -205,6 +205,55 @@ export function makeProductionExecutorDeps(
     organizations: sec.organizations,
     markingBypass: sec.markingBypass,
   };
+  const authorizeProperties = async (
+    objectType: string,
+    fields: string[],
+    usage: "filter" | "order" | "aggregation" | "knn",
+  ): Promise<void> => {
+    if (sec.markingBypass || fields.length === 0) return;
+    const requested = [...new Set(fields)].filter(
+      (field) => !field.startsWith("__"),
+    );
+    if (requested.length === 0) return;
+    const { rows } = await query(
+      `SELECT p.api_name,
+              COALESCE(p.marking_required, ARRAY[]::text[]) AS required
+         FROM property p
+         JOIN object_type ot ON ot.object_type_id = p.object_type_id
+        WHERE ot.ontology_id = $1
+          AND ot.api_name = $2
+          AND p.api_name = ANY($3::text[])`,
+      [sec.ontologyId, objectType, requested],
+    );
+    const granted = new Set(sec.markings);
+    const denied = rows.find((row) =>
+      (row.required as string[]).some((marking) => !granted.has(marking)),
+    );
+    if (!denied) return;
+    recordOssV2AuditBestEffort({
+      eventType: "restricted_property_attempt",
+      outcome: "denied",
+      tenantId: sec.tenant,
+      ontologyId: sec.ontologyId,
+      userId: sec.userId,
+      branchId: sec.branchId,
+      transactionId: sec.transactionId ?? null,
+      scenarioRid: sec.scenarioRid ?? null,
+      requestId: sec.requestId ?? null,
+      parameters: {
+        reason: "restricted_property",
+        objectType,
+        property: String(denied.api_name),
+        usage,
+      },
+    });
+    throw new ObjectSetExecutionError(
+      "PropertySecurityDenied",
+      `Access to property '${String(denied.api_name)}' is denied.`,
+      { objectType, property: denied.api_name, usage },
+      403,
+    );
+  };
   const applyContextTraversalEdits = async (input: {
     linkType: string;
     direction: "forward" | "reverse";
@@ -292,16 +341,36 @@ export function makeProductionExecutorDeps(
     return [...targets].sort();
   };
   return {
+    authorizeProperties,
     keywordOf: async (objectType, field) => {
+      await authorizeProperties(objectType, [field], "aggregation");
       if (field === "__pk" || field === "__rid") return field;
       const meta = await resolveProperty(objectType, field);
       return meta.opensearchKeywordField;
     },
 
-    translateWhere: (objectType, where) =>
-      translateFilter(where, objectType) as Promise<Record<string, unknown>>,
+    translateWhere: async (objectType, where) => {
+      const fields = new Set<string>();
+      const visit = (value: unknown): void => {
+        if (Array.isArray(value)) {
+          value.forEach(visit);
+          return;
+        }
+        if (!value || typeof value !== "object") return;
+        const record = value as Record<string, unknown>;
+        if (typeof record.field === "string") fields.add(record.field);
+        Object.values(record).forEach(visit);
+      };
+      visit(where);
+      await authorizeProperties(objectType, [...fields], "filter");
+      return translateFilter(
+        where,
+        objectType,
+      ) as Promise<Record<string, unknown>>;
+    },
 
     resolveKnnVector: async (objectType, field, knnQuery) => {
+      await authorizeProperties(objectType, [field], "knn");
       const property = await query(
         `SELECT p.base_type, cfg.dimensions
            FROM property p
