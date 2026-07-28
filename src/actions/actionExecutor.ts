@@ -116,6 +116,20 @@ export interface ExecutionContext {
   subjectCbac?: string[];
   /** When true, the subject is a superadmin with `markingBypass` — the CBAC gate is an automatic ALLOW. */
   markBypass?: boolean;
+  /**
+   * v2 ApplyActionMode VALIDATE_ONLY (OSv2 parity): run stages
+   * 1–3 (definition load, semantics, CBAC, parameter validation,
+   * submission criteria) and STOP. No edits are compiled or
+   * applied, no writeback webhooks fire, no side-effect jobs are
+   * enqueued, no functions execute. The audit row is still
+   * written by the outer finally block — Foundry audits
+   * validations too.
+   */
+  validateOnly?: boolean;
+  /** v2 apply returns validation failures in a 200 response body. */
+  returnValidationErrors?: boolean;
+  /** Public applyBatch does not support notification side effects. */
+  suppressNotifications?: boolean;
 }
 
 /** A single affected object in the result. */
@@ -134,6 +148,21 @@ export interface ExecutionResult {
   errorMessage: string | null;
   affectedObjects: AffectedObject[];
   durationMs: number;
+  validation?: {
+    result: "VALID" | "INVALID";
+    submissionCriteria: Array<{
+      result: "VALID" | "INVALID";
+      configuredFailureMessage?: string;
+    }>;
+    parameters: Record<
+      string,
+      {
+        result: "VALID" | "INVALID";
+        evaluatedConstraints: unknown[];
+        required: boolean;
+      }
+    >;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -464,8 +493,23 @@ export async function executeAction(
     // -----------------------------------------------------------------
     // STAGE 2: Validate parameters
     // -----------------------------------------------------------------
+    const parameterDefinitions =
+      actionType.parameters as ParameterDefinition[];
+    const parameterEvaluations = (
+      resultValue: "VALID" | "INVALID",
+    ): NonNullable<ExecutionResult["validation"]>["parameters"] =>
+      Object.fromEntries(
+        parameterDefinitions.map((definition) => [
+          definition.apiName,
+          {
+            result: resultValue,
+            evaluatedConstraints: [],
+            required: definition.required === true,
+          },
+        ]),
+      );
     const validation = await validateParameters(
-      actionType.parameters as ParameterDefinition[],
+      parameterDefinitions,
       parameters,
       objectExists
     );
@@ -479,6 +523,11 @@ export async function executeAction(
         undefined,
         { errors: validation.errors, executionId }
       );
+      result.validation = {
+        result: "INVALID",
+        submissionCriteria: [],
+        parameters: parameterEvaluations("INVALID"),
+      };
       return result;
     }
 
@@ -512,11 +561,36 @@ export async function executeAction(
           undefined,
           { failures: submission.failures, executionId },
         );
+        result.validation = {
+          result: "INVALID",
+          submissionCriteria: submission.failures.map((failure) => ({
+            result: "INVALID",
+            configuredFailureMessage: failure,
+          })),
+          parameters: parameterEvaluations("VALID"),
+        };
         return result;
       }
     }
+    result.validation = {
+      result: "VALID",
+      submissionCriteria: [],
+      parameters: parameterEvaluations("VALID"),
+    };
 
-    // -----------------------------------------------------------------
+    // VALIDATE_ONLY short-circuit (v2 ApplyActionMode). Placed
+    // AFTER submission criteria so all validation gates (1–3) have
+    // run, and BEFORE the writeback pre-edit stage (3.5), rule
+    // compilation (4) and edit application (6) — validation-only
+    // mode must not perform edits, trigger side effects, or
+    // enqueue write-back jobs.
+    if (context.validateOnly) {
+      result.success = true;
+      result.result = "success";
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+
     // STAGE 3.5 (Phase 6.3): Writeback pre-edit hook (Phase 4-origin,
     // re-ordered from Stage 5 to Stage 3.5 in Phase 6.3).
     //
@@ -842,7 +916,13 @@ export async function executeAction(
           affectedObjects: result.affectedObjects,
           firedAt: new Date().toISOString(),
         };
-        const jobs = extractSideEffectJobs(at.side_effects, execCtx);
+        const sideEffects = context.suppressNotifications
+          ? {
+              ...(at.side_effects as Record<string, unknown>),
+              notifications: [],
+            }
+          : at.side_effects;
+        const jobs = extractSideEffectJobs(sideEffects, execCtx);
         if (jobs.length > 0) {
           await enqueueSideEffectJobsInTransaction(pg, {
             executionId,
@@ -950,10 +1030,14 @@ export async function executeAction(
 
     // -----------------------------------------------------------------
     // STAGE 7: real-time object notifications (FOUNDRY-GAPS §5 Object
-    // Storage V2). One `object_set.changed` event per affected object type,
-    // routed by objectTopic so only clients subscribed to that
-    // ontology/object type receive it (see websocket/server.ts).
-    // Best-effort: a broken event bus must never fail a committed action.
+    // Storage V2). One `object_set.changed` event per affected object
+    // type, routed by objectTopic so only clients subscribed to that
+    // ontology/object type receive it (see websocket/server.ts). This
+    // executor is the SINGLE ownership point for the event across
+    // /apply, /applyBatch, and the bulk runner (declarative here;
+    // function-backed in the branch above) — exactly one event per
+    // affected object type per execution. Best-effort: a broken event
+    // bus must never fail a committed action.
     // -----------------------------------------------------------------
     if (application.success && application.appliedEdits.length > 0) {
       try {
@@ -970,7 +1054,15 @@ export async function executeAction(
             objectTopic: `${ontologyId}:${objectType}`,
             payload: {
               ontologyId,
+              tenantId: context.tenant ?? "default",
               objectType,
+              // FE auto-refresh (useObjectAutoRefresh) filters on
+              // this field name.
+              objectTypeApiName: objectType,
+              // Contract preserved from the retired route-level
+              // emitter: same operation label + per-type count.
+              operation: "applyAction",
+              affectedCount: primaryKeys.length,
               primaryKeys,
               actionTypeApiName,
               executionId,
@@ -1009,15 +1101,17 @@ export async function executeAction(
         });
         
         // Send notifications (email, push, etc.)
-        await sendNotifications(actionType.side_effects, {
-          executionId,
-          actionTypeApiName,
-          ontologyId,
-          result: result.result,
-          executedBy: context.executedBy || "system",
-          affectedObjects: result.affectedObjects,
-          timestamp: new Date().toISOString(),
-        });
+        if (!context.suppressNotifications) {
+          await sendNotifications(actionType.side_effects, {
+            executionId,
+            actionTypeApiName,
+            ontologyId,
+            result: result.result,
+            executedBy: context.executedBy || "system",
+            affectedObjects: result.affectedObjects,
+            timestamp: new Date().toISOString(),
+          });
+        }
       } catch (whErr) {
         console.warn(
           `[action:${actionTypeApiName}] side effect dispatch error (non-fatal): ${(whErr as Error).message}`,
@@ -1163,7 +1257,11 @@ export async function executeAction(
     // error handler in the route layer catches the OntologyError and
     // produces a standardized HTTP error response. The result object was
     // only used above to populate the audit log entry.
-    if (pendingError) {
+    const isReturnedValidationError =
+      context.returnValidationErrors === true &&
+      (pendingError?.code === "INVALID_PARAMETER" ||
+        pendingError?.code === "SUBMISSION_CRITERIA_NOT_MET");
+    if (pendingError && !isReturnedValidationError) {
       throw pendingError;
     }
   }

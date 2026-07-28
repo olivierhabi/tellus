@@ -40,6 +40,7 @@ import { getAllEditsByObjectType, getPendingEdits, markEditsAsIndexed } from "./
 import type { OntologyEditRow } from "./models/ontologyEdit";
 import client from "./services/opensearch/client";
 import { ensureDocumentSecurity } from "./services/security/documentSecurity";
+import { deterministicObjectRid } from "./services/objectIdentity";
 import type { QueryResult } from "pg";
 
 // ---------------------------------------------------------------------------
@@ -286,6 +287,11 @@ export async function reindexObjectType(
       bulkOps.push({ index: { _index: indexName, _id: pk } });
       bulkOps.push({
         __pk: pk,
+        // Phase 2 (object identity): prefer the rid persisted by the
+        // write path; deterministic fallback keeps reindexes stable.
+        __rid:
+          (merged.__rid as string | undefined) ??
+          deterministicObjectRid(ontologyId, objectTypeApiName, pk),
         __objectType: objectTypeApiName,
         __lastModified: new Date().toISOString(),
         ...merged,
@@ -296,6 +302,9 @@ export async function reindexObjectType(
       bulkOps.push({ index: { _index: indexName, _id: pk } });
       bulkOps.push({
         __pk: pk,
+        __rid:
+          (dsProps.__rid as string | undefined) ??
+          deterministicObjectRid(ontologyId, objectTypeApiName, pk),
         __objectType: objectTypeApiName,
         __lastModified: new Date().toISOString(),
         ...dsProps,
@@ -311,6 +320,9 @@ export async function reindexObjectType(
       bulkOps.push({ index: { _index: indexName, _id: pk } });
       bulkOps.push({
         __pk: pk,
+        __rid:
+          (edit.properties.__rid as string | undefined) ??
+          deterministicObjectRid(ontologyId, objectTypeApiName, pk),
         __objectType: objectTypeApiName,
         __lastModified: new Date().toISOString(),
         ...edit.properties,

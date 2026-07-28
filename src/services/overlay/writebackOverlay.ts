@@ -260,17 +260,23 @@ export async function writeOverlayForEdit(
     // (T-04 layers an explicit-branch keyspace on top — the PG row is
     // still per-ontology-`_main`-by-default for now).
     const branchUuid = deriveMainBranchId(input.ontologyId);
+    // Phase 2 (object identity): persist a stable object rid on first
+    // write. Caller-supplied rid wins; otherwise mint one. On conflict
+    // the EXISTING rid is kept — rids never change for the lifetime of
+    // an object (they survive edits, overlays and reindexes).
     const res = await client.query(
       `INSERT INTO object_instances
          (ontology_id, branch_id, object_type_api_name, primary_key, properties,
           markings, source_datasource_id, source_transaction_id,
-          last_modified_at, version)
-       VALUES ($1, $6::uuid, $2, $3, $4::jsonb, ARRAY[]::text[], NULL, NULL, NOW(), $5)
+          last_modified_at, version, rid)
+       VALUES ($1, $6::uuid, $2, $3, $4::jsonb, ARRAY[]::text[], NULL, NULL, NOW(), $5,
+               COALESCE($7, 'ri.tellus.main.object.' || gen_random_uuid()))
        ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
          DO UPDATE SET properties        = EXCLUDED.properties,
                        last_modified_at  = NOW(),
-                       version           = object_instances.version + 1
-       RETURNING version`,
+                       version           = object_instances.version + 1,
+                       rid               = COALESCE(object_instances.rid, EXCLUDED.rid)
+       RETURNING version, rid`,
       [
         input.ontologyId,
         input.objectType,
@@ -278,9 +284,15 @@ export async function writeOverlayForEdit(
         JSON.stringify(input.doc),
         input.version,
         branchUuid,
+        (input as { rid?: string }).rid ?? null,
       ],
     );
     upsertedInstance = (res.rowCount ?? 0) > 0;
+    // Stamp the persisted rid into the overlay doc so overlay-merged
+    // reads expose `__rid` immediately (before the index absorbs it).
+    if (upsertedInstance && typeof res.rows[0]?.rid === "string") {
+      input.doc.__rid = res.rows[0].rid;
+    }
     // Capture the canonical monotonic version from the UPSERT — on INSERT
     // it equals the inserted value, on UPDATE it equals existing+1. This
     // is what we MUST stamp on the overlay record; using the caller's

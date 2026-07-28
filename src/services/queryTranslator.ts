@@ -74,6 +74,33 @@ export async function translateFilter(
       return translateIsNotNull(filter, objectTypeApiName);
     case "in":
       return translateIn(filter, objectTypeApiName);
+    // Phase 6 — SearchJsonQueryV2 parity (verified operators)
+    case "containsAllTerms":
+      return translateTerms(filter, objectTypeApiName, "and");
+    case "containsAnyTerm":
+      return translateTerms(filter, objectTypeApiName, "or");
+    case "containsAllTermsInOrder":
+      return translatePhrase(filter, objectTypeApiName, false);
+    case "containsAllTermsInOrderPrefixLastTerm":
+      return translatePhrase(filter, objectTypeApiName, true);
+    case "wildcard":
+      return translateWildcard(filter, objectTypeApiName);
+    case "regex":
+      return translateRegex(filter, objectTypeApiName);
+    case "interval":
+      return translateInterval(filter, objectTypeApiName);
+    case "withinBoundingBox":
+    case "intersectsBoundingBox":
+    case "doesNotIntersectBoundingBox":
+      return translateBoundingBox(filter, objectTypeApiName);
+    case "withinDistanceOf":
+      return translateDistanceOf(filter, objectTypeApiName);
+    case "withinPolygon":
+    case "intersectsPolygon":
+    case "doesNotIntersectPolygon":
+      return translatePolygon(filter, objectTypeApiName);
+    case "geoShapeV2":
+      return translateGeoShapeV2(filter, objectTypeApiName);
     default:
       throw appError("UNSUPPORTED_FILTER", `Unsupported filter type: ${filter.type}`);
   }
@@ -244,6 +271,217 @@ async function translateIn(filter: any, objectTypeApiName: string): Promise<OsQu
   }
 
   return { terms: { [fieldName]: filter.value } };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — SearchJsonQueryV2 translations
+//
+// Field resolution bypasses getOpenSearchFieldForFilter: that helper
+// rejects geo properties for standard filters, but the v2 geo
+// operators REQUIRE geo properties (validated upstream).
+// ---------------------------------------------------------------------------
+
+async function resolveField(
+  objectTypeApiName: string,
+  field: string,
+): Promise<{ name: string; meta: PropertyMeta }> {
+  const meta = await resolveProperty(objectTypeApiName, field);
+  return { name: meta.opensearchField, meta };
+}
+
+async function translateTerms(
+  filter: any,
+  objectTypeApiName: string,
+  operator: "and" | "or",
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  const clause: Record<string, unknown> = { query: filter.value, operator };
+  // fuzzy?: boolean — verified FuzzyV2. false → exact terms only.
+  if (filter.fuzzy !== false) clause.fuzziness = "AUTO";
+  return { match: { [name]: clause } };
+}
+
+async function translatePhrase(
+  filter: any,
+  objectTypeApiName: string,
+  prefixLastTerm: boolean,
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  return prefixLastTerm
+    ? { match_phrase_prefix: { [name]: filter.value } }
+    : { match_phrase: { [name]: filter.value } };
+}
+
+async function translateWildcard(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  return {
+    wildcard: { [name]: { value: filter.value, case_insensitive: true } },
+  };
+}
+
+async function translateRegex(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  return { regexp: { [name]: { value: filter.value, flags: "ALL" } } };
+}
+
+/**
+ * OpenSearch `intervals` query — recursive rule compilation.
+ * Verified rule union: match / prefixOnLastToken (prefix) / fuzzy /
+ * allOf / anyOf.
+ */
+function compileIntervalRule(rule: any): OsQuery {
+  switch (rule.type) {
+    case "match": {
+      const m: Record<string, unknown> = { query: rule.query };
+      if (rule.maxGaps !== undefined) m.max_gaps = rule.maxGaps;
+      if (rule.ordered) m.ordered = true;
+      return { match: m };
+    }
+    case "prefixOnLastToken":
+      return { prefix: { prefix: rule.query } };
+    case "fuzzy": {
+      const f: Record<string, unknown> = { term: rule.term };
+      if (rule.fuzziness !== undefined) f.fuzziness = rule.fuzziness;
+      return { fuzzy: f };
+    }
+    case "allOf": {
+      const a: Record<string, unknown> = {
+        intervals: rule.rules.map(compileIntervalRule),
+      };
+      if (rule.maxGaps !== undefined) a.max_gaps = rule.maxGaps;
+      if (rule.ordered) a.ordered = true;
+      return { all_of: a };
+    }
+    case "anyOf":
+      return { any_of: { intervals: rule.rules.map(compileIntervalRule) } };
+    default:
+      throw appError(
+        "UNSUPPORTED_FILTER",
+        `Unsupported interval rule type: ${rule.type}`,
+      );
+  }
+}
+
+async function translateInterval(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  return { intervals: { [name]: compileIntervalRule(filter.rule) } };
+}
+
+/** Verified DistanceUnit → OpenSearch unit suffix. */
+const OS_DISTANCE_UNITS: Record<string, string> = {
+  MILLIMETERS: "mm",
+  CENTIMETERS: "cm",
+  METERS: "m",
+  KILOMETERS: "km",
+  INCHES: "in",
+  FEET: "ft",
+  YARDS: "yd",
+  MILES: "mi",
+  NAUTICAL_MILES: "nmi",
+};
+
+async function translateBoundingBox(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<OsQuery> {
+  const { name, meta } = await resolveField(objectTypeApiName, filter.field);
+  const { topLeft, bottomRight } = filter.value;
+  const box = {
+    top_left: { lat: topLeft.lat, lon: topLeft.lon },
+    bottom_right: { lat: bottomRight.lat, lon: bottomRight.lon },
+  };
+  if (getEffective(meta.baseType) === "geopoint") {
+    const q = { geo_bounding_box: { [name]: box } };
+    return filter.type === "doesNotIntersectBoundingBox"
+      ? { bool: { must_not: [q] } }
+      : q;
+  }
+  // geoshape — bounding-box via geo_shape with envelope
+  const shape = {
+    geo_shape: {
+      [name]: {
+        shape: {
+          type: "envelope",
+          coordinates: [
+            [topLeft.lon, topLeft.lat],
+            [bottomRight.lon, bottomRight.lat],
+          ],
+        },
+        relation:
+          filter.type === "withinBoundingBox" ? "within" : "intersects",
+      },
+    },
+  };
+  return filter.type === "doesNotIntersectBoundingBox"
+    ? { bool: { must_not: [shape] } }
+    : shape;
+}
+
+async function translateDistanceOf(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  const { center, distance } = filter.value;
+  const unit = OS_DISTANCE_UNITS[distance.unit] ?? "m";
+  return {
+    geo_distance: {
+      distance: `${distance.value}${unit}`,
+      [name]: { lat: center.lat, lon: center.lon },
+    },
+  };
+}
+
+async function translatePolygon(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  const relation =
+    filter.type === "withinPolygon" ? "within" : "intersects";
+  const q = {
+    geo_shape: { [name]: { shape: filter.value.geometry, relation } },
+  };
+  return filter.type === "doesNotIntersectPolygon"
+    ? { bool: { must_not: [q] } }
+    : q;
+}
+
+async function translateGeoShapeV2(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<OsQuery> {
+  const { name } = await resolveField(objectTypeApiName, filter.field);
+  const relations: Record<string, string> = {
+    INTERSECTS: "intersects",
+    DISJOINT: "disjoint",
+    WITHIN: "within",
+    CONTAINS: "contains",
+  };
+  const relation = relations[filter.spatialFilterMode];
+  if (!relation) {
+    throw appError(
+      "INVALID_FILTER",
+      `Unsupported geoShapeV2 spatialFilterMode: ${String(filter.spatialFilterMode)}`,
+    );
+  }
+  return {
+    geo_shape: {
+      [name]: {
+        shape: filter.shape,
+        relation,
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

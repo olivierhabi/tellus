@@ -50,6 +50,11 @@ import actionTypeRouter, { formatActionType } from "./routes/actionTypes";
 import actionsRouter, { validateRouter, batchRouter } from "./routes/actions";
 import { actionAuditRouter, globalAuditRouter } from "./routes/auditLog";
 import objectsRouter from "./routes/objects";
+import objectSetsV2Router from "./routes/v2/objectSetsV2";
+import objectsV2Router from "./routes/v2/objectsV2";
+import linksV2Router from "./routes/v2/linksV2";
+import actionsV2Router from "./routes/v2/actionsV2";
+import omsV2Router from "./routes/v2/omsV2";
 import healthRouter from "./routes/health";
 import editsRouter from "./routes/edits";
 import reindexStatusRouter from "./routes/reindexStatus";
@@ -1057,6 +1062,16 @@ app.use(
 );
 app.use("/api/v1/objects/:objectType", objectViewsByTypeRouter);
 app.use(objectsRouter);
+
+// ---------------------------------------------------------------------------
+// OSS v2 / OSv2 / OMS v2 surface (canonical ObjectSet engine).
+// Thin adapters — same securityContext + branch middleware as v1.
+// ---------------------------------------------------------------------------
+app.use("/api/v2/ontologies/:ontology", objectSetsV2Router);
+app.use("/api/v2/ontologies/:ontology", objectsV2Router);
+app.use("/api/v2/ontologies/:ontology", linksV2Router);
+app.use("/api/v2/ontologies/:ontology", actionsV2Router);
+app.use("/api/v2/ontologies/:ontology", omsV2Router);
 app.use(healthRouter);
 
 // ---------------------------------------------------------------------------

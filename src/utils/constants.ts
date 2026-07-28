@@ -52,6 +52,16 @@ export const SUPPORTED_FILTER_TYPES = [
   "isNull", "isNotNull",
   "in",
   "and", "or", "not",
+  // Phase 6 — SearchJsonQueryV2 parity (verified against
+  // @osdk/foundry.ontologies@2.69.0). These are additions to the
+  // ONE internal filter language; both v1 and v2 compile to them.
+  "containsAllTerms", "containsAnyTerm",
+  "containsAllTermsInOrder", "containsAllTermsInOrderPrefixLastTerm",
+  "wildcard", "regex", "interval",
+  "withinBoundingBox", "withinDistanceOf", "withinPolygon",
+  "intersectsBoundingBox", "intersectsPolygon",
+  "doesNotIntersectBoundingBox", "doesNotIntersectPolygon",
+  "geoShapeV2",
 ];
 
 export const SUPPORTED_AGGREGATION_TYPES = [

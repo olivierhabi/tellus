@@ -12,6 +12,8 @@
     "migrate": "tsx src/migrate.ts",
     "migrate:foundry": "tsx src/foundryMigrate.ts",
     "migrate:auth": "tsx src/migrateAuth.ts",
+    "migrate:backfill-object-rids": "tsx src/scripts/backfillObjectRids.ts",
+    "contract:check-oss-v2": "tsx src/scripts/checkOssV2Contract.ts",
     "migrate:all": "npm run migrate && npm run migrate:foundry && npm run migrate:auth && npm run migrate",
     "seed": "tsx src/seed.ts",
     "test": "vitest run",

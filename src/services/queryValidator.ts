@@ -47,6 +47,25 @@ const LEAF_FILTER_TYPES = new Set([
   "in",
 ]);
 
+// Phase 6 — SearchJsonQueryV2 leaf types. Validated here, translated
+// by queryTranslator. Full-text types require string properties;
+// geo types require geo properties (enforced in validateV2Leaf).
+const V2_TEXT_FILTER_TYPES = new Set([
+  "containsAllTerms", "containsAnyTerm",
+  "containsAllTermsInOrder", "containsAllTermsInOrderPrefixLastTerm",
+  "wildcard", "regex", "interval",
+]);
+const V2_GEO_FILTER_TYPES = new Set([
+  "withinBoundingBox", "withinDistanceOf", "withinPolygon",
+  "intersectsBoundingBox", "intersectsPolygon",
+  "doesNotIntersectBoundingBox", "doesNotIntersectPolygon",
+  "geoShapeV2",
+]);
+const V2_LEAF_FILTER_TYPES = new Set([
+  ...V2_TEXT_FILTER_TYPES,
+  ...V2_GEO_FILTER_TYPES,
+]);
+
 const COMPOUND_FILTER_TYPES = new Set(["and", "or", "not"]);
 
 const UNARY_FILTERS = new Set(["isNull", "isNotNull"]);
@@ -247,6 +266,12 @@ async function validateWhereClause(
     return;
   }
 
+  // Phase 6 — v2 leaf filters (SearchJsonQueryV2 parity)
+  if (V2_LEAF_FILTER_TYPES.has(filter.type)) {
+    await validateV2Leaf(filter, objectTypeApiName);
+    return;
+  }
+
   // Leaf filters
   if (LEAF_FILTER_TYPES.has(filter.type)) {
     if (!filter.field || typeof filter.field !== "string") {
@@ -318,6 +343,126 @@ async function validateWhereClause(
     if (filter.value !== null) {
       checkTypeCompatibility(filter.type, filter.field, filter.value, meta);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — v2 leaf validation
+// ---------------------------------------------------------------------------
+
+const GEO_BASE_TYPES = new Set(["geopoint", "geoshape"]);
+
+async function validateV2Leaf(
+  filter: any,
+  objectTypeApiName: string,
+): Promise<void> {
+  if (!filter.field || typeof filter.field !== "string") {
+    throw validationError(
+      "INVALID_FILTER",
+      `Filter '${filter.type}' must have a 'field' property (non-empty string).`,
+    );
+  }
+  const meta = await resolveProperty(objectTypeApiName, filter.field);
+  const effective = getEffective(meta.baseType);
+
+  if (V2_TEXT_FILTER_TYPES.has(filter.type)) {
+    if (effective !== "string") {
+      throw validationError(
+        "INCOMPATIBLE_FILTER",
+        `Filter '${filter.type}' is only supported on string properties. ` +
+          `Property '${filter.field}' has type '${meta.baseType}'.`,
+        filter.field,
+      );
+    }
+    if (filter.type === "interval") {
+      if (!filter.rule || typeof filter.rule !== "object") {
+        throw validationError(
+          "INVALID_FILTER",
+          `'interval' filter requires a 'rule' object.`,
+          filter.field,
+        );
+      }
+      return;
+    }
+    if (typeof filter.value !== "string") {
+      throw validationError(
+        "TYPE_MISMATCH",
+        `Filter '${filter.type}' requires a string value. Got ${typeof filter.value}.`,
+        filter.field,
+      );
+    }
+    return;
+  }
+
+  // Geo filters
+  if (!GEO_BASE_TYPES.has(effective)) {
+    throw validationError(
+      "INCOMPATIBLE_FILTER",
+      `Filter '${filter.type}' is only supported on geo properties ` +
+        `(geopoint/geoshape). Property '${filter.field}' has type '${meta.baseType}'.`,
+      filter.field,
+    );
+  }
+  if (filter.type === "geoShapeV2") {
+    if (!filter.shape || typeof filter.shape !== "object") {
+      throw validationError(
+        "INVALID_FILTER",
+        "'geoShapeV2' requires a compiled GeoJSON shape.",
+        filter.field,
+      );
+    }
+    if (
+      !["INTERSECTS", "DISJOINT", "WITHIN", "CONTAINS"].includes(
+        filter.spatialFilterMode,
+      )
+    ) {
+      throw validationError(
+        "INVALID_FILTER",
+        "'geoShapeV2' has an invalid spatialFilterMode.",
+        filter.field,
+      );
+    }
+    return;
+  }
+  // Point-in-polygon is valid on geopoint OR geoshape; bbox/distance
+  // are point-centric (geo_bounding_box / geo_distance on geo_point);
+  // intersects/doesNotIntersect require shape semantics.
+  const v = filter.value;
+  if (!v || typeof v !== "object") {
+    throw validationError(
+      "INVALID_FILTER",
+      `Filter '${filter.type}' requires a structured 'value' object.`,
+      filter.field,
+    );
+  }
+  if (
+    (filter.type === "withinBoundingBox" || filter.type === "intersectsBoundingBox" ||
+      filter.type === "doesNotIntersectBoundingBox") &&
+    (!v.topLeft || !v.bottomRight)
+  ) {
+    throw validationError(
+      "INVALID_FILTER",
+      `'${filter.type}' requires value.topLeft and value.bottomRight.`,
+      filter.field,
+    );
+  }
+  if (filter.type === "withinDistanceOf" && (!v.center || !v.distance)) {
+    throw validationError(
+      "INVALID_FILTER",
+      `'withinDistanceOf' requires value.center and value.distance.`,
+      filter.field,
+    );
+  }
+  if (
+    (filter.type === "withinPolygon" || filter.type === "intersectsPolygon" ||
+      filter.type === "doesNotIntersectPolygon") &&
+    !v.geometry
+  ) {
+    throw validationError(
+      "INVALID_FILTER",
+      `'${filter.type}' requires value.geometry (GeoJSON).`,
+      filter.field,
+    );
   }
 }
 

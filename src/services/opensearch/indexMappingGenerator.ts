@@ -26,6 +26,12 @@ import {
 /** System fields appended to every OpenSearch index mapping. */
 interface SystemFields {
   __pk: OpenSearchFieldMapping;
+  /**
+   * Phase 2 (OSSv2 parity): stable object rid
+   * (`ri.tellus.main.object.<uuid>`). `keyword` so `static` ObjectSet
+   * nodes and rid-lookups use O(1) `terms` queries.
+   */
+  __rid: OpenSearchFieldMapping;
   __objectType: OpenSearchFieldMapping;
   __lastModified: OpenSearchFieldMapping;
   __version: OpenSearchFieldMapping;
@@ -83,6 +89,7 @@ export interface IndexMappingResult {
 /** System field names, in order. */
 const SYSTEM_FIELD_NAMES: readonly string[] = [
   "__pk",
+  "__rid",
   "__objectType",
   "__lastModified",
   "__version",
@@ -95,6 +102,8 @@ const SYSTEM_FIELD_NAMES: readonly string[] = [
 const SYSTEM_FIELD_MAPPINGS: SystemFields = {
   // Primary key value — always keyword for exact-match lookups
   __pk: { type: "keyword" },
+  // Stable object rid — keyword for exact-match `static` set lookups
+  __rid: { type: "keyword" },
   // API name of the object type — keyword for cross-index queries
   __objectType: { type: "keyword" },
   // Timestamp when this object was last indexed or edited

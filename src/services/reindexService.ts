@@ -40,6 +40,7 @@ import {
 import { getObjectBuffer, getObjectStream } from "./storageService";
 import { parseCsvReadable } from "./indexing/streamingCsv";
 import { ensureDocumentSecurity } from "./security/documentSecurity";
+import { deterministicObjectRid } from "./objectIdentity";
 import type { PropertyInput } from "./mapping/typeMapper";
 
 // ---------------------------------------------------------------------------
@@ -873,6 +874,10 @@ export async function reindexObjectType(
       batch.push(
         ensureDocumentSecurity({
           __pk: pk,
+          // Phase 2 (object identity): persist-stable rid on reindex.
+          __rid:
+            (doc.__rid as string | undefined) ??
+            deterministicObjectRid(ontologyId, objectTypeApiName, pk),
           __objectType: objectTypeApiName,
           __lastModified: new Date().toISOString(),
           __version: 1,

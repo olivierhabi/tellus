@@ -37,6 +37,7 @@ import { markEditsAsIndexed } from "../models/ontologyEdit";
 import { writeOverlayForEdit, writeOverlayForLinkEdit } from "../services/overlay/writebackOverlay";
 import { isB1Ready } from "../services/funnel/b1Readiness";
 import { ensureDocumentSecurity } from "../services/security/documentSecurity";
+import { mintObjectRid } from "../services/objectIdentity";
 import {
   getByApiName as getLinkType,
   resolveObjectTypeApiName,
@@ -607,6 +608,12 @@ export async function applyEdits(
       // default PUBLIC classification via ensureDocumentSecurity.
       const rawDoc: Record<string, unknown> = {
         __pk: edit.primaryKey,
+        // Phase 2: stable object rid. Prefer a rid supplied by the
+        // caller (e.g. read from object_instances); otherwise mint a
+        // fresh one for this newly created object.
+        __rid:
+          (edit.propertyValues?.__rid as string | undefined) ??
+          mintObjectRid(),
         __objectType: edit.objectType,
         __lastModified: now,
         __editedBy: executionContext.executedBy,

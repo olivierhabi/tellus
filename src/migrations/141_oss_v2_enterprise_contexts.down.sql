@@ -1,0 +1,21 @@
+DROP TABLE IF EXISTS ontology_embedding_config;
+DROP INDEX IF EXISTS idx_oss_v2_audit_scope;
+DROP TABLE IF EXISTS oss_v2_audit_event;
+DROP INDEX IF EXISTS idx_object_set_subscription_dependencies;
+DROP INDEX IF EXISTS idx_object_set_subscription_owner;
+DROP TABLE IF EXISTS object_set_subscription;
+DROP INDEX IF EXISTS idx_object_set_event_occurred;
+DROP INDEX IF EXISTS idx_object_set_event_dependencies;
+DROP INDEX IF EXISTS idx_object_set_event_scope_cursor;
+DROP INDEX IF EXISTS idx_object_set_event_deduplication;
+DROP TABLE IF EXISTS object_set_event;
+ALTER TABLE property
+  DROP COLUMN IF EXISTS struct_main_value_field,
+  DROP COLUMN IF EXISTS reducer_config;
+DROP INDEX IF EXISTS idx_read_context_link_latest;
+DROP TABLE IF EXISTS ontology_read_context_link_edit;
+DROP INDEX IF EXISTS idx_read_context_object_latest;
+DROP TABLE IF EXISTS ontology_read_context_object_edit;
+DROP INDEX IF EXISTS idx_ontology_read_context_expiry;
+DROP INDEX IF EXISTS idx_ontology_read_context_scope;
+DROP TABLE IF EXISTS ontology_read_context;

@@ -1,6 +1,25 @@
 import { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
+import type { Request, Response } from "express";
 import { eventBus } from './eventBus';
+import { requireTellusAuth } from "../middleware/tellusAuth";
+import {
+  securityContext,
+  type SecurityContext,
+} from "../middleware/securityContext";
+import { resolveRequestTenant } from "../utils/requestTenant";
+import { parseObjectSet } from "../services/oss/objectSetDefinition";
+import {
+  acknowledgeCursor,
+  closeOwnedSubscription,
+  createDurableSubscription,
+  ensureDurableSubscriptionEventBridge,
+  getOwnedSubscription,
+  loadAuthorizedEventObject,
+  replayEvents,
+  type DurableSubscription,
+} from "../services/oss/durableSubscriptions";
+import { recordOssV2AuditBestEffort } from "../services/oss/audit";
 
 interface ClientState {
   ws: WebSocket;
@@ -13,6 +32,13 @@ interface ClientState {
    * never broadcast, so object churn doesn't spam project subscribers.
    */
   subscribedObjectTopics: Set<string>;
+  security: SecurityContext | null;
+  tenantId: string | null;
+  durableSubscriptions: Map<string, {
+    subscription: DurableSubscription;
+    cursor: number;
+  }>;
+  durablePoller: NodeJS.Timeout | null;
   isAlive: boolean;
 }
 
@@ -74,7 +100,47 @@ export function handleObjectSubscription(
 let wss: WebSocketServer | null = null;
 let currentEventHandler: ((...args: unknown[]) => void) | null = null;
 
+async function authenticateUpgrade(request: Request): Promise<boolean> {
+  const cookieHeader = request.headers.cookie ?? "";
+  request.cookies = Object.fromEntries(
+    cookieHeader
+      .split(";")
+      .map((part) => part.trim().split("="))
+      .filter(([key, value]) => Boolean(key && value))
+      .map(([key, value]) => [key, decodeURIComponent(value)]),
+  );
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const response = {
+      status: () => response,
+      json: () => {
+        finish(false);
+        return response;
+      },
+    } as unknown as Response;
+    void requireTellusAuth()(request, response, () => {
+      (request as Request & { auth?: unknown }).auth = request.tellusClaims;
+      securityContext(request, response, () => finish(Boolean(request.security)));
+    });
+  });
+}
+
+function durableStreamPath(pathname: string): {
+  ontology: string;
+} | null {
+  const match = pathname.match(
+    /^\/api\/v2\/ontologies\/([^/]+)\/objectSets\/stream$/,
+  );
+  return match ? { ontology: decodeURIComponent(match[1]!) } : null;
+}
+
 export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
+  ensureDurableSubscriptionEventBridge();
   if (wss) {
     console.warn('[websocket] WebSocket server already initialized, closing previous instance');
     // Remove the stale eventBus listener before closing
@@ -90,9 +156,29 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
 
   // Handle upgrade requests for /ws path
   // Use prependListener to ensure this runs before other handlers
-  httpServer.prependListener('upgrade', (request, socket, head) => {
+  httpServer.prependListener('upgrade', async (request, socket, head) => {
     const pathname = request.url ? new URL(request.url, `http://127.0.0.1:3000`).pathname : '';
     console.log(`[websocket] Upgrade event for pathname: ${pathname}`);
+    const durablePath = durableStreamPath(pathname);
+    if (durablePath) {
+      const authenticated = await authenticateUpgrade(
+        request as unknown as Request,
+      );
+      if (!authenticated) {
+        socket.write(
+          "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n",
+        );
+        socket.destroy();
+        return;
+      }
+      (request as typeof request & {
+        durableOntology?: string;
+      }).durableOntology = durablePath.ontology;
+      wss!.handleUpgrade(request, socket, head, (ws) => {
+        wss!.emit('connection', ws, request);
+      });
+      return;
+    }
     if (pathname === '/ws') {
       console.log('[websocket] Handling /ws upgrade');
       wss!.handleUpgrade(request, socket, head, (ws) => {
@@ -116,20 +202,234 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
     });
   }, 15000);
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, request) => {
+    const expressRequest = request as unknown as Request;
+    const security = expressRequest.security ?? null;
     const state: ClientState = {
       ws,
       subscribedProjects: new Set(),
       subscribedObjectTopics: new Set(),
+      security,
+      tenantId: security ? resolveRequestTenant(expressRequest) : null,
+      durableSubscriptions: new Map(),
+      durablePoller: null,
       isAlive: true,
     };
     clients.set(ws, state);
 
     ws.on('pong', () => { state.isAlive = true; });
 
-    ws.on('message', (raw) => {
+    const emitDurableUpdates = async () => {
+      if (!state.security || !state.tenantId) return;
+      for (const slot of state.durableSubscriptions.values()) {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        if (ws.bufferedAmount > 1_000_000) {
+          ws.close(1013, "slow consumer");
+          return;
+        }
+        const replay = await replayEvents(slot.subscription, slot.cursor);
+        if (replay.expired) {
+          for (const objectType of slot.subscription.dependencyTypes) {
+            ws.send(JSON.stringify({
+              type: "refreshObjectSet",
+              id: slot.subscription.id,
+              objectType,
+              cursor: String(replay.cursor),
+            }));
+          }
+          slot.cursor = replay.cursor;
+          continue;
+        }
+        const updates = [];
+        const eventIds: string[] = [];
+        for (const event of replay.events) {
+          const object = await loadAuthorizedEventObject({
+            subscription: slot.subscription,
+            event,
+            security: state.security,
+          });
+          updates.push({
+            type: "object",
+            object:
+              object ?? {
+                __apiName: event.objectType,
+                __primaryKey: event.primaryKey,
+                ...(event.objectRid ? { __rid: event.objectRid } : {}),
+              },
+            state:
+              event.state === "REMOVED" || !object
+                ? "REMOVED"
+                : "ADDED_OR_UPDATED",
+          });
+          eventIds.push(event.eventId);
+        }
+        if (updates.length > 0) {
+          ws.send(JSON.stringify({
+            type: "objectSetChanged",
+            id: slot.subscription.id,
+            updates,
+            cursor: String(replay.cursor),
+            eventIds,
+          }));
+          slot.cursor = replay.cursor;
+        }
+      }
+    };
+
+    ws.on('message', async (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
+        if (msg.type === "subscribeRequests" || Array.isArray(msg.requests)) {
+          if (!state.security || !state.tenantId) {
+            ws.send(JSON.stringify({
+              type: "subscribeResponses",
+              id: msg.id,
+              responses: [{
+                type: "error",
+                errors: [{ error: "AuthenticationRequired", args: [] }],
+              }],
+            }));
+            return;
+          }
+          const ontologyId = (request as typeof request & {
+            durableOntology?: string;
+          }).durableOntology;
+          if (!ontologyId) {
+            ws.send(JSON.stringify({ type: "error", message: "Durable ObjectSet subscriptions require the v2 stream path." }));
+            return;
+          }
+          const url = new URL(request.url ?? "/", "http://localhost");
+          const requested = Array.isArray(msg.requests) ? msg.requests : [];
+          const responses = [];
+          for (const item of requested) {
+            try {
+              const objectSet = parseObjectSet(item.objectSet);
+              const subscription = await createDurableSubscription({
+                tenantId: state.tenantId,
+                ontologyId,
+                ownerUserId: state.security.userId,
+                branchId: url.searchParams.get("branch"),
+                transactionId: url.searchParams.get("transactionId"),
+                scenarioRid: url.searchParams.get("scenarioRid"),
+                objectSet,
+                propertySet: item.propertySet ?? [],
+                referenceSet: item.referenceSet ?? [],
+                requestId: String(msg.id ?? ""),
+              });
+              state.durableSubscriptions.set(subscription.id, {
+                subscription,
+                cursor: subscription.lastAcknowledgedSequence,
+              });
+              responses.push({ type: "success", id: subscription.id });
+            } catch (error) {
+              responses.push({
+                type: "error",
+                errors: [{
+                  error:
+                    (error as { errorName?: string }).errorName ??
+                    "InvalidObjectSetSubscription",
+                  args: [],
+                }],
+              });
+            }
+          }
+          ws.send(JSON.stringify({
+            type: "subscribeResponses",
+            id: msg.id,
+            responses,
+          }));
+          if (!state.durablePoller) {
+            state.durablePoller = setInterval(() => {
+              void emitDurableUpdates().catch((error: unknown) => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({
+                    type: "subscriptionClosed",
+                    id: "stream",
+                    cause: {
+                      type: "error",
+                      error: {
+                        error:
+                          (error as { errorName?: string }).errorName ??
+                          "SubscriptionReplayError",
+                        args: [],
+                      },
+                    },
+                  }));
+                }
+              });
+            }, 500);
+          }
+          return;
+        }
+        if (msg.type === "resume") {
+          if (!state.security || !state.tenantId) return;
+          const subscription = await getOwnedSubscription({
+            subscriptionId: String(msg.subscriptionId),
+            tenantId: state.tenantId,
+            userId: state.security.userId,
+          });
+          const cursor = Number(msg.cursor ?? subscription.lastAcknowledgedSequence);
+          state.durableSubscriptions.set(subscription.id, {
+            subscription,
+            cursor: Number.isSafeInteger(cursor)
+              ? cursor
+              : subscription.lastAcknowledgedSequence,
+          });
+          recordOssV2AuditBestEffort({
+            eventType: "subscription_resume",
+            tenantId: state.tenantId,
+            ontologyId: subscription.ontologyId,
+            userId: state.security.userId,
+            branchId: subscription.branchId,
+            transactionId: subscription.transactionId,
+            scenarioRid: subscription.scenarioRid,
+            requestId: String(msg.id ?? ""),
+            outcome: "success",
+            parameters: {
+              subscriptionId: subscription.id,
+              cursor: Number.isSafeInteger(cursor)
+                ? cursor
+                : subscription.lastAcknowledgedSequence,
+            },
+          });
+          ws.send(JSON.stringify({
+            type: "subscribeResponses",
+            id: msg.id ?? "resume",
+            responses: [{ type: "success", id: subscription.id }],
+          }));
+          if (!state.durablePoller) {
+            state.durablePoller = setInterval(
+              () => void emitDurableUpdates(),
+              500,
+            );
+          }
+          return;
+        }
+        if (msg.type === "ackCursor") {
+          if (!state.security || !state.tenantId) return;
+          await acknowledgeCursor({
+            subscriptionId: String(msg.subscriptionId),
+            tenantId: state.tenantId,
+            userId: state.security.userId,
+            cursor: Number(msg.cursor),
+          });
+          return;
+        }
+        if (msg.type === "unsubscribe") {
+          if (!state.security || !state.tenantId) return;
+          await closeOwnedSubscription({
+            subscriptionId: String(msg.subscriptionId),
+            tenantId: state.tenantId,
+            userId: state.security.userId,
+          });
+          state.durableSubscriptions.delete(String(msg.subscriptionId));
+          ws.send(JSON.stringify({
+            type: "subscriptionClosed",
+            id: String(msg.subscriptionId),
+            cause: { type: "reason", reason: "USER_CLOSED" },
+          }));
+          return;
+        }
         const objectReply = handleObjectSubscription(state, msg);
         if (objectReply) {
           ws.send(JSON.stringify(objectReply));
@@ -153,8 +453,14 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
       }
     });
 
-    ws.on('close', () => { clients.delete(ws); });
-    ws.on('error', () => { clients.delete(ws); });
+    ws.on('close', () => {
+      clients.delete(ws);
+      if (state.durablePoller) clearInterval(state.durablePoller);
+    });
+    ws.on('error', () => {
+      clients.delete(ws);
+      if (state.durablePoller) clearInterval(state.durablePoller);
+    });
   });
 
   // Forward EventBus events to subscribed WebSocket clients.
