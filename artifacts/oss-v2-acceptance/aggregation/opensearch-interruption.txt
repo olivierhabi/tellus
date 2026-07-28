@@ -1,0 +1,11 @@
+commit=d733e99678c84c130fffde2513ebdf95470e51f0
+test=stop OpenSearch one second after starting the 100001-group exact request
+interrupted_http_status=503
+interrupted_error_name=AggregationBackendUnavailable
+retryable=true
+attempts=5
+restart_health=healthy
+recovery_http_status=200
+recovery_accuracy=ACCURATE
+recovery_groups=100001
+verdict=PASS

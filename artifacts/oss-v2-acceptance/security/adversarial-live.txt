@@ -1,0 +1,7 @@
+live adversarial verification (credentials and token values redacted)
+baseline_http=200 baseline_count=14
+forged_hmac={"errorCode":"INVALID_ARGUMENT","errorName":"InvalidPageToken","parameters":{"reason":"Page token failed integrity validation."}}
+altered_query_valid_token={"errorCode":"INVALID_ARGUMENT","errorName":"InvalidPageToken","parameters":{"reason":"Page token is from a different object set. Start pagination from the beginning."}}
+altered_branch_valid_token={"errorCode":"INVALID_ARGUMENT","errorName":"InvalidPageToken","parameters":{"reason":"Page token was created for a different branch."}}
+static_unknown_rid={"count":0,"errorName":null}
+{"type":"error","error":{"error":"InvalidSubscriptionMessage","args":[]}}

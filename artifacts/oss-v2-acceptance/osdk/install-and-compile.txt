@@ -1,0 +1,22 @@
+$ npm install --ignore-scripts=false
+
+added 8 packages, and audited 9 packages in 9s
+
+found 0 vulnerabilities
+$ npm run build
+
+> tellus-osdk-isolated-consumer@1.0.0 build
+> tsc --noEmit
+
+src/acceptance.ts(119,5): error TS2379: Argument of type '{ transactionId: string | undefined; }' is not assignable to parameter of type 'V2ReadContext' with 'exactOptionalPropertyTypes: true'. Consider adding 'undefined' to the types of the target's properties.
+  Types of property 'transactionId' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
+src/acceptance.ts(130,5): error TS2379: Argument of type '{ scenarioRid: string | undefined; }' is not assignable to parameter of type 'V2ReadContext' with 'exactOptionalPropertyTypes: true'. Consider adding 'undefined' to the types of the target's properties.
+  Types of property 'scenarioRid' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
+src/acceptance.ts(140,5): error TS2379: Argument of type '{ scenarioRid: string | undefined; transactionId: string | undefined; }' is not assignable to parameter of type 'V2ReadContext' with 'exactOptionalPropertyTypes: true'. Consider adding 'undefined' to the types of the target's properties.
+  Types of property 'transactionId' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
