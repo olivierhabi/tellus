@@ -11,6 +11,7 @@ import {
   createPageTokenV2,
 } from "../../../src/services/oss/pageTokenV2";
 import { objectSetFingerprint } from "../../../src/services/oss/objectSetDefinition";
+import { buildOssV2SecurityFilter } from "../../../src/services/oss/productionDeps";
 
 const NOW = new Date("2026-07-28T12:00:00Z");
 const ctx = {
@@ -21,6 +22,29 @@ const ctx = {
   scenarioRid: null,
   snapshot: false,
 };
+
+describe("OSS v2 ontology isolation", () => {
+  it("always ANDs the ontology stamp with mandatory controls", () => {
+    expect(
+      buildOssV2SecurityFilter("ontology-a", {
+        terms: { "_security.markings.keyword": ["PUBLIC"] },
+      }),
+    ).toEqual({
+      bool: {
+        must: [
+          { terms: { "_security.markings.keyword": ["PUBLIC"] } },
+          { term: { __ontology: "ontology-a" } },
+        ],
+      },
+    });
+  });
+
+  it("does not let a marking-bypass principal bypass ontology isolation", () => {
+    expect(buildOssV2SecurityFilter("ontology-a", null)).toEqual({
+      bool: { must: [{ term: { __ontology: "ontology-a" } }] },
+    });
+  });
+});
 
 function fakeSearch(
   data: Record<string, Array<Record<string, unknown>>>,
@@ -74,6 +98,27 @@ describe("loadObjectSet", () => {
     expect(r.data[0].__rid).toBe("ri.tellus.main.object.1");
     expect(r.data[0].name).toBe("A");
     expect(r.data[0].__pk).toBeUndefined();
+  });
+
+  it("restores identity fields on overlay-created objects", async () => {
+    const objectSet = { type: "base", objectType: "Employee" } as const;
+    const compiled = await compileObjectSet(objectSet, { now: () => NOW });
+    const deps = baseDeps({ Employee: [] });
+    deps.mergeOverlay = async () => [
+      { __pk: "E-overlay", name: "Overlay Created" },
+    ];
+    const result = await loadObjectSet(
+      compiled,
+      { objectSet, select: [] },
+      ctx,
+      deps,
+    );
+    expect(result.data[0]).toMatchObject({
+      __primaryKey: "E-overlay",
+      __apiName: "Employee",
+      name: "Overlay Created",
+    });
+    expect(result.data[0].__rid).toMatch(/^ri\.tellus\.main\.object\./);
   });
 
   it("excludeRid strips __rid only", async () => {
@@ -575,6 +620,211 @@ describe("aggregateObjectSet", () => {
         baseDeps({ A: [], B: [] }),
       ),
     ).rejects.toMatchObject({ errorName: "AggregationAccuracyNotSupported" });
+  });
+
+  it("pages REQUIRE_ACCURATE composite buckets without omissions", async () => {
+    const compiled = await compileObjectSet(os, { now: () => NOW });
+    const requestedAfter: unknown[] = [];
+    let firstAttempt = true;
+    const deps: ExecutorDeps = {
+      keywordOf: async (_type, field) => `${field}.keyword`,
+      translateWhere: async () => ({ match_all: {} }),
+      search: async (_type, body) => {
+        const composite = (
+          (body.aggs as Record<string, {
+            composite: { after?: Record<string, unknown> };
+          }>).__composite
+        ).composite;
+        requestedAfter.push(composite.after);
+        if (!composite.after && firstAttempt) {
+          firstAttempt = false;
+          throw new Error("transient OpenSearch interruption");
+        }
+        if (!composite.after) {
+          return {
+            hits: [],
+            total: 0,
+            aggregations: {
+              __composite: {
+                after_key: { g0: "B" },
+                buckets: [
+                  {
+                    key: { g0: null },
+                    doc_count: 1,
+                    count_objects_0: { value: 1 },
+                  },
+                  {
+                    key: { g0: "A" },
+                    doc_count: 1,
+                    count_objects_0: { value: 1 },
+                  },
+                  {
+                    key: { g0: "B" },
+                    doc_count: 1,
+                    count_objects_0: { value: 1 },
+                  },
+                ],
+              },
+            },
+          };
+        }
+        return {
+          hits: [],
+          total: 0,
+          aggregations: {
+            __composite: {
+              buckets: [
+                {
+                  key: { g0: "C" },
+                  doc_count: 1,
+                  count_objects_0: { value: 1 },
+                },
+              ],
+            },
+          },
+        };
+      },
+    };
+    const result = await aggregateObjectSet(
+      compiled,
+      {
+        objectSet: os,
+        aggregation: [{ type: "count" }],
+        groupBy: [
+          {
+            type: "exact",
+            field: "group",
+            includeNullValues: true,
+          },
+        ],
+        accuracy: "REQUIRE_ACCURATE",
+      },
+      ctx,
+      deps,
+    );
+    expect(result.accuracy).toBe("ACCURATE");
+    expect(result.data.map((item) => item.group.group)).toEqual([
+      null,
+      "A",
+      "B",
+      "C",
+    ]);
+    expect(requestedAfter).toEqual([
+      undefined,
+      undefined,
+      { g0: "B" },
+    ]);
+  });
+
+  it("merges cross-plan averages using sum/count, not average-of-averages", async () => {
+    const cross = {
+      type: "union",
+      objectSets: [
+        { type: "base", objectType: "A" },
+        { type: "base", objectType: "B" },
+      ],
+    } as const;
+    const compiled = await compileObjectSet(cross as never, { now: () => NOW });
+    const deps: ExecutorDeps = {
+      keywordOf: async (_type, field) => `${field}.keyword`,
+      translateWhere: async () => ({ match_all: {} }),
+      search: async (type) => {
+        const state =
+          type === "A"
+            ? { avg: 10, sum: 10, count: 1, docs: 3 }
+            : { avg: 20, sum: 60, count: 3, docs: 3 };
+        return {
+          hits: [],
+          total: state.docs,
+          aggregations: {
+            __composite: {
+              buckets: [
+                {
+                  key: { g0: "shared" },
+                  doc_count: state.docs,
+                  avg_value_0: { value: state.avg },
+                  __merge_sum_0: { value: state.sum },
+                  __merge_count_0: { value: state.count },
+                },
+              ],
+            },
+          },
+        };
+      },
+    };
+    const result = await aggregateObjectSet(
+      compiled,
+      {
+        objectSet: cross as never,
+        aggregation: [{ type: "avg", field: "value" }],
+        groupBy: [{ type: "exact", field: "group" }],
+        accuracy: "REQUIRE_ACCURATE",
+      },
+      ctx,
+      deps,
+    );
+    expect(result.data[0].metrics[0].value).toBe(17.5);
+  });
+
+  it("unions exact-distinct values across concrete object types", async () => {
+    const cross = {
+      type: "union",
+      objectSets: [
+        { type: "base", objectType: "A" },
+        { type: "base", objectType: "B" },
+      ],
+    } as const;
+    const compiled = await compileObjectSet(cross as never, { now: () => NOW });
+    const deps: ExecutorDeps = {
+      keywordOf: async (_type, field) => field,
+      translateWhere: async () => ({ match_all: {} }),
+      search: async (type, body) => {
+        const sources = (
+          (body.aggs as Record<string, {
+            composite: { sources: Array<Record<string, unknown>> };
+          }>).__composite
+        ).composite.sources;
+        const distinct = sources.some((source) => "__distinct" in source);
+        return {
+          hits: [],
+          total: 0,
+          aggregations: {
+            __composite: {
+              buckets: distinct
+                ? (type === "A" ? ["x", "y"] : ["y", "z"]).map((value) => ({
+                    key: { g0: "shared", __distinct: value },
+                    doc_count: 1,
+                  }))
+                : [
+                    {
+                      key: { g0: "shared" },
+                      doc_count: 2,
+                    },
+                  ],
+            },
+          },
+        };
+      },
+    };
+    const result = await aggregateObjectSet(
+      compiled,
+      {
+        objectSet: cross as never,
+        aggregation: [
+          { type: "exactDistinct", field: "value", name: "unique" },
+        ],
+        groupBy: [{ type: "exact", field: "group" }],
+        accuracy: "REQUIRE_ACCURATE",
+      },
+      ctx,
+      deps,
+    );
+    expect(result.data).toEqual([
+      {
+        group: { group: "shared" },
+        metrics: [{ name: "unique", value: 3 }],
+      },
+    ]);
   });
 
   it("aggregates the composed transaction/scenario view", async () => {

@@ -199,13 +199,27 @@ export async function writeParquetRef(opts: {
   }
   let ref: ParquetRef | null = null;
   try {
-    const up = await uploadObject(
-      opts.key,
-      fs.createReadStream(parquet.localPath),
-      "application/vnd.apache.parquet",
-      undefined,
-      parquet.sizeBytes,
-    );
+    // Ensure the descriptor is open before an upload adapter can resolve.
+    // Some test/in-memory adapters acknowledge immediately without consuming
+    // the stream; unlinking the staged file first otherwise produces a later
+    // process-level ENOENT from createReadStream.
+    const stream = fs.createReadStream(parquet.localPath);
+    await new Promise<void>((resolve, reject) => {
+      stream.once("open", () => resolve());
+      stream.once("error", reject);
+    });
+    let up: Awaited<ReturnType<typeof uploadObject>>;
+    try {
+      up = await uploadObject(
+        opts.key,
+        stream,
+        "application/vnd.apache.parquet",
+        undefined,
+        parquet.sizeBytes,
+      );
+    } finally {
+      stream.destroy();
+    }
     ref = {
       refVersion: PARQUET_REF_VERSION,
       bucket: up.bucket,

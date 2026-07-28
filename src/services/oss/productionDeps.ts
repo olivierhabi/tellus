@@ -57,6 +57,28 @@ export interface RequestSecurity {
 
 const MAX_SEARCH_AROUND_PKS = 100_000;
 
+/**
+ * OSS v2 ontology-isolation predicate.
+ *
+ * Object Storage's legacy physical index is keyed only by object-type API
+ * name. Until every writer has migrated to ontology-scoped aliases, v2 must
+ * therefore bind the logical ontology in the final mandatory-control query.
+ * Documents without the stamp fail closed.
+ */
+export function buildOssV2SecurityFilter(
+  ontologyId: string,
+  securityFilter: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  return {
+    bool: {
+      must: [
+        ...(securityFilter ? [securityFilter] : []),
+        { term: { __ontology: ontologyId } },
+      ],
+    },
+  };
+}
+
 export async function resolveInterfacePropertyMapping(
   ontologyId: string,
   interfaceApiName: string,
@@ -169,6 +191,10 @@ export function makeProductionExecutorDeps(
     };
   },
 ): ExecutorDeps {
+  const scopedSecurityFilter = buildOssV2SecurityFilter(
+    sec.ontologyId,
+    sec.securityFilter,
+  );
   const contextSecurity = {
     tenant: sec.tenant,
     ontologyId: sec.ontologyId,
@@ -232,7 +258,7 @@ export function makeProductionExecutorDeps(
           index: getIndexName(input.fromObjectType),
           body: injectSecurityFilter(
             { size: 1, query: translated },
-            sec.securityFilter,
+            scopedSecurityFilter,
             sec.branchId,
           ),
         });
@@ -337,7 +363,11 @@ export function makeProductionExecutorDeps(
 
     search: async (objectType, body, options) => {
       // Single choke point: security + branch injected exactly once.
-      const finalBody = injectSecurityFilter(body, sec.securityFilter, sec.branchId);
+      const finalBody = injectSecurityFilter(
+        body,
+        scopedSecurityFilter,
+        sec.branchId,
+      );
       let resp: { body: Record<string, unknown> };
       try {
         resp = options?.pitId
@@ -854,7 +884,7 @@ export function makeProductionExecutorDeps(
                 pageSize: 1000,
                 pageToken: pageToken ?? undefined,
               },
-              sec.securityFilter,
+              scopedSecurityFilter,
               sec.branchId,
             );
             for (const object of response.linkedObjects) {
@@ -919,7 +949,7 @@ export function makeProductionExecutorDeps(
             pageSize: 1000,
             pageToken: pageToken ?? undefined,
           },
-          sec.securityFilter,
+          scopedSecurityFilter,
           sec.branchId,
         );
         for (const o of r.linkedObjects) {
@@ -1046,6 +1076,16 @@ export function makeProductionCompilerDeps(opts: {
   userId?: string;
 }): CompilerDeps {
   return {
+    resolveObjectType: async (objectTypeApiName) => {
+      const result = await query(
+        `SELECT 1
+           FROM object_type
+          WHERE ontology_id = $1 AND api_name = $2
+          LIMIT 1`,
+        [opts.ontologyRid, objectTypeApiName],
+      );
+      return result.rows.length > 0;
+    },
     resolveReference: createReferenceResolver({
       tenant: opts.tenant,
       ontologyRid: opts.ontologyRid,

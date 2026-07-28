@@ -14,6 +14,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const SRC_ROOT = path.resolve(__dirname, "../../../src");
@@ -38,28 +39,41 @@ function findUnboundedFetches(files: string[]): string[] {
   const offenders: string[] = [];
   for (const f of files) {
     const txt = readFileSync(f, "utf8");
-    const lines = txt.split(/\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      // Match `fetch(` when it is not a method call (e.g. `this.fetch(`
-      // or `cache.fetch(`) or part of a larger identifier.
-      if (!/(?:^|[^.\w])fetch\s*\(/.test(l)) continue;
-      // Ignore comments.
-      if (/^\s*\/\//.test(l)) continue;
-      // Ignore DEFINITIONS / signatures of a method that merely happens to
-      // be named `fetch` — these are not the global fetch() and carry no
-      // AbortSignal by design (e.g. a `CursorHandle.fetch(n: number)`
-      // interface signature, or an `async fetch() {` strategy method). A
-      // global fetch() call passes runtime values, never a typed parameter
-      // list, and is never prefixed with the `async` keyword.
-      if (/\basync\s+fetch\s*\(/.test(l)) continue; // `async fetch() {`
-      if (/(?:^|[^.\w])fetch\s*\(\s*[A-Za-z_$][\w$]*\s*[?:]/.test(l)) continue; // `fetch(n: number)` / `fetch(x?: T)`
-      // Look ahead up to 15 lines — enough for the widest multi-line
-      // `fetch(url, { … })` call we have in the codebase.
-      const window = lines.slice(i, i + 15).join("\n");
-      if (/signal\s*:/.test(window)) continue;
-      offenders.push(`${path.relative(SRC_ROOT, f)}:${i + 1}: ${l.trim()}`);
-    }
+    const source = ts.createSourceFile(
+      f,
+      txt,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "fetch"
+      ) {
+        const options = node.arguments[1];
+        const carriesSignal =
+          options &&
+          ts.isObjectLiteralExpression(options) &&
+          options.properties.some(
+            (property) =>
+              (ts.isPropertyAssignment(property) ||
+                ts.isShorthandPropertyAssignment(property)) &&
+              property.name.getText(source) === "signal",
+          );
+        if (!carriesSignal) {
+          const position = source.getLineAndCharacterOfPosition(
+            node.getStart(source),
+          );
+          offenders.push(
+            `${path.relative(SRC_ROOT, f)}:${position.line + 1}: ${node.expression.getText(source)}(`,
+          );
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
   }
   return offenders;
 }

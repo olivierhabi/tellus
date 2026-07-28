@@ -879,6 +879,7 @@ export async function reindexObjectType(
             (doc.__rid as string | undefined) ??
             deterministicObjectRid(ontologyId, objectTypeApiName, pk),
           __objectType: objectTypeApiName,
+          __ontology: ontologyId,
           __lastModified: new Date().toISOString(),
           __version: 1,
           ...doc,

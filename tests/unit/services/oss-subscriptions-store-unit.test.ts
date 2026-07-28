@@ -15,6 +15,11 @@ import {
 import { compileObjectSet } from "../../../src/services/oss/objectSetCompiler";
 import { eventBus } from "../../../src/websocket/eventBus";
 import type { OverlayRecord, OverlayStore } from "../../../src/services/overlay/overlayStore";
+import {
+  createSubscriptionCursor,
+  decodeSubscriptionCursor,
+  SubscriptionProtocolError,
+} from "../../../src/services/oss/durableSubscriptions";
 
 const NOW = new Date("2026-07-28T12:00:00Z");
 
@@ -148,6 +153,47 @@ describe("subscriptionRegistry", () => {
       ),
     ).toThrowError(SubscriptionLimitError);
     subscriptionRegistry.unregisterAll(uid);
+  });
+});
+
+describe("durable subscription cursors", () => {
+  it("round-trips only for the bound tenant, user, and subscription", () => {
+    const token = createSubscriptionCursor({
+      subscriptionId: "sub-1",
+      tenantId: "tenant-a",
+      userId: "user-a",
+      sequence: 42,
+    });
+    expect(
+      decodeSubscriptionCursor(token, {
+        subscriptionId: "sub-1",
+        tenantId: "tenant-a",
+        userId: "user-a",
+      }),
+    ).toBe(42);
+    expect(() =>
+      decodeSubscriptionCursor(token, {
+        subscriptionId: "sub-1",
+        tenantId: "tenant-b",
+        userId: "user-a",
+      }),
+    ).toThrowError(SubscriptionProtocolError);
+  });
+
+  it("rejects a forged cursor", () => {
+    const token = createSubscriptionCursor({
+      subscriptionId: "sub-1",
+      tenantId: "tenant-a",
+      userId: "user-a",
+      sequence: 42,
+    });
+    expect(() =>
+      decodeSubscriptionCursor(`${token.slice(0, -1)}x`, {
+        subscriptionId: "sub-1",
+        tenantId: "tenant-a",
+        userId: "user-a",
+      }),
+    ).toThrowError(SubscriptionProtocolError);
   });
 });
 

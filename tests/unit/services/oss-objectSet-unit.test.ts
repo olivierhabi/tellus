@@ -301,6 +301,18 @@ describe("compileObjectSet — set algebra", () => {
     expect((c.plans[0]!.where as { type: string }).type).toBe("or");
   });
 
+  it("rejects a missing concrete object type when the resolver is present", async () => {
+    await expect(
+      compileObjectSet(
+        { type: "base", objectType: "Missing" },
+        { ...deps, resolveObjectType: async () => false },
+      ),
+    ).rejects.toMatchObject({
+      errorName: "ObjectTypeNotFound",
+      parameters: { objectType: "Missing" },
+    });
+  });
+
   it("union of different types produces typed plans (cross-type)", async () => {
     const c = await compileObjectSet(
       { type: "union", objectSets: [base("A"), base("B")] } as never,

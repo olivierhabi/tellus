@@ -12,7 +12,9 @@ import { parseObjectSet } from "../services/oss/objectSetDefinition";
 import {
   acknowledgeCursor,
   closeOwnedSubscription,
+  createSubscriptionCursor,
   createDurableSubscription,
+  decodeSubscriptionCursor,
   ensureDurableSubscriptionEventBridge,
   getOwnedSubscription,
   loadAuthorizedEventObject,
@@ -229,12 +231,18 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
         }
         const replay = await replayEvents(slot.subscription, slot.cursor);
         if (replay.expired) {
+          const cursor = createSubscriptionCursor({
+            subscriptionId: slot.subscription.id,
+            tenantId: slot.subscription.tenantId,
+            userId: slot.subscription.ownerUserId,
+            sequence: replay.cursor,
+          });
           for (const objectType of slot.subscription.dependencyTypes) {
             ws.send(JSON.stringify({
               type: "refreshObjectSet",
               id: slot.subscription.id,
               objectType,
-              cursor: String(replay.cursor),
+              cursor,
             }));
           }
           slot.cursor = replay.cursor;
@@ -264,11 +272,17 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
           eventIds.push(event.eventId);
         }
         if (updates.length > 0) {
+          const cursor = createSubscriptionCursor({
+            subscriptionId: slot.subscription.id,
+            tenantId: slot.subscription.tenantId,
+            userId: slot.subscription.ownerUserId,
+            sequence: replay.cursor,
+          });
           ws.send(JSON.stringify({
             type: "objectSetChanged",
             id: slot.subscription.id,
             updates,
-            cursor: String(replay.cursor),
+            cursor,
             eventIds,
           }));
           slot.cursor = replay.cursor;
@@ -320,7 +334,16 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
                 subscription,
                 cursor: subscription.lastAcknowledgedSequence,
               });
-              responses.push({ type: "success", id: subscription.id });
+              responses.push({
+                type: "success",
+                id: subscription.id,
+                cursor: createSubscriptionCursor({
+                  subscriptionId: subscription.id,
+                  tenantId: subscription.tenantId,
+                  userId: subscription.ownerUserId,
+                  sequence: subscription.lastAcknowledgedSequence,
+                }),
+              });
             } catch (error) {
               responses.push({
                 type: "error",
@@ -368,12 +391,17 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
             tenantId: state.tenantId,
             userId: state.security.userId,
           });
-          const cursor = Number(msg.cursor ?? subscription.lastAcknowledgedSequence);
+          const cursor =
+            typeof msg.cursor === "string"
+              ? decodeSubscriptionCursor(msg.cursor, {
+                  subscriptionId: subscription.id,
+                  tenantId: state.tenantId,
+                  userId: state.security.userId,
+                })
+              : subscription.lastAcknowledgedSequence;
           state.durableSubscriptions.set(subscription.id, {
             subscription,
-            cursor: Number.isSafeInteger(cursor)
-              ? cursor
-              : subscription.lastAcknowledgedSequence,
+            cursor,
           });
           recordOssV2AuditBestEffort({
             eventType: "subscription_resume",
@@ -387,15 +415,22 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
             outcome: "success",
             parameters: {
               subscriptionId: subscription.id,
-              cursor: Number.isSafeInteger(cursor)
-                ? cursor
-                : subscription.lastAcknowledgedSequence,
+              cursor,
             },
           });
           ws.send(JSON.stringify({
             type: "subscribeResponses",
             id: msg.id ?? "resume",
-            responses: [{ type: "success", id: subscription.id }],
+            responses: [{
+              type: "success",
+              id: subscription.id,
+              cursor: createSubscriptionCursor({
+                subscriptionId: subscription.id,
+                tenantId: subscription.tenantId,
+                userId: subscription.ownerUserId,
+                sequence: cursor,
+              }),
+            }],
           }));
           if (!state.durablePoller) {
             state.durablePoller = setInterval(
@@ -411,7 +446,11 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
             subscriptionId: String(msg.subscriptionId),
             tenantId: state.tenantId,
             userId: state.security.userId,
-            cursor: Number(msg.cursor),
+            cursor: decodeSubscriptionCursor(String(msg.cursor), {
+              subscriptionId: String(msg.subscriptionId),
+              tenantId: state.tenantId,
+              userId: state.security.userId,
+            }),
           });
           return;
         }
@@ -448,8 +487,16 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
             ws.send(JSON.stringify({ type: 'unsubscribed', projectId: msg.projectId }));
           }
         }
-      } catch {
-        ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+      } catch (error) {
+        ws.send(JSON.stringify({
+          type: "error",
+          error: {
+            error:
+              (error as { errorName?: string }).errorName ??
+              "InvalidSubscriptionMessage",
+            args: [],
+          },
+        }));
       }
     });
 

@@ -17,6 +17,7 @@ import { executeGetObject } from "../../services/queryExecutor";
 import { compileObjectSet } from "../../services/oss/objectSetCompiler";
 import { loadObjectSet } from "../../services/oss/objectSetExecutor";
 import {
+  buildOssV2SecurityFilter,
   makeProductionExecutorDeps,
   makeProductionCompilerDeps,
 } from "../../services/oss/productionDeps";
@@ -187,7 +188,10 @@ router.get(
       const obj = await executeGetObject(
         req.params.objectType,
         req.params.primaryKey,
-        buildSecurityFilter(req.security!),
+        buildOssV2SecurityFilter(
+          ontologyId,
+          buildSecurityFilter(req.security!),
+        ),
         readBranchHeader(req),
       );
       if (!obj) {

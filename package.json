@@ -1,6 +1,7 @@
 {
   "name": "ontology-engine",
   "version": "0.3.0",
+  "packageManager": "pnpm@10.28.2",
   "description": "Ontology Engine - a robust PostgreSQL-backed API server",
   "main": "dist/server.js",
   "scripts": {
@@ -157,6 +158,16 @@
     "vitest": "^4.0.18"
   },
   "pnpm": {
+    "onlyBuiltDependencies": [
+      "@mongodb-js/zstd",
+      "@parcel/watcher",
+      "cpu-features",
+      "duckdb",
+      "esbuild",
+      "msgpackr-extract",
+      "protobufjs",
+      "ssh2"
+    ],
     "overrides": {
       "tar@<7.5.11": "^7.5.11",
       "fast-xml-parser@<5.4.1": "5.4.1",

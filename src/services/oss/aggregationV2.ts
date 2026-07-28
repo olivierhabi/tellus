@@ -38,6 +38,7 @@ export class AggregationError extends Error {
 
 const EXACT_DISTINCT_PRECISION = 40_000;
 const DEFAULT_MAX_GROUP_COUNT = 10_000;
+export const DEFAULT_COMPOSITE_PAGE_SIZE = 1_000;
 
 /** TimeUnit → date_histogram interval (verified: value must be 1 for
  *  WEEKS/MONTHS/QUARTERS/YEARS). */
@@ -113,6 +114,127 @@ function metricAgg(a: AggregationV2, fieldOf: (f?: string) => string): Record<st
         },
       };
   }
+}
+
+export interface CompositeAggregationBuild {
+  aggs: Record<string, unknown>;
+  metricNames: string[];
+  sourceNames: string[];
+  groupNames: string[];
+}
+
+/** Composite supports every unbounded grouping used by the public contract.
+ * Range groupings are deliberately handled by the finite range aggregation
+ * path because OpenSearch does not expose a composite range source. */
+export function supportsCompositeGrouping(
+  groupBy: AggregationGroupByV2[],
+): boolean {
+  return (
+    groupBy.length > 0 &&
+    groupBy.every((grouping) => grouping.type !== "ranges")
+  );
+}
+
+/**
+ * Build one page of an exact composite aggregation. Source names are private
+ * and index-based so repeated property identifiers cannot collide.
+ */
+export function buildCompositeV2Aggs(
+  aggregation: AggregationV2[],
+  groupBy: AggregationGroupByV2[],
+  keywordOf: (field: string) => string,
+  after: Record<string, unknown> | undefined,
+  pageSize = DEFAULT_COMPOSITE_PAGE_SIZE,
+): CompositeAggregationBuild {
+  if (!supportsCompositeGrouping(groupBy)) {
+    throw new AggregationError(
+      "AggregationAccuracyNotSupported",
+      "The requested grouping cannot be paged with an exact composite aggregation.",
+      { groupByTypes: groupBy.map((grouping) => grouping.type) },
+    );
+  }
+  const metricNames: string[] = [];
+  const metricAggs: Record<string, unknown> = {};
+  for (let i = 0; i < aggregation.length; i++) {
+    const metric = aggregation[i]!;
+    const name =
+      metric.name ??
+      `${metric.type}_${(metric as { field?: string }).field ?? "objects"}_${i}`;
+    metricNames.push(name);
+    metricAggs[name] = metricAgg(metric, (field) => field ?? "__pk");
+    if (metric.type === "avg") {
+      metricAggs[`__merge_sum_${i}`] = {
+        sum: { field: metric.field },
+      };
+      metricAggs[`__merge_count_${i}`] = {
+        value_count: { field: metric.field },
+      };
+    }
+  }
+  const sourceNames: string[] = [];
+  const groupNames: string[] = [];
+  const sources = groupBy.map((grouping, index) => {
+    const sourceName = `g${index}`;
+    sourceNames.push(sourceName);
+    groupNames.push(groupByLevelName(grouping));
+    switch (grouping.type) {
+      case "exact":
+        return {
+          [sourceName]: {
+            terms: {
+              field: keywordOf(grouping.field),
+              ...(grouping.includeNullValues
+                ? { missing_bucket: true, missing_order: "first" }
+                : {}),
+            },
+          },
+        };
+      case "fixedWidth":
+        return {
+          [sourceName]: {
+            histogram: {
+              field: grouping.field,
+              interval: grouping.fixedWidth,
+            },
+          },
+        };
+      case "duration":
+        return {
+          [sourceName]: {
+            date_histogram: {
+              field: grouping.field,
+              ...durationInterval(grouping.value, grouping.unit),
+            },
+          },
+        };
+      case "objectType":
+        return {
+          [sourceName]: {
+            terms: { field: "__objectType" },
+          },
+        };
+      case "ranges":
+        throw new AggregationError(
+          "AggregationAccuracyNotSupported",
+          "Range groupings use the finite exact aggregation path.",
+        );
+    }
+  });
+  return {
+    aggs: {
+      __composite: {
+        composite: {
+          size: pageSize,
+          sources,
+          ...(after ? { after } : {}),
+        },
+        aggs: metricAggs,
+      },
+    },
+    metricNames,
+    sourceNames,
+    groupNames,
+  };
 }
 
 export function groupByLevelName(g: AggregationGroupByV2): string {
@@ -210,6 +332,8 @@ export interface AggregationItemV2 {
   /** Leaf bucket doc count — internal, used for weighted
    *  cross-plan avg merging. Never serialized to clients. */
   _docCount?: number;
+  /** Exact cross-plan merge state for averages. */
+  _averageState?: Record<string, { sum: number; count: number }>;
 }
 
 export interface ParsedAggregation {
@@ -222,8 +346,82 @@ export interface ParsedAggregation {
 interface BucketNode {
   buckets?: Array<Record<string, unknown>>;
   sum_other_doc_count?: number;
+  after_key?: Record<string, unknown>;
   value?: unknown;
   values?: Record<string, unknown>;
+}
+
+export interface ParsedCompositePage {
+  items: AggregationItemV2[];
+  afterKey?: Record<string, unknown>;
+}
+
+/** Parse one composite page without losing the private merge state required
+ * for mathematically correct cross-plan averages. */
+export function parseCompositeV2Page(
+  osAggs: Record<string, BucketNode>,
+  aggregation: AggregationV2[],
+  groupBy: AggregationGroupByV2[],
+  metricNames: string[],
+  sourceNames: string[],
+  groupNames: string[],
+): ParsedCompositePage {
+  const composite = osAggs.__composite;
+  if (!composite) return { items: [] };
+  const items = (composite.buckets ?? []).map((bucket) => {
+    const key = (bucket.key ?? {}) as Record<string, unknown>;
+    const group: Record<string, unknown> = {};
+    for (let i = 0; i < sourceNames.length; i++) {
+      const grouping = groupBy[i]!;
+      let value = key[sourceNames[i]!];
+      if (
+        grouping.type === "exact" &&
+        value == null &&
+        grouping.includeNullValues
+      ) {
+        value = grouping.defaultValue ?? null;
+      } else if (
+        grouping.type === "duration" &&
+        (typeof value === "number" ||
+          (typeof value === "string" && /^\d+$/.test(value)))
+      ) {
+        value = new Date(Number(value)).toISOString();
+      }
+      group[groupNames[i]!] = value;
+    }
+    const averageState: Record<string, { sum: number; count: number }> = {};
+    const metrics = metricNames.map((name, index) => {
+      if (aggregation[index]?.type === "avg") {
+        const sum = Number(
+          extractMetric(
+            bucket[`__merge_sum_${index}`] as BucketNode | undefined,
+          ) ?? 0,
+        );
+        const count = Number(
+          extractMetric(
+            bucket[`__merge_count_${index}`] as BucketNode | undefined,
+          ) ?? 0,
+        );
+        averageState[name] = { sum, count };
+      }
+      return {
+        name,
+        value: extractMetric(bucket[name] as BucketNode | undefined),
+      };
+    });
+    return {
+      group,
+      metrics,
+      _docCount: Number(bucket.doc_count ?? 0),
+      ...(Object.keys(averageState).length > 0
+        ? { _averageState: averageState }
+        : {}),
+    };
+  });
+  return {
+    items,
+    ...(composite.after_key ? { afterKey: composite.after_key } : {}),
+  };
 }
 
 /** Walk the nested OS response into flat v2 items. */
