@@ -17,7 +17,7 @@
 // narrow on purpose so the swap is a one-file change.
 // ---------------------------------------------------------------------------
 
-type LabelMap = Record<string, string>;
+type LabelMap = Record<string, unknown>;
 
 interface CounterState {
   help: string;
@@ -75,8 +75,11 @@ function labelKey(labels: LabelMap): string {
   return entries.map(([k, v]) => `${k}="${escapeLabel(v)}"`).join(",");
 }
 
-function escapeLabel(v: string): string {
-  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+function escapeLabel(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n");
 }
 
 export function incCounter(name: string, labels: LabelMap = {}, amount: number = 1): void {

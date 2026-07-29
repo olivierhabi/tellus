@@ -263,6 +263,7 @@ router.post(
       );
       auditAction(req, ontologyId, req.params.actionType, mode, "success");
     } catch (err) {
+      if (res.headersSent || res.writableEnded) return;
       const { status, body } = toV2Error(err);
       res.status(status).json(body);
     }
@@ -340,6 +341,7 @@ router.post(
         parsed.data.requests.length,
       );
     } catch (err) {
+      if (res.headersSent || res.writableEnded) return;
       const { status, body } = toV2Error(err);
       res.status(status).json(body);
     }

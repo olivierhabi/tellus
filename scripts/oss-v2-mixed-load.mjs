@@ -478,6 +478,16 @@ async function worker(workerId) {
 await Promise.all(
   Array.from({ length: concurrency }, (_, index) => worker(index)),
 );
+if (ws.readyState === WebSocket.OPEN && subscription.id) {
+  ws.send(
+    JSON.stringify({
+      type: "unsubscribe",
+      id: `mixed-load-unsub-${Date.now()}`,
+      subscriptionId: subscription.id,
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+}
 ws.close(1000, "LOAD_COMPLETE");
 subscription.closedAt = new Date().toISOString();
 
