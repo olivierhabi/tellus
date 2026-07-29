@@ -49,6 +49,9 @@ import {
   type RecipientPreFilter,
 } from "../../actions/notificationRecipientFilter";
 import { getKeycloakAdminService } from "../../services/keycloakAdminService";
+import { executeWebhook } from "../connectivity/webhooks/executor";
+import * as connectivityWebhooks from "../connectivity/webhooks/repository";
+import * as connectivityConnections from "../connectivity/store/connections.repo";
 
 // ---------------------------------------------------------------------------
 // Default retry policy — bounded exponential backoff + jitter. Matches
@@ -104,9 +107,41 @@ export const productionWebhookDispatch: SideEffectDispatchFn = async (job) => {
   // spec is the Webhook spec + the context is the ActionWebhookPayload
   // (actionExecutor / execution context).
   const payload = (job.payload ?? {}) as {
-    spec?: Partial<ActionWebhookSpec>;
-    context?: Partial<ActionWebhookPayload>;
+    spec?: Partial<ActionWebhookSpec> & {
+      kind?: string;
+      webhookId?: string;
+      webhookVersion?: number;
+      inputs?: Record<string, unknown>;
+    };
+    context?: Partial<ActionWebhookPayload> & { tenant?: string };
   };
+  if (payload.spec?.kind === "connectivity") {
+    const tenant = String(payload.context?.tenant ?? "default");
+    const webhookId = String(payload.spec.webhookId ?? "");
+    const version = Number(payload.spec.webhookVersion);
+    const webhook = await connectivityWebhooks.getByRid(webhookId, tenant, version);
+    const connection = await connectivityConnections.findByRid(
+      webhook.connectionRid,
+      tenant,
+    );
+    const result = await executeWebhook({
+      webhook,
+      connection,
+      tenant,
+      actor: String(payload.context?.executedBy ?? "system"),
+      kind: "production",
+      inputs: payload.spec.inputs ?? {},
+      idempotencyKey: job.idempotency_key ?? `${job.execution_id}:${job.side_effect_index}`,
+    });
+    if (result.execution.status !== "succeeded") {
+      const error = new Error(
+        `Connectivity webhook execution ${result.execution.rid} ended in '${result.execution.status}'.`,
+      ) as Error & { code?: string };
+      error.code = result.execution.errorCode ?? "CONNECTIVITY_WEBHOOK_FAILED";
+      throw error;
+    }
+    return { ok: true, receiptId: result.execution.rid };
+  }
   const spec: ActionWebhookSpec = {
     url: String(payload.spec?.url ?? ""),
     method: (payload.spec?.method ?? "POST") as string,

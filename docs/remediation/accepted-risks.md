@@ -73,5 +73,5 @@ human/calendar execution.
 6. Staged rollout 0–7 (Appendix I) — requires production traffic.
 7. 30-day steady-state (Appendix M.2) — requires 30 days of traffic.
 
-Each item is logged in `docs/remediation/final-implementation-report.md`
-with the artifact reference and what the human operator must execute.
+The applicable runbook or production release record must capture the artifact
+reference and the human operator responsible for each item.

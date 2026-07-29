@@ -936,6 +936,72 @@ async function validateConnectivityWebhookBinding(
   return errors;
 }
 
+/**
+ * Validate post-commit side effects. Legacy URL webhook specs remain
+ * supported; newly-authored UI bindings use the connectivity RID/version
+ * form and share the same immutable-contract validation as writebacks.
+ */
+async function validateSideEffectsConfig(
+  value: unknown,
+  paramNames: Set<string>,
+  tenant: string,
+  requireComplete = true,
+): Promise<string[]> {
+  if (value === undefined || value === null) return [];
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return ["sideEffects must be a JSON object."];
+  }
+  const webhooks = (value as Record<string, unknown>).webhooks;
+  if (webhooks === undefined) return [];
+  if (!Array.isArray(webhooks)) return ["sideEffects.webhooks must be an array."];
+
+  const errors: string[] = [];
+  for (let index = 0; index < webhooks.length; index += 1) {
+    const entryErrorCount = errors.length;
+    const path = `sideEffects.webhooks[${index}]`;
+    const entry = webhooks[index];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      errors.push(`${path} must be an object.`);
+      continue;
+    }
+    const spec = entry as Record<string, unknown>;
+    // Existing installations may contain direct URL delivery specs.
+    if (spec.kind !== "connectivity") {
+      if (typeof spec.url !== "string" || spec.url.length === 0) {
+        errors.push(`${path}.url is required for a legacy webhook side effect.`);
+      }
+      continue;
+    }
+    if (typeof spec.webhookId !== "string" || !spec.webhookId.startsWith(CONNECTIVITY_WEBHOOK_RID_PREFIX)) {
+      errors.push(`${path}.webhookId must be a connectivity webhook RID.`);
+      continue;
+    }
+    if (typeof spec.webhookVersion !== "number" || !Number.isInteger(spec.webhookVersion) || spec.webhookVersion < 1) {
+      errors.push(`${path}.webhookVersion must be a positive integer.`);
+      continue;
+    }
+    if (!spec.inputs || typeof spec.inputs !== "object" || Array.isArray(spec.inputs)) {
+      errors.push(`${path}.inputs must be a Record<string, ValueSource>.`);
+      continue;
+    }
+    const inputs = spec.inputs as Record<string, unknown>;
+    for (const [name, source] of Object.entries(inputs)) {
+      errors.push(...validateValueSource(source, `${path}.inputs.${name}`, paramNames));
+    }
+    if (errors.length === entryErrorCount) {
+      const bindingErrors = await validateConnectivityWebhookBinding(
+        spec.webhookId,
+        spec.webhookVersion,
+        inputs,
+        tenant,
+        requireComplete,
+      );
+      errors.push(...bindingErrors.map((error) => error.split("writeback_config").join(path)));
+    }
+  }
+  return errors;
+}
+
 // ---------------------------------------------------------------------------
 // Concrete link rule (addLink / removeLink) validator — canonical shape
 //
@@ -1235,6 +1301,18 @@ router.post(
       if (wbErrors.length > 0) {
         sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
           validationErrors: wbErrors,
+        });
+        return;
+      }
+      const sideEffectErrors = await validateSideEffectsConfig(
+        body.sideEffects,
+        paramNames,
+        resolveRequestTenant(req),
+        !isDraft,
+      );
+      if (sideEffectErrors.length > 0) {
+        sendError(res, "SIDE_EFFECTS_INVALID", sideEffectErrors.join(" "), {
+          validationErrors: sideEffectErrors,
         });
         return;
       }
@@ -1598,6 +1676,10 @@ const updateActionTypeHandler = async (
         body.writebackConfig !== undefined
           ? body.writebackConfig
           : existing.writeback_config;
+      const effectiveSideEffects =
+        body.sideEffects !== undefined
+          ? body.sideEffects
+          : existing.side_effects;
       const resultingEnabled =
         body.isEnabled !== undefined ? body.isEnabled : existing.is_enabled;
 
@@ -1669,6 +1751,25 @@ const updateActionTypeHandler = async (
         if (wbErrors.length > 0) {
           sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
             validationErrors: wbErrors,
+          });
+          return;
+        }
+      }
+      if (body.sideEffects !== undefined || body.parameters !== undefined || body.isEnabled === true) {
+        const paramNames = new Set<string>(
+          (effectiveParams as Array<Record<string, unknown>>).map(
+            (p) => p.apiName as string
+          )
+        );
+        const sideEffectErrors = await validateSideEffectsConfig(
+          effectiveSideEffects,
+          paramNames,
+          resolveRequestTenant(req),
+          resultingEnabled,
+        );
+        if (sideEffectErrors.length > 0) {
+          sendError(res, "SIDE_EFFECTS_INVALID", sideEffectErrors.join(" "), {
+            validationErrors: sideEffectErrors,
           });
           return;
         }

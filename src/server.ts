@@ -1563,11 +1563,11 @@ async function start(): Promise<void> {
     // `side_effects` produce rows in `action_side_effect_job` inside
     // the audit transaction; this background worker drains the queue
     // via webhookSafeTransport + the registered NotificationProviders.
-    // Gated by `ACTION_SIDE_EFFECT_WORKER_ENABLED=1` so the legacy
-    // fire-and-forget Stage 7 path remains the default for existing
-    // deployments + integration tests.
+    // Durable post-commit delivery is the production default. Operators can
+    // explicitly opt into the legacy in-process path with
+    // ACTION_SIDE_EFFECT_WORKER_ENABLED=0.
     try {
-      if (process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED === "1") {
+      if (process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED !== "0") {
         const { runWorkerLoop } = await import("./services/workers/sideEffectWorker");
         const controller = new AbortController();
         void runWorkerLoop({

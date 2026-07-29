@@ -14,6 +14,8 @@ const CTX = {
   actionTypeVersion: 1,
   ontologyId: "ont-1",
   executedBy: "tester",
+  tenant: "tenant-1",
+  resolvedParameters: { message: "hello", secretUnused: "do-not-persist" },
   result: "success",
   affectedObjects: [],
   firedAt: "2026-07-25T00:00:00Z",
@@ -47,6 +49,31 @@ describe("sideEffectJobExtractor", () => {
     expect((jobs[0].payload as any).context.executionId).toBe("exec-1");
     expect(jobs[0].idempotencySeed).toBe("wb:0");
     expect(jobs[1].idempotencySeed).toBe("wb:1");
+  });
+
+  it("resolves connectivity input mappings and does not persist unused action parameters", () => {
+    const jobs = extractSideEffectJobs({
+      webhooks: [{
+        kind: "connectivity",
+        webhookId: "ri.magritte.main.webhook.1",
+        webhookVersion: 2,
+        inputs: {
+          body: { source: "parameter", param: "message" },
+          actor: { source: "currentUser" },
+          sentAt: { source: "currentTimestamp" },
+          constant: { source: "static", value: "fixed" },
+        },
+      }],
+    }, CTX);
+    expect((jobs[0].payload as any).spec.inputs).toEqual({
+      body: "hello",
+      actor: "tester",
+      sentAt: "2026-07-25T00:00:00Z",
+      constant: "fixed",
+    });
+    expect((jobs[0].payload as any).context.tenant).toBe("tenant-1");
+    expect((jobs[0].payload as any).context.resolvedParameters).toBeUndefined();
+    expect(JSON.stringify(jobs[0].payload)).not.toContain("do-not-persist");
   });
 
   it("skips malformed webhook entries (non-object / null)", () => {
@@ -109,12 +136,13 @@ describe("sideEffectJobExtractor", () => {
     expect(jobs[1].kind).toBe("notification");
   });
 
-  it("context is propagated verbatim into every job payload", () => {
+  it("safe execution context is propagated into every job payload", () => {
     const ctx = { ...CTX, firedAt: "2026-01-01T12:00:00Z" };
     const jobs = extractSideEffectJobs({
       webhooks: [{ url: "https://example.com" }],
       notifications: [{ templateId: "t", recipients: [{ principal: "a" }] }],
     }, ctx);
-    expect(jobs.every((j) => (j.payload as any).context === ctx)).toBe(true);
+    expect(jobs.every((j) => (j.payload as any).context.executionId === ctx.executionId)).toBe(true);
+    expect(jobs.every((j) => (j.payload as any).context.resolvedParameters === undefined)).toBe(true);
   });
 });

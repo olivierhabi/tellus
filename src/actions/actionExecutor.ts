@@ -1002,14 +1002,14 @@ export async function executeAction(
       const entry = buildAuditEntry();
       await appendAuditRow(pg, entry);
       auditCommitted = true;
-      // Phase 5 — durable side-effect outbox. When
-      // ACTION_SIDE_EFFECT_WORKER_ENABLED=1, enqueue per-side-effect
+      // Durable side-effect outbox is enabled by default. Setting
+      // ACTION_SIDE_EFFECT_WORKER_ENABLED=0 is the explicit legacy fallback.
       // rows IN THIS SAME PG TRANSACTION so the side effects are
       // atomic with the audit row + the ontology edits. A subsequent
       // worker drains the outbox post-commit. The legacy fire-and-forget
       // path (Stage 7 below) is suppressed in this mode.
       const at = actionType;
-      if (at && process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED === "1" && at.side_effects != null) {
+      if (at && process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED !== "0" && at.side_effects != null) {
         const execCtx: SideEffectExecutionContext = {
           executionId,
           actionTypeApiName,
@@ -1017,6 +1017,8 @@ export async function executeAction(
           actionTypeVersion: at.definition_version ?? 1,
           ontologyId,
           executedBy: context.executedBy || "system",
+          tenant: context.tenant ?? "default",
+          resolvedParameters: resolvedParameters as Record<string, unknown>,
           result: result.result,
           affectedObjects: result.affectedObjects,
           firedAt: new Date().toISOString(),
@@ -1191,7 +1193,7 @@ export async function executeAction(
     // null/empty side_effects ⇒ no-op. Awaited so the audit/return reflect
     // that delivery was attempted, but failures are swallowed inside.
     // -----------------------------------------------------------------
-    if (application.success && actionType.side_effects != null && process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED !== "1") {
+    if (application.success && actionType.side_effects != null && process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED === "0") {
       try {
         // Fire webhooks
         await fireActionWebhooks(actionType.side_effects, {

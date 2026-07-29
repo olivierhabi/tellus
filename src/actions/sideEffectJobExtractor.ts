@@ -40,19 +40,37 @@ export function extractSideEffectJobs(
   if (!sideEffects || typeof sideEffects !== "object" || Array.isArray(sideEffects)) return [];
   const se = sideEffects as Record<string, unknown>;
   const out: ExtractedSideEffectJob[] = [];
+  const { resolvedParameters: _resolvedParameters, ...persistedContext } =
+    executionContext;
 
   // Webhook fanouts — one row per webhook spec.
   const webhookSpecs = Array.isArray(se.webhooks) ? (se.webhooks as Array<Record<string, unknown>>) : [];
   for (let i = 0; i < webhookSpecs.length; i++) {
     const spec = webhookSpecs[i];
     if (!spec || typeof spec !== "object") continue;
+    const resolvedSpec =
+      spec.kind === "connectivity"
+        ? {
+            ...spec,
+            inputs: Object.fromEntries(
+              Object.entries(
+                spec.inputs && typeof spec.inputs === "object" && !Array.isArray(spec.inputs)
+                  ? spec.inputs as Record<string, unknown>
+                  : {},
+              ).map(([name, source]) => [
+                name,
+                resolveValueSource(source, executionContext),
+              ]),
+            ),
+          }
+        : spec;
     out.push({
       kind: "webhook",
       // The payload is the spec + the runtime execution context — the
       // worker's dispatch function consumes both.
       payload: {
-        spec,
-        context: executionContext,
+        spec: resolvedSpec,
+        context: persistedContext,
       },
       idempotencySeed: `wb:${i}`,
     });
@@ -75,7 +93,7 @@ export function extractSideEffectJobs(
           spec,
           recipientIndex: j,
           recipient: recipients[j] ?? null,
-          context: executionContext,
+          context: persistedContext,
         },
         idempotencySeed: `notif:${i}:${j}`,
       });
@@ -93,7 +111,31 @@ export interface SideEffectExecutionContext {
   actionTypeVersion: number;
   ontologyId: string;
   executedBy: string;
+  tenant: string;
+  /** Used only while extracting jobs. The extractor persists mapped values,
+   * never the complete action parameter bag, into the outbox payload. */
+  resolvedParameters: Record<string, unknown>;
   result: string;
   affectedObjects: Array<{ objectType: string; primaryKey: string; operation: string }>;
   firedAt: string;
+}
+
+function resolveValueSource(
+  value: unknown,
+  context: SideEffectExecutionContext,
+): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  switch (source.source) {
+    case "parameter":
+      return context.resolvedParameters[String(source.param ?? "")];
+    case "static":
+      return source.value;
+    case "currentTimestamp":
+      return context.firedAt;
+    case "currentUser":
+      return context.executedBy;
+    default:
+      return undefined;
+  }
 }

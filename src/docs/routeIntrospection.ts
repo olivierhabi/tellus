@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // routeIntrospection.ts — derive the live HTTP route table from the Express
 // app so the OpenAPI document can be generated FROM the real routes instead of
-// hand-maintained (which drifts: see docs/audit/api-docs-coverage.md).
+// hand-maintained, which previously drifted from the live route surface.
 //
 // The existing `extractRoutes` in middleware/notFoundHandler.ts is best-effort
 // and mangles nested parameterised mounts (e.g. it drops the `:apiName`

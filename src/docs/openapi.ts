@@ -2817,8 +2817,8 @@ export const openApiSpec = {
 // Live-route-derived spec assembly.
 //
 // The curated `openApiSpec` above is hand-maintained and drifts (it documented
-// ~45% of the surface and carried 3 phantom paths — see
-// docs/audit/api-docs-coverage.md). To make /api/docs ALWAYS complete and
+// only part of the surface and previously carried phantom paths. To make
+// /api/docs ALWAYS complete and
 // phantom-free, we derive the served `paths` from the real Express route table
 // at request time: every live route is keyed in, reusing the rich curated
 // operation when one matches its shape, otherwise an auto-generated stub.
