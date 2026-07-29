@@ -252,6 +252,30 @@ export const getWebhook = handler("get", async (req, res) => {
   res.status(200).json(webhook);
 });
 
+export const listWebhookVersions = handler("versions.list", async (req, res) => {
+  const user = extractUser(req);
+  requireScope(user, "connectivity:read");
+  const requestedPageSize = Number(req.query.pageSize ?? 100);
+  const pageSize = Number.isInteger(requestedPageSize)
+    ? Math.min(Math.max(requestedPageSize, 1), 200)
+    : 100;
+  const requestedToken =
+    req.query.pageToken === undefined ? undefined : Number(req.query.pageToken);
+  const beforeVersion =
+    requestedToken !== undefined &&
+    Number.isInteger(requestedToken) &&
+    requestedToken > 0
+      ? requestedToken
+      : undefined;
+  const { data, nextPageToken } = await repository.listVersions(
+    req.params.webhookRid,
+    user.tenant,
+    { pageSize, beforeVersion },
+  );
+  await connections.findByRid(data[0].connectionRid, user.tenant);
+  res.status(200).json({ data, nextPageToken });
+});
+
 export const updateWebhook = handler("update", async (req, res) => {
   const user = extractUser(req);
   requireScope(user, "connectivity:write");

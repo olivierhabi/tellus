@@ -159,6 +159,7 @@ export function createConnectivityRouter(): Router {
     webhooksHandler.createWebhook,
   );
   router.get("/webhooks/:webhookRid", webhooksHandler.getWebhook);
+  router.get("/webhooks/:webhookRid/versions", webhooksHandler.listWebhookVersions);
   router.put("/webhooks/:webhookRid", webhooksHandler.updateWebhook);
   router.post("/webhooks/:webhookRid/ready", webhooksHandler.markWebhookReady);
   router.post("/webhooks/:webhookRid/activate", webhooksHandler.activateWebhook);

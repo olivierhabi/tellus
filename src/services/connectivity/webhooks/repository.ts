@@ -163,7 +163,11 @@ export async function getByRid(
       `SELECT w.*,
               v.request_config, v.input_parameters, v.output_parameters,
               v.storage_config, v.execution_policy, v.trigger_config,
-              v.signature_config
+              v.signature_config,
+              v.created_at AS created_at,
+              v.created_by AS created_by,
+              v.created_at AS updated_at,
+              v.created_by AS updated_by
          FROM connectivity_webhook w
          JOIN connectivity_webhook_version v
            ON v.webhook_rid = w.rid AND v.version = $3
@@ -180,6 +184,46 @@ export async function getByRid(
   );
   if (!result.rows[0]) throw new Error("WEBHOOK_NOT_FOUND");
   return toWebhook(result.rows[0]);
+}
+
+/**
+ * Returns every immutable configuration version for one webhook. The webhook
+ * identity (name, source, lifecycle) is intentionally shared; each returned
+ * row carries the configuration that was persisted for that exact version.
+ */
+export async function listVersions(
+  webhookRid: string,
+  tenant: string,
+  options: { pageSize: number; beforeVersion?: number },
+): Promise<{ data: ConnectivityWebhook[]; nextPageToken: string | null }> {
+  const result = await pool.query<WebhookRow>(
+    `SELECT w.*,
+            v.request_config, v.input_parameters, v.output_parameters,
+            v.storage_config, v.execution_policy, v.trigger_config,
+            v.signature_config,
+            v.version AS current_version,
+            v.created_at AS created_at,
+            v.created_by AS created_by,
+            v.created_at AS updated_at,
+            v.created_by AS updated_by
+       FROM connectivity_webhook w
+      JOIN connectivity_webhook_version v ON v.webhook_rid = w.rid
+      WHERE w.rid = $1 AND w.tenant = $2
+        AND ($3::integer IS NULL OR v.version < $3)
+      ORDER BY v.version DESC
+      LIMIT $4`,
+    [webhookRid, tenant, options.beforeVersion ?? null, options.pageSize + 1],
+  );
+  if (result.rows.length === 0) throw new Error("WEBHOOK_NOT_FOUND");
+  const hasMore = result.rows.length > options.pageSize;
+  const pageRows = result.rows.slice(0, options.pageSize);
+  const data = pageRows.map(toWebhook);
+  return {
+    data,
+    nextPageToken: hasMore
+      ? String(data[data.length - 1].currentVersion)
+      : null,
+  };
 }
 
 export async function updateVersion(params: {
