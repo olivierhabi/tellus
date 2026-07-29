@@ -14,6 +14,7 @@ import { resolveLinks } from "../../services/linkResolverService";
 import linkTypeModel, { resolveObjectTypeApiName } from "../../models/linkType";
 import { toV2Error } from "../../services/oss/v2Errors";
 import { requireOntology } from "./ontologyParam";
+import { resolveRequestTenant } from "../../utils/requestTenant";
 import { query } from "../../db";
 import { deriveMainBranchId } from "../../services/branchContext";
 import { deterministicObjectRid } from "../../services/objectIdentity";
@@ -24,7 +25,10 @@ router.get(
   "/objects/:objectType/:primaryKey/links/:linkType",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const pageSize = req.query.pageSize
         ? Number(req.query.pageSize)
         : undefined;

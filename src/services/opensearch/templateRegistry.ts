@@ -43,11 +43,14 @@ const TEMPLATE_NAME = "ontology-template";
  */
 const SYSTEM_FIELD_MAPPINGS = {
   __pk: { type: "keyword" as const },
+  __ontology: { type: "keyword" as const },
+  __rid: { type: "keyword" as const },
   __objectType: { type: "keyword" as const },
   __lastModified: { type: "date" as const },
   __version: { type: "long" as const },
   __editedBy: { type: "keyword" as const },
   __datasourceVersion: { type: "keyword" as const },
+  __branch: { type: "keyword" as const },
 };
 
 /**

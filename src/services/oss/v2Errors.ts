@@ -39,6 +39,7 @@ const ERROR_MAP: Record<string, Mapping> = {
   ObjectSetTooLarge: { status: 400, errorCode: "INVALID_ARGUMENT", errorName: "ObjectSetTooLarge" },
   InvalidPageToken: { status: 400, errorCode: "INVALID_ARGUMENT", errorName: "InvalidPageToken" },
   InvalidPageSize: { status: 400, errorCode: "INVALID_ARGUMENT", errorName: "InvalidPageSize" },
+  PropertySecurityDenied: { status: 403, errorCode: "PERMISSION_DENIED", errorName: "PropertySecurityDenied" },
   PreviewRequired: { status: 400, errorCode: "INVALID_ARGUMENT", errorName: "PreviewRequired" },
   UnsupportedFilter: { status: 400, errorCode: "INVALID_ARGUMENT", errorName: "UnsupportedFilter" },
   InvalidAggregationDurationValue: { status: 400, errorCode: "INVALID_ARGUMENT", errorName: "InvalidAggregationDurationValue" },

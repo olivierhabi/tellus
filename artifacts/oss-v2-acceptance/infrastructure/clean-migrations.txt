@@ -1,0 +1,521 @@
+$ corepack pnpm migrate:all
+
+> ontology-engine@0.3.0 migrate:all /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-clean-1c2fbe3
+> npm run migrate && npm run migrate:foundry && npm run migrate:auth && npm run migrate
+
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate
+> tsx src/migrate.ts
+
+New PostgreSQL client connected to pool
+Created table: ontology
+Created table: object_type
+Created table: property
+Added FK constraint: fk_ot_primary_key
+Added FK constraint: fk_ot_title_prop
+Created table: backing_datasource
+Created table: funnel_state
+Created table: funnel_pipeline_state
+Created table: link_type
+Created table: ontology_edit
+Created table: action_type
+Created table: action_audit_log
+Created table: link_edit
+Created table: idempotency_key
+Created table: dataset
+Created table: dataset_transaction
+Ensured backing_datasource has dataset_id column
+Ensured object_type has curatorial metadata columns
+Ensured funnel_pipeline_state has stage tracking columns
+Created table: reindex_history
+Created table: interface
+Created table: interface_property
+Created table: object_type_interface
+Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface
+Revoked UPDATE/DELETE on action_audit_log (immutable audit log)
+Could not create usage_event_daily matview: relation "usage_event" does not exist
+Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)
+Created table: object_instances
+Created table: funnel_dataset
+Created table: funnel_snapshot
+Created table: funnel_run
+Created table: funnel_stage_run
+Created table: funnel_signal
+Created table: funnel_changelog_watermark
+Created Funnel pipeline tables (object_instances, funnel_dataset, funnel_snapshot, funnel_run, funnel_stage_run, funnel_signal, funnel_changelog_watermark)
+Created table: object_type_active_index_version
+Created table: replacement_diff_log
+Created B9 replacement pipeline tables (object_type_active_index_version, replacement_diff_log)
+Ensured backing_datasource has iceberg_location column (B4)
+Ensured funnel_run has temporal_workflow_id UPSERT key (B3)
+Applied 012_funnel_object_edits.sql
+Applied 013_replacement_pipeline.sql
+Applied 014_funnel_runs.sql
+Applied 015_funnel_signal_idempotency.sql
+Applied 016_iceberg_metadata_retry.sql
+Applied 017_link_type_extensions.sql (LT-B1..B10)
+Applied 018_funnel_hardening.sql (FNL-H2/H3/H4)
+Applied 026_fnl_h3_pipeline_deploy_signal.sql (FNL-H3 signal enum)
+Applied 032_migration_ledger.sql
+Applied 035_branch_three_way_merge.sql
+Applied 036_audit_hash_chain.sql
+Applied 037_action_type_cbac.sql
+Applied 039_ontology_id_not_null.sql
+Applied 040_branch_id_on_edits.sql
+Applied 041_object_instances_branch_pk.sql
+Applied 042_commit_seq.sql
+Applied 043_link_edit_branch_composite_index.sql
+Applied 044_object_type_marking_required.sql
+Applied 045_saved_exploration_required_markings.sql
+Applied 046_export_job_security_snapshot.sql
+Applied 050_stemma_ddl.sql
+Applied 051_code_repos_audit.sql
+Applied 052_b10_stemma_events.sql
+Applied 053_b2_code_repository.sql
+Applied 054_b6_jemma.sql
+Applied 055_b8_functions_registry.sql
+Applied 056_b3_templates.sql
+Applied 057_b7_jobspec.sql
+Applied 058_b1_workshop_module.sql
+Applied 059_b1_workshop_idempotency.sql
+Applied 060_b3_workshop_module_version.sql
+Applied 061_workshop_demo_orders.sql
+Applied 062_b1_quiver_analysis.sql
+Applied 063_b1_quiver_idempotency.sql
+Applied 064_b4_quiver_versions.sql
+Applied 065_b4_quiver_working_state.sql
+Applied 066_b5_quiver_card_output_cache.sql
+Applied 067_b3_quiver_instruction_log.sql
+Applied 068_b7_quiver_iceberg_snapshots.sql
+Applied 069_b9_quiver_aip_trace.sql
+Applied 070_b10_quiver_publishing.sql
+Applied 071_autosave_snapshots.sql
+Applied 072_b4_resource_imports.sql
+Applied 073_backfill_pipeline_output_dataset_names.sql
+Deferred 074_b1_connectivity_connections.sql (dependency not present yet — will be applied by migrate:foundry): relation "resources" does not exist
+Applied 075_b1_connectivity_outbox.sql
+Applied 076_b2_connectivity_credentials.sql
+Applied 077_b4_orchestration_builds.sql
+Deferred 078_b5_table_imports.sql (dependency not present yet — will be applied by migrate:foundry): relation "connectivity_connections" does not exist
+Applied 079_b6_agents.sql
+Deferred 080_b8_virtual_tables.sql (dependency not present yet — will be applied by migrate:foundry): relation "connectivity_connections" does not exist
+Applied 081_b9_funnel.sql
+Applied 082_b10_ontology_bindings.sql
+Deferred 083_b1_connectivity_folder_fk.sql (dependency not present yet — will be applied by migrate:foundry): relation "connectivity_connections" does not exist
+Applied 084_connector_types.sql
+Deferred 085_connection_settings.sql (dependency not present yet — will be applied by migrate:foundry): relation "connectivity_connections" does not exist
+Applied 086_durable_stemma.sql
+Applied 087_b2_credential_rotation_policy.sql
+Deferred 088_b1_connectivity_egress_policies.sql (dependency not present yet — will be applied by migrate:foundry): relation "connectivity_connections" does not exist
+Deferred 089_b5_table_import_schedule.sql (dependency not present yet — will be applied by migrate:foundry): relation "table_imports" does not exist
+Deferred 090_b5_table_import_cron.sql (dependency not present yet — will be applied by migrate:foundry): relation "table_imports" does not exist
+Applied 091_foundry_build_rid.sql
+Applied 092_build_group.sql
+Applied 099_consolidate_procedure.sql
+Applied 100_single_enterprise_ontology.sql
+Deferred 101_purpose_access.sql (dependency not present yet — will be applied by migrate:foundry): relation "foundry_datasets" does not exist
+Applied 102_object_cell_marking.sql
+Applied 103_create_transforms.sql
+Applied 104_uncommitted_drafts.sql
+Applied 105_dataset_branching.sql
+Applied 106_dataset_schema_version.sql
+Applied 107_transform_retry.sql
+Applied 108_opensearch_reindex_run.sql
+Applied 109_object_instances_keyset_index.sql
+Applied 110_object_instances_ontology_ot_index.sql
+Applied 111_developer_console_applications.sql
+Applied 112_tpa_sdk_versions.sql
+Applied 113_tpa_foundry_parity.sql
+Applied 114_developer_console_production_control_plane.sql
+Applied 115_developer_console_artifact_registry.sql
+Applied 116_functions_publish_jobs.sql
+Deferred 117_function_registry_list_indexes.sql (dependency not present yet — will be applied by migrate:foundry): relation "projects" does not exist
+Applied 118_functions_publish_retrigger.sql
+Applied 119_action_type_creation_metadata.sql
+Applied 120_transform_build_runtime.sql
+Applied 121_action_semantics_v2.sql
+Applied 121_transform_incremental_state.sql
+Applied 122_link_instances_projection.sql
+Applied 123_action_semantics_backfill.sql
+Applied 124_action_semantics_constraints.sql
+Applied 125_action_migration_log.sql
+Applied 126_code_repository_chat_session.sql
+Applied 127_action_rule_discriminators.sql
+Applied 128_interface_link_constraint.sql
+Applied 129_webhook_definition.sql
+Applied 130_action_writeback_config.sql
+Applied 131_side_effect_outbox.sql
+Applied 132_action_type_definition_version.sql
+Applied 133_notification_inbox.sql
+Deferred 134_rest_api_connector.sql (dependency not present yet — will be applied by migrate:foundry): relation "connectivity_connections" does not exist
+Deferred 135_connectivity_webhooks.sql (dependency not present yet — will be applied by migrate:foundry): relation "connectivity_connections" does not exist
+Applied 138_object_rids.sql
+Applied 140_object_rid_lookup.sql
+Applied 141_oss_v2_enterprise_contexts.sql
+Deferred 12 migration(s) to migrate:foundry: 074_b1_connectivity_connections.sql, 078_b5_table_imports.sql, 080_b8_virtual_tables.sql, 083_b1_connectivity_folder_fk.sql, 085_connection_settings.sql, 088_b1_connectivity_egress_policies.sql, 089_b5_table_import_schedule.sql, 090_b5_table_import_cron.sql, 101_purpose_access.sql, 117_function_registry_list_indexes.sql, 134_rest_api_connector.sql, 135_connectivity_webhooks.sql
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate:foundry
+> tsx src/foundryMigrate.ts
+
+New PostgreSQL client connected to pool
+Running foundry data ingestion layer migrations...
+  [1/8] ltree extension enabled
+  [2/8] projects table created
+  [3/8] folders table created
+  [4/8] folder path triggers created
+  [5/8] foundry_datasets table created
+  [6/8] dataset_columns table created
+  [7/8] users, auth, members, versions, user_preferences tables created
+  [8/8] indexes created
+  [schema] pipelines.folder_id added
+  [9/10] pipelines table created
+  [ok] pipelines.compute_type → duckdb default
+  [ok] pipeline_deployments (moved before PB-B3..B10 ALTERs)
+  [ok] pipelines.output_format + dataset format tracking
+  [ok] PB-B4 iceberg columns + watermark
+  [ok] PB-B5 streaming columns
+  [ok] PB-B6 snapshot pinning columns
+  [ok] PB-B7 pipeline_acl + markings
+  [ok] FOUNDRY-GAPS §6 dataset_acl
+  [ok] PB-B8 dataset_lineage
+  [ok] PB-B7 follow-cbac pipeline_cbac_rule
+  [ok] PB-B8 follow-fnl-h3 signal enum
+  [ok] PB-B8 follow-bd-migrate foundry_dataset_id
+  [ok] PB-B10 schema fingerprint column
+  [10/10] pipeline_nodes table created
+  [schema] foundry_datasets.project_id added, folder_id made nullable
+  [schema] foundry_datasets.created_by / updated_by added
+  [ok] pipeline_signal + PB-B1 columns
+  [ok] PB-B4 snapshot invariant + PB-B1 idempotency key triggers
+  [ok] B1: resources table + indexes + etag trigger
+  [ok] B1: minted system user to own the root space (fresh install)
+  [ok] B1: resources backfill (root space + projects + folders + foundry_datasets)
+  [ok] B2: spaces table + root space row
+  [ok] B3: idempotency_keys table
+  [ok] B4 Step 12: roles + role_operations + seed
+  [ok] B4 Step 13: role_grants
+  [ok] B4 Step 14: project_members mirror trigger
+  [ok] B4 Step 15: backfilled project_members → role_grants
+  [ok] B4 Step 16: markings, resource_markings, user_markings
+  [ok] B4 Step 17-19: organizations + seeds + backfills
+  [ok] B4 Step 19b: default-org auto-enroll triggers (users + projects)
+  [ok] B4 Step 20: gatekeeper_invalidate NOTIFY triggers
+  [ok] B5 Step 01: audit_log
+  [ok] B5 Step 04: resources.trashed_at + retention_until
+  [ok] B6 Step 01: resource_dependencies
+  [ok] B6 Step 02: project_references
+  [ok] B7 Step 01: branches + branch_resources
+  [ok] B7 Step 02: proposals + proposal_approvals
+  [ok] B7 Step 03: approval_policies + branch_overlays
+  [ok] B8 Step 27: ontologies + default seed
+  [ok] B8 Step 28: object_types
+  [ok] B8 Step 29: object_type_properties
+  [ok] B8 Step 30: object_type_datasources
+  [ok] B8 Step 31: link_types (with B8.12 status/etag)
+  [ok] B8 Step 32: shared_property_types + interfaces
+  [ok] B9 Step 40: funnel_b9_state
+
+Foundry migration complete — all tables created successfully.
+Applied (deferred tail) 074_b1_connectivity_connections.sql
+Applied (deferred tail) 078_b5_table_imports.sql
+Applied (deferred tail) 080_b8_virtual_tables.sql
+Applied (deferred tail) 083_b1_connectivity_folder_fk.sql
+Applied (deferred tail) 085_connection_settings.sql
+Applied (deferred tail) 088_b1_connectivity_egress_policies.sql
+Applied (deferred tail) 089_b5_table_import_schedule.sql
+Applied (deferred tail) 090_b5_table_import_cron.sql
+Applied (deferred tail) 101_purpose_access.sql
+Applied (deferred tail) 117_function_registry_list_indexes.sql
+Applied (deferred tail) 134_rest_api_connector.sql
+Applied (deferred tail) 135_connectivity_webhooks.sql
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate:auth
+> tsx src/migrateAuth.ts
+
+New PostgreSQL client connected to pool
+[auth] personal_access_tokens ready
+[auth] auth_revoked_tokens ready
+[auth] user_totp_secrets ready
+[auth] user_webauthn_credentials ready
+[auth] user_webauthn_challenges ready
+[auth] auth_mfa_challenges ready
+[auth] tellus_audit_events ready
+[auth] mfa_attempt_budget ready
+[auth] email_outbox ready
+[auth] user_reauth_tokens ready
+[auth] passkey_enrollment_tokens ready
+[auth] system_settings ready
+[auth] reauth_attempt_budget ready
+[auth] schema up to date
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate
+> tsx src/migrate.ts
+
+New PostgreSQL client connected to pool
+Table already exists: ontology
+Table already exists: object_type
+Table already exists: property
+FK constraint already exists: fk_ot_primary_key
+FK constraint already exists: fk_ot_title_prop
+Table already exists: backing_datasource
+Table already exists: funnel_state
+Table already exists: funnel_pipeline_state
+Table already exists: link_type
+Table already exists: ontology_edit
+Table already exists: action_type
+Table already exists: action_audit_log
+Table already exists: link_edit
+Table already exists: idempotency_key
+Table already exists: dataset
+Table already exists: dataset_transaction
+Ensured backing_datasource has dataset_id column
+Ensured object_type has curatorial metadata columns
+Ensured funnel_pipeline_state has stage tracking columns
+Table already exists: reindex_history
+Table already exists: interface
+Table already exists: interface_property
+Table already exists: object_type_interface
+Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface
+Revoked UPDATE/DELETE on action_audit_log (immutable audit log)
+Could not create usage_event_daily matview: relation "usage_event" does not exist
+Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)
+Table already exists: object_instances
+Table already exists: funnel_dataset
+Table already exists: funnel_snapshot
+Table already exists: funnel_run
+Table already exists: funnel_stage_run
+Table already exists: funnel_signal
+Table already exists: funnel_changelog_watermark
+Created Funnel pipeline tables (object_instances, funnel_dataset, funnel_snapshot, funnel_run, funnel_stage_run, funnel_signal, funnel_changelog_watermark)
+Table already exists: object_type_active_index_version
+Table already exists: replacement_diff_log
+Created B9 replacement pipeline tables (object_type_active_index_version, replacement_diff_log)
+Ensured backing_datasource has iceberg_location column (B4)
+Ensured funnel_run has temporal_workflow_id UPSERT key (B3)
+Applied 012_funnel_object_edits.sql
+Applied 013_replacement_pipeline.sql
+Applied 014_funnel_runs.sql
+Applied 015_funnel_signal_idempotency.sql
+Applied 016_iceberg_metadata_retry.sql
+Applied 017_link_type_extensions.sql (LT-B1..B10)
+Applied 018_funnel_hardening.sql (FNL-H2/H3/H4)
+Applied 026_fnl_h3_pipeline_deploy_signal.sql (FNL-H3 signal enum)
+Applied 032_migration_ledger.sql
+$ corepack pnpm migrate:all # idempotency
+
+> ontology-engine@0.3.0 migrate:all /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-clean-1c2fbe3
+> npm run migrate && npm run migrate:foundry && npm run migrate:auth && npm run migrate
+
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate
+> tsx src/migrate.ts
+
+New PostgreSQL client connected to pool
+Table already exists: ontology
+Table already exists: object_type
+Table already exists: property
+FK constraint already exists: fk_ot_primary_key
+FK constraint already exists: fk_ot_title_prop
+Table already exists: backing_datasource
+Table already exists: funnel_state
+Table already exists: funnel_pipeline_state
+Table already exists: link_type
+Table already exists: ontology_edit
+Table already exists: action_type
+Table already exists: action_audit_log
+Table already exists: link_edit
+Table already exists: idempotency_key
+Table already exists: dataset
+Table already exists: dataset_transaction
+Ensured backing_datasource has dataset_id column
+Ensured object_type has curatorial metadata columns
+Ensured funnel_pipeline_state has stage tracking columns
+Table already exists: reindex_history
+Table already exists: interface
+Table already exists: interface_property
+Table already exists: object_type_interface
+Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface
+Revoked UPDATE/DELETE on action_audit_log (immutable audit log)
+Could not create usage_event_daily matview: relation "usage_event" does not exist
+Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)
+Table already exists: object_instances
+Table already exists: funnel_dataset
+Table already exists: funnel_snapshot
+Table already exists: funnel_run
+Table already exists: funnel_stage_run
+Table already exists: funnel_signal
+Table already exists: funnel_changelog_watermark
+Created Funnel pipeline tables (object_instances, funnel_dataset, funnel_snapshot, funnel_run, funnel_stage_run, funnel_signal, funnel_changelog_watermark)
+Table already exists: object_type_active_index_version
+Table already exists: replacement_diff_log
+Created B9 replacement pipeline tables (object_type_active_index_version, replacement_diff_log)
+Ensured backing_datasource has iceberg_location column (B4)
+Ensured funnel_run has temporal_workflow_id UPSERT key (B3)
+Applied 012_funnel_object_edits.sql
+Applied 013_replacement_pipeline.sql
+Applied 014_funnel_runs.sql
+Applied 015_funnel_signal_idempotency.sql
+Applied 016_iceberg_metadata_retry.sql
+Applied 017_link_type_extensions.sql (LT-B1..B10)
+Applied 018_funnel_hardening.sql (FNL-H2/H3/H4)
+Applied 026_fnl_h3_pipeline_deploy_signal.sql (FNL-H3 signal enum)
+Applied 032_migration_ledger.sql
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate:foundry
+> tsx src/foundryMigrate.ts
+
+New PostgreSQL client connected to pool
+Running foundry data ingestion layer migrations...
+  [1/8] ltree extension enabled
+  [2/8] projects table created
+  [3/8] folders table created
+  [4/8] folder path triggers created
+  [5/8] foundry_datasets table created
+  [6/8] dataset_columns table created
+  [7/8] users, auth, members, versions, user_preferences tables created
+  [8/8] indexes created
+  [9/10] pipelines table created
+  [ok] pipelines.compute_type → duckdb default
+  [ok] pipeline_deployments (moved before PB-B3..B10 ALTERs)
+  [ok] pipelines.output_format + dataset format tracking
+  [ok] PB-B4 iceberg columns + watermark
+  [ok] PB-B5 streaming columns
+  [ok] PB-B6 snapshot pinning columns
+  [ok] PB-B7 pipeline_acl + markings
+  [ok] FOUNDRY-GAPS §6 dataset_acl
+  [ok] PB-B8 dataset_lineage
+  [ok] PB-B7 follow-cbac pipeline_cbac_rule
+  [ok] PB-B8 follow-fnl-h3 signal enum
+  [ok] PB-B8 follow-bd-migrate foundry_dataset_id
+  [ok] PB-B10 schema fingerprint column
+  [10/10] pipeline_nodes table created
+  [ok] pipeline_signal + PB-B1 columns
+  [ok] PB-B4 snapshot invariant + PB-B1 idempotency key triggers
+  [ok] B1: resources table + indexes + etag trigger
+  [ok] B1: resources backfill (root space + projects + folders + foundry_datasets)
+  [ok] B2: spaces table + root space row
+  [ok] B3: idempotency_keys table
+  [ok] B4 Step 12: roles + role_operations + seed
+  [ok] B4 Step 13: role_grants
+  [ok] B4 Step 14: project_members mirror trigger
+  [ok] B4 Step 15: backfilled project_members → role_grants
+  [ok] B4 Step 16: markings, resource_markings, user_markings
+  [ok] B4 Step 17-19: organizations + seeds + backfills
+  [ok] B4 Step 19b: default-org auto-enroll triggers (users + projects)
+  [ok] B4 Step 20: gatekeeper_invalidate NOTIFY triggers
+  [ok] B5 Step 01: audit_log
+  [ok] B5 Step 04: resources.trashed_at + retention_until
+  [ok] B6 Step 01: resource_dependencies
+  [ok] B6 Step 02: project_references
+  [ok] B7 Step 01: branches + branch_resources
+  [ok] B7 Step 02: proposals + proposal_approvals
+  [ok] B7 Step 03: approval_policies + branch_overlays
+  [ok] B8 Step 27: ontologies + default seed
+  [ok] B8 Step 28: object_types
+  [ok] B8 Step 29: object_type_properties
+  [ok] B8 Step 30: object_type_datasources
+  [ok] B8 Step 31: link_types (with B8.12 status/etag)
+  [ok] B8 Step 32: shared_property_types + interfaces
+  [ok] B9 Step 40: funnel_b9_state
+
+Foundry migration complete — all tables created successfully.
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate:auth
+> tsx src/migrateAuth.ts
+
+New PostgreSQL client connected to pool
+[auth] personal_access_tokens ready
+[auth] auth_revoked_tokens ready
+[auth] user_totp_secrets ready
+[auth] user_webauthn_credentials ready
+[auth] user_webauthn_challenges ready
+[auth] auth_mfa_challenges ready
+[auth] tellus_audit_events ready
+[auth] mfa_attempt_budget ready
+[auth] email_outbox ready
+[auth] user_reauth_tokens ready
+[auth] passkey_enrollment_tokens ready
+[auth] system_settings ready
+[auth] reauth_attempt_budget ready
+[auth] schema up to date
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 migrate
+> tsx src/migrate.ts
+
+New PostgreSQL client connected to pool
+Table already exists: ontology
+Table already exists: object_type
+Table already exists: property
+FK constraint already exists: fk_ot_primary_key
+FK constraint already exists: fk_ot_title_prop
+Table already exists: backing_datasource
+Table already exists: funnel_state
+Table already exists: funnel_pipeline_state
+Table already exists: link_type
+Table already exists: ontology_edit
+Table already exists: action_type
+Table already exists: action_audit_log
+Table already exists: link_edit
+Table already exists: idempotency_key
+Table already exists: dataset
+Table already exists: dataset_transaction
+Ensured backing_datasource has dataset_id column
+Ensured object_type has curatorial metadata columns
+Ensured funnel_pipeline_state has stage tracking columns
+Table already exists: reindex_history
+Table already exists: interface
+Table already exists: interface_property
+Table already exists: object_type_interface
+Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface
+Revoked UPDATE/DELETE on action_audit_log (immutable audit log)
+Could not create usage_event_daily matview: relation "usage_event" does not exist
+Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)
+Table already exists: object_instances
+Table already exists: funnel_dataset
+Table already exists: funnel_snapshot
+Table already exists: funnel_run
+Table already exists: funnel_stage_run
+Table already exists: funnel_signal
+Table already exists: funnel_changelog_watermark
+Created Funnel pipeline tables (object_instances, funnel_dataset, funnel_snapshot, funnel_run, funnel_stage_run, funnel_signal, funnel_changelog_watermark)
+Table already exists: object_type_active_index_version
+Table already exists: replacement_diff_log
+Created B9 replacement pipeline tables (object_type_active_index_version, replacement_diff_log)
+Ensured backing_datasource has iceberg_location column (B4)
+Ensured funnel_run has temporal_workflow_id UPSERT key (B3)
+Applied 012_funnel_object_edits.sql
+Applied 013_replacement_pipeline.sql
+Applied 014_funnel_runs.sql
+Applied 015_funnel_signal_idempotency.sql
+Applied 016_iceberg_metadata_retry.sql
+Applied 017_link_type_extensions.sql (LT-B1..B10)
+Applied 018_funnel_hardening.sql (FNL-H2/H3/H4)
+Applied 026_fnl_h3_pipeline_deploy_signal.sql (FNL-H3 signal enum)
+Applied 032_migration_ledger.sql
+$ schema inventory
+222
+0

@@ -1,0 +1,13 @@
+Real two-tenant adversarial read matrix
+commit=f4080c7fbddc8c76eb4adfd26ffcfed2fd00867a
+2026-07-28T20:50:18Z
+cross_tenant_ontology status=404 error=OntologyNotFound rows=na
+cross_tenant_static_rid status=200 error=none rows=0
+cross_tenant_transaction status=404 error=ObjectTypeNotFound rows=na
+cross_tenant_scenario status=404 error=ObjectTypeNotFound rows=na
+cross_tenant_temporary_set status=404 error=ObjectSetNotFound
+altered_query_valid_token status=400 error=InvalidPageToken rows=na
+forged_hmac status=400 error=InvalidPageToken rows=na
+Cross-tenant OSDK cursor replay
+2026-07-28T20:50:33Z
+{"result":"PASS","mode":"crossTenant","frameType":"error","updateStates":[],"cursorRedacted":true}

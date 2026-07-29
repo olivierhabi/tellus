@@ -70,6 +70,107 @@ export class SubscriptionProtocolError extends Error {
   }
 }
 
+interface SubscriptionCursorPayload {
+  subscriptionId: string;
+  tenantId: string;
+  userId: string;
+  sequence: number;
+  createdAt: number;
+}
+
+function subscriptionCursorSecret(): string {
+  return (
+    process.env.TELLUS_SUBSCRIPTION_CURSOR_SECRET ??
+    process.env.TELLUS_PAGE_TOKEN_SECRET ??
+    "tellus-dev-subscription-cursor-secret"
+  );
+}
+
+function signSubscriptionCursor(body: string): string {
+  return crypto
+    .createHmac("sha256", subscriptionCursorSecret())
+    .update(body)
+    .digest("base64url");
+}
+
+export function createSubscriptionCursor(input: {
+  subscriptionId: string;
+  tenantId: string;
+  userId: string;
+  sequence: number;
+}): string {
+  const payload: SubscriptionCursorPayload = {
+    ...input,
+    createdAt: Date.now(),
+  };
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
+    "base64url",
+  );
+  return `${body}.${signSubscriptionCursor(body)}`;
+}
+
+export function decodeSubscriptionCursor(
+  token: string,
+  expected: {
+    subscriptionId: string;
+    tenantId: string;
+    userId: string;
+  },
+): number {
+  const dot = token.lastIndexOf(".");
+  if (dot <= 0) {
+    throw new SubscriptionProtocolError(
+      "InvalidSubscriptionCursor",
+      "Invalid subscription cursor format.",
+    );
+  }
+  const body = token.slice(0, dot);
+  const signature = Buffer.from(token.slice(dot + 1));
+  const expectedSignature = Buffer.from(signSubscriptionCursor(body));
+  if (
+    signature.length !== expectedSignature.length ||
+    !crypto.timingSafeEqual(signature, expectedSignature)
+  ) {
+    throw new SubscriptionProtocolError(
+      "InvalidSubscriptionCursor",
+      "Subscription cursor failed integrity validation.",
+    );
+  }
+  let payload: SubscriptionCursorPayload;
+  try {
+    payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  } catch {
+    throw new SubscriptionProtocolError(
+      "InvalidSubscriptionCursor",
+      "Invalid subscription cursor format.",
+    );
+  }
+  if (
+    payload.subscriptionId !== expected.subscriptionId ||
+    payload.tenantId !== expected.tenantId ||
+    payload.userId !== expected.userId
+  ) {
+    throw new SubscriptionProtocolError(
+      "InvalidSubscriptionCursor",
+      "Subscription cursor belongs to a different principal or subscription.",
+    );
+  }
+  if (
+    !Number.isSafeInteger(payload.sequence) ||
+    payload.sequence < 0 ||
+    !Number.isSafeInteger(payload.createdAt) ||
+    Date.now() - payload.createdAt > EVENT_RETENTION_SECONDS * 1_000
+  ) {
+    throw new SubscriptionProtocolError(
+      "SubscriptionCursorExpired",
+      "Subscription cursor has expired or is invalid.",
+      { refreshRequired: true },
+      409,
+    );
+  }
+  return payload.sequence;
+}
+
 export async function pruneDurableSubscriptionState(): Promise<{
   eventsDeleted: number;
   subscriptionsClosed: number;

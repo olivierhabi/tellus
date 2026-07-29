@@ -1,0 +1,14 @@
+{
+  "timestamp": null,
+  "nodes": [
+    {
+      "name": "63c680cdb4ab",
+      "jvm_heap_used_bytes": 184694304,
+      "jvm_heap_used_percent": 17,
+      "process_cpu_percent": 18,
+      "os_cpu_percent": 56,
+      "indexing_total": 0,
+      "search_query_total": 204
+    }
+  ]
+}

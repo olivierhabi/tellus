@@ -103,6 +103,23 @@ describe("requestTimeoutMiddleware (F-P4-08)", () => {
     expect(req.timeoutSignal.aborted).toBe(false);
   });
 
+  it("gives exact ObjectSet aggregation a bounded extended envelope", () => {
+    const mw = requestTimeoutMiddleware({
+      timeoutMs: 100,
+      exactAggregationTimeoutMs: 1_000,
+    });
+    const req = makeReq(
+      "/api/v2/ontologies/main/objectSets/aggregate",
+    );
+    req.method = "POST";
+    const { res, statusSpy } = makeRes();
+    mw(req, res, vi.fn());
+    vi.advanceTimersByTime(999);
+    expect(statusSpy).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2);
+    expect(statusSpy).toHaveBeenCalledWith(504);
+  });
+
   it("honours caller-supplied extra exempt paths", () => {
     const mw = requestTimeoutMiddleware({ exemptPaths: ["/custom/stream"] });
     const req = makeReq("/custom/stream");

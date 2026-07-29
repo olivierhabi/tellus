@@ -189,7 +189,10 @@ router.post(
   "/actions/:actionType/apply",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const query = parseQuery(req);
       const parsed = ApplyRequest.safeParse(req.body);
       if (!parsed.success) {
@@ -260,6 +263,7 @@ router.post(
       );
       auditAction(req, ontologyId, req.params.actionType, mode, "success");
     } catch (err) {
+      if (res.headersSent || res.writableEnded) return;
       const { status, body } = toV2Error(err);
       res.status(status).json(body);
     }
@@ -270,7 +274,10 @@ router.post(
   "/actions/:actionType/applyBatch",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const query = parseQuery(req);
       const parsed = ApplyBatchRequest.safeParse(req.body);
       if (!parsed.success) {
@@ -334,6 +341,7 @@ router.post(
         parsed.data.requests.length,
       );
     } catch (err) {
+      if (res.headersSent || res.writableEnded) return;
       const { status, body } = toV2Error(err);
       res.status(status).json(body);
     }

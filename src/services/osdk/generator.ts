@@ -943,6 +943,7 @@ export class OsdkV2Client {
     if (context?.transactionId) url.searchParams.set("transactionId", context.transactionId);
     if (context?.scenarioRid) url.searchParams.set("scenarioRid", context.scenarioRid);
     const ws = new WebSocket(url, { headers: this.headers });
+    let refreshAttempted = false;
     ws.on("open", () => {
       if (handlers.resume) {
         ws.send(JSON.stringify({
@@ -956,7 +957,25 @@ export class OsdkV2Client {
     });
     ws.on("message", (data) => {
       try {
-        handlers.onMessage(JSON.parse(data.toString()) as Record<string, unknown>);
+        const message = JSON.parse(data.toString()) as Record<string, unknown>;
+        const protocolError = message.error as
+          | { error?: string }
+          | undefined;
+        if (
+          handlers.resume &&
+          !refreshAttempted &&
+          message.type === "error" &&
+          protocolError?.error === "SubscriptionCursorExpired"
+        ) {
+          // The durable cursor has aged beyond server retention. The public
+          // recovery contract is a full ObjectSet resynchronization, not an
+          // endless resume retry. Reuse the caller's original request once;
+          // the subsequent subscribeResponses frame carries the new
+          // subscription and cursor.
+          refreshAttempted = true;
+          ws.send(JSON.stringify({ type: "subscribeRequests", ...request }));
+        }
+        handlers.onMessage(message);
       } catch (error) {
         handlers.onError?.(error instanceof Error ? error : new Error(String(error)));
       }

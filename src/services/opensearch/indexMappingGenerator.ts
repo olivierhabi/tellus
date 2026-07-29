@@ -26,6 +26,8 @@ import {
 /** System fields appended to every OpenSearch index mapping. */
 interface SystemFields {
   __pk: OpenSearchFieldMapping;
+  /** Owning ontology. Mandatory v2 isolation predicate. */
+  __ontology: OpenSearchFieldMapping;
   /**
    * Phase 2 (OSSv2 parity): stable object rid
    * (`ri.tellus.main.object.<uuid>`). `keyword` so `static` ObjectSet
@@ -50,6 +52,7 @@ interface SystemFields {
 
 /** The complete index settings block. */
 interface IndexSettings {
+  "index.knn"?: boolean;
   number_of_shards: number;
   number_of_replicas: number;
   refresh_interval: string;
@@ -89,6 +92,7 @@ export interface IndexMappingResult {
 /** System field names, in order. */
 const SYSTEM_FIELD_NAMES: readonly string[] = [
   "__pk",
+  "__ontology",
   "__rid",
   "__objectType",
   "__lastModified",
@@ -102,6 +106,8 @@ const SYSTEM_FIELD_NAMES: readonly string[] = [
 const SYSTEM_FIELD_MAPPINGS: SystemFields = {
   // Primary key value — always keyword for exact-match lookups
   __pk: { type: "keyword" },
+  // Owning ontology — keyword for mandatory isolation filters
+  __ontology: { type: "keyword" },
   // Stable object rid — keyword for exact-match `static` set lookups
   __rid: { type: "keyword" },
   // API name of the object type — keyword for cross-index queries
@@ -274,14 +280,19 @@ export function getIndexName(
  *         no primary key configured.
  */
 export async function generateIndexMapping(
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  ontologyId?: string,
 ): Promise<IndexMappingResult> {
   // -----------------------------------------------------------------------
   // 1. Fetch the object type from PostgreSQL
   // -----------------------------------------------------------------------
   const otResult = await query(
-    "SELECT * FROM object_type WHERE api_name = $1",
-    [objectTypeApiName]
+    `SELECT *
+       FROM object_type
+      WHERE api_name = $1
+        AND ($2::uuid IS NULL OR ontology_id = $2::uuid)
+      ORDER BY ontology_id`,
+    [objectTypeApiName, ontologyId ?? null]
   );
 
   if (otResult.rows.length === 0) {
@@ -307,6 +318,20 @@ export async function generateIndexMapping(
   }
 
   const properties = propsResult.rows;
+  const embeddingResult = await query(
+    `SELECT property_api_name, dimensions
+       FROM ontology_embedding_config
+      WHERE ontology_id = $1
+        AND object_type_api_name = $2
+        AND enabled = true`,
+    [objectType.ontology_id, objectTypeApiName],
+  );
+  const embeddingDimensions = new Map<string, number>(
+    embeddingResult.rows.map((row) => [
+      String(row.property_api_name),
+      Number(row.dimensions),
+    ]),
+  );
 
   // -----------------------------------------------------------------------
   // 3. Verify the primary key property exists
@@ -349,7 +374,19 @@ export async function generateIndexMapping(
       struct_schema: prop.struct_schema ?? null,
     };
 
-    fieldMappings[prop.api_name] = mapPropertyToOpenSearch(propertyInput);
+    const dimensions = embeddingDimensions.get(String(prop.api_name));
+    fieldMappings[prop.api_name] =
+      dimensions && dimensions > 0
+        ? ({
+            type: "knn_vector",
+            dimension: dimensions,
+            method: {
+              name: "hnsw",
+              space_type: "l2",
+              engine: "lucene",
+            },
+          } as unknown as OpenSearchFieldMapping)
+        : mapPropertyToOpenSearch(propertyInput);
   }
 
   // -----------------------------------------------------------------------
@@ -364,7 +401,11 @@ export async function generateIndexMapping(
   );
 
   const mapping: IndexMappingDocument = {
-    settings: { ...DEFAULT_INDEX_SETTINGS, number_of_shards: numberOfShards },
+    settings: {
+      ...DEFAULT_INDEX_SETTINGS,
+      number_of_shards: numberOfShards,
+      ...(embeddingDimensions.size > 0 ? { "index.knn": true } : {}),
+    },
     mappings: {
       properties: fieldMappings,
     },

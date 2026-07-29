@@ -1,7 +1,9 @@
 // Unit tests: AggregationV2 builder + parser + accuracy gate.
 import { describe, it, expect } from "vitest";
 import {
+  buildCompositeV2Aggs,
   buildV2Aggs,
+  parseCompositeV2Page,
   parseV2AggResponse,
   assertAccuracy,
   AggregationError,
@@ -65,6 +67,88 @@ describe("buildV2Aggs", () => {
     );
     const all = (aggs.__all as { aggs: Record<string, unknown> }).aggs;
     expect(all.p95).toMatchObject({ percentiles: { percents: [95] } });
+  });
+});
+
+describe("exact composite aggregation", () => {
+  it("builds paged sources, null buckets, and exact avg merge state", () => {
+    const built = buildCompositeV2Aggs(
+      [{ type: "count" }, { type: "avg", field: "salary" }],
+      [
+        {
+          type: "exact",
+          field: "dept",
+          includeNullValues: true,
+          defaultValue: "N/A",
+        },
+        { type: "objectType" },
+      ],
+      keywordOf,
+      { g0: "Eng", g1: "Employee" },
+      500,
+    );
+    expect(built.aggs).toMatchObject({
+      __composite: {
+        composite: {
+          size: 500,
+          after: { g0: "Eng", g1: "Employee" },
+          sources: [
+            {
+              g0: {
+                terms: {
+                  field: "dept.keyword",
+                  missing_bucket: true,
+                  missing_order: "first",
+                },
+              },
+            },
+            { g1: { terms: { field: "__objectType" } } },
+          ],
+        },
+        aggs: {
+          __merge_sum_1: { sum: { field: "salary" } },
+          __merge_count_1: { value_count: { field: "salary" } },
+        },
+      },
+    });
+  });
+
+  it("parses null/default groups and hidden average totals", () => {
+    const parsed = parseCompositeV2Page(
+      {
+        __composite: {
+          after_key: { g0: "Eng" },
+          buckets: [
+            {
+              key: { g0: null },
+              doc_count: 3,
+              count_objects_0: { value: 3 },
+              avg_salary_1: { value: 15 },
+              __merge_sum_1: { value: 30 },
+              __merge_count_1: { value: 2 },
+            },
+          ],
+        },
+      },
+      [{ type: "count" }, { type: "avg", field: "salary" }],
+      [
+        {
+          type: "exact",
+          field: "dept",
+          includeNullValues: true,
+          defaultValue: "N/A",
+        },
+      ],
+      ["count_objects_0", "avg_salary_1"],
+      ["g0"],
+      ["dept"],
+    );
+    expect(parsed.afterKey).toEqual({ g0: "Eng" });
+    expect(parsed.items[0]).toMatchObject({
+      group: { dept: "N/A" },
+      _docCount: 3,
+      _averageState: { avg_salary_1: { sum: 30, count: 2 } },
+    });
   });
 });
 

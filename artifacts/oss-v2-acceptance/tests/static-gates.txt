@@ -1,0 +1,21 @@
+$ corepack pnpm run build
+
+> ontology-engine@0.3.0 build /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-clean-1c2fbe3
+> tsc && npm run build:copy-assets
+
+npm warn Unknown env config "npm-globalconfig". This will stop working in the next major version of npm.
+npm warn Unknown env config "verify-deps-before-run". This will stop working in the next major version of npm.
+npm warn Unknown env config "_jsr-registry". This will stop working in the next major version of npm.
+
+> ontology-engine@0.3.0 build:copy-assets
+> bash scripts/copy-assets.sh
+
+[build] copied src/templates -> dist/templates
+[build] copied src/migrations/*.sql -> dist/migrations (202 files)
+$ corepack pnpm exec tsc --noEmit
+$ corepack pnpm run contract:check-oss-v2
+
+> ontology-engine@0.3.0 contract:check-oss-v2 /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-clean-1c2fbe3
+> tsx src/scripts/checkOssV2Contract.ts
+
+{"event":"oss_v2_contract.check_passed","sdkVersion":"2.70.0","objectSetNodeTypes":15,"searchJsonQueryV2Types":28,"bodyFields":12,"queryFields":6,"actionModes":2,"actionReturnEdits":3,"batchMaximum":20}

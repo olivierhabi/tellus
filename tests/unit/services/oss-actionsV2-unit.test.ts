@@ -18,10 +18,14 @@ vi.mock("../../../src/utils/requestTenant", () => ({
 }));
 
 import actionsV2Router from "../../../src/routes/v2/actionsV2";
+import { requestTimeoutMiddleware } from "../../../src/middleware/requestTimeout";
 
-function app() {
+function app(timeoutMs?: number) {
   const instance = express();
   instance.use(express.json());
+  if (timeoutMs !== undefined) {
+    instance.use(requestTimeoutMiddleware({ timeoutMs }));
+  }
   instance.use((req, _res, next) => {
     Object.assign(req, {
       user: { id: "user-1" },
@@ -187,5 +191,35 @@ describe("actionsV2 route contract", () => {
       {},
       expect.objectContaining({ suppressNotifications: true }),
     );
+  });
+
+  it("does not send a second response when execution finishes after the request timeout", async () => {
+    mocks.executeAction.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(
+            () =>
+              resolve({
+                success: true,
+                executionId: "operation-late",
+                result: "success",
+                failureType: null,
+                errorMessage: null,
+                affectedObjects: [],
+                durationMs: 25,
+                validation: validValidation,
+              }),
+            25,
+          );
+        }),
+    );
+
+    const response = await request(app(5))
+      .post("/api/v2/ontologies/main/actions/Promote/apply")
+      .send({ parameters: {} });
+
+    expect(response.status).toBe(504);
+    expect(response.body.errorName).toBe("RequestTimeout");
+    await new Promise((resolve) => setTimeout(resolve, 35));
   });
 });

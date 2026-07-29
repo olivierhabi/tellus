@@ -20,6 +20,7 @@ import {
 } from "../../services/oss/omsV2Mapper";
 import { toV2Error } from "../../services/oss/v2Errors";
 import { requireOntology } from "./ontologyParam";
+import { resolveRequestTenant } from "../../utils/requestTenant";
 
 const router = Router({ mergeParams: true });
 
@@ -32,7 +33,10 @@ function notFound(errorName: string, what: string, apiName: string) {
 
 router.get("/objectTypes", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     res.json({ data: await listObjectTypesV2(ontologyId) });
   } catch (err) {
     const { status, body } = toV2Error(err);
@@ -42,7 +46,10 @@ router.get("/objectTypes", async (req: Request, res: Response) => {
 
 router.get("/objectTypes/:apiName", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     const r = await getObjectTypeV2(ontologyId, req.params.apiName);
     if (!r) notFound("ObjectTypeNotFound", "ObjectType", req.params.apiName);
     res.json(r);
@@ -54,7 +61,10 @@ router.get("/objectTypes/:apiName", async (req: Request, res: Response) => {
 
 router.get("/linkTypes", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     res.json({ data: await listLinkTypesV2(ontologyId) });
   } catch (err) {
     const { status, body } = toV2Error(err);
@@ -64,7 +74,10 @@ router.get("/linkTypes", async (req: Request, res: Response) => {
 
 router.get("/linkTypes/:apiName", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     const r = await getLinkTypeV2(ontologyId, req.params.apiName);
     if (!r) notFound("LinkTypeNotFound", "LinkType", req.params.apiName);
     res.json(r);
@@ -76,7 +89,10 @@ router.get("/linkTypes/:apiName", async (req: Request, res: Response) => {
 
 router.get("/actionTypes", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     res.json({ data: await listActionTypesV2(ontologyId) });
   } catch (err) {
     const { status, body } = toV2Error(err);
@@ -86,7 +102,10 @@ router.get("/actionTypes", async (req: Request, res: Response) => {
 
 router.get("/actionTypes/:apiName", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     const r = await getActionTypeV2(ontologyId, req.params.apiName);
     if (!r) notFound("ActionTypeNotFound", "ActionType", req.params.apiName);
     res.json(r);
@@ -98,7 +117,10 @@ router.get("/actionTypes/:apiName", async (req: Request, res: Response) => {
 
 router.get("/interfaceTypes", async (req: Request, res: Response) => {
   try {
-    const ontologyId = await requireOntology(req.params.ontology);
+    const ontologyId = await requireOntology(
+      req.params.ontology,
+      resolveRequestTenant(req),
+    );
     res.json({ data: await listInterfacesV2(ontologyId) });
   } catch (err) {
     const { status, body } = toV2Error(err);
@@ -110,7 +132,10 @@ router.get(
   "/interfaceTypes/:apiName",
   async (req: Request, res: Response) => {
     try {
-      const ontologyId = await requireOntology(req.params.ontology);
+      const ontologyId = await requireOntology(
+        req.params.ontology,
+        resolveRequestTenant(req),
+      );
       const r = await getInterfaceV2(ontologyId, req.params.apiName);
       if (!r)
         notFound("InterfaceTypeNotFound", "InterfaceType", req.params.apiName);

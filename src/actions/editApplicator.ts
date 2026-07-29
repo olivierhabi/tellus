@@ -615,6 +615,10 @@ export async function applyEdits(
           (edit.propertyValues?.__rid as string | undefined) ??
           mintObjectRid(),
         __objectType: edit.objectType,
+        // OSS v2 mandatory ontology isolation. The v2 read choke point
+        // rejects unstamped documents rather than sharing a legacy
+        // object-type-only index across ontologies.
+        __ontology: executionContext.ontologyId,
         __lastModified: now,
         __editedBy: executionContext.executedBy,
         __version: 1,
@@ -647,11 +651,13 @@ export async function applyEdits(
             "ctx._source.__lastModified = params.now; " +
             "ctx._source.__editedBy = params.editedBy; " +
             "ctx._source.__branch = params.branchId; " +
+            "ctx._source.__ontology = params.ontologyId; " +
             "for (entry in params.props.entrySet()) { ctx._source[entry.getKey()] = entry.getValue(); }",
           params: {
             now,
             editedBy: executionContext.executedBy,
             branchId: executionContext.branchId,
+            ontologyId: executionContext.ontologyId,
             props: edit.propertyValues ?? {},
           },
         },

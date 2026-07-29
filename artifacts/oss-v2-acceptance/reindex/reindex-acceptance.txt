@@ -1,0 +1,8 @@
+commit=d733e99678c84c130fffde2513ebdf95470e51f0
+db_before=14 os_before=14
+http_status=403
+{"errorCode":"INSUFFICIENT_ROLE","errorName":"AuthorizationError","message":"Insufficient permissions. Requires one of: ontology-admin, ontology-editor","statusCode":403,"requestId":"5eac707d-7b9e-4b60-aaa5-412eedc4b6c3","details":{"requiredRole":["ontology-admin","ontology-editor"]}}
+db_after=14 os_after=14
+verdict=FAIL (no populated backing datasource in isolated fixture; alias transition/rollback not exercised)
+admin_retry_http_status=403
+{"errorCode":"INSUFFICIENT_ROLE","errorName":"AuthorizationError","message":"Insufficient permissions. Requires one of: ontology-admin, ontology-editor","statusCode":403,"requestId":"604ea94d-c2cc-4cff-91bb-4bbd1b3587d6","details":{"requiredRole":["ontology-admin","ontology-editor"]}}

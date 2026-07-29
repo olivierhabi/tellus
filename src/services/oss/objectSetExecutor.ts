@@ -19,7 +19,14 @@ import {
   MAX_GROUP_COUNT,
   objectSetFingerprint,
 } from "./objectSetDefinition";
-import { buildV2Aggs, parseV2AggResponse, assertAccuracy } from "./aggregationV2";
+import {
+  buildCompositeV2Aggs,
+  buildV2Aggs,
+  parseCompositeV2Page,
+  parseV2AggResponse,
+  assertAccuracy,
+  supportsCompositeGrouping,
+} from "./aggregationV2";
 import { createPageTokenV2, decodePageTokenV2 } from "./pageTokenV2";
 import { deterministicObjectRid } from "../objectIdentity";
 
@@ -55,6 +62,12 @@ export interface OsSearchResponse {
 }
 
 export interface ExecutorDeps {
+  /** Fail closed before a property can influence filters, ordering or aggs. */
+  authorizeProperties?: (
+    objectType: string,
+    fields: string[],
+    usage: "filter" | "order" | "aggregation" | "knn",
+  ) => Promise<void>;
   /** property apiName → OS keyword field (bucketing). */
   keywordOf: (objectType: string, field: string) => Promise<string>;
   /** internal where-DSL → OpenSearch query clause. */
@@ -146,6 +159,9 @@ export interface ExecutionContext {
   ontologyRid: string;
   branchRid: string | null;
   tenant: string;
+  /** Authenticated principal and authorization-state binding for page tokens. */
+  userId?: string;
+  securityFingerprint?: string;
   transactionId: string | null;
   transactionVersion?: number | null;
   scenarioRid: string | null;
@@ -326,6 +342,8 @@ export async function loadObjectSet(
     includeComputeUsage: req.includeComputeUsage === true,
     referenceSigningOptions: req.referenceSigningOptions ?? null,
     tenant: ctx.tenant,
+    userId: ctx.userId ?? null,
+    securityFingerprint: ctx.securityFingerprint ?? null,
     transactionId: ctx.transactionId,
     scenarioRid: ctx.scenarioRid,
   });
@@ -362,6 +380,16 @@ export async function loadObjectSet(
       totalCount: "0",
       propertySecurities: [],
     };
+  }
+  if (deps.authorizeProperties && orderBy.length > 0) {
+    const fields = orderBy
+      .map((entry) => entry.field)
+      .filter((field): field is string => typeof field === "string");
+    await Promise.all(
+      plans.map((plan) =>
+        deps.authorizeProperties!(plan.objectType, fields, "order"),
+      ),
+    );
   }
   const concreteObjectTypes = [
     ...new Set(plans.map((plan) => plan.objectType)),
@@ -489,6 +517,27 @@ export async function loadObjectSet(
             );
         }
       }
+      // Overlay/context composition may introduce newly-created values that
+      // did not originate as OpenSearch hits. Re-assert the public identity
+      // envelope after all composition so selection metadata never receives
+      // an undefined object type and clients always see stable system fields.
+      hits = hits.map((hit) => {
+        const primaryKey = String(
+          hit.__primaryKey ?? hit.__pk ?? "",
+        );
+        return {
+          ...hit,
+          __primaryKey: primaryKey,
+          __apiName: plan.objectType,
+          __rid:
+            hit.__rid ??
+            deterministicObjectRid(
+              ctx.ontologyRid,
+              plan.objectType,
+              primaryKey,
+            ),
+        };
+      });
       // Property authorization MUST run on the final composed value and
       // BEFORE derived properties, otherwise a derived expression can reveal
       // a restricted input.
@@ -983,6 +1032,29 @@ export async function aggregateObjectSet(
   if (plans.length === 0) {
     return { accuracy: "ACCURATE", data: [] };
   }
+  if (deps.authorizeProperties) {
+    const fields = [
+      ...req.aggregation.flatMap((aggregation) =>
+        "field" in aggregation && typeof aggregation.field === "string"
+          ? [aggregation.field]
+          : [],
+      ),
+      ...req.groupBy.flatMap((group) =>
+        "field" in group && typeof group.field === "string"
+          ? [group.field]
+          : [],
+      ),
+    ];
+    await Promise.all(
+      plans.map((plan) =>
+        deps.authorizeProperties!(
+          plan.objectType,
+          [...new Set(fields)],
+          "aggregation",
+        ),
+      ),
+    );
+  }
   // Transaction/scenario overlays are composed after the base index query.
   // Aggregating the index directly would therefore miss created objects and
   // include deleted/pre-edit values. Materialize the secured composed view
@@ -1001,9 +1073,94 @@ export async function aggregateObjectSet(
       "approximatePercentile cannot be computed over a cross-object-type set.",
     );
   }
+  if (
+    plans.length > 1 &&
+    req.aggregation.some(
+      (aggregation) =>
+        aggregation.type === "exactDistinct" ||
+        aggregation.type === "approximateDistinct",
+    ) &&
+    !(
+      req.accuracy === "REQUIRE_ACCURATE" &&
+      supportsCompositeGrouping(req.groupBy)
+    )
+  ) {
+    throw new ObjectSetExecutionError(
+      "AggregationAccuracyNotSupported",
+      "Distinct aggregations cannot be merged exactly across object-type execution plans.",
+      { objectTypeCount: plans.length },
+    );
+  }
 
   const keywordOf = (field: string) =>
     field === "__pk" ? "__pk" : `${field}.keyword`;
+
+  if (
+    req.accuracy === "REQUIRE_ACCURATE" &&
+    supportsCompositeGrouping(req.groupBy)
+  ) {
+    const namedAggregation = req.aggregation.map((aggregation, index) => ({
+      ...aggregation,
+      name:
+        aggregation.name ??
+        `${aggregation.type}_${("field" in aggregation ? aggregation.field : "objects")}_${index}`,
+    }));
+    const nonDistinct = namedAggregation.filter(
+      (aggregation) =>
+        aggregation.type !== "exactDistinct" &&
+        aggregation.type !== "approximateDistinct",
+    );
+    const mainRequest = { ...req, aggregation: nonDistinct };
+    const perPlan = await Promise.all(
+      plans.map((plan) =>
+        executeExactCompositeAggregation(
+          plan,
+          mainRequest,
+          deps,
+        ),
+      ),
+    );
+    const merged = mergePlanAggregations(
+      perPlan.map((result) => result.parsed),
+      nonDistinct,
+      perPlan[0]!.metricNames,
+    );
+    const distinct = await executeExactDistinctAggregations(
+      plans,
+      req,
+      deps,
+    );
+    const metricTypeByName = new Map(
+      namedAggregation.map((aggregation) => [
+        aggregation.name,
+        aggregation.type,
+      ]),
+    );
+    const data = merged.items.map((item) => {
+      const key = JSON.stringify(item.group);
+      const normal = new Map(
+        item.metrics.map((metric) => [metric.name, metric.value]),
+      );
+      return {
+        group: item.group,
+        metrics: namedAggregation.map((aggregation) => {
+          const name = aggregation.name;
+          const type = metricTypeByName.get(name);
+          return {
+            name,
+            value:
+              type === "exactDistinct" || type === "approximateDistinct"
+                ? (distinct.get(name)?.get(key) ?? 0)
+                : (normal.get(name) ?? null),
+          };
+        }),
+      };
+    });
+    return {
+      accuracy: "ACCURATE",
+      data,
+    };
+  }
 
   const perPlan = await Promise.all(
     plans.map(async (plan) => {
@@ -1049,6 +1206,361 @@ export async function aggregateObjectSet(
   } = { accuracy, data: merged.items };
   if (merged.excludedItems > 0) out.excludedItems = merged.excludedItems;
   return out;
+}
+
+const EXACT_AGG_PAGE_SIZE = positiveIntegerEnv(
+  "TELLUS_EXACT_AGG_PAGE_SIZE",
+  1_000,
+);
+const EXACT_AGG_MAX_PAGES = positiveIntegerEnv(
+  "TELLUS_EXACT_AGG_MAX_PAGES",
+  2_000,
+);
+const EXACT_AGG_MAX_BUCKETS = positiveIntegerEnv(
+  "TELLUS_EXACT_AGG_MAX_BUCKETS",
+  1_000_000,
+);
+const EXACT_AGG_BUDGET_MS = positiveIntegerEnv(
+  "TELLUS_EXACT_AGG_BUDGET_MS",
+  120_000,
+);
+const EXACT_AGG_RETRIES = positiveIntegerEnv(
+  "TELLUS_EXACT_AGG_RETRIES",
+  5,
+);
+
+async function executeExactDistinctAggregations(
+  plans: CompiledPlan[],
+  req: AggregateObjectSetRequestV2,
+  deps: ExecutorDeps,
+): Promise<Map<string, Map<string, number>>> {
+  const metrics = req.aggregation
+    .map((aggregation, index) => ({
+      aggregation,
+      name:
+        aggregation.name ??
+        `${aggregation.type}_${("field" in aggregation ? aggregation.field : "objects")}_${index}`,
+    }))
+    .filter(
+      (
+        entry,
+      ): entry is {
+        aggregation:
+          | { type: "exactDistinct"; field: string; name?: string }
+          | { type: "approximateDistinct"; field: string; name?: string };
+        name: string;
+      } =>
+        entry.aggregation.type === "exactDistinct" ||
+        entry.aggregation.type === "approximateDistinct",
+    );
+  const result = new Map<string, Map<string, number>>();
+  for (const metric of metrics) {
+    const counts = new Map<string, number>();
+    const seen = new Set<string>();
+    result.set(metric.name, counts);
+    for (const plan of plans) {
+      const startedAt = Date.now();
+      const resolvedKeywords = new Map<string, string>();
+      await Promise.all(
+        req.groupBy.map(async (grouping) => {
+          if (grouping.type === "exact") {
+            resolvedKeywords.set(
+              grouping.field,
+              await deps.keywordOf(plan.objectType, grouping.field),
+            );
+          }
+        }),
+      );
+      const keywordOf = (field: string) =>
+        resolvedKeywords.get(field) ??
+        (field === "__pk" ? "__pk" : `${field}.keyword`);
+      const distinctField = await deps.keywordOf(
+        plan.objectType,
+        metric.aggregation.field,
+      );
+      let after: Record<string, unknown> | undefined;
+      let page = 0;
+      do {
+        page += 1;
+        if (
+          page > EXACT_AGG_MAX_PAGES ||
+          Date.now() - startedAt > EXACT_AGG_BUDGET_MS
+        ) {
+          throw new ObjectSetExecutionError(
+            "AggregationAccuracyNotSupported",
+            "Exact distinct aggregation exceeded its execution budget.",
+            { metric: metric.name, pages: page - 1 },
+          );
+        }
+        const built = buildCompositeV2Aggs(
+          [],
+          req.groupBy,
+          keywordOf,
+          after,
+          EXACT_AGG_PAGE_SIZE,
+        );
+        const root = built.aggs.__composite as {
+          composite: {
+            sources: Array<Record<string, unknown>>;
+          };
+        };
+        root.composite.sources.push({
+          __distinct: { terms: { field: distinctField } },
+        });
+        const response = await searchAggregationPageWithRetry(
+          deps,
+          plan.objectType,
+          {
+            size: 0,
+            track_total_hits: false,
+            query: plan.where
+              ? await deps.translateWhere(plan.objectType, plan.where)
+              : { match_all: {} },
+            aggs: built.aggs,
+          },
+          startedAt,
+        );
+        const composite = (response.aggregations?.__composite ?? {}) as {
+          buckets?: Array<{
+            key?: Record<string, unknown>;
+          }>;
+          after_key?: Record<string, unknown>;
+        };
+        for (const bucket of composite.buckets ?? []) {
+          const key = bucket.key ?? {};
+          const group = compositeGroupFromKey(
+            key,
+            req.groupBy,
+            built.sourceNames,
+            built.groupNames,
+          );
+          const groupKey = JSON.stringify(group);
+          const pairKey = JSON.stringify([group, key.__distinct]);
+          if (seen.has(pairKey)) continue;
+          seen.add(pairKey);
+          counts.set(groupKey, (counts.get(groupKey) ?? 0) + 1);
+          if (seen.size > EXACT_AGG_MAX_BUCKETS) {
+            throw new ObjectSetExecutionError(
+              "AggregationAccuracyNotSupported",
+              "Exact distinct aggregation exceeded the configured bucket budget.",
+              {
+                metric: metric.name,
+                buckets: seen.size,
+                maximumBuckets: EXACT_AGG_MAX_BUCKETS,
+              },
+            );
+          }
+        }
+        if (
+          (composite.buckets?.length ?? 0) === 0 ||
+          !composite.after_key
+        ) {
+          break;
+        }
+        if (
+          after &&
+          JSON.stringify(after) === JSON.stringify(composite.after_key)
+        ) {
+          throw new ObjectSetExecutionError(
+            "AggregationAccuracyNotSupported",
+            "OpenSearch returned a non-advancing exact-distinct cursor.",
+            { metric: metric.name, page },
+          );
+        }
+        after = composite.after_key;
+      } while (true);
+    }
+  }
+  return result;
+}
+
+function compositeGroupFromKey(
+  key: Record<string, unknown>,
+  groupBy: AggregateObjectSetRequestV2["groupBy"],
+  sourceNames: string[],
+  groupNames: string[],
+): Record<string, unknown> {
+  const group: Record<string, unknown> = {};
+  for (let index = 0; index < groupBy.length; index++) {
+    const grouping = groupBy[index]!;
+    let value = key[sourceNames[index]!];
+    if (
+      grouping.type === "exact" &&
+      value == null &&
+      grouping.includeNullValues
+    ) {
+      value = grouping.defaultValue ?? null;
+    } else if (
+      grouping.type === "duration" &&
+      (typeof value === "number" ||
+        (typeof value === "string" && /^\d+$/.test(value)))
+    ) {
+      value = new Date(Number(value)).toISOString();
+    }
+    group[groupNames[index]!] = value;
+  }
+  return group;
+}
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+async function executeExactCompositeAggregation(
+  plan: CompiledPlan,
+  req: AggregateObjectSetRequestV2,
+  deps: ExecutorDeps,
+): Promise<{
+  parsed: {
+    items: Array<{
+      group: Record<string, unknown>;
+      metrics: Array<{ name: string; value: unknown }>;
+      _docCount?: number;
+      _averageState?: Record<string, { sum: number; count: number }>;
+    }>;
+    excludedItems: number;
+    approximate: boolean;
+  };
+  metricNames: string[];
+}> {
+  const startedAt = Date.now();
+  const items: Array<{
+    group: Record<string, unknown>;
+    metrics: Array<{ name: string; value: unknown }>;
+    _docCount?: number;
+    _averageState?: Record<string, { sum: number; count: number }>;
+  }> = [];
+  let after: Record<string, unknown> | undefined;
+  let page = 0;
+  let metricNames: string[] = [];
+  const resolvedKeywords = new Map<string, string>();
+  await Promise.all(
+    req.groupBy.map(async (grouping) => {
+      if (grouping.type === "exact") {
+        resolvedKeywords.set(
+          grouping.field,
+          await deps.keywordOf(plan.objectType, grouping.field),
+        );
+      }
+    }),
+  );
+  const keywordOf = (field: string) =>
+    resolvedKeywords.get(field) ??
+    (field === "__pk" ? "__pk" : `${field}.keyword`);
+  do {
+    page += 1;
+    if (
+      page > EXACT_AGG_MAX_PAGES ||
+      Date.now() - startedAt > EXACT_AGG_BUDGET_MS
+    ) {
+      throw new ObjectSetExecutionError(
+        "AggregationAccuracyNotSupported",
+        "Exact aggregation exceeded its execution budget.",
+        {
+          pages: page - 1,
+          buckets: items.length,
+          budgetMs: EXACT_AGG_BUDGET_MS,
+        },
+      );
+    }
+    const built = buildCompositeV2Aggs(
+      req.aggregation,
+      req.groupBy,
+      keywordOf,
+      after,
+      EXACT_AGG_PAGE_SIZE,
+    );
+    metricNames = built.metricNames;
+    const body: Record<string, unknown> = {
+      size: 0,
+      track_total_hits: false,
+      query: plan.where
+        ? await deps.translateWhere(plan.objectType, plan.where)
+        : { match_all: {} },
+      aggs: built.aggs,
+    };
+    const response = await searchAggregationPageWithRetry(
+      deps,
+      plan.objectType,
+      body,
+      startedAt,
+    );
+    const parsed = parseCompositeV2Page(
+      (response.aggregations ?? {}) as Record<string, never>,
+      req.aggregation,
+      req.groupBy,
+      built.metricNames,
+      built.sourceNames,
+      built.groupNames,
+    );
+    items.push(...parsed.items);
+    if (items.length > EXACT_AGG_MAX_BUCKETS) {
+      throw new ObjectSetExecutionError(
+        "AggregationAccuracyNotSupported",
+        "Exact aggregation exceeded the configured bucket budget.",
+        {
+          buckets: items.length,
+          maximumBuckets: EXACT_AGG_MAX_BUCKETS,
+        },
+      );
+    }
+    if (parsed.items.length === 0 || !parsed.afterKey) break;
+    if (after && JSON.stringify(after) === JSON.stringify(parsed.afterKey)) {
+      throw new ObjectSetExecutionError(
+        "AggregationAccuracyNotSupported",
+        "OpenSearch returned a non-advancing composite cursor.",
+        { page },
+      );
+    }
+    after = parsed.afterKey;
+  } while (true);
+  return {
+    parsed: {
+      items,
+      excludedItems: 0,
+      approximate: false,
+    },
+    metricNames,
+  };
+}
+
+async function searchAggregationPageWithRetry(
+  deps: ExecutorDeps,
+  objectType: string,
+  body: Record<string, unknown>,
+  startedAt: number,
+): Promise<OsSearchResponse> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= EXACT_AGG_RETRIES; attempt++) {
+    try {
+      return await deps.search(objectType, body);
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt === EXACT_AGG_RETRIES ||
+        Date.now() - startedAt >= EXACT_AGG_BUDGET_MS
+      ) {
+        break;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(5_000, 500 * 2 ** (attempt - 1))),
+      );
+    }
+  }
+  throw new ObjectSetExecutionError(
+    "AggregationBackendUnavailable",
+    "OpenSearch did not return an exact aggregation page after retries.",
+    {
+      retryable: true,
+      attempts: EXACT_AGG_RETRIES,
+      cause:
+        lastError instanceof Error
+          ? lastError.name
+          : "UnknownAggregationBackendError",
+    },
+    503,
+  );
 }
 
 async function aggregateComposedReadContext(
@@ -1323,6 +1835,7 @@ function mergePlanAggregations(
       group: Record<string, unknown>;
       metrics: Array<{ name: string; value: unknown }>;
       _docCount?: number;
+      _averageState?: Record<string, { sum: number; count: number }>;
     }>;
     excludedItems: number;
     approximate: boolean;
@@ -1351,7 +1864,16 @@ function mergePlanAggregations(
   );
   interface Slot {
     group: Record<string, unknown>;
-    per: Map<string, { weighted: number; weight: number; nums: number[] }>;
+    per: Map<
+      string,
+      {
+        weighted: number;
+        weight: number;
+        nums: number[];
+        exactSum: number;
+        exactCount: number;
+      }
+    >;
   }
   const byKey = new Map<string, Slot>();
   let excluded = 0;
@@ -1367,11 +1889,22 @@ function mergePlanAggregations(
         byKey.set(key, slot);
       }
       for (const m of item.metrics) {
-        const cur = slot.per.get(m.name) ?? { weighted: 0, weight: 0, nums: [] };
+        const cur = slot.per.get(m.name) ?? {
+          weighted: 0,
+          weight: 0,
+          nums: [],
+          exactSum: 0,
+          exactCount: 0,
+        };
         if (typeof m.value === "number") {
           cur.nums.push(m.value);
           cur.weighted += m.value * (item._docCount ?? 0);
           cur.weight += item._docCount ?? 0;
+        }
+        const average = item._averageState?.[m.name];
+        if (average) {
+          cur.exactSum += average.sum;
+          cur.exactCount += average.count;
         }
         slot.per.set(m.name, cur);
       }
@@ -1382,22 +1915,34 @@ function mergePlanAggregations(
   //   count/sum/*Distinct → additive
   //   avg                 → weighted by bucket doc counts
   //   min/max             → extremum of plan extrema
-  const items = [...byKey.values()].map((slot) => ({
-    group: slot.group,
-    metrics: metricNames.map((name) => {
-      const cur = slot.per.get(name);
-      if (!cur || cur.nums.length === 0) return { name, value: null };
-      switch (typeByName.get(name)) {
-        case "avg":
-          return { name, value: cur.weight > 0 ? cur.weighted / cur.weight : null };
-        case "min":
-          return { name, value: Math.min(...cur.nums) };
-        case "max":
-          return { name, value: Math.max(...cur.nums) };
-        default: // count, sum, distincts
-          return { name, value: cur.nums.reduce((a, b) => a + b, 0) };
-      }
-    }),
-  }));
+  const items = [...byKey.values()]
+    .map((slot) => ({
+      group: slot.group,
+      metrics: metricNames.map((name) => {
+        const cur = slot.per.get(name);
+        if (!cur || cur.nums.length === 0) return { name, value: null };
+        switch (typeByName.get(name)) {
+          case "avg":
+            return {
+              name,
+              value:
+                cur.exactCount > 0
+                  ? cur.exactSum / cur.exactCount
+                  : cur.weight > 0
+                    ? cur.weighted / cur.weight
+                    : null,
+            };
+          case "min":
+            return { name, value: Math.min(...cur.nums) };
+          case "max":
+            return { name, value: Math.max(...cur.nums) };
+          default: // count, sum, distincts
+            return { name, value: cur.nums.reduce((a, b) => a + b, 0) };
+        }
+      }),
+    }))
+    .sort((left, right) =>
+      JSON.stringify(left.group).localeCompare(JSON.stringify(right.group)),
+    );
   return { items, excludedItems: excluded, approximate };
 }

@@ -57,6 +57,28 @@ export interface RequestSecurity {
 
 const MAX_SEARCH_AROUND_PKS = 100_000;
 
+/**
+ * OSS v2 ontology-isolation predicate.
+ *
+ * Object Storage's legacy physical index is keyed only by object-type API
+ * name. Until every writer has migrated to ontology-scoped aliases, v2 must
+ * therefore bind the logical ontology in the final mandatory-control query.
+ * Documents without the stamp fail closed.
+ */
+export function buildOssV2SecurityFilter(
+  ontologyId: string,
+  securityFilter: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  return {
+    bool: {
+      must: [
+        ...(securityFilter ? [securityFilter] : []),
+        { term: { __ontology: ontologyId } },
+      ],
+    },
+  };
+}
+
 export async function resolveInterfacePropertyMapping(
   ontologyId: string,
   interfaceApiName: string,
@@ -169,6 +191,10 @@ export function makeProductionExecutorDeps(
     };
   },
 ): ExecutorDeps {
+  const scopedSecurityFilter = buildOssV2SecurityFilter(
+    sec.ontologyId,
+    sec.securityFilter,
+  );
   const contextSecurity = {
     tenant: sec.tenant,
     ontologyId: sec.ontologyId,
@@ -178,6 +204,55 @@ export function makeProductionExecutorDeps(
     cbac: sec.cbac,
     organizations: sec.organizations,
     markingBypass: sec.markingBypass,
+  };
+  const authorizeProperties = async (
+    objectType: string,
+    fields: string[],
+    usage: "filter" | "order" | "aggregation" | "knn",
+  ): Promise<void> => {
+    if (sec.markingBypass || fields.length === 0) return;
+    const requested = [...new Set(fields)].filter(
+      (field) => !field.startsWith("__"),
+    );
+    if (requested.length === 0) return;
+    const { rows } = await query(
+      `SELECT p.api_name,
+              COALESCE(p.marking_required, ARRAY[]::text[]) AS required
+         FROM property p
+         JOIN object_type ot ON ot.object_type_id = p.object_type_id
+        WHERE ot.ontology_id = $1
+          AND ot.api_name = $2
+          AND p.api_name = ANY($3::text[])`,
+      [sec.ontologyId, objectType, requested],
+    );
+    const granted = new Set(sec.markings);
+    const denied = rows.find((row) =>
+      (row.required as string[]).some((marking) => !granted.has(marking)),
+    );
+    if (!denied) return;
+    recordOssV2AuditBestEffort({
+      eventType: "restricted_property_attempt",
+      outcome: "denied",
+      tenantId: sec.tenant,
+      ontologyId: sec.ontologyId,
+      userId: sec.userId,
+      branchId: sec.branchId,
+      transactionId: sec.transactionId ?? null,
+      scenarioRid: sec.scenarioRid ?? null,
+      requestId: sec.requestId ?? null,
+      parameters: {
+        reason: "restricted_property",
+        objectType,
+        property: String(denied.api_name),
+        usage,
+      },
+    });
+    throw new ObjectSetExecutionError(
+      "PropertySecurityDenied",
+      `Access to property '${String(denied.api_name)}' is denied.`,
+      { objectType, property: denied.api_name, usage },
+      403,
+    );
   };
   const applyContextTraversalEdits = async (input: {
     linkType: string;
@@ -232,7 +307,7 @@ export function makeProductionExecutorDeps(
           index: getIndexName(input.fromObjectType),
           body: injectSecurityFilter(
             { size: 1, query: translated },
-            sec.securityFilter,
+            scopedSecurityFilter,
             sec.branchId,
           ),
         });
@@ -266,16 +341,36 @@ export function makeProductionExecutorDeps(
     return [...targets].sort();
   };
   return {
+    authorizeProperties,
     keywordOf: async (objectType, field) => {
+      await authorizeProperties(objectType, [field], "aggregation");
       if (field === "__pk" || field === "__rid") return field;
       const meta = await resolveProperty(objectType, field);
       return meta.opensearchKeywordField;
     },
 
-    translateWhere: (objectType, where) =>
-      translateFilter(where, objectType) as Promise<Record<string, unknown>>,
+    translateWhere: async (objectType, where) => {
+      const fields = new Set<string>();
+      const visit = (value: unknown): void => {
+        if (Array.isArray(value)) {
+          value.forEach(visit);
+          return;
+        }
+        if (!value || typeof value !== "object") return;
+        const record = value as Record<string, unknown>;
+        if (typeof record.field === "string") fields.add(record.field);
+        Object.values(record).forEach(visit);
+      };
+      visit(where);
+      await authorizeProperties(objectType, [...fields], "filter");
+      return translateFilter(
+        where,
+        objectType,
+      ) as Promise<Record<string, unknown>>;
+    },
 
     resolveKnnVector: async (objectType, field, knnQuery) => {
+      await authorizeProperties(objectType, [field], "knn");
       const property = await query(
         `SELECT p.base_type, cfg.dimensions
            FROM property p
@@ -337,7 +432,11 @@ export function makeProductionExecutorDeps(
 
     search: async (objectType, body, options) => {
       // Single choke point: security + branch injected exactly once.
-      const finalBody = injectSecurityFilter(body, sec.securityFilter, sec.branchId);
+      const finalBody = injectSecurityFilter(
+        body,
+        scopedSecurityFilter,
+        sec.branchId,
+      );
       let resp: { body: Record<string, unknown> };
       try {
         resp = options?.pitId
@@ -854,7 +953,7 @@ export function makeProductionExecutorDeps(
                 pageSize: 1000,
                 pageToken: pageToken ?? undefined,
               },
-              sec.securityFilter,
+              scopedSecurityFilter,
               sec.branchId,
             );
             for (const object of response.linkedObjects) {
@@ -919,7 +1018,7 @@ export function makeProductionExecutorDeps(
             pageSize: 1000,
             pageToken: pageToken ?? undefined,
           },
-          sec.securityFilter,
+          scopedSecurityFilter,
           sec.branchId,
         );
         for (const o of r.linkedObjects) {
@@ -1046,6 +1145,16 @@ export function makeProductionCompilerDeps(opts: {
   userId?: string;
 }): CompilerDeps {
   return {
+    resolveObjectType: async (objectTypeApiName) => {
+      const result = await query(
+        `SELECT 1
+           FROM object_type
+          WHERE ontology_id = $1 AND api_name = $2
+          LIMIT 1`,
+        [opts.ontologyRid, objectTypeApiName],
+      );
+      return result.rows.length > 0;
+    },
     resolveReference: createReferenceResolver({
       tenant: opts.tenant,
       ontologyRid: opts.ontologyRid,

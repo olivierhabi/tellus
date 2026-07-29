@@ -21,6 +21,10 @@ export function resolveRequestTenant(req: Request): string {
   const r = req as unknown as Record<string, unknown>;
   const candidates = [
     r.user,
+    // globalAuth stores the verified JWT payload on req.auth. Custom tenant
+    // protocol-mapper claims live here even when the normalized user object
+    // contains only identity fields.
+    r.auth,
     (r.session as Record<string, unknown> | undefined)?.user,
     r.tellusUser,
     r.multipassUser,

@@ -9,6 +9,10 @@ const mocks = vi.hoisted(() => ({
   requireOntology: vi.fn(async () => "ontology-id"),
   tempResolve: vi.fn(),
   savedGet: vi.fn(),
+  getLinkType: vi.fn(),
+  resolveObjectTypeApiName: vi.fn(),
+  resolveLinks: vi.fn(),
+  composeReadContextLinkTargets: vi.fn(),
 }));
 
 vi.mock("../../../src/services/oss/objectSetCompiler", () => ({
@@ -21,6 +25,7 @@ vi.mock("../../../src/services/oss/objectSetExecutor", () => ({
 vi.mock("../../../src/services/oss/productionDeps", () => ({
   makeProductionCompilerDeps: () => ({}),
   makeProductionExecutorDeps: () => ({}),
+  resolveInterfacePropertyMapping: vi.fn(),
 }));
 vi.mock("../../../src/services/oss/objectSetStore", () => ({
   temporaryObjectSetStore: {
@@ -41,13 +46,14 @@ vi.mock("../../../src/middleware/securityContext", () => ({
 }));
 vi.mock("../../../src/services/oss/readContext", () => ({
   resolveReadContexts: async () => ({ transaction: null, scenario: null }),
+  composeReadContextLinkTargets: mocks.composeReadContextLinkTargets,
 }));
 vi.mock("../../../src/models/linkType", () => ({
-  default: { getByApiName: vi.fn() },
-  resolveObjectTypeApiName: vi.fn(),
+  default: { getByApiName: mocks.getLinkType },
+  resolveObjectTypeApiName: mocks.resolveObjectTypeApiName,
 }));
 vi.mock("../../../src/services/linkResolverService", () => ({
-  resolveLinks: vi.fn(),
+  resolveLinks: mocks.resolveLinks,
 }));
 vi.mock("../../../src/db", () => ({
   query: vi.fn(),
@@ -66,6 +72,8 @@ function app() {
         userId: "user-1",
         markings: [],
         cbac: [],
+        organizations: [],
+        markingMode: "disjunctive",
         systemPrincipal: false,
         markingBypass: false,
       },
@@ -96,6 +104,23 @@ describe("ObjectSet v2 route contract", () => {
       totalCount: "1",
       propertySecurities: [],
     });
+    mocks.getLinkType.mockResolvedValue({
+      api_name: "worksAt",
+      source_object_type: "employee-type-id",
+      target_object_type: "company-type-id",
+    });
+    mocks.resolveObjectTypeApiName.mockImplementation(async (id: string) =>
+      id === "employee-type-id" ? "Employee" : "Company",
+    );
+    mocks.resolveLinks.mockResolvedValue({
+      linkedObjects: [{ __pk: "C-1" }],
+      totalCount: 1,
+      nextPageToken: null,
+    });
+    mocks.composeReadContextLinkTargets.mockImplementation(
+      async (input: { baseTargetPrimaryKeys: string[] }) =>
+        input.baseTargetPrimaryKeys,
+    );
   });
 
   it("serves the SDK loadObjectsMultipleObjectTypes path and $ metadata", async () => {
@@ -109,7 +134,7 @@ describe("ObjectSet v2 route contract", () => {
         selectV2: [],
       });
 
-    expect(response.status).toBe(200);
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
     expect(response.body.data[0]).toMatchObject({
       $apiName: "Employee",
       $primaryKey: "E-1",
@@ -147,6 +172,43 @@ describe("ObjectSet v2 route contract", () => {
       });
 
     expect(response.status).not.toBe(400);
+  });
+
+  it("normalizes raw resolver __pk values before secured link loading", async () => {
+    mocks.loadObjectSet
+      .mockResolvedValueOnce({
+        data: [{ __apiName: "Employee", __primaryKey: "E-1" }],
+        nextPageToken: null,
+        totalCount: "1",
+        propertySecurities: [],
+      })
+      .mockResolvedValueOnce({
+        data: [{ __apiName: "Company", __primaryKey: "C-1" }],
+        nextPageToken: null,
+        totalCount: "1",
+        propertySecurities: [],
+      });
+
+    const response = await request(app())
+      .post("/api/v2/ontologies/main/objectSets/loadLinks")
+      .send({
+        objectSet: { type: "base", objectType: "Employee" },
+        links: ["worksAt"],
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(mocks.composeReadContextLinkTargets).toHaveBeenCalledWith(
+      expect.objectContaining({ baseTargetPrimaryKeys: ["C-1"] }),
+    );
+    expect(response.body.data[0].linkedObjects).toEqual([
+      {
+        targetObject: {
+          __primaryKey: "C-1",
+          __apiName: "Company",
+        },
+        linkType: "worksAt",
+      },
+    ]);
   });
 
   it("gets a tenant-scoped temporary ObjectSet by RID", async () => {

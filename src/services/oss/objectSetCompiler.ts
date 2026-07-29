@@ -71,6 +71,8 @@ export interface CompiledObjectSet {
 // ---------------------------------------------------------------------------
 
 export interface CompilerDeps {
+  /** Fail-closed existence check for concrete object types. */
+  resolveObjectType?: (objectTypeApiName: string) => Promise<boolean>;
   /** Resolve a saved or temporary object set rid to its definition. */
   resolveReference?: (rid: string) => Promise<ObjectSet | null>;
   /** Interface apiName → implementing object type apiNames. */
@@ -378,6 +380,16 @@ async function compileNode(
 
   switch (n.type) {
     case "base":
+      if (
+        deps.resolveObjectType &&
+        !(await deps.resolveObjectType(n.objectType as string))
+      ) {
+        throw new ObjectSetCompileError(
+          "ObjectTypeNotFound",
+          `Object type not found: ${String(n.objectType)}`,
+          { objectType: n.objectType },
+        );
+      }
       return [{ objectType: n.objectType as string, where: null }];
 
     case "filter": {
