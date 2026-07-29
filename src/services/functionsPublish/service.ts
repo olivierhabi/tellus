@@ -1,11 +1,52 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import ts from "typescript";
+import {
+  classifyFunctionKind,
+  InvalidEditDeclarationError,
+  type FunctionKind,
+} from "./functionKind";
 
-import type { StemmaAdapter } from "../codeRepository/adapters/types";
-import { compareSemver, parseSemver } from "../functionsRegistry/semver";
+import type { StemmaAdapter, StemmaTreeEntry } from "../codeRepository/adapters/types";
+import { compareSemver, isPreviewRelease, parseSemver } from "../functionsRegistry/semver";
 import { listVersions, publishVersion } from "../functionsRegistry/store";
+import {
+  createS3FunctionArtifactStore,
+  FUNCTION_ARTIFACT_MAX_SOURCE_BYTES,
+  FUNCTION_ARTIFACT_MAX_SOURCE_FILES,
+  type FunctionArtifactStore,
+} from "../functionsRegistry/artifactStore";
 import { mintFunctionVersionRid } from "../codeRepos/contracts/rid";
+import {
+  formatTypeCheckDiagnostic,
+  typeCheckRepository,
+  type TypeCheckSourceFile,
+} from "./typeCheck";
+import {
+  resolveTestRunnerTunables,
+  runRepositoryTests,
+  type TestRunnerTunables,
+} from "./testRunner";
+import {
+  AuthorityDeadline,
+  classifyError,
+  computeBackoffMs,
+  describeTransientError,
+  realSleep,
+  resolveLifecycleTunables,
+  RunAuthority,
+  RunAuthorityLostError,
+  TransientStageError,
+  type LifecycleTunables,
+} from "./retry";
+import {
+  compareSignaturesStructural,
+  normalizeSignature,
+} from "./signatureCompat";
+import {
+  startLogRetentionMaintenance,
+  type MaintenanceHandle,
+} from "./maintenance";
 
 const STAGES = ["setup", "lint", "test", "build", "publish"] as const;
 type Stage = (typeof STAGES)[number];
@@ -54,11 +95,25 @@ interface FunctionSource {
   path: string;
   source: string;
   signature: FunctionSignature;
+  functionKind: FunctionKind;
 }
 
 interface FunctionSignature {
   parameters: Array<{ name: string; type: string; optional: boolean }>;
   output: string;
+}
+
+/**
+ * The complete publish-time metadata for one function — signature AND
+ * declared kind, produced by ONE source analysis (the AST walk in
+ * inspectPublishedFunction) and written to the registry in ONE
+ * transaction (registerFunctions). Phase 4's signature-metadata
+ * binding must read from this same write — do not add a second
+ * publish-time parser or registry write path.
+ */
+export interface PublishedFunctionMetadata {
+  signature: FunctionSignature;
+  functionKind: FunctionKind;
 }
 
 interface PublishRequestRow {
@@ -69,6 +124,37 @@ interface PublishRequestRow {
   semver: string;
   message: string | null;
   commit_sha: string;
+}
+
+/** Mutable per-execution context threaded through the stage chain. */
+interface StageWork {
+  activeStage: Stage;
+  authority: RunAuthority;
+  abortSignal: AbortSignal;
+  request: PublishRequestRow | null;
+  tree: { entries: readonly StemmaTreeEntry[]; branchHead: string } | null;
+  functions: FunctionSource[];
+  testSources: Array<{ path: string; source: string }>;
+  canonical: string | null;
+  artifactSha256: string | null;
+  artifactBlobId: string | null;
+}
+
+/** A run this worker is currently executing (for shutdown drain). */
+interface ActiveExecution {
+  authority: RunAuthority;
+  abort: AbortController;
+  done: Promise<void>;
+}
+
+function requireRequest(work: StageWork): PublishRequestRow {
+  if (!work.request) throw new Error("publish request metadata is missing");
+  return work.request;
+}
+
+function requireTree(work: StageWork): { entries: readonly StemmaTreeEntry[]; branchHead: string } {
+  if (!work.tree) throw new Error("repository checkout missing — setup stage did not run");
+  return work.tree;
 }
 
 export class FunctionsPublishError extends Error {
@@ -99,26 +185,76 @@ export class FunctionsPublishError extends Error {
 export class FunctionsPublishService {
   private readonly owner = `functions-publish-${process.pid}-${randomUUID()}`;
   private readonly running = new Set<string>();
+  private readonly activeRuns = new Map<string, ActiveExecution>();
+  private readonly testTunables: TestRunnerTunables;
+  private readonly lifecycle: LifecycleTunables;
   private timer: NodeJS.Timeout | null = null;
+  private maintenance: MaintenanceHandle | null = null;
   private stopped = false;
+  private stopPromise: Promise<void> | null = null;
+
+  private readonly artifacts: FunctionArtifactStore;
 
   constructor(
-    private readonly deps: { pool: Pool; stemma: StemmaAdapter },
+    private readonly deps: { pool: Pool; stemma: StemmaAdapter; artifacts?: FunctionArtifactStore },
     private readonly concurrency = Math.max(1, Number(process.env.FUNCTIONS_PUBLISH_CONCURRENCY ?? 2)),
-  ) {}
+    testTunables: Partial<TestRunnerTunables> = {},
+    lifecycleTunables: Partial<LifecycleTunables> = {},
+  ) {
+    // Env-resolved defaults (FUNCTIONS_PUBLISH_TEST_TIMEOUT_MS etc.) with a
+    // constructor override hook for tests — same DI convention as
+    // `concurrency` above.
+    this.testTunables = { ...resolveTestRunnerTunables(), ...testTunables };
+    this.lifecycle = { ...resolveLifecycleTunables(), ...lifecycleTunables };
+    // Production default: the real S3/MinIO object store. Tests may
+    // inject a hermetic store — but the codeRepos integration lane
+    // exercises the real one (MinIO runs in docker-compose).
+    this.artifacts = deps.artifacts ?? createS3FunctionArtifactStore();
+  }
 
   start(): void {
     if (this.timer) return;
     this.stopped = false;
     this.timer = setInterval(() => void this.pump(), 1_000);
     this.timer.unref();
+    // Bounded log retention + orphan-artifact sweep (Track 2 #9).
+    // Advisory-locked: a multi-replica fleet runs exactly one
+    // cleanup at a time. Failures never affect publishing.
+    this.maintenance = startLogRetentionMaintenance(this.deps.pool);
     void this.pump();
   }
 
-  stop(): void {
-    this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+  /**
+   * Abort-and-drain shutdown.
+   *
+   * Stops claiming new work, signals authority loss to every active
+   * execution (interrupting backoff and killing any test subprocess
+   * group), then waits for them to settle up to shutdownGraceMs.
+   * Heartbeats keep renewing until each execute() acknowledges and
+   * stops in its own finally — the run is NEVER marked CANCELLED or
+   * FAILED by a worker shutdown; the lease simply lapses afterwards
+   * so another worker can reclaim the still-RUNNING run.
+   * Idempotent: a second call returns the same drain promise.
+   */
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = (async () => {
+      this.stopped = true;
+      if (this.timer) clearInterval(this.timer);
+      this.timer = null;
+      this.maintenance?.stop();
+      this.maintenance = null;
+      const active = [...this.activeRuns.entries()];
+      for (const [runRid, entry] of active) {
+        this.loseAuthority(runRid, entry.authority, "shutdown");
+        entry.abort.abort(new RunAuthorityLostError("shutdown"));
+      }
+      await Promise.race([
+        Promise.allSettled(active.map(([, entry]) => entry.done)),
+        realSleep(this.lifecycle.shutdownGraceMs),
+      ]);
+    })();
+    return this.stopPromise;
   }
 
   async enqueue(args: EnqueuePublishArgs): Promise<EnqueuedPublish> {
@@ -178,6 +314,32 @@ export class FunctionsPublishService {
       };
     }
 
+    // Active-run guard (Track 2 #7): at most one active run per
+    // (repository, branch) — the same rule retrigger enforces.
+    // This pre-check produces the informative response; the partial
+    // unique index jemma_run_active_per_ref_uq remains the final
+    // concurrency authority (race loser is mapped below — a raw
+    // 23505 never escapes as an HTTP 500).
+    const active = await this.deps.pool.query<{ rid: string }>(
+      `SELECT rid FROM jemma_run
+        WHERE repository_rid = $1 AND ref = $2
+          AND state IN ('QUEUED','RUNNING')
+        LIMIT 1`,
+      [args.repositoryRid, args.branch],
+    );
+    if (active.rows[0]) {
+      // Bounded operational log — one line per conflict, run
+      // rids only (no SQL, no principal data).
+      console.warn(
+        `functions-publish: enqueue rejected — active run ${active.rows[0].rid} for ${args.repositoryRid}@${args.branch}`,
+      );
+      throw new FunctionsPublishError(
+        "RUN_ALREADY_ACTIVE",
+        "A functions-publish run is already active for this repository branch",
+        { activeRunRid: active.rows[0].rid },
+      );
+    }
+
     const runRid = `ri.jemma.main.run.${randomUUID()}`;
     const client = await this.deps.pool.connect();
     try {
@@ -203,7 +365,49 @@ export class FunctionsPublishService {
       );
       await client.query("COMMIT");
     } catch (error) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (isPgUniqueViolation(error, "jemma_run_active_per_ref_uq")) {
+        // Lost the race against a concurrent enqueue/retrigger: the
+        // winner inserted between our pre-check and our INSERT.
+        // Resolve the winner deterministically — same-semver races
+        // replay (dedup semantics), different-semver races conflict.
+        const winner = await this.deps.pool.query<{
+          rid: string;
+          repository_rid: string;
+          ref: string;
+          commit_sha: string;
+          state: string;
+          semver: string;
+        }>(
+          `SELECT r.rid, r.repository_rid, r.ref, r.commit_sha, r.state, p.semver
+             FROM jemma_run r
+             JOIN function_publish_request p ON p.run_rid = r.rid
+            WHERE r.repository_rid = $1 AND r.ref = $2
+              AND r.state IN ('QUEUED','RUNNING')
+            LIMIT 1`,
+          [args.repositoryRid, args.branch],
+        ).catch(() => null);
+        const won = winner?.rows[0];
+        if (won && won.semver === args.semver) {
+          return {
+            runRid: won.rid,
+            repositoryRid: won.repository_rid,
+            branch: won.ref,
+            commitSha: won.commit_sha,
+            semver: args.semver,
+            state: won.state,
+            replayed: true,
+          };
+        }
+        console.warn(
+          `functions-publish: enqueue lost the active-run race for ${args.repositoryRid}@${args.branch} (winner ${won?.rid ?? "unknown"})`,
+        );
+        throw new FunctionsPublishError(
+          "RUN_ALREADY_ACTIVE",
+          "A functions-publish run is already active for this repository branch",
+          won ? { activeRunRid: won.rid } : {},
+        );
+      }
       throw error;
     } finally {
       client.release();
@@ -222,24 +426,62 @@ export class FunctionsPublishService {
     };
   }
 
+  /**
+   * Cancel a run and leave a coherent terminal snapshot in ONE
+   * transaction: run CANCELLED (lease cleared), the currently
+   * RUNNING stage and all PENDING stages become SKIPPED with
+   * finished_at set — no stage is ever left RUNNING under a
+   * terminal run. (jemma_run_stage's CHECK supports
+   * PENDING|RUNNING|SUCCEEDED|FAILED|SKIPPED; SKIPPED is the
+   * repository's cancellation-compatible terminal stage state.)
+   *
+   * Idempotent: a terminal run matches no rows, so a repeated
+   * cancel mutates nothing and appends no duplicate log line.
+   * If THIS worker owns the run, local execution is aborted
+   * immediately (test subprocess group killed) rather than
+   * waiting for the next heartbeat tick.
+   */
   async cancel(runRid: string): Promise<boolean> {
-    const result = await this.deps.pool.query(
-      `UPDATE jemma_run
-          SET state = 'CANCELLED', finished_at = now(), failure_reason = 'cancelled-by-user',
-              lease_owner = NULL, lease_expires_at = NULL, resource_version = resource_version + 1,
-              updated_at = now()
-        WHERE rid = $1 AND job_name = 'functions-publish' AND state IN ('QUEUED','RUNNING')`,
-      [runRid],
-    );
-    if (result.rowCount) {
-      await this.deps.pool.query(
-        `UPDATE jemma_run_stage SET state = 'SKIPPED', finished_at = now()
-          WHERE run_rid = $1 AND state = 'PENDING'`,
+    const client = await this.deps.pool.connect();
+    let cancelled = false;
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `UPDATE jemma_run
+            SET state = 'CANCELLED', finished_at = now(), failure_reason = 'cancelled-by-user',
+                lease_owner = NULL, lease_expires_at = NULL, resource_version = resource_version + 1,
+                updated_at = now()
+          WHERE rid = $1 AND job_name = 'functions-publish' AND state IN ('QUEUED','RUNNING')`,
         [runRid],
       );
-      await this.log(runRid, null, "system", "Cancellation requested by user");
+      if (result.rowCount) {
+        cancelled = true;
+        await client.query(
+          `UPDATE jemma_run_stage SET state = 'SKIPPED', finished_at = now()
+            WHERE run_rid = $1 AND state IN ('PENDING','RUNNING')`,
+          [runRid],
+        );
+        await client.query(
+          `INSERT INTO jemma_run_log(run_rid, stage_name, stream, message)
+           VALUES ($1, NULL, 'system', 'Cancellation requested by user')`,
+          [runRid],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
-    return Boolean(result.rowCount);
+    if (cancelled) {
+      const entry = this.activeRuns.get(runRid);
+      if (entry) {
+        entry.authority.lose("cancelled");
+        entry.abort.abort(new RunAuthorityLostError("cancelled"));
+      }
+    }
+    return cancelled;
   }
 
   async getRetryEligibility(runRid: string): Promise<RetryEligibility> {
@@ -453,14 +695,38 @@ export class FunctionsPublishService {
 
   private async pump(): Promise<void> {
     if (this.stopped) return;
-    while (this.running.size < this.concurrency) {
-      const runRid = await this.claim();
-      if (!runRid) return;
-      this.running.add(runRid);
-      void this.execute(runRid).finally(() => {
-        this.running.delete(runRid);
-        void this.pump();
-      });
+    try {
+      while (this.running.size < this.concurrency) {
+        const runRid = await this.claim();
+        if (!runRid) return;
+        this.running.add(runRid);
+        const entry: ActiveExecution = {
+          authority: new RunAuthority(),
+          abort: new AbortController(),
+          done: Promise.resolve(),
+        };
+        entry.done = this.execute(runRid, entry.authority, entry.abort.signal)
+          .finally(() => {
+            this.activeRuns.delete(runRid);
+            this.running.delete(runRid);
+            void this.pump();
+          });
+        this.activeRuns.set(runRid, entry);
+      }
+    } catch (error) {
+      // Poll-loop resilience: pump() is always fired-and-forgotten
+      // (`void this.pump()` from start(), enqueue(), and execution
+      // settle), so a rejected claim — transient DB outage, or a
+      // pool draining during shutdown — would otherwise surface as
+      // an unhandled rejection and crash the worker process. The
+      // claim is idempotent (FOR UPDATE SKIP LOCKED): the next 1s
+      // interval tick or enqueue-triggered pump retries. Bounded
+      // log: classification only, no run ids, no SQL.
+      if (!this.stopped) {
+        console.warn(
+          `functions-publish: claim pump failed (${classifyError(error)}); retrying on next tick`,
+        );
+      }
     }
   }
 
@@ -475,17 +741,32 @@ export class FunctionsPublishService {
        )
        UPDATE jemma_run r
           SET state = 'RUNNING', started_at = COALESCE(started_at, now()),
-              pod_name = $1, lease_owner = $1, lease_expires_at = now() + interval '10 minutes',
+              pod_name = $1, lease_owner = $1,
+              lease_expires_at = now() + ($2::bigint * interval '1 millisecond'),
               resource_version = resource_version + 1, updated_at = now()
          FROM candidate c WHERE r.rid = c.rid
        RETURNING r.rid`,
-      [this.owner],
+      // One lease-TTL source of truth shared with renewal (retry.ts
+      // tunables) — claim and heartbeat can never drift apart.
+      [this.owner, this.lifecycle.leaseTtlMs],
     );
     return result.rows[0]?.rid ?? null;
   }
 
-  private async execute(runRid: string): Promise<void> {
-    let activeStage: Stage = "setup";
+  private async execute(runRid: string, authority: RunAuthority, abortSignal: AbortSignal): Promise<void> {
+    const heartbeat = this.startHeartbeat(runRid, authority);
+    const work: StageWork = {
+      activeStage: "setup",
+      authority,
+      abortSignal,
+      request: null,
+      tree: null,
+      functions: [],
+      testSources: [],
+      canonical: null,
+      artifactSha256: null,
+      artifactBlobId: null,
+    };
     try {
       const requestResult = await this.deps.pool.query<PublishRequestRow>(
         `SELECT p.run_rid, p.repository_rid, p.branch, p.default_branch, p.semver,
@@ -496,129 +777,316 @@ export class FunctionsPublishService {
       );
       const request = requestResult.rows[0];
       if (!request) throw new Error("publish request metadata is missing");
+      work.request = request;
 
-      await this.stageStarted(runRid, "setup");
-      const tree = await this.deps.stemma.listTree({
-        repositoryRid: request.repository_rid,
-        branch: request.branch,
-        path: "",
-        depth: 6,
-      });
-      if (tree.kind !== "ok") throw new Error(`repository checkout failed: ${tree.kind}`);
-      if (tree.branchHead !== request.commit_sha) {
-        throw new Error(`branch moved: expected ${request.commit_sha}, found ${tree.branchHead}`);
-      }
-      const paths = discoverTypeScriptV2FunctionPaths(tree.entries.map((entry) => ({ path: entry.path, type: entry.type })));
-      await this.log(runRid, "setup", "stdout", `Cloning repository ${request.repository_rid}.`);
-      await this.log(runRid, "setup", "stdout", `Checked out ${request.branch} at ${request.commit_sha}.`);
-      const functions: FunctionSource[] = [];
-      for (const path of paths) {
-        const blob = await this.deps.stemma.readBlob({
-          repositoryRid: request.repository_rid,
-          branch: request.branch,
-          path,
-        });
-        if (blob.kind !== "ok") throw new Error(`source unreadable: ${path}`);
-        const source = new TextDecoder().decode(blob.content);
-        functions.push({ apiName: fileStem(path), path, source, signature: inspectTypeScriptV2Function(path, source) });
-      }
-      await this.stageSucceeded(runRid, "setup");
+      await this.executeStage(runRid, authority, work, "setup", () => this.stageSetup(runRid, work));
+      await this.executeStage(runRid, authority, work, "lint", () => this.stageLint(runRid, work));
+      await this.executeStage(runRid, authority, work, "test", () => this.stageTest(runRid, work));
+      await this.executeStage(runRid, authority, work, "build", () => this.stageBuild(runRid, work));
+      await this.executeStage(runRid, authority, work, "publish", () => this.stagePublish(runRid, work));
 
-      activeStage = "lint";
-      await this.stageStarted(runRid, "lint");
-      await this.log(runRid, "lint", "stdout", `Discovered ${functions.length} TypeScript v2 function(s).`);
-      for (const fn of functions) validateTypeScript(fn.path, fn.source);
-      await this.log(runRid, "lint", "stdout", "TypeScript syntax and explicit function signatures validated.");
-      await this.stageSucceeded(runRid, "lint");
-
-      activeStage = "test";
-      await this.stageStarted(runRid, "test");
-      const testCount = tree.entries.filter((entry) => entry.type === "blob" && /\.(test|spec)\.tsx?$/.test(entry.path)).length;
-      await this.log(runRid, "test", "stdout", testCount
-        ? `Validated ${testCount} test source file(s) during compilation.`
-        : "No test files were discovered; repository compile checks passed.");
-      await this.stageSucceeded(runRid, "test");
-
-      activeStage = "build";
-      await this.stageStarted(runRid, "build");
-      const canonical = JSON.stringify({
-        exports: functions.map((fn) => fn.apiName),
-        sources: Object.fromEntries(functions.map((fn) => [fn.apiName, fn.source])),
-        signatures: Object.fromEntries(functions.map((fn) => [fn.apiName, fn.signature])),
-      });
-      const artifactSha256 = createHash("sha256").update(canonical).digest("hex");
-      await this.log(runRid, "build", "stdout", `Created content-addressed bundle sha256:${artifactSha256}.`);
-      await this.stageSucceeded(runRid, "build");
-
-      activeStage = "publish";
-      await this.stageStarted(runRid, "publish");
-      await this.assertNotCancelled(runRid);
-      await validateCompatibility(this.deps.pool, request.repository_rid, request.branch, request.semver, functions);
-      const isPreview = request.branch !== request.default_branch || parseSemver(request.semver).preRelease.length > 0;
-      const manifest = {
-        exports: functions.map((fn) => fn.apiName),
-        sources: Object.fromEntries(functions.map((fn) => [fn.apiName, fn.source])),
-        signatures: Object.fromEntries(functions.map((fn) => [fn.apiName, fn.signature])),
-        sourcePaths: Object.fromEntries(functions.map((fn) => [fn.apiName, fn.path])),
-        runtime: "NODE_20",
-        functionCount: functions.length,
-        message: request.message,
-      };
-      const published = await publishVersion(this.deps.pool, {
-        rid: mintFunctionVersionRid(),
-        repositoryRid: request.repository_rid,
-        branch: request.branch,
-        isPreview,
-        semver: request.semver,
-        commitSha: request.commit_sha,
-        runtime: "NODE_20",
-        artifactBlobId: `inline:${artifactSha256.slice(0, 16)}`,
-        artifactSha256,
-        artifactBytes: Buffer.byteLength(canonical),
-        manifest,
-      });
-      if (published.outcome === "immutable-conflict") throw new Error("version exists with a different immutable artifact");
-      const functionRids = await this.registerFunctions(request, functions, published.row.rid, artifactSha256);
-      await this.deps.pool.query(
-        `UPDATE function_publish_request
-            SET version_rid = $2, artifact_sha256 = $3, function_rids = $4::jsonb, updated_at = now()
-          WHERE run_rid = $1`,
-        [runRid, published.row.rid, artifactSha256, JSON.stringify(functionRids)],
-      );
-      for (const fn of functions) {
-        await this.log(runRid, "publish", "stdout", `Registered ${fn.apiName} with rid '${functionRids[fn.apiName]}'.`);
-      }
-      await this.stageSucceeded(runRid, "publish");
-      await this.deps.pool.query(
-        `UPDATE jemma_run SET state = 'SUCCEEDED', finished_at = now(), exit_code = 0,
-                lease_owner = NULL, lease_expires_at = NULL, resource_version = resource_version + 1,
-                updated_at = now() WHERE rid = $1 AND state = 'RUNNING'`,
-        [runRid],
-      );
-      await this.log(runRid, null, "system", "BUILD SUCCESSFUL");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const cancelled = await this.isCancelled(runRid);
-      if (!cancelled) {
-        await this.log(runRid, activeStage, "stderr", message);
-        await this.deps.pool.query(
-          `UPDATE jemma_run_stage SET state = 'FAILED', finished_at = now(), exit_code = 1
-            WHERE run_rid = $1 AND stage_name = $2 AND state = 'RUNNING'`,
-          [runRid, activeStage],
-        );
-        await this.deps.pool.query(
-          `UPDATE jemma_run_stage SET state = 'SKIPPED', finished_at = now()
-            WHERE run_rid = $1 AND state = 'PENDING'`,
-          [runRid],
-        );
-        await this.deps.pool.query(
-          `UPDATE jemma_run SET state = 'FAILED', finished_at = now(), exit_code = 1,
-                  failure_reason = 'stage-failed', lease_owner = NULL, lease_expires_at = NULL,
+      // Finalize and log in ONE statement: the terminal log line can
+      // never be written by a worker that failed to finalize, and a
+      // successful finalize can never lose its terminal line.
+      const finalized = await this.deps.pool.query(
+        `WITH done AS (
+           UPDATE jemma_run
+              SET state = 'SUCCEEDED', finished_at = now(), exit_code = 0,
+                  lease_owner = NULL, lease_expires_at = NULL,
                   resource_version = resource_version + 1, updated_at = now()
-            WHERE rid = $1 AND state = 'RUNNING'`,
-          [runRid],
+            WHERE rid = $1 AND lease_owner = $2 AND state = 'RUNNING'
+           RETURNING rid
+         )
+         INSERT INTO jemma_run_log(run_rid, stage_name, stream, message)
+         SELECT $1, NULL, 'system', 'BUILD SUCCESSFUL' FROM done`,
+        [runRid, this.owner],
+      );
+      if (finalized.rowCount === 0) throw await this.authorityError(runRid);
+    } catch (error) {
+      if (error instanceof RunAuthorityLostError) {
+        // Cancellation or lease loss: the canceller (or the worker that
+        // reclaimed the lease) drives the lifecycle now. This worker
+        // must not write FAILED, skip stages, or log anything further.
+        return;
+      }
+      try {
+        await this.failRun(runRid, work.activeStage, error);
+      } catch {
+        // The DB itself may be down. The lease TTL expires and another
+        // worker reclaims the run — no false terminal state is written.
+      }
+    } finally {
+      await heartbeat.stop();
+    }
+  }
+
+  /**
+   * Run one stage with stage-scoped transient retry.
+   *
+   * Previously succeeded stages are never re-entered; the current stage
+   * stays RUNNING (never transiently FAILED) across attempts; the run
+   * stays RUNNING with the lease held and renewed through backoff.
+   */
+  private async executeStage(
+    runRid: string,
+    authority: RunAuthority,
+    work: StageWork,
+    stage: Stage,
+    body: () => Promise<void>,
+  ): Promise<void> {
+    work.activeStage = stage;
+    authority.throwIfLost();
+    for (;;) {
+      try {
+        await this.stageStarted(runRid, stage);
+        await body();
+        // Re-check authority after the stage body: a long-running
+        // body that lost local authority mid-way (deadline expired,
+        // cancel, shutdown) must not mark the stage succeeded.
+        authority.throwIfLost();
+        await this.stageSucceeded(runRid, stage);
+        return;
+      } catch (error) {
+        // Classify BEFORE mutating any stage/run/retry state.
+        if (error instanceof RunAuthorityLostError) throw error;
+        if (classifyError(error) !== "transient") throw error;
+        const reservation = await this.reserveRetry(runRid);
+        if (reservation.kind === "exhausted") throw error;
+        if (reservation.kind === "authority-lost") throw reservation.error;
+        const summary = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+        await this.logAuthoritative(
+          runRid,
+          stage,
+          "system",
+          `Transient error (${describeTransientError(error)}); retry ${reservation.retryNumber} of `
+            + `${this.lifecycle.maxTransientRetries} after ${reservation.delayMs}ms backoff — ${summary}`,
+        );
+        await this.waitBackoff(reservation.delayMs, authority);
+        // Loop re-enters stageStarted, which re-asserts authority.
+      }
+    }
+  }
+
+  private async stageSetup(runRid: string, work: StageWork): Promise<void> {
+    const request = requireRequest(work);
+    const tree = await this.deps.stemma.listTree({
+      repositoryRid: request.repository_rid,
+      branch: request.branch,
+      path: "",
+      depth: 6,
+    });
+    if (tree.kind === "transient") throw new TransientStageError("repository checkout failed: transient stemma error");
+    if (tree.kind !== "ok") throw new Error(`repository checkout failed: ${tree.kind}`);
+    if (tree.branchHead !== request.commit_sha) {
+      throw new Error(`branch moved: expected ${request.commit_sha}, found ${tree.branchHead}`);
+    }
+    work.tree = { entries: tree.entries, branchHead: tree.branchHead };
+    const paths = discoverTypeScriptV2FunctionPaths(tree.entries.map((entry) => ({ path: entry.path, type: entry.type })));
+    // Bounded artifact inputs (Track 2 #8): the publish bundle
+    // holds every source, so file count and per-file size are
+    // hard limits — deterministic failure, never truncation.
+    if (paths.length > FUNCTION_ARTIFACT_MAX_SOURCE_FILES) {
+      throw new Error(
+        `repository declares ${paths.length} function files, above the ${FUNCTION_ARTIFACT_MAX_SOURCE_FILES}-file limit`,
+      );
+    }
+    await this.logAuthoritative(runRid, "setup", "stdout", `Cloning repository ${request.repository_rid}.`);
+    await this.logAuthoritative(runRid, "setup", "stdout", `Checked out ${request.branch} at ${request.commit_sha}.`);
+    // Reset per attempt — a retried stage must not accumulate state.
+    work.functions = [];
+    for (const path of paths) {
+      // Local authority check between blob reads — a worker past its
+      // confirmed lease horizon must not keep doing external I/O.
+      work.authority.throwIfLost();
+      // Path-traversal guard: a tree entry must be a plain
+      // relative POSIX path before it becomes a bundle key.
+      if (!/^[A-Za-z0-9_./-]+$/.test(path) || path.split("/").includes("..")) {
+        throw new Error(`invalid function path: ${JSON.stringify(path.slice(0, 200))}`);
+      }
+      const blob = await this.deps.stemma.readBlob({
+        repositoryRid: request.repository_rid,
+        branch: request.branch,
+        path,
+      });
+      if (blob.kind === "transient") throw new TransientStageError(`source unreadable (transient): ${path}`);
+      if (blob.kind !== "ok") throw new Error(`source unreadable: ${path}`);
+      if (blob.content.byteLength > FUNCTION_ARTIFACT_MAX_SOURCE_BYTES) {
+        throw new Error(
+          `function source ${path} is ${blob.content.byteLength} bytes, above the ${FUNCTION_ARTIFACT_MAX_SOURCE_BYTES}-byte limit`,
         );
       }
+      const source = new TextDecoder().decode(blob.content);
+      const metadata = inspectPublishedFunction(path, source);
+      work.functions.push({
+        apiName: fileStem(path),
+        path,
+        source,
+        signature: metadata.signature,
+        functionKind: metadata.functionKind,
+      });
+    }
+  }
+
+  private async stageLint(runRid: string, work: StageWork): Promise<void> {
+    const request = requireRequest(work);
+    const tree = requireTree(work);
+    await this.logAuthoritative(runRid, "lint", "stdout", `Discovered ${work.functions.length} TypeScript v2 function(s).`);
+    // Test sources are loaded once here and reused by the test stage —
+    // no duplicate blob reads within a run.
+    work.testSources = await this.readTestSources(request, tree.entries);
+    // Local authority check before CPU-intensive compilation.
+    work.authority.throwIfLost();
+    const typeCheck = typeCheckRepository([
+      ...work.functions.map((fn): TypeCheckSourceFile => ({ path: fn.path, source: fn.source, kind: "function" })),
+      ...work.testSources.map((file): TypeCheckSourceFile => ({ ...file, kind: "test" })),
+    ]);
+    if (!typeCheck.ok) {
+      for (const diagnostic of typeCheck.diagnostics) {
+        await this.logAuthoritative(runRid, "lint", "stderr", formatTypeCheckDiagnostic(diagnostic));
+      }
+      if (typeCheck.truncatedCount > 0) {
+        await this.logAuthoritative(runRid, "lint", "stderr", `… ${typeCheck.truncatedCount} further diagnostic(s) omitted`);
+      }
+      throw new FunctionsPublishError(
+        "INVALID_FUNCTION",
+        `TypeScript type-check failed with ${typeCheck.diagnostics.length + typeCheck.truncatedCount} error(s)`,
+        { diagnostics: typeCheck.diagnostics.map(formatTypeCheckDiagnostic) },
+      );
+    }
+    await this.logAuthoritative(runRid, "lint", "stdout",
+      `TypeScript type-check passed for ${work.functions.length} function(s) and ${work.testSources.length} test file(s).`);
+  }
+
+  private async stageTest(runRid: string, work: StageWork): Promise<void> {
+    if (work.testSources.length === 0) {
+      // Zero-test policy (unchanged from the previous stage semantics):
+      // no discovered tests is not a failure — lint already type-checked
+      // the repository's sources.
+      await this.logAuthoritative(runRid, "test", "stdout", "No test files were discovered; repository compile checks passed.");
+      return;
+    }
+    // Local authority check before spawning user code — and the
+    // abort signal kills the child group if authority is lost
+    // mid-run (cancel, lease loss, shutdown).
+    work.authority.throwIfLost();
+    const testResult = await runRepositoryTests(
+      [
+        ...work.functions.map((fn) => ({ path: fn.path, source: fn.source })),
+        ...work.testSources,
+      ],
+      this.testTunables,
+      work.abortSignal,
+    );
+    // Re-check immediately after the subprocess returns: a worker
+    // that lost authority mid-test must not record a stage result.
+    work.authority.throwIfLost();
+    for (const failure of testResult.failures) {
+      await this.logAuthoritative(runRid, "test", "stderr", failure);
+    }
+    if (testResult.status !== "passed") {
+      throw new Error(
+        `tests failed: ${testResult.failedCount} of ${testResult.testCount} test(s) failed across ${testResult.fileCount} test file(s)`,
+      );
+    }
+    await this.logAuthoritative(runRid, "test", "stdout",
+      `Executed ${testResult.testCount} test(s) across ${testResult.fileCount} test file(s) in ${Math.round(testResult.durationMs)}ms: ${testResult.passedCount} passed.`);
+  }
+
+  private async stageBuild(runRid: string, work: StageWork): Promise<void> {
+    const canonical = JSON.stringify({
+      exports: work.functions.map((fn) => fn.apiName),
+      sources: Object.fromEntries(work.functions.map((fn) => [fn.apiName, fn.source])),
+      signatures: Object.fromEntries(work.functions.map((fn) => [fn.apiName, fn.signature])),
+    });
+    work.canonical = canonical;
+    work.artifactSha256 = createHash("sha256").update(canonical).digest("hex");
+    // Track 2 #8: persist the bundle as a real immutable,
+    // content-addressed object. Upload is idempotent (digest-keyed,
+    // head-before-upload dedup), so a retried build stage is safe.
+    // An orphan blob is possible if the later DB transaction rolls
+    // back — sweepOrphanedFunctionArtifacts reclaims those.
+    const put = await this.artifacts.put({ digest: work.artifactSha256, bundle: canonical });
+    work.artifactBlobId = put.blobId;
+    await this.logAuthoritative(runRid, "build", "stdout",
+      `Created content-addressed bundle sha256:${work.artifactSha256}.`);
+    await this.logAuthoritative(runRid, "build", "stdout",
+      put.deduplicated
+        ? `Artifact already stored as ${put.blobId} (deduplicated).`
+        : `Stored artifact ${put.blobId} (${put.storedBytes} bytes).`);
+  }
+
+  private async stagePublish(runRid: string, work: StageWork): Promise<void> {
+    const request = requireRequest(work);
+    const canonical = work.canonical ?? "";
+    const artifactSha256 = work.artifactSha256 ?? "";
+    // Re-assert authority immediately before externally visible side
+    // effects — a cancelled/reclaimed run must not publish.
+    await this.assertAuthority(runRid);
+    try {
+      await validateCompatibility(this.deps.pool, request.repository_rid, request.branch, request.semver, work.functions);
+    } catch (error) {
+      // Surface the full breaking-change list in the run log, not just the
+      // top-line "Backward-incompatible changes require a major release"
+      // message — operators diagnosing a failed publish need the detail.
+      if (error instanceof FunctionsPublishError && Array.isArray(error.details.breaking)) {
+        await this.logAuthoritative(
+          runRid,
+          "publish",
+          "stderr",
+          error.details.breaking.map((line) => String(line)).join("; "),
+        );
+      }
+      throw error;
+    }
+    const isPreview = isPreviewRelease(request.branch, request.default_branch, request.semver);
+    // The bundle (with full sources) lives in the artifact blob
+    // store — the manifest carries only compact metadata. Source
+    // reads go through resolveFunctionSource(s) (artifactStore),
+    // which also serves historical inline manifests. NO inline
+    // fallback is written for new versions.
+    const artifactBlobId = work.artifactBlobId;
+    if (!artifactBlobId) throw new Error("artifact blob missing — build stage did not run");
+    const manifest = {
+      exports: work.functions.map((fn) => fn.apiName),
+      signatures: Object.fromEntries(work.functions.map((fn) => [fn.apiName, fn.signature])),
+      // Normalized structural form (Track 2 #6) — additive and
+      // optional; historical manifests carry only `signatures`
+      // and remain readable (comparison normalizes on read).
+      signaturesNormalized: Object.fromEntries(
+        work.functions.map((fn) => [fn.apiName, normalizeSignature(fn.signature)]),
+      ),
+      sourcePaths: Object.fromEntries(work.functions.map((fn) => [fn.apiName, fn.path])),
+      artifactFormat: "functions-publish-bundle/v1",
+      runtime: "NODE_20",
+      functionCount: work.functions.length,
+      message: request.message,
+    };
+    // publishVersion is idempotent on (repository, branch, semver) +
+    // artifact_sha256 — safe under ambiguous-commit retry (dedup) —
+    // and registerFunctions is a single transaction of upserts.
+    const published = await publishVersion(this.deps.pool, {
+      rid: mintFunctionVersionRid(),
+      repositoryRid: request.repository_rid,
+      branch: request.branch,
+      isPreview,
+      semver: request.semver,
+      commitSha: request.commit_sha,
+      runtime: "NODE_20",
+      artifactBlobId,
+      artifactSha256,
+      artifactBytes: Buffer.byteLength(canonical),
+      manifest,
+    });
+    if (published.outcome === "immutable-conflict") throw new Error("version exists with a different immutable artifact");
+    const functionRids = await this.registerFunctions(request, work.functions, published.row.rid, artifactSha256);
+    await this.deps.pool.query(
+      `UPDATE function_publish_request
+          SET version_rid = $2, artifact_sha256 = $3, function_rids = $4::jsonb, updated_at = now()
+        WHERE run_rid = $1`,
+      [runRid, published.row.rid, artifactSha256, JSON.stringify(functionRids)],
+    );
+    for (const fn of work.functions) {
+      await this.logAuthoritative(runRid, "publish", "stdout", `Registered ${fn.apiName} with rid '${functionRids[fn.apiName]}'.`);
     }
   }
 
@@ -649,10 +1117,10 @@ export class FunctionsPublishService {
         await client.query(
           `INSERT INTO function_registry_function_version(
              function_rid, semver, branch, release_version_rid, commit_sha,
-             source_path, artifact_sha256, signature
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+             source_path, artifact_sha256, signature, function_kind
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
            ON CONFLICT(function_rid, branch, semver) DO NOTHING`,
-          [rid, request.semver, request.branch, releaseVersionRid, request.commit_sha, fn.path, artifactSha256, JSON.stringify(fn.signature)],
+          [rid, request.semver, request.branch, releaseVersionRid, request.commit_sha, fn.path, artifactSha256, JSON.stringify(fn.signature), fn.functionKind],
         );
         result[fn.apiName] = rid;
       }
@@ -672,23 +1140,249 @@ export class FunctionsPublishService {
     }
   }
 
+  private async readTestSources(
+    request: PublishRequestRow,
+    entries: readonly StemmaTreeEntry[],
+  ): Promise<Array<{ path: string; source: string }>> {
+    const testPaths = entries
+      .filter((entry) => entry.type === "blob" && /\.(test|spec)\.tsx?$/.test(entry.path))
+      .map((entry) => entry.path)
+      .sort();
+    const sources: Array<{ path: string; source: string }> = [];
+    for (const path of testPaths) {
+      const blob = await this.deps.stemma.readBlob({
+        repositoryRid: request.repository_rid,
+        branch: request.branch,
+        path,
+      });
+      if (blob.kind !== "ok") throw new Error(`test source unreadable: ${path}`);
+      sources.push({ path, source: new TextDecoder().decode(blob.content) });
+    }
+    return sources;
+  }
+
   private async stageStarted(runRid: string, stage: Stage): Promise<void> {
-    await this.assertNotCancelled(runRid);
-    await this.deps.pool.query(
-      `UPDATE jemma_run_stage SET state = 'RUNNING', started_at = now(), finished_at = NULL, exit_code = NULL,
+    const started = await this.deps.pool.query(
+      `UPDATE jemma_run_stage s
+          SET state = 'RUNNING', started_at = now(), finished_at = NULL, exit_code = NULL,
               log_object_uri = $3
-        WHERE run_rid = $1 AND stage_name = $2`,
-      [runRid, stage, `db://jemma/runs/${runRid}/logs?stage=${stage}`],
+        WHERE s.run_rid = $1 AND s.stage_name = $2
+          AND EXISTS (
+            SELECT 1 FROM jemma_run r
+             WHERE r.rid = s.run_rid AND r.lease_owner = $4 AND r.state = 'RUNNING'
+          )`,
+      [runRid, stage, `db://jemma/runs/${runRid}/logs?stage=${stage}`, this.owner],
     );
-    await this.log(runRid, stage, "stdout", `> Task :functions-typescript:${stage}`);
+    if (started.rowCount === 0) throw await this.authorityError(runRid);
+    await this.logAuthoritative(runRid, stage, "stdout", `> Task :functions-typescript:${stage}`);
   }
 
   private async stageSucceeded(runRid: string, stage: Stage): Promise<void> {
-    await this.deps.pool.query(
-      `UPDATE jemma_run_stage SET state = 'SUCCEEDED', finished_at = now(), exit_code = 0
-        WHERE run_rid = $1 AND stage_name = $2 AND state = 'RUNNING'`,
-      [runRid, stage],
+    const succeeded = await this.deps.pool.query(
+      `UPDATE jemma_run_stage s
+          SET state = 'SUCCEEDED', finished_at = now(), exit_code = 0
+        WHERE s.run_rid = $1 AND s.stage_name = $2 AND s.state = 'RUNNING'
+          AND EXISTS (
+            SELECT 1 FROM jemma_run r
+             WHERE r.rid = s.run_rid AND r.lease_owner = $3 AND r.state = 'RUNNING'
+          )`,
+      [runRid, stage, this.owner],
     );
+    if (succeeded.rowCount === 0) throw await this.authorityError(runRid);
+  }
+
+  /**
+   * Final deterministic-failure path (also used after retry-budget
+   * exhaustion). Every write is authority-guarded and best-effort: a
+   * zero-row update means the lease was lost mid-failure, and the new
+   * authority's state must not be overwritten.
+   */
+  private async failRun(runRid: string, stage: Stage, error: unknown): Promise<void> {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 16_384);
+    await this.deps.pool.query(
+      `INSERT INTO jemma_run_log(run_rid, stage_name, stream, message)
+       SELECT $1, $2, $3, $4
+        WHERE EXISTS (
+          SELECT 1 FROM jemma_run
+           WHERE rid = $1 AND lease_owner = $5 AND state = 'RUNNING'
+        )`,
+      [runRid, stage, "stderr", message, this.owner],
+    );
+    await this.deps.pool.query(
+      `UPDATE jemma_run_stage s
+          SET state = 'FAILED', finished_at = now(), exit_code = 1
+        WHERE s.run_rid = $1 AND s.stage_name = $2 AND s.state = 'RUNNING'
+          AND EXISTS (
+            SELECT 1 FROM jemma_run r
+             WHERE r.rid = s.run_rid AND r.lease_owner = $3 AND r.state = 'RUNNING'
+          )`,
+      [runRid, stage, this.owner],
+    );
+    await this.deps.pool.query(
+      `UPDATE jemma_run_stage s
+          SET state = 'SKIPPED', finished_at = now()
+        WHERE s.run_rid = $1 AND s.state = 'PENDING'
+          AND EXISTS (
+            SELECT 1 FROM jemma_run r
+             WHERE r.rid = s.run_rid AND r.lease_owner = $2 AND r.state = 'RUNNING'
+          )`,
+      [runRid, this.owner],
+    );
+    await this.deps.pool.query(
+      `UPDATE jemma_run SET state = 'FAILED', finished_at = now(), exit_code = 1,
+              failure_reason = 'stage-failed', lease_owner = NULL, lease_expires_at = NULL,
+              resource_version = resource_version + 1, updated_at = now()
+        WHERE rid = $1 AND lease_owner = $2 AND state = 'RUNNING'`,
+      [runRid, this.owner],
+    );
+  }
+
+  /**
+   * Atomically reserve the next transient retry for THIS owner.
+   * Zero rows returned means budget exhausted OR authority lost —
+   * distinguished by a follow-up read (the final failure write is
+   * itself authority-guarded, so a race here cannot double-write).
+   */
+  private async reserveRetry(runRid: string): Promise<
+    | { kind: "retry"; retryNumber: number; delayMs: number }
+    | { kind: "exhausted" }
+    | { kind: "authority-lost"; error: RunAuthorityLostError }
+  > {
+    const reserved = await this.deps.pool.query<{ retry_count: number }>(
+      `UPDATE jemma_run
+          SET retry_count = retry_count + 1,
+              resource_version = resource_version + 1, updated_at = now()
+        WHERE rid = $1 AND lease_owner = $2 AND state = 'RUNNING'
+          AND retry_count < $3
+        RETURNING retry_count`,
+      [runRid, this.owner, this.lifecycle.maxTransientRetries],
+    );
+    const row = reserved.rows[0];
+    if (row) {
+      return {
+        kind: "retry",
+        retryNumber: row.retry_count,
+        delayMs: computeBackoffMs(row.retry_count, this.lifecycle),
+      };
+    }
+    const state = await this.deps.pool.query<{ state: string; lease_owner: string | null }>(
+      `SELECT state, lease_owner FROM jemma_run WHERE rid = $1`,
+      [runRid],
+    );
+    const current = state.rows[0];
+    if (current && current.state === "RUNNING" && current.lease_owner === this.owner) {
+      return { kind: "exhausted" };
+    }
+    return { kind: "authority-lost", error: await this.authorityError(runRid) };
+  }
+
+  /** Backoff that aborts the moment authority is lost mid-wait. */
+  private async waitBackoff(delayMs: number, authority: RunAuthority): Promise<void> {
+    await Promise.race([this.lifecycle.sleep(delayMs), authority.lostPromise]);
+    authority.throwIfLost();
+  }
+
+  /**
+   * Lease renewal doubling as the authority assertion. A zero-row
+   * update proves the lease is gone (cancelled or reclaimed) — no
+   * separate check-then-write race.
+   */
+  private async assertAuthority(runRid: string): Promise<void> {
+    const renewed = await this.deps.pool.query(
+      `UPDATE jemma_run
+          SET lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
+              updated_at = now()
+        WHERE rid = $1 AND lease_owner = $2 AND state = 'RUNNING'`,
+      [runRid, this.owner, this.lifecycle.leaseTtlMs],
+    );
+    if (renewed.rowCount === 0) throw await this.authorityError(runRid);
+  }
+
+  private async authorityError(runRid: string): Promise<RunAuthorityLostError> {
+    const result = await this.deps.pool.query<{ state: string }>(
+      `SELECT state FROM jemma_run WHERE rid = $1`,
+      [runRid],
+    );
+    return new RunAuthorityLostError(result.rows[0]?.state === "CANCELLED" ? "cancelled" : "lease-lost");
+  }
+
+  /**
+   * Self-scheduling heartbeat (no overlapping renewals: each tick
+   * awaits the previous renewal). Runs for the whole execute(),
+   * including transient backoff.
+   *
+   * Safety deadline (monotonic clock): the worker trusts its lease
+   * only until `lastConfirmedRenewal + leaseTtl - safetyMargin`.
+   * A zero-row renewal loses authority immediately; a transient
+   * error keeps beating BUT never extends the deadline — once it
+   * passes, authority is lost locally, which aborts stage work,
+   * backoff, and any test subprocess before another worker can
+   * legally reclaim.
+   */
+  private startHeartbeat(runRid: string, authority: RunAuthority): { stop: () => Promise<void> } {
+    // Clamp the safety margin against the ACTUAL (possibly overridden)
+    // lease TTL. resolveLifecycleTunables clamps against the default
+    // TTL, so a short test TTL with a default-computed margin would
+    // produce a deadline in the past.
+    const margin = Math.min(
+      this.lifecycle.renewalSafetyMarginMs,
+      Math.floor(this.lifecycle.leaseTtlMs / 2),
+    );
+    const deadline = new AuthorityDeadline(
+      this.lifecycle.leaseTtlMs,
+      margin,
+      this.lifecycle.now,
+    );
+    // Bind the deadline so every authority.throwIfLost() at external-work
+    // boundaries (blob reads, subprocess launch, publish entry, post-subprocess
+    // recheck) also evaluates the local lease horizon. A persistent renewal
+    // outage must stop ALL work — including non-DB work — before another
+    // worker can legally reclaim the lease.
+    authority.bindDeadline(deadline);
+    let stopped = false;
+    const loop = (async () => {
+      while (!stopped) {
+        // realSleep, not lifecycle.sleep: the injected sleep is for
+        // test-controlled backoff only — the heartbeat must tick on a
+        // real schedule regardless of test-injected sleep gates.
+        await realSleep(this.lifecycle.heartbeatIntervalMs);
+        if (stopped) return;
+        try {
+          const renewed = await this.deps.pool.query(
+            `UPDATE jemma_run /* heartbeat */
+                SET lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
+                    updated_at = now()
+              WHERE rid = $1 AND lease_owner = $2 AND state = 'RUNNING'`,
+            [runRid, this.owner, this.lifecycle.leaseTtlMs],
+          );
+          if (renewed.rowCount === 0) {
+            this.loseAuthority(runRid, authority, (await this.authorityError(runRid)).reason);
+            return;
+          }
+          deadline.confirmRenewal();
+        } catch (error) {
+          if (classifyError(error) !== "transient" || deadline.expired()) {
+            this.loseAuthority(runRid, authority, "lease-lost");
+            return;
+          }
+        }
+      }
+    })();
+    return {
+      stop: async () => {
+        stopped = true;
+        await loop.catch(() => undefined);
+      },
+    };
+  }
+
+  private loseAuthority(
+    runRid: string,
+    authority: RunAuthority,
+    reason: "lease-lost" | "cancelled" | "shutdown",
+  ): void {
+    authority.lose(reason);
+    this.lifecycle.onAuthorityLost?.(runRid, reason);
   }
 
   private async log(runRid: string, stage: Stage | null, stream: "stdout" | "stderr" | "system", message: string): Promise<void> {
@@ -698,13 +1392,22 @@ export class FunctionsPublishService {
     );
   }
 
-  private async isCancelled(runRid: string): Promise<boolean> {
-    const result = await this.deps.pool.query<{ state: string }>(`SELECT state FROM jemma_run WHERE rid = $1`, [runRid]);
-    return result.rows[0]?.state === "CANCELLED";
-  }
-
-  private async assertNotCancelled(runRid: string): Promise<void> {
-    if (await this.isCancelled(runRid)) throw new Error("run cancelled");
+  /**
+   * Log write that proves ownership in the same statement — a worker
+   * that lost the lease cannot append to the reclaimer's timeline;
+   * the zero-row insert stops it via RunAuthorityLostError.
+   */
+  private async logAuthoritative(runRid: string, stage: Stage | null, stream: "stdout" | "stderr" | "system", message: string): Promise<void> {
+    const written = await this.deps.pool.query(
+      `INSERT INTO jemma_run_log(run_rid, stage_name, stream, message)
+       SELECT $1, $2, $3, $4
+        WHERE EXISTS (
+          SELECT 1 FROM jemma_run
+           WHERE rid = $1 AND lease_owner = $5 AND state = 'RUNNING'
+        )`,
+      [runRid, stage, stream, message.slice(0, 16_384), this.owner],
+    );
+    if (written.rowCount === 0) throw await this.authorityError(runRid);
   }
 }
 
@@ -765,27 +1468,18 @@ function fileStem(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1, -3);
 }
 
-function validateTypeScript(path: string, source: string): void {
-  const output = ts.transpileModule(source, {
-    fileName: path,
-    reportDiagnostics: true,
-    compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.CommonJS,
-      strict: true,
-      isolatedModules: true,
-      esModuleInterop: true,
-    },
-  });
-  const errors = (output.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
-  if (errors.length) {
-    throw new FunctionsPublishError("INVALID_FUNCTION", `TypeScript compile failed for ${path}`, {
-      diagnostics: errors.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")),
-    });
-  }
+export function inspectTypeScriptV2Function(path: string, source: string): FunctionSignature {
+  return inspectPublishedFunction(path, source).signature;
 }
 
-export function inspectTypeScriptV2Function(path: string, source: string): FunctionSignature {
+/**
+ * The single publish-time source analysis: extracts the declared
+ * signature AND the declared function kind (edit contract) from one
+ * AST walk. A malformed/contradictory edit declaration throws
+ * FunctionsPublishError INVALID_FUNCTION — the release FAILS rather
+ * than publishing incorrect registry metadata.
+ */
+export function inspectPublishedFunction(path: string, source: string): PublishedFunctionMetadata {
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const declaration = file.statements.find((statement): statement is ts.FunctionDeclaration =>
     ts.isFunctionDeclaration(statement)
@@ -802,13 +1496,25 @@ export function inspectTypeScriptV2Function(path: string, source: string): Funct
   if (!declaration.type || declaration.parameters.some((parameter) => !parameter.type)) {
     throw new FunctionsPublishError("INVALID_FUNCTION", `${path} must explicitly type every input and its return value`);
   }
+  let functionKind: FunctionKind;
+  try {
+    functionKind = classifyFunctionKind(file, declaration, path);
+  } catch (error) {
+    if (error instanceof InvalidEditDeclarationError) {
+      throw new FunctionsPublishError("INVALID_FUNCTION", error.message);
+    }
+    throw error;
+  }
   return {
-    parameters: declaration.parameters.map((parameter) => ({
-      name: parameter.name.getText(file),
-      type: parameter.type!.getText(file),
-      optional: Boolean(parameter.questionToken || parameter.initializer),
-    })),
-    output: declaration.type.getText(file),
+    signature: {
+      parameters: declaration.parameters.map((parameter) => ({
+        name: parameter.name.getText(file),
+        type: parameter.type!.getText(file),
+        optional: Boolean(parameter.questionToken || parameter.initializer),
+      })),
+      output: declaration.type.getText(file),
+    },
+    functionKind,
   };
 }
 
@@ -835,17 +1541,15 @@ async function validateCompatibility(
   for (const [name, oldSignature] of Object.entries(priorSignatures)) {
     const next = current.get(name);
     if (!next) continue;
-    if (oldSignature.output !== next.output) breaking.push(`${name}: output changed`);
-    oldSignature.parameters.forEach((oldParameter, index) => {
-      const parameter = next.parameters[index];
-      if (!parameter) breaking.push(`${name}: dropped input ${oldParameter.name}`);
-      else if (parameter.name !== oldParameter.name || parameter.type !== oldParameter.type) {
-        breaking.push(`${name}: reordered or changed input ${oldParameter.name}`);
-      }
-    });
-    next.parameters.slice(oldSignature.parameters.length).forEach((parameter) => {
-      if (!parameter.optional) breaking.push(`${name}: added required input ${parameter.name}`);
-    });
+    // Structural comparison (Track 2 #6): formatting-only type
+    // differences (whitespace, parens, comments, union order) are
+    // compatible; semantic changes follow the documented variance
+    // rules in signatureCompat.ts. Existing manifests carry textual
+    // signatures, which this comparison consumes unchanged — no
+    // republication of historical artifacts is required.
+    for (const line of compareSignaturesStructural(oldSignature, next)) {
+      breaking.push(`${name}: ${line}`);
+    }
   }
   const majorBump = parseSemver(semver).major > parseSemver(latest.semver).major;
   if (breaking.length && !majorBump && parseSemver(semver).major !== 0) {

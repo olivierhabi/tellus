@@ -3,7 +3,7 @@ model_list:
     litellm_params:
       model: openai/glm-5.2
       api_base: https://ws-8p464sqf20yfd2f2.cn-hongkong.maas.aliyuncs.com/compatible-mode/v1
-      api_key: sk-ws-H.RMMERRY.obG1.MEYCIQCneEQCeMBCyCyvOH5i87aZUVhHgeDwFOu7Vv1mcLyY8wIhAP7On6K_Y6i_8ywwlSW3Yox-OdnayrJ5tZ2H_uQsV9lK
+      api_key: os.environ/LITELLM_GLM_API_KEY
       # Keep drop_params on: the upstream 400s on some Claude-Code-only params.
       drop_params: true
       # LiteLLM's OpenAI->Anthropic streaming chunker drops the leading `{` of a

@@ -253,6 +253,14 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 409,
     errorCode: ERROR_CODES.CONFLICT,
   },
+  // RunAlreadyActive — a functions-publish run is already QUEUED or
+  // RUNNING for this (repository, branch); the client must wait for
+  // it or cancel it before tagging another release. 409, mirroring
+  // the Jemma:RunAlreadyActive retrigger contract.
+  "CodeRepos:RunAlreadyActive": {
+    status: 409,
+    errorCode: ERROR_CODES.CONFLICT,
+  },
   "CodeRepos:ReleaseCompileError": {
     status: 422,
     errorCode: ERROR_CODES.INVALID_ARGUMENT,

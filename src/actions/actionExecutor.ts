@@ -75,6 +75,11 @@ import { buildActionPlan, objectKey, type ObjectIdentity } from "./actionPlanner
 import { loadPersistedState, toLockIdentities } from "./actionV2StateLoader";
 import type { LockIdentity } from "./actionLockManager";
 import { withBoundedRetry } from "./actionRetry";
+import {
+  executeFunctionAction,
+  type FunctionActionBinding,
+  type FunctionActionParameterDefinition,
+} from "./functionActionExecutor";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -591,6 +596,106 @@ export async function executeAction(
       return result;
     }
 
+    // Function-backed Action Types execute an immutable published Function
+    // version. The Function runtime returns an Ontology edit batch; its
+    // persistence layer commits that batch transactionally. Declarative rule
+    // compilation is deliberately bypassed because function actions persist
+    // `rules: []` and are mutually exclusive with declarative rules.
+    if (semantics.executionMode === "function") {
+      if (!actionType.function_config) {
+        result.failureType = "unclassified";
+        result.errorMessage = "Function-backed Action Type has no function binding.";
+        pendingError = new OntologyError(
+          result.errorMessage,
+          "FUNCTION_CONFIG_INVALID",
+          422,
+          { executionId, actionTypeApiName },
+        );
+        return result;
+      }
+      const functionExecution = await executeFunctionAction({
+        ontologyId,
+        binding: actionType.function_config as FunctionActionBinding,
+        parameters: resolvedParameters as Record<string, unknown>,
+        parameterDefinitions:
+          actionType.parameters as FunctionActionParameterDefinition[],
+        executedBy: context.executedBy || "system",
+        maxAffectedObjects: actionType.max_affected_objects,
+        preCommitHook: async (client, affectedObjects) => {
+          result.success = true;
+          result.result = "success";
+          result.affectedObjects = affectedObjects;
+          result.durationMs = Date.now() - startTime;
+          await appendAuditRow(client, buildAuditEntry());
+          auditCommitted = true;
+        },
+      });
+      result.success = true;
+      result.result = "success";
+      result.affectedObjects = functionExecution.affectedObjects;
+
+      // STAGE 7 parity (function mode) — one `object_set.changed` event
+      // per affected object type, identical in shape to the declarative
+      // Stage 7 block below. The function branch returns before that
+      // block, so emit here. This executor is the SINGLE ownership
+      // point for change events across /apply, /applyBatch, and the
+      // bulk runner (the /apply route's former route-level copy was
+      // removed — exactly one event per affected type per execution).
+      // Ordering guarantee: executeFunctionAction only resolves AFTER
+      // its edit transaction has COMMITted (see
+      // ontologyRuntime.applyEdits), so this event can never fire
+      // before the writes are durable. On failure
+      // executeFunctionAction throws and this block is unreachable —
+      // subscribers never see a change event for a rolled-back
+      // action. Webhook/notification side effects are deliberately
+      // NOT fired here: their semantics for function-backed actions
+      // are not established. Best-effort: a broken event bus must
+      // never fail a committed action.
+      if (functionExecution.affectedObjects.length > 0) {
+        try {
+          const byType = new Map<string, Array<string | number>>();
+          for (const affected of functionExecution.affectedObjects) {
+            const pks = byType.get(affected.objectType) ?? [];
+            pks.push(affected.primaryKey);
+            byType.set(affected.objectType, pks);
+          }
+          for (const [objectType, primaryKeys] of byType) {
+            eventBus.emit('ws:event', {
+              event: 'object_set.changed',
+              projectId: null,
+              objectTopic: `${ontologyId}:${objectType}`,
+              payload: {
+                ontologyId,
+                tenantId: context.tenant ?? "default",
+                objectType,
+                // FE auto-refresh (useObjectAutoRefresh) filters on
+                // this field name — keep it in sync with the
+                // declarative Stage 7 payload.
+                objectTypeApiName: objectType,
+                // Contract preserved from the retired route-level
+                // emitter: same operation label + per-type count.
+                operation: "applyAction",
+                affectedCount: primaryKeys.length,
+                primaryKeys,
+                actionTypeApiName,
+                executionId,
+                branchId: context.branchId ?? null,
+                result: result.result,
+                changedAt: new Date().toISOString(),
+              },
+            });
+          }
+        } catch (emitErr) {
+          console.warn(
+            `[action:${actionTypeApiName}] object_set.changed emission failed (non-fatal): ${(emitErr as Error).message}`,
+          );
+        }
+      }
+
+      return result;
+    }
+
+    // -----------------------------------------------------------------
     // STAGE 3.5 (Phase 6.3): Writeback pre-edit hook (Phase 4-origin,
     // re-ordered from Stage 5 to Stage 3.5 in Phase 6.3).
     //

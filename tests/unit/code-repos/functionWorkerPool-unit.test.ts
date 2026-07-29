@@ -140,3 +140,67 @@ describe("runSandboxedWithSdkAsync (worker pool or fallback)", () => {
     expect(r.output).toBe(42);
   });
 });
+
+describe("v2 calling convention — (client, ...params)", () => {
+  // Palantir TypeScript v2 Ontology edit functions declare an injected
+  // `client` first parameter; Action parameters follow and bind BY NAME
+  // from the input. The sandbox injects a placeholder client (the edit
+  // batch ignores it) and binds the remaining params from the input.
+
+  const EDIT_FN = `
+    module.exports = function markOrderUrgent(client, order) {
+      const batch = createEditBatch(client);
+      batch.update(order, { status: "URGENT" });
+      return batch.getEdits();
+    };
+  `;
+
+  it("injects the placeholder client and binds params by name", async () => {
+    const r = await runSandboxedWithSdkSync(
+      EDIT_FN,
+      { order: { $apiName: "Order", $primaryKey: "o1" } },
+      EMPTY,
+    );
+    expect(r.status).toBe("ok");
+    expect(r.output).toEqual([
+      { op: "update", objectType: "Order", primaryKey: "o1", patch: { status: "URGENT" } },
+    ]);
+  });
+
+  it("binds multiple Action parameters by name, in declared order", async () => {
+    const src = `
+      module.exports = function rename(client, order, status) {
+        const batch = createEditBatch(client);
+        batch.update(order, { status });
+        return batch.getEdits();
+      };
+    `;
+    const r = await runSandboxedWithSdkSync(
+      src,
+      { order: { $apiName: "Order", $primaryKey: "o2" }, status: "closed" },
+      EMPTY,
+    );
+    expect(r.status).toBe("ok");
+    expect(r.output).toEqual([
+      { op: "update", objectType: "Order", primaryKey: "o2", patch: { status: "closed" } },
+    ]);
+  });
+
+  it("keeps the legacy single-argument convention for one-param functions", async () => {
+    const src = `module.exports = function(page){ return page.objectType; };`;
+    const r = await runSandboxedWithSdkSync(src, { objectType: "Order" }, EMPTY);
+    expect(r.status).toBe("ok");
+    expect(r.output).toBe("Order");
+  });
+
+  it("throws a precise error when user code calls into the placeholder client", async () => {
+    const src = `module.exports = function(client, order){ return client.fetch(order); };`;
+    const r = await runSandboxedWithSdkSync(
+      src,
+      { order: { $apiName: "Order", $primaryKey: "o1" } },
+      EMPTY,
+    );
+    expect(r.status).toBe("error");
+    expect(r.errorMessage).toContain("client.fetch is not available");
+  });
+});

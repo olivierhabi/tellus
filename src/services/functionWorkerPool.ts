@@ -34,6 +34,7 @@ import {
   runSandboxedWithSdk,
   awaitSandboxPromise,
   type SandboxResult,
+  type SignatureParameter,
 } from "./functionRuntime";
 import {
   buildOntologySdk,
@@ -67,11 +68,22 @@ const POOL_SIZE = Math.max(1, Number(process.env.FUNCTION_WORKER_POOL_SIZE ?? 4)
 // The vm cap is per-phase (module eval, then invocation). Allow both phases to
 // reach the cap plus slack before declaring the worker hung.
 const WORKER_WALL_BUDGET_MS = FUNCTION_TIMEOUT_MS * 2 + 2_000;
+// Per-worker V8 old-space cap (Phase 5). 256MB matches the publish
+// test-runner's child-process budget. Read lazily so deploy-time
+// overrides apply without a module reload.
+function workerMaxOldSpaceMb(): number {
+  return Math.max(
+    64,
+    Number(process.env.FUNCTION_WORKER_MAX_OLD_SPACE_MB ?? 256),
+  );
+}
 
 interface Task {
   readonly transpiled: string;
   readonly input: unknown;
   readonly snapshot: OntologySnapshot;
+  /** Pinned version's published signature (Phase 4 primary binding). */
+  readonly signatureParams?: SignatureParameter[];
 }
 interface Pending {
   readonly task: Task;
@@ -90,10 +102,42 @@ const queue: Pending[] = [];
 let poolInitialized = false;
 let nextTaskId = 1;
 
+/**
+ * Worker construction options (Phase 5 hardening):
+ *  * Memory cap — the vm timeout bounds CPU only; a memory-bomb
+ *    function must throw in-worker, not OOM the worker into a
+ *    respawn loop.
+ *  * Environment whitelist — workers inherit the full process.env
+ *    (DB credentials, LLM tokens) by default. The worker needs none
+ *    of them (the snapshot arrives via postMessage); strip
+ *    everything else so a sandbox escape finds no secrets in
+ *    process.env.
+ * Exported for construction tests (the pool itself falls back to
+ * sync execution where the .ts worker cannot be resolved).
+ */
+export function workerOptions(): {
+  execArgv: string[];
+  resourceLimits: { maxOldGenerationSizeMb: number };
+  env: Record<string, string>;
+} {
+  return {
+    execArgv: workerExecArgv,
+    resourceLimits: {
+      maxOldGenerationSizeMb: workerMaxOldSpaceMb(),
+    },
+    env: {
+      NODE_ENV: process.env.NODE_ENV ?? "development",
+      TZ: process.env.TZ ?? "",
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+    },
+  };
+}
+
 function spawnSlot(): Slot | null {
   if (!workerFile) return null;
   try {
-    const worker = new Worker(workerFile, { execArgv: workerExecArgv });
+    const worker = new Worker(workerFile, workerOptions());
     const slot: Slot = { worker, busy: false, current: null, dead: false };
 
     worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[]; requestedTypes?: string[] }) => {
@@ -193,6 +237,7 @@ function dispatch(slot: Slot, pending: Pending): void {
     transpiled: pending.task.transpiled,
     input: pending.task.input,
     snapshot: pending.task.snapshot,
+    signatureParams: pending.task.signatureParams,
   });
 }
 
@@ -278,11 +323,12 @@ export async function runSandboxedWithSdkAsync(
   transpiled: string,
   input: unknown,
   snapshot: OntologySnapshot,
+  signatureParams?: SignatureParameter[],
 ): Promise<SandboxAsyncResult> {
   if (!POOL_ENABLED || !workerFile) {
-    return runSandboxedWithSdkSync(transpiled, input, snapshot);
+    return runSandboxedWithSdkSync(transpiled, input, snapshot, signatureParams);
   }
-  return submitToPool({ transpiled, input, snapshot });
+  return submitToPool({ transpiled, input, snapshot, signatureParams });
 }
 
 /**
@@ -293,6 +339,7 @@ export async function runSandboxedWithSdkSync(
   transpiled: string,
   input: unknown,
   snapshot: OntologySnapshot,
+  signatureParams?: SignatureParameter[],
 ): Promise<SandboxAsyncResult> {
   const { sdk, getEdits, getRequestedTypes } = buildOntologySdk(snapshot);
   let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
@@ -300,7 +347,7 @@ export async function runSandboxedWithSdkSync(
     Edits: sdk.Edits,
     createEditBatch: sdk.createEditBatch,
     __ontologyTypes: sdk.objectTypeDescriptors,
-  });
+  }, signatureParams);
   // Async function: the sandbox returned a Promise (vm can't await). Resolve it
   // here under the timeout — the sync fallback is the structural path (pool
   // unavailable), and it should still honor async Foundry functions.

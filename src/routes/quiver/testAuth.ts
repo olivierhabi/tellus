@@ -1,3 +1,4 @@
+import { isTestAuthBypassEnabled } from "../../utils/testAuthGate";
 // ---------------------------------------------------------------------------
 // testAuth.ts — single source of truth for the Quiver test-auth bypass guard.
 //
@@ -22,10 +23,7 @@
  * of `QUIVER_ALLOW_TEST_AUTH`.
  */
 export function isQuiverTestAuthAllowed(): boolean {
-  return (
-    process.env.QUIVER_ALLOW_TEST_AUTH === "1" &&
-    process.env.NODE_ENV !== "production"
-  );
+  return isTestAuthBypassEnabled("QUIVER_ALLOW_TEST_AUTH");
 }
 
 /**

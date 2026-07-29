@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Request, Response, NextFunction } from "express";
+import { isTestAuthBypassEnabled } from "../../../utils/testAuthGate";
 import { buildEnvelope, ERROR_CODES } from "../contracts/errors";
 import { requireTellusAuth } from "../../../middleware/tellusAuth";
 
@@ -139,10 +140,7 @@ export function requireCodeReposAuth() {
     // through to upstream because the upstream `requireTellusAuth` middleware
     // has its own envelope shape (errorName: "AuthenticationError") which would
     // violate G-C-08's requirement of `Stemma:Unauthenticated`.
-    if (
-      process.env.CODE_REPOS_TEST_AUTH === "1" &&
-      process.env.NODE_ENV !== "production"
-    ) {
+    if (isTestAuthBypassEnabled("CODE_REPOS_TEST_AUTH")) {
       // 1. Explicit test-principal override (G-C-11). Always honoured in dev
       //    so integration tests can pin a specific principal (alice/bob/carol)
       //    regardless of the caller's address.

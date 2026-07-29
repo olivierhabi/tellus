@@ -30,7 +30,11 @@ import type { Pool } from "pg";
 
 import { isRid, isStructurallyRid, mintFunctionVersionRid } from "../../codeRepos/contracts/rid";
 import { publishVersion, listVersions } from "../../functionsRegistry/store";
-import { parseSemver, compareSemver } from "../../functionsRegistry/semver";
+import { parseSemver, compareSemver, isPreviewRelease } from "../../functionsRegistry/semver";
+import {
+  createS3FunctionArtifactStore,
+  FunctionArtifactError,
+} from "../../functionsRegistry/artifactStore";
 import { ERROR_CODES } from "../../codeRepos/contracts/errors";
 import { requireCodeReposAuth } from "../../codeRepos/middleware/principal";
 import { idempotencyMiddleware } from "../../codeRepos/middleware/idempotency";
@@ -2013,9 +2017,10 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       }
       const defaultBranch = repoRows[0].default_branch;
       const branch = typeof b.branch === "string" && b.branch.length > 0 ? b.branch : defaultBranch;
-      // Preview vs stable: a release off a non-default branch, or a prerelease
-      // SemVer (1.2.3-rc1), is a preview build (never resolves on default).
-      const isPreview = branch !== defaultBranch || parsedSemver.preRelease.length > 0;
+      // Preview vs stable: single shared predicate (see
+      // functionsRegistry/semver.ts) — non-default branch or a
+      // prerelease SemVer is a preview build.
+      const isPreview = isPreviewRelease(branch, defaultBranch, semver);
 
       // TypeScript v2 uses the durable functions-publish pipeline. Keep the
       // legacy synchronous implementation below as a compatibility fallback
@@ -2048,6 +2053,12 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             }
             if (error.code === "NO_FUNCTIONS") {
               return sendError(res, codeReposError("CodeRepos:NoFunctionsToPublish", { branch }));
+            }
+            if (error.code === "RUN_ALREADY_ACTIVE") {
+              return sendError(res, codeReposError("CodeRepos:RunAlreadyActive", {
+                branch,
+                ...error.details,
+              }));
             }
             return sendError(res, codeReposError("CodeRepos:VersionConflict", {
               reason: error.message,
@@ -2133,16 +2144,32 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       }
 
       // 5 — publish the immutable bundle.
+      const canonical = JSON.stringify({ exports: exportsList, sources });
+      const artifactSha256 = createHash("sha256").update(canonical).digest("hex");
+      const artifactBytes = Buffer.byteLength(canonical, "utf8");
+      // Track 2 #8: real content-addressed blob — the same
+      // store as the worker pipeline. The manifest carries no
+      // source text; there is no inline fallback anywhere.
+      let artifactBlobId: string;
+      try {
+        const put = await createS3FunctionArtifactStore().put({
+          digest: artifactSha256,
+          bundle: canonical,
+        });
+        artifactBlobId = put.blobId;
+      } catch (e) {
+        if (e instanceof FunctionArtifactError && e.code === "ARTIFACT_TOO_LARGE") {
+          return sendError(res, codeReposError("CodeRepos:InvalidSettings", { reason: e.message }));
+        }
+        throw e;
+      }
       const manifest = {
         exports: exportsList,
-        sources,
+        artifactFormat: "functions-publish-bundle/v1",
         runtime: "NODE_20" as const,
         functionCount: exportsList.length,
         message: typeof b.message === "string" ? b.message.slice(0, 1024) : null,
       };
-      const canonical = JSON.stringify({ exports: exportsList, sources });
-      const artifactSha256 = createHash("sha256").update(canonical).digest("hex");
-      const artifactBytes = Buffer.byteLength(canonical, "utf8");
 
       let publishResult;
       try {
@@ -2154,7 +2181,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           semver,
           commitSha,
           runtime: "NODE_20",
-          artifactBlobId: `inline:${artifactSha256.slice(0, 16)}`,
+          artifactBlobId,
           artifactSha256,
           artifactBytes,
           manifest,

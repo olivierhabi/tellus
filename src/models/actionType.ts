@@ -63,6 +63,8 @@ export interface ActionTypeRow {
    * at the structural level by migration 130's CHECK constraint.
    */
   writeback_config: unknown | null;
+  /** Immutable published Function binding for function execution mode. */
+  function_config?: unknown | null;
   max_affected_objects: number;
   is_enabled: boolean;
   created_at: string;
@@ -92,6 +94,7 @@ export interface CreateActionTypeInput {
   sideEffects?: unknown | null;
   /** Phase 4 — pre-edit writeback config (null = no writeback). One-writeback-per-action structural invariant is enforced by migration 130 CHECK. */
   writebackConfig?: unknown | null;
+  functionConfig?: unknown | null;
   maxAffectedObjects?: number;
   isEnabled?: boolean;
   createdBy?: string;
@@ -115,6 +118,7 @@ export interface UpdateActionTypeInput {
   side_effects?: unknown | null;
   /** Phase 4 — pre-edit writeback config (NULL = no writeback). One-writeback-per-action enforced by CHECK constraint from migration 130. */
   writeback_config?: unknown | null;
+  function_config?: unknown | null;
   max_affected_objects?: number;
   is_enabled?: boolean;
 }
@@ -134,6 +138,7 @@ const UPDATABLE_FIELDS: ReadonlySet<string> = new Set([
   "submission_criteria",
   "side_effects",
   "writeback_config",
+  "function_config",
   "max_affected_objects",
   "is_enabled",
 ]);
@@ -203,8 +208,9 @@ async function createActionType(
           icon_name, icon_color, save_location_rid,
           parameters, rules, submission_criteria, side_effects,
           max_affected_objects, is_enabled, created_by,
-          semantics_version, execution_mode, delete_policy, writeback_config)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          semantics_version, execution_mode, delete_policy, writeback_config,
+          function_config)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        RETURNING *`,
       [
         ontologyId,
@@ -232,6 +238,9 @@ async function createActionType(
         // validateWritebackConfig() validates the shape before this INSERT.
         actionTypeDef.writebackConfig != null
           ? JSON.stringify(actionTypeDef.writebackConfig)
+          : null,
+        actionTypeDef.functionConfig != null
+          ? JSON.stringify(actionTypeDef.functionConfig)
           : null,
       ]
     );
@@ -366,7 +375,8 @@ async function updateActionType(
       key === "rules" ||
       key === "submission_criteria" ||
       key === "side_effects" ||
-      key === "writeback_config"
+      key === "writeback_config" ||
+      key === "function_config"
     ) {
       values.push(value != null ? JSON.stringify(value) : null);
     } else {

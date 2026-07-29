@@ -189,9 +189,16 @@ router.post(
             durationMs: result.durationMs,
           };
 
-          // Object-change events are emitted once by the action executor
-          // after the edit transaction commits. Keeping emission out of
-          // this route prevents duplicate subscription updates.
+          // NOTE: real-time object-change notifications are owned
+          // exclusively by the action executor (actionExecutor
+          // Stage 7, declarative and function branches), which
+          // emits exactly one event per affected object type AFTER
+          // the edit transaction commits — for /apply, /applyBatch,
+          // and the bulk runner alike. This route previously emitted
+          // a second, route-level copy on /apply only; that produced
+          // duplicate events for every mutation and was removed.
+          // Do not re-add emission here (pinned by
+          // tests/unit/actions/actionExecutorFunctionEvents-unit.test.ts).
 
           // Step 4a: cache success
           if (idempotencyKey) {

@@ -25,6 +25,7 @@ export interface ActionDefinitionHashInput {
   semanticsVersion?: number | null;
   executionMode?: string | null;
   deletePolicy?: string | null;
+  functionConfig?: unknown;
 }
 
 /**
@@ -51,6 +52,7 @@ export function hashActionDefinition(input: ActionDefinitionHashInput): string {
     semanticsVersion: input.semanticsVersion ?? null,
     executionMode: input.executionMode ?? null,
     deletePolicy: input.deletePolicy ?? null,
+    functionConfig: input.functionConfig ?? null,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }

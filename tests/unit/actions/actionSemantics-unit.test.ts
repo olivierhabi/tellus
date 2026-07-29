@@ -60,14 +60,13 @@ describe("actionSemantics — validateActionSemantics", () => {
     expect(r.valid).toBe(false);
     expect(r.error!.code).toBe("INCOMPATIBLE_ACTION_SEMANTICS");
   });
-  it("rejects function execution mode until supported", () => {
+  it("accepts function execution mode for version 2", () => {
     const r = validateActionSemantics({
       semanticsVersion: 2,
       executionMode: "function",
       deletePolicy: "restrict",
     });
-    expect(r.valid).toBe(false);
-    expect(r.error!.code).toBe("INVALID_EXECUTION_MODE");
+    expect(r.valid).toBe(true);
   });
   it("rejects an unknown future version (fail closed)", () => {
     const r = validateActionSemantics({
@@ -87,8 +86,8 @@ describe("actionSemantics — validateActionSemantics", () => {
     expect(r.valid).toBe(false);
     expect(r.error!.code).toBe("INVALID_DELETE_POLICY");
   });
-  it("validated exactly two combinations in the matrix", () => {
-    expect(VALID_SEMANTICS_COMBINATIONS).toHaveLength(2);
+  it("validates declarative and function combinations for both versions", () => {
+    expect(VALID_SEMANTICS_COMBINATIONS).toHaveLength(4);
   });
   it("treats partial validation as valid until the full triple is given", () => {
     expect(validateActionSemantics({ semanticsVersion: 1 }).valid).toBe(true);
@@ -154,9 +153,9 @@ describe("actionSemantics — behaviourMatrix", () => {
     expect(behaviourMatrix.deleteRestrict(1)).toBe(false);
     expect(behaviourMatrix.deleteRestrict(2)).toBe(true);
   });
-  it("function execution unsupported everywhere", () => {
-    expect(behaviourMatrix.functionExecutionSupported(1)).toBe(false);
-    expect(behaviourMatrix.functionExecutionSupported(2)).toBe(false);
+  it("function execution supports immutable published bindings", () => {
+    expect(behaviourMatrix.functionExecutionSupported(1)).toBe(true);
+    expect(behaviourMatrix.functionExecutionSupported(2)).toBe(true);
   });
   it("SUPPORTED_SEMANTICS_VERSIONS = {1,2}", () => {
     expect(SUPPORTED_SEMANTICS_VERSIONS.has(1)).toBe(true);

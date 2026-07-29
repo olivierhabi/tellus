@@ -57,9 +57,33 @@ curl -s -X POST http://localhost:8086/realms/tellus/protocol/openid-connect/toke
 - FE UI: `WebhookActionTypeTab.tsx` adds `EmbeddedObjectRuleBodyPicker` (object-type HTMLSelect + action RadioGroup) under the webhook card preview; `ActionTypeDialog.tsx`'s `webhookTabNode` threads the existing `objectTypes` list into the new tab props.
 - FE tests: 4 new `actionBuilders.test.ts` tests cover the gate-removed writeback path + the still-gated side-effect path + the serialise path's reachability. Total FE unit: 37 / 2 files.
 
+## Phase 6.6 — webhook binding wired to the REAL data-connection webhooks
+
+The Action Type webhook tab no longer reads the Phase-3 ontology webhook registry (`webhook_definition`); it lists and binds REAL data-connection webhooks (connectivity engine) end-to-end.
+
+- Binding model: `writeback_config.webhookId` is dual-typed. `ri.magritte.main.webhook.<uuid>` → resolved against the connectivity webhook store (canonical); anything else → legacy `webhook_definition` name (backward compat). `CONNECTIVITY_WEBHOOK_RID_PREFIX` / `isConnectivityWebhookRef` live in `src/actions/writebackExecutor.ts`.
+- FE data source: `hooks/useConnectionWebhooks.ts` — pages all connections (200/page), keeps `rest-api` sources, fans out `webhooksApi.list` per source, flattens into the `BindableWebhook` view-model (`lib/data-connection/webhooks.ts#toBindableWebhook`). Registry client REMOVED from FE (`useWebhooks`, `listWebhooks`/`getWebhookLatest`/`createWebhook` + registry `WebhookDefinition` types in `lib/ontologyApi.ts`).
+- FE picker/dialog: `WebhookPicker` is rid-keyed with the 7-state connectivity lifecycle; `WebhookActionBuilderState.webhookName` → `webhookRid`; adapter serialises `writebackConfig.webhookId = <rid>`.
+- BE save-time: `validateWritebackConfig(wb, ontologyId, paramNames, tenant)` — connectivity refs resolve the pinned version via `webhooks/repository.getByRid`, reject `disabled`/`archived`/`failed`, and validate input mappings against the webhook's DECLARED inputs (replaces the registry-era "≥1 input" rule for connectivity refs; zero-input webhooks are valid).
+- BE execution: `executeWriteback` branches on the RID prefix → `executeConnectivityWriteback` resolves pinned webhook + parent connection and delegates to the connectivity engine `executeWebhook(kind: "production")` (vault secrets, SSRF/DNS pinning, retries, idempotency replay, recorded executions). Engine-extracted `outputSummary` IS the `writebackResponse` outputs map; registry-era `outputBindings` are ignored on this path. `REQUEST_TIMEOUT` → `WRITEBACK_TIMEOUT`; other non-succeeded → `WRITEBACK_REJECTED`.
+- Tenant threading: `utils/requestTenant.ts#resolveRequestTenant` (non-throwing, same fallback chain as connectivity `extractUser`, default "default") → `ExecutionContext.tenant` → `runWritebackStage` → `WritebackExecutionContext.tenant`. Wired in `routes/actions.ts` (3 execute contexts) + `routes/bulkActions.ts`.
+- Tests: 7 new connectivity-path tests in `tests/unit/actions/writebackExecutor-unit.test.ts` (27 total in file; 524 BE unit green). FE `actionBuilders.test.ts` webhook ctx switched to rid-based entries.
+
+## Phase 7 — OSS v2 / OSv2 / OMS v2 canonical ObjectSet engine
+
+- Contract source: `@osdk/foundry.ontologies@2.69.0` (api-gateway 1.1709.0). The dead B10 prototype's invented operators (`notIn`/`endsWith`) do NOT exist in v2 and are never exposed on the v2 surface.
+- Canonical engine in `src/services/oss/`: `objectSetDefinition.ts` (zod; 14 verified ObjectSet nodes + 27 SearchJsonQueryV2 ops + AggregationV2/GroupByV2 + limits), `objectSetCompiler.ts` (set algebra → typed per-objectType plans; same-type folds via and/or/not; cross-type fans out; `relativeDateRange` compiles to ABSOLUTE bounds at compile time), `objectSetExecutor.ts` (injected deps; cross-type deterministic merge; derived properties), `aggregationV2.ts` (accuracy gate: REQUIRE_ACCURATE + truncation → `AggregationAccuracyNotSupported`), `pageTokenV2.ts` (HMAC-signed, binds ontology+branch+fingerprint; secret `TELLUS_PAGE_TOKEN_SECRET`), `objectSetStore.ts` (saved = `ri.object-set.main.versioned-object-set.<uuid>` via Compass resources; temporary = Redis overlay store, TTL 1h, tenant+ontology scoped), `subscriptionRegistry.ts` (object_set.changed → per-subscription in-memory re-evaluation; `TELLUS_MAX_OBJECTSET_SUBSCRIPTIONS` default 100), `omsV2Mapper.ts`, `productionDeps.ts`, `v2Errors.ts`.
+- Object identity: migration `138_object_rids.sql` adds `object_instances.rid` (`ri.tellus.main.object.<uuid>` — Palantir object-rid prefix is not publicly documented, Tellus namespace by contract); `__rid` stamped in indexer/reindexService/editApplicator/writebackOverlay UPSERT; `__apiName` + `excludeRid` in `objectResponseFormatter.ts`.
+- v2 routes (thin adapters, mounted in server.ts): `routes/v2/objectSetsV2.ts` (loadObjects, loadMultipleObjectTypes, aggregate, createTemporary), `objectsV2.ts` (list/search/get), `linksV2.ts`, `actionsV2.ts` (apply/applyBatch + `options.mode=VALIDATE_ONLY` executor short-circuit after Stage 3 + `returnEdits`), `omsV2.ts` (objectTypes/linkTypes/actionTypes/interfaceTypes).
+- Security: all v2 reads pass through the ONE choke point (`injectSecurityFilter` in `productionDeps.search`); get-object stays fail-closed via `executeGetObject`.
+- Filters: Phase 6 extended the ONE internal language (`queryTranslator.ts`/`queryValidator.ts`/`constants.ts`) with containsAllTerms/containsAnyTerm/containsAllTermsInOrder(+PrefixLastTerm)/wildcard/regex/interval/geo-six. `nearestNeighbors` is an ObjectSet node, never a filter; text-embedding queries fail typed (`NearestNeighborsTextNotConfigured`).
+- OSDK generator emits additive `clientV2.ts` (object-set-based calls); v1 files unchanged.
+- Tests: `tests/unit/services/oss-*-unit.test.ts` (64 tests). Scoped unit suite 601 green; `npx tsc --noEmit` clean.
+
 ## Phase 6.5+ follow-on — outgoing work
 
 - FE side-effect binding mode serialiser (emits `side_effects: { webhooks, notifications }` shape that the BE already persists). Picker preserves the selection; the follow-on flips the side-effect gate off.
+- ~~FE webhook input-mapping authoring UI~~ — SHIPPED: `WebhookInputsSection` in `WebhookActionTypeTab.tsx` maps every declared webhook input to a `parameter` / `static` value source; `WebhookActionBuilderState.inputMappings` persists into `writeback_config.inputs`; static values coerced to the declared scalar kind at serialise time.
 - Native SMTP transport via nodemailer (one-file additive after `npm install nodemailer`).
 - OpenTelemetry spans around the actionExecutor stages 1-9 (Phase 6.3 ships the worker's `runOnce` span).
 - Operator UI for the side-effect outbox dead-letter queue + manual `requeueDeadSideEffectJob` button.

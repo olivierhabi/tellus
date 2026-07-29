@@ -13,11 +13,9 @@
 //   * `executionMode`    ∈ { "declarative", "function" }
 //   * `deletePolicy`     ∈ { "legacy_unchecked", "restrict" }
 //
-// `function` is represented in the type system so the contract is explicit,
-// but it is REJECTED at every enforcement boundary until function-rule
-// execution is implemented. Future `detach`/`cascade` delete policies are
-// intentionally NOT persisted yet — they land via a later schema migration
-// when their behaviour exists.
+// `function` executes an immutable published Function Registry binding.
+// Future `detach`/`cascade` delete policies are intentionally NOT persisted
+// yet — they land via a later schema migration when their behaviour exists.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -31,8 +29,7 @@
 export type ActionSemanticsVersion = 1 | 2;
 
 /**
- * How a rule executes. `function` is a placeholder in the type system and
- * is rejected at every boundary until function-rule execution exists.
+ * How a rule executes. `function` resolves a pinned published Function.
  */
 export type ActionExecutionMode = "declarative" | "function";
 
@@ -70,12 +67,14 @@ export interface ActionSemantics {
  * Version 2:
  *   { semanticsVersion: 2, executionMode: "declarative", deletePolicy: "restrict" }
  *
- * `executionMode: "function"` must be represented but is rejected until
- * function execution is implemented. Unknown future versions fail closed.
+ * `executionMode: "function"` requires a validated immutable functionConfig.
+ * Unknown future versions fail closed.
  */
 export const VALID_SEMANTICS_COMBINATIONS: ReadonlyArray<ActionSemantics> = [
   { semanticsVersion: 1, executionMode: "declarative", deletePolicy: "legacy_unchecked" },
+  { semanticsVersion: 1, executionMode: "function", deletePolicy: "legacy_unchecked" },
   { semanticsVersion: 2, executionMode: "declarative", deletePolicy: "restrict" },
+  { semanticsVersion: 2, executionMode: "function", deletePolicy: "restrict" },
 ];
 
 /** The currently-supported known semantics versions. */
@@ -134,7 +133,7 @@ export interface SemanticsValidationResult {
  * version 2 + `legacy_unchecked`) → `INCOMPATIBLE_ACTION_SEMANTICS`.
  * Unknown version (not in {1,2}) → `UNSUPPORTED_SEMANTICS_VERSION`.
  * Unknown mode/policy string   → `INVALID_EXECUTION_MODE` / `INVALID_DELETE_POLICY`.
- * `executionMode: "function"` → `INVALID_EXECUTION_MODE` (rejected until implemented).
+ * `executionMode: "function"` is valid with the version's delete policy.
  */
 export function validateActionSemantics(
   semantics: Partial<ActionSemantics>,
@@ -157,17 +156,6 @@ export function validateActionSemantics(
     };
   }
 
-  // Function execution is represented but rejected until implemented.
-  if (executionMode === "function") {
-    return {
-      valid: false,
-      error: {
-        code: "INVALID_EXECUTION_MODE",
-        message:
-          "Function execution mode is not yet supported. Use 'declarative'.",
-      },
-    };
-  }
   if (
     executionMode !== undefined &&
     executionMode !== "declarative" &&
@@ -326,8 +314,8 @@ export const behaviourMatrix = {
     return version === 2;
   },
 
-  /** Function execution: unsupported in all versions until implemented. */
+  /** Function execution is supported for immutable published bindings. */
   functionExecutionSupported(_version: ActionSemanticsVersion): boolean {
-    return false;
+    return true;
   },
 } as const;

@@ -19,6 +19,7 @@
 
 import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
+import { resolveFunctionSource } from "../services/functionsRegistry/artifactStore";
 import {
   createActionType,
   getActionType,
@@ -199,11 +200,117 @@ const KNOWN_CODES = new Set([
   "WRITEBACK_OUTPUT_SCHEMA_MISMATCH",
   "WRITEBACK_CONFIG_INVALID",
   "SIDE_EFFECT_CONFIGURATION_INVALID",
+  "FUNCTION_CONFIG_INVALID",
+  "FUNCTION_VERSION_NOT_FOUND",
 ]);
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+interface FunctionActionConfig {
+  functionRid: string;
+  repositoryRid: string;
+  apiName: string;
+  branch: string;
+  semver: string;
+  autoUpgrade?: boolean;
+}
+
+async function validateFunctionConfig(
+  raw: unknown,
+  parameters: Array<Record<string, unknown>>,
+): Promise<string[]> {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    return ["functionConfig is required for executionMode 'function'."];
+  }
+  const config = raw as Partial<FunctionActionConfig>;
+  const required: Array<keyof FunctionActionConfig> = [
+    "functionRid",
+    "repositoryRid",
+    "apiName",
+    "branch",
+    "semver",
+  ];
+  const errors: string[] = [];
+  for (const key of required) {
+    if (typeof config[key] !== "string" || !(config[key] as string).trim()) {
+      errors.push(`functionConfig.${key} is required.`);
+    }
+  }
+  if (errors.length > 0) return errors;
+
+  const found = await query(
+    `SELECT f.repository_rid, f.api_name, v.signature,
+            fv.state, fv.runtime, fv.manifest_json, fv.artifact_blob_id
+       FROM function_registry_function f
+       JOIN function_registry_function_version v
+         ON v.function_rid = f.rid
+        AND v.branch = $2
+        AND v.semver = $3
+       JOIN function_version fv ON fv.rid = v.release_version_rid
+      WHERE f.rid = $1`,
+    [config.functionRid, config.branch, config.semver],
+  );
+  if (!found.rowCount) {
+    return [
+      `Published Function '${config.functionRid}' version ${config.semver} on branch '${config.branch}' was not found.`,
+    ];
+  }
+  const row = found.rows[0];
+  if (row.repository_rid !== config.repositoryRid || row.api_name !== config.apiName) {
+    errors.push("functionConfig identity does not match the Function Registry record.");
+  }
+  if (row.state !== "AVAILABLE") {
+    errors.push(`Function version ${config.semver} is '${row.state}' and cannot back a new Action Type.`);
+  }
+  if (row.runtime !== "NODE_20") {
+    errors.push(`Function runtime '${row.runtime}' is not supported for Function-backed Action Types.`);
+  }
+  // Source resolution (Track 2 #8): inline historical manifests
+  // or the content-addressed artifact blob for new versions.
+  let source: string | null = null;
+  try {
+    source = await resolveFunctionSource(row, config.apiName as string);
+  } catch {
+    source = null;
+  }
+  if (typeof source !== "string" || source.length === 0) {
+    errors.push(`Published source for Function '${config.apiName}' is unavailable in version ${config.semver}.`);
+  }
+
+  const declared = new Map(
+    parameters.map((parameter) => [
+      String(parameter.apiName ?? ""),
+      {
+        type: String(parameter.type ?? ""),
+        required: parameter.required !== false,
+      },
+    ]),
+  );
+  const signatureParameters = Array.isArray(row.signature?.parameters)
+    ? row.signature.parameters
+    : [];
+  for (const signatureParameter of signatureParameters) {
+    if (!signatureParameter || typeof signatureParameter.name !== "string") continue;
+    if (
+      signatureParameter.name === "client" &&
+      typeof signatureParameter.type === "string" &&
+      /(?:^|\.)Client$/.test(signatureParameter.type.trim())
+    ) {
+      continue;
+    }
+    const actionParameter = declared.get(signatureParameter.name);
+    if (!actionParameter) {
+      errors.push(`Function parameter '${signatureParameter.name}' is missing from action parameters.`);
+      continue;
+    }
+    if (signatureParameter.optional !== true && !actionParameter.required) {
+      errors.push(`Function parameter '${signatureParameter.name}' must be required.`);
+    }
+  }
+  return errors;
+}
 
 /** Canonical action-type DB-row presenter used by every API read surface. */
 export function formatActionType(row: Record<string, any>): Record<string, unknown> {
@@ -225,6 +332,7 @@ export function formatActionType(row: Record<string, any>): Record<string, unkno
     submissionCriteria: row.submission_criteria ?? null,
     sideEffects: row.side_effects ?? null,
     writebackConfig: row.writeback_config ?? null,
+    functionConfig: row.function_config ?? null,
     maxAffectedObjects: row.max_affected_objects,
     isEnabled: row.is_enabled,
     status: row.is_enabled ? "ACTIVE" : "EXPERIMENTAL",
@@ -268,7 +376,7 @@ function actorOf(req: Request): string {
  * optimistic-concurrency token + resulting hash in the audit ledger.
  */
 function currentDefinitionHashFor(
-  row: { parameters?: unknown; rules?: unknown },
+  row: { parameters?: unknown; rules?: unknown; function_config?: unknown },
   semantics: { semanticsVersion: number; executionMode: string; deletePolicy: string },
 ): string {
   return hashActionDefinition({
@@ -277,6 +385,7 @@ function currentDefinitionHashFor(
     semanticsVersion: semantics.semanticsVersion,
     executionMode: semantics.executionMode,
     deletePolicy: semantics.deletePolicy,
+    functionConfig: row.function_config,
   });
 }
 
@@ -1052,12 +1161,23 @@ router.post(
       }
 
       // rules
-      const rules = body.rules;
-      if (!rules || !Array.isArray(rules) || rules.length === 0) {
+      const isFunctionAction = body.executionMode === "function";
+      const rules = body.rules ?? [];
+      if (!Array.isArray(rules) || (!isFunctionAction && rules.length === 0)) {
         sendError(
           res,
           "VALIDATION_FAILED",
-          "rules must be a non-empty array (an action with no rules is meaningless)."
+          isFunctionAction
+            ? "rules must be an array."
+            : "rules must be a non-empty array (an action with no rules is meaningless)."
+        );
+        return;
+      }
+      if (isFunctionAction && rules.length > 0) {
+        sendError(
+          res,
+          "FUNCTION_CONFIG_INVALID",
+          "Function-backed Action Types cannot also declare declarative rules.",
         );
         return;
       }
@@ -1067,11 +1187,30 @@ router.post(
         params.map((p: Record<string, unknown>) => p.apiName as string)
       );
 
-      const ruleErrors = await validateRules(rules, ontologyId, paramNames);
+      const ruleErrors = isFunctionAction
+        ? []
+        : await validateRules(rules, ontologyId, paramNames);
       if (ruleErrors.length > 0) {
         sendError(res, "VALIDATION_FAILED", ruleErrors.join(" "), {
           validationErrors: ruleErrors,
         });
+        return;
+      }
+
+      if (isFunctionAction) {
+        const functionErrors = await validateFunctionConfig(body.functionConfig, params);
+        if (functionErrors.length > 0) {
+          sendError(res, "FUNCTION_CONFIG_INVALID", functionErrors.join(" "), {
+            validationErrors: functionErrors,
+          });
+          return;
+        }
+      } else if (body.functionConfig != null) {
+        sendError(
+          res,
+          "FUNCTION_CONFIG_INVALID",
+          "functionConfig is only valid when executionMode is 'function'.",
+        );
         return;
       }
 
@@ -1163,6 +1302,7 @@ router.post(
         submissionCriteria: body.submissionCriteria ?? null,
         sideEffects: body.sideEffects ?? null,
         writebackConfig: body.writebackConfig ?? null,
+        functionConfig: body.functionConfig ?? null,
         maxAffectedObjects: maxAffected,
         isEnabled: body.isEnabled ?? true,
         createdBy: actorOf(req),

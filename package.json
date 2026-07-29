@@ -23,6 +23,7 @@
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:unit:watch": "vitest --config vitest.unit.config.ts",
     "test:unit:coverage": "vitest run --config vitest.unit.config.ts --coverage",
+    "test:ai-contract": "vitest run --config vitest.codeRepos.config.ts tests/integration/code-repos/functions-publish/aiEditContract-integration.test.ts",
     "test:integration": "vitest run",
     "test:integration:legacy": "bash tests/integration/run-all.sh",
     "test:daily": "bash tests/daily/run-all.sh",
@@ -177,5 +178,17 @@
         "GHSA-298w-vvm4-ww55"
       ]
     }
-  }
+  },
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/olivierhabi/tellus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/olivierhabi/tellus/issues"
+  },
+  "homepage": "https://github.com/olivierhabi/tellus#readme"
 }

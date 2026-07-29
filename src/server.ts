@@ -4,6 +4,7 @@ import "dotenv/config";
 // module graph on first require.
 import "./services/otelBootstrap";
 import { assertQuiverTestAuthSafe } from "./routes/quiver/testAuth";
+import { assertNoTestAuthInProduction, TEST_AUTH_FLAGS } from "./utils/testAuthGate";
 import { createCompressionMiddleware } from "./middleware/compression";
 import crypto from "crypto";
 import http from "http";
@@ -193,24 +194,10 @@ for (const key of REQUIRED_ENV_VARS) {
 // authenticated identity. Fail loud at deploy time, not latent at runtime.
 try {
   assertQuiverTestAuthSafe();
-  if (
-    process.env.NODE_ENV === "production" &&
-    process.env.CODE_REPOS_TEST_AUTH === "1"
-  ) {
-    throw new Error(
-      "CODE_REPOS_TEST_AUTH=1 is set in production — the X-Tellus-Test-Principal " +
-        "bypass must never be enabled in production. Unset it before deploying.",
-    );
-  }
-  if (
-    process.env.NODE_ENV === "production" &&
-    process.env.TELLUS_TEST_HOOKS === "1"
-  ) {
-    throw new Error(
-      "TELLUS_TEST_HOOKS=1 is set in production — test hooks must never be " +
-        "enabled in production. Unset it before deploying.",
-    );
-  }
+  // Covers CODE_REPOS_TEST_AUTH, CODE_ASSISTANT_TEST_AUTH,
+  // QUIVER_ALLOW_TEST_AUTH and TELLUS_TEST_HOOKS (Phase 5: the
+  // code-assistant bypass previously had NO boot guard).
+  assertNoTestAuthInProduction(TEST_AUTH_FLAGS);
 } catch (err) {
   console.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);

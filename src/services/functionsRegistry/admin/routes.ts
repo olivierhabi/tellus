@@ -160,14 +160,15 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
                 r.display_name AS repository_name,
                 latest.semver,
                 latest.branch,
+                latest.function_kind,
                 latest.created_at AS published_at,
                 latest.created_at::text AS published_at_cursor,
                 COALESCE(parent_project.id, direct_project.id)::text AS project_id,
                 COALESCE(parent_project.name, direct_project.name) AS project_name
            FROM function_registry_function f
            JOIN code_repository r ON r.rid = f.repository_rid
-           JOIN LATERAL (
-             SELECT v.semver, v.branch, v.created_at
+            JOIN LATERAL (
+              SELECT v.semver, v.branch, v.created_at, v.function_kind
                FROM function_registry_function_version v
               WHERE v.function_rid = f.rid
               ORDER BY v.created_at DESC, v.semver DESC, v.branch ASC
@@ -230,6 +231,10 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
         sourcePath: row.source_path,
         version: row.semver,
         branch: row.branch,
+        // Declared kind of the LATEST registry version (NULL = never
+        // analyzed — the FE treats NULL and 'unknown' as not
+        // edit-capable).
+        functionKind: row.function_kind ?? null,
         owningProject: row.project_id && row.project_name
           ? { id: row.project_id, displayName: row.project_name }
           : null,
@@ -256,7 +261,7 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
     const result = await deps.pool.query(
       `SELECT f.rid, f.repository_rid, f.api_name, f.display_name, f.source_path,
               v.semver, v.branch, v.release_version_rid, v.commit_sha,
-              v.artifact_sha256, v.signature, v.created_at
+              v.artifact_sha256, v.signature, v.function_kind, v.created_at
          FROM function_registry_function f
          JOIN function_registry_function_version v ON v.function_rid = f.rid
         WHERE f.rid = $1
@@ -285,6 +290,7 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
       artifactSha256: row.artifact_sha256,
       parameters: row.signature?.parameters ?? [],
       output: row.signature?.output ?? null,
+      functionKind: row.function_kind ?? null,
       publishedAt: row.created_at instanceof Date ? row.created_at.toISOString() : new Date(row.created_at).toISOString(),
     });
   }));

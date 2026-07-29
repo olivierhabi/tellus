@@ -44,6 +44,10 @@ export default defineConfig({
       // Keycloak realm. requireCodeReposAuth() ignores this header unless
       // CODE_REPOS_TEST_AUTH=1 is set, so production paths are unaffected.
       CODE_REPOS_TEST_AUTH: "1",
+      // Real-LLM generations (reasoning models especially) can exceed the
+      // client's default 120s ceiling. Only the AI contract suite uses
+      // this client; 10 min matches the suite's per-attempt budget.
+      AI_ENGINE_TIMEOUT_MS: process.env.AI_ENGINE_TIMEOUT_MS ?? "600000",
     },
   },
 });

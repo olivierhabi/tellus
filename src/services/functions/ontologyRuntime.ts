@@ -276,10 +276,10 @@ function collapseEdits(raw: ReadonlyArray<OntologyEdit>): OntologyEdit[] {
   const objects = new Map<string, OntologyEdit>();
   const order: string[] = [];
   const links = new Map<string, OntologyEdit>();
-  const okey = (t: string, pk: string) => `${t} ${pk}`;
+  const okey = (t: string, pk: string) => `${t}\u0000${pk}`;
   for (const e of raw) {
     if (e.op === "link" || e.op === "unlink") {
-      links.set(`${e.linkType} ${e.sourcePrimaryKey} ${e.targetPrimaryKey}`, e); // last wins
+      links.set(`${e.linkType}\u0000${e.sourcePrimaryKey}\u0000${e.targetPrimaryKey}`, e); // last wins
       continue;
     }
     const k = okey(e.objectType, e.primaryKey);
@@ -464,6 +464,9 @@ export interface ApplyEditsArgs {
   readonly ontologyId: string;
   readonly edits: readonly OntologyEdit[];
   readonly actorUserId?: string | null;
+  /** Function-backed Actions use this to append their audit row in the same
+   * transaction as the ontology mutations. Preview/invoke callers omit it. */
+  readonly preCommitHook?: (client: PoolClient) => Promise<void>;
 }
 export interface ApplyEditsResult {
   readonly created: number;
@@ -474,7 +477,12 @@ export interface ApplyEditsResult {
 }
 
 export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<ApplyEditsResult> {
-  if (args.edits.length === 0) return { created: 0, updated: 0, deleted: 0, linked: 0, unlinked: 0 };
+  // Preview callers can return immediately for an empty batch. Action callers
+  // still need a transaction so their pre-commit audit hook runs for a
+  // successful no-op Function invocation.
+  if (args.edits.length === 0 && !args.preCommitHook) {
+    return { created: 0, updated: 0, deleted: 0, linked: 0, unlinked: 0 };
+  }
   const client: PoolClient = await pool.connect();
   let created = 0, updated = 0, deleted = 0, linked = 0, unlinked = 0;
   try {
@@ -552,6 +560,7 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
         if (e.op === "link") linked += 1; else unlinked += 1;
       }
     }
+    if (args.preCommitHook) await args.preCommitHook(client);
     await client.query("COMMIT");
     return { created, updated, deleted, linked, unlinked };
   } catch (err) {

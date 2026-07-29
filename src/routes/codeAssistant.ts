@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import { Router, type Request, type Response, type NextFunction } from "express";
+import { isTestAuthBypassEnabled } from "../utils/testAuthGate";
 import { z } from "zod";
 import { AppError } from "../utils/foundryAppError";
 import {
@@ -65,10 +66,13 @@ let _upstream: AuthMiddleware | null | undefined;
  */
 export function requireCodeAssistantAuth(): AuthMiddleware {
   return (req: Request, res: Response, next: NextFunction): void => {
+    // Fail-closed on UNSET NODE_ENV (pinned by
+    // codeAssistant-unit.test.ts) — stricter than the code-repos
+    // surface, preserved deliberately.
     if (
-      process.env.CODE_ASSISTANT_TEST_AUTH === "1" &&
-      process.env.NODE_ENV &&
-      process.env.NODE_ENV !== "production"
+      isTestAuthBypassEnabled("CODE_ASSISTANT_TEST_AUTH", {
+        allowUnsetNodeEnv: false,
+      })
     ) {
       const header = req.header("X-Tellus-Test-Principal");
       const userId =

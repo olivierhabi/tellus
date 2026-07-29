@@ -22,7 +22,7 @@ import {
   type OntologySnapshot,
   type OntologyEdit,
 } from "./functions/ontologyRuntime";
-import { runSandboxedWithSdk, awaitSandboxPromise, type SandboxResult } from "./functionRuntime";
+import { runSandboxedWithSdk, awaitSandboxPromise, type SandboxResult, type SignatureParameter } from "./functionRuntime";
 
 interface WorkerRequest {
   /** Correlates the response with the pending task on the main thread. */
@@ -30,6 +30,8 @@ interface WorkerRequest {
   readonly transpiled: string;
   readonly input: unknown;
   readonly snapshot: OntologySnapshot;
+  /** Pinned version's published signature (Phase 4 primary binding). */
+  readonly signatureParams?: SignatureParameter[];
 }
 
 interface WorkerResponse {
@@ -47,7 +49,7 @@ if (!parentPort) {
 const port = parentPort;
 
 port.on("message", async (msg: WorkerRequest) => {
-  const { id, transpiled, input, snapshot } = msg;
+  const { id, transpiled, input, snapshot, signatureParams } = msg;
   try {
     const { sdk, getEdits, getRequestedTypes } = buildOntologySdk(snapshot);
     let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
@@ -55,7 +57,7 @@ port.on("message", async (msg: WorkerRequest) => {
       Edits: sdk.Edits,
       createEditBatch: sdk.createEditBatch,
       __ontologyTypes: sdk.objectTypeDescriptors,
-    });
+    }, signatureParams);
     // Async function: the sandbox returned a Promise (vm can't await it).
     // Resolve it here under the timeout BEFORE posting — Promises can't cross
     // postMessage. The pool's wall budget is the backstop; the per-Promise

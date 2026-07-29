@@ -704,3 +704,90 @@ jobs:
           name: test-all-console-log
           path: /tmp/test-all.log
           retention-days: 7
+
+  # ===========================================================================
+  # Job 6: AI edit-function contract (Phase 3 — REAL production models)
+  #
+  # Runs the real-LLM contract test: for every model in the production
+  # catalog, a real generation is published through the versioned
+  # release/registry path and must store function_kind = 'edit'.
+  #
+  # INERT BY DEFAULT. Requires a repo admin to configure:
+  #   - variable TELOS_AIE_AGENT_URL      — a reachable telos-AIE-agent
+  #     engine holding the production LLM credentials (credentials never
+  #     live in this repo or in CI).
+  #   - variable AI_CONTRACT_TEST_ENABLED = "1" — explicit opt-in gate.
+  #   - secret  TELOS_AIE_AGENT_TOKEN     — only if the engine enforces
+  #     the shared-secret header (optional).
+  # ===========================================================================
+  ai-contract:
+    name: AI Contract (real models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ vars.AI_CONTRACT_TEST_ENABLED == '1' }}
+
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      AI_CONTRACT_TEST: "1"
+      TELOS_AIE_AGENT_URL: ${{ vars.TELOS_AIE_AGENT_URL }}
+      TELOS_AIE_AGENT_TOKEN: ${{ secrets.TELOS_AIE_AGENT_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify engine catalog is reachable
+        run: |
+          if [ -z "$TELOS_AIE_AGENT_URL" ]; then
+            echo "TELOS_AIE_AGENT_URL is not configured — set the repo variable or disable AI_CONTRACT_TEST_ENABLED."
+            exit 1
+          fi
+          curl -sf --max-time 15 "$TELOS_AIE_AGENT_URL/api/models"
+
+      - name: Run AI contract test (real production models)
+        run: pnpm run test:ai-contract
+
+  # Secret scanning — fails the build when a NEW commit introduces a
+  # credential. Scans PR/push commits (gitleaks default), not the full
+  # historical tree; the known historical exposure (litellm_config.yaml,
+  # commit dd0ea16, rotated) is governed by docs/security/
+  # litellm-credential-rotation.md instead of a perpetual CI failure.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
