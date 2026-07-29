@@ -1,0 +1,15 @@
+OSDK resume after authorization revocation
+commit=cadf88186ec67ab67fb7d6314bc111f2c5fb6014
+2026-07-28T20:41:05Z
+{"result":"PASS","mode":"revocation","frameType":"objectSetChanged","updateStates":["ADDED_OR_UPDATED"],"cursorRedacted":true}
+RERUN with confirmed realm-role revocation (prior shell wrapper did not revoke)
+2026-07-28T20:41:42Z
+markingRolePresent=false
+{"result":"PASS","mode":"revocation","frameType":"objectSetChanged","updateStates":["REMOVED"],"cursorRedacted":true}
+Regenerated OSDK authorization-revocation resume
+commit=f4080c7fbddc8c76eb4adfd26ffcfed2fd00867a
+2026-07-28T20:48:05Z
+{"result":"PASS","mode":"revocation","frameType":"refreshObjectSet","updateStates":[],"cursorRedacted":true}
+Regenerated OSDK revocation resume plus full refresh visibility
+2026-07-28T20:48:56Z
+{"result":"PASS","mode":"revocation","frameType":"objectSetChanged","updateStates":["REMOVED"],"visibleAfterRefresh":0,"cursorRedacted":true}

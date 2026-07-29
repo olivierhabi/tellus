@@ -1,0 +1,20 @@
+Atomic rollback acceptance
+2026-07-28T20:21:58Z
+{"acknowledged":true}alias             index                               filter routing.index routing.search is_write_index
+ontology-employee ontology-employee-rollback-ms53q2qh -      -             -              true
+{"count":68,"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}{"took":94,"timed_out":false,"_shards":{"total":1,"successful":1,"skipped":0,"failed":0},"hits":{"total":{"value":68,"relation":"eq"},"max_score":null,"hits":[]},"aggregations":{"distinct_rid":{"value":68},"missing_rid":{"doc_count":0},"distinct_pk":{"value":68}}}Post-rollback API compatibility
+2026-07-28T20:23:46Z
+node=3400 route=v1-list status=401 rows=0
+node=3400 route=v2-load status=401 rows=0 missingRid=
+node=3401 route=v1-list status=401 rows=0
+node=3401 route=v2-load status=401 rows=0 missingRid=
+Post-rollback API compatibility rerun with isolated JWKS
+2026-07-28T20:24:37Z
+node=3400 route=v1-list status=200 rows=68
+node=3400 route=v2-load status=200 rows=3 missingRid=0
+node=3401 route=v1-list status=200 rows=68
+node=3401 route=v2-load status=200 rows=3 missingRid=0
+node=3400 route=v1-action-validate status=200 valid=true
+node=3400 route=v1-link-metadata status=200 count=1
+node=3401 route=v1-action-validate status=200 valid=true
+node=3401 route=v1-link-metadata status=200 count=1
