@@ -1,1 +1,0 @@
-{"errorCode":"INSUFFICIENT_ROLE","errorName":"AuthorizationError","message":"Insufficient permissions. Requires one of: ontology-admin, ontology-editor","statusCode":403,"requestId":"5eac707d-7b9e-4b60-aaa5-412eedc4b6c3","details":{"requiredRole":["ontology-admin","ontology-editor"]}}

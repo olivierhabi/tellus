@@ -1,3 +1,0 @@
-ERROR:  column "api_name" of relation "ontology" does not exist
-LINE 1: INSERT INTO ontology(ontology_id,api_name,display_name) VALU...
-                                         ^

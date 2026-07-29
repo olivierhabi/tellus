@@ -1,6 +1,0 @@
-
-> ontology-engine@0.3.0 migrate:backfill-object-rids /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-rc
-> tsx src/scripts/backfillObjectRids.ts
-
-New PostgreSQL client connected to pool
-{"event":"object_rid_backfill.complete","total":0,"elapsedMs":67}

@@ -1,9 +1,0 @@
-
-> ontology-engine@0.3.0 migrate:backfill-object-rids /Users/olivierhabimana/Desktop/projects/tellus-oss-v2-rc
-> tsx src/scripts/backfillObjectRids.ts
-
-New PostgreSQL client connected to pool
-{"event":"object_rid_backfill.progress","batch":1,"updated":1000,"total":1000,"elapsedMs":126}
-(node:63118) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 error listeners added to [Client]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
-(Use `node --trace-warnings ...` to show where the warning was created)
-{"event":"object_rid_backfill.complete","total":10000,"elapsedMs":605}

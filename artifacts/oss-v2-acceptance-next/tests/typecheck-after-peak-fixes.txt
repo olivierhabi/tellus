@@ -1,3 +1,0 @@
-command: npx tsc --noEmit
-exit: 0
-commit: 3da6a67bd27d1a7723c7dc697926a0f4de94c354

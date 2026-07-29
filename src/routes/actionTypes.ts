@@ -771,6 +771,7 @@ async function validateWritebackConfig(
   ontologyId: string,
   paramNames: Set<string>,
   tenant: string,
+  requireComplete = true,
 ): Promise<string[]> {
   const errors: string[] = [];
   if (wb === undefined || wb === null) return errors; // null is fine (no writeback)
@@ -858,6 +859,7 @@ async function validateWritebackConfig(
           wbRow.webhookVersion,
           (wbRow.inputs ?? {}) as Record<string, unknown>,
           tenant,
+          requireComplete,
         )),
       );
     } else {
@@ -896,6 +898,7 @@ async function validateConnectivityWebhookBinding(
   webhookVersion: number,
   inputs: Record<string, unknown>,
   tenant: string,
+  requireComplete = true,
 ): Promise<string[]> {
   const errors: string[] = [];
   let webhook;
@@ -923,6 +926,7 @@ async function validateConnectivityWebhookBinding(
     }
   }
   for (const input of declared) {
+    if (!requireComplete) continue;
     if (input.required && !(input.id in inputs)) {
       errors.push(
         `writeback_config.inputs is missing a mapping for required input '${input.id}' declared by webhook '${webhook.displayName}' v${webhookVersion}.`,
@@ -1162,8 +1166,12 @@ router.post(
 
       // rules
       const isFunctionAction = body.executionMode === "function";
+      const isDraft = body.isEnabled === false;
       const rules = body.rules ?? [];
-      if (!Array.isArray(rules) || (!isFunctionAction && rules.length === 0)) {
+      if (
+        !Array.isArray(rules) ||
+        (!isFunctionAction && !isDraft && rules.length === 0)
+      ) {
         sendError(
           res,
           "VALIDATION_FAILED",
@@ -1187,7 +1195,7 @@ router.post(
         params.map((p: Record<string, unknown>) => p.apiName as string)
       );
 
-      const ruleErrors = isFunctionAction
+      const ruleErrors = isFunctionAction || rules.length === 0
         ? []
         : await validateRules(rules, ontologyId, paramNames);
       if (ruleErrors.length > 0) {
@@ -1217,7 +1225,13 @@ router.post(
       // Phase 4 — writeback_config validation (one-writeback-per-action
       // invariant is structural in DB migration 130; this validates the
       // shape, the webhook reference, and the input-mapping's ValueSources).
-        const wbErrors = await validateWritebackConfig(body.writebackConfig, ontologyId, paramNames, resolveRequestTenant(req));
+      const wbErrors = await validateWritebackConfig(
+        body.writebackConfig,
+        ontologyId,
+        paramNames,
+        resolveRequestTenant(req),
+        !isDraft,
+      );
       if (wbErrors.length > 0) {
         sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
           validationErrors: wbErrors,
@@ -1580,6 +1594,12 @@ const updateActionTypeHandler = async (
       const effectiveRules: unknown[] = body.rules !== undefined
         ? body.rules
         : (existing.rules as unknown[]);
+      const effectiveWriteback =
+        body.writebackConfig !== undefined
+          ? body.writebackConfig
+          : existing.writeback_config;
+      const resultingEnabled =
+        body.isEnabled !== undefined ? body.isEnabled : existing.is_enabled;
 
       // Validate parameters if provided
       if (body.parameters !== undefined) {
@@ -1597,10 +1617,14 @@ const updateActionTypeHandler = async (
       }
 
       // Validate rules if provided, or re-validate existing rules against new params
-      if (body.rules !== undefined || body.parameters !== undefined) {
+      if (
+        body.rules !== undefined ||
+        body.parameters !== undefined ||
+        body.isEnabled === true
+      ) {
         const rulesToValidate = effectiveRules;
         if (!Array.isArray(rulesToValidate) || rulesToValidate.length === 0) {
-          if (body.rules !== undefined) {
+          if (resultingEnabled) {
             sendError(
               res,
               "VALIDATION_FAILED",
@@ -1629,13 +1653,19 @@ const updateActionTypeHandler = async (
       // updated, the new ones; otherwise the existing ones on disk so the
       // value-source resolver can verify the new writeback_config's
       // input mappings reference still-existing parameters.
-      if (body.writebackConfig !== undefined) {
+      if (body.writebackConfig !== undefined || body.isEnabled === true) {
         const paramNames = new Set<string>(
           (effectiveParams as Array<Record<string, unknown>>).map(
             (p) => p.apiName as string
           )
         );
-      const wbErrors = await validateWritebackConfig(body.writebackConfig, ontologyId, paramNames, resolveRequestTenant(req));
+        const wbErrors = await validateWritebackConfig(
+          effectiveWriteback,
+          ontologyId,
+          paramNames,
+          resolveRequestTenant(req),
+          resultingEnabled,
+        );
         if (wbErrors.length > 0) {
           sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
             validationErrors: wbErrors,

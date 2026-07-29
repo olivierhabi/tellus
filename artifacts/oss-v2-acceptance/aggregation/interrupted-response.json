@@ -1,1 +1,0 @@
-{"errorCode":"INTERNAL","errorName":"AggregationBackendUnavailable","errorInstanceId":"1bcb40a3-2246-45eb-8eda-260d2be1556b","parameters":{"retryable":true,"attempts":5,"cause":"ObjectSetExecutionError","reason":"OpenSearch did not return an exact aggregation page after retries."}}

@@ -1,4 +1,0 @@
-
-> tellus-osdk-rc-consumer@1.0.0 build
-> tsc --noEmit
-

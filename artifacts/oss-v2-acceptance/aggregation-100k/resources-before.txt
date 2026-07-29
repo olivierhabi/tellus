@@ -1,3 +1,0 @@
-CONTAINER ID   NAME                          CPU %     MEM USAGE / LIMIT   MEM %     NET I/O         BLOCK I/O         PIDS
-e63d44ecfd69   tellus-oss-v2-rc-postgres     0.38%     43.17MiB / 1GiB     4.22%     702kB / 195kB   10.2MB / 98.6MB   6
-89a777e30f11   tellus-oss-v2-rc-opensearch   1.43%     1.208GiB / 2GiB     60.41%    6.32kB / 57kB   123MB / 2.9MB     92
