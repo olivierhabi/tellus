@@ -71,19 +71,26 @@ globalThis.fetch = (async (
   return _origFetch(input, init);
 }) as typeof globalThis.fetch;
 
-// Probe whether Keycloak is reachable. Tests that do NOT need auth (pure
-// unit tests) may run in environments where Keycloak is not available;
-// in that case we leave the default token unset and let auth-requiring
-// tests fail with a clear 401 signal.
+// Probe whether Keycloak is reachable. The BE validates JWTs offline against
+// Keycloak JWKS, so "realm certs endpoint responds 200" is a sufficient
+// readiness signal. A single 2s probe raced the globalSetup boot on chilly
+// boxes (the "Keycloak not reachable → 401" storm); poll with a bounded
+// deadline instead so setupFiles waits for Keycloak to come up.
 async function keycloakReachable(): Promise<boolean> {
   const kcUrl = process.env.KEYCLOAK_URL || "http://localhost:8086";
-  try {
-    const r = await fetch(`${kcUrl}/realms/${process.env.KEYCLOAK_REALM || "tellus"}/protocol/openid-connect/certs`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    return r.ok;
-  } catch {
-    return false;
+  const realm = process.env.KEYCLOAK_REALM || "tellus";
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      const r = await fetch(`${kcUrl}/realms/${realm}/protocol/openid-connect/certs`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (r.ok) return true;
+    } catch {
+      /* not ready yet */
+    }
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 1000));
   }
 }
 

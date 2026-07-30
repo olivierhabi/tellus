@@ -27,6 +27,7 @@ import {
 } from "./actionPlanner";
 import { invalidObjectReferenceError, type ActionError } from "./actionErrors";
 import { behaviourMatrix, type ActionSemanticsVersion } from "./actionSemantics";
+import { getByApiName as getLinkTypeByApiName, resolveObjectTypeApiName } from "../models/linkType";
 
 interface ValueSource {
   source: "parameter" | "static" | "currentTimestamp" | "currentUser";
@@ -215,14 +216,33 @@ export async function buildPlannedStepsFromRules(
         errors.push(invalidObjectReferenceError(`rules[${i}]`, `${rule.type} could not resolve source/target object reference.`));
         continue;
       }
-      // Build minimal identities (objectType is resolved by the compiler at
-      // apply time from the link type; for planning we use the raw PK + a
-      // placeholder objectType derived from the linkType string if present).
+      // Build minimal identities. The objectType is resolved from the link
+      // type NOW (not deferred to the compiler): the v2 final-state validator
+      // builds the edge key as `link|srcOt|srcPk|tgtOt|tgtPk` and checks the
+      // source/target against the final object-state set, whose keys are
+      // `ot|pk`. An empty objectType (the previous placeholder) never matches,
+      // flagging EVERY concrete addLink as a dangling relationship. Resolve
+      // the link type's source/target object-type apiNames so the edge key is
+      // faithful and the dangling invariant can succeed. If the link type is
+      // unknown here, leave the OT empty — the compiler surfaces
+      // `link-type-not-found` at compile time.
       const linkApiName = rule.linkType ?? rule.objectType ?? "";
+      let srcOt = "";
+      let tgtOt = "";
+      try {
+        const lt = await getLinkTypeByApiName(ctx.ontologyId, linkApiName);
+        if (lt) {
+          srcOt = await resolveObjectTypeApiName(lt.source_object_type);
+          tgtOt = await resolveObjectTypeApiName(lt.target_object_type);
+        }
+      } catch {
+        /* link-type resolution is best-effort at plan time; the compiler
+           is the authoritative resolver and will error on a bad linkType. */
+      }
       relationshipDeltas.push({
         linkTypeApiName: linkApiName,
-        source: { ontologyId: ctx.ontologyId, branchId: ctx.branchId, objectType: "", primaryKey: srcRaw as PrimaryKeyValue },
-        target: { ontologyId: ctx.ontologyId, branchId: ctx.branchId, objectType: "", primaryKey: tgtRaw as PrimaryKeyValue },
+        source: { ontologyId: ctx.ontologyId, branchId: ctx.branchId, objectType: srcOt, primaryKey: srcRaw as PrimaryKeyValue },
+        target: { ontologyId: ctx.ontologyId, branchId: ctx.branchId, objectType: tgtOt, primaryKey: tgtRaw as PrimaryKeyValue },
         op: rule.type === "addLink" ? "add" : "remove",
         ruleIndex: ruleIdx,
       });
