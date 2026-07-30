@@ -394,6 +394,11 @@ export async function setup(): Promise<void> {
       // (connectivity egress) to reach the controlled service on loopback.
       // Mirrors the existing actionWebhooks unit-test opt-in. Test-only.
       CONNECTIVITY_EGRESS_ALLOW_RESERVED: "localhost,127.0.0.1/8,::1",
+      // The request-timeout middleware defaults to 5000ms; the first action
+      // apply after a cold seed (fresh OpenSearch indices) can exceed that on
+      // a chilly CI box and falsely 504. Give the integration server a
+      // generous action budget (test-only; production keeps the 5s default).
+      REQUEST_TIMEOUT_MS: "30000",
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
