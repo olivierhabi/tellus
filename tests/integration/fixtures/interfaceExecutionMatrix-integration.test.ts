@@ -58,7 +58,18 @@ async function apply(actionType: string, parameters: Record<string, unknown>, id
 }
 
 async function readObject(objectType: string, pk: string): Promise<{ status: number; body: any }> {
-  return api("GET", `${ONT}/objectTypes/${objectType}/objects/${encodeURIComponent(pk)}/view`);
+  // The object view reads from OpenSearch, which is eventually consistent
+  // (index lag) after a create and can transiently 503 under shared-server
+  // load. The object IS persisted (the apply's affectedObjects confirmed the
+  // create); poll the read until it is consistent — a bounded wait on the
+  // known condition, not a fixed sleep or a hidden retry of the assertion.
+  const deadline = Date.now() + 15_000;
+  let res = await api("GET", `${ONT}/objectTypes/${objectType}/objects/${encodeURIComponent(pk)}/view`);
+  while (res.status !== 200 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 400));
+    res = await api("GET", `${ONT}/objectTypes/${objectType}/objects/${encodeURIComponent(pk)}/view`);
+  }
+  return res;
 }
 
 beforeAll(async () => {

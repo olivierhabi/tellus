@@ -107,18 +107,24 @@ async function jobsForExecution(execId: string): Promise<{ total: number; succee
 }
 
 describe("side-effect outbox — failure isolation + durability + no double delivery", () => {
+  // The first execution's failing side-effect job retries with backoff for the
+  // whole suite; tracked here so it can be removed once it is no longer needed
+  // (after the retry test), preventing its retry hammer from fatiguing the
+  // controlled service for the later crash-recovery test (test isolation).
+  let firstExecId: string | null = null;
+
   it("applies the action: the ontology edit commits AND every side effect is enqueued (3 durable jobs)", async () => {
     await controlledReset();
     const idem = `idem-sf-${Date.now()}`;
     const res = await apply("sf-obj-1", idem);
     expect(res.status).toBe(200);
     expect(affectedCreates(res.body)).toBe(1);
-    const execId = res.body.executionId as string;
+    firstExecId = res.body.executionId as string;
 
     // §12.3 / crash-recovery: the jobs are durable pending/running rows in
     // the SAME tx as the ontology commit — independent of the request. At
     // least 3 jobs, one per configured side effect.
-    const jobs = await jobsForExecution(execId);
+    const jobs = await jobsForExecution(firstExecId);
     expect(jobs.total).toBe(3);
   });
 
@@ -156,9 +162,26 @@ describe("side-effect outbox — failure isolation + durability + no double deli
     // per success job), never a third — successfully delivered jobs are not
     // delivered twice.
     expect(await controlledCount("/sideeffect/success")).toBe(2);
+    // Test isolation: the retry behaviour is now proven. Remove the first
+    // execution's jobs so the failing job stops retry-hammering the
+    // controlled service for the remainder of the suite (its retry hammer
+    // fatigues the shared service for the later crash-recovery test).
+    if (firstExecId) {
+      await query("DELETE FROM action_side_effect_job WHERE execution_id = $1", [firstExecId]);
+    }
   }, 30_000);
 
   it("crash-recovery (commit-before-dispatch): jobs persist as durable rows and are delivered by the worker post-commit", async () => {
+    // Deterministic outbox isolation: the durable action_side_effect_job
+    // table persists across tests (the seed wipes object_instances, NOT the
+    // outbox). The earlier tests' failing side-effect job retries with
+    // backoff for the whole suite, congesting the worker + the controlled
+    // service. Drain those leftover pending/retrying jobs HERE (before this
+    // test's own apply) so this test's success deliveries are not rejected by
+    // the cross-test retry storm. This test then applies its OWN execution
+    // and proves its OWN jobs are durable + delivered — the contract under
+    // test is unchanged.
+    await query("DELETE FROM action_side_effect_job WHERE status IN ('pending','retrying','running')");
     await controlledReset();
     const idem = `idem-sf2-${Date.now()}`;
     const res = await apply("sf-obj-2", idem);
