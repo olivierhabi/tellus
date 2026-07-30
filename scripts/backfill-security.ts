@@ -1,87 +1,28 @@
 #!/usr/bin/env tsx
 // ---------------------------------------------------------------------------
 // backfill-security.ts — stamp `_security.markings: ['PUBLIC']` on every
-// document that predates the Phase A4 (F-03) remediation.
+// document that predates the Phase A4 (F-03) remediation. (Gap M: made
+// OpenSearch-resilient — bounded retry + DEFER on unavailable, no FATAL on
+// a transient outage.)
 // ---------------------------------------------------------------------------
-//
-// Purpose: after the public-leak branch was removed from
-// `buildSecurityFilter` (middleware/securityContext.ts), documents without
-// `_security.markings` become invisible to marking-constrained users. This
-// script is the one-time migration that stamps the default `['PUBLIC']`
-// classification on every existing document so the legacy data remains
-// visible under the stricter filter.
-//
-// Idempotent: re-running the script is a no-op for docs that already have
-// `_security.markings`. The `ctx._security` existence check inside the
-// painless script ensures we never overwrite an existing classification.
 //
 // Usage:
 //   tsx scripts/backfill-security.ts            # backfill all ontology-* indices
 //   tsx scripts/backfill-security.ts <index>    # backfill a single index
 //
-// Exits 0 on success, 1 on any failure. Emits progress to stderr and the
-// list of modified indices + doc counts to stdout (for chaining into a
-// migration ledger update).
+// Exit codes:
+//   0 — completed, OR fully DEFERRED because OpenSearch was unavailable
+//       (idempotent — the next run retries; no data was lost or written).
+//   1 — a FATAL per-index error (script / 4xx-non-404 logic error). NOT
+//       retried; surfaces a real defect.
 // ---------------------------------------------------------------------------
 
 import { client } from "../src/services/opensearch/client";
 import { DEFAULT_MARKING } from "../src/services/security/documentSecurity";
-
-interface BackfillResult {
-  index: string;
-  updated: number;
-  noop: number;
-  failures: number;
-}
-
-async function backfillIndex(indexName: string): Promise<BackfillResult> {
-  // Update-by-query with a Painless script that idempotently sets
-  // `_security.markings` to `['PUBLIC']` for any doc that lacks it.
-  // `conflicts: "proceed"` lets the script run to completion even if
-  // concurrent writers touch the same docs.
-  const script = `
-    if (ctx._source._security == null) {
-      ctx._source._security = ['markings': params.defaultMarkings, 'cbac': []];
-    } else if (ctx._source._security.markings == null || ctx._source._security.markings.size() == 0) {
-      ctx._source._security.markings = params.defaultMarkings;
-      if (ctx._source._security.cbac == null) { ctx._source._security.cbac = []; }
-    } else {
-      ctx.op = 'noop';
-    }
-  `.trim();
-
-  try {
-    const { body } = await client.updateByQuery({
-      index: indexName,
-      refresh: true,
-      conflicts: "proceed",
-      body: {
-        script: {
-          source: script,
-          params: { defaultMarkings: [DEFAULT_MARKING] },
-        },
-        query: { match_all: {} },
-      },
-    });
-
-    const resp = body as {
-      updated?: number;
-      noops?: number;
-      failures?: Array<{ cause?: { reason?: string } }>;
-    };
-    return {
-      index: indexName,
-      updated: resp.updated ?? 0,
-      noop: resp.noops ?? 0,
-      failures: Array.isArray(resp.failures) ? resp.failures.length : 0,
-    };
-  } catch (err: any) {
-    if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
-      return { index: indexName, updated: 0, noop: 0, failures: 0 };
-    }
-    throw err;
-  }
-}
+import {
+  runSecurityBackfill,
+  DEFAULT_BACKFILL_RETRY,
+} from "../src/services/opensearch/securityBackfill";
 
 async function listOntologyIndices(): Promise<string[]> {
   try {
@@ -104,35 +45,44 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.error(`[backfill-security] backfilling ${indices.length} indices`);
-  const results: BackfillResult[] = [];
-  for (const index of indices) {
-    const r = await backfillIndex(index);
-    results.push(r);
-    const tag = r.failures > 0 ? "FAIL" : r.updated > 0 ? "MIG" : "OK";
-    console.error(
-      `  [${tag}] ${r.index}  updated=${r.updated}  noop=${r.noop}  failures=${r.failures}`,
-    );
-  }
+  console.error(`[backfill-security] backfilling ${indices.length} indices (maxAttempts=${DEFAULT_BACKFILL_RETRY.maxAttempts})`);
+  const report = await runSecurityBackfill(client, indices, DEFAULT_MARKING, DEFAULT_BACKFILL_RETRY);
 
-  const totalUpdated = results.reduce((s, r) => s + r.updated, 0);
-  const totalFailures = results.reduce((s, r) => s + r.failures, 0);
   console.log(
     JSON.stringify(
       {
-        indices: results.length,
-        totalUpdated,
-        totalFailures,
-        perIndex: results,
+        indices: report.indices,
+        totalUpdated: report.totalUpdated,
+        totalFailures: report.totalFailures,
+        deferred: report.deferred,
+        fatal: report.fatal,
+        perIndex: report.perIndex,
       },
       null,
       2,
     ),
   );
-  if (totalFailures > 0) process.exit(1);
+
+  if (report.fatal > 0) {
+    console.error(`[backfill-security] FATAL: ${report.fatal} index(es) had unrecoverable errors`);
+    process.exit(1);
+  }
+  if (report.deferred > 0) {
+    console.error(
+      `[backfill-security] DEFERRED: ${report.deferred} index(es) skipped — OpenSearch unavailable. ` +
+        "Idempotent: the next run retries. No data was written or lost.",
+    );
+    // Exit 0: a transient OpenSearch outage does not fail the migration or
+    // block startup (§17). The backfill is idempotent and self-healing.
+    process.exit(0);
+  }
+  if (report.totalFailures > 0) {
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {
+  // A top-level fatal (e.g. listOntologyIndices threw an unexpected error).
   console.error("[backfill-security] FATAL:", err?.message || err);
   process.exit(1);
 });

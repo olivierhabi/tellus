@@ -24,6 +24,23 @@ import path from "path";
 const ROOT = path.resolve(__dirname, "..");
 let serverProcess: ChildProcess | null = null;
 
+// ---------------------------------------------------------------------------
+// Gap A — deterministic controlled webhook test service.
+//
+// A long-lived child process on 127.0.0.1:$CONTROLLED_WEBHOOK_PORT (default
+// 3329, advertised as http://localhost:<port>) that every integration / E2E /
+// Cypress test can target for writeback + side-effect webhook behavior. It is
+// started here so no test requires a developer to start it manually, and torn
+// down with the server. The app server's env also gets
+// WebhookAllowInsecureHttpForDev=1 so the production webhook transport's
+// buildEgressPolicy() permits HTTP to localhost ONLY (the SSRF-safe dev
+// relaxation; production NODE_ENV keeps httpsRequired=true + unrestricted, so
+// the relaxation never escapes the test environment). See §5 and §18 of the
+// completion directive. The CLI lives at tests/webhooks/controlledWebhookServer.ts
+// and the server factory at src/services/testing/controlledWebhookServer.ts.
+// ---------------------------------------------------------------------------
+let controlledWebhookProcess: ChildProcess | null = null;
+
 function killPort3000(): void {
   try {
     execSync("lsof -ti:3000 | xargs kill -9 2>/dev/null || true", {
@@ -257,6 +274,16 @@ export async function setup(): Promise<void> {
   await waitForPg();
   console.log("[globalSetup] PostgreSQL ready.");
 
+  // Quiesce the application before the destructive canonical-ontology reset.
+  // Previously this happened after runSeeds(), so a developer server left on
+  // :3000 could keep background workers and request transactions active while
+  // seedOntology deleted object/link definitions. PostgreSQL then waited on
+  // those transactions until the pool-level statement_timeout cancelled the
+  // seed with SQLSTATE 57014. Stopping the server first removes the lock
+  // contention instead of hiding it behind a larger timeout.
+  killPort3000();
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
   // Step 0.5: Seed the canonical test ontology + action types. This must
   // run BEFORE the server spawns — some routes read the seeded ontology
   // on startup (action type registry warmup).
@@ -266,10 +293,6 @@ export async function setup(): Promise<void> {
   // integration suites can log in as cypress@tellus.local / Password123!.
   // Idempotent and fast on a re-run (all upserts are HTTP 409-safe).
   runKeycloakBootstrap();
-
-  killPort3000();
-  // Brief pause to let the port free up after kill
-  await new Promise((r) => setTimeout(r, 1500));
 
   const serverPath = path.join(ROOT, "src/server.ts");
 
@@ -357,12 +380,52 @@ export async function setup(): Promise<void> {
       OVERLAY_SWEEPER_DISABLED: "true",
       REPLACEMENT_SCHEDULER_DISABLED: "true",
       TEMPORAL_WORKER_DISABLED: "true",
+      // Gap A — permit the production webhook transport to call the
+      // controlled webhook service over HTTP to localhost ONLY. The
+      // SSRF-safe buildEgressPolicy() relaxation requires NODE_ENV !==
+      // "production" AND WebhookAllowInsecureHttpForDev=1; the running
+      // test server is a dev process, so this is safe and scoped.
+      WebhookAllowInsecureHttpForDev: "1",
+      // Gap E/F — enable version-2 action-type creation so interface-object
+      // and interface-link rule discriminators can be authored on the test
+      // server. Gated off by default in production pending the v2 runbook.
+      ACTION_SEMANTICS_V2_CREATION_ENABLED: "1",
+      // Gap G/H — allow the action side-effect webhook delivery path
+      // (connectivity egress) to reach the controlled service on loopback.
+      // Mirrors the existing actionWebhooks unit-test opt-in. Test-only.
+      CONNECTIVITY_EGRESS_ALLOW_RESERVED: "localhost,127.0.0.1/8,::1",
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
 
   serverProcess.unref();
+
+  // Gap A — start the deterministic controlled webhook service alongside the
+  // app server. It advertises http://localhost:<port>; integration/E2E tests
+  // read CONTROLLED_WEBHOOK_URL (set below) to target it. Detached so it dies
+  // with the group on teardown.
+  const controlledPort = String(process.env.CONTROLLED_WEBHOOK_PORT ?? "3329");
+  try {
+    controlledWebhookProcess = spawn(
+      "npx",
+      ["tsx", path.join(ROOT, "tests/webhooks/controlledWebhookServer.ts")],
+      {
+        cwd: ROOT,
+        env: { ...process.env, CONTROLLED_WEBHOOK_PORT: controlledPort },
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      },
+    );
+    controlledWebhookProcess.unref();
+    process.env.CONTROLLED_WEBHOOK_URL = `http://localhost:${controlledPort}`;
+    controlledWebhookProcess.stderr?.on("data", (c: Buffer) => {
+      // eslint-disable-next-line no-console
+      console.error(`[globalSetup] controlled-webhook stderr: ${c.toString()}`);
+    });
+  } catch {
+    controlledWebhookProcess = null;
+  }
 
   // Collect server stdout/stderr for diagnostic output on failure
   let serverLog = "";
@@ -430,6 +493,15 @@ export async function teardown(): Promise<void> {
       // Process might already be dead
     }
     serverProcess = null;
+  }
+  // Gap A — stop the controlled webhook service with the server.
+  if (controlledWebhookProcess?.pid) {
+    try {
+      process.kill(-controlledWebhookProcess.pid, "SIGTERM");
+    } catch {
+      // Best-effort; the process may have already exited.
+    }
+    controlledWebhookProcess = null;
   }
   killPort3000();
 }

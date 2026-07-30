@@ -172,6 +172,39 @@ export const DEFAULT_EGRESS_POLICY: EgressPolicy = {
 };
 
 // ---------------------------------------------------------------------------
+// buildEgressPolicy — env-driven policy selection.
+//
+// Production: the immutable DEFAULT_EGRESS_POLICY (httpsRequired=true,
+// unrestricted hosts). This is the only policy the production transport
+// ever uses.
+//
+// Deterministic test mode (Gap A controlled webhook service): when
+// `WebhookAllowInsecureHttpForDev=1` AND `NODE_ENV !== "production"`, the
+// policy permits HTTP (httpsRequired=false) and restricts the egress
+// allowlist to the single host `localhost`. This is the narrowest possible
+// relaxation: the controlled webhook service advertises its URL as
+// `http://localhost:<port>` (a hostname, NOT an IP literal, so the SSRF
+// IP-literal guard still rejects 127.0.0.1/169.254.x/link-local forms
+// even if a binding tried them), the host allowlist rejects every other
+// host, and HTTP is only ever honored outside production. No arbitrary
+// user-supplied webhook URL escapes the allowlist — the security model
+// (§18 of the completion directive) is preserved.
+//
+// ---------------------------------------------------------------------------
+
+export function buildEgressPolicy(env: NodeJS.ProcessEnv = process.env): EgressPolicy {
+  const devInsecureHttp =
+    env.WebhookAllowInsecureHttpForDev === "1" &&
+    env.NODE_ENV !== "production";
+  if (!devInsecureHttp) return DEFAULT_EGRESS_POLICY;
+  return {
+    ...DEFAULT_EGRESS_POLICY,
+    httpsRequired: false,
+    allowedHosts: ["localhost"],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // assertEgressUrl — the production-grade safe-transport entry point.
 // Pure (DNS-rebinding is checked at request time in the transport layer).
 //
