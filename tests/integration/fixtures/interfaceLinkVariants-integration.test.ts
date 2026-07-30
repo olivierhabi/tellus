@@ -91,6 +91,13 @@ async function apply(actionType: string, parameters: Record<string, unknown>, id
 }
 
 async function createEntity(chosenType: string, entityId: string): Promise<void> {
+  // Create via the interface rule. 409 = a previous run already created this
+  // object; fine for link tests — the object exists (transactionally in
+  // object_instances), which is what the interface-link DB resolver needs.
+  // NOTE: no OpenSearch poll. Concrete addLink's existence gate is OpenSearch-
+  // backed, so concrete-link tests use a COMBINED create+link action (pending
+  // Edits bypass OS); interface-link tests resolve via the DB resolver and
+  // don't need OS at all. This keeps the suite OpenSearch-independent.
   const res = await apply("lvCreate", {
     chosenType,
     entityId,
@@ -99,25 +106,8 @@ async function createEntity(chosenType: string, entityId: string): Promise<void>
     createdAt: "2026-07-30T10:00:00.000Z",
     contactDetails: CONTACT,
   });
-  // 409 = a previous run (or a re-attempt) already created this object; that
-  // is fine for link tests — the object exists, which is what we need.
   if (res.status !== 200 && res.status !== 409) {
     throw new Error(`createEntity ${chosenType}/${entityId} failed ${res.status}: ${JSON.stringify(res.body).slice(0, 200)}`);
-  }
-  // The PRODUCTION addLink existence gate is OpenSearch-backed (objectExists).
-  // Wait until the just-created object is indexed before returning, so the
-  // caller's concrete addLink apply sees a real source/target object. OS
-  // indexing can lag well beyond 15s under shared-server load (the backfill
-  // storms), so poll generously; interface-link tests don't reach this gate
-  // (their resolver is DB-backed) and return near-instantly.
-  const deadline = Date.now() + 40_000;
-  let view = await api("GET", `${ONT}/objectTypes/${chosenType}/objects/${encodeURIComponent(entityId)}/view`);
-  while (view.status !== 200 && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 500));
-    view = await api("GET", `${ONT}/objectTypes/${chosenType}/objects/${encodeURIComponent(entityId)}/view`);
-  }
-  if (view.status !== 200) {
-    throw new Error(`createEntity ${chosenType}/${entityId} never became readable (${view.status})`);
   }
 }
 
@@ -276,6 +266,47 @@ beforeAll(async () => {
     parameters: ifaceRefParams(),
     rules: [{ type: "deleteInterfaceLink", interfaceLinkConstraint: ifaceLinkConstraint, interfaceId: iface(), source: { source: "parameter", param: "sourceRef" }, target: { source: "parameter", param: "targetRef" } }],
   });
+
+  // Combined create+concrete-link actions. Concrete addLink's existence gate
+  // is OpenSearch-backed (objectExists); creating the source/target objects in
+  // the SAME action lets the planner's pendingEdits satisfy that gate WITHOUT
+  // waiting for OpenSearch indexing — the OS-independent, production-faithful
+  // path. createObject (concrete) is modelled in the v2 final-state set, so the
+  // addLink edge's source/target are present in finalObjectState and the
+  // dangling invariant passes (unlike a separate-action addLink, which would
+  // block on OS indexing of objects created in a prior apply).
+  const combinedParams = () => [
+    { apiName: "srcPk", displayName: "Source PK", type: "string", required: true },
+    { apiName: "tgtPk", displayName: "Target PK", type: "string", required: true },
+    { apiName: "displayName", displayName: "Display Name", type: "string", required: true },
+    { apiName: "status", displayName: "Status", type: "string", required: true },
+    { apiName: "createdAt", displayName: "Created At", type: "timestamp", required: true },
+    { apiName: "contactDetails", displayName: "Contact Details", type: "struct", required: true },
+  ];
+  const combinedRules = (linkApi: string) => {
+    const props = (pkParam: string) => ({
+      entityId: { source: "parameter", param: pkParam },
+      displayName: { source: "parameter", param: "displayName" },
+      status: { source: "parameter", param: "status" },
+      createdAt: { source: "parameter", param: "createdAt" },
+      contactDetails: { source: "parameter", param: "contactDetails" },
+    });
+    return [
+      { type: "createObject", objectType: s("CustomerAccount"), properties: props("srcPk") },
+      { type: "createObject", objectType: s("SupplierAccount"), properties: props("tgtPk") },
+      { type: "addLink", linkType: linkApi, sourceObject: { source: "parameter", param: "srcPk" }, targetObject: { source: "parameter", param: "tgtPk" } },
+    ];
+  };
+  await createActionType("lvCreateAndLinkM2M", {
+    displayName: "LV Create + Link M2M",
+    parameters: combinedParams(),
+    rules: combinedRules(s("customerSuppliers")),
+  });
+  await createActionType("lvCreateAndLinkFk", {
+    displayName: "LV Create + Link FK",
+    parameters: combinedParams(),
+    rules: combinedRules(s("customerOwnsSuppliers")),
+  });
 }, 180_000);
 
 afterAll(async () => {
@@ -297,9 +328,9 @@ describe("Gap LV — concrete link rules (M2M + FK) applied + verified authorita
   const supPk = `m2mSup-${RUN}`;
 
   it("A1. addLink on the MANY_TO_MANY link writes a link_edit 'add' (net > 0)", async () => {
-    await createEntity(s("CustomerAccount"), custPk);
-    await createEntity(s("SupplierAccount"), supPk);
-    const res = await apply("lvLinkM2M", { customerPk: custPk, supplierPk: supPk }, `lv-m2m-${RUN}`);
+    // Combined create+link: pendingEdits satisfies the concrete addLink
+    // existence gate without OpenSearch (the OS-independent path).
+    const res = await apply("lvCreateAndLinkM2M", { srcPk: custPk, tgtPk: supPk, displayName: "LV", status: "active", createdAt: "2026-07-30T10:00:00.000Z", contactDetails: CONTACT }, `lv-m2m-${RUN}`);
     expect(res.status).toBe(200);
     await assertLinkActive(s("customerSuppliers"), custPk, supPk, "present");
   }, 40_000);
@@ -316,9 +347,7 @@ describe("Gap LV — foreign-key O2M addLink/removeLink writes & clears the FK p
   const supPk = `fkSup-${RUN}`;
 
   it("B1. addLink on the FK O2M link writes fkCustomer<suffix> on the target (authoritative FK record)", async () => {
-    await createEntity(s("CustomerAccount"), custPk);
-    await createEntity(s("SupplierAccount"), supPk);
-    const res = await apply("lvLinkFk", { customerPk: custPk, supplierPk: supPk }, `lv-fk-${RUN}`);
+    const res = await apply("lvCreateAndLinkFk", { srcPk: custPk, tgtPk: supPk, displayName: "LV", status: "active", createdAt: "2026-07-30T10:00:00.000Z", contactDetails: CONTACT }, `lv-fk-${RUN}`);
     expect(res.status).toBe(200);
     // O2M FK link: the authoritative link record is the FK property on the
     // target (many) side — written transactionally in object_instances.

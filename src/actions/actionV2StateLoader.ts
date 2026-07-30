@@ -17,6 +17,7 @@
 import type { PoolClient } from "pg";
 import { query as poolQuery } from "../db";
 import { objectKey, type ObjectIdentity } from "./actionPlanner";
+import { canonicalPrimaryKey } from "./actionLockManager";
 import {
   countActiveByEndpoint,
   existsActiveByEndpoint,
@@ -79,7 +80,11 @@ export async function loadActiveEdgesForIdentities(
       [ont, br, ot, pk],
     );
     for (const r of ((outRows as any).rows) ?? []) {
-      out.add(`${r.link_type_api_name}|${r.source_object_type}|${r.source_primary_key}|${r.target_object_type}|${r.target_primary_key}`);
+      // Canonicalize the pks so the persisted edge key matches the planner's
+      // objectKey/canonicalPrimaryKey encoding (e.g. `S:<pk>` for string pks).
+      // Without this, a removeLink delta (canonical) never matched the persisted
+      // edge (raw pk) -> the edge survived the delete and was flagged dangling.
+      out.add(`${r.link_type_api_name}|${r.source_object_type}|${canonicalPrimaryKey(r.source_primary_key)}|${r.target_object_type}|${canonicalPrimaryKey(r.target_primary_key)}`);
     }
     // inbound (id is target)
     const inRows = await exec(
@@ -91,7 +96,7 @@ export async function loadActiveEdgesForIdentities(
       [ont, br, ot, pk],
     );
     for (const r of (inRows as any).rows ?? []) {
-      out.add(`${r.link_type_api_name}|${r.source_object_type}|${r.source_primary_key}|${r.target_object_type}|${r.target_primary_key}`);
+      out.add(`${r.link_type_api_name}|${r.source_object_type}|${canonicalPrimaryKey(r.source_primary_key)}|${r.target_object_type}|${canonicalPrimaryKey(r.target_primary_key)}`);
     }
   }
   return out;
