@@ -62,6 +62,31 @@ export function extractSideEffectJobs(
                 resolveValueSource(source, executionContext),
               ]),
             ),
+            ...(spec.inputFunction &&
+            typeof spec.inputFunction === "object" &&
+            !Array.isArray(spec.inputFunction)
+              ? {
+                  inputFunction: {
+                    ...(spec.inputFunction as Record<string, unknown>),
+                    arguments: Object.fromEntries(
+                      Object.entries(
+                        (spec.inputFunction as Record<string, unknown>).arguments &&
+                          typeof (spec.inputFunction as Record<string, unknown>).arguments ===
+                            "object" &&
+                          !Array.isArray(
+                            (spec.inputFunction as Record<string, unknown>).arguments,
+                          )
+                          ? ((spec.inputFunction as Record<string, unknown>)
+                              .arguments as Record<string, unknown>)
+                          : {},
+                      ).map(([name, source]) => [
+                        name,
+                        resolveValueSource(source, executionContext),
+                      ]),
+                    ),
+                  },
+                }
+              : {}),
           }
         : spec;
     out.push({
@@ -115,6 +140,11 @@ export interface SideEffectExecutionContext {
   /** Used only while extracting jobs. The extractor persists mapped values,
    * never the complete action parameter bag, into the outbox payload. */
   resolvedParameters: Record<string, unknown>;
+  parameterDefinitions?: Array<{
+    apiName?: string;
+    type?: string;
+    objectType?: string;
+  }>;
   result: string;
   affectedObjects: Array<{ objectType: string; primaryKey: string; operation: string }>;
   firedAt: string;
@@ -135,6 +165,26 @@ function resolveValueSource(
       return context.firedAt;
     case "currentUser":
       return context.executedBy;
+    case "objectProperty": {
+      const parameterName = String(source.param ?? "");
+      const reference = context.resolvedParameters[parameterName];
+      const definition = context.parameterDefinitions?.find(
+        (candidate) => candidate.apiName === parameterName,
+      );
+      if (
+        typeof reference !== "string" ||
+        definition?.type !== "object_reference" ||
+        typeof definition.objectType !== "string"
+      ) {
+        return undefined;
+      }
+      return {
+        source: "resolvedObjectProperty",
+        objectType: definition.objectType,
+        primaryKey: reference,
+        path: String(source.path ?? ""),
+      };
+    }
     default:
       return undefined;
   }

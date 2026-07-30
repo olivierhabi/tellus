@@ -424,6 +424,12 @@ export async function setup(): Promise<void> {
     );
     controlledWebhookProcess.unref();
     process.env.CONTROLLED_WEBHOOK_URL = `http://localhost:${controlledPort}`;
+    // Tests that drive the side-effect worker IN-PROCESS (runOnce) deliver
+    // webhooks from the vitest process itself, so the connectivity egress
+    // guard reads THIS process's env — mirror the server child's allowlist
+    // or in-process deliveries are egress-blocked while server-loop
+    // deliveries succeed (flaky split-brain delivery in outbox tests).
+    process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED ??= "localhost,127.0.0.1/8,::1";
     controlledWebhookProcess.stderr?.on("data", (c: Buffer) => {
       // eslint-disable-next-line no-console
       console.error(`[globalSetup] controlled-webhook stderr: ${c.toString()}`);

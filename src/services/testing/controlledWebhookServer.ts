@@ -384,6 +384,7 @@ export function createControlledWebhookServer(opts?: {
     // Timeout behavior: never respond. Record an invocation with status -1.
     if (pending.delayMs === -1) {
       const rec = record(started, req, url, rawBody, -1, "no-response", idempotencyKey, correlationId, actionOperationId, 0, isDuplicate);
+      invocations.push(rec);
       if (behavior === "duplicate" && idempotencyKey != null) dedupSeen.set(idempotencyKey, rec);
       // Intentionally do not end the response; caller times out.
       return;

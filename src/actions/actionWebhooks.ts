@@ -84,13 +84,15 @@ export function parseWebhookSpecs(sideEffects: unknown): ActionWebhookSpec[] {
 export async function deliverOneWebhook(
   spec: ActionWebhookSpec,
   payload: ActionWebhookPayload,
+  opts?: { idempotencyKey?: string },
 ): Promise<{ url: string; ok: boolean; status?: number; error?: string; receiptId?: string }> {
-  return deliverOne(spec, payload);
+  return deliverOne(spec, payload, opts?.idempotencyKey);
 }
 
 async function deliverOne(
   spec: ActionWebhookSpec,
   payload: ActionWebhookPayload,
+  idempotencyKey?: string,
 ): Promise<WebhookDeliveryResult> {
   let url: URL;
   try {
@@ -119,6 +121,11 @@ async function deliverOne(
         "user-agent": "tellus-action-webhook/1",
         "x-tellus-action": payload.actionTypeApiName,
         "x-tellus-execution-id": payload.executionId,
+        // Stable idempotency key so a dedup-aware receiver collapses
+        // at-least-once retries into exactly-once effect (the same key is
+        // re-sent on every retry of the same job/execution). Receivers
+        // that ignore the header are unaffected — additive only.
+        ...(idempotencyKey ? { "x-idempotency-key": idempotencyKey } : {}),
         ...(spec.headers ?? {}),
       },
       body: JSON.stringify(payload),
@@ -145,7 +152,9 @@ export async function fireActionWebhooks(
   if (specs.length === 0) return [];
   const results: WebhookDeliveryResult[] = [];
   for (const spec of specs) {
-    const r = await deliverOne(spec, payload);
+    // Fire-and-forget path: the execution id is the natural stable key —
+    // all webhooks of one execution share it (receivers dedup per URL).
+    const r = await deliverOne(spec, payload, payload.executionId);
     results.push(r);
     try {
       incCounter(r.ok ? "tellus_action_webhook_delivered_total" : "tellus_action_webhook_failed_total");

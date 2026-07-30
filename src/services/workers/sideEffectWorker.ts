@@ -52,6 +52,8 @@ import { getKeycloakAdminService } from "../../services/keycloakAdminService";
 import { executeWebhook } from "../connectivity/webhooks/executor";
 import * as connectivityWebhooks from "../connectivity/webhooks/repository";
 import * as connectivityConnections from "../connectivity/store/connections.repo";
+import { query } from "../../db";
+import { executeWebhookInputFunction } from "../../actions/webhookInputFunctionExecutor";
 
 // ---------------------------------------------------------------------------
 // Default retry policy — bounded exponential backoff + jitter. Matches
@@ -112,6 +114,16 @@ export const productionWebhookDispatch: SideEffectDispatchFn = async (job) => {
       webhookId?: string;
       webhookVersion?: number;
       inputs?: Record<string, unknown>;
+      inputFunction?: {
+        functionRid?: string;
+        repositoryRid?: string;
+        apiName?: string;
+        branch?: string;
+        semver?: string;
+        arguments?: Record<string, unknown>;
+        resultMode?: string;
+        suppressWhenNull?: boolean;
+      };
     };
     context?: Partial<ActionWebhookPayload> & { tenant?: string };
   };
@@ -124,23 +136,119 @@ export const productionWebhookDispatch: SideEffectDispatchFn = async (job) => {
       webhook.connectionRid,
       tenant,
     );
-    const result = await executeWebhook({
-      webhook,
-      connection,
-      tenant,
-      actor: String(payload.context?.executedBy ?? "system"),
-      kind: "production",
-      inputs: payload.spec.inputs ?? {},
-      idempotencyKey: job.idempotency_key ?? `${job.execution_id}:${job.side_effect_index}`,
-    });
-    if (result.execution.status !== "succeeded") {
+    const resolveObjectProperty = async (value: unknown): Promise<unknown> => {
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        (value as { source?: unknown }).source !== "resolvedObjectProperty"
+      ) {
+        return value;
+      }
+      const descriptor = value as {
+        objectType?: unknown;
+        primaryKey?: unknown;
+        path?: unknown;
+      };
+      const objectType = String(descriptor.objectType ?? "");
+      const primaryKey = String(descriptor.primaryKey ?? "");
+      const path = String(descriptor.path ?? "");
+      const objectResult = await query(
+        `SELECT properties FROM object_instances
+          WHERE ontology_id = $1
+            AND object_type_api_name = $2
+            AND primary_key = $3
+          ORDER BY updated_at DESC
+          LIMIT 1`,
+        [String(payload.context?.ontologyId ?? ""), objectType, primaryKey],
+      );
+      const properties = objectResult.rows[0]?.properties;
+      return path
+        .split("/")
+        .filter(Boolean)
+        .reduce<unknown>((current, segment) => {
+          if (!current || typeof current !== "object" || Array.isArray(current)) {
+            return undefined;
+          }
+          return (current as Record<string, unknown>)[segment];
+        }, properties);
+    };
+    const directInputs = Object.fromEntries(
+      await Promise.all(
+        Object.entries(payload.spec.inputs ?? {}).map(async ([name, value]) => [
+          name,
+          await resolveObjectProperty(value),
+        ]),
+      ),
+    );
+    let payloads: Record<string, unknown>[] = [directInputs];
+    if (payload.spec.inputFunction) {
+      const functionArguments = Object.fromEntries(
+        await Promise.all(
+          Object.entries(payload.spec.inputFunction.arguments ?? {}).map(
+            async ([name, value]) => [name, await resolveObjectProperty(value)],
+          ),
+        ),
+      );
+      const output = await executeWebhookInputFunction({
+        ontologyId: String(payload.context?.ontologyId ?? ""),
+        binding: {
+          functionRid: String(payload.spec.inputFunction.functionRid ?? ""),
+          repositoryRid: String(payload.spec.inputFunction.repositoryRid ?? ""),
+          apiName: String(payload.spec.inputFunction.apiName ?? ""),
+          branch: String(payload.spec.inputFunction.branch ?? ""),
+          semver: String(payload.spec.inputFunction.semver ?? ""),
+        },
+        arguments: functionArguments,
+      });
+      if (output == null && payload.spec.inputFunction.suppressWhenNull) {
+        return { ok: true, receiptId: "suppressed:null-function-output" };
+      }
+      const candidates =
+        payload.spec.inputFunction.resultMode === "list" ? output : [output];
+      if (
+        !Array.isArray(candidates) ||
+        candidates.some(
+          (candidate) =>
+            !candidate || typeof candidate !== "object" || Array.isArray(candidate),
+        )
+      ) {
+        throw new Error(
+          "Webhook input Function returned a value that does not match its configured payload mode.",
+        );
+      }
+      payloads = candidates as Record<string, unknown>[];
+    }
+    const results = await Promise.all(
+      payloads.map((inputs, index) =>
+        executeWebhook({
+          webhook,
+          connection,
+          tenant,
+          actor: String(payload.context?.executedBy ?? "system"),
+          kind: "production",
+          inputs,
+          idempotencyKey: `${
+            job.idempotency_key ?? `${job.execution_id}:${job.side_effect_index}`
+          }:${index}`,
+        }),
+      ),
+    );
+    const failed = results.find(
+      (result) => result.execution.status !== "succeeded",
+    );
+    if (failed) {
       const error = new Error(
-        `Connectivity webhook execution ${result.execution.rid} ended in '${result.execution.status}'.`,
+        `Connectivity webhook execution ${failed.execution.rid} ended in '${failed.execution.status}'.`,
       ) as Error & { code?: string };
-      error.code = result.execution.errorCode ?? "CONNECTIVITY_WEBHOOK_FAILED";
+      error.code =
+        failed.execution.errorCode ?? "CONNECTIVITY_WEBHOOK_FAILED";
       throw error;
     }
-    return { ok: true, receiptId: result.execution.rid };
+    return {
+      ok: true,
+      receiptId: results.map((result) => result.execution.rid).join(","),
+    };
   }
   const spec: ActionWebhookSpec = {
     url: String(payload.spec?.url ?? ""),
@@ -162,7 +270,14 @@ export const productionWebhookDispatch: SideEffectDispatchFn = async (job) => {
   // reused by actionExecutor Stage 7. Phase 5 reuses it so the
   // in-process + worker paths share the egress guard + the
   // delivery semantics.
-  const r = await deliverOneWebhook(spec, context);
+  // Stable idempotency key — the SAME derivation as the connectivity
+  // path above: the job row's idempotency_key (or its deterministic
+  // fallback). Retries of this job re-send the SAME key, so a
+  // dedup-aware receiver collapses at-least-once delivery into
+  // exactly-once effect.
+  const r = await deliverOneWebhook(spec, context, {
+    idempotencyKey: job.idempotency_key ?? `${job.execution_id}:${job.side_effect_index}`,
+  });
   if (!r.ok) {
     const err = new Error(`Webhook dispatch failed: ${r.error ?? "unknown"}`) as Error & { code?: string };
     err.code = "WEBHOOK_DISPATCHER_REJECTED";
