@@ -35,6 +35,7 @@ import { client as opensearchClient } from "../services/opensearch/client";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { markEditsAsIndexed } from "../models/ontologyEdit";
 import { writeOverlayForEdit, writeOverlayForLinkEdit } from "../services/overlay/writebackOverlay";
+import { deriveMainBranchId } from "../services/branchContext";
 import { isB1Ready } from "../services/funnel/b1Readiness";
 import { ensureDocumentSecurity } from "../services/security/documentSecurity";
 import { mintObjectRid } from "../services/objectIdentity";
@@ -839,7 +840,38 @@ async function writeOverlayForEditInTxn(
 ): Promise<void> {
   const { edit, editId, ontologyId, actorUserId, correlationId, causationId, actionRid } = input;
   const deleted = edit.operation === "delete";
-  const doc = deleted ? {} : edit.propertyValues ?? {};
+  // object_edits.new_value keeps the PARTIAL edit payload (the change log
+  // records what changed, not the whole object) — unchanged from prior
+  // behavior.
+  const editDoc = deleted ? {} : edit.propertyValues ?? {};
+  // The writeback contract requires the OVERLAY `doc` = the FULL post-edit
+  // object state (overlay reads + object_instances UPSERT both project this
+  // doc). A modifyObject edit carries only the CHANGED subset in
+  // `edit.propertyValues`; passing that partial doc verbatim would (a)
+  // clobber every un-touched property in object_instances on the ON
+  // CONFLICT update and (b) make the Redis overlay advertise a partial
+  // object ({province} only), which the read path surfaces as the event's
+  // `currentValues` — breaking live objects-modified detection (the prior
+  // membership still has the full values, so every update false-positives
+  // as a change to the un-touched monitored property). For an update, MERGE
+  // the partial edit into the existing object_instances row (locked in
+  // this txn) and pass the full merged doc to the overlay/UPSERT only.
+  let overlayDoc: Record<string, unknown>;
+  if (deleted) {
+    overlayDoc = {};
+  } else if (edit.operation === "update") {
+    const branchUuid = deriveMainBranchId(ontologyId);
+    const existing = await pgClient.query<{ properties: Record<string, unknown> | null }>(
+      `SELECT properties FROM object_instances
+        WHERE ontology_id = $1 AND branch_id = $2
+          AND object_type_api_name = $3 AND primary_key = $4
+        FOR UPDATE`,
+      [ontologyId, branchUuid, edit.objectType, edit.primaryKey],
+    );
+    overlayDoc = { ...(existing.rows[0]?.properties ?? {}), ...(edit.propertyValues ?? {}) };
+  } else {
+    overlayDoc = edit.propertyValues ?? {};
+  }
 
   // Guard the B1/B7 writeback behind a SAVEPOINT. A missing `object_edits`
   // or `object_instances` table (transitional deployments where migration
@@ -863,7 +895,7 @@ async function writeOverlayForEditInTxn(
         edit.objectType,
         edit.primaryKey,
         "*",
-        JSON.stringify(doc),
+        JSON.stringify(editDoc),
         actorUserId,
         correlationId ?? null,
         causationId ?? null,
@@ -875,8 +907,9 @@ async function writeOverlayForEditInTxn(
       ontologyId,
       objectType: edit.objectType,
       primaryKey: edit.primaryKey,
-      doc,
+      doc: overlayDoc,
       deleted,
+      operation: edit.operation,
       version: 1, // monotonic bump is owned by object_instances UPSERT itself
       editId,
       actorUserId,

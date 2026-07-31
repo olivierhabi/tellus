@@ -59,6 +59,15 @@ export interface WriteOverlayInput {
   doc: Record<string, unknown>;
   /** True when the edit is a delete (tombstone). */
   deleted: boolean;
+  /**
+   * Edit operation. `update` is a PARTIAL modify: the on-conflict UPSERT
+   * MERGES `doc` into the existing `object_instances.properties` instead of
+   * replacing it (a bare `properties = EXCLUDED.properties` clobbers every
+   * un-touched property — modifyObject's contract is partial). `create`
+   * and `delete` replace the full property set (create re-seeds; delete
+   * tombstones with `{}`).
+   */
+  operation?: "create" | "update" | "delete";
   version: number;
   editId: string;
   actorUserId?: string | null;
@@ -271,12 +280,16 @@ export async function writeOverlayForEdit(
           last_modified_at, version, rid)
        VALUES ($1, $6::uuid, $2, $3, $4::jsonb, ARRAY[]::text[], NULL, NULL, NOW(), $5,
                COALESCE($7, 'ri.tellus.main.object.' || gen_random_uuid()))
-       ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
-         DO UPDATE SET properties        = EXCLUDED.properties,
-                       last_modified_at  = NOW(),
-                       version           = object_instances.version + 1,
-                       rid               = COALESCE(object_instances.rid, EXCLUDED.rid)
-       RETURNING version, rid`,
+        ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
+          DO UPDATE SET properties        = CASE
+                                                WHEN $8 = 'update'
+                                                  THEN object_instances.properties || EXCLUDED.properties
+                                                ELSE EXCLUDED.properties
+                                              END,
+                        last_modified_at  = NOW(),
+                        version           = object_instances.version + 1,
+                        rid               = COALESCE(object_instances.rid, EXCLUDED.rid)
+        RETURNING version, rid`,
       [
         input.ontologyId,
         input.objectType,
@@ -285,6 +298,7 @@ export async function writeOverlayForEdit(
         input.version,
         branchUuid,
         (input as { rid?: string }).rid ?? null,
+        input.operation ?? (input.deleted ? "delete" : "create"),
       ],
     );
     upsertedInstance = (res.rowCount ?? 0) > 0;
