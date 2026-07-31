@@ -17,6 +17,7 @@
 
 import { client } from "../opensearch/client";
 import { getIndexName } from "../opensearch/indexMappingGenerator";
+import { objectTypeIndexName } from "../opensearch/objectIndexNames";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -236,7 +237,7 @@ export async function runSelfTests(): Promise<void> {
         count: docCount,
         indexExists: true,
       }),
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
   }
 
@@ -247,7 +248,7 @@ export async function runSelfTests(): Promise<void> {
         count: 0,
         indexExists: false,
       }),
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
   }
 
@@ -257,7 +258,7 @@ export async function runSelfTests(): Promise<void> {
       getDocumentCount: async () => {
         throw error;
       },
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
   }
 
@@ -468,7 +469,7 @@ export async function runSelfTests(): Promise<void> {
         return { count: 42, indexExists: true };
       },
       getIndexName: (apiName: string) =>
-        `ontology-${apiName.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`,
+        objectTypeIndexName(apiName),
     };
 
     await verifyIndexCount("Taxpayer", 42, { deps });
@@ -584,7 +585,7 @@ export async function runSelfTests(): Promise<void> {
         return { count: 50, indexExists: true };
       },
       getIndexName: (apiName: string) => {
-        const name = `ontology-${apiName.toLowerCase()}`;
+        const name = objectTypeIndexName(apiName);
         callLog.push(`name:${name}`);
         return name;
       },

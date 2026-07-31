@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { query } from "../../db";
+import { objectIndexPrefix } from "../../config/environmentIdentity";
 import {
   mapPropertyToOpenSearch,
   PropertyInput,
@@ -244,7 +245,7 @@ export function getIndexName(
   const slug = objectTypeApiName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   if (ontologyId !== undefined && ontologyId !== null && ontologyId !== "") {
     const ontSlug = ontologyId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    return `ontology-${ontSlug}-${slug}`;
+    return `${objectIndexPrefix()}${ontSlug}-${slug}`;
   }
   // Legacy fallback — logged as missing-tenant. Callers should be updated.
   // Import lazily to avoid cyclic init when indexMappingGenerator is
@@ -260,7 +261,7 @@ export function getIndexName(
   } catch {
     // Metrics not loaded yet — silent during early boot is acceptable.
   }
-  return `ontology-${slug}`;
+  return `${objectIndexPrefix()}${slug}`;
 }
 
 // ---------------------------------------------------------------------------

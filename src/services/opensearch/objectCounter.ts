@@ -17,6 +17,8 @@ import { client } from "./client";
 import { getIndexName } from "./indexMappingGenerator";
 import { query as dbQuery } from "../../db";
 import type { QueryResult } from "pg";
+import { objectTypeIndexName } from "./objectIndexNames";
+import { objectIndexPrefix } from "../../config/environmentIdentity";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,7 +95,7 @@ async function defaultCountIndex(indexName: string): Promise<number> {
 
 async function defaultCatIndices(): Promise<CatIndexEntry[]> {
   const { body } = await client.cat.indices({
-    index: "ontology-*",
+    index: `${objectIndexPrefix()}*`,
     format: "json",
   });
   return body as CatIndexEntry[];
@@ -282,9 +284,10 @@ export async function countAllObjectTypes(
     const sizeStr = (entry["store.size"] as string) || "0b";
     const sizeBytes = parseSizeToBytes(sizeStr);
 
-    // Strip "ontology-" prefix to get the lowercased name
-    const stripped = indexName.startsWith("ontology-")
-      ? indexName.slice("ontology-".length)
+    // Strip the deployment's index prefix to get the lowercased name
+    const prefix = objectIndexPrefix();
+    const stripped = indexName.startsWith(prefix)
+      ? indexName.slice(prefix.length)
       : indexName;
 
     // Look up original casing from PG, fall back to stripped name
@@ -328,7 +331,7 @@ export async function runSelfTests(): Promise<void> {
   // =======================================================================
 
   function mockGetIndexName(apiName: string): string {
-    return `ontology-${apiName.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
+    return objectTypeIndexName(apiName);
   }
 
   function createSingleDeps(

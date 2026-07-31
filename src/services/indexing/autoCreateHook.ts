@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { generateIndexMapping } from "../opensearch/indexMappingGenerator";
+import { objectTypeIndexName } from "../opensearch/objectIndexNames";
 import {
   indexExists,
   createIndex,
@@ -204,11 +205,11 @@ export async function runSelfTests(): Promise<void> {
         if (generateFail) {
           throw new Error(`Object type '${apiName}' not found in metadata store`);
         }
-        return { ...defaultMapping, objectTypeApiName: apiName, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { ...defaultMapping, objectTypeApiName: apiName, indexName: objectTypeIndexName(apiName) };
       },
       indexExists: async (apiName: string) => ({
         exists: ixExists,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
       createIndex: async (apiName: string) => {
         if (createFail) {
@@ -216,10 +217,10 @@ export async function runSelfTests(): Promise<void> {
         }
         return {
           success: true as const,
-          indexName: `ontology-${apiName.toLowerCase()}`,
+          indexName: objectTypeIndexName(apiName),
         };
       },
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
   }
 
@@ -344,17 +345,17 @@ export async function runSelfTests(): Promise<void> {
     const deps: AutoCreateDeps = {
       generateIndexMapping: async (apiName: string) => {
         callOrder.push("generateIndexMapping");
-        return { ...defaultMapping, objectTypeApiName: apiName, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { ...defaultMapping, objectTypeApiName: apiName, indexName: objectTypeIndexName(apiName) };
       },
       indexExists: async (apiName: string) => {
         callOrder.push("indexExists");
-        return { exists: false, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { exists: false, indexName: objectTypeIndexName(apiName) };
       },
       createIndex: async (apiName: string) => {
         callOrder.push("createIndex");
-        return { success: true as const, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { success: true as const, indexName: objectTypeIndexName(apiName) };
       },
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
 
     await onDatasourceRegistered("Employee", { deps });
@@ -373,17 +374,17 @@ export async function runSelfTests(): Promise<void> {
 
     const deps: AutoCreateDeps = {
       generateIndexMapping: async (apiName: string) => {
-        return { ...defaultMapping, objectTypeApiName: apiName, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { ...defaultMapping, objectTypeApiName: apiName, indexName: objectTypeIndexName(apiName) };
       },
       indexExists: async (apiName: string) => ({
         exists: true,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
       createIndex: async () => {
         createCalled = true;
         return { success: true as const, indexName: "ontology-employee" };
       },
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
 
     await onDatasourceRegistered("Employee", { deps });
@@ -403,13 +404,13 @@ export async function runSelfTests(): Promise<void> {
       },
       indexExists: async (apiName: string) => {
         indexExistsCalled = true;
-        return { exists: false, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { exists: false, indexName: objectTypeIndexName(apiName) };
       },
       createIndex: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
 
     try {

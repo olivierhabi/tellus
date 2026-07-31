@@ -17,6 +17,7 @@ import { mapFilters } from "../services/opensearch/filterMapper";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
 import { incCounter } from "../services/funnel/metrics";
+import { objectTypeIndexName } from "../services/opensearch/objectIndexNames";
 
 const router = Router({ mergeParams: true });
 
@@ -59,7 +60,7 @@ router.post(
           scoped: String(branchId !== null),
         });
         const result = await searchObjects(
-          `ontology-${objectTypeApiName.toLowerCase()}`,
+          objectTypeIndexName(objectTypeApiName),
           body,
           buildSecurityFilter(req.security),
           branchId
@@ -113,7 +114,7 @@ router.post(
           scoped: String(branchId !== null),
         });
         const result = await searchObjects(
-          `ontology-${objectTypeApiName.toLowerCase()}`,
+          objectTypeIndexName(objectTypeApiName),
           body,
           buildSecurityFilter(req.security),
           branchId

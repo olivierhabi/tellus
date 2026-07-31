@@ -560,6 +560,13 @@ app.get("/health", async (_req: Request, res: Response) => {
         status: "healthy",
         database: "connected",
         timestamp: result.rows[0].now,
+        // FUNN-ISO-1: non-secret deployment identity stamp. The destructive-
+        // test guard uses this to prove which environment actually owns a
+        // port before it is allowed to kill/replace the process there, and
+        // to assert API↔test-lane coherence for destructive suites.
+        // Uses the raw env var (never the resolver's implicit default) so a
+        // dev server reports the DENY-listed "tellus-dev" value explicitly.
+        environmentId: process.env.TELLUS_ENVIRONMENT_ID ?? "tellus-dev",
       });
     } finally {
       // Reset timeout before releasing back to pool

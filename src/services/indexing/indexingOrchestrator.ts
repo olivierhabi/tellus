@@ -26,6 +26,7 @@ import { readCSV, ReadCSVResult } from "./csvReader";
 import { validatePrimaryKeys, PKValidationResult } from "./primaryKeyValidator";
 import { buildBatch, BuildBatchResult, BatchProgress } from "./batchDocumentBuilder";
 import { mergeEditsWithDatasource, MergeResult, QueryFn } from "./editMerger";
+import { objectTypeIndexName } from "../opensearch/objectIndexNames";
 import {
   createIndex,
   deleteIndex,
@@ -831,26 +832,26 @@ export async function runSelfTests(): Promise<void> {
 
       indexExists: async (apiName: string) => ({
         exists: ixExists,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
 
       createIndex: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
 
       recreateIndex: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
         recreated: true as const,
       }),
 
       updateMapping: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
 
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
 
       readCSV: async (filePath: string): Promise<ReadCSVResult> => {
         if (readFail) {

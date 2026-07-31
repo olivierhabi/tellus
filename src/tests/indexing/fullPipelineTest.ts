@@ -19,6 +19,7 @@ import { readCSV } from "../../services/indexing/csvReader";
 import { validatePrimaryKeys } from "../../services/indexing/primaryKeyValidator";
 import { buildBatch } from "../../services/indexing/batchDocumentBuilder";
 import { mergeEditsWithDatasource, MergeResult } from "../../services/indexing/editMerger";
+import { objectTypeIndexName } from "../../services/opensearch/objectIndexNames";
 import {
   bulkIndex,
   BulkIndexResult,
@@ -53,7 +54,7 @@ const DATA_DIR = path.resolve(__dirname, "../../..", "data");
 const DIRTY_CSV_PATH = path.join(DATA_DIR, "test-pipeline-dirty.csv");
 const CLEAN_CSV_PATH = path.join(DATA_DIR, "test-pipeline-clean.csv");
 const OBJECT_TYPE_API_NAME = "Employee";
-const INDEX_NAME = `ontology-${OBJECT_TYPE_API_NAME.toLowerCase()}`;
+const INDEX_NAME = objectTypeIndexName(OBJECT_TYPE_API_NAME);
 const TOTAL_ROWS = 500;
 
 // ---------------------------------------------------------------------------

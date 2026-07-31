@@ -71,6 +71,31 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** Locally-scoped default environment id for the single-stack dev loop. */
 export const LOCAL_DEV_ENVIRONMENT_ID = "tellus-dev";
 
+/** Default OpenSearch prefix for object-type indices (dev/prod shape). */
+export const DEFAULT_OBJECT_INDEX_PREFIX = "ontology-";
+
+/**
+ * The deployment's OpenSearch prefix for object-type indices (the search
+ * analogue of TEMPORAL_NAMESPACE). Empty/invalid values fall back to the
+ * historical default so existing clusters are untouched. Test/verify
+ * environments MUST override this (the destructive-test guard deny-lists
+ * the default for them).
+ */
+export function objectIndexPrefix(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const raw = env.OS_INDEX_PREFIX?.trim();
+  if (!raw) return DEFAULT_OBJECT_INDEX_PREFIX;
+  if (!/^[a-z0-9][a-z0-9-]*-$/.test(raw)) {
+    throw new DeploymentConfigurationError(
+      `OS_INDEX_PREFIX='${raw}' is invalid; use lower-case [a-z0-9-] ending ` +
+        `with '-' (e.g. 'ttest-ontology-').`,
+      "OS_INDEX_PREFIX",
+    );
+  }
+  return raw;
+}
+
 export function isStrictMode(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.NODE_ENV === "production" || env.TELLUS_DEPLOYMENT_STRICT === "1";
 }

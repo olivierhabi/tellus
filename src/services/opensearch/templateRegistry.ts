@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import { client } from "./client";
+import { objectIndexPrefix } from "../../config/environmentIdentity";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,8 +33,23 @@ export interface EnsureTemplateResult {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Template name registered in OpenSearch. */
+/** Base template name registered in OpenSearch. */
 const TEMPLATE_NAME = "ontology-template";
+
+/**
+ * Deployment-scoped template identity: the default prefix keeps the
+ * historical name/pattern; a custom OS_INDEX_PREFIX gets its own
+ * template (named + patterned by prefix) so test/verify stacks never
+ * collide with the dev template.
+ */
+function templateName(): string {
+  const prefix = objectIndexPrefix();
+  if (prefix === "ontology-") return TEMPLATE_NAME;
+  return `${TEMPLATE_NAME}-${prefix.replace(/-$/, "").replace(/[^a-z0-9-]/g, "-")}`;
+}
+function templatePattern(): string {
+  return `${objectIndexPrefix()}*`;
+}
 
 /**
  * System field mappings — identical to the ones in indexMappingGenerator.ts.
@@ -81,7 +97,7 @@ const DEFAULT_TEMPLATE_SETTINGS = {
 /**
  * Create or update the `ontology-template` index template in OpenSearch.
  *
- * This template matches all `ontology-*` indices and applies:
+ * This template matches all `<prefix>*` indices (default `ontology-*`) and applies:
  *   - Default index settings (shards, replicas, refresh interval, etc.)
  *   - System field mappings (__pk, __objectType, __lastModified, etc.)
  *
@@ -109,9 +125,9 @@ export async function ensureIndexTemplate(): Promise<EnsureTemplateResult> {
 
   try {
     await client.indices.putTemplate({
-      name: TEMPLATE_NAME,
+      name: templateName(),
       body: {
-        index_patterns: ["ontology-*"],
+        index_patterns: [templatePattern()],
         settings: DEFAULT_TEMPLATE_SETTINGS,
         mappings: {
           properties: SYSTEM_FIELD_MAPPINGS,
@@ -120,13 +136,13 @@ export async function ensureIndexTemplate(): Promise<EnsureTemplateResult> {
     });
 
     console.log(
-      `Index template '${TEMPLATE_NAME}' ensured (action: ${action})`
+      `Index template '${templateName()}' ensured (action: ${action}, pattern: ${templatePattern()})`
     );
 
     return {
       success: true,
       action,
-      templateName: TEMPLATE_NAME,
+      templateName: templateName(),
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -136,7 +152,7 @@ export async function ensureIndexTemplate(): Promise<EnsureTemplateResult> {
         : message;
 
     throw new Error(
-      `Failed to ${action === "created" ? "create" : "update"} index template '${TEMPLATE_NAME}': ${details}`
+      `Failed to ${action === "created" ? "create" : "update"} index template '${templateName()}': ${details}`
     );
   }
 }
