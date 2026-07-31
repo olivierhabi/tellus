@@ -1,0 +1,8 @@
+Task Queue Statistics:
+    BuildID    TaskQueueType  ApproximateBacklogCount  ApproximateBacklogAge  BacklogIncreaseRate  TasksAddRate  TasksDispatchRate
+  UNVERSIONED  workflow                             0  0s                                       0             0                  0
+  UNVERSIONED  activity                             0  0s                           1.3709068e-06    0.49062735         0.49062598
+Pollers:
+    BuildID    TaskQueueType                        Identity                        LastAccessTime  RatePerSecond
+  UNVERSIONED  workflow       tellus-dev:963a877a7eaf:49977@Olivier-HABIMANA.local  53 seconds ago         100000
+  UNVERSIONED  activity       tellus-dev:963a877a7eaf:49977@Olivier-HABIMANA.local  4 seconds ago          100000

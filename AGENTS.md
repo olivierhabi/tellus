@@ -7,11 +7,28 @@ Every element of the full e2e evaluation chain runs inside it: dedicated Postgre
 
 | Layer | What it is |
 |--------|-----------|
-| `scripts/automate-verify-stack/stack.env` | Ports, DB name, realm, bucket, owner/admin/unauth accounts |
-| `scripts/automate-verify-stack/up.sh` | Create: migrations → realm+users (superadmin) → detach API (:3100) → FE (:3101) → seed |
-| `scripts/automate-verify-stack/down.sh` | Teardown: kill ports, drop DB (purge verify indices in OS), delete realm, empty bucket |
+| `scripts/automate-verify-stack/stack.env` | Ports, DB name, realm, bucket, owner/admin/unauth accounts **+ FUNN-ISO identity (`VERIFY_STACK_ID` → `TELLUS_ENVIRONMENT_ID`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`)** |
+| `scripts/automate-verify-stack/up.sh` | Create: migrations → realm+users (superadmin) → **Temporal namespace + search attributes** → detach API (:3100, env identity inherited from stack.env) → FE (:3101) → seed |
+| `scripts/automate-verify-stack/down.sh` | Teardown: kill ports, drop DB (purge verify indices in OS), delete realm, empty bucket, **terminate open Temporal workflows (TTL cleanup for the ephemeral namespace)** |
 | `scripts/automate-verify-stack/seed-domain.ts` | Object type (`VerifyTaxpayer`), 4 action types, code repo (v1/v2/v3 Function source committed+tagged), Jemma publish runs. |
-| `scripts/verify-tellus-automate-complete.sh` | The authoritative gate: down→up→seed→version→(4 canonical cypress scenarios)×2→permissions→tsc/unit→flex→git→`TELLUS_AUTOMATE_COMPLETE`. |
+| `scripts/verify-tellus-automate-complete.sh` | The authoritative gate: down→up→**Temporal poller-env audit**→seed→version→(4 canonical cypress scenarios)×2→permissions→tsc/unit→flex→git→`TELLUS_AUTOMATE_COMPLETE`. |
+
+## Temporal / Object Data Funnel isolation (FUNN-ISO)
+
+Every deployment owns its Temporal `namespace + task queue` and stamps a
+sealed `deployment_environment` row in its database. Workers refuse to boot
+on mismatches; every funnel activity fences (env ctx ↔ worker ↔ db seal)
+and throws `FunnelExecutionEnvironmentMismatch` (non-retryable) instead of
+returning a silent empty success. Terminals are CAS-guarded (stale runs can
+never overwrite newer state) and require stage evidence. Dispatches use the
+durable `funnel_signal` outbox with `dispatch_pending → workflow_started`
+CAS. Operators audit pollers via `scripts/verify-temporal-pollers.sh`
+(identities are `<envId>:<buildId>:<pid>@host`). Legacy shared-namespace
+workflows live under `tellus-funnel` (TTL) and were migrated/terminated by
+`scripts/migrate-funnel-temporal-isolation.ts` (evidence:
+`.migration-evidence/`). Dev defaults: `TELLUS_ENVIRONMENT_ID=tellus-dev`,
+ns/queue `tellus-funnel[-queue]-tellus-dev`; production requires all four
+identity vars explicitly.
 
 ## Gate results (two consecutive runs, both clean)
 - **17/17 Function-version semantics**: v1 pinned, v2 autoUpgrade, v3 compatible-major incompatible rejected.
@@ -27,6 +44,9 @@ Every element of the full e2e evaluation chain runs inside it: dedicated Postgre
 - `scripts/verify-automate-function-versions.ts` — pinned/autoUpgrade/incompatible semantics.
 - `scripts/verify-automate-permissions.ts` — superadmin handler merges/updates parts that could lead to incorrect ownership grants for code repos.
 - `scripts/cleanup-automate-permissions.ts` — deliberately merges/updates parts that could lead to incorrect ownership grants for code repos.
+- `scripts/migrate-funnel-temporal-isolation.ts` — legacy-namespace workflow migration with evidence (`.migration-evidence/funnel-temporal-isolation/*.json`).
+- `scripts/repair-olivierorder.ts` — repair harness used for the 2026-07-31 stuck-"Indexing" recovery; reusable pattern for cross-environment incidents.
+- `scripts/verify-temporal-pollers.sh` — fails when a task-queue poller belongs to an unexpected environment/build.
 
 ## Key fixes in this session
 - `src/services/automate/conditionRuntime.ts` — `processLiveAutomation`: live-events branch filter relaxed so root/merged committed branches (`parent_branch_id IS NULL` or `'MERGED'` in `ontology_branch`) are processed instead of only `branch_id IS NULL` (which never matches: all committed objects live on the root branch, not null).
