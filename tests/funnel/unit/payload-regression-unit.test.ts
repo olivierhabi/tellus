@@ -152,6 +152,8 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     const result = await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
+      // FUNN-ISO: the activity fence requires the dispatch environment id.
+      environmentId: "tellus-dev",
     });
 
     // The single most important assertion: the row array that used to
@@ -163,6 +165,8 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     const result = await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
+      // FUNN-ISO: the activity fence requires the dispatch environment id.
+      environmentId: "tellus-dev",
     });
 
     expect(result).toEqual(
@@ -192,6 +196,8 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     const result = await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
+      // FUNN-ISO: the activity fence requires the dispatch environment id.
+      environmentId: "tellus-dev",
     });
 
     const serialized = JSON.stringify(result);
@@ -202,6 +208,8 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
+      // FUNN-ISO: the activity fence requires the dispatch environment id.
+      environmentId: "tellus-dev",
     });
 
     // computeChangelog was called. Under Option 2 it streams the rows to a

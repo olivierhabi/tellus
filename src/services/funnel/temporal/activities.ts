@@ -549,7 +549,16 @@ export async function projectStageToPostgres(input: {
   runKey?: string;
 }): Promise<void> {
   try {
-    await fence(input);
+    // projectStageToPostgres is the best-effort PROGRESS marker (it must
+    // never fail the workflow on a PG blip). Hard environment fencing
+    // belongs to the stage activities + projectFunnelTerminalActivity. When
+    // the caller DID stamp an environment, however, a mismatch with this
+    // worker/DB is a split-brain symptom and is metricated loudly, while
+    // legacy unstamped callers (e.g. the non-Temporal replay path in tests)
+    // remain best-effort.
+    if (input.environmentId) {
+      await fence(input);
+    }
     const { ontologyId, objectTypeApiName, currentStage, objectsIndexed, runKey } = input;
     // Temporal gives us a stable workflowId per workflow instance. For
     // long-lived parent workflows we further scope with `runKey` (the

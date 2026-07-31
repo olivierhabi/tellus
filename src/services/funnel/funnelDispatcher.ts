@@ -158,10 +158,18 @@ async function tick(options: DispatcherOptions): Promise<number> {
     // projection the user-facing `funnel_state.status` would stay at
     // its previous value forever (typically `not_indexed`), which is
     // the bug pre-2026-05-06.
+    const pgEnvId = getEnvironmentIdentity().environmentId;
+    const otRow = await query(
+      `SELECT object_type_id FROM object_type
+        WHERE ontology_id = $1 AND api_name = $2 LIMIT 1`,
+      [signal.ontology_id, objectTypeApiName],
+    );
+    const pgObjectTypeRid = otRow.rows[0]?.object_type_id as string | undefined;
     await projectFunnelTerminalToState(
       signal.ontology_id,
       objectTypeApiName,
-      "indexing"
+      "indexing",
+      { environmentId: pgEnvId, objectTypeRid: pgObjectTypeRid },
     );
 
     const result = await runWorkflow(
@@ -178,14 +186,23 @@ async function tick(options: DispatcherOptions): Promise<number> {
         signal.ontology_id,
         objectTypeApiName,
         "indexed",
-        { runId: result.runId }
+        {
+          runId: result.runId,
+          environmentId: pgEnvId,
+          objectTypeRid: pgObjectTypeRid,
+        },
       );
     } else {
       await projectFunnelTerminalToState(
         signal.ontology_id,
         objectTypeApiName,
         "failed",
-        { errorMessage: result.errorMessage ?? "Funnel pipeline failed" }
+        {
+          runId: result.runId,
+          errorMessage: result.errorMessage ?? "Funnel pipeline failed",
+          environmentId: pgEnvId,
+          objectTypeRid: pgObjectTypeRid,
+        },
       );
     }
 
@@ -371,16 +388,54 @@ async function dispatchSignalToTemporal(
  * workflow a plain in-flight signal.
  */
 export async function reconcileStaleDispatches(): Promise<number> {
+  // dispatch_pending rows are retried aggressively (their workflow start
+  // may never have happened). workflow_started rows are only re-dispatched
+  // when the parent workflow is KNOWN-GONE — re-signaling a live workflow
+  // every tick floods its (serial) signal queue with duplicate passes and
+  // is itself a stuck-"Indexing" generator. Visibility check is done ONCE
+  // per tick, not per row.
   const stale = await query(
     `SELECT run_id, ontology_id, object_type_api_name, signal_payload,
-            environment_id, started_at
+            environment_id, started_at, status
        FROM funnel_run
-      WHERE status IN ('dispatch_pending', 'workflow_started')
-        AND started_at < now() - $1::interval`,
-    [`${Math.ceil(DISPATCH_STALE_AFTER_MS / 1000)} seconds`],
+      WHERE status = 'dispatch_pending'
+        AND started_at < now() - $1::interval
+      UNION ALL
+      SELECT run_id, ontology_id, object_type_api_name, signal_payload,
+             environment_id, started_at, status
+        FROM funnel_run
+       WHERE status = 'workflow_started'
+         AND started_at < now() - $2::interval`,
+    [
+      `${Math.ceil(DISPATCH_STALE_AFTER_MS / 1000)} seconds`,
+      // workflow_started rows get a generous window: the long-lived parent
+      // drains signals SERIALLY and a pass on a 746-row type legitimately
+      // takes minutes. Default 10 min.
+      `${Math.ceil(Number(process.env.FUNNEL_WORKFLOW_STARTED_STALE_MS ?? 600_000) / 1000)} seconds`,
+    ],
   );
   if (stale.rows.length === 0) return 0;
   const identity = getEnvironmentIdentity();
+
+  // One Temporal visibility pass for this tick: which parent workflows
+  // are RUNNING right now?
+  let aliveWorkflowIds: Set<string> | null = null;
+  try {
+    const { getTemporalClient, funnelWorkflowId } = await import("./temporal/worker");
+    const client = getTemporalClient();
+    if (client) {
+      aliveWorkflowIds = new Set<string>();
+      for await (const wf of client.workflow.list({
+        query: "ExecutionStatus = 'Running'",
+      })) {
+        aliveWorkflowIds.add(wf.workflowId);
+      }
+      void funnelWorkflowId;
+    }
+  } catch {
+    aliveWorkflowIds = null; // visibility unavailable — err on the side of no re-dispatch
+  }
+
   let retried = 0;
   for (const row of stale.rows as Array<{
     run_id: string;
@@ -389,8 +444,10 @@ export async function reconcileStaleDispatches(): Promise<number> {
     signal_payload: Record<string, unknown> | null;
     environment_id: string | null;
     started_at: Date;
+    status: string;
   }>) {
-    const ageSeconds = (Date.now() - row.started_at.getTime()) / 1000;
+    const startedAtMs = new Date(row.started_at as unknown as string).getTime();
+    const ageSeconds = (Date.now() - startedAtMs) / 1000;
     observeDispatchPendingAge(ageSeconds, {
       object_type: row.object_type_api_name,
     });
@@ -401,6 +458,20 @@ export async function reconcileStaleDispatches(): Promise<number> {
     }
     const signalId = row.signal_payload?.signalId as string | undefined;
     if (!signalId) continue;
+    // workflow_started + live parent workflow → the signal is QUEUED on
+    // the parent; do not re-dispatch (that would append duplicates).
+    if (row.status === "workflow_started") {
+      const { funnelWorkflowId } = await import("./temporal/worker");
+      const ot = await query(
+        `SELECT object_type_id FROM object_type
+          WHERE ontology_id = $1 AND api_name = $2 LIMIT 1`,
+        [row.ontology_id, row.object_type_api_name],
+      );
+      if (ot.rows[0] && aliveWorkflowIds?.has(funnelWorkflowId(row.ontology_id, ot.rows[0].object_type_id))) {
+        continue;
+      }
+      if (aliveWorkflowIds === null) continue; // can't verify — don't dup
+    }
     const otRes = await query(
       `SELECT object_type_id FROM object_type
         WHERE ontology_id = $1 AND api_name = $2 LIMIT 1`,
@@ -456,9 +527,12 @@ export async function reportStaleIndexingStates(): Promise<number> {
   const { observeIndexingAge } = await import("./isolationMetrics");
   const rows = await findStaleIndexingStates(DISPATCH_STALE_AFTER_MS * 2);
   for (const row of rows) {
-    observeIndexingAge((Date.now() - row.updated_at.getTime()) / 1000, {
-      object_type: row.api_name ?? "unknown",
-    });
+    observeIndexingAge(
+      (Date.now() - new Date(row.updated_at as unknown as string).getTime()) / 1000,
+      {
+        object_type: row.api_name ?? "unknown",
+      },
+    );
   }
   return rows.length;
 }
