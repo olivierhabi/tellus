@@ -150,6 +150,40 @@ async function ensureNamespace(
       ...identityLogFields(identity),
     })
   );
+
+  // Best-effort: register the funnel lineage search attributes for this
+  // namespace so dispatch can attach typed attributes (not just memo).
+  // operatorService.addSearchAttributes is idempotent about *values* —
+  // re-adding an existing attribute errors with AlreadyExists which we
+  // tolerate. Clusters without operator permissions still dispatch fine
+  // via the memo-only fallback in signalTemporalWorkflow.
+  try {
+    // temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD = 2.
+    // Hard-coded to avoid a direct @temporalio/api dependency (the client
+    // package bundles the same proto).
+    const INDEXED_VALUE_TYPE_KEYWORD = 2;
+    const searchAttributes: Record<string, number> = {};
+    for (const name of Object.values(FUNNEL_SEARCH_ATTRIBUTES)) {
+      searchAttributes[name] = INDEXED_VALUE_TYPE_KEYWORD;
+    }
+    await connection.operatorService.addSearchAttributes({
+      namespace: ns,
+      searchAttributes,
+    } as never);
+    console.log(
+      JSON.stringify({
+        level: "info",
+        type: "temporal_search_attributes_registered",
+        namespace: ns,
+        attributes: Object.keys(searchAttributes),
+      }),
+    );
+  } catch (err) {
+    // Already-registered or insufficient privileges — memo fallback covers us.
+    console.warn(
+      `[temporal] search-attribute registration best-effort failed for ${ns}: ${(err as Error).message}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,8 +403,20 @@ export async function signalTemporalWorkflow(
     } catch (err) {
       // Clusters without the custom search attributes registered reject the
       // start — retry memo-only so dispatch itself is never blocked by a
-      // metadata-registration gap.
-      if (!/search.?attribute/i.test((err as Error).message)) throw err;
+      // metadata-registration gap. The "search attribute" complaint is in
+      // the gRPC CAUSE chain, not the envelope message, so walk it.
+      let isSearchAttrErr = false;
+      let cur = err as { message?: string; cause?: unknown } | undefined;
+      let depth = 0;
+      while (cur && depth < 8) {
+        if (/search.?attribute/i.test(cur.message ?? "")) {
+          isSearchAttrErr = true;
+          break;
+        }
+        cur = cur.cause as typeof cur;
+        depth++;
+      }
+      if (!isSearchAttrErr) throw err;
       await temporalClient.workflow.signalWithStart("ObjectTypeFunnelWorkflow", {
         workflowId,
         taskQueue: identity.temporalTaskQueue,
@@ -392,8 +438,19 @@ export async function signalTemporalWorkflow(
       environment: identity.environmentId,
       object_type: input.objectTypeApiName,
     });
+    // Unwrap the Temporal cause chain — "Failed to signalWithStart Workflow"
+    // is the envelope; the REAL cause (notfound/validation/…) sits in .cause.
+    let causeMsg = "";
+    let cur = err as { cause?: unknown } | undefined;
+    let depth = 0;
+    while (cur?.cause && depth < 8) {
+      const c = cur.cause as { message?: string; details?: string };
+      if (c?.message) causeMsg += ` | cause: ${c.details ?? c.message}`;
+      cur = cur.cause as typeof cur;
+      depth++;
+    }
     console.warn(
-      `[temporal] signalWithStart failed for ${input.objectTypeApiName}: ${(err as Error).message}`
+      `[temporal] signalWithStart failed for ${input.objectTypeApiName}: ${(err as Error).message}${causeMsg}`
     );
     return false;
   }

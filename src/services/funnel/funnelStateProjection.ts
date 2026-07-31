@@ -274,15 +274,28 @@ export async function projectFunnelTerminalToState(
     let errorMessageForEmit: string | null = null;
 
     if (status === "indexed") {
-      if (typeof options.objectsIndexed === "number") {
-        runObjects = Math.max(0, Math.floor(options.objectsIndexed));
-      } else if (options.runId) {
-        const r = await query(
-          `SELECT COALESCE(objects_indexed, 0) AS n
-             FROM funnel_run WHERE run_id = $1`,
-          [options.runId]
+      // The badge shows the TOTAL object count, not the per-run delta —
+      // otherwise a no-op re-run (merge upserts=0) clobbers the displayed
+      // total back to 0 although all objects still exist. Authoritative
+      // source: object_instances for this (ontology, type). The previous
+      // per-run `merge.upserts` is still recorded in the run row's
+      // objects_indexed column and stage output_json for audit.
+      const n = await query(
+        `SELECT count(*)::int AS n FROM object_instances
+          WHERE ontology_id = $1 AND object_type_api_name = $2`,
+        [ontologyId, objectTypeApiName],
+      );
+      runObjects = Number(n.rows[0]?.n ?? 0);
+      if (typeof options.objectsIndexed === "number" && options.objectsIndexed !== runObjects) {
+        console.log(
+          JSON.stringify({
+            level: "info",
+            type: "funnel_terminal_count_reconciled",
+            objectTypeApiName,
+            runDelta: options.objectsIndexed,
+            totalObjects: runObjects,
+          }),
         );
-        runObjects = Number(r.rows[0]?.n ?? 0);
       }
       // CAS: a stale run must never overwrite a newer run's terminal
       // state. active_run_started_at is the monotonic guard (set on the
