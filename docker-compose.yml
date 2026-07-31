@@ -582,9 +582,14 @@ services:
       retries: 10
       start_period: 40s
 
-  # One-shot: register the `tellus-funnel` namespace the worker expects.
-  # Retries until the Temporal frontend answers, then creates the namespace
-  # idempotently. ($$ escapes shell vars from Compose interpolation.)
+  # One-shot: register the Temporal namespaces the workers expect.
+  # FUNN-ISO: each deployment owns a namespace; the dev namespace defaults
+  # to `tellus-funnel-tellus-dev` (see src/config/environmentIdentity.ts —
+  # sharing a namespace+queue across databases was the 2026-07-31
+  # split-brain). The legacy `tellus-funnel` namespace is KEPT (72h
+  # retention) so pre-isolation workflow history + the migration window
+  # remain inspectable — it must receive no new pollers.
+  # ($$ escapes shell vars from Compose interpolation.)
   temporal-init:
     image: temporalio/admin-tools:1.25
     restart: "no"
@@ -598,9 +603,16 @@ services:
           if temporal operator cluster health --address temporal:7233 >/dev/null 2>&1; then break; fi
           echo "waiting for temporal frontend... ($$i)"; sleep 2;
         done
-        temporal operator namespace describe --address temporal:7233 tellus-funnel >/dev/null 2>&1 \
-          || temporal operator namespace create --address temporal:7233 --retention 72h tellus-funnel
-        echo "temporal namespace tellus-funnel ready"
+        DEV_NS=$${DEV_TEMPORAL_NAMESPACE:-$${TEMPORAL_NAMESPACE:-tellus-funnel-tellus-dev}}
+        for ns in "$$DEV_NS" tellus-funnel; do
+          temporal operator namespace describe --address temporal:7233 "$$ns" >/dev/null 2>&1 \
+            || temporal operator namespace create --address temporal:7233 --retention 72h "$$ns"
+          echo "temporal namespace $$ns ready"
+        done
+        for sa in TellusEnvironmentId TellusOntologyRid TellusObjectTypeRid TellusWorkerBuildId; do
+          temporal operator search-attribute create --address temporal:7233 --name "$$sa" --type Keyword >/dev/null 2>&1 \
+            && echo "search attribute $$sa registered" || true
+        done
 
   # -------------------------------------------------------------------------
   # Lakekeeper — Iceberg REST catalog (Task B2).
@@ -755,9 +767,14 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tellus}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tellus_ch_pw}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
-      # Funnel orchestration → Temporal (in-cluster).
+      # Funnel orchestration → Temporal (in-cluster). FUNN-ISO defaults to
+      # the clearly-defined single-stack dev identity; production deploys
+      # must set TELLUS_ENVIRONMENT_ID + TEMPORAL_NAMESPACE +
+      # TEMPORAL_TASK_QUEUE explicitly (strict mode enforces this at boot).
+      TELLUS_ENVIRONMENT_ID: ${TELLUS_ENVIRONMENT_ID:-tellus-dev}
       TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-tellus-funnel}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-tellus-funnel-tellus-dev}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-tellus-funnel-queue-tellus-dev}
       # Iceberg REST catalog → Lakekeeper (in-cluster). The warehouse storage
       # endpoint must be reachable from the Lakekeeper container, hence minio:9000.
       LAKEKEEPER_URL: http://lakekeeper:8181

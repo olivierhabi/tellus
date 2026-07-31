@@ -112,6 +112,10 @@ const { syncOpenSearchActivity } = proxyActivities<typeof Activities>({
 // `client.workflow.getHandle(workflowId).signal(sourceTxnSignal, {...})`.
 export interface SignalPayload {
   signalId?: string;
+  /** FUNN-ISO-6: pre-created funnel_run (status=dispatch_pending) this
+   *  signal drives — binds outbox row ↔ Temporal execution for terminal
+   *  CAS + audit. */
+  funnelRunId?: string;
   transactionId?: string;
   editBatchSize?: number;
   schemaChangeEventId?: string;
@@ -124,6 +128,20 @@ export const schemaChangeSignal = defineSignal<[SignalPayload]>("schemaChanged")
 export interface ObjectTypeFunnelInput {
   ontologyId: string;
   objectTypeApiName: string;
+  /**
+   * FUNN-ISO-2 — stable object-type RID. The dispatching environment
+   * resolved (ontologyId, apiName, rid) at dispatch time; the activity
+   * fence verifies the triple against the database it actually reads, so a
+   * worker pointed at the wrong DB can never "successfully" run a pass
+   * whose expected resources do not exist there.
+   */
+  objectTypeRid?: string;
+  /**
+   * FUNN-ISO-3 — deployment environment identity stamped into the workflow
+   * at dispatch. Every activity fence-compares it against (a) its own
+   * worker identity and (b) the database seal. Immutable per workflow run.
+   */
+  environmentId?: string;
   /**
    * FNL-H1 — state carried across a `continueAsNew` boundary. Fresh
    * workflow invocations omit this; continue-as-new child workflows
@@ -169,6 +187,27 @@ function resolveContinueAsNewThreshold(input: ObjectTypeFunnelInput): number {
  * Pure property access — deterministic, safe inside the workflow sandbox.
  * Falls back to the top-level `.message` if no cause chain is present.
  */
+/**
+ * Walk the Temporal failure `.cause` chain looking for a specific typed
+ * error name (e.g. "FunnelObjectTypeMissing",
+ * "FunnelExecutionEnvironmentMismatch"). Temporal wraps activity throws in
+ * ActivityFailure/ApplicationFailure — custom error .name is preserved on
+ * ApplicationFailure.type (and .message otherwise).
+ *
+ * Pure property access — deterministic, safe inside the workflow sandbox.
+ */
+function isTypedCause(err: unknown, typeName: string): boolean {
+  let cur = err as { name?: string; type?: string; message?: string; cause?: unknown } | undefined;
+  let depth = 0;
+  while (cur && depth < 16) {
+    if (cur.name === typeName || cur.type === typeName) return true;
+    if (typeof cur.message === "string" && cur.message.includes(typeName)) return true;
+    cur = cur.cause as typeof cur;
+    depth++;
+  }
+  return false;
+}
+
 function rootCauseMessage(err: unknown): string {
   let cur = err as { message?: string; cause?: unknown } | undefined;
   let msg = cur instanceof Error ? cur.message : "Funnel pipeline failed";
@@ -231,6 +270,9 @@ export async function ObjectTypeFunnelWorkflow(
       // returning immediately gives us a workflow-history-safe sentinel
       // — `Date.now()` is NOT deterministic inside a workflow.
       const runKey = sig?.signalId ?? `nosig-${pendingDrainedCount++}`;
+      /** FUNN-ISO-6: the pre-created funnel_run (dispatch_pending) this
+       *  signal drives — threaded into terminal projections for CAS. */
+      const funnelRunId = sig?.funnelRunId;
 
       // Per-signal terminal projection — wraps the four-stage pipeline so
       // `funnel_state.status` always flips from 'indexing' to either
@@ -250,6 +292,10 @@ export async function ObjectTypeFunnelWorkflow(
           currentStage: "merge",
           completedPrevious: "changelog",
           runKey,
+          stageOutput: {
+            rowsEmitted: changelog.rowsEmitted,
+            snapshotId: changelog.snapshotId,
+          },
         });
         const merge = await runMergeActivity({
           ...input,
@@ -269,6 +315,8 @@ export async function ObjectTypeFunnelWorkflow(
         await syncOpenSearchActivity({
           ontologyId: input.ontologyId,
           objectTypeApiName: input.objectTypeApiName,
+          objectTypeRid: input.objectTypeRid,
+          environmentId: input.environmentId,
         });
 
         await projectStageToPostgres({
@@ -277,6 +325,12 @@ export async function ObjectTypeFunnelWorkflow(
           objectsIndexed: merge.upserts,
           completedPrevious: "merge",
           runKey,
+          stageOutput: {
+            upserts: merge.upserts,
+            deletes: merge.deletes,
+            mergedRowCount: merge.mergedRowCount,
+            mergedSnapshotId: merge.mergedSnapshotId,
+          },
         });
         const indexing = await runIndexingActivityProxy({
           ...input,
@@ -289,8 +343,13 @@ export async function ObjectTypeFunnelWorkflow(
           currentStage: "hydration",
           completedPrevious: "indexing",
           runKey,
+          stageOutput: {
+            editsIndexed: indexing.editsIndexed,
+            publishedSplitCount: indexing.publishedSplitIds.length,
+            quickwit: indexing.quickwit,
+          },
         });
-        await runHydrationActivityProxy({
+        const hydration = await runHydrationActivityProxy({
           ...input,
           publishedSplitIds: indexing.publishedSplitIds,
         });
@@ -300,6 +359,7 @@ export async function ObjectTypeFunnelWorkflow(
           currentStage: null,
           completedPrevious: "hydration",
           runKey,
+          stageOutput: { prefetched: hydration.prefetched },
         });
 
         // Terminal projection: flip the UI badge from 'indexing' → 'indexed'
@@ -311,10 +371,38 @@ export async function ObjectTypeFunnelWorkflow(
         await projectFunnelTerminalActivity({
           ontologyId: input.ontologyId,
           objectTypeApiName: input.objectTypeApiName,
+          objectTypeRid: input.objectTypeRid,
+          environmentId: input.environmentId,
           status: "indexed",
           objectsIndexed: merge.upserts,
+          funnelRunId,
+          runKey,
         });
       } catch (err) {
+        // FUNN-ISO-4 — an expected-identity projection that cannot resolve
+        // the object type means the type was deleted mid-run (or, in the
+        // bad old world, the activity landed in the wrong DB). Mark the run
+        // with the explicit terminal state `object_type_deleted` and
+        // continue draining signals — do NOT rethrow (the pipeline itself
+        // was fine) and never report "indexed".
+        if (isTypedCause(err, "FunnelObjectTypeMissing")) {
+          try {
+            await projectFunnelTerminalActivity({
+              ontologyId: input.ontologyId,
+              objectTypeApiName: input.objectTypeApiName,
+              objectTypeRid: input.objectTypeRid,
+              environmentId: input.environmentId,
+              status: "cancelled",
+              errorMessage: `object_type_deleted: ${rootCauseMessage(err)}`,
+              funnelRunId,
+              runKey,
+              allowObjectTypeDeletedMarking: true,
+            });
+          } catch {
+            /* projection best-effort; there is no OT left to write to */
+          }
+          continue;
+        }
         // ANY exception in the four-stage pipeline lands us here. We must
         // still flip the badge so the user sees 'Failed' instead of an
         // eternal 'Indexing' spinner — then re-throw so Temporal applies
@@ -333,9 +421,13 @@ export async function ObjectTypeFunnelWorkflow(
           await projectFunnelTerminalActivity({
             ontologyId: input.ontologyId,
             objectTypeApiName: input.objectTypeApiName,
+            objectTypeRid: input.objectTypeRid,
+            environmentId: input.environmentId,
             status: "failed",
             errorMessage: message,
+            funnelRunId,
             runKey,
+            allowObjectTypeDeletedMarking: true,
           });
         } catch {
           /* projection is best-effort; original error wins below */

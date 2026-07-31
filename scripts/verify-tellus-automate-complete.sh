@@ -51,6 +51,13 @@ if ! bash "$STACK_DIR/up.sh" > /tmp/automate-verify-gate-up.log 2>&1; then
 fi
 
 echo ""
+echo "[2b/10] Temporal isolation — pollers on the verify queue belong to the verify env only"
+if ! bash scripts/verify-temporal-pollers.sh "$TEMPORAL_NAMESPACE" "$TEMPORAL_TASK_QUEUE" "$TELLUS_ENVIRONMENT_ID"; then
+  echo "FATAL: foreign Temporal poller identities on the verify queue (FUNN-ISO violation)"
+  exit 1
+fi
+
+echo ""
 echo "[3/10] Function-version semantics (v1 pinned, v2 autoUpgrade, v3 incompatible rejection)"
 CYPRESS_PG_DB="$VERIFY_DB" pnpm exec tsx scripts/verify-automate-function-versions.ts \
   > /tmp/automate-verify-gate-fnver.log 2>&1 \

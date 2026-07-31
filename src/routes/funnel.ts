@@ -14,7 +14,7 @@
 import { Router, Request, Response } from "express";
 import { query } from "../db";
 import { sendSignal, SignalType } from "../services/funnel/durableWorkflow";
-import { signalTemporalWorkflow, isTemporalConnected } from "../services/funnel/temporal/worker";
+import { isTemporalConnected } from "../services/funnel/temporal/worker";
 import { drainPendingSignals } from "../services/funnel/funnelDispatcher";
 import { getInstance } from "../models/objectInstance";
 import { getOverlayStore } from "../services/overlay/getOverlayStore";
@@ -86,23 +86,23 @@ router.post("/signals", async (req: Request, res: Response) => {
     return;
   }
   try {
-    // Always append to the Postgres signal inbox (durable audit trail).
+    // FUNN-ISO-6 — the Postgres signal inbox IS the transactional outbox:
+    // the request handler ONLY appends the signal row; the dispatcher loop
+    // claims it and performs the Temporal workflow start, CAS-ing the
+    // funnel_run from dispatch_pending → workflow_started on ack. Doing the
+    // Temporal start inline here would leave no durable trail if the
+    // process died between the signal insert and the signalWithStart.
     const signalId = await sendSignal({
       ontologyId,
       objectTypeApiName,
       signalType,
-      payload,
+      payload: { ...(payload ?? {}), signalType },
     });
-    // If the Temporal worker is connected, signal-with-start the real
-    // workflow too. The PG dispatcher will no-op on already-consumed
-    // signals; Temporal is authoritative.
-    const temporal = isTemporalConnected()
-      ? await signalTemporalWorkflow(ontologyId, objectTypeApiName, signalType, {
-          signalId,
-          ...(payload ?? {}),
-        })
-      : false;
-    res.status(202).json({ signalId, temporal });
+    res.status(202).json({
+      signalId,
+      dispatch: "queued",
+      temporal: isTemporalConnected(),
+    });
   } catch (err) {
     res.status(500).json({ error: "INTERNAL", message: (err as Error).message });
   }

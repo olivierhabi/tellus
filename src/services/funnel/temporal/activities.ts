@@ -41,6 +41,18 @@ import {
   projectFunnelTerminalToState,
   type FunnelStateStatus,
 } from "../funnelStateProjection";
+import {
+  fenceExecutionContext,
+  FunnelExecutionEnvironmentMismatch,
+  FunnelObjectTypeMissing,
+  FunnelStaleStateTransition,
+} from "../environmentGuard";
+import {
+  recordMissingObjectType,
+  recordMissingDatasource,
+  recordTerminalProjectionFailed,
+} from "../isolationMetrics";
+import { ApplicationFailure } from "@temporalio/activity";
 import { getObjectBuffer, getObjectStream, headObject } from "../../storageService";
 import { parseCsvReadable } from "../../indexing/streamingCsv";
 import {
@@ -126,6 +138,36 @@ function startHeartbeatLoop(): { stop: () => void } {
 export interface ObjectTypeCtx {
   ontologyId: string;
   objectTypeApiName: string;
+  /** FUNN-ISO — dispatch-stamped stable identity + environment. The fence
+   *  verifies (env ↔ worker ↔ database seal) before ANY read or write. */
+  objectTypeRid?: string;
+  environmentId?: string;
+}
+
+/**
+ * FUNN-ISO — execution-context fence. Called at the top of EVERY activity.
+ * Guard errors are re-thrown as NON-RETRYABLE ApplicationFailures: a retry
+ * can never repair a worker wired to the wrong environment, and converting
+ * the mismatch into retries would repeat the 2026-07-31 silent-green
+ * failure pattern at a slower cadence.
+ */
+async function fence(input: { environmentId?: string }): Promise<void> {
+  try {
+    await fenceExecutionContext({ environmentId: input.environmentId });
+  } catch (err) {
+    if (
+      err instanceof FunnelExecutionEnvironmentMismatch ||
+      err instanceof FunnelObjectTypeMissing ||
+      err instanceof FunnelStaleStateTransition
+    ) {
+      throw ApplicationFailure.create({
+        message: err.message,
+        type: err.name,
+        nonRetryable: true,
+      });
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +198,7 @@ async function runChangelogActivityImpl(
   manifest: ManifestEntry[];
   ownedProperties: string[];
 }> {
+  await fence(input);
   // Optional dev/demo pacing — no-op in production (env default 0).
   await sleepForStageDelay();
   const table = await ensureTable(input.objectTypeApiName, "changelog", "default");
@@ -214,6 +257,18 @@ async function runChangelogActivityImpl(
       reader = await buildFoundryBridgedReader(foundry);
     } else {
       const pending = await getPendingMergeEdits(input.objectTypeApiName);
+      // FUNN-ISO-4 observability: a funnel pass with NO backing datasource
+      // and NO edits is not an error per se (a legitimately empty OT does
+      // this), but it is the exact signature of the cross-database failure
+      // class — the OTHER environment's datasource is invisible here.
+      // Count it loudly so dashboards can catch the anomaly; the fence
+      // already guarantees the activity ran in the right environment.
+      if (pending.length === 0) {
+        recordMissingDatasource({
+          object_type: input.objectTypeApiName,
+          environment: input.environmentId ?? "unknown",
+        });
+      }
       const rows: SourceChangeRow[] = pending.map((e) => ({
         primary_key: e.primary_key,
         operation:
@@ -308,6 +363,7 @@ async function runMergeActivityImpl(
   editIds: string[];
   mergedRowCount: number;
 }> {
+  await fence(input);
   await sleepForStageDelay();
   const mergedTable = await ensureTable(input.objectTypeApiName, "merged", "state");
   const pending = await getPendingMergeEdits(input.objectTypeApiName);
@@ -366,10 +422,11 @@ export async function runIndexingActivityProxy(
 
 async function runIndexingActivityProxyImpl(
   input: ObjectTypeCtx & {
-    mergedSnapshotId: string;
-    mergedRowCount: number;
+  mergedSnapshotId: string;
+  mergedRowCount: number;
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
+  await fence(input);
   await sleepForStageDelay();
   const pending = await getPendingIndexEdits(input.objectTypeApiName);
   const editIds = pending.map((e) => e.edit_id);
@@ -437,6 +494,7 @@ export async function runHydrationActivityProxy(
 async function runHydrationActivityProxyImpl(
   input: ObjectTypeCtx & { publishedSplitIds: string[] }
 ): Promise<{ prefetched: number }> {
+  await fence(input);
   await sleepForStageDelay();
   if (input.publishedSplitIds.length === 0) return { prefetched: 0 };
   // Hydration errors must NOT be silently swallowed — the spec §B3
@@ -461,8 +519,18 @@ async function runHydrationActivityProxyImpl(
 export async function projectStageToPostgres(input: {
   ontologyId: string;
   objectTypeApiName: string;
+  /** FUNN-ISO — deployment identity carried by the workflow. The fence
+   *  gates the write so a projection from another environment can never
+   *  land in this database. */
+  environmentId?: string;
+  objectTypeRid?: string;
   currentStage: "changelog" | "merge" | "indexing" | "hydration" | null;
   objectsIndexed?: number;
+  /** Per-stage evidence counts (rowsEmitted/upserts/deletes/…) merged
+   *  into the stage row's output_json — the operator-facing record that
+   *  distinguishes "valid empty source" from "stage executed nothing
+   *  suspiciously" and feeds the terminal indexed-consistency checks. */
+  stageOutput?: Record<string, unknown>;
   /** When true, the previous stage just completed and should be
    *  stamped `succeeded` in funnel_stage_run. The workflow calls
    *  projectStageToPostgres twice per stage transition: once on
@@ -481,6 +549,7 @@ export async function projectStageToPostgres(input: {
   runKey?: string;
 }): Promise<void> {
   try {
+    await fence(input);
     const { ontologyId, objectTypeApiName, currentStage, objectsIndexed, runKey } = input;
     // Temporal gives us a stable workflowId per workflow instance. For
     // long-lived parent workflows we further scope with `runKey` (the
@@ -517,9 +586,10 @@ export async function projectStageToPostgres(input: {
       const updated = await query(
         `INSERT INTO funnel_run
            (ontology_id, object_type_api_name, workflow_type, status,
-            current_stage, objects_indexed, temporal_workflow_id, started_at, completed_at)
+            current_stage, objects_indexed, temporal_workflow_id, started_at, completed_at,
+            environment_id)
          VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'completed',
-                 NULL, COALESCE($3, 0), $4, now(), now())
+                 NULL, COALESCE($3, 0), $4, now(), now(), $5)
          ON CONFLICT (temporal_workflow_id)
          WHERE temporal_workflow_id IS NOT NULL
          DO UPDATE SET status = 'completed',
@@ -527,15 +597,20 @@ export async function projectStageToPostgres(input: {
                        objects_indexed = COALESCE(EXCLUDED.objects_indexed, funnel_run.objects_indexed),
                        completed_at = now()
          RETURNING run_id`,
-        [ontologyId, objectTypeApiName, objectsIndexed ?? null, workflowId]
+        [ontologyId, objectTypeApiName, objectsIndexed ?? null, workflowId, input.environmentId ?? null]
       );
-      // Close the last open stage_run row.
+      // Close the last open stage_run row (with evidence counts merged).
       if (updated.rows[0]?.run_id && input.completedPrevious) {
         await query(
           `UPDATE funnel_stage_run
-              SET status = 'succeeded', finished_at = now()
+              SET status = 'succeeded', finished_at = now(),
+                  output_json = COALESCE($3::jsonb, output_json)
             WHERE run_id = $1 AND stage = $2 AND status = 'running'`,
-          [updated.rows[0].run_id, input.completedPrevious]
+          [
+            updated.rows[0].run_id,
+            input.completedPrevious,
+            input.stageOutput ? JSON.stringify(input.stageOutput) : null,
+          ]
         );
       }
       return;
@@ -543,13 +618,22 @@ export async function projectStageToPostgres(input: {
     const runRow = await query(
       `INSERT INTO funnel_run
          (ontology_id, object_type_api_name, workflow_type, status,
-          current_stage, objects_indexed, temporal_workflow_id, started_at)
+          current_stage, objects_indexed, temporal_workflow_id, started_at,
+          environment_id)
        VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running',
-               $3, COALESCE($4, 0), $5, now())
+               $3, COALESCE($4, 0), $5, now(), $6)
        ON CONFLICT (temporal_workflow_id)
        WHERE temporal_workflow_id IS NOT NULL
        DO UPDATE SET current_stage = EXCLUDED.current_stage,
-                     objects_indexed = COALESCE(EXCLUDED.objects_indexed, funnel_run.objects_indexed)
+                     objects_indexed = COALESCE(EXCLUDED.objects_indexed, funnel_run.objects_indexed),
+                     -- CAS: dispatch_pending / workflow_started rows move to
+                     -- 'running' only when execution actually begins — a
+                     -- completed/cancelled row is NEVER regressed.
+                     status = CASE
+                       WHEN funnel_run.status IN ('dispatch_pending', 'workflow_started', 'running')
+                         THEN 'running'
+                       ELSE funnel_run.status
+                     END
        RETURNING run_id`,
       [
         ontologyId,
@@ -557,17 +641,26 @@ export async function projectStageToPostgres(input: {
         currentStage,
         objectsIndexed ?? null,
         workflowId,
+        input.environmentId ?? null,
       ]
     );
+    // NOTE: re-dispatch of the SAME signal id onto a terminal run row is
+    // rejected by the CASE-guard above (status is preserved, never
+    // regressed); the environment fence is the primary cross-env block.
     const runId = runRow.rows[0]?.run_id as string | undefined;
     if (runId) {
       // Close the previously-running stage (if any) + open a new one.
       if (input.completedPrevious) {
         await query(
           `UPDATE funnel_stage_run
-              SET status = 'succeeded', finished_at = now()
+              SET status = 'succeeded', finished_at = now(),
+                  output_json = COALESCE($3::jsonb, output_json)
             WHERE run_id = $1 AND stage = $2 AND status = 'running'`,
-          [runId, input.completedPrevious]
+          [
+            runId,
+            input.completedPrevious,
+            input.stageOutput ? JSON.stringify(input.stageOutput) : null,
+          ]
         );
       }
       await query(
@@ -1032,6 +1125,9 @@ function sqlStr(s: string): string {
 export async function projectFunnelTerminalActivity(input: {
   ontologyId: string;
   objectTypeApiName: string;
+  /** FUNN-ISO — stamped dispatch identity (fence + CAS inputs). */
+  objectTypeRid?: string;
+  environmentId?: string;
   status: FunnelStateStatus;
   objectsIndexed?: number;
   errorMessage?: string;
@@ -1040,18 +1136,37 @@ export async function projectFunnelTerminalActivity(input: {
    *  closing the bookkeeping divergence that left `funnel_run` stuck at
    *  "changelog" while Temporal was terminal FAILED. */
   runKey?: string;
+  /** The pre-created dispatch run (FUNN-ISO-6) — CAS anchor. */
+  funnelRunId?: string;
+  /** Permit the explicit object_type_deleted terminal marking. */
+  allowObjectTypeDeletedMarking?: boolean;
 }): Promise<void> {
-  await projectFunnelTerminalToState(
-    input.ontologyId,
-    input.objectTypeApiName,
-    input.status,
-    {
+  await fence(input);
+  try {
+    await projectFunnelTerminalToState(
+      input.ontologyId,
+      input.objectTypeApiName,
+      input.status,
+      {
       objectsIndexed: input.objectsIndexed,
       errorMessage: input.errorMessage,
       runKey: input.runKey,
-      path: "post",
-    },
-  );
+      runId: input.funnelRunId,
+      environmentId: input.environmentId,
+      objectTypeRid: input.objectTypeRid,
+        allowObjectTypeDeletedMarking: input.allowObjectTypeDeletedMarking,
+        path: "post",
+      },
+    );
+  } catch (err) {
+    recordTerminalProjectionFailed({
+      object_type: input.objectTypeApiName,
+      status: input.status,
+      environment: input.environmentId ?? "unknown",
+      error_class: err instanceof Error ? err.constructor.name : "unknown",
+    });
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1189,8 @@ export async function projectFunnelTerminalActivity(input: {
 export async function syncOpenSearchActivity(input: {
   ontologyId: string;
   objectTypeApiName: string;
+  objectTypeRid?: string;
+  environmentId?: string;
 }): Promise<{
   indexName: string;
   indexCreated: boolean;
@@ -1081,33 +1198,40 @@ export async function syncOpenSearchActivity(input: {
   rowsIndexed: number;
   durationMs: number;
 }> {
+  await fence(input);
   // The Object Type may have been deleted while its funnel workflow was still
   // alive — durable `ObjectTypeFunnelWorkflow` instances outlive the type they
   // index. Syncing a now-missing type throws "not found in metadata store"
   // (indexMappingGenerator), which fails the activity on every retry and the
   // whole workflow with it. Treat a deleted type as a no-op so the workflow
   // completes cleanly instead of error-looping.
+  const rid = (input as { objectTypeRid?: string }).objectTypeRid;
   const exists = await query(
-    `SELECT 1
+    `SELECT object_type_id
        FROM object_type
       WHERE ontology_id = $1 AND api_name = $2
       LIMIT 1`,
     [input.ontologyId, input.objectTypeApiName]
   );
-  if (exists.rows.length === 0) {
-    console.warn(
-      `[temporal/indexing] object type '${input.objectTypeApiName}' no longer exists — skipping OpenSearch sync (deleted)`
-    );
-    const { getIndexName } = await import(
-      "../../opensearch/indexMappingGenerator"
-    );
-    return {
-      indexName: getIndexName(input.objectTypeApiName),
-      indexCreated: false,
-      rowsRead: 0,
-      rowsIndexed: 0,
-      durationMs: 0,
-    };
+  if (
+    exists.rows.length === 0 ||
+    (rid && exists.rows[0].object_type_id !== rid)
+  ) {
+    // FAIL-CLOSED (FUNN-ISO-4): the workflow expected this type. A missing
+    // type means mid-run deletion (legitimate) or cross-environment
+    // execution (the 2026-07-31 bug). Throw a typed error — the workflow
+    // converts it to the explicit `object_type_deleted` terminal state;
+    // never a silent green no-op.
+    recordMissingObjectType({
+      object_type: input.objectTypeApiName,
+      status: "sync_opensearch",
+      environment: (input as { environmentId?: string }).environmentId ?? "unknown",
+    });
+    throw ApplicationFailure.create({
+      message: `object type '${input.objectTypeApiName}' (rid=${rid ?? "?"}) not found in this database — refusing OpenSearch sync`,
+      type: "FunnelObjectTypeMissing",
+      nonRetryable: true,
+    });
   }
 
   // Lazy import so the worker's bundle doesn't pull the opensearch

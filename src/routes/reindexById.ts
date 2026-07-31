@@ -36,10 +36,7 @@ import { Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { sendError, sendSuccess } from "../utils/responseFormatter";
 import { sendSignal } from "../services/funnel/durableWorkflow";
-import {
-  isTemporalConnected,
-  signalTemporalWorkflow,
-} from "../services/funnel/temporal/worker";
+import { isTemporalConnected } from "../services/funnel/temporal/worker";
 
 export async function resolveObjectTypeIdToApiName(
   req: Request,
@@ -116,26 +113,16 @@ export async function saveToOntology(
   }
 
   try {
-    // 1. Durable Postgres queue — authoritative. If Temporal is down
-    //    the dispatcher picks this up on its next poll, so no save is
-    //    ever lost regardless of Temporal availability.
+    // FUNN-ISO-6 — the Postgres signal inbox is the transactional outbox;
+    // the dispatcher claims the row, pre-creates funnel_run
+    // (dispatch_pending), starts the Temporal workflow, and CAS-acks it to
+    // workflow_started. Inline signalWithStart here would leave no durable
+    // trail between the two network calls.
     const signalId = await sendSignal({
       ontologyId,
       objectTypeApiName: apiName,
       signalType: "editBatchPending",
     });
-
-    // 2. Best-effort Temporal kick. Already-consumed signals are a
-    //    no-op in the dispatcher (see `claimNextSignal`), so double
-    //    delivery (PG + Temporal) is safe.
-    const temporal = isTemporalConnected()
-      ? await signalTemporalWorkflow(
-          ontologyId,
-          apiName,
-          "editBatchPending",
-          { signalId }
-        )
-      : false;
 
     // Structured log via the `req.log` helper attached by
     // `requestLogger` middleware — rides the per-request requestId
@@ -146,7 +133,8 @@ export async function saveToOntology(
       ontologyId,
       objectTypeApiName: apiName,
       signalId,
-      temporal,
+      dispatch: "queued",
+      temporalArmed: isTemporalConnected(),
     });
 
     sendSuccess(
@@ -154,7 +142,8 @@ export async function saveToOntology(
       {
         status: "accepted",
         signalId,
-        temporal,
+        dispatch: "queued",
+        temporal: isTemporalConnected(),
         ontologyId,
         objectTypeApiName: apiName,
       },

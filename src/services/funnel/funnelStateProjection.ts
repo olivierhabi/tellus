@@ -1,31 +1,31 @@
 // ---------------------------------------------------------------------------
-// Funnel state projection
+// Funnel state projection — FUNN-ISO-4/5 (fail-closed, CAS-safe)
 //
 // Bridge from the workflow audit log (`funnel_run`, written by every stage)
 // to the UI-facing badge column (`funnel_state.status`, read by
 // `objectType.indexingState` and `objectType.object_count`).
 //
-// Historically the funnel pipeline wrote ONLY to `funnel_run` +
-// `funnel_pipeline_state`. The user-facing badge reads `funnel_state.status`,
-// which is a separate table populated by:
-//   (a) initial OT creation                            → 'not_indexed'
-//   (b) the explicit "Reindex" button                  → 'indexing' → 'indexed/failed'
-//   (c) datasource registration                        → 'not_indexed'
+// Master history (pre-FUNN-ISO): a missing object type was a SILENT no-op
+// (`outcome: "ot_missing"`), which is precisely how an activity that
+// mistakenly executed against a foreign database produced a green
+// "completed" Temporal run while the badge never advanced — the
+// 2026-07-31 OlivierOrder stuck-"Indexing" incident.
 //
-// `Save → editBatchPending` → the funnel pipeline ran successfully but never
-// touched `funnel_state`, so the badge stayed at `not_indexed` no matter how
-// many times the user clicked Save. This module closes that gap by projecting
-// the funnel run's terminal state into `funnel_state` keyed by the OT's UUID.
-//
-// Extracted from `funnelDispatcher.ts` so the Temporal worker
-// (`temporal/activities.ts`) can reuse the exact same projection semantics
-// without duplicating SQL, metrics, or WebSocket emission. The PG dispatcher
-// (when Temporal is offline) and the Temporal workflow (when connected) both
-// call into this single helper, eliminating a class of "indexing-stuck"
-// bugs caused by drifted implementations.
-//
-// Best-effort: any failure here is logged + swallowed. The funnel pipeline
-// already succeeded; failing the projection must not retry the whole run.
+// Fail-closed contract now:
+//   * status='indexed' requires the run's stages {changelog, merge,
+//     indexing, hydration} to ALL exist as 'succeeded' for THIS run_id, and
+//     the run row's environment to match the projecting environment. Any
+//     deviation → recordProjectionSkipped / recordStageEnvironmentInconsistency
+//     and a FunnelStaleStateTransition throw (the workflow then lands in
+//     'failed', never 'indexed').
+//   * Terminal writes are compare-and-swapped: a stale run (older
+//     active_run_started_at) can NEVER overwrite a newer run's state.
+//   * funnel_state.environment_id adopts the first writer; a later
+//     conflicting environment write throws FunnelExecutionEnvironmentMismatch.
+//   * Missing object type → mark funnel_run 'cancelled' with
+//     'object_type_deleted: …' when a run identity is known (explicit
+//     terminal state for legitimate mid-run deletes); otherwise loud log +
+//     metric. NEVER reported as "indexed".
 // ---------------------------------------------------------------------------
 
 import { query } from "../../db";
@@ -35,22 +35,26 @@ import {
   funnelProjectionSeconds,
 } from "../../metrics/funnelProjection";
 import { eventBus } from "../../websocket/eventBus";
+import {
+  recordMissingObjectType,
+  recordProjectionSkipped,
+  recordStageEnvironmentInconsistency,
+} from "./isolationMetrics";
+import {
+  FunnelExecutionEnvironmentMismatch,
+  FunnelStaleStateTransition,
+} from "./environmentGuard";
 
 export type FunnelStateStatus =
   | "not_indexed"
   | "indexing"
   | "indexed"
   | "failed"
-  | "stale";
+  | "stale"
+  | "cancelled";
 
 /**
  * Where in the dispatcher lifecycle this projection is being emitted from.
- *  - `pre`          : PG-dispatcher path, before runWorkflow() is invoked.
- *  - `pre_temporal` : Temporal path, immediately after signalWithStart hand-off.
- *  - `post`         : terminal projection (success / failure) after the
- *                     pipeline finishes.
- * The label is recorded on every metric emission so SRE can disambiguate
- * which path emitted a given projection sample.
  */
 export type ProjectionPath = "pre" | "post" | "pre_temporal";
 
@@ -58,22 +62,122 @@ export interface ProjectFunnelTerminalOptions {
   runId?: string;
   errorMessage?: string;
   path?: ProjectionPath;
-  /**
-   * Explicit objects-indexed count. Used by Temporal which already has the
-   * pipeline result in-hand and does not need a DB round-trip to
-   * `funnel_run.objects_indexed` to learn the count. When omitted (PG
-   * dispatcher), the function falls back to looking up the count by
-   * `runId`, which is required for the `indexed` branch.
-   */
   objectsIndexed?: number;
-  /** Driving signal id (Temporal path only). When present on a `failed`
-   *  projection, `funnel_run` is also marked failed by `temporal_workflow_id`
-   *  — without this, funnel_run stays "running/<current_stage>" while
-   *  Temporal is terminal FAILED (the OO7 bookkeeping divergence that made
-   *  the UI read "stuck at changelog"). The PG dispatcher path omits this
-   *  (durableWorkflow.ts already marks funnel_run failed there). */
+  /** Driving signal id (Temporal path). */
   runKey?: string;
+  // ------------------------------------------------------------------
+  // FUNN-ISO identity + consistency inputs
+  // ------------------------------------------------------------------
+  /** Deployment environment stamping + CAS + cross-env guard. */
+  environmentId?: string;
+  /** Stable OT RID — used to recompute the RID-keyed temporal_workflow_id. */
+  objectTypeRid?: string;
+  /** Explicit permission to mark the run object_type_deleted when the OT is
+   *  gone (the workflow's intentional-delete path). */
+  allowObjectTypeDeletedMarking?: boolean;
 }
+
+interface RunIdentity {
+  runId: string;
+  startedAt: Date | null;
+  environmentId: string | null;
+  status: string;
+}
+
+const REQUIRED_STAGES = ["changelog", "merge", "indexing", "hydration"] as const;
+
+async function resolveRunIdentity(
+  objectTypeApiName: string,
+  ontologyId: string,
+  options: ProjectFunnelTerminalOptions,
+): Promise<RunIdentity | null> {
+  if (options.runId) {
+    const r = await query(
+      `SELECT run_id, started_at, environment_id, status FROM funnel_run WHERE run_id = $1`,
+      [options.runId],
+    );
+    if (!r.rows[0]) return null;
+    return {
+      runId: r.rows[0].run_id,
+      startedAt: r.rows[0].started_at,
+      environmentId: r.rows[0].environment_id ?? null,
+      status: r.rows[0].status,
+    };
+  }
+  if (options.runKey) {
+    const wfId = options.objectTypeRid
+      ? `ObjectTypeFunnelWorkflow/${ontologyId}/${options.objectTypeRid}`
+      : `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
+    const r = await query(
+      `SELECT run_id, started_at, environment_id, status FROM funnel_run
+        WHERE temporal_workflow_id = $1`,
+      [`${wfId}:${options.runKey}`],
+    );
+    if (!r.rows[0]) return null;
+    return {
+      runId: r.rows[0].run_id,
+      startedAt: r.rows[0].started_at,
+      environmentId: r.rows[0].environment_id ?? null,
+      status: r.rows[0].status,
+    };
+  }
+  return null;
+}
+
+/**
+ * Terminal 'indexed' must be impossible when a required stage is missing,
+ * failed, skipped, or executed under a different environment identity.
+ * Throws FunnelStaleStateTransition / FunnelExecutionEnvironmentMismatch.
+ */
+async function verifyTerminalConsistency(
+  run: RunIdentity,
+  objectTypeApiName: string,
+  environmentId?: string,
+): Promise<void> {
+  if (environmentId && run.environmentId && run.environmentId !== environmentId) {
+    recordStageEnvironmentInconsistency({
+      reason: "run_env_mismatch",
+      object_type: objectTypeApiName,
+      run_environment: run.environmentId,
+      projector_environment: environmentId,
+    });
+    throw new FunnelExecutionEnvironmentMismatch(
+      "context_vs_db",
+      environmentId,
+      run.environmentId,
+    );
+  }
+  const stages = await query(
+    `SELECT stage, status FROM funnel_stage_run WHERE run_id = $1`,
+    [run.runId],
+  );
+  const okStages = new Set(
+    stages.rows
+      .filter((s: { status: string }) => s.status === "succeeded")
+      .map((s: { stage: string }) => s.stage),
+  );
+  const missing = REQUIRED_STAGES.filter((s) => !okStages.has(s));
+  if (missing.length > 0) {
+    recordProjectionSkipped({
+      reason: "terminal_verify_failed",
+      object_type: objectTypeApiName,
+      missing_stages: missing.join(","),
+    });
+    recordStageEnvironmentInconsistency({
+      reason: "terminal_verify_missing_stages",
+      object_type: objectTypeApiName,
+      missing_stages: missing.join(","),
+    });
+    throw new FunnelStaleStateTransition(
+      `terminal 'indexed' rejected for run ${run.runId} (${objectTypeApiName}): ` +
+        `required stage(s) missing or not succeeded: ${missing.join(", ")}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// projectFunnelTerminalToState
+// ---------------------------------------------------------------------------
 
 export async function projectFunnelTerminalToState(
   ontologyId: string,
@@ -83,10 +187,7 @@ export async function projectFunnelTerminalToState(
 ): Promise<void> {
   const path = options.path ?? "post";
   const startedAt = Date.now();
-  const observeDuration = (outcome: "ok" | "ot_missing" | "db_error") => {
-    // Manually observe to keep metrics independent of prom-client's
-    // startTimer/stopTimer label-merge semantics, which can throw in
-    // edge cases when only a subset of labels is provided up-front.
+  const observeDuration = (outcome: "ok" | "ot_missing" | "db_error" | "skipped") => {
     try {
       funnelProjectionSeconds.observe(
         { status, outcome },
@@ -105,12 +206,63 @@ export async function projectFunnelTerminalToState(
     );
     const objectTypeId = otRow.rows[0]?.object_type_id as string | undefined;
     if (!objectTypeId) {
-      // OT was renamed/deleted between signal emission and projection.
-      // Nothing to update; bail silently — the new OT row, if any,
-      // initializes its own funnel_state on creation.
+      // FAIL-CLOSED: a missing OT is NEVER a skip-and-report-indexed.
+      // When we know the run identity, the run gets the explicit terminal
+      // state 'cancelled (object_type_deleted)' so the audit trail records
+      // intent instead of a phantom success.
+      recordMissingObjectType({
+        object_type: objectTypeApiName,
+        status,
+        environment: options.environmentId ?? "unknown",
+      });
       funnelProjectionTotal.inc({ status, outcome: "ot_missing", path });
       observeDuration("ot_missing");
+      const run = await resolveRunIdentity(ontologyIdPlaceholder(ontologyId), objectTypeApiName, options);
+      if (run && options.allowObjectTypeDeletedMarking) {
+        await query(
+          `UPDATE funnel_run
+              SET status = 'cancelled',
+                  error_message = $1,
+                  completed_at = now()
+            WHERE run_id = $2 AND status IN ('dispatch_pending','workflow_started','running')`,
+          [
+            `object_type_deleted: ${objectTypeApiName} not found in ontology ${ontologyId} (deleted mid-run or wrong database)`,
+            run.runId,
+          ]
+        );
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            type: "funnel_object_type_deleted_mid_run",
+            ontologyId,
+            objectTypeApiName,
+            runId: run.runId,
+            environmentId: options.environmentId ?? null,
+          }),
+        );
+        return;
+      }
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          type: "funnel_missing_object_type",
+          ontologyId,
+          objectTypeApiName,
+          status,
+          environmentId: options.environmentId ?? null,
+        }),
+      );
       return;
+    }
+
+    // ---------------------------------------------------------------
+    // Resolve run identity + guard terminal consistency
+    // ---------------------------------------------------------------
+    const run = await resolveRunIdentity(ontologyId, objectTypeApiName, options);
+    if ((status === "indexed" || status === "failed") && run) {
+      if (status === "indexed") {
+        await verifyTerminalConsistency(run, objectTypeApiName, options.environmentId);
+      }
     }
 
     // Track payload deltas across the three success branches so the
@@ -122,13 +274,6 @@ export async function projectFunnelTerminalToState(
     let errorMessageForEmit: string | null = null;
 
     if (status === "indexed") {
-      // Two paths to learn the count:
-      //   (a) Caller (Temporal) supplied `objectsIndexed` directly. Use it.
-      //   (b) Caller (PG dispatcher) supplied a `runId`. Pull the count
-      //       from funnel_run.
-      // Without either, we record zero — the badge is still authoritative
-      // for "indexed at all" vs "still indexing", and the next run will
-      // re-stamp with a real count.
       if (typeof options.objectsIndexed === "number") {
         runObjects = Math.max(0, Math.floor(options.objectsIndexed));
       } else if (options.runId) {
@@ -139,32 +284,98 @@ export async function projectFunnelTerminalToState(
         );
         runObjects = Number(r.rows[0]?.n ?? 0);
       }
-      await query(
+      // CAS: a stale run must never overwrite a newer run's terminal
+      // state. active_run_started_at is the monotonic guard (set on the
+      // pre-projection when the run was dispatched).
+      const cas = await query(
         `INSERT INTO funnel_state
            (object_type_id, status, objects_indexed, last_indexed_at,
-            error_message)
-         VALUES ($1, 'indexed', $2, now(), NULL)
+            error_message, environment_id, active_run_id, active_run_started_at)
+         VALUES ($1, 'indexed', $2, now(), NULL, $3, $4, $5)
          ON CONFLICT (object_type_id) DO UPDATE SET
           status            = 'indexed',
           objects_indexed   = EXCLUDED.objects_indexed,
           last_indexed_at   = now(),
           error_message     = NULL,
-          updated_at        = now()`,
-        [objectTypeId, runObjects]
+          environment_id    = COALESCE(EXCLUDED.environment_id, funnel_state.environment_id),
+          active_run_id     = EXCLUDED.active_run_id,
+          active_run_started_at = EXCLUDED.active_run_started_at,
+          updated_at        = now()
+         WHERE funnel_state.active_run_started_at IS NULL
+            OR funnel_state.active_run_started_at <= EXCLUDED.active_run_started_at`,
+        [
+          objectTypeId,
+          runObjects,
+          options.environmentId ?? null,
+          run?.runId ?? null,
+          run?.startedAt ?? null,
+        ]
       );
+      if (cas.rowCount === 0) {
+        // Stale terminal activity — the newer run owns the badge. Loud,
+        // metricated, and NOT an exception (the newer run is truth).
+        recordProjectionSkipped({
+          reason: "stale_terminal_overwrite_blocked",
+          object_type: objectTypeApiName,
+        });
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            type: "funnel_projection_stale_overwrite_blocked",
+            ontologyId,
+            objectTypeApiName,
+            runId: run?.runId ?? null,
+          }),
+        );
+        observeDuration("skipped");
+        return;
+      }
+      // Environment mismatch guard on pre-existing state (cross-env write
+      // into the badge is the split-brain signature).
+      if (options.environmentId) {
+        const envRow = await query(
+          `SELECT environment_id FROM funnel_state WHERE object_type_id = $1`,
+          [objectTypeId],
+        );
+        const existingEnv = envRow.rows[0]?.environment_id as string | null;
+        if (existingEnv && existingEnv !== options.environmentId) {
+          recordStageEnvironmentInconsistency({
+            reason: "state_env_conflict",
+            object_type: objectTypeApiName,
+            state_environment: existingEnv,
+            projector_environment: options.environmentId,
+          });
+          throw new FunnelExecutionEnvironmentMismatch(
+            "context_vs_db",
+            options.environmentId,
+            existingEnv,
+          );
+        }
+      }
       lastIndexedAtIso = new Date().toISOString();
       funnelProjectionTotal.inc({ status, outcome: "ok", path });
       observeDuration("ok");
-    } else if (status === "failed") {
+    } else if (status === "failed" || status === "cancelled") {
       await query(
         `INSERT INTO funnel_state
-           (object_type_id, status, error_message)
-         VALUES ($1, 'failed', $2)
+           (object_type_id, status, error_message, environment_id,
+            active_run_id, active_run_started_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (object_type_id) DO UPDATE SET
-           status        = 'failed',
+           status        = EXCLUDED.status,
            error_message = EXCLUDED.error_message,
+           environment_id = COALESCE(EXCLUDED.environment_id, funnel_state.environment_id),
+           active_run_id = COALESCE(EXCLUDED.active_run_id, funnel_state.active_run_id),
+           active_run_started_at = COALESCE(EXCLUDED.active_run_started_at, funnel_state.active_run_started_at),
            updated_at    = now()`,
-        [objectTypeId, options.errorMessage ?? null]
+        [
+          objectTypeId,
+          status,
+          options.errorMessage ?? null,
+          options.environmentId ?? null,
+          run?.runId ?? null,
+          run?.startedAt ?? null,
+        ]
       );
       errorMessageForEmit = options.errorMessage ?? null;
       // Mark funnel_run failed too — keyed by the per-save
@@ -175,18 +386,18 @@ export async function projectFunnelTerminalToState(
       // instead of "failed"). Only the Temporal path passes runKey; the PG
       // dispatcher path is already marked failed by durableWorkflow.ts.
       if (options.runKey) {
-        const temporalWorkflowId = `ObjectTypeFunnelWorkflow-${objectTypeApiName}:${options.runKey}`;
+        const temporalWorkflowId = options.objectTypeRid
+          ? `ObjectTypeFunnelWorkflow/${ontologyId}/${options.objectTypeRid}:${options.runKey}`
+          : `ObjectTypeFunnelWorkflow-${objectTypeApiName}:${options.runKey}`;
         try {
           await query(
             `UPDATE funnel_run
                 SET status = 'failed', completed_at = now(), error_message = $1
-              WHERE temporal_workflow_id = $2`,
+              WHERE temporal_workflow_id = $2
+                AND status IN ('dispatch_pending','workflow_started','running')`,
             [options.errorMessage ?? null, temporalWorkflowId]
           );
         } catch (runErr) {
-          // Best-effort — the funnel_state update above is the authoritative
-          // UI badge; a funnel_run update failure must not fail the projection.
-          // eslint-disable-next-line no-console
           console.warn(
             JSON.stringify({
               level: "warn",
@@ -202,29 +413,34 @@ export async function projectFunnelTerminalToState(
       observeDuration("ok");
     } else {
       // 'indexing' / 'not_indexed' / 'stale' — clear any prior error so
-      // the UI doesn't keep displaying a stale failure copy.
+      // the UI doesn't keep displaying a stale failure copy. Copy the run
+      // CAS anchor so a later stale terminal can't overwrite this state.
       await query(
         `INSERT INTO funnel_state
-           (object_type_id, status, error_message)
-         VALUES ($1, $2, NULL)
+           (object_type_id, status, error_message, environment_id,
+            active_run_id, active_run_started_at)
+         VALUES ($1, $2, NULL, $3, $4, $5)
          ON CONFLICT (object_type_id) DO UPDATE SET
            status        = EXCLUDED.status,
            error_message = NULL,
+           environment_id = COALESCE(EXCLUDED.environment_id, funnel_state.environment_id),
+           active_run_id = COALESCE(EXCLUDED.active_run_id, funnel_state.active_run_id),
+           active_run_started_at = COALESCE(EXCLUDED.active_run_started_at, funnel_state.active_run_started_at),
            updated_at    = now()`,
-        [objectTypeId, status]
+        [
+          objectTypeId,
+          status,
+          options.environmentId ?? null,
+          run?.runId ?? null,
+          run?.startedAt ?? null,
+        ]
       );
       funnelProjectionTotal.inc({ status, outcome: "ok", path });
       observeDuration("ok");
     }
 
     // Live update: broadcast `funnel_state.changed` to every connected
-    // WebSocket client. The FE hook (`useObjectTypeById` + listener)
-    // merges this directly into the React Query cache, so the UI badge
-    // flips with sub-second latency — no polling refetch needed.
-    //
-    // `projectId: null` means broadcast (see websocket/server.ts:81).
-    // We use the same convention as `emitDatasetEvent` from
-    // `utils/emitEvent.ts` — same EventBus channel, same shape.
+    // WebSocket client.
     try {
       eventBus.emit("ws:event", {
         event: "funnel_state.changed",
@@ -237,15 +453,12 @@ export async function projectFunnelTerminalToState(
           objectsIndexed: status === "indexed" ? runObjects : undefined,
           lastIndexedAt: lastIndexedAtIso,
           errorMessage: errorMessageForEmit,
+          environmentId: options.environmentId ?? null,
           path,
           emittedAt: new Date().toISOString(),
         },
       });
     } catch (emitErr) {
-      // Live emission must never fail the projection. If it does, the
-      // FE polling baseline (30 s) and explicit invalidations on Save
-      // will still converge the badge — just with a small delay.
-      // eslint-disable-next-line no-console
       console.warn(
         JSON.stringify({
           level: "warn",
@@ -258,12 +471,14 @@ export async function projectFunnelTerminalToState(
       );
     }
   } catch (err) {
-    // Projection is observability, not core correctness — never fail
-    // the funnel run on a projection error. BUT we MUST surface the
-    // failure so SRE can alert: a silent projection bug means the
-    // page badge stays "Not indexed" forever despite the pipeline
-    // having completed successfully — exactly the bug class that
-    // motivated this helper.
+    // Cross-environment + terminal-consistency violations are FAILURE
+    // SIGNALS, not observability noise — rethrow so the workflow lands in
+    // 'failed'. Plain DB errors are still logged + metricated; callers
+    // with fail-closed requirements (workflow terminal activity) catch
+    // and surface them as the run's failure message.
+    const isConsistencyError =
+      err instanceof FunnelExecutionEnvironmentMismatch ||
+      err instanceof FunnelStaleStateTransition;
     const errorClass =
       err instanceof Error ? err.constructor.name : "unknown";
     funnelProjectionTotal.inc({ status, outcome: "db_error", path });
@@ -273,12 +488,12 @@ export async function projectFunnelTerminalToState(
       error_class: errorClass,
     });
     observeDuration("db_error");
-    // Structured warn — the prod log aggregator scrapes these.
-    // eslint-disable-next-line no-console
     console.warn(
       JSON.stringify({
-        level: "warn",
-        type: "funnel_projection_failed",
+        level: isConsistencyError ? "error" : "warn",
+        type: isConsistencyError
+          ? "funnel_projection_consistency_violation"
+          : "funnel_projection_failed",
         ontologyId,
         objectTypeApiName,
         status,
@@ -287,5 +502,31 @@ export async function projectFunnelTerminalToState(
         errorClass,
       }),
     );
+    if (isConsistencyError) throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Stale "Indexing" reconciliation gauge probe — FUNN-ISO-6
+//
+// Returns funnel_state rows that have been in 'indexing' longer than the
+// threshold; the reconciliation loop flags them and records the metric.
+// ---------------------------------------------------------------------------
+export async function findStaleIndexingStates(
+  thresholdMs: number
+): Promise<Array<{ object_type_id: string; updated_at: Date; api_name: string }>> {
+  const res = await query(
+    `SELECT fs.object_type_id, fs.updated_at, ot.api_name
+       FROM funnel_state fs
+       LEFT JOIN object_type ot ON ot.object_type_id = fs.object_type_id
+      WHERE fs.status = 'indexing'
+        AND fs.updated_at < now() - $1::interval`,
+    [`${Math.ceil(thresholdMs / 1000)} seconds`],
+  );
+  return res.rows;
+}
+
+/** Placeholder guard: resolveRunIdentity's first arg is ontologyId. */
+function ontologyIdPlaceholder(ontologyId: string): string {
+  return ontologyId;
 }

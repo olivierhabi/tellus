@@ -87,13 +87,25 @@ async function probeTemporal(): Promise<ProbeResult> {
     // it doesn't detect a frontend outage that started mid-run. Do a
     // live TCP probe on the Temporal gRPC port instead so a paused
     // frontend container is caught within the 1s probe budget.
-    const { isTemporalConnected } = await import("../services/funnel/temporal/worker");
+    const { isTemporalConnected, getWorkerDiagnostics } = await import("../services/funnel/temporal/worker");
     if (!isTemporalConnected()) {
       throw new Error("temporal_worker_not_connected");
     }
+    // FUNN-ISO — hard gate: the worker's configured deployment identity
+    // MUST match the database's sealed identity. A mismatch here is the
+    // exact split-brain precondition (worker wired to the wrong database);
+    // readiness MUST go red or the queue quietly serves foreign work.
+    const { getDatabaseEnvironmentId } = await import("../services/funnel/environmentGuard");
+    const dbEnv = await getDatabaseEnvironmentId();
+    const diag = getWorkerDiagnostics();
+    if (diag.identity && dbEnv && diag.identity.environmentId !== dbEnv) {
+      throw new Error(
+        `environment_mismatch: worker=${diag.identity.environmentId} db=${dbEnv}`,
+      );
+    }
     const net = await import("net");
     const [host, portStr] = (
-      process.env.TEMPORAL_ADDRESS ?? "localhost:7233"
+      diag.identity?.temporalAddress ?? process.env.TEMPORAL_ADDRESS ?? "localhost:7233"
     ).split(":");
     const port = parseInt(portStr ?? "7233", 10);
     await new Promise<void>((resolve, reject) => {

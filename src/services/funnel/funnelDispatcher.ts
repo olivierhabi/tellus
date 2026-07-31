@@ -21,6 +21,14 @@ import { claimNextSignal, runWorkflow, WorkflowContext } from "./durableWorkflow
 import { sleepForStageDelay } from "./stageDelay";
 import { projectFunnelTerminalToState } from "./funnelStateProjection";
 import {
+  getEnvironmentIdentity,
+  identityLogFields,
+} from "../../config/environmentIdentity";
+import {
+  observeDispatchPendingAge,
+  recordRunStuck,
+} from "./isolationMetrics";
+import {
   computeChangelog,
   SnapshotDiffReader,
   SourceChangeRow,
@@ -110,6 +118,15 @@ async function tick(options: DispatcherOptions): Promise<number> {
   // committed snapshots). We still mark signals consumed so the inbox
   // stays drained for audit + testing.
   const temporalActive = isTemporalConnected();
+  if (temporalActive) {
+    // Best-effort retry of stale dispatch rows before processing new signals.
+    try {
+      await reconcileStaleDispatches();
+      await reportStaleIndexingStates();
+    } catch (err) {
+      console.warn(`[funnel/dispatcher] reconcile tick failed: ${(err as Error).message}`);
+    }
+  }
   const objectTypes = options.objectTypes ?? (await listObjectTypesWithSignals());
   let runsStarted = 0;
   for (const objectTypeApiName of objectTypes) {
@@ -117,26 +134,19 @@ async function tick(options: DispatcherOptions): Promise<number> {
     if (!signal) continue;
 
     if (temporalActive) {
-      // Temporal owns execution — we just record the hand-off so the
-      // UI projection can correlate this signal to its Temporal run
-      // (the Temporal workflow projects back into funnel_run itself,
-      // see services/funnel/temporal/activities.ts:projectStageToPostgres).
-      await query(
-        `INSERT INTO funnel_run
-           (ontology_id, object_type_api_name, workflow_type, status,
-            signal_payload, completed_at)
-         VALUES ($1, $2, 'temporal_handoff', 'completed', $3::jsonb, now())
-         RETURNING run_id`,
-        [signal.ontology_id, objectTypeApiName, JSON.stringify(signal.payload)]
-      );
-      // Project that we've handed off to Temporal so the UI badge
-      // flips to "Indexing" immediately. Temporal's own activities
-      // are responsible for projecting the terminal state.
-      await projectFunnelTerminalToState(
+      // FUNN-ISO-6 — durable dispatch with ack + CAS. The outbox record is
+      // the durable funnel_signal row (already claimed transactionally);
+      // the funnel_run row is created FIRST with status 'dispatch_pending',
+      // and only AFTER Temporal acknowledges the workflow start do we CAS
+      // it to 'workflow_started'. If dispatch fails, the run stays
+      // dispatch_pending and `reconcileStaleDispatches` retries it on the
+      // next tick — no silent loss of either the signal or the status flip.
+      const dispatched = await dispatchSignalToTemporal(
         signal.ontology_id,
         objectTypeApiName,
-        "indexing"
+        signal,
       );
+      if (dispatched) runsStarted++;
       continue;
     }
 
@@ -195,6 +205,263 @@ async function tick(options: DispatcherOptions): Promise<number> {
 // call into the shared helper, which fixes a class of "indexing-stuck" bugs
 // caused by drifted implementations on the two pipeline paths.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// FUNN-ISO-6 — Durable Temporal dispatch.
+//
+// The funnel_signal claim IS the outbox transaction (FOR UPDATE SKIP LOCKED
+// inside claimNextSignal). Here we:
+//   1. resolve the object-type RID (stable identity),
+//   2. pre-create funnel_run(status='dispatch_pending', environment_id=…),
+//      keyed on the deterministic `temporal_workflow_id` — idempotent by
+//      construction (redelivered claims upsert onto the same row),
+//   3. call signalTemporalWorkflow and, only on Temporal ack, CAS the run
+//      to 'workflow_started' and flip the UI badge to 'indexing'.
+// On dispatch failure the run STAYS dispatch_pending and
+// `reconcileStaleDispatches` retries — nothing is silently lost.
+// ---------------------------------------------------------------------------
+
+const DISPATCH_STALE_AFTER_MS = Number(
+  process.env.FUNNEL_DISPATCH_STALE_AFTER_MS ?? 30_000,
+);
+
+async function dispatchSignalToTemporal(
+  ontologyId: string,
+  objectTypeApiName: string,
+  signal: { signal_id: string; signal_type: string; payload: Record<string, unknown> },
+): Promise<boolean> {
+  const identity = getEnvironmentIdentity();
+  // 1. Stable OT identity — if the type is gone the signal is a no-op.
+  const otRes = await query(
+    `SELECT object_type_id FROM object_type
+      WHERE ontology_id = $1 AND api_name = $2 LIMIT 1`,
+    [ontologyId, objectTypeApiName],
+  );
+  const objectTypeRid = otRes.rows[0]?.object_type_id as string | undefined;
+  if (!objectTypeRid) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        type: "funnel_dispatch_object_type_missing",
+        ontologyId,
+        objectTypeApiName,
+        signalId: signal.signal_id,
+        ...identityLogFields(identity),
+      }),
+    );
+    return false;
+  }
+
+  // 2. Idempotent run-row pre-creation. temporal_workflow_id is the
+  //    deterministic `<bareWfId>:<signalId>` key that
+  //    projectStageToPostgres also upserts — the lifecycle converges on
+  //    ONE funnel_run row per signal.
+  const { funnelWorkflowId } = await import("./temporal/worker");
+  const temporalWorkflowId = `${funnelWorkflowId(ontologyId, objectTypeRid)}:${signal.signal_id}`;
+  const insert = await query(
+    `INSERT INTO funnel_run
+       (ontology_id, object_type_api_name, workflow_type, status,
+        signal_payload, temporal_workflow_id, environment_id)
+     VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'dispatch_pending',
+             $3::jsonb, $4, $5)
+     ON CONFLICT (temporal_workflow_id)
+       WHERE temporal_workflow_id IS NOT NULL
+       DO NOTHING
+     RETURNING run_id`,
+    [
+      ontologyId,
+      objectTypeApiName,
+      JSON.stringify({ ...signal.payload, signalId: signal.signal_id }),
+      temporalWorkflowId,
+      identity.environmentId,
+    ],
+  );
+  let runId = insert.rows[0]?.run_id as string | undefined;
+  if (!runId) {
+    const existing = await query(
+      `SELECT run_id FROM funnel_run WHERE temporal_workflow_id = $1`,
+      [temporalWorkflowId],
+    );
+    runId = existing.rows[0]?.run_id as string | undefined;
+  }
+  if (!runId) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        type: "funnel_dispatch_run_row_unavailable",
+        objectTypeApiName,
+        signalId: signal.signal_id,
+      }),
+    );
+    return false;
+  }
+
+  // 3. Actual workflow start (idempotent signalWithStart).
+  const { signalTemporalWorkflow } = await import("./temporal/worker");
+  const ok = await signalTemporalWorkflow({
+    ontologyId,
+    objectTypeApiName,
+    objectTypeRid,
+    signalType: signal.signal_type as
+      | "sourceTransactionCommitted"
+      | "editBatchPending"
+      | "schemaChanged"
+      | "pipelineDeployCompleted",
+    payload: { ...signal.payload, signalId: signal.signal_id, funnelRunId: runId },
+  });
+  if (!ok) {
+    // Leave status='dispatch_pending' — reconciliation retries. Record
+    // the reason for the operator run-details UI + metrics.
+    await query(
+      `UPDATE funnel_run SET error_message = $1 WHERE run_id = $2`,
+      ["dispatch failed: Temporal worker unreachable or rejected start; will retry", runId],
+    );
+    return false;
+  }
+
+  // 4. Ack — CAS dispatch_pending → workflow_started (allowed transition).
+  const cas = await query(
+    `UPDATE funnel_run SET status = 'workflow_started'
+      WHERE run_id = $1 AND status = 'dispatch_pending'
+      RETURNING run_id`,
+    [runId],
+  );
+  if (cas.rows.length === 0) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        type: "funnel_dispatch_cas_skipped",
+        runId,
+        objectTypeApiName,
+        reason: "row no longer dispatch_pending (concurrent reconciler won or terminal flip)",
+      }),
+    );
+  }
+  await query(
+    `UPDATE funnel_signal SET consumed_by_run_id = $1 WHERE signal_id = $2`,
+    [runId, signal.signal_id],
+  );
+
+  // Flip the UI badge: CAS-anchored 'indexing' projection.
+  await projectFunnelTerminalToState(ontologyId, objectTypeApiName, "indexing", {
+    runId,
+    environmentId: identity.environmentId,
+    objectTypeRid,
+    path: "pre_temporal",
+  });
+  console.log(
+    JSON.stringify({
+      level: "info",
+      type: "funnel_dispatched",
+      ontologyId,
+      objectTypeApiName,
+      objectTypeRid,
+      signalId: signal.signal_id,
+      funnelRunId: runId,
+      ...identityLogFields(identity),
+    }),
+  );
+  return true;
+}
+
+/**
+ * Reconciliation loop (called from tick): retry every dispatch_pending /
+ * workflow_started run older than the staleness threshold. Idempotent —
+ * signalWithStart(USE_EXISTING) makes re-dispatch of an already-running
+ * workflow a plain in-flight signal.
+ */
+export async function reconcileStaleDispatches(): Promise<number> {
+  const stale = await query(
+    `SELECT run_id, ontology_id, object_type_api_name, signal_payload,
+            environment_id, started_at
+       FROM funnel_run
+      WHERE status IN ('dispatch_pending', 'workflow_started')
+        AND started_at < now() - $1::interval`,
+    [`${Math.ceil(DISPATCH_STALE_AFTER_MS / 1000)} seconds`],
+  );
+  if (stale.rows.length === 0) return 0;
+  const identity = getEnvironmentIdentity();
+  let retried = 0;
+  for (const row of stale.rows as Array<{
+    run_id: string;
+    ontology_id: string;
+    object_type_api_name: string;
+    signal_payload: Record<string, unknown> | null;
+    environment_id: string | null;
+    started_at: Date;
+  }>) {
+    const ageSeconds = (Date.now() - row.started_at.getTime()) / 1000;
+    observeDispatchPendingAge(ageSeconds, {
+      object_type: row.object_type_api_name,
+    });
+    if (row.environment_id && row.environment_id !== identity.environmentId) {
+      // Row belongs to another environment (split-brain inheritance from a
+      // legacy shared namespace). Do NOT dispatch into it from here.
+      continue;
+    }
+    const signalId = row.signal_payload?.signalId as string | undefined;
+    if (!signalId) continue;
+    const otRes = await query(
+      `SELECT object_type_id FROM object_type
+        WHERE ontology_id = $1 AND api_name = $2 LIMIT 1`,
+      [row.ontology_id, row.object_type_api_name],
+    );
+    if (!otRes.rows[0]) {
+      recordRunStuck({ reason: "dispatch_reconcile_ot_deleted", object_type: row.object_type_api_name });
+      await query(
+        `UPDATE funnel_run SET status = 'cancelled', completed_at = now(),
+                error_message = $1
+          WHERE run_id = $2 AND status IN ('dispatch_pending', 'workflow_started')`,
+        [`dispatch reconciled: object type '${row.object_type_api_name}' deleted`, row.run_id],
+      );
+      continue;
+    }
+    const { signalTemporalWorkflow } = await import("./temporal/worker");
+    const ok = await signalTemporalWorkflow({
+      ontologyId: row.ontology_id,
+      objectTypeApiName: row.object_type_api_name,
+      objectTypeRid: otRes.rows[0].object_type_id as string,
+      signalType: (row.signal_payload?.signalType as never) ?? "editBatchPending",
+      payload: { ...(row.signal_payload ?? {}), signalId, funnelRunId: row.run_id },
+    });
+    if (ok) {
+      await query(
+        `UPDATE funnel_run SET status = 'workflow_started', error_message = NULL
+          WHERE run_id = $1 AND status = 'dispatch_pending'`,
+        [row.run_id],
+      );
+      retried++;
+      console.log(
+        JSON.stringify({
+          level: "info",
+          type: "funnel_dispatch_reconciled",
+          runId: row.run_id,
+          objectType: row.object_type_api_name,
+          ageSeconds: Math.round(ageSeconds),
+        }),
+      );
+    }
+  }
+  return retried;
+}
+
+/**
+ * Reconcile funnel_state rows stuck in 'indexing': count age for the
+ * funnel_indexing_age_seconds metric. The badge itself can only be flipped
+ * by the terminal projection (fail-closed) — reconciliation REPORTS but
+ * never forces a green state.
+ */
+export async function reportStaleIndexingStates(): Promise<number> {
+  const { findStaleIndexingStates } = await import("./funnelStateProjection");
+  const { observeIndexingAge } = await import("./isolationMetrics");
+  const rows = await findStaleIndexingStates(DISPATCH_STALE_AFTER_MS * 2);
+  for (const row of rows) {
+    observeIndexingAge((Date.now() - row.updated_at.getTime()) / 1000, {
+      object_type: row.api_name ?? "unknown",
+    });
+  }
+  return rows.length;
+}
 
 async function listObjectTypesWithSignals(): Promise<string[]> {
   try {

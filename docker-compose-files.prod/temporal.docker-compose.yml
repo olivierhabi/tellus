@@ -335,6 +335,12 @@ services:
 
   # -------------------------------------------------------------------------
   # One-shot: create the `tellus-funnel` namespace with 30-day retention.
+  # NOTE (FUNN-ISO): in production the app runs in strict mode — set
+  # TELLUS_ENVIRONMENT_ID / TEMPORAL_NAMESPACE / TEMPORAL_TASK_QUEUE on the
+  # app service and EDIT the namespace name in the one-shot below to match
+  # (production namespace provisioning belongs to deployment infra; the
+  # worker refuses to start against a non-existent namespace in strict
+  # mode).
   # Runs after frontend is healthy; re-runnable (409 on re-create tolerated).
   # -------------------------------------------------------------------------
   temporal-namespace-init:

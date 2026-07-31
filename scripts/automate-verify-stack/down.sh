@@ -61,5 +61,28 @@ curl -s -m 15 -X POST "http://localhost:9200/_search" -H 'Content-Type: applicat
     done
 echo "purged OpenSearch indices for ontology $VERIFY_ONTOLOGY"
 
+# --- 6. Temporal namespace (FUNN-ISO cleanup policy). ---
+# Ephemeral verify namespaces have a short history retention
+# (VERIFY_TEMPORAL_RETENTION, default 72h) — TTL expiry is the documented
+# cleanup mechanism since Temporal does not support namespace deletion.
+# Before dropping the DB we TERMINATE open workflows so nothing keeps
+# executing against a database that is about to disappear; closed history
+# then expires via TTL.
+TNS=$(docker ps --format '{{.Names}}' | grep -E '^tellus-temporal(-1)?$' | head -1 || true)
+if [ -n "$TNS" ]; then
+  ids=$(docker exec "$TNS" temporal workflow list --address temporal:7233 \
+        --namespace "$TEMPORAL_NAMESPACE" --query "ExecutionStatus='Running'" --limit 200 2>/dev/null \
+        | awk '{print $2}' | grep -v '^$' || true)
+  term_count=0
+  for wid in $ids; do
+    # first column of `temporal workflow list` default output is WorkflowId
+    docker exec "$TNS" temporal workflow terminate --address temporal:7233 \
+      --namespace "$TEMPORAL_NAMESPACE" --workflow-id "$wid" \
+      --reason "automate-verify down.sh (stack teardown)" >/dev/null 2>&1 \
+      && term_count=$((term_count+1)) || true
+  done
+  echo "terminated $term_count running workflow(s) in namespace $TEMPORAL_NAMESPACE (closed history TTL-expires in $VERIFY_TEMPORAL_RETENTION)"
+fi
+
 rm -rf /tmp/automate-verify-stack
 echo "=== automate-verify stack DOWN ==="

@@ -109,12 +109,24 @@ export async function runWorkflow(
   input: WorkflowStartInput,
   workflowFn: WorkflowFn
 ): Promise<WorkflowResult> {
+  // FUNN-ISO — stamp the deployment environment on every funnel_run so a
+  // cross-environment write is detectable in-band and the terminal CAS
+  // guard has a value to compare against.
+  let environmentId: string | null = null;
+  try {
+    const { getEnvironmentIdentity } = await import(
+      "../../config/environmentIdentity"
+    );
+    environmentId = getEnvironmentIdentity().environmentId;
+  } catch {
+    /* strict-mode misconfig would have failed startup — belt and braces */
+  }
   // Durable creation of the funnel_run row.
   const runRow = await query(
     `INSERT INTO funnel_run
        (ontology_id, object_type_api_name, workflow_type, status,
-        signal_payload, parent_run_id)
-     VALUES ($1, $2, $3, 'running', $4::jsonb, $5)
+        signal_payload, parent_run_id, environment_id)
+     VALUES ($1, $2, $3, 'running', $4::jsonb, $5, $6)
      RETURNING run_id`,
     [
       input.ontologyId,
@@ -122,6 +134,7 @@ export async function runWorkflow(
       input.workflowType ?? "ObjectTypeFunnelWorkflow",
       JSON.stringify(input.signalPayload ?? null),
       input.parentRunId ?? null,
+      environmentId,
     ]
   );
   const runId = runRow.rows[0].run_id as string;
@@ -554,15 +567,29 @@ async function sweepViaTemporalVisibility(): Promise<SweepOrphanedRunsResult | n
     object_type_api_name: string;
     started_at: string;
   }>) {
-    // MUST match the Temporal workflow id — i.e. the bare
-    // `ObjectTypeFunnelWorkflow-<apiName>` (single-sourced as
-    // `funnelWorkflowId()` in temporal/worker.ts). This is NOT the
-    // per-save value stored in funnel_run.temporal_workflow_id (which is
-    // `<bareId>:<runKey>` by design for per-save UPSERT idempotency);
-    // reconstruct the bare id here from object_type_api_name rather than
-    // trusting the stored column.
-    const expected = `ObjectTypeFunnelWorkflow-${row.object_type_api_name}`;
-    if (!aliveWorkflowIds.has(expected)) {
+    // MUST match the Temporal workflow id. Post-FUNN-ISO that is the
+    // RID-keyed `ObjectTypeFunnelWorkflow/<ontologyRid>/<objectTypeRid>`;
+    // rows created before the migration carry the legacy
+    // `ObjectTypeFunnelWorkflow-<apiName>`. A run is orphaned only when
+    // NEITHER id is alive — this is NOT the per-save value stored in
+    // funnel_run.temporal_workflow_id (which is `<bareId>:<runKey>`).
+    let expectedIds = [`ObjectTypeFunnelWorkflow-${row.object_type_api_name}`];
+    try {
+      const wf = await query(
+        `SELECT ontology_id, object_type_id FROM object_type
+          WHERE api_name = $1 ORDER BY created_at DESC LIMIT 1`,
+        [row.object_type_api_name],
+      );
+      if (wf.rows[0]) {
+        expectedIds = [
+          `ObjectTypeFunnelWorkflow/${wf.rows[0].ontology_id}/${wf.rows[0].object_type_id}`,
+          ...expectedIds,
+        ];
+      }
+    } catch {
+      /* fallback to legacy id only */
+    }
+    if (!expectedIds.some((id) => aliveWorkflowIds.has(id))) {
       orphanRunIds.push(row.run_id);
     }
   }

@@ -582,11 +582,16 @@ export class DeploymentService {
         const { isTemporalConnected } = await import("./funnel/temporal/worker");
         if (isTemporalConnected()) {
           const { Connection, Client } = await import("@temporalio/client");
-          const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
-          const namespace = process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
-          const taskQueue = process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
-          const conn = await Connection.connect({ address });
-          const client = new Client({ connection: conn, namespace });
+          // FUNN-ISO: deployment-scoped namespace + queue.
+          const { getEnvironmentIdentity } = await import("../config/environmentIdentity");
+          const identity = getEnvironmentIdentity();
+          const conn = await Connection.connect({ address: identity.temporalAddress });
+          const client = new Client({
+            connection: conn,
+            namespace: identity.temporalNamespace,
+            identity: identity.workerIdentity,
+          });
+          const taskQueue = identity.temporalTaskQueue;
           // PB-B9 — propagate the inbound HTTP request's trace_id into
           // the Temporal workflow so spans stitch across HTTP → workflow
           // → activity → DuckDB/Iceberg. We push trace_id onto:

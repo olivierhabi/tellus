@@ -1,6 +1,6 @@
 // Verify TERMINATE_EXISTING: two back-to-back signalTemporalWorkflow
 // calls for the same Object Type must leave behind exactly one RUNNING
-// workflow, and the first one must be in TERMINATED (or a terminal
+// workflow, and the first one must be TERMINATED (or a terminal
 // non-RUNNING state). Guards against the "stuck-on-sync" regression.
 import "dotenv/config";
 import { Client, Connection } from "@temporalio/client";
@@ -9,53 +9,53 @@ import {
   startTemporalWorker,
   isTemporalConnected,
   stopTemporalWorker,
+  funnelWorkflowId,
 } from "../src/services/funnel/temporal/worker";
+import { resolveEnvironmentIdentity } from "../src/config/environmentIdentity";
 
 // Isolation: use a dedicated test namespace + unique object type per run
 // so parallel CI jobs can't collide. `FUNNEL_TERMINATE_ON_SAVE=true`
 // activates the conflict-policy we're verifying.
 process.env.TEMPORAL_NAMESPACE =
-  process.env.TEMPORAL_TEST_NAMESPACE ?? process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
+  process.env.TEMPORAL_TEST_NAMESPACE ?? process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel-test";
 process.env.TEMPORAL_TASK_QUEUE =
-  process.env.TEMPORAL_TEST_TASK_QUEUE ?? process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
+  process.env.TEMPORAL_TEST_TASK_QUEUE ?? process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-test-queue";
 process.env.FUNNEL_TERMINATE_ON_SAVE = "true";
 process.env.FUNNEL_CANCEL_STALE_THRESHOLD_MS = "60000000"; // disable cancel grace for this test
 
 const OBJECT_TYPE = `TerminateTestOT_${process.pid}_${Date.now()}`;
+const OBJECT_TYPE_RID = `00000000-0000-0000-0000-${String(process.pid).padStart(12, "0")}`;
 const ONTOLOGY_ID = "00000000-0000-0000-0000-000000000001";
 
 (async () => {
-  // 1. Need a connected Temporal client (the worker bootstrap is what
-  //    wires it up in src/services/funnel/temporal/worker.ts).
+  // 1. Need a connected Temporal client.
   await startTemporalWorker();
   if (!isTemporalConnected()) {
     process.stderr.write("SKIP: Temporal not reachable\n");
     process.exit(0);
   }
+  const identity = resolveEnvironmentIdentity();
+
+  const pseudoSignal = (signalId: string) =>
+    signalTemporalWorkflow({
+      ontologyId: ONTOLOGY_ID,
+      objectTypeApiName: OBJECT_TYPE,
+      objectTypeRid: OBJECT_TYPE_RID,
+      signalType: "sourceTransactionCommitted",
+      payload: { signalId },
+    });
 
   // 2. Send first signal — this starts workflow W1.
-  const first = await signalTemporalWorkflow(
-    ONTOLOGY_ID,
-    OBJECT_TYPE,
-    "sourceTransactionCommitted",
-    { signalId: "first" }
-  );
+  const first = await pseudoSignal("first");
 
   // Grab W1's runId immediately.
-  const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
-  const namespace = process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
-  const conn = await Connection.connect({ address });
-  const client = new Client({ connection: conn, namespace });
-  const handle = client.workflow.getHandle(`ObjectTypeFunnelWorkflow-${OBJECT_TYPE}`);
+  const conn = await Connection.connect({ address: identity.temporalAddress });
+  const client = new Client({ connection: conn, namespace: identity.temporalNamespace });
+  const handle = client.workflow.getHandle(funnelWorkflowId(ONTOLOGY_ID, OBJECT_TYPE_RID));
   const w1 = await handle.describe();
 
   // 3. Send second signal — this must TERMINATE W1 and start W2.
-  const second = await signalTemporalWorkflow(
-    ONTOLOGY_ID,
-    OBJECT_TYPE,
-    "sourceTransactionCommitted",
-    { signalId: "second" }
-  );
+  const second = await pseudoSignal("second");
 
   // Give Temporal ~500ms to process the terminate.
   await new Promise((r) => setTimeout(r, 500));
@@ -79,12 +79,9 @@ const ONTOLOGY_ID = "00000000-0000-0000-0000-000000000001";
     report.firstSignalOk &&
     report.secondSignalOk &&
     report.freshRunIdAfterSecondSave &&
-    // The "current" handle always resolves to the latest runId; the
-    // latest run must be RUNNING (not the stuck one).
     (report.w2StatusNow === "RUNNING" || report.w2StatusNow === "COMPLETED");
 
-  // Cleanup — terminate the surviving workflow so we don't leak test
-  // fixtures into the Temporal namespace.
+  // Cleanup.
   try {
     await handle.terminate("test cleanup");
   } catch {

@@ -15,9 +15,20 @@ import { Client, Connection } from "@temporalio/client";
     process.stderr.write("Usage: terminate-stuck-funnel-workflow.ts <objectTypeApiName>\n");
     process.exit(2);
   }
-  const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
-  const namespace = process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
-  const workflowId = `ObjectTypeFunnelWorkflow-${objectType}`;
+  // FUNN-ISO: identity-resolved namespace; workflow ids are RID-keyed
+  // (new dispatches) with a legacy api-name fallback (migration window).
+  const { resolveEnvironmentIdentity } = await import("../src/config/environmentIdentity");
+  const identity = resolveEnvironmentIdentity();
+  const address = identity.temporalAddress;
+  const namespace = identity.temporalNamespace;
+  const ridLookup = await (await import("../src/db")).query(
+    `SELECT object_type_id, ontology_id FROM object_type WHERE api_name = $1 LIMIT 1`,
+    [objectType],
+  );
+  const rid = ridLookup.rows[0];
+  const workflowId = rid
+    ? `ObjectTypeFunnelWorkflow/${rid.ontology_id}/${rid.object_type_id}`
+    : `ObjectTypeFunnelWorkflow-${objectType}`;
 
   const conn = await Connection.connect({ address });
   const client = new Client({ connection: conn, namespace });

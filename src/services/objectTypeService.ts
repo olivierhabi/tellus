@@ -495,7 +495,7 @@ async function remove(ontologyId: string, apiName: string): Promise<void> {
   //    a zombie funnel workflow retrying against a missing type, or an orphaned
   //    OpenSearch index serving stale rows. The row is already gone, so these
   //    failures MUST NOT roll back or throw — log and continue.
-  await cleanupAfterDelete(apiName);
+  await cleanupAfterDelete(apiName, { ontologyId, objectTypeRid: objectTypeId });
 
   console.log(
     `Deleted object type ${apiName} (${objectTypeId}) with all cascaded resources`
@@ -507,12 +507,18 @@ async function remove(ontologyId: string, apiName: string): Promise<void> {
  * object type. Both are best-effort and isolated so one failure doesn't block
  * the other or the delete.
  */
-async function cleanupAfterDelete(apiName: string): Promise<void> {
+async function cleanupAfterDelete(
+  apiName: string,
+  identity: { ontologyId: string; objectTypeRid: string },
+): Promise<void> {
   try {
     const { terminateTemporalWorkflow } = await import(
       "./funnel/temporal/worker"
     );
-    await terminateTemporalWorkflow(apiName, "object type deleted");
+    // Terminates BOTH the RID-keyed workflow and the legacy api-name-keyed
+    // one (migration window) so a deleted type cannot leave a zombie of
+    // either generation.
+    await terminateTemporalWorkflow(apiName, "object type deleted", identity);
   } catch (err) {
     console.warn(
       `[objectType.delete] funnel workflow terminate failed for ${apiName}: ${(err as Error).message}`

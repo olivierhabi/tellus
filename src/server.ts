@@ -49,6 +49,11 @@ import objectDataStoreRouter from "./routes/objectDataStore";
 import linkRouter from "./routes/links";
 import actionTypeRouter, { formatActionType } from "./routes/actionTypes";
 import actionsRouter, { validateRouter, batchRouter } from "./routes/actions";
+import automationsRouter from "./routes/automations";
+import {
+  startAutomateRuntime,
+  stopAutomateRuntime,
+} from "./services/automate/runtime";
 import { actionAuditRouter, globalAuditRouter } from "./routes/auditLog";
 import objectsRouter from "./routes/objects";
 import objectSetsV2Router from "./routes/v2/objectSetsV2";
@@ -662,6 +667,7 @@ app.use(
 app.use("/api/v1/actions", validateRouter);
 app.use("/api/v1/actions", batchRouter);
 app.use("/api/v1/audit", globalAuditRouter);
+app.use("/api/v1/automations", automationsRouter);
 
 // Phase 6.4 — per-user notification inbox. Mounted globally (not under
 // /ontology/:ontologyId) because the inbox is user-scoped, not ontology-
@@ -1377,6 +1383,10 @@ async function start(): Promise<void> {
       );
     });
     functionsPublishService.start();
+    if (process.env.AUTOMATE_RUNTIME_DISABLED !== "true") {
+      startAutomateRuntime();
+      console.log("Automate durable scheduler and worker started");
+    }
 
     startDeveloperConsoleReconciliationWorker(foundryDb as unknown as import('knex').Knex);
     startDeveloperConsoleArtifactBuildWorker(foundryDb as unknown as import('knex').Knex);
@@ -1503,7 +1513,14 @@ async function start(): Promise<void> {
         if (process.env.TEMPORAL_WORKER_DISABLED === "true") return;
         const ok = await startTemporalWorker();
         if (ok) {
-          console.log("Temporal worker registered on tellus-funnel");
+          const { getWorkerDiagnostics } = await import(
+            "./services/funnel/temporal/worker"
+          );
+          const diag = getWorkerDiagnostics();
+          console.log(
+            `Temporal worker registered on ${diag.identity?.temporalNamespace}/${diag.identity?.temporalTaskQueue} ` +
+              `(env=${diag.identity?.environmentId} db=${diag.dbEnvironmentId} build=${diag.identity?.workerBuildId})`,
+          );
           // PB-B4 follow-3.1 — kick the iceberg compaction+expiration
           // schedule. Falls back to the in-process interval loop when
           // Temporal is unreachable (the two paths don't double-execute;
@@ -1797,6 +1814,7 @@ async function shutdown(signal: string): Promise<void> {
   // hang on one misbehaving worker. The connectivity health prober is included
   // because its recordStatus() writes to the foundry pool every tick.
   const workerStops: Array<[string, () => unknown]> = [
+    ["automateRuntime", stopAutomateRuntime],
     ["developerConsoleArtifactBuilder", stopDeveloperConsoleArtifactBuildWorker],
     ["developerConsoleReconciler", stopDeveloperConsoleReconciliationWorker],
     ["funnelDispatcher", stopFunnelDispatcher],

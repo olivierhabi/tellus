@@ -115,6 +115,33 @@ assign_super() { # $1 userId
 assign_super "$OWNER_ID"
 echo "owner $OWNER_ID granted tellus-superadmin (Function-automation owner access)"
 
+# --- 2b. Isolated Temporal namespace (FUNN-ISO) — idempotent. ---
+# Temporal namespaces are the isolation unit containing workflows + task
+# queues; without this the verify worker polls the shared dev queue and
+# Temporal freely dispatches dev activities into the verify database (the
+# 2026-07-31 split-brain this stack exists to prevent). up.sh provisions
+# the verify namespace idempotently; the API's worker bootstrap verifies
+# the same name against `deployment_environment` in $VERIFY_DB.
+TNS=$(docker ps --format '{{.Names}}' | grep -E '^tellus-temporal(-1)?$' | head -1 || true)
+if [ -n "$TNS" ]; then
+  if ! docker exec "$TNS" temporal operator namespace describe --address temporal:7233 "$TEMPORAL_NAMESPACE" >/dev/null 2>&1; then
+    docker exec "$TNS" temporal operator namespace create --address temporal:7233 \
+      --retention "$VERIFY_TEMPORAL_RETENTION" --description "automate-verify stack $VERIFY_STACK_ID (ephemeral)" \
+      "$TEMPORAL_NAMESPACE" \
+      && echo "created Temporal namespace $TEMPORAL_NAMESPACE (retention $VERIFY_TEMPORAL_RETENTION)"
+  else
+    echo "Temporal namespace $TEMPORAL_NAMESPACE exists (idempotent)"
+  fi
+  # Custom search attributes for funnel lineage — cluster-scoped, idempotent.
+  for sa in TellusEnvironmentId TellusOntologyRid TellusObjectTypeRid TellusWorkerBuildId; do
+    docker exec "$TNS" temporal operator search-attribute create --address temporal:7233 \
+      --namespace "$TEMPORAL_NAMESPACE" --name "$sa" --type Keyword >/dev/null 2>&1 \
+      && echo "  search attribute $sa registered" || true
+  done
+else
+  echo "WARN: temporal container not found — API worker bootstrap will provision $TEMPORAL_NAMESPACE itself"
+fi
+
 # --- 3. Isolated MinIO bucket (best-effort; s3 client auto-creates too). ---
 # Uses the tellus S3 creds from .env against the configured endpoint.
 node -e "import('dotenv/config').then(async()=>{const{S3Client,CreateBucketCommand}=await import('@aws-sdk/client-s3');const c=new S3Client({region:process.env.S3_REGION,endpoint:process.env.S3_ENDPOINT,credentials:{accessKeyId:process.env.S3_ACCESS_KEY_ID,secretAccessKey:process.env.S3_SECRET_ACCESS_KEY},forcePathStyle:process.env.S3_FORCE_PATH_STYLE==='true'});try{await c.send(new CreateBucketCommand({Bucket:'$VERIFY_S3_BUCKET'}));console.log('bucket $VERIFY_S3_BUCKET created')}catch(e){if(String(e).includes('BucketAlreadyOwnedByYou'))console.log('bucket exists');else console.log('bucket best-effort:',e.message||e)}})" 2>&1 | tail -2 || true
@@ -127,6 +154,10 @@ mkdir -p /tmp/automate-verify-stack
 ( export PORT="$VERIFY_API_PORT" PGDATABASE="$VERIFY_DB" KEYCLOAK_REALM="$VERIFY_REALM" \
   S3_BUCKET="$VERIFY_S3_BUCKET" AUTOMATE_RUNTIME_DISABLED=false \
   CODE_REPOS_TEST_AUTH=0 TELLUS_TEST_HOOKS=1 \
+  TELLUS_ENVIRONMENT_ID="$TELLUS_ENVIRONMENT_ID" \
+  TEMPORAL_NAMESPACE="$TEMPORAL_NAMESPACE" \
+  TEMPORAL_TASK_QUEUE="$TEMPORAL_TASK_QUEUE" \
+  TEMPORAL_WORKER_BUILD_ID="$TEMPORAL_WORKER_BUILD_ID" \
   PG_CONNECT_TIMEOUT_MS=30000 PG_POOL_MAX=10 && \
   bash "$DETACH" /tmp/automate-verify-api.log /tmp/automate-verify-stack/api.pid pnpm exec tsx src/server.ts )
 echo "starting isolated API on :$VERIFY_API_PORT (log /tmp/automate-verify-api.log)"
