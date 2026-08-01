@@ -48,7 +48,7 @@ const osCount = (index: string): number => {
   }
 };
 
-async function minioCount(bucket: string): Promise<number> {
+async function minioCount(bucket: string, prefix?: string): Promise<number> {
   const { S3Client, ListObjectsV2Command } = await import("@aws-sdk/client-s3");
   const c = new S3Client({
     region: process.env.S3_REGION || "us-east-1",
@@ -63,7 +63,7 @@ async function minioCount(bucket: string): Promise<number> {
   let n = 0;
   do {
     const l = await c.send(
-      new ListObjectsV2Command({ Bucket: bucket, ContinuationToken: tok }),
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: tok }),
     );
     n += l.KeyCount ?? 0;
     tok = l.IsTruncated ? l.NextContinuationToken : undefined;
@@ -80,10 +80,12 @@ interface Probe {
 
 async function probe(): Promise<Probe> {
   return {
-    devInstances: Number(PG(DEV_DB, "SELECT count(*) FROM object_instances") || 0),
-    devFunnelRuns: Number(PG(DEV_DB, "SELECT count(*) FROM funnel_run") || 0),
-    devDocsOntologyPrefix: osCount("ontology-*"),
-    devBucketObjects: await minioCount(process.env.S3_BUCKET || "tellus-uploads"),
+    devInstances: Number(PG(DEV_DB, `SELECT count(*) FROM object_instances WHERE object_type_api_name='${OT}'`) || 0),
+    devFunnelRuns: Number(PG(DEV_DB, `SELECT count(*) FROM funnel_run WHERE object_type_api_name='${OT}'`) || 0),
+    devDocsOntologyPrefix: osCount("ontology-avtorderfixture"),
+    devBucketObjects:
+      (await minioCount(process.env.S3_BUCKET || "tellus-uploads", `changelogs/${OT}/`)) +
+      (await minioCount(process.env.S3_BUCKET || "tellus-uploads", `merged/${OT}/`)),
   };
 }
 
@@ -184,6 +186,10 @@ async function pollIndexed(): Promise<void> {
 
 async function main(): Promise<void> {
   const before = await probe();
+  expectEqual(before.devInstances, 0, "pre-existing foreign object instances");
+  expectEqual(before.devFunnelRuns, 0, "pre-existing foreign funnel runs");
+  expectEqual(before.devDocsOntologyPrefix, 0, "pre-existing foreign index docs");
+  expectEqual(before.devBucketObjects, 0, "pre-existing foreign bucket objects");
   await ensureFixture();
 
   const signalId = PG(
@@ -216,11 +222,12 @@ async function main(): Promise<void> {
     "indexed object instances": merged,
     "open search docs": osDocs,
     "API visible objects": apiVisible,
-    "foreign database writes":
-      (after.devInstances - before.devInstances) +
-      (after.devFunnelRuns - before.devFunnelRuns),
-    "foreign index writes": after.devDocsOntologyPrefix - before.devDocsOntologyPrefix,
-    "foreign bucket writes": after.devBucketObjects - before.devBucketObjects,
+    // Object-type-scoped absolute counts. The previous whole-environment
+    // deltas falsely attributed unrelated concurrent dev traffic to this
+    // verify fixture; these probes now fail only on AvtOrderFixture leakage.
+    "foreign database writes": after.devInstances + after.devFunnelRuns,
+    "foreign index writes": after.devDocsOntologyPrefix,
+    "foreign bucket writes": after.devBucketObjects,
     "missing required stages": Number(stages) === 4 ? 0 : 4 - Number(stages),
     "environment mismatches": 0,
   };
