@@ -17,6 +17,7 @@
 //   DELETE /:actionApiName         — Delete an action type
 // ---------------------------------------------------------------------------
 
+import { randomUUID } from "node:crypto";
 import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { resolveFunctionSource } from "../services/functionsRegistry/artifactStore";
@@ -68,10 +69,14 @@ import {
 import { hashActionDefinition } from "../actions/actionDefinitionHash";
 import { defaultSchemaLookup } from "../actions/objectReferenceResolver";
 import { recordMigration } from "../models/actionMigrationLog";
-import { getByApiName as getLinkTypeByApiName } from "../models/linkType";
+import {
+  getByApiName as getLinkTypeByApiName,
+  resolveObjectTypeApiName,
+} from "../models/linkType";
 import { getInterfaceLinkConstraintByApiName } from "../models/interfaceLinkConstraint";
 import { getWebhookByNameVersion } from "../models/webhookDefinition";
 import { getByRid as getConnectivityWebhookByRid } from "../services/connectivity/webhooks/repository";
+import type { WebhookParameterTypeValue } from "../services/connectivity/webhooks/contracts";
 import { CONNECTIVITY_WEBHOOK_RID_PREFIX } from "../actions/writebackExecutor";
 import { resolveRequestTenant } from "../utils/requestTenant";
 import { resolveSemanticsForRow } from "../models/actionType";
@@ -79,6 +84,102 @@ import {
   validateConcreteLinkRuleShape,
   validateInterfaceLinkRuleShape,
 } from "../actions/ruleShapeValidator";
+import {
+  isActionParameterCompatibleWithWebhook,
+  isStaticWebhookValueCompatible,
+} from "../actions/webhookTypeCompatibility";
+import {
+  parsePublishedFunctionType,
+  validateFunctionWebhookContract,
+  type PublishedFunctionSignature,
+} from "../actions/functionWebhookContract";
+
+export const ACTION_PARAMETER_RID_PREFIX = "ri.actions.main.parameter.";
+export const ACTION_RULE_RID_PREFIX = "ri.actions.main.rule.";
+export const ACTION_RULE_SCHEMA_VERSION = 1;
+
+export function ensureParameterRids(
+  parameters: Array<Record<string, unknown>>,
+  existingParameters: Array<Record<string, unknown>> = [],
+): Array<Record<string, unknown>> {
+  const existingRids = new Set(
+    existingParameters
+      .map((parameter) => parameter.rid)
+      .filter((rid): rid is string => typeof rid === "string"),
+  );
+  const existingRidsByApiName = new Map(
+    existingParameters
+      .filter(
+        (parameter) =>
+          typeof parameter.apiName === "string" &&
+          typeof parameter.rid === "string",
+      )
+      .map((parameter) => [parameter.apiName as string, parameter.rid as string]),
+  );
+
+  return parameters.map((parameter) => ({
+    ...parameter,
+    rid:
+      typeof parameter.rid === "string" &&
+      parameter.rid.startsWith(ACTION_PARAMETER_RID_PREFIX) &&
+      existingRids.has(parameter.rid)
+        ? parameter.rid
+        : existingRidsByApiName.get(String(parameter.apiName)) ??
+          `${ACTION_PARAMETER_RID_PREFIX}${randomUUID()}`,
+  }));
+}
+
+/**
+ * Canonicalise authoring identity without changing rule semantics or dropping
+ * extension fields. Existing rule RIDs are action-owned: callers cannot move a
+ * RID from another action into this definition. Legacy definitions are
+ * matched by array position during their first save; migration 147 backfills
+ * persisted rows so normal updates carry the RID explicitly.
+ */
+export function ensureRuleRids(
+  rules: Array<Record<string, unknown>>,
+  existingRules: Array<Record<string, unknown>> = [],
+): Array<Record<string, unknown>> {
+  const ownedRids = new Set(
+    existingRules
+      .map((rule) => rule.ruleId)
+      .filter(
+        (ruleId): ruleId is string =>
+          typeof ruleId === "string" &&
+          ruleId.startsWith(ACTION_RULE_RID_PREFIX),
+      ),
+  );
+  const seen = new Set<string>();
+  const hasSubmittedOwnedRid = rules.some(
+    (rule) =>
+      typeof rule.ruleId === "string" && ownedRids.has(rule.ruleId),
+  );
+
+  return rules.map((rule, index) => {
+    const submitted =
+      typeof rule.ruleId === "string" &&
+      rule.ruleId.startsWith(ACTION_RULE_RID_PREFIX) &&
+      ownedRids.has(rule.ruleId) &&
+      !seen.has(rule.ruleId)
+        ? rule.ruleId
+        : undefined;
+    const positional =
+      !hasSubmittedOwnedRid &&
+      typeof existingRules[index]?.ruleId === "string" &&
+      String(existingRules[index].ruleId).startsWith(ACTION_RULE_RID_PREFIX) &&
+      !seen.has(String(existingRules[index].ruleId))
+        ? String(existingRules[index].ruleId)
+        : undefined;
+    const ruleId =
+      submitted ?? positional ?? `${ACTION_RULE_RID_PREFIX}${randomUUID()}`;
+    seen.add(ruleId);
+    return {
+      ...rule,
+      ruleId,
+      schemaVersion: ACTION_RULE_SCHEMA_VERSION,
+    };
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Router
@@ -114,6 +215,9 @@ const VALID_PARAM_TYPES = new Set([
   "geopoint",
   "geoshape",
   "object_reference",
+  "object_type_reference",
+  "interface_reference",
+  "interface_reference_array",
   "object_set",
   "string_array",
   "integer_array",
@@ -157,6 +261,9 @@ const VALID_RULE_TYPES = new Set([
   // until the rule-compiler dispatch + runtime resolver land.
   "createInterfaceLink",
   "deleteInterfaceLink",
+  "createInterfaceObject",
+  "modifyInterfaceObject",
+  "deleteInterfaceObject",
 ]);
 
 /** Valid property mapping source types. */
@@ -165,6 +272,8 @@ const VALID_SOURCES = new Set([
   "static",
   "currentTimestamp",
   "currentUser",
+  "writebackResponse",
+  "objectProperty",
 ]);
 
 /** Error codes the route layer knows how to translate. */
@@ -319,6 +428,12 @@ export function formatActionType(row: Record<string, any>): Record<string, unkno
     execution_mode: row.execution_mode ?? null,
     delete_policy: row.delete_policy ?? null,
   });
+  const persistedRules = Array.isArray(row.rules)
+    ? row.rules.filter(
+        (rule: unknown): rule is Record<string, unknown> =>
+          !!rule && typeof rule === "object" && !Array.isArray(rule),
+      )
+    : [];
   return {
     rid: row.action_type_id,
     apiName: row.api_name,
@@ -328,7 +443,7 @@ export function formatActionType(row: Record<string, any>): Record<string, unkno
     iconColor: row.icon_color ?? null,
     saveLocationRid: row.save_location_rid ?? null,
     parameters: row.parameters,
-    rules: row.rules,
+    rules: ensureRuleRids(persistedRules, persistedRules),
     submissionCriteria: row.submission_criteria ?? null,
     sideEffects: row.side_effects ?? null,
     writebackConfig: row.writeback_config ?? null,
@@ -481,6 +596,34 @@ function validateValueSource(
       return [`${path} references non-existent parameter '${source.param}'.`];
     }
   }
+  if (source.source === "writebackResponse") {
+    if (typeof source.outputId !== "string" || source.outputId.length === 0) {
+      return [
+        `${path}: source 'writebackResponse' requires a non-empty 'outputId'.`,
+      ];
+    }
+    if (
+      source.path !== undefined &&
+      (typeof source.path !== "string" ||
+        (source.path !== "" && !source.path.startsWith("/")))
+    ) {
+      return [
+        `${path}.path must be an RFC 6901 JSONPointer beginning with '/'.`,
+      ];
+    }
+  }
+  if (source.source === "objectProperty") {
+    if (typeof source.param !== "string" || !paramNames.has(source.param)) {
+      return [`${path} references a missing object parameter '${String(source.param ?? "")}'.`];
+    }
+    if (
+      typeof source.path !== "string" ||
+      source.path.length === 0 ||
+      source.path.startsWith("/")
+    ) {
+      return [`${path}.path must begin with an object property API name.`];
+    }
+  }
   return [];
 }
 
@@ -564,6 +707,27 @@ async function validateParameters(
         }
       }
     }
+    if (
+      paramType === "object_type_reference" ||
+      paramType === "interface_reference" ||
+      paramType === "interface_reference_array"
+    ) {
+      if (!p.interfaceId || typeof p.interfaceId !== "string") {
+        errors.push(
+          `Parameter '${p.apiName}' has type '${paramType}' but no interfaceId specified.`,
+        );
+      } else {
+        const interfaceResult = await query(
+          "SELECT interface_id FROM interface WHERE ontology_id = $1 AND api_name = $2",
+          [ontologyId, p.interfaceId],
+        );
+        if (interfaceResult.rows.length === 0) {
+          errors.push(
+            `Parameter '${p.apiName}' references non-existent interface '${p.interfaceId}'.`,
+          );
+        }
+      }
+    }
 
     // constraints validation
     if (p.constraints && typeof p.constraints === "object") {
@@ -590,9 +754,23 @@ async function validateParameters(
 async function validateRules(
   rules: unknown[],
   ontologyId: string,
-  paramNames: Set<string>
+  paramNames: Set<string>,
+  parameters: Array<Record<string, unknown>>,
 ): Promise<string[]> {
   const errors: string[] = [];
+  const orderedObjectRules: Array<{
+    index: number;
+    ruleId?: string;
+    type: string;
+    objectType: string;
+    identity: string;
+  }> = [];
+  const orderedLinkRules: Array<{
+    index: number;
+    ruleId?: string;
+    type: string;
+    identity: string;
+  }> = [];
 
   if (!Array.isArray(rules)) {
     errors.push("rules must be an array.");
@@ -702,6 +880,196 @@ async function validateRules(
       } else if (ruleType === "createObject" || ruleType === "modifyOrCreateObject") {
         errors.push(`${idx}.properties is required for '${ruleType}' rules.`);
       }
+
+      const objectIdentitySource =
+        ruleType === "createObject"
+          ? primaryKeyProperty &&
+            rule.properties &&
+            typeof rule.properties === "object" &&
+            !Array.isArray(rule.properties)
+            ? (rule.properties as Record<string, unknown>)[primaryKeyProperty]
+            : undefined
+          : rule.objectReference;
+      if (objectIdentitySource !== undefined) {
+        orderedObjectRules.push({
+          index: i,
+          ruleId:
+            typeof rule.ruleId === "string" ? rule.ruleId : undefined,
+          type: ruleType,
+          objectType: String(rule.objectType),
+          identity: JSON.stringify(objectIdentitySource),
+        });
+      }
+
+      if (ruleType === "createObject" && rule.links !== undefined) {
+        if (!Array.isArray(rule.links)) {
+          errors.push(`${idx}.links must be an array when present.`);
+        } else {
+          const seenAttachedLinks = new Set<string>();
+          for (let linkIndex = 0; linkIndex < rule.links.length; linkIndex += 1) {
+            const mapping = rule.links[linkIndex];
+            const linkPath = `${idx}.links[${linkIndex}]`;
+            if (
+              !mapping ||
+              typeof mapping !== "object" ||
+              Array.isArray(mapping)
+            ) {
+              errors.push(`${linkPath} must be an attached link mapping.`);
+              continue;
+            }
+            const attached = mapping as Record<string, unknown>;
+            if (
+              typeof attached.linkType !== "string" ||
+              attached.linkType.length === 0
+            ) {
+              errors.push(`${linkPath}.linkType is required.`);
+              continue;
+            }
+            if (
+              attached.createdObjectSide !== "source" &&
+              attached.createdObjectSide !== "target"
+            ) {
+              errors.push(
+                `${linkPath}.createdObjectSide must be 'source' or 'target'.`,
+              );
+              continue;
+            }
+            errors.push(
+              ...validateValueSource(
+                attached.otherObject,
+                `${linkPath}.otherObject`,
+                paramNames,
+              ),
+            );
+            const identity = JSON.stringify([
+              attached.linkType,
+              attached.createdObjectSide,
+              attached.otherObject,
+            ]);
+            if (seenAttachedLinks.has(identity)) {
+              errors.push(
+                `${linkPath} duplicates an earlier attached link mapping.`,
+              );
+            }
+            seenAttachedLinks.add(identity);
+
+            try {
+              const linkType = await getLinkTypeByApiName(
+                ontologyId,
+                attached.linkType,
+              );
+              if (!linkType) {
+                errors.push(
+                  `${linkPath}.linkType '${attached.linkType}' does not exist.`,
+                );
+                continue;
+              }
+              if (linkType.cardinality !== "MANY_TO_MANY") {
+                errors.push(
+                  `${linkPath}.linkType '${attached.linkType}' is ${linkType.cardinality}. One-to-one and one-to-many relationships must be authored by mapping the foreign-key property in an object rule.`,
+                );
+              }
+              const endpointId =
+                attached.createdObjectSide === "source"
+                  ? linkType.source_object_type
+                  : linkType.target_object_type;
+              const endpointApiName =
+                await resolveObjectTypeApiName(endpointId);
+              if (endpointApiName !== rule.objectType) {
+                errors.push(
+                  `${linkPath} places created '${rule.objectType}' on the ${attached.createdObjectSide} side of '${attached.linkType}', which expects '${endpointApiName}'.`,
+                );
+              }
+            } catch {
+              errors.push(
+                `${linkPath}.linkType '${attached.linkType}' could not be resolved.`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    if (
+      ruleType === "createInterfaceObject" ||
+      ruleType === "modifyInterfaceObject" ||
+      ruleType === "deleteInterfaceObject"
+    ) {
+      if (typeof rule.interfaceId !== "string" || rule.interfaceId.length === 0) {
+        errors.push(`${idx}.interfaceId is required.`);
+      } else {
+        const interfaceResult = await query(
+          `SELECT i.interface_id, ip.api_name, ip.is_required
+             FROM interface i
+             LEFT JOIN interface_property ip ON ip.interface_id = i.interface_id
+            WHERE i.ontology_id = $1 AND i.api_name = $2`,
+          [ontologyId, rule.interfaceId],
+        );
+        if (interfaceResult.rows.length === 0) {
+          errors.push(
+            `${idx}.interfaceId '${rule.interfaceId}' does not exist in ontology.`,
+          );
+        } else {
+          const interfaceProperties = new Set(
+            interfaceResult.rows
+              .map((row) => row.api_name)
+              .filter((name): name is string => typeof name === "string"),
+          );
+          if (ruleType !== "deleteInterfaceObject") {
+            if (
+              !rule.properties ||
+              typeof rule.properties !== "object" ||
+              Array.isArray(rule.properties)
+            ) {
+              errors.push(`${idx}.properties must be an object.`);
+            } else {
+              for (const [property, source] of Object.entries(
+                rule.properties as Record<string, unknown>,
+              )) {
+                if (!interfaceProperties.has(property)) {
+                  errors.push(
+                    `${idx}.properties.${property} is not a shared property of interface '${rule.interfaceId}'.`,
+                  );
+                }
+                errors.push(
+                  ...validateValueSource(
+                    source,
+                    `${idx}.properties.${property}`,
+                    paramNames,
+                  ),
+                );
+              }
+            }
+          }
+        }
+      }
+
+      if (ruleType === "createInterfaceObject") {
+        const objectTypeParameter =
+          typeof rule.objectTypeParameter === "string"
+            ? parameters.find(
+                (parameter) =>
+                  parameter.apiName === rule.objectTypeParameter,
+              )
+            : undefined;
+        if (
+          !objectTypeParameter ||
+          objectTypeParameter.type !== "object_type_reference" ||
+          objectTypeParameter.interfaceId !== rule.interfaceId
+        ) {
+          errors.push(
+            `${idx}.objectTypeParameter must reference an object_type_reference parameter constrained to interface '${String(rule.interfaceId ?? "")}'.`,
+          );
+        }
+      } else {
+        errors.push(
+          ...validateValueSource(
+            rule.interfaceReference,
+            `${idx}.interfaceReference`,
+            paramNames,
+          ),
+        );
+      }
     }
 
     // For addLink/removeLink: validate canonical rule shape.
@@ -715,6 +1083,23 @@ async function validateRules(
       // Ontology-coupled existence check — only run when the shape is valid.
       if (errors.filter((e) => e.startsWith(`${idx}:`)).length === 0) {
         await validateConcreteLinkRule(rule, idx, paramNames, ontologyId, errors);
+      }
+      if (
+        typeof (rule.linkType ?? rule.linkTypeApiName) === "string" &&
+        rule.sourceObject !== undefined &&
+        rule.targetObject !== undefined
+      ) {
+        orderedLinkRules.push({
+          index: i,
+          ruleId:
+            typeof rule.ruleId === "string" ? rule.ruleId : undefined,
+          type: ruleType,
+          identity: JSON.stringify([
+            rule.linkType ?? rule.linkTypeApiName,
+            rule.sourceObject,
+            rule.targetObject,
+          ]),
+        });
       }
     }
 
@@ -730,6 +1115,71 @@ async function validateRules(
       const shapeHadError = errors.some((e) => e.startsWith(`${idx}:`));
       if (!shapeHadError) {
         await validateInterfaceLinkRule(rule, idx, paramNames, ontologyId, errors);
+      }
+    }
+  }
+
+  const firstCreate = new Map<string, (typeof orderedObjectRules)[number]>();
+  const firstDelete = new Map<string, (typeof orderedObjectRules)[number]>();
+  for (const entry of orderedObjectRules) {
+    const key = `${entry.objectType}:${entry.identity}`;
+    const create = firstCreate.get(key);
+    const deletion = firstDelete.get(key);
+    if (entry.type === "createObject") {
+      if (create) {
+        errors.push(
+          `rules[${entry.index}]${entry.ruleId ? ` (${entry.ruleId})` : ""} duplicates object creation from rules[${create.index}]${create.ruleId ? ` (${create.ruleId})` : ""}. Keep one create rule for this object identity.`,
+        );
+      }
+      if (deletion) {
+        errors.push(
+          `rules[${entry.index}] creates an object after rules[${deletion.index}] deleted the same identity. Move deletion after all object rules or remove the conflicting rule.`,
+        );
+      }
+      firstCreate.set(key, create ?? entry);
+      continue;
+    }
+    if (
+      (entry.type === "modifyObject" ||
+        entry.type === "modifyOrCreateObject") &&
+      deletion
+    ) {
+      errors.push(
+        `rules[${entry.index}] modifies an object after rules[${deletion.index}] deleted the same identity. Move the delete rule later.`,
+      );
+    }
+    if (entry.type === "deleteObject") {
+      firstDelete.set(key, deletion ?? entry);
+    }
+  }
+
+  const laterCreates = new Map<string, (typeof orderedObjectRules)[number]>();
+  for (const entry of [...orderedObjectRules].reverse()) {
+    const key = `${entry.objectType}:${entry.identity}`;
+    const laterCreate = laterCreates.get(key);
+    if (
+      laterCreate &&
+      (entry.type === "modifyObject" ||
+        entry.type === "modifyOrCreateObject" ||
+        entry.type === "deleteObject")
+    ) {
+      errors.push(
+        `rules[${entry.index}] ${entry.type === "deleteObject" ? "deletes" : "modifies"} an object before rules[${laterCreate.index}] creates the same identity. Move the create rule earlier.`,
+      );
+    }
+    if (entry.type === "createObject") laterCreates.set(key, entry);
+  }
+
+  const linkCreates = new Map<string, (typeof orderedLinkRules)[number]>();
+  for (const entry of orderedLinkRules) {
+    const earlier = linkCreates.get(entry.identity);
+    if (entry.type === "addLink") {
+      if (earlier) {
+        errors.push(
+          `rules[${entry.index}] duplicates link creation from rules[${earlier.index}]. Remove the duplicate or map different endpoints.`,
+        );
+      } else {
+        linkCreates.set(entry.identity, entry);
       }
     }
   }
@@ -770,6 +1220,7 @@ async function validateWritebackConfig(
   wb: unknown,
   ontologyId: string,
   paramNames: Set<string>,
+  parameters: Array<Record<string, unknown>>,
   tenant: string,
   requireComplete = true,
 ): Promise<string[]> {
@@ -858,8 +1309,11 @@ async function validateWritebackConfig(
           wbRow.webhookId,
           wbRow.webhookVersion,
           (wbRow.inputs ?? {}) as Record<string, unknown>,
+          parameters,
+          ontologyId,
           tenant,
           requireComplete,
+          wbRow.inputFunction,
         )),
       );
     } else {
@@ -897,8 +1351,11 @@ async function validateConnectivityWebhookBinding(
   webhookRid: string,
   webhookVersion: number,
   inputs: Record<string, unknown>,
+  parameters: Array<Record<string, unknown>>,
+  ontologyId: string,
   tenant: string,
   requireComplete = true,
+  inputFunction?: unknown,
 ): Promise<string[]> {
   const errors: string[] = [];
   let webhook;
@@ -917,6 +1374,21 @@ async function validateConnectivityWebhookBinding(
     return errors;
   }
   const declared = webhook.configuration.inputs ?? [];
+  if (inputFunction !== undefined) {
+    if (Object.keys(inputs).length > 0) {
+      errors.push(
+        "writeback_config cannot combine direct input mappings with inputFunction.",
+      );
+    }
+    errors.push(
+      ...(await validateWebhookInputFunction(
+        inputFunction,
+        parameters,
+        declared,
+      )),
+    );
+    return errors;
+  }
   const declaredIds = new Set(declared.map((input) => input.id));
   for (const key of Object.keys(inputs)) {
     if (!declaredIds.has(key)) {
@@ -926,14 +1398,469 @@ async function validateConnectivityWebhookBinding(
     }
   }
   for (const input of declared) {
-    if (!requireComplete) continue;
-    if (input.required && !(input.id in inputs)) {
+    if (requireComplete && input.required && !(input.id in inputs)) {
       errors.push(
         `writeback_config.inputs is missing a mapping for required input '${input.id}' declared by webhook '${webhook.displayName}' v${webhookVersion}.`,
       );
     }
+    const mapping = inputs[input.id];
+    if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+      continue;
+    }
+    const source = mapping as Record<string, unknown>;
+    if (source.source === "parameter" && typeof source.param === "string") {
+      const parameter = parameters.find(
+        (candidate) => candidate.apiName === source.param,
+      );
+      if (
+        parameter &&
+        !isActionParameterCompatibleWithWebhook(
+          {
+            apiName: String(parameter.apiName),
+            type: String(parameter.type),
+            required: parameter.required === true,
+          },
+          input.type,
+        )
+      ) {
+        errors.push(
+          `writeback_config.inputs.${input.id} maps action parameter '${source.param}' of type '${parameter.type}' to incompatible webhook type '${input.type.kind}'.`,
+        );
+      }
+      if (parameter && input.required && parameter.required !== true) {
+        errors.push(
+          `writeback_config.inputs.${input.id} is required, but action parameter '${source.param}' is optional and may be unavailable at execution time.`,
+        );
+      }
+    }
+    if (
+      source.source === "objectProperty" &&
+      typeof source.param === "string" &&
+      typeof source.path === "string"
+    ) {
+      const parameter = parameters.find(
+        (candidate) => candidate.apiName === source.param,
+      );
+      if (!parameter || parameter.type !== "object_reference") {
+        errors.push(
+          `writeback_config.inputs.${input.id} must source object properties from an object_reference parameter.`,
+        );
+      } else if (typeof parameter.objectType !== "string") {
+        errors.push(
+          `writeback_config.inputs.${input.id} uses object parameter '${source.param}' without an objectType.`,
+        );
+      } else {
+        const [propertyApiName, ...nestedPath] = source.path.split("/").filter(Boolean);
+        const propertyResult = await query(
+          `SELECT p.base_type, p.is_required
+             FROM property p
+             JOIN object_type ot ON ot.object_type_id = p.object_type_id
+            WHERE ot.ontology_id = $1
+              AND ot.api_name = $2
+              AND p.api_name = $3`,
+          [ontologyId, parameter.objectType, propertyApiName],
+        );
+        const property = propertyResult.rows[0] as
+          | { base_type: string; is_required: boolean }
+          | undefined;
+        if (!property) {
+          errors.push(
+            `writeback_config.inputs.${input.id} references missing property '${source.path}' on '${parameter.objectType}'.`,
+          );
+        } else if (nestedPath.length > 0 && property.base_type !== "struct") {
+          errors.push(
+            `writeback_config.inputs.${input.id} path '${source.path}' is nested beneath non-struct property '${propertyApiName}'.`,
+          );
+        } else if (
+          nestedPath.length === 0 &&
+          !isActionParameterCompatibleWithWebhook(
+            {
+              apiName: propertyApiName,
+              type: property.base_type,
+              required: property.is_required,
+            },
+            input.type,
+          )
+        ) {
+          errors.push(
+            `writeback_config.inputs.${input.id} maps property '${source.path}' of type '${property.base_type}' to incompatible webhook type '${input.type.kind}'.`,
+          );
+        } else if (
+          input.required &&
+          property.is_required !== true
+        ) {
+          errors.push(
+            `writeback_config.inputs.${input.id} is required, but object property '${source.path}' is nullable.`,
+          );
+        }
+      }
+    }
+    if (
+      source.source === "static" &&
+      !isStaticWebhookValueCompatible(
+        source.value,
+        input.type,
+        !input.required,
+      )
+    ) {
+      errors.push(
+        `writeback_config.inputs.${input.id} has a static value incompatible with webhook type '${input.type.kind}'${input.required ? "" : " or its nullable contract"}.`,
+      );
+    }
+    if (source.source === "currentUser" && input.type.kind !== "string") {
+      errors.push(
+        `writeback_config.inputs.${input.id} maps current user to incompatible webhook type '${input.type.kind}'; current user is a string principal identifier.`,
+      );
+    }
+    if (
+      source.source === "currentTimestamp" &&
+      input.type.kind !== "timestamp"
+    ) {
+      errors.push(
+        `writeback_config.inputs.${input.id} maps current submission time to incompatible webhook type '${input.type.kind}'.`,
+      );
+    }
+    if (source.source === "writebackResponse") {
+      errors.push(
+        `writeback_config.inputs.${input.id} cannot read a response from the same writeback before it executes.`,
+      );
+    }
   }
   return errors;
+}
+
+async function validateWebhookInputFunction(
+  raw: unknown,
+  parameters: Array<Record<string, unknown>>,
+  webhookInputs: ReadonlyArray<{
+    id: string;
+    required: boolean;
+    type: WebhookParameterTypeValue;
+  }>,
+): Promise<string[]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return ["writeback_config.inputFunction must be an object."];
+  }
+  const config = raw as Record<string, unknown>;
+  const errors: string[] = [];
+  const requiredStrings = [
+    "functionRid",
+    "repositoryRid",
+    "apiName",
+    "branch",
+    "semver",
+  ] as const;
+  for (const key of requiredStrings) {
+    if (typeof config[key] !== "string" || !config[key]) {
+      errors.push(`writeback_config.inputFunction.${key} is required.`);
+    }
+  }
+  if (config.resultMode !== "single" && config.resultMode !== "list") {
+    errors.push(
+      "writeback_config.inputFunction.resultMode must be 'single' or 'list'.",
+    );
+  }
+  if (
+    !config.arguments ||
+    typeof config.arguments !== "object" ||
+    Array.isArray(config.arguments)
+  ) {
+    errors.push(
+      "writeback_config.inputFunction.arguments must be a value-source map.",
+    );
+  }
+  if (errors.length > 0) return errors;
+
+  const found = await query(
+    `SELECT f.repository_rid, f.api_name, v.signature, v.function_kind,
+            fv.state, fv.runtime
+       FROM function_registry_function f
+       JOIN function_registry_function_version v
+         ON v.function_rid = f.rid
+        AND v.branch = $2
+        AND v.semver = $3
+       JOIN function_version fv ON fv.rid = v.release_version_rid
+      WHERE f.rid = $1`,
+    [config.functionRid, config.branch, config.semver],
+  );
+  const row = found.rows[0] as
+    | {
+        repository_rid: string;
+        api_name: string;
+        signature: PublishedFunctionSignature | null;
+        function_kind: string | null;
+        state: string;
+        runtime: string;
+      }
+    | undefined;
+  if (!row) {
+    return [
+      `Published Function '${config.functionRid}' ${config.semver} was not found.`,
+    ];
+  }
+  if (
+    row.repository_rid !== config.repositoryRid ||
+    row.api_name !== config.apiName
+  ) {
+    errors.push(
+      "writeback_config.inputFunction identity does not match the Function Registry record.",
+    );
+  }
+  if (row.state !== "AVAILABLE" || row.runtime !== "NODE_20") {
+    errors.push(
+      `Function version is not callable (state=${row.state}, runtime=${row.runtime}).`,
+    );
+  }
+  if (row.function_kind !== "query") {
+    errors.push(
+      `Function '${config.apiName}' must be a query Function to derive webhook inputs.`,
+    );
+  }
+  if (!row.signature || typeof row.signature.output !== "string") {
+    errors.push("Published Function is missing a typed return contract.");
+    return errors;
+  }
+
+  const argumentMappings = config.arguments as Record<string, unknown>;
+  const signatureNames = new Set(
+    row.signature.parameters.map((parameter) => parameter.name),
+  );
+  for (const name of Object.keys(argumentMappings)) {
+    if (!signatureNames.has(name)) {
+      errors.push(
+        `writeback_config.inputFunction.arguments.${name} references a deleted Function parameter.`,
+      );
+    }
+  }
+  for (const functionParameter of row.signature.parameters) {
+    const mapping = argumentMappings[functionParameter.name];
+    if (mapping === undefined) {
+      if (!functionParameter.optional) {
+        errors.push(
+          `writeback_config.inputFunction.arguments is missing required Function input '${functionParameter.name}'.`,
+        );
+      }
+      continue;
+    }
+    errors.push(
+      ...validateValueSource(
+        mapping,
+        `writeback_config.inputFunction.arguments.${functionParameter.name}`,
+        new Set(
+          parameters
+            .map((parameter) => parameter.apiName)
+            .filter((name): name is string => typeof name === "string"),
+        ),
+      ),
+    );
+    const parsed = parsePublishedFunctionType(functionParameter.type);
+    if (!parsed) {
+      errors.push(
+        `Function input '${functionParameter.name}' has unsupported type '${functionParameter.type}'.`,
+      );
+      continue;
+    }
+    if (
+      mapping &&
+      typeof mapping === "object" &&
+      !Array.isArray(mapping)
+    ) {
+      const source = mapping as Record<string, unknown>;
+      if (source.source === "parameter" && typeof source.param === "string") {
+        const actionParameter = parameters.find(
+          (parameter) => parameter.apiName === source.param,
+        );
+        if (
+          actionParameter &&
+          !isActionParameterCompatibleWithWebhook(
+            {
+              apiName: String(actionParameter.apiName),
+              type: String(actionParameter.type),
+              required: actionParameter.required === true,
+            },
+            parsed.type,
+          )
+        ) {
+          errors.push(
+            `Action parameter '${source.param}' is incompatible with Function input '${functionParameter.name}' (${functionParameter.type}).`,
+          );
+        }
+      } else if (
+        source.source === "static" &&
+        !isStaticWebhookValueCompatible(
+          source.value,
+          parsed.type,
+          functionParameter.optional || parsed.nullable,
+        )
+      ) {
+        errors.push(
+          `Static value for Function input '${functionParameter.name}' is incompatible with '${functionParameter.type}'.`,
+        );
+      }
+    }
+  }
+  const contract = validateFunctionWebhookContract(
+    row.signature,
+    webhookInputs,
+    config.resultMode as "single" | "list",
+  );
+  errors.push(...contract.errors.map((error) => `inputFunction: ${error}`));
+  return errors;
+}
+
+interface LocatedWritebackSource {
+  path: string;
+  outputId: string;
+  pointer: string;
+}
+
+function collectWritebackSources(
+  value: unknown,
+  path: string,
+  found: LocatedWritebackSource[],
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      collectWritebackSources(entry, `${path}[${index}]`, found),
+    );
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  if (
+    record.source === "writebackResponse" &&
+    typeof record.outputId === "string"
+  ) {
+    found.push({
+      path,
+      outputId: record.outputId,
+      pointer: typeof record.path === "string" ? record.path : "",
+    });
+    return;
+  }
+  for (const [key, nested] of Object.entries(record)) {
+    collectWritebackSources(nested, `${path}.${key}`, found);
+  }
+}
+
+function decodeJsonPointer(pointer: string): string[] | null {
+  if (pointer === "" || pointer === "/") return [];
+  if (!pointer.startsWith("/")) return null;
+  const parts = pointer.slice(1).split("/");
+  if (parts.some((part) => /~(?![01])/u.test(part))) return null;
+  return parts.map((part) => part.replace(/~1/gu, "/").replace(/~0/gu, "~"));
+}
+
+export function resolveWebhookOutputPath(
+  root: WebhookParameterTypeValue,
+  pointer: string,
+): string | null {
+  const segments = decodeJsonPointer(pointer);
+  if (segments === null) return "is not a valid RFC 6901 JSONPointer";
+  let current = root;
+  for (const segment of segments) {
+    if (current.kind === "record") {
+      const field = current.fields.find((candidate) => candidate.id === segment);
+      if (!field) return `references missing record field '${segment}'`;
+      current = field.type;
+      continue;
+    }
+    if (current.kind === "list") {
+      if (!/^(?:0|[1-9]\d*)$/u.test(segment)) {
+        return `must use a non-negative array index at '${segment}'`;
+      }
+      current = current.elementType;
+      continue;
+    }
+    return `cannot descend through primitive output type '${current.kind}' at '${segment}'`;
+  }
+  return null;
+}
+
+/**
+ * Cross-validates every rule-level writeback source against the immutable
+ * webhook version. This is deliberately independent of the editor: stale
+ * output ids and nested paths are rejected again on save.
+ */
+async function validateWritebackOutputReferences(
+  rules: unknown[],
+  writebackConfig: unknown,
+  tenant: string,
+): Promise<string[]> {
+  const references: LocatedWritebackSource[] = [];
+  rules.forEach((rule, index) =>
+    collectWritebackSources(rule, `rules[${index}]`, references),
+  );
+  if (references.length === 0) return [];
+  if (
+    !writebackConfig ||
+    typeof writebackConfig !== "object" ||
+    Array.isArray(writebackConfig)
+  ) {
+    return references.map(
+      (reference) =>
+        `${reference.path} reads writeback output '${reference.outputId}', but this Action Type has no writeback webhook.`,
+    );
+  }
+  const config = writebackConfig as Record<string, unknown>;
+  if (
+    typeof config.webhookId !== "string" ||
+    typeof config.webhookVersion !== "number"
+  ) {
+    return [];
+  }
+
+  if (config.webhookId.startsWith(CONNECTIVITY_WEBHOOK_RID_PREFIX)) {
+    let webhook;
+    try {
+      webhook = await getConnectivityWebhookByRid(
+        config.webhookId,
+        tenant,
+        config.webhookVersion,
+      );
+    } catch {
+      return [];
+    }
+    const outputs = new Map(
+      (webhook.configuration.outputs ?? []).map((output) => [
+        output.id,
+        output,
+      ]),
+    );
+    const errors: string[] = [];
+    for (const reference of references) {
+      const output = outputs.get(reference.outputId);
+      if (!output) {
+        errors.push(
+          `${reference.path} references missing output '${reference.outputId}' on webhook '${webhook.displayName}' v${config.webhookVersion}. Select a current output or update the pinned webhook version.`,
+        );
+        continue;
+      }
+      const pathError = resolveWebhookOutputPath(
+        output.type,
+        reference.pointer,
+      );
+      if (pathError) {
+        errors.push(
+          `${reference.path}.path '${reference.pointer}' ${pathError} for output '${reference.outputId}'.`,
+        );
+      }
+    }
+    return errors;
+  }
+
+  const bindings =
+    config.outputBindings &&
+    typeof config.outputBindings === "object" &&
+    !Array.isArray(config.outputBindings)
+      ? (config.outputBindings as Record<string, unknown>)
+      : {};
+  return references
+    .filter((reference) => !(reference.outputId in bindings))
+    .map(
+      (reference) =>
+        `${reference.path} references missing writeback output binding '${reference.outputId}'.`,
+    );
 }
 
 /**
@@ -944,6 +1871,8 @@ async function validateConnectivityWebhookBinding(
 async function validateSideEffectsConfig(
   value: unknown,
   paramNames: Set<string>,
+  parameters: Array<Record<string, unknown>>,
+  ontologyId: string,
   tenant: string,
   requireComplete = true,
 ): Promise<string[]> {
@@ -993,8 +1922,11 @@ async function validateSideEffectsConfig(
         spec.webhookId,
         spec.webhookVersion,
         inputs,
+        parameters,
+        ontologyId,
         tenant,
         requireComplete,
+        spec.inputFunction,
       );
       errors.push(...bindingErrors.map((error) => error.split("writeback_config").join(path)));
     }
@@ -1229,6 +2161,7 @@ router.post(
         });
         return;
       }
+      const persistedParams = ensureParameterRids(params);
 
       // rules
       const isFunctionAction = body.executionMode === "function";
@@ -1263,13 +2196,19 @@ router.post(
 
       const ruleErrors = isFunctionAction || rules.length === 0
         ? []
-        : await validateRules(rules, ontologyId, paramNames);
+        : await validateRules(rules, ontologyId, paramNames, params);
       if (ruleErrors.length > 0) {
         sendError(res, "VALIDATION_FAILED", ruleErrors.join(" "), {
           validationErrors: ruleErrors,
         });
         return;
       }
+      const persistedRules = ensureRuleRids(
+        rules.filter(
+          (rule: unknown): rule is Record<string, unknown> =>
+            !!rule && typeof rule === "object" && !Array.isArray(rule),
+        ),
+      );
 
       if (isFunctionAction) {
         const functionErrors = await validateFunctionConfig(body.functionConfig, params);
@@ -1295,6 +2234,7 @@ router.post(
         body.writebackConfig,
         ontologyId,
         paramNames,
+        params,
         resolveRequestTenant(req),
         !isDraft,
       );
@@ -1304,9 +2244,26 @@ router.post(
         });
         return;
       }
+      const writebackReferenceErrors =
+        await validateWritebackOutputReferences(
+          rules,
+          body.writebackConfig,
+          resolveRequestTenant(req),
+        );
+      if (writebackReferenceErrors.length > 0) {
+        sendError(
+          res,
+          "WRITEBACK_CONFIG_INVALID",
+          writebackReferenceErrors.join(" "),
+          { validationErrors: writebackReferenceErrors },
+        );
+        return;
+      }
       const sideEffectErrors = await validateSideEffectsConfig(
         body.sideEffects,
         paramNames,
+        params,
+        ontologyId,
         resolveRequestTenant(req),
         !isDraft,
       );
@@ -1389,8 +2346,8 @@ router.post(
         iconName: body.icon ?? null,
         iconColor: body.iconColor ?? null,
         saveLocationRid: body.saveLocationRid ?? null,
-        parameters: params,
-        rules,
+        parameters: persistedParams,
+        rules: persistedRules,
         submissionCriteria: body.submissionCriteria ?? null,
         sideEffects: body.sideEffects ?? null,
         writebackConfig: body.writebackConfig ?? null,
@@ -1720,7 +2677,12 @@ const updateActionTypeHandler = async (
               (p) => p.apiName as string
             )
           );
-          const ruleErrors = await validateRules(rulesToValidate, ontologyId, paramNames);
+          const ruleErrors = await validateRules(
+            rulesToValidate,
+            ontologyId,
+            paramNames,
+            effectiveParams as Array<Record<string, unknown>>,
+          );
           if (ruleErrors.length > 0) {
             sendError(res, "VALIDATION_FAILED", ruleErrors.join(" "), {
               validationErrors: ruleErrors,
@@ -1745,6 +2707,7 @@ const updateActionTypeHandler = async (
           effectiveWriteback,
           ontologyId,
           paramNames,
+          effectiveParams as Array<Record<string, unknown>>,
           resolveRequestTenant(req),
           resultingEnabled,
         );
@@ -1752,6 +2715,27 @@ const updateActionTypeHandler = async (
           sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
             validationErrors: wbErrors,
           });
+          return;
+        }
+      }
+      if (
+        body.rules !== undefined ||
+        body.writebackConfig !== undefined ||
+        body.isEnabled === true
+      ) {
+        const writebackReferenceErrors =
+          await validateWritebackOutputReferences(
+            effectiveRules,
+            effectiveWriteback,
+            resolveRequestTenant(req),
+          );
+        if (writebackReferenceErrors.length > 0) {
+          sendError(
+            res,
+            "WRITEBACK_CONFIG_INVALID",
+            writebackReferenceErrors.join(" "),
+            { validationErrors: writebackReferenceErrors },
+          );
           return;
         }
       }
@@ -1764,6 +2748,8 @@ const updateActionTypeHandler = async (
         const sideEffectErrors = await validateSideEffectsConfig(
           effectiveSideEffects,
           paramNames,
+          effectiveParams as Array<Record<string, unknown>>,
+          ontologyId,
           resolveRequestTenant(req),
           resultingEnabled,
         );
@@ -1783,8 +2769,28 @@ const updateActionTypeHandler = async (
       if (body.icon !== undefined) updates.icon_name = body.icon;
       if (body.iconColor !== undefined) updates.icon_color = body.iconColor;
       if (body.saveLocationRid !== undefined) updates.save_location_rid = body.saveLocationRid;
-      if (body.parameters !== undefined) updates.parameters = body.parameters;
-      if (body.rules !== undefined) updates.rules = body.rules;
+      if (body.parameters !== undefined) {
+        updates.parameters = ensureParameterRids(
+          body.parameters as Array<Record<string, unknown>>,
+          Array.isArray(existing.parameters)
+            ? (existing.parameters as Array<Record<string, unknown>>)
+            : [],
+        );
+      }
+      if (body.rules !== undefined) {
+        updates.rules = ensureRuleRids(
+          body.rules.filter(
+            (rule: unknown): rule is Record<string, unknown> =>
+              !!rule && typeof rule === "object" && !Array.isArray(rule),
+          ),
+          Array.isArray(existing.rules)
+            ? existing.rules.filter(
+                (rule: unknown): rule is Record<string, unknown> =>
+                  !!rule && typeof rule === "object" && !Array.isArray(rule),
+              )
+            : [],
+        );
+      }
       if (body.submissionCriteria !== undefined) updates.submission_criteria = body.submissionCriteria;
       if (body.sideEffects !== undefined) updates.side_effects = body.sideEffects;
       if (body.writebackConfig !== undefined) updates.writeback_config = body.writebackConfig;
@@ -1916,6 +2922,41 @@ router.post(
         body.newDisplayName && typeof body.newDisplayName === "string"
           ? body.newDisplayName
           : `Copy of ${source.display_name}`;
+      const sourceSemanticsVersion: ActionSemanticsVersion | undefined =
+        source.semantics_version === 1 || source.semantics_version === 2
+          ? source.semantics_version
+          : undefined;
+      const sourceExecutionMode: ActionExecutionMode | undefined =
+        source.execution_mode === "declarative" ||
+        source.execution_mode === "function"
+          ? source.execution_mode
+          : undefined;
+      const sourceDeletePolicy: DeletePolicy | undefined =
+        source.delete_policy === "legacy_unchecked" ||
+        source.delete_policy === "restrict"
+          ? source.delete_policy
+          : undefined;
+      if (
+        source.semantics_version != null &&
+        sourceSemanticsVersion === undefined
+      ) {
+        throw appError(
+          "VALIDATION_FAILED",
+          `Cannot clone action type with unsupported semantics version '${source.semantics_version}'.`,
+        );
+      }
+      if (source.execution_mode != null && sourceExecutionMode === undefined) {
+        throw appError(
+          "VALIDATION_FAILED",
+          `Cannot clone action type with unsupported execution mode '${source.execution_mode}'.`,
+        );
+      }
+      if (source.delete_policy != null && sourceDeletePolicy === undefined) {
+        throw appError(
+          "VALIDATION_FAILED",
+          `Cannot clone action type with unsupported delete policy '${source.delete_policy}'.`,
+        );
+      }
 
       // 4. Create the clone using the existing createActionType model function.
       //    This handles uniqueness checking (throws ACTION_TYPE_ALREADY_EXISTS
@@ -1927,17 +2968,44 @@ router.post(
         iconName: source.icon_name,
         iconColor: source.icon_color,
         saveLocationRid: source.save_location_rid,
-        parameters: JSON.parse(JSON.stringify(source.parameters)), // deep copy
-        rules: JSON.parse(JSON.stringify(source.rules)),           // deep copy
+        parameters: ensureParameterRids(
+          JSON.parse(JSON.stringify(source.parameters)).map(
+            (parameter: Record<string, unknown>) => {
+              const { rid: _sourceRid, ...definition } = parameter;
+              return definition;
+            },
+          ),
+        ),
+        rules: ensureRuleRids(
+          JSON.parse(JSON.stringify(source.rules)).map(
+            (rule: Record<string, unknown>) => {
+              const {
+                ruleId: _sourceRuleId,
+                schemaVersion: _sourceSchemaVersion,
+                ...definition
+              } = rule;
+              return definition;
+            },
+          ),
+        ),
         submissionCriteria: source.submission_criteria != null
           ? JSON.parse(JSON.stringify(source.submission_criteria))
           : null,
         sideEffects: source.side_effects != null
           ? JSON.parse(JSON.stringify(source.side_effects))
           : null,
+        writebackConfig: source.writeback_config != null
+          ? JSON.parse(JSON.stringify(source.writeback_config))
+          : null,
+        functionConfig: source.function_config != null
+          ? JSON.parse(JSON.stringify(source.function_config))
+          : null,
         maxAffectedObjects: source.max_affected_objects,
         isEnabled: source.is_enabled,
         createdBy: actorOf(req),
+        semanticsVersion: sourceSemanticsVersion,
+        executionMode: sourceExecutionMode,
+        deletePolicy: sourceDeletePolicy,
       });
 
       sendCreated(res, formatActionType(clonedRow));
