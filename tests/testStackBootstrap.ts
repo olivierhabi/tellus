@@ -18,25 +18,36 @@ import path from "path";
 import { spawnSync } from "child_process";
 import pg from "pg";
 
-import { query } from "../../db";
-import { resolveEnvironmentIdentity } from "../config/environmentIdentity";
+import { resolveEnvironmentIdentity } from "../src/config/environmentIdentity";
 import {
   sealTestDatabaseEnvironment,
-} from "../services/testing/destructiveTestGuard";
+} from "../src/services/testing/destructiveTestGuard";
 
 const ROOT = path.resolve(__dirname, "..");
 
 function sh(cmd: string, args: string[], label: string): void {
   const r = spawnSync(cmd, args, {
     cwd: ROOT,
-    env: process.env,
+    env: {
+      // Minimum contract for the migrators: they read PG* from env (they do
+      // NOT load dotenv).
+      PGHOST: "localhost",
+      PGPORT: "5432",
+      PGUSER: "tellus",
+      PGPASSWORD: "tellus123",
+      ...process.env,
+    },
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    shell: false,
   });
+  if (r.error) {
+    throw new Error(`[test-stack bootstrap] ${label} spawn error: ${r.error.message}`);
+  }
   if (r.status !== 0) {
     throw new Error(
       `[test-stack bootstrap] ${label} failed (exit ${r.status}):\n` +
-        `${(r.stdout ?? "").slice(-800)}\n${(r.stderr ?? "").slice(-800)}`,
+        `stdout: ${(r.stdout ?? "").slice(-900)}\nstderr: ${(r.stderr ?? "").slice(-900)}`,
     );
   }
 }
@@ -71,10 +82,10 @@ async function ensureDatabase(): Promise<void> {
 
 function ensureMigrations(): void {
   console.log("[test-stack bootstrap] applying migrations (main → foundry → auth → main)…");
-  sh("npx", ["tsx", "src/migrate.ts"], "migrate (1)");
-  sh("npx", ["tsx", "src/foundryMigrate.ts"], "migrate:foundry");
-  sh("npx", ["tsx", "src/migrateAuth.ts"], "migrate:auth");
-  sh("npx", ["tsx", "src/migrate.ts"], "migrate (2)");
+  sh("pnpm", ["exec", "tsx", "src/migrate.ts"], "migrate (1)");
+  sh("pnpm", ["exec", "tsx", "src/foundryMigrate.ts"], "migrate:foundry");
+  sh("pnpm", ["exec", "tsx", "src/migrateAuth.ts"], "migrate:auth");
+  sh("pnpm", ["exec", "tsx", "src/migrate.ts"], "migrate (2)");
 }
 
 async function ensureSeal(): Promise<void> {
