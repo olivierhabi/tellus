@@ -11,14 +11,33 @@
 
 import { query } from "../db";
 import { ensureEnterpriseOntology } from "../services/ontology/canonicalOntology";
+import {
+  assertDestructiveTestEnvironment,
+} from "../services/testing/destructiveTestGuard";
 
 /**
  * Ensure the single enterprise ontology exists and clear its content, returning
  * the canonical ontology id. Each seed run is a full reset of the enterprise
  * ontology's contents (matching the previous per-seed "delete + recreate"
  * semantics), but now scoped to the one shared ontology.
+ *
+ * FUNN-ISO-1: the reset is DESTRUCTIVE and only legal against a dedicated
+ * test/verify environment. The destructive-test guard enforces the full
+ * environment proof (sealed DB, test-shaped ns/queue/realm/prefix/bucket,
+ * dev/prod deny-lists). Reseeding the SHARED dev ontology through this path
+ * is no longer possible — dev content is restored via the verify-stack cycle
+ * or explicit, human-run SQL, never by an automated test runner.
  */
 export async function resetEnterpriseOntologyForSeed(): Promise<string> {
+  // skipApiProbe: every caller of this function is the pre-server phase
+  // (browser of the seed scripts / vitest globalSetup before spawn). Port
+  // ownership of the about-to-run lane API is guaranteed by globalSetup's
+  // fail-closed claimTestApiPort, and the API-identity re-proof runs after
+  // the server is healthy (vitest-globalSetup-post-spawn).
+  await assertDestructiveTestEnvironment({
+    operation: "resetEnterpriseOntologyForSeed",
+    skipApiProbe: true,
+  });
   const ontologyId = await ensureEnterpriseOntology();
 
   // Data-key tables (no FK to ontology) — clear explicitly.

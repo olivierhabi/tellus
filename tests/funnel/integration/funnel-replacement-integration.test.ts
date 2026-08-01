@@ -8,8 +8,17 @@
 // backend can't reach Quickwit.
 // ---------------------------------------------------------------------------
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { api } from "../../helpers/api";
+
+beforeAll(async () => {
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "funnel-replacement-fixture-cleanup",
+    skipApiProbe: true,
+  });
+});
 
 describe("POST /api/v1/funnel/replacement/start", () => {
   it("400s without the required fields", async () => {

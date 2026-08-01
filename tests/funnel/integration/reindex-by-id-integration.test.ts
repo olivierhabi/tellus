@@ -28,6 +28,12 @@ const OT_API_NAME = `ReindexByIdProbe${STAMP}`;
 let OT_ID = "";
 
 beforeAll(async () => {
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "reindex-by-id-fixture-cleanup",
+    skipApiProbe: true,
+  });
   // No INSERT INTO ontology — the canonical ontology already exists (singleton).
   // object_type FK is satisfied by the canonical ontology_id.
   const ot = await query(

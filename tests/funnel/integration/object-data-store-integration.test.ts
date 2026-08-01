@@ -21,6 +21,12 @@ const OT_API_NAME = `DataStoreProbe${STAMP}`;
 let OT_ID = "";
 
 beforeAll(async () => {
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "object-data-store-fixture-cleanup",
+    skipApiProbe: true,
+  });
   // Single-ontology: the canonical ontology already exists (seeded) and is
   // UNIQUE — never INSERT INTO ontology (would violate uq_ontology_singleton).
   // The FK on object_type.ontology_id is satisfied by the canonical row, so

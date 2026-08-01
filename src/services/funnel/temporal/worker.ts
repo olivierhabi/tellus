@@ -41,11 +41,16 @@ import {
   type EnvironmentIdentity,
 } from "../../../config/environmentIdentity";
 import { sealDatabaseEnvironment } from "../environmentGuard";
+import {
+  resolveWorkerVersioningConfig,
+  versionedWorkerOptions,
+} from "./versioning";
 
 let workerInstance: Worker | null = null;
 let temporalClient: Client | null = null;
 let workerIdentitySnapshot: EnvironmentIdentity | null = null;
 let workerDatabaseEnvironmentId: string | null = null;
+let workerVersioningSnapshot: import("./versioning").WorkerVersioningConfig | null = null;
 
 // ---------------------------------------------------------------------------
 // Workflow identity
@@ -219,12 +224,18 @@ export async function startTemporalWorker(): Promise<boolean> {
     throw err;
   }
 
+  let routingProvisioned = false;
   try {
+    const versioning = resolveWorkerVersioningConfig(identity);
     workerInstance = await Worker.create({
       connection: conn.native,
       namespace: identity.temporalNamespace,
       taskQueue: identity.temporalTaskQueue,
       identity: identity.workerIdentity,
+      // Temporal-supported Worker Versioning (SDK @deprecated legacy API,
+      // functional on server 1.25): poll as this build; routing assigned by
+      // the queue's build-id rules (scripts/provision-task-queue-versioning).
+      ...versionedWorkerOptions(versioning),
       // PB-B4 follow-3.1 — register both the Funnel's own workflows
       // and the Pipeline-Builder workflows under the same worker so
       // pb-b4 iceberg maintenance runs on the existing task queue.
@@ -240,6 +251,21 @@ export async function startTemporalWorker(): Promise<boolean> {
     });
     workerIdentitySnapshot = identity;
     workerDatabaseEnvironmentId = dbEnvironmentId;
+    workerVersioningSnapshot = versioning;
+    // Queue routing self-provisioning: with build-ID versioning enabled, an
+    // unrouted queue strands every dispatched workflow ("baseline" probe
+    // evidence). APIs must boot with routing in place. Strict mode: infra
+    // owns the rule (failure = boot error, surfacing platform misconfig).
+    if (versioning.enabled) {
+      const { ensureQueueAssignmentRule } = await import("./versioning");
+      const route = await ensureQueueAssignmentRule(conn.client as never, {
+        namespace: identity.temporalNamespace,
+        taskQueue: identity.temporalTaskQueue,
+        buildId: versioning.buildId,
+        strict: identity.mode === "strict",
+      });
+      routingProvisioned = route.provisioned;
+    }
     void workerInstance.run().catch(async (err) => {
       console.error(`[temporal] worker run failed: ${(err as Error).message}`);
       try {
@@ -259,6 +285,10 @@ export async function startTemporalWorker(): Promise<boolean> {
         level: "info",
         type: "temporal_worker_started",
         dbEnvironmentId,
+        versioningEnabled: versioning.enabled,
+        buildId: versioning.buildId,
+        deploymentName: versioning.deploymentName,
+        routingProvisioned,
         ...identityLogFields(identity),
       })
     );
@@ -281,6 +311,7 @@ export async function stopTemporalWorker(): Promise<void> {
   temporalClient = null;
   workerIdentitySnapshot = null;
   workerDatabaseEnvironmentId = null;
+  workerVersioningSnapshot = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -557,10 +588,12 @@ export function getWorkerDiagnostics(): {
   connected: boolean;
   identity: EnvironmentIdentity | null;
   dbEnvironmentId: string | null;
+  versioning: import("./versioning").WorkerVersioningConfig | null;
 } {
   return {
     connected: isTemporalConnected(),
     identity: workerIdentitySnapshot,
     dbEnvironmentId: workerDatabaseEnvironmentId,
+    versioning: workerVersioningSnapshot,
   };
 }

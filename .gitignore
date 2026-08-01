@@ -49,3 +49,8 @@ backups/
 
 # OSDK codegen output (scripts/osdk-regen.ts) — regenerated, not committed
 generated/osdk/
+
+# Verbatim runtime evidence dumps (full workflow histories, raw search hits,
+# tokens) — CI artifacts / dev machines only; see docs/evidence-policy.md.
+# Redacted records and manifests elsewhere under .migration-evidence/ ARE committed.
+.migration-evidence/raw/

@@ -7,8 +7,17 @@
 // external deps are offline.
 // ---------------------------------------------------------------------------
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { api } from "../../helpers/api";
+
+beforeAll(async () => {
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "funnel-instances-overlay-fixture-cleanup",
+    skipApiProbe: true,
+  });
+});
 
 describe("GET /api/v1/funnel/instances/:objectType/:pk", () => {
   it("400s without an ontologyId query param", async () => {

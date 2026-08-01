@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-07-31T23:08:24.082Z",
+  "gitCommit": "2d25198fac127642faecd6efd1f8939ad76c1d72",
+  "gitStatus": "M .gitignore\n M .migration-evidence/olivierorder-20260731T191845Z/opensearch__olivierorder_sample.json\n M docs/API_REFERENCE.md\n M docs/API_REFERENCE_GENERATED.md\n M package.json\n M pnpm-lock.yaml\n M src/actions/actionExecutor.ts\n M src/actions/actionRules.types.ts\n M src/actions/functionActionExecutor.ts\n M src/actions/parameterValidator.ts\n M src/actions/ruleCompiler.ts\n M src/routes/actionTypes.ts\n M src/seeds/seedOntology.ts\n M src/services/functionsRegistry/admin/routes.ts\n M src/services/keycloakAdminService.ts\n M src/services/overlay/getOverlayStore.ts\n M tests/funnel/integration/environment-isolation-integration.test.ts\n M tests/funnel/integration/funnel-instances-overlay-integration.test.ts\n M tests/funnel/integration/funnel-replacement-integration.test.ts\n M tests/funnel/integration/funnel-runs-integration.test.ts\n M tests/funnel/integration/funnel-signals-integration.test.ts\n M tests/funnel/integration/object-data-store-integration.test.ts\n M tests/funnel/integration/recovery-probe-integration.test.ts\n M tests/funnel/integration/reindex-by-id-integration.test.ts\n M tests/funnel/integration/temporal-run-key-integration.test.ts\n M tests/globalSetup.ts\n M tests/unit/actions/actionTypeFormatter-unit.test.ts\n M tests/unit/actions/ruleCompiler-unit.test.ts\n M tests/unit/actions/sideEffectJobExtractor-unit.test.ts\n M vitest.config.ts\n?? .migration-evidence/MANIFEST.json\n?? .migration-evidence/funnel-temporal-isolation/2026-07-31T17-23-33-160Z.mapping.json\n?? .migration-evidence/incidents/\n?? docs/automate-platform.md\n?? docs/automate-session-2026-07-30-continued.md\n?? docs/evidence-policy.md\n?? scripts/destructive-guard-cli.ts\n?? scripts/evidence/\n?? src/actions/functionWebhookContract.ts\n?? src/actions/webhookTypeCompatibility.ts\n?? src/migrations/143_automate.down.sql\n?? src/migrations/143_automate.sql\n?? src/migrations/144_automate_condition_jobs.down.sql\n?? src/migrations/144_automate_condition_jobs.sql\n?? src/migrations/145_automate_evaluation_retries.down.sql\n?? src/migrations/145_automate_evaluation_retries.sql\n?? src/migrations/146_action_parameter_rids.down.sql\n?? src/migrations/146_action_parameter_rids.sql\n?? src/migrations/147_action_rule_ids.down.sql\n?? src/migrations/147_action_rule_ids.sql\n?? src/migrations/148_action_rule_id_uniqueness.down.sql\n?? src/migrations/148_action_rule_id_uniqueness.sql\n?? src/migrations/149_interface_object_rule_discriminators.down.sql\n?? src/migrations/149_interface_object_rule_discriminators.sql\n?? src/routes/automations.ts\n?? src/services/automate/compatibility.ts\n?? src/services/automate/contracts.ts\n?? src/services/automate/effectExecutors.ts\n?? src/services/automate/objectCondition.ts\n?? src/services/automate/permissions.ts\n?? src/services/automate/repository.ts\n?? src/services/automate/retry.ts\n?? src/services/automate/runtime.ts\n?? src/services/automate/schedule.ts\n?? src/services/automate/validation.ts\n?? src/services/testing/destructiveTestGuard.ts\n?? tests/integration/automate/\n?? tests/laneEnv.ts\n?? tests/testStackBootstrap.ts\n?? tests/unit/actions/functionWebhookContract-unit.test.ts\n?? tests/unit/actions/parameterValidator-interface-unit.test.ts\n?? tests/unit/actions/webhookTypeCompatibility-unit.test.ts\n?? tests/unit/automate/\n?? tests/unit/evidence/\n?? tests/unit/testing/\n?? vitest.automate.config.ts\n?? vitest.automate.integration.config.ts",
+  "files": [
+    {
+      "path": "funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json",
+      "sha256": "d0ac392474ce3c051753fd111598dddeb58c3036bc13185cf2f07589d82aed4d",
+      "sizeBytes": 2708,
+      "modifiedAtUtc": "2026-07-31T17:23:33.583Z"
+    },
+    {
+      "path": "funnel-temporal-isolation/2026-07-31T17-23-33-160Z.mapping.json",
+      "sha256": "7727de7287f740dc395393d5f9c7d03809599ad6a74041e16fd8285db0071826",
+      "sizeBytes": 6827,
+      "modifiedAtUtc": "2026-07-31T23:06:21.079Z"
+    },
+    {
+      "path": "incidents/FUNN-ISO-2026-07-31-split-brain.json",
+      "sha256": "7155ecf346b35c37cd6484a2b4596a13d3095b128da4c64f0c17d55b1875122e",
+      "sizeBytes": 5822,
+      "modifiedAtUtc": "2026-07-31T23:04:16.149Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__backing_datasource.txt",
+      "sha256": "a049d7e9eef4ba38f47a018e30b7b5e3d7c0490b808d79d5739312232c48cac2",
+      "sizeBytes": 791,
+      "modifiedAtUtc": "2026-07-31T17:18:46.142Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__deployment_environment.txt",
+      "sha256": "7f9d8e84f1d31a987240ede082da33b2c5c85948f5b494d48517bafb0e6f67e3",
+      "sizeBytes": 65,
+      "modifiedAtUtc": "2026-07-31T18:39:35.621Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_run.txt",
+      "sha256": "d89d7812e43d69f219cea65a77ab062f76441f18c689d39375de04fdc42b2a00",
+      "sizeBytes": 901,
+      "modifiedAtUtc": "2026-07-31T17:18:45.906Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_run_after.txt",
+      "sha256": "6efadbb449d685b9014c3b3c0e176a658837cb9cbe5e384b5191d2f9b17cfe11",
+      "sizeBytes": 2097,
+      "modifiedAtUtc": "2026-07-31T18:39:35.381Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_run_premigrate.txt",
+      "sha256": "f99acb5dbe2655f7dd40d9a5b47739d6b7f7a8ea6e32f22470fe2deb8a6e7b6d",
+      "sizeBytes": 356,
+      "modifiedAtUtc": "2026-07-31T17:22:58.079Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_signal.txt",
+      "sha256": "58dbc8b38f3895e45b6f6c1c32e4cc2b5e880f6657e694ec01580803349b701f",
+      "sizeBytes": 521,
+      "modifiedAtUtc": "2026-07-31T17:18:46.064Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_stage_run.txt",
+      "sha256": "7e9f116dca6570f802b3a7b81d282795ba934fee0bc9d6308492d439abb4e117",
+      "sizeBytes": 339,
+      "modifiedAtUtc": "2026-07-31T17:18:45.981Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_stage_run_after.txt",
+      "sha256": "aed3963eba7d0fe9ded033893bc71050bc55f8a5f88565db4f0fd5f0a74aa01b",
+      "sizeBytes": 5926,
+      "modifiedAtUtc": "2026-07-31T18:39:35.491Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_state.txt",
+      "sha256": "6dac7d51c3b4f42ca407c2d76f42a7e394efd689960c9671b7b0ef525b243f2f",
+      "sizeBytes": 174,
+      "modifiedAtUtc": "2026-07-31T17:18:45.819Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__funnel_state_after.txt",
+      "sha256": "8ade134a1e7ee71fa3022f770d1b14c1c4bf2605ae55aec19c6858f0b4fc894c",
+      "sizeBytes": 272,
+      "modifiedAtUtc": "2026-07-31T18:39:35.265Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__object_instances_count.txt",
+      "sha256": "d35afb174a7f8cee01b12d840310722409dfce5ae07492ccd5dd346eb94ad661",
+      "sizeBytes": 4,
+      "modifiedAtUtc": "2026-07-31T18:39:35.738Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/dev__object_type.txt",
+      "sha256": "e71464d2c3637eca8b449328322ad6e0ef17a57c30fc629a2929bbc3ce628c97",
+      "sizeBytes": 310,
+      "modifiedAtUtc": "2026-07-31T17:18:45.738Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/opensearch__olivierorder_count.txt",
+      "sha256": "3980e6a536f284db6a62bc4a4fe70658b0fa26db6b59628f44d08fd701f1b82f",
+      "sizeBytes": 73,
+      "modifiedAtUtc": "2026-07-31T18:39:35.811Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/opensearch__olivierorder_sample.json",
+      "sha256": "bbed1ef0257b065798ffc1f80e02b18c11423b61147f5e527c59c82ba65a09a6",
+      "sizeBytes": 2046,
+      "modifiedAtUtc": "2026-07-31T23:03:39.719Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/temporal__olivierorder_postterminate.txt",
+      "sha256": "41a9b005a64a30e944d64b1424e9fc6424b87120b7c2567b8145c1f1091da5e5",
+      "sizeBytes": 282,
+      "modifiedAtUtc": "2026-07-31T17:23:48.383Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/temporal__taskqueue_after.txt",
+      "sha256": "e8777c155eec265f0763dacaa601cffe483c6ee4efcfe738d0cf9705c8ca2ff1",
+      "sizeBytes": 767,
+      "modifiedAtUtc": "2026-07-31T18:39:36.181Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/temporal__taskqueue_before.txt",
+      "sha256": "d5238778ff453b2998b46042d0c5210ed163333e46c3feba848c58c32b33ae73",
+      "sizeBytes": 695,
+      "modifiedAtUtc": "2026-07-31T17:18:46.607Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/temporal__workflow_history.json",
+      "sha256": "23151ba87202079d15fab492f0fc6a3bb075d371e1561375d9a9f0dec5ef7ea7",
+      "sizeBytes": 276685,
+      "modifiedAtUtc": "2026-07-31T17:18:46.492Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/verify__funnel_run.txt",
+      "sha256": "8450bd424ce725d873e4c2ab42f872a7ca1bdb162946b1194ef4b61124676855",
+      "sizeBytes": 266,
+      "modifiedAtUtc": "2026-07-31T17:18:46.229Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/verify__funnel_run_premigrate.txt",
+      "sha256": "62374241756e4a573a8a88289acca935b30bc67d373a796688fe77ea6c54de30",
+      "sizeBytes": 36,
+      "modifiedAtUtc": "2026-07-31T17:22:58.165Z"
+    },
+    {
+      "path": "olivierorder-20260731T191845Z/verify__funnel_stage_run.txt",
+      "sha256": "6ba37cd3fdefaad216f3ef590318c7a3b793b840def72f18dc9aa268c8db9088",
+      "sizeBytes": 307,
+      "modifiedAtUtc": "2026-07-31T17:18:46.298Z"
+    }
+  ]
+}

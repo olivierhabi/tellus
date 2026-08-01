@@ -17,6 +17,9 @@
 //      and that no foreign-environment rows exist.
 // ---------------------------------------------------------------------------
 
+// LANE import must be first: its side effect pins the lane identity into
+// process.env before any src module reads configuration.
+import { LANE } from "../../laneEnv";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const STAMP = Date.now();
@@ -29,11 +32,17 @@ let ROOT_BRANCH = "";
 let db: typeof import("../../../src/db");
 
 beforeAll(async () => {
-  process.env.TELLUS_ENVIRONMENT_ID = "tellus-dev";
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "recovery-probe-fixture-cleanup",
+    skipApiProbe: true,
+  });
+  process.env.TELLUS_ENVIRONMENT_ID = LANE.TELLUS_ENVIRONMENT_ID;
   db = await import("../../../src/db");
   const guard = await import("../../../src/services/funnel/environmentGuard");
   await guard.sealDatabaseEnvironment({
-    environmentId: "tellus-dev",
+    environmentId: LANE.TELLUS_ENVIRONMENT_ID,
     temporalNamespace: "t", temporalTaskQueue: "q", temporalAddress: "x",
     workerBuildId: "test", mode: "local", workerIdentity: "t",
   });
@@ -108,7 +117,7 @@ describe("FUNN-ISO recovery reproduction (746 rows)", () => {
       );
       expect(fs1.rows[0].status).toBe("indexed");
       expect(fs1.rows[0].objects_indexed).toBe(N_ROWS);
-      expect(fs1.rows[0].environment_id).toBe("tellus-dev");
+      expect(fs1.rows[0].environment_id).toBe(LANE.TELLUS_ENVIRONMENT_ID);
       expect(fs1.rows[0].error_message).toBeNull();
 
       // All 4 stages committed in ONE funnel_run with the dev identity.
@@ -121,7 +130,7 @@ describe("FUNN-ISO recovery reproduction (746 rows)", () => {
         (r: { status: string }) => true,
       );
       expect(pipelineRuns.length).toBeGreaterThanOrEqual(1);
-      expect(pipelineRuns.every((r: { environment_id: string }) => r.environment_id === "tellus-dev")).toBe(true);
+      expect(pipelineRuns.every((r: { environment_id: string }) => r.environment_id === LANE.TELLUS_ENVIRONMENT_ID)).toBe(true);
 
       const stages = await db.query(
         `SELECT stage, status FROM funnel_stage_run WHERE run_id = $1`,
@@ -137,8 +146,8 @@ describe("FUNN-ISO recovery reproduction (746 rows)", () => {
       // No foreign-environment rows for this type at all.
       const foreign = await db.query(
         `SELECT count(*)::int AS n FROM funnel_run
-          WHERE object_type_api_name = $1 AND environment_id <> 'tellus-dev'`,
-        [OT],
+          WHERE object_type_api_name = $1 AND environment_id <> $2`,
+        [OT, LANE.TELLUS_ENVIRONMENT_ID],
       );
       expect(foreign.rows[0].n).toBe(0);
 

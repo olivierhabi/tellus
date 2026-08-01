@@ -13,13 +13,25 @@
 // tests/tuesday/integration/rate-limiter-integration.test.ts can verify
 // the action rate limiter works correctly at 100/min and 10/min batch.
 //
-// The server is killed on teardown. If a developer has a server already
-// running on port 3000, it is killed and replaced — test determinism
-// requires a controlled process with known env vars.
+// The server is killed on teardown. Port 3000 is claimed FAIL-CLOSED: only
+// a leftover server that self-identifies (via /health.environmentId) as
+// THIS test lane is ever killed; dev/verify servers abort the run loudly.
+// The lane itself is pinned to dedicated infrastructure by ./laneEnv and
+// re-proofed through src/services/testing/destructiveTestGuard.ts.
 // ---------------------------------------------------------------------------
 
+// Lane env MUST be pinned before any other import executes (the pg pool,
+// envIdentity and auth configs all read process.env at import time). The
+// `./laneEnv` module applies the deterministic test-lane identity
+// (tellus_tests / tellus-tests-main / dedicated realm+indices+bucket) as an
+// import side effect — the default lane can no longer be steered into the
+// shared dev environment by a partially-overridden shell config.
+import "./laneEnv";
 import { spawn, execSync, spawnSync, type ChildProcess } from "child_process";
 import path from "path";
+import { LANE } from "./laneEnv";
+import { bootstrapTestStack } from "./testStackBootstrap";
+import { assertDestructiveTestEnvironment } from "../src/services/testing/destructiveTestGuard";
 
 const ROOT = path.resolve(__dirname, "..");
 let serverProcess: ChildProcess | null = null;
@@ -41,14 +53,45 @@ let serverProcess: ChildProcess | null = null;
 // ---------------------------------------------------------------------------
 let controlledWebhookProcess: ChildProcess | null = null;
 
-function killPort3000(): void {
+/**
+ * FUNN-ISO-1: port claiming is FAIL-CLOSED, not "kill whatever's there".
+ *
+ * A development server on :3000 self-identifies via /health.environmentId
+ * (default "tellus-dev"). We kill the port ONLY when the responder is the
+ * test lane's own leftover server (environmentId === lane env id). Any
+ * other responder — dev, verify, unknown, silent — is an error: test
+ * infrastructure never destroys a foreign process. That turn of the screw
+ * is what makes "the integration suite wiped the dev ontology" impossible
+ * even when a developer happens to leave their dev stack running.
+ */
+async function claimTestApiPort(port = 3000): Promise<void> {
+  let foreign: string | null = null;
   try {
-    execSync("lsof -ti:3000 | xargs kill -9 2>/dev/null || true", {
-      stdio: "ignore",
+    const res = await fetch(`http://localhost:${port}/health`, {
+      signal: AbortSignal.timeout(2000),
     });
+    if (res.ok) {
+      const body = (await res.json()) as { environmentId?: unknown };
+      foreign = typeof body?.environmentId === "string" ? body.environmentId : "<missing>";
+    } else {
+      foreign = `<http ${res.status}>`;
+    }
   } catch {
-    // Port might not be in use — expected
+    foreign = null; // unreachable — port is free
   }
+  if (foreign === null) return;
+  if (foreign !== LANE.TELLUS_ENVIRONMENT_ID) {
+    throw new Error(
+      `[globalSetup] REFUSING to scaffold the test lane: port ${port} is held by a ` +
+        `server that self-identifies as environmentId='${foreign}' ` +
+        `(expected '${LANE.TELLUS_ENVIRONMENT_ID}'). Stop it yourself — test ` +
+        `infrastructure never kills foreign processes.`,
+    );
+  }
+  console.log(
+    `[globalSetup] port ${port} held by a leftover '${foreign}' server — killing it (lane-owned).`,
+  );
+  execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: "ignore" });
 }
 
 /**
@@ -183,6 +226,7 @@ function runKeycloakBootstrap(): void {
   const r = spawnSync("bash", [path.join(ROOT, "scripts/bootstrap-keycloak.sh")], {
     cwd: ROOT,
     encoding: "utf8",
+    env: { ...process.env, KC_REALM: LANE.KEYCLOAK_REALM },
   });
   if (r.status !== 0) {
     console.error("[globalSetup] keycloak stdout:", r.stdout?.slice(-500));
@@ -268,20 +312,41 @@ export async function setup(): Promise<void> {
     );
   }
 
+  // (FUNN-ISO-1) Step −1: the lane identity is pinned by `./laneEnv` on
+  // import. NOTHING in the following sequence may run unless the resulting
+  // environment passes the destructive-test guard end to end — including a
+  // live DB-level seal check. This is the structural turn of the screw that
+  // makes the 2026-07-31 "the integration suite wiped the dev ontology"
+  // incident unpossible.
+
   // Step 0: Ensure PostgreSQL is reachable before spawning the server.
   // Docker Desktop on macOS can take several seconds to wake up.
   console.log("[globalSetup] Waiting for PostgreSQL...");
   await waitForPg();
   console.log("[globalSetup] PostgreSQL ready.");
 
-  // Quiesce the application before the destructive canonical-ontology reset.
-  // Previously this happened after runSeeds(), so a developer server left on
-  // :3000 could keep background workers and request transactions active while
-  // seedOntology deleted object/link definitions. PostgreSQL then waited on
-  // those transactions until the pool-level statement_timeout cancelled the
-  // seed with SQLSTATE 57014. Stopping the server first removes the lock
-  // contention instead of hiding it behind a larger timeout.
-  killPort3000();
+  // Step 0.1: provision the lane's own infrastructure (idempotent):
+  // tellus_tests database + migrations + environment seal + dedicated
+  // Temporal namespace/search attributes. Non-destructive — runs BEFORE the
+  // destructive guard so a fresh machine can establish the seal the guard
+  // then demands.
+  await bootstrapTestStack();
+
+  // Step 0.2: prove this lane may destructively mutate infrastructure. Any
+  // missing/ambiguous/foreign fragment → hard failure, before ANY delete.
+  const proof = await assertDestructiveTestEnvironment({
+    operation: "vitest-globalSetup",
+    skipApiProbe: true, // the lane server does not exist yet
+  });
+  console.log(
+    `[globalSetup] destructive-test guard passed: lane='${proof.environmentId}' ` +
+      `db='${proof.databaseName}' realm='${proof.keycloakRealm}' prefix='${proof.objectIndexPrefix}' ` +
+      `bucket='${proof.objectStorageBucketOrPrefix}'`,
+  );
+
+  // Step 0.3: Quiesce — claim :3000 ONLY if it belongs to a leftover lane
+  // server (foreign environments are NEVER killed; see claimTestApiPort).
+  await claimTestApiPort(3000);
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
   // Step 0.5: Seed the canonical test ontology + action types. This must
@@ -461,6 +526,12 @@ export async function setup(): Promise<void> {
         console.log(
           `[globalSetup] Server ready (PID ${serverProcess.pid}) with RATE_LIMIT_MAX=999999`
         );
+        // Post-spawn re-proof: the lane API's own /health.environmentId must
+        // attest to identical identity. If an existing FOREIGN server got
+        // there first (race), we notice before any test touches it.
+        await assertDestructiveTestEnvironment({
+          operation: "vitest-globalSetup-post-spawn",
+        });
         // Server is up; seeded data has been indexed to OpenSearch via
         // editApplicator. Run the F-03 backfill last so both pre-existing
         // docs AND seed-generated docs carry _security.markings.
@@ -514,5 +585,7 @@ export async function teardown(): Promise<void> {
     }
     controlledWebhookProcess = null;
   }
-  killPort3000();
+  // Belt+braces: only kills the port if it currently belongs to the lane
+  // server (never a foreign process — see claimTestApiPort).
+  await claimTestApiPort(3000);
 }

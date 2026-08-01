@@ -9,19 +9,23 @@
 //   (never a successful no-op) — the exact pre-fix behavior that silently
 //   completed against the wrong database.
 //
-//   POSITIVE: a correctly-identified run (dev env ⌢ dev DB seal ⌢ TELLUS_DEV
+//   POSITIVE: a correctly-identified run (lane env ⌢ lane DB seal ⌢ lane
 //   namespace queue) reaches terminal 'indexed' and records per-stage
 //   evidence.
 //
 //   FAIL-CLOSED: projecting 'indexed' for a run missing stage rows is
 //   rejected (FunnelStaleStateTransition) — no green runs without evidence.
 //
-// Requires: dev Postgres with main migrations applied (TELLUS_MIGRATION_GATE
-//=auto is fine). Uses the canonical singleton ontology. Fixtures are
-// apiName-stamped and cleaned up on teardown; the database SEAL is only
-// read (the dev DB stays sealed as tellus-dev).
+// Requires: the isolated test lane (FUNN-ISO-1) — lane Postgres
+// (PGDATABASE=tellus_tests) with main migrations applied. Uses the canonical
+// singleton ontology. Fixtures are apiName-stamped and cleaned up on
+// teardown; the database SEAL agrees with the lane identity (the lane DB
+// stays sealed as tellus-tests-main).
 // ---------------------------------------------------------------------------
 
+// LANE import must be first: its side effect pins the lane identity into
+// process.env before any src module reads configuration.
+import { LANE } from "../../laneEnv";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const STAMP = Date.now();
@@ -36,14 +40,20 @@ let guard: typeof import("../../../src/services/funnel/environmentGuard");
 let projection: typeof import("../../../src/services/funnel/funnelStateProjection");
 
 beforeAll(async () => {
-  process.env.TELLUS_ENVIRONMENT_ID = "tellus-dev";
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "environment-isolation-fixture",
+    skipApiProbe: true,
+  });
+  process.env.TELLUS_ENVIRONMENT_ID = LANE.TELLUS_ENVIRONMENT_ID;
   db = await import("../../../src/db");
   guard = await import("../../../src/services/funnel/environmentGuard");
   projection = await import("../../../src/services/funnel/funnelStateProjection");
 
   await guard.sealDatabaseEnvironment({
-    environmentId: "tellus-dev",
-    temporalNamespace: "tellus-funnel-tellus-dev",
+    environmentId: LANE.TELLUS_ENVIRONMENT_ID,
+    temporalNamespace: LANE.TEMPORAL_NAMESPACE,
     temporalTaskQueue: "q",
     temporalAddress: "x",
     workerBuildId: "test",
@@ -86,7 +96,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
     ).rejects.toMatchObject({
       name: "FunnelExecutionEnvironmentMismatch",
       source: "context_vs_worker",
-      expected: "tellus-dev",
+      expected: LANE.TELLUS_ENVIRONMENT_ID,
       actual: "some-other-environment",
     });
   });
@@ -99,8 +109,8 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
   });
 
   it("POSITIVE: own environment passes the fence and returns the db seal", async () => {
-    const out = await guard.fenceExecutionContext({ environmentId: "tellus-dev" });
-    expect(out.dbEnvironmentId).toBe("tellus-dev");
+    const out = await guard.fenceExecutionContext({ environmentId: LANE.TELLUS_ENVIRONMENT_ID });
+    expect(out.dbEnvironmentId).toBe(LANE.TELLUS_ENVIRONMENT_ID);
   });
 
   it("FAIL-CLOSED: 'indexed' projection without stage evidence is rejected", async () => {
@@ -108,7 +118,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
     // the verify worker wrote during the incident).
     const run = await db.query(
       `INSERT INTO funnel_run (ontology_id, object_type_api_name, workflow_type, status, environment_id)
-       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running', 'tellus-dev')
+       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running', '${LANE.TELLUS_ENVIRONMENT_ID}')
        RETURNING run_id, started_at`,
       [ONTOLOGY_ID, FOREIGN_OT],
     );
@@ -117,7 +127,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
     await expect(
       projection.projectFunnelTerminalToState(ONTOLOGY_ID, FOREIGN_OT, "indexed", {
         runId,
-        environmentId: "tellus-dev",
+        environmentId: LANE.TELLUS_ENVIRONMENT_ID,
         allowObjectTypeDeletedMarking: true,
       }),
     ).rejects.toThrow(/required stage/);
@@ -133,7 +143,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
   it("FAIL-CLOSED: missing object type marks the run object_type_deleted, not 'indexed'", async () => {
     const run = await db.query(
       `INSERT INTO funnel_run (ontology_id, object_type_api_name, workflow_type, status, environment_id)
-       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running', 'tellus-dev')
+       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running', '${LANE.TELLUS_ENVIRONMENT_ID}')
        RETURNING run_id`,
       [ONTOLOGY_ID, `Ghost${STAMP}`],
     );
@@ -141,7 +151,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
 
     await projection.projectFunnelTerminalToState(ONTOLOGY_ID, `Ghost${STAMP}`, "indexed", {
       runId,
-      environmentId: "tellus-dev",
+      environmentId: LANE.TELLUS_ENVIRONMENT_ID,
       allowObjectTypeDeletedMarking: true,
     });
 
@@ -156,13 +166,13 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
   it("CAS: a stale run cannot overwrite a newer run's terminal state", async () => {
     const old = await db.query(
       `INSERT INTO funnel_run (ontology_id, object_type_api_name, workflow_type, status, environment_id, started_at)
-       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'completed', 'tellus-dev', now() - interval '10 minutes')
+       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'completed', '${LANE.TELLUS_ENVIRONMENT_ID}', now() - interval '10 minutes')
        RETURNING run_id`,
       [ONTOLOGY_ID, OT],
     );
     const fresh = await db.query(
       `INSERT INTO funnel_run (ontology_id, object_type_api_name, workflow_type, status, environment_id, started_at)
-       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'completed', 'tellus-dev', now())
+       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'completed', '${LANE.TELLUS_ENVIRONMENT_ID}', now())
        RETURNING run_id`,
       [ONTOLOGY_ID, OT],
     );
@@ -181,13 +191,13 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
     await projection.projectFunnelTerminalToState(ONTOLOGY_ID, OT, "indexed", {
       runId: fresh.rows[0].run_id,
       objectsIndexed: 5,
-      environmentId: "tellus-dev",
+      environmentId: LANE.TELLUS_ENVIRONMENT_ID,
     });
     // Older run's terminal projection must NOT demote the newer badge.
     await projection.projectFunnelTerminalToState(ONTOLOGY_ID, OT, "indexed", {
       runId: old.rows[0].run_id,
       objectsIndexed: 3,
-      environmentId: "tellus-dev",
+      environmentId: LANE.TELLUS_ENVIRONMENT_ID,
     });
 
     const fs1 = await db.query(
@@ -201,7 +211,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
   it("POSITIVE: full legitimate run reaches indexed with stage evidence", async () => {
     const run = await db.query(
       `INSERT INTO funnel_run (ontology_id, object_type_api_name, workflow_type, status, environment_id)
-       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running', 'tellus-dev')
+       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running', '${LANE.TELLUS_ENVIRONMENT_ID}')
        RETURNING run_id`,
       [ONTOLOGY_ID, FOREIGN_OT],
     );
@@ -216,7 +226,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
     await projection.projectFunnelTerminalToState(ONTOLOGY_ID, FOREIGN_OT, "indexed", {
       runId,
       objectsIndexed: 746,
-      environmentId: "tellus-dev",
+      environmentId: LANE.TELLUS_ENVIRONMENT_ID,
     });
     const fs1 = await db.query(
       `SELECT status, objects_indexed FROM funnel_state WHERE object_type_id = $1`,

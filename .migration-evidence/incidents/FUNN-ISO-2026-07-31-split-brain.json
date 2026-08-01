@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "incidentId": "FUNN-ISO-2026-07-31-SPLIT-BRAIN",
+  "title": "Phantom funnel_run left in 'running/merge' after legacy shared-namespace workflow stranded by environment isolation cutover",
+  "severity": "high",
+  "detectedAtUtc": "2026-07-31T17:23:33Z",
+  "resolvedAtUtc": "2026-07-31T19:18:45Z",
+  "summary": "Before the FUNN-ISO environment-isolation cutover, funnel workflows ran in the shared legacy Temporal namespace 'tellus-funnel' with no environment fencing. The tellus_automate_verify stack ran an ObjectType funnel for OlivierOrder whose workflow (ObjectTypeFunnelWorkflow-OlivierOrder:a3e133d8-...) completed the changelog stage and stalled in merge when the verify stack was torn down mid-run by the gate cycle. The workflow execution remained listed as RUNNING in the legacy namespace and the funnel_run row remained 'running' — a split-brain between Temporal and the (already dropped) verify database.",
+  "phantomRun": {
+    "runId": "7ffa9ddf-7e90-4915-8699-4d08d83b2609",
+    "database": "tellus_automate_verify",
+    "status": "running",
+    "currentStage": "merge",
+    "environmentId": null,
+    "workflowId": "ObjectTypeFunnelWorkflow-OlivierOrder:a3e133d8-19fd-4cad-b305-a418d181ff57",
+    "lastCompletedStage": "changelog",
+    "pendingStage": "merge"
+  },
+  "remediation": {
+    "action": "namespace_retirement_and_database_snapshot_then_retirement",
+    "reason": "The legacy shared namespace offered no environment fencing, so stranded executions could not be fenced, reclaimed, or terminally reconciled by any owning worker. Full remediation was to retire the namespace (terminate stranded executions with history retained only until the 72h retention limit), snapshot the doomed verify database rows into evidence files before the ephemeral stack dropped the database, and reconstruct funnel state under the isolated per-environment namespace with CAS-guarded terminals.",
+    "incidentId": "FUNN-ISO-2026-07-31-SPLIT-BRAIN",
+    "environmentId": "tellus-dev",
+    "completedAtUtc": "2026-07-31T19:18:45Z",
+    "terminatedWorkflows": [
+      "ObjectTypeFunnelWorkflow-OlivierOrder",
+      "ObjectTypeFunnelWorkflow-OlivierOrderJune",
+      "ObjectTypeFunnelWorkflow-OlivierOrder11",
+      "ObjectTypeFunnelWorkflow-RealEstateProperty"
+    ],
+    "replacementNamespace": "tellus-funnel-tellus-dev",
+    "evidenceFiles": [
+      "funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json",
+      "funnel-temporal-isolation/2026-07-31T17-23-33-160Z.mapping.json",
+      "olivierorder-20260731T191845Z/verify__funnel_run.txt",
+      "olivierorder-20260731T191845Z/verify__funnel_stage_run.txt",
+      "olivierorder-20260731T191845Z/verify__funnel_run_premigrate.txt",
+      "olivierorder-20260731T191845Z/temporal__workflow_history.json",
+      "olivierorder-20260731T191845Z/temporal__olivierorder_postterminate.txt",
+      "olivierorder-20260731T191845Z/temporal__taskqueue_before.txt",
+      "olivierorder-20260731T191845Z/temporal__taskqueue_after.txt",
+      "olivierorder-20260731T191845Z/dev__funnel_run_after.txt",
+      "olivierorder-20260731T191845Z/dev__funnel_stage_run_after.txt",
+      "olivierorder-20260731T191845Z/dev__funnel_state_after.txt",
+      "olivierorder-20260731T191845Z/dev__deployment_environment.txt"
+    ]
+  },
+  "snapshot": {
+    "database": "tellus_automate_verify",
+    "capturedAtUtc": "2026-07-31T19:18:45Z",
+    "preservedFiles": [
+      "olivierorder-20260731T191845Z/verify__funnel_run.txt",
+      "olivierorder-20260731T191845Z/verify__funnel_stage_run.txt",
+      "olivierorder-20260731T191845Z/verify__funnel_run_premigrate.txt"
+    ],
+    "preservedRows": [
+      {
+        "table": "funnel_run",
+        "file": "olivierorder-20260731T191845Z/verify__funnel_run.txt",
+        "description": "run 7ffa9ddf-7e90-4915-8699-4d08d83b2609, status running, current_stage merge, workflow id ObjectTypeFunnelWorkflow-OlivierOrder:a3e133d8-19fd-4cad-b305-a418d181ff57"
+      },
+      {
+        "table": "funnel_stage_run",
+        "file": "olivierorder-20260731T191845Z/verify__funnel_stage_run.txt",
+        "description": "stage row eee254ff (changelog, succeeded) and stage row d217bf14 (merge, running) for run 7ffa9ddf-7e90-4915-8699-4d08d83b2609"
+      }
+    ]
+  },
+  "explanation": "A post-hoc live-row transition of run 7ffa9ddf-7e90-4915-8699-4d08d83b2609 to 'cancelled' is impossible: the verify stack is ephemeral-by-design — scripts/automate-verify-stack/down.sh forces DROP DATABASE on the tellus_automate_verify database — and the gate cycle retired the database BEFORE this audit began, so the row no longer exists anywhere live. The pre-drop row state is instead preserved verbatim in the snapshot evidence files listed above. The equivalent write-state transition is documented as a reproduction in the dev environment: dev__funnel_run_after.txt shows the replacement runs (e.g. 005ca4b0-..., 1a4338fa-...) completed with environment_id=tellus-dev under the isolated namespace, and dev__funnel_state_after.txt shows OlivierOrder terminally repaired to indexed/746. The migration tooling's cancelledFunnelRunIds for the legacy capture is empty because the verify database was already gone — there was nothing left to CAS to cancelled.",
+  "prevention": [
+    "Per-environment Temporal namespace + task queue with a sealed deployment_environment row (FUNN-ISO); workers refuse to boot on identity mismatch.",
+    "Funnel activities fence on environment context (env ctx <-> worker <-> db seal) and throw non-retryable FunnelExecutionEnvironmentMismatch instead of silent empty success.",
+    "Terminal transitions are CAS-guarded and require stage evidence, so a stale run can never overwrite newer state.",
+    "Ephemeral verify stacks snapshot incident-relevant rows into .migration-evidence before teardown."
+  ]
+}

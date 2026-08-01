@@ -1,5 +1,9 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
+// Single source of truth for the ISOLATED integration-lane identity
+// (FUNN-ISO-1). globalSetup pins the same values into its own process via
+// the module's import side effect; workers need them here (fresh process).
+import { LANE } from "./tests/laneEnv";
 
 export default defineConfig({
   test: {
@@ -64,10 +68,15 @@ export default defineConfig({
     },
     fileParallelism: false,
 
-    // Environment
+    // Environment — ISOLATED integration lane (FUNN-ISO-1).
+    // NOTE: PGDATABASE is deliberately NOT tellus_db anymore. The whole lane
+    // (DB, environment seal, Temporal ns/queue, Keycloak realm, OpenSearch
+    // index prefix, MinIO bucket, API stamp) targets the dedicated
+    // tellus_tests environment; the destructive-test guard refuses to let
+    // any destructive helper under this config reach shared dev resources.
     env: {
+      ...LANE,
       PGHOST: "localhost",
-      PGDATABASE: "tellus_db",
       PGUSER: "tellus",
       PGPASSWORD: "tellus123",
       // F-09: Disable rate limiter during tests to prevent cross-run

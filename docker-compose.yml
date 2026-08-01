@@ -566,6 +566,10 @@ services:
       POSTGRES_SEEDS: temporal-postgres
     ports:
       - "127.0.0.1:7233:7233"
+    volumes:
+      # FUNN-ISO-3: enable the task-queue Build-ID routing APIs (assignment +
+      # redirect rules) that back Temporal Worker Versioning on server 1.25.
+      - ./deploy/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro
     logging: *default-logging
     deploy:
       resources:
