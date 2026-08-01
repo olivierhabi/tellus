@@ -1,0 +1,15 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Temporal histories use UUID identifiers as payload references; UUIDs are identifiers, not credentials"
+regexTarget = "secret"
+regexes = [
+  '''^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$''',
+]
+
+[[allowlists]]
+description = "Secret-scanner unit test contains deliberately planted, non-live credential-shaped fixtures"
+paths = [
+  '''(^|/)tests/unit/evidence/evidenceAudit-unit\.test\.ts$''',
+]
