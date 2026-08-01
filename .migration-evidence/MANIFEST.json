@@ -1,9 +1,15 @@
 {
   "schemaVersion": 1,
-  "generatedAtUtc": "2026-07-31T23:08:24.082Z",
-  "gitCommit": "2d25198fac127642faecd6efd1f8939ad76c1d72",
-  "gitStatus": "M .gitignore\n M .migration-evidence/olivierorder-20260731T191845Z/opensearch__olivierorder_sample.json\n M docs/API_REFERENCE.md\n M docs/API_REFERENCE_GENERATED.md\n M package.json\n M pnpm-lock.yaml\n M src/actions/actionExecutor.ts\n M src/actions/actionRules.types.ts\n M src/actions/functionActionExecutor.ts\n M src/actions/parameterValidator.ts\n M src/actions/ruleCompiler.ts\n M src/routes/actionTypes.ts\n M src/seeds/seedOntology.ts\n M src/services/functionsRegistry/admin/routes.ts\n M src/services/keycloakAdminService.ts\n M src/services/overlay/getOverlayStore.ts\n M tests/funnel/integration/environment-isolation-integration.test.ts\n M tests/funnel/integration/funnel-instances-overlay-integration.test.ts\n M tests/funnel/integration/funnel-replacement-integration.test.ts\n M tests/funnel/integration/funnel-runs-integration.test.ts\n M tests/funnel/integration/funnel-signals-integration.test.ts\n M tests/funnel/integration/object-data-store-integration.test.ts\n M tests/funnel/integration/recovery-probe-integration.test.ts\n M tests/funnel/integration/reindex-by-id-integration.test.ts\n M tests/funnel/integration/temporal-run-key-integration.test.ts\n M tests/globalSetup.ts\n M tests/unit/actions/actionTypeFormatter-unit.test.ts\n M tests/unit/actions/ruleCompiler-unit.test.ts\n M tests/unit/actions/sideEffectJobExtractor-unit.test.ts\n M vitest.config.ts\n?? .migration-evidence/MANIFEST.json\n?? .migration-evidence/funnel-temporal-isolation/2026-07-31T17-23-33-160Z.mapping.json\n?? .migration-evidence/incidents/\n?? docs/automate-platform.md\n?? docs/automate-session-2026-07-30-continued.md\n?? docs/evidence-policy.md\n?? scripts/destructive-guard-cli.ts\n?? scripts/evidence/\n?? src/actions/functionWebhookContract.ts\n?? src/actions/webhookTypeCompatibility.ts\n?? src/migrations/143_automate.down.sql\n?? src/migrations/143_automate.sql\n?? src/migrations/144_automate_condition_jobs.down.sql\n?? src/migrations/144_automate_condition_jobs.sql\n?? src/migrations/145_automate_evaluation_retries.down.sql\n?? src/migrations/145_automate_evaluation_retries.sql\n?? src/migrations/146_action_parameter_rids.down.sql\n?? src/migrations/146_action_parameter_rids.sql\n?? src/migrations/147_action_rule_ids.down.sql\n?? src/migrations/147_action_rule_ids.sql\n?? src/migrations/148_action_rule_id_uniqueness.down.sql\n?? src/migrations/148_action_rule_id_uniqueness.sql\n?? src/migrations/149_interface_object_rule_discriminators.down.sql\n?? src/migrations/149_interface_object_rule_discriminators.sql\n?? src/routes/automations.ts\n?? src/services/automate/compatibility.ts\n?? src/services/automate/contracts.ts\n?? src/services/automate/effectExecutors.ts\n?? src/services/automate/objectCondition.ts\n?? src/services/automate/permissions.ts\n?? src/services/automate/repository.ts\n?? src/services/automate/retry.ts\n?? src/services/automate/runtime.ts\n?? src/services/automate/schedule.ts\n?? src/services/automate/validation.ts\n?? src/services/testing/destructiveTestGuard.ts\n?? tests/integration/automate/\n?? tests/laneEnv.ts\n?? tests/testStackBootstrap.ts\n?? tests/unit/actions/functionWebhookContract-unit.test.ts\n?? tests/unit/actions/parameterValidator-interface-unit.test.ts\n?? tests/unit/actions/webhookTypeCompatibility-unit.test.ts\n?? tests/unit/automate/\n?? tests/unit/evidence/\n?? tests/unit/testing/\n?? vitest.automate.config.ts\n?? vitest.automate.integration.config.ts",
+  "generatedAtUtc": "2026-08-01T06:37:22.120Z",
+  "gitCommit": "a35ae6f8c1a37eceb651ead136bf62a6c4bf1ae3",
+  "gitStatus": "",
   "files": [
+    {
+      "path": "fixture-recovery/matrix.json",
+      "sha256": "a33bf5fdf1f85c3d059e51d4d87a92a825f0173c65b98222b6242e04d49ce6f9",
+      "sizeBytes": 469,
+      "modifiedAtUtc": "2026-08-01T02:44:22.738Z"
+    },
     {
       "path": "funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json",
       "sha256": "d0ac392474ce3c051753fd111598dddeb58c3036bc13185cf2f07589d82aed4d",
@@ -147,6 +153,24 @@
       "sha256": "6ba37cd3fdefaad216f3ef590318c7a3b793b840def72f18dc9aa268c8db9088",
       "sizeBytes": 307,
       "modifiedAtUtc": "2026-07-31T17:18:46.298Z"
+    },
+    {
+      "path": "worker-versioning/probe-a.log",
+      "sha256": "30908612e6e9219df55906a3002a2454a0e38c60a38864cdfa259b5374172c8e",
+      "sizeBytes": 180,
+      "modifiedAtUtc": "2026-07-31T23:54:24.100Z"
+    },
+    {
+      "path": "worker-versioning/probe-b.log",
+      "sha256": "a98cc15bc8393114802ef46b3e500b297478a3c2e1c6834e7cba4d3954aef725",
+      "sizeBytes": 178,
+      "modifiedAtUtc": "2026-07-31T23:54:24.101Z"
+    },
+    {
+      "path": "worker-versioning/report.json",
+      "sha256": "18c76245df8ee9cc4c527fcaf3ac12aff77784d2f8d8e7711ea0cd5ea33a0104",
+      "sizeBytes": 919,
+      "modifiedAtUtc": "2026-07-31T23:54:24.037Z"
     }
   ]
 }
