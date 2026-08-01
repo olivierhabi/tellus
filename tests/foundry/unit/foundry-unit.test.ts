@@ -128,13 +128,6 @@ describe('BE-001 — Express Init', () => {
 });
 
 // ---------------------------------------------------------------------------
-// BE-002: Schema — SQL migration, skip (no pure logic)
-// ---------------------------------------------------------------------------
-describe('BE-002 — Schema Migration', () => {
-  it.skip('SQL migration — no pure logic to unit-test', () => {});
-});
-
-// ---------------------------------------------------------------------------
 // BE-003: Projects — CreateProjectSchema, UpdateProjectSchema, UuidParamSchema
 // ---------------------------------------------------------------------------
 import {
@@ -784,13 +777,6 @@ describe('BE-007 — Dataset Schemas', () => {
       if (result.success) expect(result.data.rows).toBe(100);
     });
   });
-});
-
-// ---------------------------------------------------------------------------
-// BE-008: Deletion — needs DB, skip
-// ---------------------------------------------------------------------------
-describe('BE-008 — Deletion', () => {
-  it.skip('requires database interaction — no pure logic to test', () => {});
 });
 
 // ---------------------------------------------------------------------------
@@ -1792,13 +1778,6 @@ describe('BE-025 — Knexfile Config', () => {
     expect(environments).toContain('test');
     expect(environments).toContain('production');
   });
-});
-
-// ---------------------------------------------------------------------------
-// BE-026: Tests — meta-test, skip
-// ---------------------------------------------------------------------------
-describe('BE-026 — Tests (Meta)', () => {
-  it.skip('Meta-test — no additional logic to test', () => {});
 });
 
 // ---------------------------------------------------------------------------
