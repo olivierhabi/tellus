@@ -51,7 +51,8 @@ export type ValueSourceTag =
   | "static"
   | "currentTimestamp"
   | "currentUser"
-  | "writebackResponse";
+  | "writebackResponse"
+  | "objectProperty";
 
 export interface ParameterValueSource {
   readonly source: "parameter";
@@ -90,42 +91,94 @@ export interface WritebackResponseValueSource {
   readonly path?: string;
 }
 
+/** A readable property on an object-reference action parameter. */
+export interface ObjectPropertyValueSource {
+  readonly source: "objectProperty";
+  readonly param: string;
+  /** Object property API name; nested struct fields use RFC 6901 segments. */
+  readonly path: string;
+}
+
 export type ValueSource =
   | ParameterValueSource
   | StaticValueSource
   | CurrentTimestampValueSource
   | CurrentUserValueSource
-  | WritebackResponseValueSource;
+  | WritebackResponseValueSource
+  | ObjectPropertyValueSource;
 
 // ---------------------------------------------------------------------------
 // Object rules
 // ---------------------------------------------------------------------------
 
-export interface CreateObjectRule {
+export interface ActionRuleMetadata {
+  /**
+   * Stable authoring identity. Optional only while reading legacy definitions;
+   * canonical persistence always assigns a RID before saving.
+   */
+  readonly ruleId?: string;
+  /** Version of the persisted rule envelope, independent of action semantics. */
+  readonly schemaVersion?: 1;
+}
+
+export interface CreateObjectLinkMapping {
+  /** A MANY_TO_MANY link whose one endpoint is the object created by this rule. */
+  readonly linkType: string;
+  /** Which endpoint of the link type the newly created object occupies. */
+  readonly createdObjectSide: "source" | "target";
+  /** The opposite endpoint, normally an object-reference action parameter. */
+  readonly otherObject: ValueSource;
+}
+
+export interface CreateObjectRule extends ActionRuleMetadata {
   readonly type: "createObject";
   readonly objectType: string;
   /** apiName → ValueSource. Required: every primary-key + required property. */
   readonly properties: Readonly<Record<string, ValueSource>>;
+  /** Attached MANY_TO_MANY edits executed in the same canonical edit plan. */
+  readonly links?: ReadonlyArray<CreateObjectLinkMapping>;
 }
 
-export interface ModifyObjectRule {
+export interface ModifyObjectRule extends ActionRuleMetadata {
   readonly type: "modifyObject";
   readonly objectType: string;
   readonly objectReference: ValueSource;
   readonly properties: Readonly<Record<string, ValueSource>>;
 }
 
-export interface ModifyOrCreateObjectRule {
+export interface ModifyOrCreateObjectRule extends ActionRuleMetadata {
   readonly type: "modifyOrCreateObject";
   readonly objectType: string;
   readonly objectReference: ValueSource;
   readonly properties: Readonly<Record<string, ValueSource>>;
 }
 
-export interface DeleteObjectRule {
+export interface DeleteObjectRule extends ActionRuleMetadata {
   readonly type: "deleteObject";
   readonly objectType: string;
   readonly objectReference: ValueSource;
+}
+
+export interface CreateInterfaceObjectRule extends ActionRuleMetadata {
+  readonly type: "createInterfaceObject";
+  readonly interfaceId: string;
+  /** Parameter containing the concrete implementing object type API name. */
+  readonly objectTypeParameter: string;
+  /** Interface property API name → ValueSource. */
+  readonly properties: Readonly<Record<string, ValueSource>>;
+}
+
+export interface ModifyInterfaceObjectRule extends ActionRuleMetadata {
+  readonly type: "modifyInterfaceObject";
+  readonly interfaceId: string;
+  readonly interfaceReference: ValueSource;
+  readonly properties: Readonly<Record<string, ValueSource>>;
+}
+
+export interface DeleteInterfaceObjectRule extends ActionRuleMetadata {
+  readonly type: "deleteInterfaceObject";
+  readonly interfaceId: string;
+  readonly interfaceReference: ValueSource;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +192,7 @@ export interface DeleteObjectRule {
 
 export type LinkOperation = "addLink" | "removeLink";
 
-export interface AddLinkRule {
+export interface AddLinkRule extends ActionRuleMetadata {
   readonly type: "addLink";
   /** Canonical: link-type apiName. */
   readonly linkType: string;
@@ -147,7 +200,7 @@ export interface AddLinkRule {
   readonly targetObject: ValueSource;
 }
 
-export interface RemoveLinkRule {
+export interface RemoveLinkRule extends ActionRuleMetadata {
   readonly type: "removeLink";
   readonly linkType: string;
   readonly sourceObject: ValueSource;
@@ -167,7 +220,7 @@ export interface RemoveLinkRule {
 
 export type InterfaceLinkOperation = "createInterfaceLink" | "deleteInterfaceLink";
 
-export interface CreateInterfaceLinkRule {
+export interface CreateInterfaceLinkRule extends ActionRuleMetadata {
   readonly type: "createInterfaceLink";
   /** apiName of the interface link constraint. */
   readonly interfaceLinkConstraint: string;
@@ -177,7 +230,7 @@ export interface CreateInterfaceLinkRule {
   readonly target: ValueSource;
 }
 
-export interface DeleteInterfaceLinkRule {
+export interface DeleteInterfaceLinkRule extends ActionRuleMetadata {
   readonly type: "deleteInterfaceLink";
   readonly interfaceLinkConstraint: string;
   readonly interfaceId: string;
@@ -194,6 +247,9 @@ export type ActionRule =
   | ModifyObjectRule
   | ModifyOrCreateObjectRule
   | DeleteObjectRule
+  | CreateInterfaceObjectRule
+  | ModifyInterfaceObjectRule
+  | DeleteInterfaceObjectRule
   | AddLinkRule
   | RemoveLinkRule
   | CreateInterfaceLinkRule
@@ -205,6 +261,9 @@ export const ACTION_RULE_DISCRIMINATORS = [
   "modifyObject",
   "modifyOrCreateObject",
   "deleteObject",
+  "createInterfaceObject",
+  "modifyInterfaceObject",
+  "deleteInterfaceObject",
   "addLink",
   "removeLink",
   "createInterfaceLink",
@@ -306,11 +365,28 @@ export interface WritebackOutputDefinition {
   readonly valueType: string;
 }
 
+/** A version-pinned published query Function that produces webhook inputs. */
+export interface WebhookFunctionInputConfig {
+  readonly functionRid: string;
+  readonly repositoryRid: string;
+  readonly apiName: string;
+  readonly branch: string;
+  readonly semver: string;
+  /** Published Function parameter name → ordinary Action value source. */
+  readonly arguments: Readonly<Record<string, ValueSource>>;
+  /** Writebacks require `single`; side effects may fan out a returned list. */
+  readonly resultMode: "single" | "list";
+  /** Side effects may suppress delivery when a Function returns null/undefined. */
+  readonly suppressWhenNull?: boolean;
+}
+
 export interface ActionWritebackConfig {
   readonly webhookId: string;
   readonly webhookVersion: number;
   /** Input name → ValueSource. Each input validated against webhook.inputSchema at save+exec time. */
   readonly inputs: Readonly<Record<string, ValueSource>>;
+  /** Mutually exclusive with direct `inputs`; its returned record is the input map. */
+  readonly inputFunction?: WebhookFunctionInputConfig;
   readonly outputBindings?: Readonly<Record<string, WritebackOutputDefinition>>;
   /**
    * Only `"abort"` is supported today. On failure: ontology edits are NOT
@@ -335,6 +411,7 @@ export interface WebhookSideEffectConfig {
   readonly webhookId: string;
   readonly webhookVersion: number;
   readonly inputs: Readonly<Record<string, ValueSource>>;
+  readonly inputFunction?: WebhookFunctionInputConfig;
 }
 
 export type NotificationChannel = "in_app" | "email" | "slack_compatible";

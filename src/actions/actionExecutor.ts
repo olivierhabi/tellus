@@ -1019,6 +1019,13 @@ export async function executeAction(
           executedBy: context.executedBy || "system",
           tenant: context.tenant ?? "default",
           resolvedParameters: resolvedParameters as Record<string, unknown>,
+          parameterDefinitions: Array.isArray(at.parameters)
+            ? (at.parameters as Array<{
+                apiName?: string;
+                type?: string;
+                objectType?: string;
+              }>)
+            : [],
           result: result.result,
           affectedObjects: result.affectedObjects,
           firedAt: new Date().toISOString(),

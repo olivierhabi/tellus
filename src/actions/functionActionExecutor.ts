@@ -47,7 +47,7 @@ function isOntologyEdit(value: unknown): value is OntologyEdit {
   );
 }
 
-function transpileFunction(apiName: string, source: string): string {
+export function transpileFunction(apiName: string, source: string): string {
   const ts = require("typescript") as typeof import("typescript");
   const out = ts.transpileModule(source, {
     compilerOptions: {

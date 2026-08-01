@@ -79,6 +79,12 @@ export interface KeycloakEvent {
   details?: Record<string, string>;
 }
 
+export interface KeycloakGroup {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export type RequiredAction = 'webauthn-register' | 'webauthn-register-passwordless' | 'CONFIGURE_TOTP' | 'UPDATE_PASSWORD' | 'VERIFY_EMAIL';
 
 interface CachedToken {
@@ -353,6 +359,7 @@ export class KeycloakAdminService {
     email: string | null;
     firstName: string | null;
     lastName: string | null;
+    enabled: boolean;
   } | null> {
     try {
       const u = await this.call<{
@@ -361,6 +368,7 @@ export class KeycloakAdminService {
         email?: string;
         firstName?: string;
         lastName?: string;
+        enabled?: boolean;
       }>('GET', `/users/${encodeURIComponent(id)}`, {
         query: { briefRepresentation: 'true' },
       });
@@ -371,6 +379,7 @@ export class KeycloakAdminService {
         email: u.email ?? null,
         firstName: u.firstName ?? null,
         lastName: u.lastName ?? null,
+        enabled: u.enabled ?? true,
       };
     } catch (err) {
       if (err instanceof AppError && err.statusCode === 404) return null;
@@ -595,6 +604,81 @@ export class KeycloakAdminService {
       `/users/${userId}/role-mappings/realm`,
     );
     return rows.map((r) => r.name);
+  }
+
+  async listUserGroups(userId: string): Promise<string[]> {
+    const groups = await this.listUserGroupReferences(userId);
+    return groups.map((group) => group.path);
+  }
+
+  async listUserGroupReferences(userId: string): Promise<KeycloakGroup[]> {
+    const groups = await this.call<Array<KeycloakGroup>>(
+      "GET",
+      `/users/${encodeURIComponent(userId)}/groups`,
+      { query: { briefRepresentation: "true", max: "1000" } },
+    );
+    return groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      path: group.path ?? group.name,
+    }));
+  }
+
+  async listGroups(opts: {
+    search?: string;
+    first?: number;
+    max?: number;
+  } = {}): Promise<KeycloakGroup[]> {
+    const groups = await this.call<Array<KeycloakGroup>>("GET", "/groups", {
+      query: {
+        search: opts.search,
+        first: opts.first?.toString(),
+        max: Math.min(opts.max ?? 100, 1_001).toString(),
+        briefRepresentation: "true",
+      },
+    });
+    return groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      path: group.path ?? group.name,
+    }));
+  }
+
+  async listGroupMembers(groupId: string): Promise<Array<{
+    id: string;
+    username: string;
+    email: string | null;
+    enabled: boolean;
+  }>> {
+    const users = await this.call<Array<{
+      id: string;
+      username: string;
+      email?: string;
+      enabled?: boolean;
+    }>>(
+      "GET",
+      `/groups/${encodeURIComponent(groupId)}/members`,
+      {
+        query: {
+          first: "0",
+          max: "1001",
+          briefRepresentation: "true",
+        },
+      },
+    );
+    if (users.length > 1_000) {
+      throw new AppError(
+        "Notification groups are limited to 1,000 members.",
+        422,
+        "NOTIFICATION_GROUP_TOO_LARGE",
+      );
+    }
+    return users.map((user) => ({
+      id: user.id,
+      username: user.username,
+      email: user.email ?? null,
+      enabled: user.enabled ?? true,
+    }));
   }
 
   async assignRealmRoleToUser(userId: string, roleName: string): Promise<void> {

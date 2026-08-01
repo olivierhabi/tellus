@@ -295,6 +295,80 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
     });
   }));
 
+  router.get("/functions/registry/:functionRid/versions", asyncRoute(async (req: Request, res: Response) => {
+    const { functionRid } = req.params;
+    if (!isFunctionRegistryRid(functionRid)) {
+      sendError(res, functionsError("Functions:InvalidArgument", { reason: "invalid-function-rid" }));
+      return;
+    }
+    const principal = req.codeReposPrincipal;
+    if (!principal) {
+      sendError(res, functionsError("Functions:Internal", { reason: "missing-principal" }));
+      return;
+    }
+    const isPlatformAdmin = principal.roles.some(
+      (role) => role.toLowerCase() === "tellus-superadmin",
+    );
+    const principalUserId = UUID_RE.test(principal.userId) ? principal.userId : null;
+    const result = await deps.pool.query(
+      `SELECT function.rid, function.repository_rid, function.api_name,
+              function.display_name, version.semver, version.branch,
+              version.release_version_rid, version.commit_sha,
+              version.artifact_sha256, version.signature,
+              version.function_kind, version.created_at
+         FROM function_registry_function function
+         JOIN function_registry_function_version version
+           ON version.function_rid = function.rid
+         JOIN code_repository repository
+           ON repository.rid = function.repository_rid
+         LEFT JOIN folders parent_folder
+           ON parent_folder.id::text =
+              substring(repository.parent_folder_rid FROM '([0-9a-fA-F-]{36})$')
+         LEFT JOIN projects parent_project
+           ON parent_project.id = parent_folder.project_id
+         LEFT JOIN projects direct_project
+           ON direct_project.id::text =
+              substring(repository.project_rid FROM '([0-9a-fA-F-]{36})$')
+        WHERE function.rid = $1
+          AND repository.state IN ('ACTIVE', 'ARCHIVED')
+          AND (
+            $2::boolean
+            OR ($3::text IS NOT NULL AND repository.created_by::text = $3)
+            OR ($3::text IS NOT NULL AND EXISTS (
+              SELECT 1 FROM project_members membership
+               WHERE membership.project_id =
+                     COALESCE(parent_project.id, direct_project.id)
+                 AND membership.user_id::text = $3
+            ))
+          )
+        ORDER BY string_to_array(split_part(version.semver, '-', 1), '.')::int[] DESC,
+                 version.created_at DESC
+        LIMIT 100`,
+      [functionRid, isPlatformAdmin, principalUserId],
+    );
+    if (!result.rowCount) {
+      sendError(res, functionsError("Functions:VersionNotFound", { functionRid }));
+      return;
+    }
+    res.status(200).json({
+      items: result.rows.map((row) => ({
+        rid: row.rid,
+        repositoryRid: row.repository_rid,
+        apiName: row.api_name,
+        displayName: row.display_name,
+        version: row.semver,
+        branch: row.branch,
+        releaseVersionRid: row.release_version_rid,
+        commitSha: row.commit_sha,
+        artifactSha256: row.artifact_sha256,
+        parameters: row.signature?.parameters ?? [],
+        output: row.signature?.output ?? null,
+        functionKind: row.function_kind ?? null,
+        publishedAt: iso(row.created_at),
+      })),
+    });
+  }));
+
   router.post("/functions/:repositoryRid/versions", async (req: Request, res: Response) => {
     const { repositoryRid } = req.params;
     if (!isStructurallyRid(repositoryRid)) {

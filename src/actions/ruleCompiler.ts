@@ -22,6 +22,7 @@ import objectTypeService from "../services/objectTypeService";
 import propertyService from "../services/propertyService";
 import { getByApiName as getLinkType, resolvePropertyApiName, resolveObjectTypeApiName } from "../models/linkType";
 import type { LinkTypeRow } from "../models/linkType";
+import { query } from "../db";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,6 +43,11 @@ interface CreateObjectRule {
   type: "createObject";
   objectType: string;
   properties: Record<string, ValueSource>;
+  links?: Array<{
+    linkType: string;
+    createdObjectSide: "source" | "target";
+    otherObject: ValueSource;
+  }>;
 }
 
 /** A modifyObject rule. */
@@ -67,6 +73,26 @@ interface DeleteObjectRule {
   objectReference: ValueSource;
 }
 
+interface CreateInterfaceObjectRule {
+  type: "createInterfaceObject";
+  interfaceId: string;
+  objectTypeParameter: string;
+  properties: Record<string, ValueSource>;
+}
+
+interface ModifyInterfaceObjectRule {
+  type: "modifyInterfaceObject";
+  interfaceId: string;
+  interfaceReference: ValueSource;
+  properties: Record<string, ValueSource>;
+}
+
+interface DeleteInterfaceObjectRule {
+  type: "deleteInterfaceObject";
+  interfaceId: string;
+  interfaceReference: ValueSource;
+}
+
 /** An addLink rule. */
 interface AddLinkRule {
   type: "addLink";
@@ -89,6 +115,9 @@ type Rule =
   | ModifyObjectRule
   | ModifyOrCreateObjectRule
   | DeleteObjectRule
+  | CreateInterfaceObjectRule
+  | ModifyInterfaceObjectRule
+  | DeleteInterfaceObjectRule
   | AddLinkRule
   | RemoveLinkRule
   | CreateInterfaceLinkRuleRuntime
@@ -232,6 +261,20 @@ export async function compileRules(
       case "deleteObject":
         await compileDeleteObject(
           rule, resolvedParameters, objectFetcher, executionContext, i, preliminaryEdits, errors
+        );
+        break;
+
+      case "createInterfaceObject":
+      case "modifyInterfaceObject":
+      case "deleteInterfaceObject":
+        await compileInterfaceObjectRule(
+          rule,
+          resolvedParameters,
+          objectFetcher,
+          executionContext,
+          i,
+          preliminaryEdits,
+          errors,
         );
         break;
 
@@ -380,7 +423,7 @@ async function compileCreateObject(
     return;
   }
 
-  // 5. Generate edit
+  // 5. Generate the object edit.
   edits.push({
     objectType: rule.objectType,
     primaryKey,
@@ -389,6 +432,37 @@ async function compileCreateObject(
     linkEdits: [],
     ruleIndex,
   });
+
+  // 6. Compile attached MANY_TO_MANY links through the same canonical link
+  // path as standalone addLink rules. Save-time validation guarantees the
+  // selected link is M2M and the created object occupies the declared side.
+  for (const link of rule.links ?? []) {
+    const createdObject = {
+      source: "static" as const,
+      value: primaryKey,
+    };
+    await compileLinkRule(
+      {
+        type: "addLink",
+        linkType: link.linkType,
+        sourceObject:
+          link.createdObjectSide === "source"
+            ? createdObject
+            : link.otherObject,
+        targetObject:
+          link.createdObjectSide === "target"
+            ? createdObject
+            : link.otherObject,
+      },
+      "add",
+      resolvedParameters,
+      objectFetcher,
+      executionContext,
+      ruleIndex,
+      edits,
+      errors,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +653,205 @@ async function compileDeleteObject(
   });
 }
 
+interface ResolvedInterfaceImplementation {
+  objectType: string;
+  propertyMapping: Record<string, string>;
+}
+
+async function resolveInterfaceImplementation(
+  ontologyId: string,
+  interfaceId: string,
+  objectType: string,
+): Promise<ResolvedInterfaceImplementation | null> {
+  const result = await query(
+    `SELECT ot.api_name AS object_type, oti.property_mapping
+       FROM interface i
+       JOIN object_type_interface oti ON oti.interface_id = i.interface_id
+       JOIN object_type ot ON ot.object_type_id = oti.object_type_id
+      WHERE i.ontology_id = $1 AND i.api_name = $2 AND ot.api_name = $3`,
+    [ontologyId, interfaceId, objectType],
+  );
+  if (result.rows.length !== 1) return null;
+  const row = result.rows[0] as {
+    object_type: string;
+    property_mapping: Record<string, string> | null;
+  };
+  return {
+    objectType: row.object_type,
+    propertyMapping: row.property_mapping ?? {},
+  };
+}
+
+function resolveInterfaceReference(
+  source: ValueSource,
+  parameters: Record<string, unknown>,
+  context: ExecutionContext,
+): { objectType: string; primaryKey: string } | null {
+  const value = resolveValue(source, parameters, context);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const reference = value as Record<string, unknown>;
+  if (
+    typeof reference.objectType !== "string" ||
+    typeof reference.primaryKey !== "string"
+  ) {
+    return null;
+  }
+  return {
+    objectType: reference.objectType,
+    primaryKey: reference.primaryKey,
+  };
+}
+
+function mapInterfaceProperties(
+  properties: Record<string, ValueSource>,
+  implementation: ResolvedInterfaceImplementation,
+  ruleIndex: number,
+  errors: string[],
+): Record<string, ValueSource> {
+  const mapped: Record<string, ValueSource> = {};
+  for (const [interfaceProperty, source] of Object.entries(properties)) {
+    const concreteProperty = implementation.propertyMapping[interfaceProperty];
+    if (!concreteProperty) {
+      errors.push(
+        `Interface rule at index ${ruleIndex} cannot resolve shared property '${interfaceProperty}' on implementing object type '${implementation.objectType}'.`,
+      );
+      continue;
+    }
+    mapped[concreteProperty] = source;
+  }
+  return mapped;
+}
+
+async function compileInterfaceObjectRule(
+  rule:
+    | CreateInterfaceObjectRule
+    | ModifyInterfaceObjectRule
+    | DeleteInterfaceObjectRule,
+  resolvedParameters: Record<string, unknown>,
+  objectFetcher: ObjectFetcher,
+  executionContext: ExecutionContext,
+  ruleIndex: number,
+  edits: PreliminaryEdit[],
+  errors: string[],
+): Promise<void> {
+  if (rule.type === "createInterfaceObject") {
+    const selectedObjectType = resolvedParameters[rule.objectTypeParameter];
+    if (typeof selectedObjectType !== "string" || selectedObjectType.length === 0) {
+      errors.push(
+        `createInterfaceObject rule at index ${ruleIndex} requires parameter '${rule.objectTypeParameter}' to select an implementing object type.`,
+      );
+      return;
+    }
+    const implementation = await resolveInterfaceImplementation(
+      executionContext.ontologyId,
+      rule.interfaceId,
+      selectedObjectType,
+    );
+    if (!implementation) {
+      errors.push(
+        `Object type '${selectedObjectType}' does not implement interface '${rule.interfaceId}'.`,
+      );
+      return;
+    }
+    await compileCreateObject(
+      {
+        type: "createObject",
+        objectType: implementation.objectType,
+        properties: mapInterfaceProperties(
+          rule.properties,
+          implementation,
+          ruleIndex,
+          errors,
+        ),
+      },
+      resolvedParameters,
+      objectFetcher,
+      executionContext,
+      ruleIndex,
+      edits,
+      errors,
+    );
+    return;
+  }
+
+  const reference = resolveInterfaceReference(
+    rule.interfaceReference,
+    resolvedParameters,
+    executionContext,
+  );
+  if (!reference) {
+    errors.push(
+      `${rule.type} rule at index ${ruleIndex} could not resolve an interface reference.`,
+    );
+    return;
+  }
+  const implementation = await resolveInterfaceImplementation(
+    executionContext.ontologyId,
+    rule.interfaceId,
+    reference.objectType,
+  );
+  if (!implementation) {
+    errors.push(
+      `Object type '${reference.objectType}' does not implement interface '${rule.interfaceId}'.`,
+    );
+    return;
+  }
+  const referenceSource: ValueSource = {
+    source: "static",
+    value: reference.primaryKey,
+  };
+  if (rule.type === "deleteInterfaceObject") {
+    await compileDeleteObject(
+      {
+        type: "deleteObject",
+        objectType: implementation.objectType,
+        objectReference: referenceSource,
+      },
+      resolvedParameters,
+      objectFetcher,
+      executionContext,
+      ruleIndex,
+      edits,
+      errors,
+    );
+    return;
+  }
+  const concreteProperties = mapInterfaceProperties(
+    rule.properties,
+    implementation,
+    ruleIndex,
+    errors,
+  );
+  const primaryKeyProperty = await getPrimaryKeyPropertyName(
+    executionContext.ontologyId,
+    implementation.objectType,
+    errors,
+  );
+  if (
+    primaryKeyProperty &&
+    Object.prototype.hasOwnProperty.call(concreteProperties, primaryKeyProperty)
+  ) {
+    errors.push(
+      `modifyInterfaceObject rule at index ${ruleIndex} cannot modify primary key property '${primaryKeyProperty}'.`,
+    );
+    delete concreteProperties[primaryKeyProperty];
+  }
+  await compileModifyObject(
+    {
+      type: "modifyObject",
+      objectType: implementation.objectType,
+      objectReference: referenceSource,
+      properties: concreteProperties,
+    },
+    resolvedParameters,
+    objectFetcher,
+    executionContext,
+    ruleIndex,
+    edits,
+    errors,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // addLink / removeLink compiler
 // ---------------------------------------------------------------------------
@@ -625,8 +898,41 @@ async function compileInterfaceLinkRule(
     return;
   }
 
+  const sourceReference =
+    typeof sourcePkValue === "object" && !Array.isArray(sourcePkValue)
+      ? (sourcePkValue as Record<string, unknown>)
+      : null;
+  const targetReference =
+    typeof targetPkValue === "object" && !Array.isArray(targetPkValue)
+      ? (targetPkValue as Record<string, unknown>)
+      : null;
+  const runtimeRule: InterfaceLinkRuleRuntimeUnion = {
+    ...rule,
+    source: {
+      ...rule.source,
+      ...(typeof sourceReference?.objectType === "string"
+        ? { objectType: sourceReference.objectType }
+        : {}),
+    },
+    target: {
+      ...rule.target,
+      ...(typeof targetReference?.objectType === "string"
+        ? { objectType: targetReference.objectType }
+        : {}),
+    },
+  };
+  const runtimeParameters = {
+    ...resolvedParameters,
+    ...(typeof sourceReference?.primaryKey === "string"
+      ? { [rule.source.param]: sourceReference.primaryKey }
+      : {}),
+    ...(typeof targetReference?.primaryKey === "string"
+      ? { [rule.target.param]: targetReference.primaryKey }
+      : {}),
+  };
+
   const { resolveInterfaceLinkRule, buildConcreteLinkEditsFromCandidates } = await import("./rules/interfaceLinkRules");
-  const result = await resolveInterfaceLinkRule(executionContext.ontologyId, rule as any);
+  const result = await resolveInterfaceLinkRule(executionContext.ontologyId, runtimeRule as any);
 
   switch (result.kind) {
     case "missing":
@@ -653,12 +959,12 @@ async function compileInterfaceLinkRule(
       // source as the original rule, so the existing compileLinkRule
       // path resolves them to the right PreliminaryEdit unchanged.
       const candidates = result.candidates;
-      const concreteEdits = buildConcreteLinkEditsFromCandidates(rule, candidates);
+      const concreteEdits = buildConcreteLinkEditsFromCandidates(runtimeRule, candidates);
       for (const edit of concreteEdits) {
         await compileLinkRule(
           edit as unknown as AddLinkRule | RemoveLinkRule,
           edit.type === "addLink" ? "add" : "remove",
-          resolvedParameters,
+          runtimeParameters,
           objectFetcher,
           executionContext,
           ruleIndex,
@@ -846,12 +1152,22 @@ function mergeEdits(
     let finalLinkEdits: LinkEdit[] = [...first.linkEdits];
     let hasCreate = first.operation === "create";
     let hasDelete = first.operation === "delete";
+    let createRuleIndex =
+      first.operation === "create" ? first.ruleIndex : undefined;
+    let deleteRuleIndex =
+      first.operation === "delete" ? first.ruleIndex : undefined;
 
     for (let i = 1; i < group.length; i++) {
       const edit = group[i];
 
-      if (edit.operation === "create") hasCreate = true;
-      if (edit.operation === "delete") hasDelete = true;
+      if (edit.operation === "create") {
+        hasCreate = true;
+        createRuleIndex ??= edit.ruleIndex;
+      }
+      if (edit.operation === "delete") {
+        hasDelete = true;
+        deleteRuleIndex ??= edit.ruleIndex;
+      }
 
       // Apply merge rules
       if (finalOperation === "create" && edit.operation === "delete") {
@@ -863,7 +1179,7 @@ function mergeEdits(
       } else if (finalOperation === "delete" && edit.operation === "create") {
         // delete + create = conflict (reverse order)
         errors.push(
-          `Conflicting rules: cannot create and delete the same object '${edit.primaryKey}' in one action`
+          `Invalid rule order at rules[${edit.ruleIndex}]: object '${edit.primaryKey}' was deleted by rules[${deleteRuleIndex ?? first.ruleIndex}] before this create. Move the delete rule after all creates and modifications.`
         );
       } else if (finalOperation === "create" && edit.operation === "update") {
         // create + modify = create with merged properties
@@ -884,8 +1200,9 @@ function mergeEdits(
         finalOperation = "delete";
         finalPropertyValues = null;
       } else if (finalOperation === "delete" && edit.operation === "update") {
-        // delete + modify = delete still wins (modifications are moot)
-        // operation stays "delete"
+        errors.push(
+          `Invalid rule order at rules[${edit.ruleIndex}]: object '${edit.primaryKey}' was deleted by rules[${deleteRuleIndex ?? first.ruleIndex}] before this modification. Move the delete rule after all modifications.`
+        );
       } else if (finalOperation === "update" && edit.operation === "update") {
         // modify + modify = merge properties, later wins
         if (edit.propertyValues) {
@@ -893,11 +1210,9 @@ function mergeEdits(
           Object.assign(finalPropertyValues, edit.propertyValues);
         }
       } else if (finalOperation === "create" && edit.operation === "create") {
-        // create + create = merge properties (last wins per property)
-        if (edit.propertyValues) {
-          if (!finalPropertyValues) finalPropertyValues = {};
-          Object.assign(finalPropertyValues, edit.propertyValues);
-        }
+        errors.push(
+          `Duplicate object creation at rules[${edit.ruleIndex}]: object '${edit.primaryKey}' was already created by rules[${createRuleIndex ?? first.ruleIndex}]. Keep a single create rule and move later property mappings into it.`
+        );
       } else if (finalOperation === "delete" && edit.operation === "delete") {
         // delete + delete = still delete (idempotent)
       }

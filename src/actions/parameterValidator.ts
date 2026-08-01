@@ -29,6 +29,8 @@ export interface ParameterDefinition {
   type: string;
   required?: boolean;
   objectType?: string;
+  /** Required for interface_reference and interface_reference_array. */
+  interfaceId?: string;
   defaultValue?: unknown;
   constraints?: ParameterConstraints;
 }
@@ -270,6 +272,21 @@ async function validateAndCoerceType(
     case "object_reference":
       return coerceObjectReference(apiName, value, def, objectExistsChecker, errors);
 
+    case "object_type_reference":
+      if (typeof value !== "string" || value.length === 0) {
+        errors.push(
+          `Parameter '${apiName}' must be the API name of an object type implementing interface '${def.interfaceId ?? ""}'.`,
+        );
+        return undefined;
+      }
+      return value;
+
+    case "interface_reference":
+      return coerceInterfaceReference(apiName, value, def, objectExistsChecker, errors);
+
+    case "interface_reference_array":
+      return coerceInterfaceReferenceArray(apiName, value, def, objectExistsChecker, errors);
+
     case "object_set":
       return coerceObjectSet(apiName, value, errors);
 
@@ -309,6 +326,79 @@ async function validateAndCoerceType(
       );
       return undefined;
   }
+}
+
+export interface ResolvedInterfaceReference {
+  objectType: string;
+  primaryKey: string;
+}
+
+async function coerceInterfaceReference(
+  apiName: string,
+  value: unknown,
+  def: ParameterDefinition,
+  objectExistsChecker: ObjectExistsChecker,
+  errors: string[],
+): Promise<ResolvedInterfaceReference | undefined> {
+  if (!def.interfaceId) {
+    errors.push(
+      `Parameter '${apiName}' is type 'interface_reference' but has no interfaceId configured.`,
+    );
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(
+      `Parameter '${apiName}' must be an interface reference object with objectType and primaryKey.`,
+    );
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.objectType !== "string" ||
+    candidate.objectType.length === 0 ||
+    typeof candidate.primaryKey !== "string" ||
+    candidate.primaryKey.length === 0
+  ) {
+    errors.push(
+      `Parameter '${apiName}' must contain non-empty string objectType and primaryKey fields.`,
+    );
+    return undefined;
+  }
+  if (!(await objectExistsChecker(candidate.objectType, candidate.primaryKey))) {
+    errors.push(
+      `Parameter '${apiName}' references object '${candidate.primaryKey}' of type '${candidate.objectType}' which does not exist in the Ontology.`,
+    );
+    return undefined;
+  }
+  return {
+    objectType: candidate.objectType,
+    primaryKey: candidate.primaryKey,
+  };
+}
+
+async function coerceInterfaceReferenceArray(
+  apiName: string,
+  value: unknown,
+  def: ParameterDefinition,
+  objectExistsChecker: ObjectExistsChecker,
+  errors: string[],
+): Promise<ResolvedInterfaceReference[] | undefined> {
+  if (!Array.isArray(value)) {
+    errors.push(`Parameter '${apiName}' must be an array of interface references.`);
+    return undefined;
+  }
+  const resolved: ResolvedInterfaceReference[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = await coerceInterfaceReference(
+      `${apiName}[${index}]`,
+      value[index],
+      def,
+      objectExistsChecker,
+      errors,
+    );
+    if (item) resolved.push(item);
+  }
+  return resolved.length === value.length ? resolved : undefined;
 }
 
 // --- String ---

@@ -15,7 +15,18 @@ const CTX = {
   ontologyId: "ont-1",
   executedBy: "tester",
   tenant: "tenant-1",
-  resolvedParameters: { message: "hello", secretUnused: "do-not-persist" },
+  resolvedParameters: {
+    message: "hello",
+    order: "order-1",
+    secretUnused: "do-not-persist",
+  },
+  parameterDefinitions: [
+    {
+      apiName: "order",
+      type: "object_reference",
+      objectType: "Order",
+    },
+  ],
   result: "success",
   affectedObjects: [],
   firedAt: "2026-07-25T00:00:00Z",
@@ -73,6 +84,49 @@ describe("sideEffectJobExtractor", () => {
     });
     expect((jobs[0].payload as any).context.tenant).toBe("tenant-1");
     expect((jobs[0].payload as any).context.resolvedParameters).toBeUndefined();
+    expect(JSON.stringify(jobs[0].payload)).not.toContain("do-not-persist");
+  });
+
+  it("preserves only resolved object-property descriptors and mapped Function arguments", () => {
+    const jobs = extractSideEffectJobs(
+      {
+        webhooks: [
+          {
+            kind: "connectivity",
+            webhookId: "ri.magritte.main.webhook.1",
+            webhookVersion: 2,
+            inputs: {
+              customer: {
+                source: "objectProperty",
+                param: "order",
+                path: "customer/name",
+              },
+            },
+            inputFunction: {
+              functionRid: "ri.function.main.function.payload",
+              repositoryRid: "ri.stemma.main.repository.repo",
+              apiName: "payload",
+              branch: "main",
+              semver: "1.0.0",
+              resultMode: "single",
+              arguments: {
+                message: { source: "parameter", param: "message" },
+              },
+            },
+          },
+        ],
+      },
+      CTX,
+    );
+    expect((jobs[0].payload as any).spec.inputs.customer).toEqual({
+      source: "resolvedObjectProperty",
+      objectType: "Order",
+      primaryKey: "order-1",
+      path: "customer/name",
+    });
+    expect((jobs[0].payload as any).spec.inputFunction.arguments).toEqual({
+      message: "hello",
+    });
     expect(JSON.stringify(jobs[0].payload)).not.toContain("do-not-persist");
   });
 
