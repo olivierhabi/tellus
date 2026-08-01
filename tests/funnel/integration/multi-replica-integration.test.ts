@@ -121,7 +121,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const c of children) { try { c.kill("SIGKILL"); } catch { /* fine */ } }
-  await db.query(`DELETE FROM ontology_edit WHERE object_type_id = $1`, [OT_ID]).catch(() => undefined);
+  await db.query(`DELETE FROM ontology_edit WHERE object_type_api_name = $1`, [OT]).catch(() => undefined);
   await db.query(`DELETE FROM object_instances WHERE object_type_api_name = $1`, [OT]).catch(() => undefined);
   await db.query(`DELETE FROM funnel_run WHERE object_type_api_name = $1`, [OT]).catch(() => undefined);
   await db.query(`DELETE FROM funnel_signal WHERE object_type_api_name = $1`, [OT]).catch(() => undefined);
@@ -177,7 +177,33 @@ describe("multi-replica fleet correctness", () => {
       );
       // 3) Spawn replica B (normal pacing) WHILE A is mid-merge.
       const b = spawnReplica({ label: "B", envOverrides: { FUNNEL_STAGE_DELAY_MS: "3000" } });
-      await new Promise((r) => setTimeout(r, 5_000)); // B starts polling
+      // Prove both replicas are registered concurrently. The earlier check
+      // only established that A was polling before B started, which was not
+      // sufficient evidence of a two-worker fleet.
+      let concurrentPollers: unknown;
+      {
+        const { Connection } = await import("@temporalio/client");
+        const conn = await Connection.connect({ address: "localhost:7233" });
+        try {
+          await waitFor(async () => {
+            const desc = await conn.workflowService.describeTaskQueue({
+              namespace: LANE.TEMPORAL_NAMESPACE,
+              taskQueue: { name: QUEUE, kind: 1 },
+            } as never);
+            const pollers = (desc.pollers ?? []).filter((poller) =>
+              poller.identity?.startsWith(`${LANE.TELLUS_ENVIRONMENT_ID}:`),
+            );
+            const identities = new Set(pollers.map((poller) => poller.identity));
+            if (identities.size < 2) return false;
+            concurrentPollers = desc;
+            return true;
+          }, "two concurrently registered lane pollers", 60_000);
+        } finally {
+          await conn.close();
+        }
+      }
+      expect(concurrentPollers).toBeDefined();
+      console.log("FUNN_ISO_CONCURRENT_POLLER_PROOF=" + JSON.stringify(concurrentPollers));
 
       // 4) Hard-kill A mid-activity (SIGKILL = unclean death).
       // tsx-script encapsulation: children[0].pid is the node/WRAPPER's pid —
@@ -227,6 +253,11 @@ describe("multi-replica fleet correctness", () => {
         [OT],
       );
       expect(inst.rows[0].n).toBe(3);
+      const stateRows = await db.query(
+        `SELECT count(*)::int AS n FROM funnel_state WHERE object_type_id = $1`,
+        [OT_ID],
+      );
+      expect(stateRows.rows[0].n).toBe(1);
 
       // 7) All writes carry the lane's environment identity; NOTHING was
       //    ever stamped by a foreign environment.
