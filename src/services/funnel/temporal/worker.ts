@@ -364,6 +364,19 @@ export async function signalTemporalWorkflow(
   const identity = workerIdentitySnapshot ?? getEnvironmentIdentity();
   const workflowId = funnelWorkflowId(input.ontologyId, input.objectTypeRid);
 
+  // FUNN-ISO-3: first-dispatch gate — never let a signal start the OT's
+  // parent workflow BEFORE the queue's assignment rule exists, or the
+  // workflow is stamped unversioned and can never be claimed by versioned
+  // pollers. Wait (bounded); the outbox CAS retries otherwise.
+  {
+    const { waitForQueueRule } = await import("./versioning");
+    await waitForQueueRule(
+      temporalClient.connection as never,
+      identity.temporalNamespace,
+      identity.temporalTaskQueue,
+    );
+  }
+
   // Conflict policy — prod-safe default `USE_EXISTING` keeps the "one
   // long-running parent workflow per OT" invariant. Opt-in
   // `FUNNEL_TERMINATE_ON_SAVE=true` makes every save forcibly replace an

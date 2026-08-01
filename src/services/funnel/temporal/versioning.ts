@@ -156,7 +156,7 @@ export async function ensureQueueAssignmentRule(
         namespace,
         taskQueue,
         conflictToken: token,
-        insertAssignmentRule: { ruleIndex: 0, rule: { targetBuildId: buildId, percentageRamp: 100 } },
+        insertAssignmentRule: { ruleIndex: 0, rule: { targetBuildId: buildId, percentageRamp: { rampPercentage: 100 } } },
       })) as QueuedRules;
       token = inserted.conflictToken ?? token;
       if (previous) {
@@ -192,4 +192,46 @@ export async function ensureQueueAssignmentRule(
     }
   }
   return { provisioned: false };
+}
+
+/**
+ * Dispatch-time routing gate. The (other) side of the order race the
+ * stamped-queue tests exposed: if a signal starts its parent workflow
+ * BEFORE the queue's assignment rule exists, that workflow is stamped
+ * "unversioned" and can NEVER be claimed by versioned pollers — stuck
+ * forever, exactly the production-relevant mode during a fresh-stack
+ * first-boot (temporal namespace created, worker polls, dispatcher
+ * signals from a path that never passed through boot order).
+ * This gate makes the first dispatch wait (bounded) for the rule.
+ * Timeouts are a WARN (legacy foreign-owner queues may be managed
+ * externally) — the CAS-outbox bicycle then retries dispatch through
+ * `reconcileStaleDispatches` once rules exist.
+ */
+export async function waitForQueueRule(
+  client: { workflowService: WorkflowServiceLike },
+  namespace: string,
+  taskQueue: string,
+  timeoutMs = 5000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const rules = (await client.workflowService.getWorkerVersioningRules({
+        namespace,
+        taskQueue,
+      })) as QueuedRules;
+      const top = rules.assignmentRules?.[0]?.rule?.targetBuildId;
+      if (typeof top === "string" && top.length > 0) return true;
+    } catch {
+      /* rule API may be unavailable on older servers — proceed */
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  console.warn(
+    `[temporal] queue '${taskQueue}' has no build-ID assignment rule after ` +
+      `${timeoutMs}ms — WF start risks an unversioned stamp; dispatch proceeds ` +
+      `under the outbox CAS (a stale dispatch will resignal after reconcile).`,
+  );
+  return false;
 }
