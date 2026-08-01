@@ -64,7 +64,12 @@ let controlledWebhookProcess: ChildProcess | null = null;
  * is what makes "the integration suite wiped the dev ontology" impossible
  * even when a developer happens to leave their dev stack running.
  */
-async function claimTestApiPort(port = 3000): Promise<void> {
+function laneApiPort(): number {
+  const u = new URL(LANE.TELLUS_TEST_API_BASE_URL);
+  return Number(u.port || 3000);
+}
+
+async function claimTestApiPort(port = laneApiPort()): Promise<void> {
   let foreign: string | null = null;
   try {
     const res = await fetch(`http://localhost:${port}/health`, {
@@ -290,7 +295,7 @@ async function waitForPg(maxWaitMs = 30_000): Promise<void> {
  */
 async function isServerHealthy(): Promise<boolean> {
   try {
-    const res = await fetch("http://localhost:3000/health", {
+    const res = await fetch(`${LANE.TELLUS_TEST_API_BASE_URL}/health`, {
       signal: AbortSignal.timeout(2000),
     });
     return res.ok;
@@ -349,7 +354,7 @@ export async function setup(): Promise<void> {
 
   // Step 0.3: Quiesce — claim :3000 ONLY if it belongs to a leftover lane
   // server (foreign environments are NEVER killed; see claimTestApiPort).
-  await claimTestApiPort(3000);
+  await claimTestApiPort(laneApiPort());
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
   // Step 0.5: Seed the canonical test ontology + action types. This must
@@ -522,7 +527,7 @@ export async function setup(): Promise<void> {
   // Wait for server to become healthy (max 60s — Docker Desktop can be slow)
   for (let i = 0; i < 60; i++) {
     try {
-      const res = await fetch("http://localhost:3000/health", {
+      const res = await fetch(`${LANE.TELLUS_TEST_API_BASE_URL}/health`, {
         signal: AbortSignal.timeout(2000),
       });
       if (res.ok) {
@@ -590,5 +595,5 @@ export async function teardown(): Promise<void> {
   }
   // Belt+braces: only kills the port if it currently belongs to the lane
   // server (never a foreign process — see claimTestApiPort).
-  await claimTestApiPort(3000);
+  await claimTestApiPort(laneApiPort());
 }

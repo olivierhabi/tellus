@@ -25,6 +25,10 @@ const OT = `ReplicaProbe${STAMP}`;
 let OT_ID = "";
 
 let db: typeof import("../../../src/db");
+// Dedicated task queue per test execution — pre-existing rules would pin
+// this run\'s freshly-started workflows to stale builds; a stamped queue is
+// self-provisioning (replica workers claim their own routing rule).
+const QUEUE = `replica-queue-${STAMP}`;
 const receipts = path.join("/tmp", `replica-receipts-${STAMP}.log`);
 const children: ChildProcess[] = [];
 
@@ -39,13 +43,13 @@ function spawnReplica(opts: {
     "npx",
     ["tsx", "scripts/funnel-probe/replicaWorker.ts", "--label", opts.label],
     {
-      cwd: path.resolve(__dirname, "../.."),
+      cwd: path.resolve(__dirname, "../../.."),
       env: {
         ...process.env,
         TELLUS_ENVIRONMENT_ID: LANE.TELLUS_ENVIRONMENT_ID,
         PGDATABASE: LANE.PGDATABASE,
         TEMPORAL_NAMESPACE: LANE.TEMPORAL_NAMESPACE,
-        TEMPORAL_TASK_QUEUE: LANE.TEMPORAL_TASK_QUEUE,
+        TEMPORAL_TASK_QUEUE: QUEUE,
         FUNNEL_STAGE_DELAY_MS: opts.envOverrides?.FUNNEL_STAGE_DELAY_MS ?? "0",
         FUNNEL_STAGE_RECEIPT_FILE: receiptFile,
         FUNNEL_STAGE_RECEIPT_LABEL: opts.label,
@@ -85,6 +89,18 @@ beforeAll(async () => {
   OT_ID = ins.rows[0]?.object_type_id as string;
   await db.query(`DELETE FROM funnel_run WHERE object_type_api_name = $1`, [OT]);
   await db.query(`DELETE FROM funnel_signal WHERE object_type_api_name = $1`, [OT]);
+  // Property + primary-key wire-up so the syncOpenSearch/indexMapping
+  // activity has a key to authoritatively emit documents on (the
+  // rule-fences assess: "no primary key property configured").
+  const pk = await db.query(
+    `INSERT INTO property (object_type_id, api_name, display_name, base_type, is_required, ordinal)
+     VALUES ($1, 'pk', 'PK', 'string', true, 0) RETURNING property_id`,
+    [OT_ID],
+  );
+  await db.query(
+    `UPDATE object_type SET primary_key_property_id = $1 WHERE object_type_id = $2`,
+    [pk.rows[0].property_id, OT_ID],
+  );
   // 3 pending edits so the merge stage has real content to idempotently
   // re-apply across the kill+retry.
   const br = await db.query(
@@ -95,9 +111,10 @@ beforeAll(async () => {
   for (let i = 1; i <= 3; i++) {
     await db.query(
       `INSERT INTO ontology_edit
-         (ontology_id, object_type_id, branch_id, edit_type, object_pk, payload)
-       VALUES ($1, $2, $3, 'edit_object', $4, null)`,
-      [ONTOLOGY_ID, OT_ID, branchId, `replica-${i}`],
+         (ontology_id, object_type_api_name, primary_key, operation, property_values,
+          link_edits, executed_by, branch_id)
+       VALUES ($1, $2, $3, 'update', $4, '[]', 'replica-test', $5)`,
+      [ONTOLOGY_ID, OT, `replica-${i}`, JSON.stringify({ qa: i }), branchId],
     );
   }
 });
@@ -131,7 +148,7 @@ describe("multi-replica fleet correctness", () => {
       await sendSignal({
         ontologyId: ONTOLOGY_ID,
         objectTypeApiName: OT,
-        signalType: "manualRun",
+        signalType: "sourceTransactionCommitted",
       });
 
       // 1) Both workers VISIBLY poll the same queue — Temporal attribute.
@@ -142,7 +159,7 @@ describe("multi-replica fleet correctness", () => {
         await waitFor(async () => {
           const desc = await conn.workflowService.describeTaskQueue({
             namespace: LANE.TEMPORAL_NAMESPACE,
-            taskQueue: { name: LANE.TEMPORAL_TASK_QUEUE, kind: 1 },
+            taskQueue: { name: QUEUE, kind: 1 },
           } as never);
           const raw = JSON.stringify(desc);
           return raw.includes(LANE.TELLUS_ENVIRONMENT_ID);
@@ -219,13 +236,13 @@ describe("multi-replica fleet correctness", () => {
         "npx",
         ["tsx", "scripts/funnel-probe/replicaWorker.ts", "--label", "FOREIGN"],
         {
-          cwd: path.resolve(__dirname, "../.."),
+          cwd: path.resolve(__dirname, "../../.."),
           env: {
             ...process.env,
             // The hostile config: verify env identity claiming the lane queue.
             TELLUS_ENVIRONMENT_ID: "tellus-automate-verify-main",
             TEMPORAL_NAMESPACE: LANE.TEMPORAL_NAMESPACE,
-            TEMPORAL_TASK_QUEUE: LANE.TEMPORAL_TASK_QUEUE,
+            TEMPORAL_TASK_QUEUE: QUEUE,
             PGDATABASE: LANE.PGDATABASE,
             FUNNEL_STAGE_RECEIPT_FILE: receiptFile,
             FUNNEL_STAGE_RECEIPT_LABEL: "FOREIGN",

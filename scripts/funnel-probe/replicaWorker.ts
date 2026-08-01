@@ -24,12 +24,13 @@ function flag(name: string, dflt: string): string {
 }
 
 async function main(): Promise<void> {
+  await import("dotenv/config");
   const label = flag("label", `replica-${process.pid}`);
   const interval = Number(flag("dispatcher-interval-ms", "500"));
 
-  const { startTemporalWorker } = await import("../src/services/funnel/temporal/worker");
-  const { startFunnelDispatcher } = await import("../src/services/funnel/funnelDispatcher");
-  const { getEnvironmentIdentity, identityLogFields } = await import("../src/config/environmentIdentity");
+  const { startTemporalWorker } = await import("../../src/services/funnel/temporal/worker");
+  const { startFunnelDispatcher } = await import("../../src/services/funnel/funnelDispatcher");
+  const { getEnvironmentIdentity, identityLogFields } = await import("../../src/config/environmentIdentity");
 
   // startTemporalWorker itself seals the DB → the environment-gate rejects
   // BEFORE any poll (the multi-replica negative case). useVersioning+buildId

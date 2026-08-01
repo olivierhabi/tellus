@@ -20,7 +20,7 @@ import knexLib, { Knex } from "knex";
 // middleware; that path doesn't see the spawned server's seeded users.
 import { ROOT_SPACE_RID } from "../../../src/lib/rid";
 
-const TEST_SERVER = process.env.TEST_SERVER_URL || "http://localhost:3000";
+const TEST_SERVER = process.env.TEST_SERVER_URL || (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 const knex: Knex = knexLib({
   client: "pg",

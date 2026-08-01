@@ -56,7 +56,7 @@ function hasAuthHeader(init?: RequestInit): boolean {
 
 function targetsTestServer(url: string | URL | Request): boolean {
   const s = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
-  return s.startsWith("http://localhost:3000");
+  return s.startsWith(process.env.TEST_BASE_URL ?? "http://localhost:3000");
 }
 
 globalThis.fetch = (async (

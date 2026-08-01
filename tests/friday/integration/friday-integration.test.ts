@@ -18,7 +18,7 @@ import { resetRateLimiter } from "../../helpers/rateLimitReset";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const BASE = "http://localhost:3000";
+const BASE = (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 // Generate a unique 4-digit suffix based on timestamp to avoid collisions
 const SUFFIX = String(Date.now()).slice(-4);

@@ -31,6 +31,9 @@ export interface LaneEnv {
   OS_INDEX_PREFIX: string;
   TELLUS_DESTRUCTIVE_TESTS_ALLOWED: string;
   TELLUS_TEST_API_BASE_URL: string;
+  TEST_BASE_URL: string;
+  TELLUS_TEST_BASE_URL: string;
+  PORT: string;
   DATA_DIR: string;
 }
 
@@ -47,7 +50,10 @@ export const LANE: LaneEnv = {
   S3_BUCKET: "tellus-tests-bucket",
   OS_INDEX_PREFIX: "ttest-ontology-",
   TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1",
-  TELLUS_TEST_API_BASE_URL: "http://localhost:3000",
+  TELLUS_TEST_API_BASE_URL: "http://localhost:3002",
+  TEST_BASE_URL: "http://localhost:3002",
+  TELLUS_TEST_BASE_URL: "http://localhost:3002",
+  PORT: "3002",
   DATA_DIR: "/tmp/ontology-testdata",
 };
 

@@ -14,7 +14,7 @@
 // Set TEST_BASE_URL if server is not on localhost:3000.
 // ---------------------------------------------------------------------------
 
-const BASE_URL = process.env.TEST_BASE_URL || "http://localhost:3000";
+const BASE_URL = process.env.TEST_BASE_URL ?? "http://localhost:3000";
 
 // ---------------------------------------------------------------------------
 // Types

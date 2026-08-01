@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeAll } from "vitest";
 
-const BASE = "http://localhost:3000";
+const BASE = (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 let serverReachable = false;
 let ontologyId = "";

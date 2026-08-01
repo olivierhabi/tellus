@@ -35,7 +35,7 @@ import { randomUUID } from "crypto";
 
 const KEYCLOAK_URL = process.env.KEYCLOAK_URL || "http://localhost:8086";
 const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM || "tellus";
-const BASE = "http://localhost:3000";
+const BASE = (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 // ---------------------------------------------------------------------------
 // Helpers — fetch a real JWT from the test Keycloak instance, not a stub.
