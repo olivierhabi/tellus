@@ -143,7 +143,7 @@ async function ensureNamespace(
   await connection.workflowService.registerNamespace({
     namespace: ns,
     workflowExecutionRetentionPeriod: {
-      seconds: retentionDays * 86400 as unknown as import("long"),
+      seconds: retentionDays * 86400 as never,
     },
   });
   console.log(
