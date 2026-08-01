@@ -590,15 +590,19 @@ export async function projectStageToPostgres(input: {
     // object_type_api_name, NOT from this stored column. (See the
     // PASS-BY-REFERENCE notes + durableWorkflow.sweepViaTemporalVisibility.)
     const workflowId = runKey ? `${baseWorkflowId}:${runKey}` : baseWorkflowId;
+    // FUNN-ISO-4: stamp the immutable execution-plan snapshot on creation —
+    // ON CONFLICT keeps the pre-existing run's original snapshot intact.
+    const { currentDefinition: funnelCurrentDefinition } = await import("../../funnel/executionPlan");
+    const defPlan = funnelCurrentDefinition();
 
     if (currentStage === null) {
       const updated = await query(
         `INSERT INTO funnel_run
            (ontology_id, object_type_api_name, workflow_type, status,
             current_stage, objects_indexed, temporal_workflow_id, started_at, completed_at,
-            environment_id)
+            environment_id, definition_version, execution_plan)
          VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'completed',
-                 NULL, COALESCE($3, 0), $4, now(), now(), $5)
+                 NULL, COALESCE($3, 0), $4, now(), now(), $5, $6, $7::jsonb)
          ON CONFLICT (temporal_workflow_id)
          WHERE temporal_workflow_id IS NOT NULL
          DO UPDATE SET status = 'completed',
@@ -606,7 +610,8 @@ export async function projectStageToPostgres(input: {
                        objects_indexed = COALESCE(EXCLUDED.objects_indexed, funnel_run.objects_indexed),
                        completed_at = now()
          RETURNING run_id`,
-        [ontologyId, objectTypeApiName, objectsIndexed ?? null, workflowId, input.environmentId ?? null]
+        [ontologyId, objectTypeApiName, objectsIndexed ?? null, workflowId, input.environmentId ?? null,
+         defPlan.definitionVersion, JSON.stringify(defPlan)]
       );
       // Close the last open stage_run row (with evidence counts merged).
       if (updated.rows[0]?.run_id && input.completedPrevious) {
@@ -628,9 +633,9 @@ export async function projectStageToPostgres(input: {
       `INSERT INTO funnel_run
          (ontology_id, object_type_api_name, workflow_type, status,
           current_stage, objects_indexed, temporal_workflow_id, started_at,
-          environment_id)
+          environment_id, definition_version, execution_plan)
        VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running',
-               $3, COALESCE($4, 0), $5, now(), $6)
+               $3, COALESCE($4, 0), $5, now(), $6, $7, $8::jsonb)
        ON CONFLICT (temporal_workflow_id)
        WHERE temporal_workflow_id IS NOT NULL
        DO UPDATE SET current_stage = EXCLUDED.current_stage,
@@ -651,6 +656,8 @@ export async function projectStageToPostgres(input: {
         objectsIndexed ?? null,
         workflowId,
         input.environmentId ?? null,
+        defPlan.definitionVersion,
+        JSON.stringify(defPlan),
       ]
     );
     // NOTE: re-dispatch of the SAME signal id onto a terminal run row is

@@ -121,12 +121,16 @@ export async function runWorkflow(
   } catch {
     /* strict-mode misconfig would have failed startup — belt and braces */
   }
-  // Durable creation of the funnel_run row.
+  // Durable creation of the funnel_run row — with the immutable
+  // execution-plan snapshot (FUNN-ISO-4).
+  const { currentDefinition } = await import("./executionPlan");
+  const planSnapshot = currentDefinition();
   const runRow = await query(
     `INSERT INTO funnel_run
        (ontology_id, object_type_api_name, workflow_type, status,
-        signal_payload, parent_run_id, environment_id)
-     VALUES ($1, $2, $3, 'running', $4::jsonb, $5, $6)
+        signal_payload, parent_run_id, environment_id,
+        definition_version, execution_plan)
+     VALUES ($1, $2, $3, 'running', $4::jsonb, $5, $6, $7, $8::jsonb)
      RETURNING run_id`,
     [
       input.ontologyId,
@@ -135,6 +139,8 @@ export async function runWorkflow(
       JSON.stringify(input.signalPayload ?? null),
       input.parentRunId ?? null,
       environmentId,
+      planSnapshot.definitionVersion,
+      JSON.stringify(planSnapshot),
     ]
   );
   const runId = runRow.rows[0].run_id as string;

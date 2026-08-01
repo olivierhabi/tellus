@@ -242,6 +242,52 @@ const DISPATCH_STALE_AFTER_MS = Number(
   process.env.FUNNEL_DISPATCH_STALE_AFTER_MS ?? 30_000,
 );
 
+/**
+ * Insert the dispatch_pending run row stamping the immutable execution-plan
+ * snapshot (FUNN-ISO-4). Exported so the pipeline-evolution tests can
+ * exercise plan stamping directly.
+ */
+export async function insertDispatchPendingRun(
+  ontologyId: string,
+  objectTypeApiName: string,
+  temporalWorkflowId: string,
+  payload: Record<string, unknown>,
+): Promise<string | undefined> {
+  const identity = getEnvironmentIdentity();
+  const { currentDefinition } = await import("./executionPlan");
+  const plan = currentDefinition();
+  const insert = await query(
+    `INSERT INTO funnel_run
+       (ontology_id, object_type_api_name, workflow_type, status,
+        signal_payload, temporal_workflow_id, environment_id,
+        definition_version, execution_plan)
+     VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'dispatch_pending',
+             $3::jsonb, $4, $5, $6, $7::jsonb)
+     ON CONFLICT (temporal_workflow_id)
+       WHERE temporal_workflow_id IS NOT NULL
+       DO NOTHING
+     RETURNING run_id`,
+    [
+      ontologyId,
+      objectTypeApiName,
+      JSON.stringify(payload),
+      temporalWorkflowId,
+      identity.environmentId,
+      plan.definitionVersion,
+      JSON.stringify(plan),
+    ],
+  );
+  let runId = insert.rows[0]?.run_id as string | undefined;
+  if (!runId) {
+    const existing = await query(
+      `SELECT run_id FROM funnel_run WHERE temporal_workflow_id = $1`,
+      [temporalWorkflowId],
+    );
+    runId = existing.rows[0]?.run_id as string | undefined;
+  }
+  return runId;
+}
+
 async function dispatchSignalToTemporal(
   ontologyId: string,
   objectTypeApiName: string,
@@ -275,33 +321,13 @@ async function dispatchSignalToTemporal(
   //    ONE funnel_run row per signal.
   const { funnelWorkflowId } = await import("./temporal/worker");
   const temporalWorkflowId = `${funnelWorkflowId(ontologyId, objectTypeRid)}:${signal.signal_id}`;
-  const insert = await query(
-    `INSERT INTO funnel_run
-       (ontology_id, object_type_api_name, workflow_type, status,
-        signal_payload, temporal_workflow_id, environment_id)
-     VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'dispatch_pending',
-             $3::jsonb, $4, $5)
-     ON CONFLICT (temporal_workflow_id)
-       WHERE temporal_workflow_id IS NOT NULL
-       DO NOTHING
-     RETURNING run_id`,
-    [
-      ontologyId,
-      objectTypeApiName,
-      JSON.stringify({ ...signal.payload, signalId: signal.signal_id }),
-      temporalWorkflowId,
-      identity.environmentId,
-    ],
+  const runId0 = await insertDispatchPendingRun(
+    ontologyId,
+    objectTypeApiName,
+    temporalWorkflowId,
+    { ...signal.payload, signalId: signal.signal_id },
   );
-  let runId = insert.rows[0]?.run_id as string | undefined;
-  if (!runId) {
-    const existing = await query(
-      `SELECT run_id FROM funnel_run WHERE temporal_workflow_id = $1`,
-      [temporalWorkflowId],
-    );
-    runId = existing.rows[0]?.run_id as string | undefined;
-  }
-  if (!runId) {
+  if (!runId0) {
     console.warn(
       JSON.stringify({
         level: "warn",
@@ -312,6 +338,7 @@ async function dispatchSignalToTemporal(
     );
     return false;
   }
+  const runId = runId0;
 
   // 3. Actual workflow start (idempotent signalWithStart).
   const { signalTemporalWorkflow } = await import("./temporal/worker");

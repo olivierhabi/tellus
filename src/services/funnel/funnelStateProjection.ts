@@ -44,6 +44,10 @@ import {
   FunnelExecutionEnvironmentMismatch,
   FunnelStaleStateTransition,
 } from "./environmentGuard";
+import {
+  parseExecutionPlan,
+  type FunnelExecutionPlan,
+} from "./executionPlan";
 
 export type FunnelStateStatus =
   | "not_indexed"
@@ -84,7 +88,10 @@ interface RunIdentity {
   status: string;
 }
 
-const REQUIRED_STAGES = ["changelog", "merge", "indexing", "hydration"] as const;
+// FUNN-ISO-4: terminal completeness derives from the RUN'S OWN persisted
+// immutable execution plan (migration 151), never from this module's
+// current pipeline shape — a redeployed pipeline definition must not
+// rewrite the criteria for in-flight history.
 
 async function resolveRunIdentity(
   objectTypeApiName: string,
@@ -147,16 +154,59 @@ async function verifyTerminalConsistency(
       run.environmentId,
     );
   }
+  // Read the run's persisted, immutable execution plan — the definition
+  // to validate by. parseExecutionPlan fails closed on unknown shapes.
+  let plan: FunnelExecutionPlan;
+  {
+    const pr = await query(
+      `SELECT definition_version, execution_plan FROM funnel_run WHERE run_id = $1`,
+      [run.runId],
+    );
+    try {
+      plan = parseExecutionPlan(
+        pr.rows[0]?.execution_plan ?? { definitionVersion: pr.rows[0]?.definition_version },
+      );
+    } catch (err) {
+      recordProjectionSkipped({
+        reason: "unknown_pipeline_definition",
+        object_type: objectTypeApiName,
+        run_environment: run.environmentId ?? "unknown",
+      });
+      throw err;
+    }
+  }
+  const knownStages = new Set([
+    ...plan.requiredStages,
+    ...plan.optionalStages,
+  ]);
   const stages = await query(
     `SELECT stage, status FROM funnel_stage_run WHERE run_id = $1`,
     [run.runId],
   );
+  // A recorded stage outside the plan's vocabulary is a definition-evolution
+  // violation: fail closed (never derive rules for unknown stages).
+  const foreignStages = stages.rows
+    .map((s: { stage: string }) => s.stage)
+    .filter((s: string) => !knownStages.has(s as never));
+  if (foreignStages.length > 0) {
+    recordStageEnvironmentInconsistency({
+      reason: "terminal_verify_foreign_stage",
+      object_type: objectTypeApiName,
+      stages: foreignStages.join(","),
+    });
+    throw new FunnelStaleStateTransition(
+      `terminal 'indexed' rejected for run ${run.runId} (${objectTypeApiName}, plan v${plan.definitionVersion}): ` +
+        `stage(s) not in the persisted execution plan: ${[...new Set(foreignStages)].join(", ")}`,
+    );
+  }
+  // Duplicate stage-completed rows are de-duped by construction (unique
+  // (run_id, stage, attempt) + Set) — the probe remains idempotent.
   const okStages = new Set(
     stages.rows
       .filter((s: { status: string }) => s.status === "succeeded")
       .map((s: { stage: string }) => s.stage),
   );
-  const missing = REQUIRED_STAGES.filter((s) => !okStages.has(s));
+  const missing = plan.requiredStages.filter((s) => !okStages.has(s));
   if (missing.length > 0) {
     recordProjectionSkipped({
       reason: "terminal_verify_failed",
@@ -169,7 +219,7 @@ async function verifyTerminalConsistency(
       missing_stages: missing.join(","),
     });
     throw new FunnelStaleStateTransition(
-      `terminal 'indexed' rejected for run ${run.runId} (${objectTypeApiName}): ` +
+      `terminal 'indexed' rejected for run ${run.runId} (${objectTypeApiName}, plan v${plan.definitionVersion}): ` +
         `required stage(s) missing or not succeeded: ${missing.join(", ")}`,
     );
   }
