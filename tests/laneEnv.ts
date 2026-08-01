@@ -18,6 +18,10 @@
 // ---------------------------------------------------------------------------
 
 export interface LaneEnv {
+  PGHOST: string;
+  PGPORT: string;
+  PGUSER: string;
+  PGPASSWORD: string;
   PGDATABASE: string;
   TELLUS_ENVIRONMENT_ID: string;
   TEMPORAL_NAMESPACE: string;
@@ -31,6 +35,10 @@ export interface LaneEnv {
 }
 
 export const LANE: LaneEnv = {
+  PGHOST: "localhost",
+  PGPORT: "5432",
+  PGUSER: "tellus",
+  PGPASSWORD: "tellus123",
   PGDATABASE: "tellus_tests",
   TELLUS_ENVIRONMENT_ID: "tellus-tests-main",
   TEMPORAL_NAMESPACE: "tellus-funnel-tellus-tests-main",

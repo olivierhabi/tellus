@@ -16,5 +16,10 @@ ALTER TABLE funnel_signal
       'sourceTransactionCommitted',
       'editBatchPending',
       'schemaChanged',
+      'manualRun',
       'pipelineDeployCompleted'
     ));
+-- NB: 152_funnel_signal_manual_run.sql exists because the ORIGINAL body of this
+-- migration accidentally DROPPED 'manualRun' (added by 018): the widened list
+-- here includes it, and 152 additionally widens any schema that received the
+-- historical (erroneous) form.

@@ -525,6 +525,7 @@ async function migrateFoundry(): Promise<void> {
           'sourceTransactionCommitted',
           'editBatchPending',
           'schemaChanged',
+          'manualRun',
           'pipelineDeployCompleted'
         ))
     `);

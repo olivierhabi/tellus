@@ -246,7 +246,10 @@ async function waitForPg(maxWaitMs = 30_000): Promise<void> {
     const p = new Pool({
       host: process.env.PGHOST || "localhost",
       port: parseInt(process.env.PGPORT || "5432", 10),
-      database: process.env.PGDATABASE || "tellus_db",
+      // Maintenance DB: the lane DB (PGDATABASE tellus_tests) may not EXIST
+      // yet — that's bootstrapTestStack's job; reachability is a server
+      // property, not a lane-DB property.
+      database: "postgres",
       user: process.env.PGUSER || "tellus",
       password: process.env.PGPASSWORD || "tellus123",
       connectionTimeoutMillis: 3000,
