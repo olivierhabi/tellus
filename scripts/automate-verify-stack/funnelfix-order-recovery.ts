@@ -21,6 +21,7 @@ const OT = "AvtOrderFixture";
 const EXPECTED = 746;
 
 const DEV_DB = process.env.DEV_PGDATABASE || "tellus_db";
+const DEV_S3_BUCKET = process.env.DEV_S3_BUCKET || "tellus-uploads";
 const VERIFY_DB = process.env.VERIFY_DB || "tellus_automate_verify";
 const VERIFY_OS_PREFIX = process.env.OS_INDEX_PREFIX || "verify-main-ontology-";
 const VERIFY_API = `http://localhost:${process.env.VERIFY_API_PORT ?? 3100}`;
@@ -84,8 +85,8 @@ async function probe(): Promise<Probe> {
     devFunnelRuns: Number(PG(DEV_DB, `SELECT count(*) FROM funnel_run WHERE object_type_api_name='${OT}'`) || 0),
     devDocsOntologyPrefix: osCount("ontology-avtorderfixture"),
     devBucketObjects:
-      (await minioCount(process.env.S3_BUCKET || "tellus-uploads", `changelogs/${OT}/`)) +
-      (await minioCount(process.env.S3_BUCKET || "tellus-uploads", `merged/${OT}/`)),
+      (await minioCount(DEV_S3_BUCKET, `changelogs/${OT}/`)) +
+      (await minioCount(DEV_S3_BUCKET, `merged/${OT}/`)),
   };
 }
 
@@ -97,6 +98,7 @@ async function ensureFixture(): Promise<void> {
 DELETE FROM funnel_signal WHERE object_type_api_name='${OT}';
 DELETE FROM funnel_stage_run WHERE run_id IN (SELECT run_id FROM funnel_run WHERE object_type_api_name='${OT}');
 DELETE FROM funnel_run WHERE object_type_api_name='${OT}';
+DELETE FROM ontology_edit WHERE object_type_api_name='${OT}';
 DELETE FROM object_instances WHERE object_type_api_name='${OT}';
 DELETE FROM object_type WHERE api_name='${OT}';
 
@@ -111,9 +113,13 @@ UPDATE object_type SET primary_key_property_id = (
     SELECT p.property_id FROM property p
       JOIN object_type t ON t.api_name = '${OT}' AND p.object_type_id = t.object_type_id
      WHERE p.api_name = 'pk') WHERE api_name = '${OT}';
-INSERT INTO object_instances (ontology_id, branch_id, object_type_api_name, primary_key, properties, markings)
-  SELECT '${ONTOLOGY_ID}', (SELECT branch_id FROM ontology_branch WHERE name = 'main' LIMIT 1),
-         '${OT}', 'row-' || g::text, jsonb_build_object('pk', 'row-' || g::text, 'qty', g), ARRAY['PUBLIC']
+INSERT INTO ontology_edit
+  (ontology_id, object_type_api_name, primary_key, operation, property_values,
+   link_edits, executed_by, branch_id)
+  SELECT '${ONTOLOGY_ID}', '${OT}', 'row-' || g::text, 'update',
+         jsonb_build_object('pk', 'row-' || g::text, 'qty', g), '[]'::jsonb,
+         'funniso-recovery-fixture',
+         (SELECT branch_id FROM ontology_branch WHERE name = 'main' LIMIT 1)
   FROM generate_series(1, ${EXPECTED}) g;
 `;
   require("fs").writeFileSync(tmpfile, sql);
@@ -127,7 +133,7 @@ INSERT INTO object_instances (ontology_id, branch_id, object_type_api_name, prim
   }
 }
 
-async function apiVisibleCount(): Promise<number> {
+async function apiVisibleCount(): Promise<{ totalCount: number; pageRows: number; nextPageToken: unknown }> {
   const tokRes = await fetch(
     `${KC_URL}/realms/${KC_REALM}/protocol/openid-connect/token`,
     {
@@ -138,7 +144,7 @@ async function apiVisibleCount(): Promise<number> {
       }),
     },
   );
-  if (!tokRes.ok) return -1;
+  if (!tokRes.ok) return { totalCount: -1, pageRows: -1, nextPageToken: null };
   const { access_token } = (await tokRes.json()) as { access_token: string };
   const search = await fetch(`${VERIFY_API}/api/v1/objects/${OT}/search`, {
     method: "POST",
@@ -148,9 +154,15 @@ async function apiVisibleCount(): Promise<number> {
     },
     body: JSON.stringify({ $pageSize: 1000 }),
   });
-  if (!search.ok) return -1;
+  if (!search.ok) return { totalCount: -1, pageRows: -1, nextPageToken: null };
   const body = (await search.json()) as Record<string, unknown>;
-  return Array.isArray(body.data) ? body.data.length : -1;
+  const result = {
+    totalCount: Number(body.totalCount ?? -1),
+    pageRows: Array.isArray(body.data) ? body.data.length : -1,
+    nextPageToken: body.nextPageToken ?? null,
+  };
+  console.log("API_COUNT_EVIDENCE=" + JSON.stringify(result));
+  return result;
 }
 
 async function pollIndexed(): Promise<void> {
@@ -191,6 +203,9 @@ async function main(): Promise<void> {
   expectEqual(before.devDocsOntologyPrefix, 0, "pre-existing foreign index docs");
   expectEqual(before.devBucketObjects, 0, "pre-existing foreign bucket objects");
   await ensureFixture();
+  const sourceRows = Number(
+    PG(VERIFY_DB, `SELECT count(*) FROM ontology_edit WHERE object_type_api_name='${OT}'`),
+  );
 
   const signalId = PG(
     VERIFY_DB,
@@ -217,11 +232,11 @@ async function main(): Promise<void> {
   const after = await probe();
 
   const matrix = {
-    "source rows": EXPECTED,
+    "source rows": sourceRows,
     "merged rows": merged,
     "indexed object instances": merged,
     "open search docs": osDocs,
-    "API visible objects": apiVisible,
+    "API visible objects": apiVisible.totalCount,
     // Object-type-scoped absolute counts. The previous whole-environment
     // deltas falsely attributed unrelated concurrent dev traffic to this
     // verify fixture; these probes now fail only on AvtOrderFixture leakage.
@@ -232,10 +247,15 @@ async function main(): Promise<void> {
     "environment mismatches": 0,
   };
 
+  expectEqual(matrix["source rows"], EXPECTED, "source rows");
   expectEqual(matrix["merged rows"], EXPECTED, "merged rows");
   expectEqual(matrix["indexed object instances"], EXPECTED, "object instances");
   expectEqual(osDocs, EXPECTED, "OS docs");
-  expectEqual(apiVisible, EXPECTED, "API visible");
+  expectEqual(apiVisible.totalCount, EXPECTED, "API authoritative totalCount");
+  expectEqual(apiVisible.pageRows, EXPECTED, "API page rows");
+  if (apiVisible.nextPageToken !== null) {
+    throw new Error(`API pagination incomplete: nextPageToken=${String(apiVisible.nextPageToken)}`);
+  }
   expectEqual(Number(String(stages)), 4, "succeeded stage rows (attempt 1)");
   expectEqual(matrix["foreign database writes"], 0, "foreign db writes");
   expectEqual(matrix["foreign index writes"], 0, "foreign index writes");
