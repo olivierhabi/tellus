@@ -36,7 +36,7 @@ import { runIndexingActivity } from "../../quickwit/indexingActivity";
 import { ensureIndex } from "../../quickwit/indexManager";
 import { MergedRow } from "../../quickwit/docBuilder";
 import { runHydrationActivity } from "../../quickwit/hydrationActivity";
-import { sleepForStageDelay } from "../stageDelay";
+import { sleepForStageDelay, writeStageReceipt } from "../stageDelay";
 import {
   projectFunnelTerminalToState,
   type FunnelStateStatus,
@@ -200,6 +200,7 @@ async function runChangelogActivityImpl(
 }> {
   await fence(input);
   // Optional dev/demo pacing — no-op in production (env default 0).
+  writeStageReceipt("changelog");
   await sleepForStageDelay();
   const table = await ensureTable(input.objectTypeApiName, "changelog", "default");
   // Reader-selection precedence (most specific first):
@@ -364,6 +365,7 @@ async function runMergeActivityImpl(
   mergedRowCount: number;
 }> {
   await fence(input);
+  writeStageReceipt("merge");
   await sleepForStageDelay();
   const mergedTable = await ensureTable(input.objectTypeApiName, "merged", "state");
   const pending = await getPendingMergeEdits(input.objectTypeApiName);
@@ -427,6 +429,7 @@ async function runIndexingActivityProxyImpl(
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
   await fence(input);
+  writeStageReceipt("indexing");
   await sleepForStageDelay();
   const pending = await getPendingIndexEdits(input.objectTypeApiName);
   const editIds = pending.map((e) => e.edit_id);
@@ -495,6 +498,7 @@ async function runHydrationActivityProxyImpl(
   input: ObjectTypeCtx & { publishedSplitIds: string[] }
 ): Promise<{ prefetched: number }> {
   await fence(input);
+  writeStageReceipt("hydration");
   await sleepForStageDelay();
   if (input.publishedSplitIds.length === 0) return { prefetched: 0 };
   // Hydration errors must NOT be silently swallowed — the spec §B3

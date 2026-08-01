@@ -18,7 +18,7 @@
 
 import { query } from "../../db";
 import { claimNextSignal, runWorkflow, WorkflowContext } from "./durableWorkflow";
-import { sleepForStageDelay } from "./stageDelay";
+import { sleepForStageDelay, writeStageReceipt } from "./stageDelay";
 import { projectFunnelTerminalToState } from "./funnelStateProjection";
 import {
   getEnvironmentIdentity,
@@ -601,7 +601,8 @@ async function objectTypeFunnelWorkflow(
     input: { objectTypeApiName: ctx.objectTypeApiName },
     activity: async () => {
       // Optional dev/demo pacing — no-op in production (env default 0).
-      await sleepForStageDelay();
+      writeStageReceipt("changelog");
+        await sleepForStageDelay();
       // Two reader paths:
       //   (a) Source datasource has an Iceberg location registered AND
       //       DuckDB is available → use iceberg_scan incremental read
@@ -687,7 +688,8 @@ async function objectTypeFunnelWorkflow(
     stage: "merge",
     input: { objectTypeApiName: ctx.objectTypeApiName, rowsFromChangelog: changelogOut.rowsEmitted },
     activity: async () => {
-      await sleepForStageDelay();
+      writeStageReceipt("merge");
+        await sleepForStageDelay();
       const pending = await getPendingMergeEdits(ctx.objectTypeApiName);
       // PASS-BY-REFERENCE (Option 2): re-read the committed changelog rows
       // from the snapshot (Parquet object in MinIO via parquet_ref) instead
@@ -729,7 +731,8 @@ async function objectTypeFunnelWorkflow(
     stage: "indexing",
     input: { objectTypeApiName: ctx.objectTypeApiName, upserts: mergeOut.upserts },
     activity: async () => {
-      await sleepForStageDelay();
+      writeStageReceipt("indexing");
+        await sleepForStageDelay();
       // Two code paths:
       //   (a) Quickwit reachable — call runIndexingActivity to ensure the
       //       ot_<type> index exists, stream merged rows onto Kafka,
