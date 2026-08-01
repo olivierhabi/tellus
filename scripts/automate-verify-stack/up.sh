@@ -27,8 +27,13 @@ set -a; . scripts/automate-verify-stack/stack.env; set +a
 # (no accidental sprawl — collision = same stack, same namespace). No
 # partial-rollback needed: every piece below is idempotent.
 mkdir -p /tmp/automate-verify-stack
-exec 9>/tmp/automate-verify-stack/up.lock
-flock -w 300 9 || { echo "another up.sh is running; lock stale > 300s"; exit 1; }
+LOCK_DIR=/tmp/automate-verify-stack/.up-lock.d
+mitok=0; while [ $mitok -lt 30 ]; do
+  if mkdir "$LOCK_DIR" 2>/dev/null; then break; fi
+  mitok=$((mitok+1)); sleep 10
+done
+[ -d "$LOCK_DIR" ] || { echo "another up.sh holds the lock > 300s"; exit 1; }
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 # --- 0b. Port availability — fail loudly instead of silently competing. ---
 for p in "$VERIFY_API_PORT" "$VERIFY_FE_PORT"; do
   if [ -n "$(lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null)" ]; then
@@ -39,7 +44,7 @@ for p in "$VERIFY_API_PORT" "$VERIFY_FE_PORT"; do
 done
 echo "ports $VERIFY_API_PORT (api) and $VERIFY_FE_PORT (fe) are free"
 
-PSQL() { docker exec -e PGPASSWORD="$PGPASSWORD" tellus-postgres-1 psql -h localhost -p 5432 -U "$PGUSER" -d "$PGDATABASE" -tAc "$1"; }
+PSQL() { docker exec -e PGPASSWORD="$PGPASSWORD" tellus-postgres-1 psql -h localhost -p 5432 -U "$PGUSER" -d postgres -tAc "$1"; }
 
 # --- 1. Isolated PostgreSQL DB + migrations. ---
 if [ "$(PSQL "SELECT 1 FROM pg_database WHERE datname='$VERIFY_DB'")" != "1" ]; then
