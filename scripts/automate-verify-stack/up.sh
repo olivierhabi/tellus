@@ -21,7 +21,15 @@ DETACH="$REPO_ROOT/scripts/automate-verify-stack/detach.sh"
 set -a; . ./.env; set +a
 set -a; . scripts/automate-verify-stack/stack.env; set +a
 
-# --- 0. Port availability — fail loudly instead of silently competing. ---
+# --- 0. Race-proofing + port availability. —
+# CI may run multiple instances of this script; an flock mutex protects the
+# setup order, and namespaces derive deterministically from VERIFY_STACK_ID
+# (no accidental sprawl — collision = same stack, same namespace). No
+# partial-rollback needed: every piece below is idempotent.
+mkdir -p /tmp/automate-verify-stack
+exec 9>/tmp/automate-verify-stack/up.lock
+flock -w 300 9 || { echo "another up.sh is running; lock stale > 300s"; exit 1; }
+# --- 0b. Port availability — fail loudly instead of silently competing. ---
 for p in "$VERIFY_API_PORT" "$VERIFY_FE_PORT"; do
   if [ -n "$(lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null)" ]; then
     echo "ERROR: port $p is already in use (run scripts/automate-verify-stack/down.sh first or pick other ports)." >&2
@@ -158,6 +166,7 @@ mkdir -p /tmp/automate-verify-stack
   TEMPORAL_NAMESPACE="$TEMPORAL_NAMESPACE" \
   TEMPORAL_TASK_QUEUE="$TEMPORAL_TASK_QUEUE" \
   TEMPORAL_WORKER_BUILD_ID="$TEMPORAL_WORKER_BUILD_ID" \
+  OS_INDEX_PREFIX="$OS_INDEX_PREFIX" \
   PG_CONNECT_TIMEOUT_MS=30000 PG_POOL_MAX=10 && \
   bash "$DETACH" /tmp/automate-verify-api.log /tmp/automate-verify-stack/api.pid pnpm exec tsx src/server.ts )
 echo "starting isolated API on :$VERIFY_API_PORT (log /tmp/automate-verify-api.log)"

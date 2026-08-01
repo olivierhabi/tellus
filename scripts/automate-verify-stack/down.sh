@@ -13,6 +13,12 @@ cd "$(dirname "$0")/../.."
 set -a; . ./.env; set +a
 set -a; . scripts/automate-verify-stack/stack.env; set +a
 
+# --- 0b. DESTRUCTIVE GUARD: prove this teardown may destroy; abort early. ---
+REPO_ROOT="$PWD"
+./node_modules/.bin/tsx scripts/destructive-guard-cli.ts \
+  --operation "down.sh-stack-teardown" --skip-api-probe \
+  || { echo "REFUSED: env cannot prove this is a sealed, isolated verify stack — NOT destroying anything"; exit 1; }
+
 # 1. Stop the isolated API + FE by their recorded pids (best-effort), then
 #    kill anything still bound to the verify ports as a safety net.
 for name in api fe; do
@@ -24,7 +30,6 @@ for p in "$VERIFY_API_PORT" "$VERIFY_FE_PORT"; do
   [ -n "$pid" ] && kill -9 $pid 2>/dev/null && echo "killed leftover process on :$p ($pid)"
 done
 
-set -a; . ./.env; set +a
 PSQL() { docker exec -e PGPASSWORD="$PGPASSWORD" tellus-postgres-1 psql -h localhost -p 5432 -U "$PGUSER" -d "$PGDATABASE" -tAc "$1"; }
 
 # 2. Drop the isolated database ( forcibly disconnect any lingering conns).
@@ -46,21 +51,17 @@ fi
 # 4. Delete the isolated MinIO bucket.
 node -e "import('dotenv/config').then(async()=>{const{S3Client,ListObjectsV2Command,DeleteObjectCommand,DeleteBucketCommand}=await import('@aws-sdk/client-s3');const c=new S3Client({region:process.env.S3_REGION,endpoint:process.env.S3_ENDPOINT,credentials:{accessKeyId:process.env.S3_ACCESS_KEY_ID,secretAccessKey:process.env.S3_SECRET_ACCESS_KEY},forcePathStyle:process.env.S3_FORCE_PATH_STYLE==='true'});async function empty(){let tok;do{const l=await c.send(new ListObjectsV2Command({Bucket:'$VERIFY_S3_BUCKET',ContinuationToken:tok}));for(const o of (l.Contents||[])){await c.send(new DeleteObjectCommand({Bucket:'$VERIFY_S3_BUCKET',Key:o.Key}))}tok=l.IsTruncated?l.NextContinuationToken:undefined}while(tok)}try{await empty();await c.send(new DeleteBucketCommand({Bucket:'$VERIFY_S3_BUCKET'}));console.log('bucket $VERIFY_S3_BUCKET deleted (emptied + removed)')}catch(e){console.log('bucket best-effort:',e.message||e)}})" 2>&1 | tail -1 || true
 
-# 5. Purge the OpenSearch indices for the verify ontology's object types.
-# down.sh drops the isolated PG database but the OpenSearch indices (shared
-# OS container) are NOT dropped — docs authored during a prior verify run
-# (the VerifyTaxpayer objects the E2E creates) survive a down/up cycle and
-# pollute the next run's membership baseline (the baseline reads OS). Delete
-# every `ontology-*` index whose `__ontology` is the verify ontology id so
-# each run starts from a clean index matching the fresh DB.
-VERIFY_ONTOLOGY="${VERIFY_ONTOLOGY:-00000000-0000-0000-0000-000000000001}"
-curl -s -m 15 -X POST "http://localhost:9200/_search" -H 'Content-Type: application/json' \
-  -d "{\"size\":0,\"query\":{\"term\":{\"__ontology\":\"$VERIFY_ONTOLOGY\"}},\"aggs\":{\"idx\":{\"terms\":{\"field\":\"_index\",\"size\":50}}}}" \
-  | jq -r '.aggregations.idx.buckets[].key' 2>/dev/null | while read -r idx; do
-      [ -n "$idx" ] && curl -s -m 15 -X DELETE "http://localhost:9200/$idx" -o /dev/null
+# 5. Purge this stack's OpenSearch data — name-scoped, NOT content-scoped.
+# The canonical ontology id is SHARED across stacks (a single DB row holds
+# the singleton), so term-scanning `__ontology` would claim DEV's indices
+# too. The OS_INDEX_PREFIX discipline means verify's indices live under
+# verify-ontology-*; the purge enumerates BY NAME and never disturbs dev.
+OS_PREFIX="${OS_INDEX_PREFIX:-verify-main-ontology-}"
+docker exec tellus-opensearch-1 curl -s -m 15 -X GET "http://localhost:9200/_cat/indices?h=index" 2>/dev/null \
+  | awk '{print $1}' | grep -E "^${OS_PREFIX}" | while read -r idx; do
+      [ -n "$idx" ] && curl -s -m 15 -X DELETE "http://localhost:9200/$idx" -o /dev/null         && echo "deleted index $idx"
     done
-echo "purged OpenSearch indices for ontology $VERIFY_ONTOLOGY"
-
+echo "purged ${OS_PREFIX}* OpenSearch indices"
 # --- 6. Temporal namespace (FUNN-ISO cleanup policy). ---
 # Ephemeral verify namespaces have a short history retention
 # (VERIFY_TEMPORAL_RETENTION, default 72h) — TTL expiry is the documented
