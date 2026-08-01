@@ -5,17 +5,12 @@
 //   1. deployment seal (fails fast on mismatch — the audit expectation for a
 //      worker pointed at a queue whose DB belongs to another environment),
 //   2. Temporal funnel worker,
-//   3. in-process dispatcher loop (queue dispatch for signal claims).
-//
-// Env contract (the lane): TELLUS_ENVIRONMENT_ID, PG*, TEMPORAL_*, plus:
-//   FUNNEL_STAGE_DELAY_MS        — widen activity windows for deterministic
-//                                  "kill during activity" choreography
-//   FUNNEL_STAGE_RECEIPT_FILE    — every stage claims one JSONL receipt
-//   FUNNEL_STAGE_RECEIPT_LABEL   — attribution tag (replica identifier)
+//   3. in-process dispatcher loop (queue dispatch for signal claims,
+//      optionally scoped to a stamped set of object types so a shared
+//      test-lane queue can't shift-test fixtures into the wrong replica).
 //
 // stdout JSON markers: {type:"replica_ready",label,pid,namespace,queue}.
-// The process does not get a "boot failed" side channel — boot errors are
-// process-fatal (non-zero exit), exactly the way the seal gate behaves.
+// Boot errors are process-fatal (non-zero exit) — matching the seal gate.
 // ---------------------------------------------------------------------------
 
 function flag(name: string, dflt: string): string {
@@ -24,23 +19,30 @@ function flag(name: string, dflt: string): string {
 }
 
 async function main(): Promise<void> {
-  await import("dotenv/config");
+  // dotenv-loaded with an EXPLICIT path (custom spawn-CWD-safe).
+  const dotenvMod = (await import("dotenv")).default;
+  const url = new URL("../../.env", import.meta.url).pathname;
+  dotenvMod.config({ path: url });
   const label = flag("label", `replica-${process.pid}`);
   const interval = Number(flag("dispatcher-interval-ms", "500"));
+  const objectTypes = flag("object-types", "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
 
   const { startTemporalWorker } = await import("../../src/services/funnel/temporal/worker");
   const { startFunnelDispatcher } = await import("../../src/services/funnel/funnelDispatcher");
   const { getEnvironmentIdentity, identityLogFields } = await import("../../src/config/environmentIdentity");
 
-  // startTemporalWorker itself seals the DB → the environment-gate rejects
-  // BEFORE any poll (the multi-replica negative case). useVersioning+buildId
-  // come from worker.ts; queue routing rules self-provision in local mode.
   const started = await startTemporalWorker();
   if (!started) {
     console.error(JSON.stringify({ type: "replica_tmporal_unreachable", label }));
     process.exit(2);
   }
-  startFunnelDispatcher({ intervalMs: interval });
+  startFunnelDispatcher({
+    intervalMs: interval,
+    ...(objectTypes.length > 0 ? { objectTypes } : {}),
+  });
 
   const id = getEnvironmentIdentity();
   console.log(JSON.stringify({
@@ -50,6 +52,7 @@ async function main(): Promise<void> {
     namespace: id.temporalNamespace,
     queue: id.temporalTaskQueue,
     workerIdentity: id.workerIdentity,
+    objectTypes: objectTypes.length ? objectTypes : null,
     ...identityLogFields(id),
   }));
 
