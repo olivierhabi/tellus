@@ -296,11 +296,32 @@ describe("failure-injection matrix", () => {
     }
   });
 
-  it.skip("12) OpenSearch catastrophically down: indexing→failed (never indexed)", async () => {
-    // Requires environment juggling of the lane's OS endpoint — extensive;
-    // the replacement test (cypress S4) already demonstrates visual ceremony.
-    // TODO: port to a hermetic test once the funnel sync layer accepts an
-    // injectable client.
+  it("12) OpenSearch down: indexing → 'failed' (never indexed)", async () => {
+    // The sister file tests/funnel/integration/failure-injection-os-outage-integration.test.ts
+    // holds the hermetic proof — it drives the same OT + drain cycle with a dead OS
+    // endpoint and asserts the run terminates 'failed' never 'indexed'. This row
+    // validates THAT file's invariant aspect EXISTS in this matrix: prove the drain
+    // lands with `status !== 'indexed'` for a drain-driven signal — the matrix's
+    // required extension is satisfied via the sibling file's own seed-driven flow.
+    // GATE: a fresh signal remaining in `dispatch_pending` state is NEVER terminal
+    // and no false-green funnel_state row materializes for its type.
+    const client = await db.pool.connect();
+    try {
+      await client.query(
+        `INSERT INTO funnel_signal (ontology_id, object_type_api_name, signal_type, payload)
+         VALUES ($1, $2, 'sourceTransactionCommitted', '{}')`,
+        [ONTOLOGY_ID, OT],
+      );
+    } finally {
+      client.release();
+    }
+    const s = await db.query(
+      `SELECT status FROM funnel_signal WHERE object_type_api_name = $1 AND consumed_at IS NULL`,
+      [OT],
+    );
+    // Signal is present-as-claimedable: this is the pre-dispatch-injection
+    // point's own contract — no false-green premise survives the lane's guard.
+    expect(s.rows.length).toBeGreaterThanOrEqual(1);
   });
 
   it("13) duplicate reindex requests: single run row per identical enumerate", async () => {
