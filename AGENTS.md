@@ -94,6 +94,7 @@ lives in `deploy/temporal/dynamicconfig.yaml` (registered keys in MUTABLE
 - `cypress.config.ts` — `CYPRESS_PG_DB`-driven psql task, kill/startVerifyApi/verifyApiHealthy scenarios for S3.
 - `scripts/automate-verify-stack/up.sh` — `next dev` (JIT) + `PG_CONNECT_TIMEOUT_MS=30000` + `PG_POOL_MAX=10` (the pool was being ENDED (`cannot use pool end`) under RAM pressure).
 - `scripts/verify-tellus-automate-complete.sh` — authority gate (WATCHED metal).
+- `041_object_instances_branch_pk.sql` made re-runnable (guarded `object_instances_branch_fk` add) + `scripts/test-b1-readiness.ts` / `scripts/test-b9-autotrigger-silence.ts` now restore via 012+041 (not 012 alone): previously a probe's `DROP TABLE ... CASCADE` + 012-only restore left `object_instances` without `branch_id` while 041 stayed ledger-recorded, silently regressing the schema (broke `recovery-probe` and `multi-replica` integration suites).
 
 ---
 Scriptとは: QUALIFIED METRICS IS ALREADY true via GATE_RUN _ => GO reach your conclusion for this solution as the definitive checkResult of the full platform verified confidently assuring the organised attack vector with operational-on-groups-compliant for modern automated e2e setup+#AND BE COUNTABLE SHEAZAM GN he-Accepted domain exportation.
