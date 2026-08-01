@@ -19,24 +19,52 @@ REPO_ROOT="$PWD"
   --operation "down.sh-stack-teardown" --skip-api-probe \
   || { echo "REFUSED: env cannot prove this is a sealed, isolated verify stack — NOT destroying anything"; exit 1; }
 
-# 1. Stop the isolated API + FE by their recorded pids (best-effort), then
-#    kill anything still bound to the verify ports as a safety net.
+# 1. Stop the isolated API + FE — WAIT FOR THE PROCESS TO ACTUALLY DIE.
+# A pool with a live process keeps at-N connections open and our later DROP
+# ALWAYS races it. The ONLY criterion: nothing listens on the ports and no
+# pid in my stacks (=it's dead).
+kill_process_on_port() {
+  local port="$1" label="$2"
+  local pp
+  pp=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  [ -n "$pp" ] && kill -9 "$pp" 2>/dev/null && echo "killed $label pid $pp on :$port"
+}
 for name in api fe; do
   pidfile="/tmp/automate-verify-stack/$name.pid"
-  [ -f "$pidfile" ] && kill -9 "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile"
+  if [ -f "$pidfile" ]; then
+    PPIDV=$(cat "$pidfile"); kill -9 "$PPIDV" 2>/dev/null; rm -f "$pidfile"
+  fi
 done
 for p in "$VERIFY_API_PORT" "$VERIFY_FE_PORT"; do
-  pid=$(lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null || true)
-  [ -n "$pid" ] && kill -9 $pid 2>/dev/null && echo "killed leftover process on :$p ($pid)"
+  kill_process_on_port "$p" "stack"
+done
+sleep 3
+# Only proceed once BOTH ports are free — never proceed with a zombie.
+for p in "$VERIFY_API_PORT" "$VERIFY_FE_PORT"; do
+  for try in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -z "$(lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null)" ]; then break; fi
+    sleep 1
+  done
+  [ -z "$(lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null)" ] || { echo "port $p still held after kill attempts — aborting"; exit 1; }
 done
 
 PSQL() { docker exec -e PGPASSWORD="$PGPASSWORD" tellus-postgres-1 psql -h localhost -p 5432 -U "$PGUSER" -d "$PGDATABASE" -tAc "$1"; }
+PSQL_MAINT() { docker exec -e PGPASSWORD="$PGPASSWORD" tellus-postgres-1 psql -h localhost -p 5432 -U "$PGUSER" -d postgres -tAc "$1"; }
 
-# 2. Drop the isolated database ( forcibly disconnect any lingering conns).
-if [ "$(PSQL "SELECT 1 FROM pg_database WHERE datname='$VERIFY_DB'")" = "1" ]; then
-  PSQL "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$VERIFY_DB' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
-  PSQL "DROP DATABASE IF EXISTS \"$VERIFY_DB\" WITH (FORCE)" >/dev/null 2>&1 || PSQL "DROP DATABASE \"$VERIFY_DB\"" >/dev/null 2>&1 || true
-  echo "dropped DB $VERIFY_DB"
+# 2. Drop the isolated database — retry until no backend survives.
+if [ "$(PSQL_MAINT "SELECT 1 FROM pg_database WHERE datname='$VERIFY_DB'")" = "1" ]; then
+  PSQL_MAINT "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$VERIFY_DB' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+  sleep 1
+  for attempt in 1 2 3 4 5; do
+    if PSQL_MAINT "DROP DATABASE \"$VERIFY_DB\"" >/dev/null 2>&1; then
+      echo "dropped DB $VERIFY_DB (attempt $attempt)"
+      break
+    fi
+    echo "drop DATABASE attempt $attempt failed — waiting for backends to die"
+    PSQL_MAINT "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$VERIFY_DB' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+    sleep 3
+  done
+  [ -z "$(PSQL_MAINT "SELECT 1 FROM pg_database WHERE datname='$VERIFY_DB'")" ] || { echo "DB $VERIFY_DB could NOT be dropped — aborting (stale data ≠ re-created fixture)"; exit 1; }
 fi
 
 # 3. Delete the isolated Keycloak realm.
