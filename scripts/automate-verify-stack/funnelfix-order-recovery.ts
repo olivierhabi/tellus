@@ -88,8 +88,10 @@ async function probe(): Promise<Probe> {
 }
 
 async function ensureFixture(): Promise<void> {
-  execSync(
-    `docker exec -e PGPASSWORD=${process.env.PGPASSWORD || "tellus123"} tellus-postgres-1 psql -U ${process.env.PGUSER || "tellus"} -d ${VERIFY_DB} <<'SQL'
+  // The previous heredoc-based execSync silently failed under some shells —
+  // write to a temp file and drive psql from that path. Deterministic.
+  const tmpfile = `/tmp/funnelfix-fixture-${process.pid}.sql`;
+  const sql = `
 DELETE FROM funnel_signal WHERE object_type_api_name='${OT}';
 DELETE FROM funnel_stage_run WHERE run_id IN (SELECT run_id FROM funnel_run WHERE object_type_api_name='${OT}');
 DELETE FROM funnel_run WHERE object_type_api_name='${OT}';
@@ -100,9 +102,9 @@ INSERT INTO object_type (ontology_id, api_name, display_name, status)
   VALUES ('${ONTOLOGY_ID}', '${OT}', 'AVT OrderFixture', 'experimental')
   ON CONFLICT (ontology_id, api_name) DO NOTHING;
 INSERT INTO property (object_type_id, api_name, display_name, base_type, is_required, ordinal)
-  SELECT ot.object_type_id, 'pk', 'PK', 'string', true, 0 FROM object_type ot WHERE ot.api_name = '${OT}';
+  SELECT ot.object_type_id, 'pk', 'PK', 'string', true, 0 FROM object_type ot WHERE ot.api_name = '${OT}' AND NOT EXISTS (SELECT 1 FROM property WHERE object_type_id = ot.object_type_id AND api_name = 'pk');
 INSERT INTO property (object_type_id, api_name, display_name, base_type, is_required, ordinal)
-  SELECT ot.object_type_id, 'qty', 'Qty', 'integer', false, 1 FROM object_type ot WHERE ot.api_name = '${OT}';
+  SELECT ot.object_type_id, 'qty', 'Qty', 'integer', false, 1 FROM object_type ot WHERE ot.api_name = '${OT}' AND NOT EXISTS (SELECT 1 FROM property WHERE object_type_id = ot.object_type_id AND api_name = 'qty');
 UPDATE object_type SET primary_key_property_id = (
     SELECT p.property_id FROM property p
       JOIN object_type t ON t.api_name = '${OT}' AND p.object_type_id = t.object_type_id
@@ -111,9 +113,16 @@ INSERT INTO object_instances (ontology_id, branch_id, object_type_api_name, prim
   SELECT '${ONTOLOGY_ID}', (SELECT branch_id FROM ontology_branch WHERE name = 'main' LIMIT 1),
          '${OT}', 'row-' || g::text, jsonb_build_object('pk', 'row-' || g::text, 'qty', g), ARRAY['PUBLIC']
   FROM generate_series(1, ${EXPECTED}) g;
-SQL`,
-    { encoding: "utf-8", shell: "/bin/bash" },
-  );
+`;
+  require("fs").writeFileSync(tmpfile, sql);
+  try {
+    execSync(
+      `docker exec -i -e PGPASSWORD=${process.env.PGPASSWORD || "tellus123"} tellus-postgres-1 psql -U ${process.env.PGUSER || "tellus"} -d ${VERIFY_DB} < ${tmpfile}`,
+      { encoding: "utf-8", shell: "/bin/bash", maxBuffer: 8 * 1024 * 1024 },
+    );
+  } finally {
+    require("fs").unlinkSync(tmpfile);
+  }
 }
 
 async function apiVisibleCount(): Promise<number> {
