@@ -111,9 +111,12 @@ vi.mock("../../../src/services/funnel/metrics", () => ({
 }));
 
 // sleepForStageDelay is a no-op with the default env (FUNNEL_STAGE_DELAY_MS=0)
-// but stub it to be certain the suite never waits.
+// but stub it to be certain the suite never waits. writeStageReceipt is
+// equally deterministic (no-op when the receipt env is unset — no env set
+// in this lane).
 vi.mock("../../../src/services/funnel/stageDelay", () => ({
   sleepForStageDelay: vi.fn().mockResolvedValue(undefined),
+  writeStageReceipt: vi.fn(),
 }));
 
 const { runChangelogActivity } = await import(
