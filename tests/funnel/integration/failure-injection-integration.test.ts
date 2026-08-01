@@ -5,8 +5,10 @@
 // false-green invariants prove through the RING of persisted state only
 // (the surrounding grand-scale properties — Temporal worker kill, dispatcher
 // + OS catastrophe — are covered live by multi-replica/replacement tests
-// and the cypress gate; where they BELONG in this file, they're marked as
-// such explicitly).
+// and the cypress gate. Boundaries 8, 9, and 12 are executable tests in
+// environment-isolation-integration, multi-replica-integration, and
+// failure-injection-os-outage-integration respectively; they are not repeated
+// here as assertion-free placeholders.
 // ---------------------------------------------------------------------------
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -161,11 +163,10 @@ describe("failure-injection matrix", () => {
     const runId = await dispatcher.insertDispatchPendingRun(ONTOLOGY_ID, OT, wfId, {});
     await db.query(`UPDATE funnel_run SET status = 'workflow_started' WHERE run_id = $1`, [runId!]);
     const fs1 = await db.query(
-      `SELECT count(*)::int AS n FROM funnel_state WHERE object_type_id = $1`,
+      `SELECT status FROM funnel_state WHERE object_type_id = $1`,
       [OT_ID],
     );
-    // Missing projection = nothing to false-green:
-    expect(fs1.rows[0].n === 0 || fs1.rows[0].n === 1).toBe(true);
+    expect(fs1.rows.every((row) => row.status !== "indexed")).toBe(true);
     await db.query(`DELETE FROM funnel_run WHERE run_id = $1`, [runId!]);
   });
 
@@ -227,16 +228,6 @@ describe("failure-injection matrix", () => {
     await db.query(`DELETE FROM funnel_run WHERE run_id = $1`, [runId!]);
   });
 
-  it("8) during terminal projection: consistency gate exposes post-completion blocker", () => {
-    // Covered live by environment-isolation CAS test: rows from a stale
-    // younger run CANNOT demote the badge. Document: the proof exists as
-    // e2e code linked from this matrix.
-  });
-
-  it("9) worker mid-activity shutdown: multi-replica fleet test proves no corruption (SIGKILL)", () => {
-    // proofs in tests/funnel/integration/multi-replica-integration.test.ts
-  });
-
   it("10) dispatcher restart mid-drain: reconcile makes pending > started progress idempotent", async () => {
     const wfId = `ObjectTypeFunnelWorkflow/${ONTOLOGY_ID}/${OT_ID}:dispatcher-restart`;
     const runId = await dispatcher.insertDispatchPendingRun(ONTOLOGY_ID, OT, wfId, {});
@@ -288,40 +279,17 @@ describe("failure-injection matrix", () => {
         [OT],
       );
       expect(rows.rows[0].n).toBe(0);
-      // And a rollback means the work remains recoverable (the transactional
-      // outbox does NOT lose the write).
+      await expect(pool2.query(`SELECT * FROM funnel_run_missing_for_fault_injection`))
+        .rejects.toThrow(/does not exist/);
     } finally {
       await pool2.query("ROLLBACK").catch(() => undefined);
       await pool2.end();
     }
-  });
-
-  it("12) OpenSearch down: indexing → 'failed' (never indexed)", async () => {
-    // The sister file tests/funnel/integration/failure-injection-os-outage-integration.test.ts
-    // holds the hermetic proof — it drives the same OT + drain cycle with a dead OS
-    // endpoint and asserts the run terminates 'failed' never 'indexed'. This row
-    // validates THAT file's invariant aspect EXISTS in this matrix: prove the drain
-    // lands with `status !== 'indexed'` for a drain-driven signal — the matrix's
-    // required extension is satisfied via the sibling file's own seed-driven flow.
-    // GATE: a fresh signal remaining in `dispatch_pending` state is NEVER terminal
-    // and no false-green funnel_state row materializes for its type.
-    const client = await db.pool.connect();
-    try {
-      await client.query(
-        `INSERT INTO funnel_signal (ontology_id, object_type_api_name, signal_type, payload)
-         VALUES ($1, $2, 'sourceTransactionCommitted', '{}')`,
-        [ONTOLOGY_ID, OT],
-      );
-    } finally {
-      client.release();
-    }
-    const s = await db.query(
-      `SELECT count(*)::int AS n FROM funnel_signal WHERE object_type_api_name = $1 AND consumed_at IS NULL`,
+    const after = await db.query(
+      `SELECT count(*)::int AS n FROM funnel_run WHERE object_type_api_name = $1`,
       [OT],
     );
-    // Signal is present-as-claimed: this is the pre-dispatch-injection
-    // point's own contract — no false-green premise survives the lane's guard.
-    expect(s.rows[0]?.n as number).toBeGreaterThanOrEqual(1);
+    expect(after.rows[0].n).toBe(0);
   });
 
   it("13) duplicate reindex requests: single run row per identical enumerate", async () => {
@@ -359,6 +327,12 @@ describe("failure-injection matrix", () => {
       [OT, fp],
     );
     expect(sigCount.rows[0].n).toBe(1);
+    await dispatcher.drainPendingSignals({ objectTypes: [OT] });
+    const runCount = await db.query(
+      `SELECT count(*)::int AS n FROM funnel_run WHERE object_type_api_name = $1`,
+      [OT],
+    );
+    expect(runCount.rows[0].n).toBe(1);
     await db.query(`DELETE FROM funnel_signal WHERE object_type_api_name = $1`, [OT]);
   });
 });

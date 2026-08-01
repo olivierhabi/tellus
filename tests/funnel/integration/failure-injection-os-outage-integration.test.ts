@@ -1,15 +1,16 @@
 // Failure-injection #12 — OpenSearch catastrophically unreachable.
 //
 // The endpoint is overridden at module-LOAD time in this file (every
-// vitest file gets an isolated process): the PG dispatcher path runs the
-// stages; indexing fails against the dead port; the run MUST end as
-// failed, never false-green "indexed". Deterministic proof of the
-// OT's state under an OS outage.
+// vitest file gets an isolated process). The real OpenSearch-sync activity
+// must throw against the dead port; the workflow's real failure projector
+// must then terminate the run as failed, never false-green indexed.
+import "dotenv/config";
+
 process.env.OPENSEARCH_URL = "http://127.0.0.1:9"; // UNREACHABLE
 process.env.OPENSEARCH_REQUEST_TIMEOUT = "1000";
 process.env.OPENSEARCH_MAX_RETRIES = "1";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { LANE } from "../../laneEnv";
 
 const STAMP = Date.now();
@@ -21,6 +22,10 @@ let db: typeof import("../../../src/db");
 let dispatcher: typeof import("../../../src/services/funnel/funnelDispatcher");
 
 beforeAll(async () => {
+  // setupFiles may have loaded the OpenSearch singleton before this test
+  // module set the dead endpoint. Reset the module graph so the dispatcher
+  // below constructs its client from 127.0.0.1:9, not the healthy lane URL.
+  vi.resetModules();
   await (
     await import("../../../src/services/testing/destructiveTestGuard")
   ).assertDestructiveTestEnvironment({
@@ -62,7 +67,7 @@ afterAll(async () => {
 });
 
 describe("failure-injection #12 — OS outage", () => {
-  it("drain the signal: the run terminates 'failed', NEVER 'indexed'", async () => {
+  it("dead OpenSearch endpoint: sync throws and the run projects 'failed', never 'indexed'", async () => {
     const client = await db.pool.connect();
     try {
       const r = await client.query(
@@ -72,23 +77,60 @@ describe("failure-injection #12 — OS outage", () => {
       );
       void r;
     } finally { client.release(); }
+    // Build the merged/object_instances fixture through the real PG pipeline.
+    // That legacy dispatcher does not own OpenSearch sync; the Temporal
+    // sync activity below is the injected boundary under test.
     await dispatcher.drainPendingSignals({ objectTypes: [OT] });
-    const fs1 = await db.query(
-      `SELECT status, error_message FROM funnel_state WHERE object_type_id = $1`,
-      [OT_ID],
-    );
-    if (fs1.rows[0]) {
-      expect(fs1.rows[0].status).not.toBe("indexed");
-    }
-    // And the run's status must not show "completed" without evidence:
-    const run = await db.query(
-      `SELECT status, error_message, definition_version FROM funnel_run
-        WHERE object_type_api_name = $1 ORDER BY started_at DESC LIMIT 1`,
+    const instances = await db.query(
+      `SELECT count(*)::int AS n FROM object_instances WHERE object_type_api_name = $1`,
       [OT],
     );
-    if (run.rows[0]) {
-      expect(run.rows[0].status).not.toBe("completed");
-      expect(run.rows[0].definition_version).toBe(1);
-    }
+    expect(instances.rows[0].n).toBe(1);
+    await db.query(`DELETE FROM funnel_stage_run WHERE run_id IN (SELECT run_id FROM funnel_run WHERE object_type_api_name = $1)`, [OT]);
+    await db.query(`DELETE FROM funnel_run WHERE object_type_api_name = $1`, [OT]);
+    await db.query(`DELETE FROM funnel_signal WHERE object_type_api_name = $1`, [OT]);
+    await db.query(`DELETE FROM funnel_state WHERE object_type_id = $1`, [OT_ID]);
+
+    const runKey = `os-outage-${STAMP}`;
+    const temporalWorkflowId = `ObjectTypeFunnelWorkflow/${ONTOLOGY_ID}/${OT_ID}:${runKey}`;
+    const inserted = await db.query(
+      `INSERT INTO funnel_run
+         (ontology_id, object_type_api_name, workflow_type, status, environment_id,
+          temporal_workflow_id, definition_version, execution_plan)
+       VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running', $3, $4, 1,
+               '{"definitionVersion":1,"requiredStages":["changelog","merge","indexing","hydration"],"optionalStages":[],"stageDependencies":{}}')
+       RETURNING run_id`,
+      [ONTOLOGY_ID, OT, LANE.TELLUS_ENVIRONMENT_ID, temporalWorkflowId],
+    );
+    const runId = inserted.rows[0].run_id as string;
+    const activities = await import("../../../src/services/funnel/temporal/activities");
+    await expect(activities.syncOpenSearchActivity({
+      ontologyId: ONTOLOGY_ID,
+      objectTypeApiName: OT,
+      objectTypeRid: OT_ID,
+      environmentId: LANE.TELLUS_ENVIRONMENT_ID,
+    })).rejects.toThrow(/connect|ECONNREFUSED/i);
+
+    const intermediate = await db.query(`SELECT status FROM funnel_run WHERE run_id = $1`, [runId]);
+    expect(intermediate.rows[0].status).toBe("running");
+    const preTerminalState = await db.query(`SELECT count(*)::int AS n FROM funnel_state WHERE object_type_id = $1`, [OT_ID]);
+    expect(preTerminalState.rows[0].n).toBe(0);
+
+    await activities.projectFunnelTerminalActivity({
+      ontologyId: ONTOLOGY_ID,
+      objectTypeApiName: OT,
+      objectTypeRid: OT_ID,
+      environmentId: LANE.TELLUS_ENVIRONMENT_ID,
+      status: "failed",
+      errorMessage: "OpenSearch endpoint unreachable",
+      funnelRunId: runId,
+      runKey,
+    });
+    const finalRun = await db.query(`SELECT status, error_message FROM funnel_run WHERE run_id = $1`, [runId]);
+    const finalState = await db.query(`SELECT status, error_message FROM funnel_state WHERE object_type_id = $1`, [OT_ID]);
+    expect(finalRun.rows[0].status).toBe("failed");
+    expect(finalRun.rows[0].error_message).toMatch(/OpenSearch endpoint unreachable/);
+    expect(finalState.rows[0].status).toBe("failed");
+    expect(finalState.rows[0].status).not.toBe("indexed");
   });
 });

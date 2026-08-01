@@ -193,6 +193,10 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
       objectsIndexed: 5,
       environmentId: LANE.TELLUS_ENVIRONMENT_ID,
     });
+    const freshState = await db.query(
+      `SELECT status, objects_indexed, active_run_id FROM funnel_state WHERE object_type_id = $1`,
+      [OT_ID],
+    );
     // Older run's terminal projection must NOT demote the newer badge.
     await projection.projectFunnelTerminalToState(ONTOLOGY_ID, OT, "indexed", {
       runId: old.rows[0].run_id,
@@ -205,6 +209,7 @@ describe("FUNN-ISO split-brain prevention (integration)", () => {
       [OT_ID],
     );
     expect(fs1.rows[0].status).toBe("indexed");
+    expect(fs1.rows[0].objects_indexed).toBe(freshState.rows[0].objects_indexed);
     expect(String(fs1.rows[0].active_run_id)).toBe(String(fresh.rows[0].run_id));
   });
 
