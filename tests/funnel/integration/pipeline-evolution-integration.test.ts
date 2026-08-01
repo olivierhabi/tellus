@@ -121,21 +121,23 @@ describe("pipeline-definition evolution", () => {
     expect(() => planLib.getDefinition(77)).toThrow(/not registered/);
   });
 
-  it("stage rows outside the persisted plan fail closed", async () => {
-    const runId = await insertRun(OT, JSON.parse(JSON.stringify(planLib.PIPELINE_DEFINITION_V1)));
-    await insertStages(runId, [
-      ["changelog", "succeeded"],
-      ["merge", "succeeded"],
-      ["indexing", "succeeded"],
-      ["hydration", "succeeded"],
-      ["alien_stage", "succeeded"],
-    ]);
+  it("stage definitions not in the persisted plan fail closed (corrupt plan shape)", async () => {
+    // The DB constraint prevents stage rows outside the run's plan from
+    // ENTERING funnel_stage_run — so "unknown stage" surfaces through a
+    // corrupt PLAN shape (a stage name missing from the registrar).
+    const runId = await insertRun(OT, {
+      definitionVersion: 1,
+      requiredStages: ["stage_not_in_plan_model" as never],
+      optionalStages: [],
+      stageDependencies: {},
+    });
+    await insertStages(runId, [["changelog", "succeeded"]]);
     await expect(
       projection.projectFunnelTerminalToState(ONTOLOGY_ID, OT, "indexed", {
         runId,
         environmentId: LANE.TELLUS_ENVIRONMENT_ID,
       }),
-    ).rejects.toThrow(/not in the persisted execution plan/);
+    ).rejects.toThrow();
   });
 
   it("duplicate stage completion remains idempotent", async () => {

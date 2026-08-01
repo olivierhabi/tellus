@@ -46,6 +46,7 @@ import {
 } from "./environmentGuard";
 import {
   parseExecutionPlan,
+  UnknownFunnelDefinitionError,
   type FunnelExecutionPlan,
 } from "./executionPlan";
 
@@ -541,7 +542,8 @@ export async function projectFunnelTerminalToState(
     // and surface them as the run's failure message.
     const isConsistencyError =
       err instanceof FunnelExecutionEnvironmentMismatch ||
-      err instanceof FunnelStaleStateTransition;
+      err instanceof FunnelStaleStateTransition ||
+      err instanceof UnknownFunnelDefinitionError;
     const errorClass =
       err instanceof Error ? err.constructor.name : "unknown";
     funnelProjectionTotal.inc({ status, outcome: "db_error", path });
