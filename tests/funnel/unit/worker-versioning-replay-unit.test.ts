@@ -11,10 +11,10 @@
 // captured, real funnel workflow histories from the fixture recovery run.
 // ---------------------------------------------------------------------------
 
+import { spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { Worker } from "@temporalio/worker";
 
 const FIXTURE_DIR = path.resolve(__dirname, "../fixtures/histories");
 
@@ -27,19 +27,25 @@ describe("workflow replay gate", () => {
   it("captured production-like histories replay deterministically", async () => {
     const files = fixtureFiles();
     expect(files.length).toBeGreaterThan(0);
+    // The Temporal bridge owns a process-global native Runtime. Other unit
+    // files can load/unload native modules before this test and leave bridge
+    // handles from a different module instance, producing a Neon downcast
+    // failure unrelated to replay determinism. Run the replay gate in one
+    // clean child process so every history shares exactly one native Runtime.
     for (const file of files) {
-      const history = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, file), "utf8"));
-      await Worker.runReplayHistory(
-        {
-          workflowsPath: path.resolve(
-            FIXTURE_DIR,
-            file.includes("funnel")
-              ? "../../../../src/services/funnel/temporal/workflowsBundle.ts"
-              : "../../../../scripts/temporal-probe/workflowBundle.ts",
-          ),
-        } as never,
-        history,
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          path.resolve(__dirname, "../../../scripts/replay-funnel-histories.ts"),
+          path.join(FIXTURE_DIR, file),
+        ],
+        { cwd: path.resolve(__dirname, "../../.."), encoding: "utf8", timeout: 175_000 },
       );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(result.stdout).toContain(`replayed ${file}`);
     }
   }, 180_000);
 });
