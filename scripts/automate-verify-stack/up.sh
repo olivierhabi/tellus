@@ -196,7 +196,7 @@ done
 # the isolated API via TELLUS_BACKEND_ORIGIN. Leaving NEXT_PUBLIC_API_URL at
 # its default (/api) routes the browser through the FE's own BFF on :3101,
 # which proxies to TELLUS_BACKEND_ORIGIN (the isolated API on :3100).
-FE_REPO="$(cd "$(dirname "$0")/../../.." && pwd)/tellus-fe"
+FE_REPO="${FE_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)/tellus-fe}"
 if [ ! -d "$FE_REPO" ]; then
   echo "ERROR: frontend repo not found at $FE_REPO" >&2; exit 1
 fi

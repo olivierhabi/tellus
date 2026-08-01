@@ -29,7 +29,7 @@ cd "$(dirname "$0")/.."
 STACK_DIR="scripts/automate-verify-stack"
 set -a; . "$STACK_DIR/stack.env"; set +a
 DETACH="$STACK_DIR/detach.sh"
-FE_REPO="/Users/olivierhabimana/Desktop/projects/tellus-fe"
+export FE_REPO="${FE_REPO:-/Users/olivierhabimana/Desktop/projects/tellus-fe}"
 FE_PNPM_VERSION="10.28.1"
 CYPRESS_SPEC="cypress/e2e/automate-isolated-e2e.cy.ts"
 
