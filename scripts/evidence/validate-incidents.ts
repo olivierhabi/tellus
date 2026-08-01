@@ -273,7 +273,7 @@ function validateMapping(doc: Record<string, unknown>, evidenceRoot: string, err
       {
         oldNamespace: { kind: "enum", values: ["tellus-funnel"] },
         oldWorkflowId: { kind: "string" },
-        oldRunId: { kind: "null" },
+        oldRunId: { kind: "uuid" },
         lastCompletedStage: { kind: "stringOrNull" },
         replacementNamespace: { kind: "enum", values: ["tellus-funnel-tellus-dev"] },
         replacementWorkflowId: { kind: "stringOrNull" },
@@ -333,10 +333,24 @@ function validateMapping(doc: Record<string, unknown>, evidenceRoot: string, err
   // Completeness: every terminated funnel workflow in the capture file is mapped.
   const capturePath = path.join(evidenceRoot, String(doc.captureFile));
   if (fs.existsSync(capturePath)) {
-    const capture = JSON.parse(fs.readFileSync(capturePath, "utf8")) as { terminated?: string[] };
+    const capture = JSON.parse(fs.readFileSync(capturePath, "utf8")) as {
+      terminated?: string[];
+      workflows?: Array<{ workflowId?: string; runId?: string }>;
+    };
     for (const wf of capture.terminated ?? []) {
-      if (!funnelEntries.some((e) => e.oldWorkflowId === wf)) {
+      const mapped = funnelEntries.find((e) => e.oldWorkflowId === wf);
+      if (!mapped) {
         errors.push(`mapping: terminated workflow "${wf}" from the capture file has no mapping entry`);
+        continue;
+      }
+      const captured = capture.workflows?.find((e) => e.workflowId === wf);
+      if (!captured) {
+        errors.push(`mapping: terminated workflow "${wf}" has no workflow capture entry`);
+      } else if (mapped.oldRunId !== captured.runId) {
+        errors.push(
+          `mapping: workflow "${wf}" run ID ${JSON.stringify(mapped.oldRunId)} ` +
+            `does not match capture ${JSON.stringify(captured.runId)}`,
+        );
       }
     }
   }
