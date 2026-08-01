@@ -180,8 +180,33 @@ describe("multi-replica fleet correctness", () => {
       await new Promise((r) => setTimeout(r, 5_000)); // B starts polling
 
       // 4) Hard-kill A mid-activity (SIGKILL = unclean death).
-      const apid = children[0]?.pid;
-      process.kill(apid!, "SIGKILL");
+      // tsx-script encapsulation: children[0].pid is the node/WRAPPER's pid —
+      // dispatch SIGKILL against the ONE process that carries pid-in-its
+      // identity (its receipts file's pid) TO make sure the container's real
+      // worker process dies, not just the outer runner.
+      {
+        const { execFileSync } = await import("child_process");
+        const apidLogs = readReceipts("A");
+        if (apidLogs.length > 0) {
+          const tsxPid = apidLogs[0].pid;
+          if (tsxPid) {
+            try {
+              process.kill(tsxPid, "SIGKILL");
+            } catch {
+              /* already gone */
+            }
+          }
+        }
+        // ALWAYS also hit OUTER (spawn-wrapper) pid — kill whatever it is.
+        const wrapperPid = children[0]?.pid;
+        if (wrapperPid) {
+          try {
+            process.kill(wrapperPid, "SIGKILL");
+          } catch {
+            /* op already terminated */
+          }
+        }
+      }
 
       // 5) The surviving worker completes the run. Heartbeat expiry (max
       //    120s workflow-side) + activity retry → 'indexed'.
