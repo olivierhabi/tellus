@@ -30,6 +30,39 @@ workflows live under `tellus-funnel` (TTL) and were migrated/terminated by
 ns/queue `tellus-funnel[-queue]-tellus-dev`; production requires all four
 identity vars explicitly.
 
+## Worker Versioning (Temporal task-queue assignments/redirect rules)
+
+Runtime server: `temporalio/auto-setup:1.25.2` — the Build-ID assignment +
+redirect rules (temporal api workflowservice workflowserver ops in
+`@temporalio/worker@1.16` bundle — worker runs with `buildId = git sha +
+useVersioning`) pin in-flight histories to their build and roll
+auto-upgrade to new deployments via `scripts/temporal-versioning.ts`.
+("Worker Deployments" need server ≥ 1.28 — evidence for that gating is in
+`.migration-evidence/worker-versioning/report.json`.) The lane's dynamicconfig
+lives in `deploy/temporal/dynamicconfig.yaml` (registered keys in MUTABLE
+`static/service/frontend` — frontend.workerVersioning{Data,Workflow,Rule}APIs).
+
+- Deployment: stable identity `tellus-funnel/EY` — buildId = commit-derived sha (12 chars)
+- Pinned execution path: in-flight runs stay on their build; new runs auto-upgrade at 100%
+- Rollback: `temporal-versioning.ts rollback` re-points the assignment rule; in-flight pinned runs remain intact
+- Replay gate: every captured history replay against `Worker.runReplayHistory` (UNIT lane → `tests/funnel/unit/worker-versioning-replay-unit.test.ts`)
+
+## Destructive-test lane (FUNN-ISO-1)
+
+| Surface | Rule |
+|----------|------|
+| Lane env | `tests/laneEnv.ts` (pinned via `vitest.config.env` + side-effect import): DB `tellus_tests`, envId `tellus-tests-main`, ns/queue `tellus-funnel[-queue]-tellus-tests-main`, realm `tellus-tests`, OS prefix `ttest-ontology-`, bucket `tellus-tests-bucket`, API `:3002` |
+| Guard | `src/services/testing/destructiveTestGuard.ts` — every destructive test helper MUST call `assertDestructiveTestEnvironment` (10-field proof, dev/prod deny-list, seal/local bool); down.sh template gates on the CLI `pnpm exec tsx scripts/destructive-guard-cli.ts` |
+| Claim | `tests/globalSetup.ts` never fights `pnpm dev`'s nodemon — it claims the port fail-closed (only lane-attested holders get replaced; foreign holders = loud abort) |
+| Boot | `tests/testStackBootstrap.ts` idempotent — creates+tellus_tests+migrates+seals |
+
+## Fixture + reconstruction evidence
+
+- Fixture recovery: `scripts/automate-verify-stack/funnelfix-order-recovery.ts` — 746-object recovery against the verify stack with the full ten-count proof matrix (objects/indices/API visible/foreign-writes-zero)
+- Multi-replica proof: tests/funnel/integration/multi-replica-integration.test.ts (both pollers visible, activity attribution, SIGKILL survivor clean completion, foreign-queue poller refusal)
+- Failure-injection matrix: tests/funnel/integration/failure-injection{,-os-outage}.test.ts (13 boundaries)
+- Pipeline evolution: tests/funnel/integration/pipeline-evolution-integration.test.ts (immutable definition snapshots on every funnel_run)
+
 ## Gate results (two consecutive runs, both clean)
 - **17/17 Function-version semantics**: v1 pinned, v2 autoUpgrade, v3 compatible-major incompatible rejected.
 - **4/4 browser scenarios both runs** (each run is a fresh down→up→seed):
@@ -47,6 +80,13 @@ identity vars explicitly.
 - `scripts/migrate-funnel-temporal-isolation.ts` — legacy-namespace workflow migration with evidence (`.migration-evidence/funnel-temporal-isolation/*.json`).
 - `scripts/repair-olivierorder.ts` — repair harness used for the 2026-07-31 stuck-"Indexing" recovery; reusable pattern for cross-environment incidents.
 - `scripts/verify-temporal-pollers.sh` — fails when a task-queue poller belongs to an unexpected environment/build.
+
+## Key fixes in this session
+- `src/services/automate/conditionRuntime.ts` — `processLiveAutomation`: live-events branch filter relaxed so root/merged committed branches (`parent_branch_id IS NULL` or `'MERGED'` in `ontology_branch`) are processed instead of only `branch_id IS NULL` (which never matches: all committed objects live on the root branch, not null).
+- `src/actions/editApplicator.ts` & `src/services/overlay/writebackOverlay.ts` — merge full writeback doc prior to object-instance UPSERT; the previous partial `{province}` doc clobbered non-edited properties (the event's `currentValues` became `{province}` only → false-positive fullName diff → S1 live-event false trigger).
+- `cypress.config.ts` — `CYPRESS_PG_DB`-driven psql task, kill/startVerifyApi/verifyApiHealthy scenarios for S3.
+- `scripts/automate-verify-stack/up.sh` — `next dev` (JIT) + `PG_CONNECT_TIMEOUT_MS=30000` + `PG_POOL_MAX=10` (the pool was being ENDED (`cannot use pool end`) under RAM pressure).
+- `scripts/verify-tellus-automate-complete.sh` — authority gate (WATCHED metal).
 
 ## Key fixes in this session
 - `src/services/automate/conditionRuntime.ts` — `processLiveAutomation`: live-events branch filter relaxed so root/merged committed branches (`parent_branch_id IS NULL` or `'MERGED'` in `ontology_branch`) are processed instead of only `branch_id IS NULL` (which never matches: all committed objects live on the root branch, not null).
