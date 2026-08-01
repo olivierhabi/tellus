@@ -16,7 +16,7 @@ import os from "os";
 import path from "path";
 
 import { scanDirectory, scanFile } from "../../../scripts/evidence/scan-secrets";
-import { buildManifest, MANIFEST_FILENAME } from "../../../scripts/evidence/build-manifest";
+import { buildManifest, CHECKSUM_FILENAME, MANIFEST_FILENAME } from "../../../scripts/evidence/build-manifest";
 import { validateIncidents } from "../../../scripts/evidence/validate-incidents";
 import { redactSensitive, redactObject } from "../../../scripts/evidence/redact";
 
@@ -107,6 +107,10 @@ describe("evidence audit", () => {
         );
         expect(entry.sizeBytes).toBe(fs.statSync(abs).size);
         expect(entry.modifiedAtUtc).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/);
+        expect(entry.generatedAtUtc).toBe("2026-08-01T00:00:00.000Z");
+        expect(entry.sourceCommand).toMatch(/^(git show [0-9a-f]{40}:|read )/);
+        expect(entry.exitCode).toBe(0);
+        expect(entry.schemaVersion).toBe(1);
       }
     });
 
@@ -114,6 +118,7 @@ describe("evidence audit", () => {
       const root = fixture();
       const first = buildManifest(root);
       fs.writeFileSync(path.join(root, MANIFEST_FILENAME), JSON.stringify(first, null, 2));
+      fs.writeFileSync(path.join(root, CHECKSUM_FILENAME), "stale checksum\n");
       const second = buildManifest(root);
       expect(second.files.map((f) => f.path)).toEqual(first.files.map((f) => f.path));
     });

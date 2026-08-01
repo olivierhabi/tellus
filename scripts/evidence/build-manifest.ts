@@ -19,6 +19,10 @@ export interface ManifestFileEntry {
   sha256: string;
   sizeBytes: number;
   modifiedAtUtc: string;
+  generatedAtUtc: string;
+  sourceCommand: string;
+  exitCode: number;
+  schemaVersion: 1;
 }
 
 export interface Manifest {
@@ -30,6 +34,7 @@ export interface Manifest {
 }
 
 export const MANIFEST_FILENAME = "MANIFEST.json";
+export const CHECKSUM_FILENAME = "MANIFEST.sha256";
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -55,15 +60,24 @@ function git(args: string, cwd: string): string {
 
 export function buildManifest(rootDir: string, nowUtc = new Date().toISOString()): Manifest {
   const abs = path.resolve(rootDir);
+  const commit = git("rev-parse HEAD", abs) || git("rev-parse HEAD", process.cwd());
+  const repoRoot = git("rev-parse --show-toplevel", abs) || git("rev-parse --show-toplevel", process.cwd());
   const files: ManifestFileEntry[] = walk(abs)
-    .filter((f) => path.basename(f) !== MANIFEST_FILENAME)
+    .filter((f) => ![MANIFEST_FILENAME, CHECKSUM_FILENAME].includes(path.basename(f)))
     .map((f) => {
       const stat = fs.statSync(f);
+      const repoPath = repoRoot
+        ? path.relative(repoRoot, f).split(path.sep).join("/")
+        : path.relative(abs, f).split(path.sep).join("/");
       return {
         path: path.relative(abs, f).split(path.sep).join("/"),
         sha256: sha256File(f),
         sizeBytes: stat.size,
         modifiedAtUtc: stat.mtime.toISOString(),
+        generatedAtUtc: nowUtc,
+        sourceCommand: commit ? `git show ${commit}:${repoPath}` : `read ${repoPath}`,
+        exitCode: 0,
+        schemaVersion: 1,
       };
     })
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
@@ -71,7 +85,7 @@ export function buildManifest(rootDir: string, nowUtc = new Date().toISOString()
   return {
     schemaVersion: 1,
     generatedAtUtc: nowUtc,
-    gitCommit: git("rev-parse HEAD", abs) || git("rev-parse HEAD", process.cwd()),
+    gitCommit: commit,
     gitStatus: git("status --porcelain", abs) || git("status --porcelain", process.cwd()),
     files,
   };
@@ -79,7 +93,13 @@ export function buildManifest(rootDir: string, nowUtc = new Date().toISOString()
 
 export function writeManifest(rootDir: string): Manifest {
   const manifest = buildManifest(rootDir);
-  fs.writeFileSync(path.join(rootDir, MANIFEST_FILENAME), JSON.stringify(manifest, null, 2) + "\n");
+  const manifestPath = path.join(rootDir, MANIFEST_FILENAME);
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  const checksums = [
+    ...manifest.files.map((entry) => `${entry.sha256}  ${entry.path}`),
+    `${sha256File(manifestPath)}  ${MANIFEST_FILENAME}`,
+  ];
+  fs.writeFileSync(path.join(rootDir, CHECKSUM_FILENAME), `${checksums.join("\n")}\n`);
   return manifest;
 }
 
@@ -88,6 +108,7 @@ if (require.main === module) {
   const manifest = writeManifest(rootDir);
   console.log(
     `build-manifest: wrote ${path.join(rootDir, MANIFEST_FILENAME)} ` +
+      `and ${path.join(rootDir, CHECKSUM_FILENAME)} ` +
       `(${manifest.files.length} files, commit ${manifest.gitCommit.slice(0, 12) || "unknown"})`,
   );
 }
