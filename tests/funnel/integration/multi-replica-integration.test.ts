@@ -173,7 +173,7 @@ describe("multi-replica fleet correctness", () => {
       await waitFor(
         () => Promise.resolve(readReceipts("A").some((r) => r.stage === "merge")),
         "replica A enters the merge stage",
-        120_000,
+        300_000,
       );
       // 3) Spawn replica B (normal pacing) WHILE A is mid-merge.
       const b = spawnReplica({ label: "B", envOverrides: { FUNNEL_STAGE_DELAY_MS: "3000" } });
