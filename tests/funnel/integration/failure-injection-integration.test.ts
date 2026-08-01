@@ -316,12 +316,12 @@ describe("failure-injection matrix", () => {
       client.release();
     }
     const s = await db.query(
-      `SELECT status FROM funnel_signal WHERE object_type_api_name = $1 AND consumed_at IS NULL`,
+      `SELECT count(*)::int AS n FROM funnel_signal WHERE object_type_api_name = $1 AND consumed_at IS NULL`,
       [OT],
     );
-    // Signal is present-as-claimedable: this is the pre-dispatch-injection
+    // Signal is present-as-claimed: this is the pre-dispatch-injection
     // point's own contract — no false-green premise survives the lane's guard.
-    expect(s.rows.length).toBeGreaterThanOrEqual(1);
+    expect(s.rows[0]?.n as number).toBeGreaterThanOrEqual(1);
   });
 
   it("13) duplicate reindex requests: single run row per identical enumerate", async () => {
