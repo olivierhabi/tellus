@@ -41,7 +41,7 @@ function spawnReplica(opts: {
   const out = fs.openSync(logFile, "w");
   const child = spawn(
     "npx",
-    ["tsx", "scripts/funnel-probe/replicaWorker.ts", "--label", opts.label],
+    ["tsx", "scripts/funnel-probe/replicaWorker.ts", "--label", opts.label, "--object-types", OT],
     {
       cwd: path.resolve(__dirname, "../../.."),
       env: {
