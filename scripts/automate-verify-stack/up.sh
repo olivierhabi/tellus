@@ -172,7 +172,7 @@ mkdir -p /tmp/automate-verify-stack
   TEMPORAL_TASK_QUEUE="$TEMPORAL_TASK_QUEUE" \
   TEMPORAL_WORKER_BUILD_ID="$TEMPORAL_WORKER_BUILD_ID" \
   OS_INDEX_PREFIX="$OS_INDEX_PREFIX" \
-  PG_CONNECT_TIMEOUT_MS=30000 PG_POOL_MAX=10 && \
+  PG_CONNECT_TIMEOUT_MS=30000 PG_POOL_MAX=10 REQUEST_TIMEOUT_MS=30000 && \
   bash "$DETACH" /tmp/automate-verify-api.log /tmp/automate-verify-stack/api.pid pnpm exec tsx src/server.ts )
 echo "starting isolated API on :$VERIFY_API_PORT (log /tmp/automate-verify-api.log)"
 API_OK=false

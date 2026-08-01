@@ -30,6 +30,7 @@ STACK_DIR="scripts/automate-verify-stack"
 set -a; . "$STACK_DIR/stack.env"; set +a
 DETACH="$STACK_DIR/detach.sh"
 FE_REPO="/Users/olivierhabimana/Desktop/projects/tellus-fe"
+FE_PNPM_VERSION="10.28.1"
 CYPRESS_SPEC="cypress/e2e/automate-isolated-e2e.cy.ts"
 
 echo "════════════════════════════════════════════════════════════════════════"
@@ -77,7 +78,11 @@ CYPRESS_ENV=(
 )
 for CP_RUN in 1 2; do
   echo "  [cypress run #$CP_RUN] $(date)"
-  if ! ( cd "$FE_REPO" && env "${CYPRESS_ENV[@]}" pnpm exec cypress run --headless --spec "$CYPRESS_SPEC" ) \
+  # Corepack currently selects pnpm 11 in the FE checkout even though its
+  # lockfile/node_modules were produced by pnpm 10. Pin the acceptance
+  # command so `pnpm exec` cannot perform an implicit cross-version reinstall
+  # (which either corrupts the live dev server tree or aborts without a TTY).
+  if ! ( cd "$FE_REPO" && env CI=true "${CYPRESS_ENV[@]}" corepack "pnpm@$FE_PNPM_VERSION" exec cypress run --headless --spec "$CYPRESS_SPEC" ) \
       > "/tmp/automate-verify-gate-cypress-$CP_RUN.log" 2>&1; then
     echo "  CYPRESS run #$CP_RUN FAILED:"
     tail -50 "/tmp/automate-verify-gate-cypress-$CP_RUN.log" | sed -e 's/^/    /'
