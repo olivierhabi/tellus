@@ -156,7 +156,7 @@ export async function ensureQueueAssignmentRule(
         namespace,
         taskQueue,
         conflictToken: token,
-        insertAssignmentRule: { ruleIndex: 0, rule: { targetBuildId: buildId, percentageRamp: {} } },
+        insertAssignmentRule: { ruleIndex: 0, rule: { targetBuildId: buildId, percentageRamp: 100 } },
       })) as QueuedRules;
       token = inserted.conflictToken ?? token;
       if (previous) {
