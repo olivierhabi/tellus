@@ -123,6 +123,15 @@ const { runChangelogActivity } = await import(
   "../../../src/services/funnel/temporal/activities"
 );
 
+// FUNN-ISO: the activity fence requires the dispatch ctx environment id to
+// match THIS worker process's identity. This test is a payload-size guard —
+// the specific environment name is irrelevant to what it proves — so take
+// the ambient identity instead of hard-coding one. Hard-coding "tellus-dev"
+// passed only because the offline unit lane leaves the worker env to
+// dotenv (tellus-dev) and broke under the default (lane-pinned) config
+// where the worker identity is "tellus-tests-main".
+const WORKER_ENV_ID = process.env.TELLUS_ENVIRONMENT_ID ?? "tellus-dev";
+
 beforeEach(() => {
   hoisted.computeChangelogMock.mockReset();
   hoisted.computeChangelogMock.mockResolvedValue({
@@ -155,8 +164,7 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     const result = await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
-      // FUNN-ISO: the activity fence requires the dispatch environment id.
-      environmentId: "tellus-dev",
+      environmentId: WORKER_ENV_ID,
     });
 
     // The single most important assertion: the row array that used to
@@ -168,8 +176,7 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     const result = await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
-      // FUNN-ISO: the activity fence requires the dispatch environment id.
-      environmentId: "tellus-dev",
+      environmentId: WORKER_ENV_ID,
     });
 
     expect(result).toEqual(
@@ -199,8 +206,7 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     const result = await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
-      // FUNN-ISO: the activity fence requires the dispatch environment id.
-      environmentId: "tellus-dev",
+      environmentId: WORKER_ENV_ID,
     });
 
     const serialized = JSON.stringify(result);
@@ -211,8 +217,7 @@ describe("PASS-BY-REFERENCE — changelog activity return payload", () => {
     await runChangelogActivity({
       ontologyId: "00000000-0000-0000-0000-000000000001",
       objectTypeApiName: "Order",
-      // FUNN-ISO: the activity fence requires the dispatch environment id.
-      environmentId: "tellus-dev",
+      environmentId: WORKER_ENV_ID,
     });
 
     // computeChangelog was called. Under Option 2 it streams the rows to a
