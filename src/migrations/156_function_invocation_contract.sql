@@ -39,8 +39,16 @@ ALTER TABLE function_registry_function_version
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'function_registry_function_version_contract_check'
+    -- Namespace-qualified: pg_constraint names are GLOBAL, so a bare
+    -- conname check misfires when the migration runs under a non-public
+    -- search_path (per-schema test harnesses).
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE c.conname = 'function_registry_function_version_contract_check'
+       AND t.relname = 'function_registry_function_version'
+       AND n.nspname = current_schema()
   ) THEN
     ALTER TABLE function_registry_function_version
       ADD CONSTRAINT function_registry_function_version_contract_check
@@ -67,8 +75,14 @@ ALTER TABLE automation_effect_execution
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'automation_effect_execution_contract_check'
+    -- Namespace-qualified (see the registry constraint block above).
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE c.conname = 'automation_effect_execution_contract_check'
+       AND t.relname = 'automation_effect_execution'
+       AND n.nspname = current_schema()
   ) THEN
     ALTER TABLE automation_effect_execution
       ADD CONSTRAINT automation_effect_execution_contract_check

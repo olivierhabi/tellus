@@ -62,6 +62,8 @@ async function applyPublishMigrations(ctx: SchemaContext): Promise<void> {
   // 139 adds function_registry_function_version.function_kind, which
   // registerFunctions now writes (functionKind classification).
   await ctx.applyMigration("src/migrations/139_function_kind.sql");
+    await ctx.applyMigration("src/migrations/143_automate.sql");
+await ctx.applyMigration("src/migrations/156_function_invocation_contract.sql");
 }
 
 // ---------------------------------------------------------------------------

@@ -213,6 +213,8 @@ async function applyPublishMigrations(ctx: SchemaContext): Promise<void> {
   await ctx.applyMigration("src/migrations/118_functions_publish_retrigger.sql");
   await ctx.applyMigration("src/migrations/137_functions_publish_retry.sql");
   await ctx.applyMigration("src/migrations/139_function_kind.sql");
+    await ctx.applyMigration("src/migrations/143_automate.sql");
+await ctx.applyMigration("src/migrations/156_function_invocation_contract.sql");
 }
 
 async function waitForTerminal(pool: Pool, rid: string, timeoutMs = 60_000): Promise<string> {
