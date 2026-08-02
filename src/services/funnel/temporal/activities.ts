@@ -34,6 +34,11 @@ import {
 } from "../../../models/ontologyEdit";
 import { runIndexingActivity } from "../../quickwit/indexingActivity";
 import { ensureIndex } from "../../quickwit/indexManager";
+import {
+  buildFullIndexBatch,
+  recordIndexingDeferred,
+  updatePendingIndexGauges,
+} from "../indexingStage";
 import { MergedRow } from "../../quickwit/docBuilder";
 import { runHydrationActivity } from "../../quickwit/hydrationActivity";
 import { sleepForStageDelay, writeStageReceipt } from "../stageDelay";
@@ -434,32 +439,53 @@ async function runIndexingActivityProxyImpl(
   const pending = await getPendingIndexEdits(input.objectTypeApiName);
   const editIds = pending.map((e) => e.edit_id);
 
+  // TRUTHFUL ACKNOWLEDGEMENT (OSv2 serving-index parity): we stamp
+  // applied_to_index_at ONLY after Quickwit confirms split publication.
+  // When Quickwit is unreachable or any step fails we leave the edits
+  // pending — the Redis overlay stays alive (the sweeper keys off
+  // applied_to_index_at) and the retry covers repairs via
+  // buildFullIndexBatch (re-reads object_instances for edits merged by
+  // earlier runs). See indexingStage.ts for the invariant.
+  if (editIds.length === 0) {
+    updatePendingIndexGauges(input.objectTypeApiName, pending);
+    return { editsIndexed: 0, publishedSplitIds: [], quickwit: false };
+  }
+
   const reachable = await isQuickwitReachable();
-  // Quickwit unreachable (the dev default) OR nothing to index → mark the
-  // pending edits applied and return. Crucially we do NOT re-read the
-  // merged rows here: the count alone is enough, so the (potentially
-  // large) merged snapshot is never touched on this path.
-  if (!reachable || input.mergedRowCount === 0) {
-    await markEditsAppliedToIndex(editIds);
-    return { editsIndexed: editIds.length, publishedSplitIds: [], quickwit: false };
+  if (!reachable) {
+    recordIndexingDeferred({
+      objectTypeApiName: input.objectTypeApiName,
+      pending,
+      reason: "quickwit_unreachable",
+    });
+    return { editsIndexed: 0, publishedSplitIds: [], quickwit: false };
   }
 
   try {
     await ensureIndex({ objectTypeApiName: input.objectTypeApiName });
     // PASS-BY-REFERENCE: re-read the merged rows from the committed
     // merged snapshot by id (NOT from a Temporal activity return value).
-    // This only runs when Quickwit is actually reachable; on the dev
-    // (Quickwit-down) path the early-return above avoids the re-read.
-    const mergedRowsSource = await loadMergedRowsFromSnapshot(input.mergedSnapshotId);
-    const mergedRows: MergedRow[] = mergedRowsSource.map((r, i) => ({
+    // Skipped entirely when this run merged nothing — the repair pass
+    // covers everything from object_instances in that case.
+    const mergedRowsSource =
+      input.mergedRowCount > 0
+        ? await loadMergedRowsFromSnapshot(input.mergedSnapshotId)
+        : [];
+    const baseRows: MergedRow[] = mergedRowsSource.map((r, i) => ({
       primary_key: r.primary_key,
       properties: r.properties,
       operation: r.operation === "delete" ? "DELETE" : "UPDATE",
       version: i + 1,
       source_transaction_id: r.source_transaction_id ?? undefined,
     }));
+    const batch = await buildFullIndexBatch({
+      ontologyId: input.ontologyId,
+      objectTypeApiName: input.objectTypeApiName,
+      baseRows,
+      pending,
+    });
     const reader = (async function* () {
-      yield { rows: mergedRows, editIds };
+      yield { rows: batch.rows, editIds: batch.editIds };
     });
     const out = await runIndexingActivity({
       ontologyId: input.ontologyId,
@@ -469,16 +495,22 @@ async function runIndexingActivityProxyImpl(
       publishTimeoutMs: 15_000,
       publishPollMs: 1_000,
     });
-    await markEditsAppliedToIndex(editIds);
+    await markEditsAppliedToIndex(batch.editIds);
+    updatePendingIndexGauges(input.objectTypeApiName, []);
     return {
-      editsIndexed: editIds.length,
+      editsIndexed: batch.editIds.length,
       publishedSplitIds: out.publishedSplitIds,
       quickwit: true,
     };
   } catch (err) {
     console.warn(`[temporal/indexing] ${(err as Error).message}`);
-    await markEditsAppliedToIndex(editIds);
-    return { editsIndexed: editIds.length, publishedSplitIds: [], quickwit: false };
+    recordIndexingDeferred({
+      objectTypeApiName: input.objectTypeApiName,
+      pending,
+      reason: "quickwit_indexing_failed",
+      error: (err as Error).message,
+    });
+    return { editsIndexed: 0, publishedSplitIds: [], quickwit: false };
   }
 }
 

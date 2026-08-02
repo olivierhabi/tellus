@@ -50,6 +50,11 @@ import {
   markEditsAppliedToIndex,
 } from "../../models/ontologyEdit";
 import { runIndexingActivity } from "../quickwit/indexingActivity";
+import {
+  buildFullIndexBatch,
+  recordIndexingDeferred,
+  updatePendingIndexGauges,
+} from "./indexingStage";
 import { ensureIndex } from "../quickwit/indexManager";
 import { MergedRow } from "../quickwit/docBuilder";
 import { runHydrationActivity } from "../quickwit/hydrationActivity";
@@ -733,62 +738,101 @@ async function objectTypeFunnelWorkflow(
     activity: async () => {
       writeStageReceipt("indexing");
         await sleepForStageDelay();
-      // Two code paths:
-      //   (a) Quickwit reachable — call runIndexingActivity to ensure the
-      //       ot_<type> index exists, stream merged rows onto Kafka,
-      //       and wait for splits to publish. This is the B6 hot path.
-      //   (b) Quickwit unreachable — stamp applied_to_index_at directly
-      //       so edits keep flowing; the overlay becomes the authority
-      //       until the indexer catches up.
+      // TRUTHFUL ACKNOWLEDGEMENT (OSv2 serving-index parity):
+      //   applied_to_index_at is stamped ONLY after Quickwit has published
+      //   the batch (runIndexingActivity waits for split publish past our
+      //   high Kafka offset and throws on timeout). When Quickwit is
+      //   unreachable or indexing fails we DO NOT stamp: the edits remain
+      //   pending (applied_to_index_at IS NULL), the Redis write-back
+      //   overlay is retained (the sweeper keys off applied_to_index_at),
+      //   and the next funnel run retries with full coverage via the
+      //   repair pass in buildFullIndexBatch (re-reads object_instances
+      //   for edits merged by earlier runs). See indexingStage.ts.
       const pending = await getPendingIndexEdits(ctx.objectTypeApiName);
       const editIds = pending.map((e) => e.edit_id);
 
-      const quickwitOk = await isQuickwitReachable();
-      if (quickwitOk && mergeOut.mergedRows.length > 0) {
-        try {
-          await ensureIndex({ objectTypeApiName: ctx.objectTypeApiName });
-          const mergedRows: MergedRow[] = mergeOut.mergedRows.map((r, i) => ({
-            primary_key: r.primary_key,
-            properties: r.properties,
-            operation: r.operation === "delete" ? "DELETE" : "UPDATE",
-            version: i + 1,
-            source_transaction_id: r.source_transaction_id ?? undefined,
-          }));
-          const reader = (async function* () {
-            yield { rows: mergedRows, editIds };
-          });
-          const out = await runIndexingActivity({
-            ontologyId: ctx.ontologyId,
-            objectTypeApiName: ctx.objectTypeApiName,
-            primaryKeyApiName: "primary_key",
-            reader,
-            publishTimeoutMs: 15_000,
-            publishPollMs: 1_000,
-          });
-          await markEditsAppliedToIndex(editIds);
-          return {
-            editsIndexed: editIds.length,
-            rowsStreamed: out.rowsStreamed,
-            publishedSplits: out.publishedSplitIds.length,
-            publishedSplitIds: out.publishedSplitIds,
-            quickwit: true,
-          };
-        } catch (err) {
-          // Fall through to stamp-only — the edits are durable in PG
-          // and the next run will retry.
-          console.warn(
-            `[funnel] Quickwit indexing failed, stamping edits and continuing: ${(err as Error).message}`
-          );
-        }
+      if (editIds.length === 0) {
+        updatePendingIndexGauges(ctx.objectTypeApiName, pending);
+        return {
+          editsIndexed: 0,
+          rowsStreamed: 0,
+          publishedSplits: 0,
+          publishedSplitIds: [] as string[],
+          quickwit: false,
+          indexingDeferred: false,
+        };
       }
 
-      await markEditsAppliedToIndex(editIds);
-      return {
-        editsIndexed: editIds.length,
-        rowsStreamed: 0,
-        publishedSplitIds: [] as string[],
-        quickwit: false,
-      };
+      const quickwitOk = await isQuickwitReachable();
+      if (!quickwitOk) {
+        recordIndexingDeferred({
+          objectTypeApiName: ctx.objectTypeApiName,
+          pending,
+          reason: "quickwit_unreachable",
+        });
+        return {
+          editsIndexed: 0,
+          rowsStreamed: 0,
+          publishedSplits: 0,
+          publishedSplitIds: [] as string[],
+          quickwit: false,
+          indexingDeferred: true,
+        };
+      }
+
+      try {
+        await ensureIndex({ objectTypeApiName: ctx.objectTypeApiName });
+        const baseRows: MergedRow[] = mergeOut.mergedRows.map((r, i) => ({
+          primary_key: r.primary_key,
+          properties: r.properties,
+          operation: r.operation === "delete" ? "DELETE" : "UPDATE",
+          version: i + 1,
+          source_transaction_id: r.source_transaction_id ?? undefined,
+        }));
+        const batch = await buildFullIndexBatch({
+          ontologyId: ctx.ontologyId,
+          objectTypeApiName: ctx.objectTypeApiName,
+          baseRows,
+          pending,
+        });
+        const reader = async function* () {
+          yield { rows: batch.rows, editIds: batch.editIds };
+        };
+        const out = await runIndexingActivity({
+          ontologyId: ctx.ontologyId,
+          objectTypeApiName: ctx.objectTypeApiName,
+          primaryKeyApiName: "primary_key",
+          reader,
+          publishTimeoutMs: 15_000,
+          publishPollMs: 1_000,
+        });
+        await markEditsAppliedToIndex(batch.editIds);
+        updatePendingIndexGauges(ctx.objectTypeApiName, []);
+        return {
+          editsIndexed: batch.editIds.length,
+          rowsStreamed: out.rowsStreamed,
+          publishedSplits: out.publishedSplitIds.length,
+          publishedSplitIds: out.publishedSplitIds,
+          quickwit: true,
+          indexingDeferred: false,
+        };
+      } catch (err) {
+        // Truthful failure: no stamp, no overlay retirement, retry next run.
+        recordIndexingDeferred({
+          objectTypeApiName: ctx.objectTypeApiName,
+          pending,
+          reason: "quickwit_indexing_failed",
+          error: (err as Error).message,
+        });
+        return {
+          editsIndexed: 0,
+          rowsStreamed: 0,
+          publishedSplits: 0,
+          publishedSplitIds: [] as string[],
+          quickwit: false,
+          indexingDeferred: true,
+        };
+      }
     },
   });
 

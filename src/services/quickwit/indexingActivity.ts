@@ -142,6 +142,26 @@ async function defaultPublisher(
 // waitForPublishedSplits — polls Quickwit splits until publish caught up
 // ---------------------------------------------------------------------------
 
+/**
+ * Thrown when Quickwit never confirms split publication past the batch's
+ * high Kafka offset within the deadline. Callers MUST treat this as
+ * "not indexed" — editing ack (markEditsAppliedToIndex) is only allowed
+ * after offsetReached() returned true (OSv2 serving-index parity).
+ */
+export class QuickwitPublishTimeoutError extends Error {
+  constructor(
+    public readonly indexId: string,
+    public readonly targetOffset: number,
+    public readonly timeoutMs: number,
+  ) {
+    super(
+      `Quickwit index ${indexId} did not publish splits past kafka offset ` +
+        `${targetOffset} within ${timeoutMs}ms`,
+    );
+    this.name = "QuickwitPublishTimeoutError";
+  }
+}
+
 async function waitForPublishedSplits(
   client: QuickwitClient,
   indexId: string,
@@ -152,23 +172,22 @@ async function waitForPublishedSplits(
   if (lastKafkaOffset <= 0) return [];
 
   const deadline = Date.now() + timeoutMs;
-  let lastSeen: QuickwitSplit[] = [];
   while (Date.now() < deadline) {
     try {
       const splits = await client.listSplits(indexId, ["Published"]);
-      lastSeen = splits;
       if (offsetReached(splits, lastKafkaOffset)) {
         return splits.map((s) => s.split_id);
       }
     } catch {
-      /* fall through to retry */
+      /* broker/metastore blip — fall through to retry */
     }
     await sleep(pollMs);
   }
-  // Timed out — return whatever published splits exist so the caller can
-  // still trigger Hydration against them. The workflow above us decides
-  // whether to mark the activity as failed.
-  return lastSeen.map((s) => s.split_id);
+  // Timed out. We must NOT pretend the batch is queryable: throw so the
+  // caller leaves the edits pending and the next run republishes
+  // idempotently (Quickwit's Kafka source commits offsets on publish;
+  // search-time __version ordering absorbs duplicates).
+  throw new QuickwitPublishTimeoutError(indexId, lastKafkaOffset, timeoutMs);
 }
 
 function offsetReached(splits: QuickwitSplit[], target: number): boolean {
