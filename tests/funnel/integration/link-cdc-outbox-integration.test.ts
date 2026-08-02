@@ -29,6 +29,18 @@ describe("link_cdc_outbox — real PG + real Kafka", () => {
     await shutdownCdcLinkProducer();
   });
 
+  // Re-run hygiene: earlier lane runs leave published rows behind for the
+  // deterministic event ids below (staging is intentionally idempotent ON
+  // CONFLICT DO NOTHING — a re-staged row must keep its original state).
+  beforeAll(async () => {
+    await query(
+      `DELETE FROM link_cdc_outbox
+        WHERE event_id IN ('11111111-2222-3333-4444-555555666661',
+                           '11111111-2222-3333-4444-555555666662',
+                           '11111111-2222-3333-4444-555555666663')`,
+    );
+  });
+
   it("staging + rollback leaves NO observable row (atomicity)", async () => {
     const tx = await getClient();
     const eventId = "11111111-2222-3333-4444-555555666661";
