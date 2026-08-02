@@ -771,6 +771,9 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tellus}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tellus_ch_pw}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
+      # The Kafka-engine DDL is emitted by THIS process; the broker string
+      # must be reachable FROM the ClickHouse container (internal alias).
+      CLICKHOUSE_KAFKA_BROKERS: ${CLICKHOUSE_KAFKA_BROKERS:-kafka:29092}
       # Funnel orchestration → Temporal (in-cluster). FUNN-ISO defaults to
       # the clearly-defined single-stack dev identity; production deploys
       # must set TELLUS_ENVIRONMENT_ID + TEMPORAL_NAMESPACE +

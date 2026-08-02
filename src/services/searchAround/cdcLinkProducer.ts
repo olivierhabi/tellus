@@ -130,8 +130,8 @@ function serialisePayload(row: LinkCdcRow): string {
     schema_version: row.schema_version ?? "2.0.0",
     event_id: row.event_id ?? null,
     event_ts_micros: row.event_ts_micros ?? Date.now() * 1000,
-    ontology_id: row.ontology_id ?? null,
-    link_type_api_name: row.link_type_api_name ?? null,
+    ontology_id: row.ontology_id ?? "",
+    link_type_api_name: row.link_type_api_name ?? "",
     operation: row.operation ?? "ADD",
     actor_principal_id: row.actor_principal_id ?? null,
     action_rid: row.action_rid ?? null,
@@ -139,8 +139,12 @@ function serialisePayload(row: LinkCdcRow): string {
     causation_id: row.causation_id ?? null,
     retracts_event_id: row.retracts_event_id ?? null,
     direction: row.direction ?? "forward",
-    branch_id: row.branch_id ?? null,
-    tenant_id: row.tenant_id ?? null,
+    // Edge-index scope keys are ClickHouse Strings — JSON null would make
+    // the Kafka-engine message skip-as-broken instead of queryable (the
+    // Stage 7 seq inherits it; DO NOT ever exploit skip_broken here).
+    branch_id: row.branch_id ?? "",
+    tenant_id: row.tenant_id ?? "",
+    outbox_seq: row.outbox_seq ?? 0,
   });
 }
 

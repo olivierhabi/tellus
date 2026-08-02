@@ -26,7 +26,7 @@
 // ---------------------------------------------------------------------------
 
 import { ClickHouseClient, getClickHouseClient } from "./clickhouseClient";
-import { ensureLinkCdcTopic } from "./cdcLinkProducer";
+import { ensureLinkCdcTopic, linkCdcTopic } from "./cdcLinkProducer";
 
 export interface LinkTypeDescriptor {
   sourceObjectType: string;
@@ -171,7 +171,9 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
   const target = linkTableName(link);
   const kafkaTable = `${target}__kafka`;
   const mv = `${target}__mv`;
-  const topic = `cdc.links.${sanitize(link.sourceObjectType)}.${sanitize(link.linkName)}`;
+  // Environment-scoped topic naming (MUST match the producer side —
+  // linkCdcTopic — or the engine subscribes to a topic nobody writes).
+  const topic = linkCdcTopic(link.sourceObjectType, link.linkName);
   // ClickHouse's Kafka-engine resolves the broker address from inside
   // its own container — so `localhost:9092` (the host-published
   // listener) does NOT work even though the Node producer uses it. In
@@ -180,7 +182,9 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
   const internalBroker =
     process.env.CLICKHOUSE_KAFKA_BROKERS ??
     process.env.KAFKA_INTERNAL_BROKERS ??
-    "redpanda:29092";
+    // Matches the compose topology (kafka:29092 internal alias); a
+    // NON-standard stack must set CLICKHOUSE_KAFKA_BROKERS explicitly.
+    "kafka:29092";
   return {
     kafkaTable,
     mv,
@@ -199,7 +203,9 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
         branch_id        String,
         tenant_id        String,
         operation        String,
-        outbox_seq       UInt64 DEFAULT 0
+        -- Kafka-engine tables reject DEFAULT/MATERIALIZED (CH Code 36); a
+        -- missing field is a broken message (loud), never a silent DEFAULT.
+        outbox_seq       UInt64
       )
       ENGINE = Kafka()
       SETTINGS

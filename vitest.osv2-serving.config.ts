@@ -33,6 +33,9 @@ export default defineConfig({
       CLICKHOUSE_USER: "tellus",
       CLICKHOUSE_PASSWORD: "tellus_ch_pw",
       CLICKHOUSE_DATABASE: "osv2_serving",
+      // The Kafka-engine DDL emitted by the lane must use the INTERNAL
+      // broker alias — the engine connects from inside the CH container.
+      CLICKHOUSE_KAFKA_BROKERS: "kafka:29092",
       REDIS_URL: "redis://localhost:6379/15",
     },
   },
