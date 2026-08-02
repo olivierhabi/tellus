@@ -102,7 +102,7 @@ describe("confirmEdgeIndexVisibility", () => {
     // Per-scope watermark stats were upserted with the observed maxes.
     const upsert = calls.pg.find((c) => c.text.includes("INSERT INTO link_edge_watermarks"));
     expect(upsert).toBeDefined();
-    expect(upsert!.params).toEqual(["", "ont-1", "main", "ownedBy", 77, 999]);
+    expect(upsert!.params).toEqual(["default", "ont-1", "main", "ownedBy", 77, 999]);
   });
 
   it("invisible handle ⇒ polls to the deadline, DEFERS, and never writes a watermark row", async () => {
@@ -246,13 +246,13 @@ describe("stageLinkCdcEvent monotonic offset", () => {
     const embed = stmts.find((s) => s.text.includes("jsonb_set"));
     expect(embed).toBeDefined();
     expect(embed!.params).toEqual([input.eventId, 42]);
-    // Scope keys normalised to "" (ClickHouse String columns) when unset.
+    // Scope keys: folded to canonical "default" (Stage 8 handshake).
     const insert = stmts[0];
-    expect(insert.params![2]).toBeNull(); // PG tenant column stays NULL (param $3) ...
+    expect(insert.params![2]).toBe("default"); // PG tenant column (param $3) — canonical key, NOT NULL
     expect(insert.params![3]).toBe("ont-1"); // ontology column (param $4)
     expect(insert.params![4]).toBe("main"); // branch column (param $5)
     const payload = JSON.parse(insert.params![10] as string);
-    expect(payload.tenant_id).toBe(""); // ...but the CH-bound payload (param $11) is "".
+    expect(payload.tenant_id).toBe("default"); // CH-bound payload uses the same canonical handshake.
   });
 
   it("conflicting re-stage (retried action) keeps the original row + seq", async () => {

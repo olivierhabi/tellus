@@ -43,6 +43,7 @@ import {
 } from "../searchAround/linkMaterializedView";
 import { sqlString } from "../searchAround/clickhouseTraversal";
 import { StoreWatermarkTimeout, type IsolationScope } from "./contracts";
+import { canonicalTenant } from "../searchAround/edgeVersion";
 
 export interface EdgeIndexAckHandle {
   eventId: string;
@@ -119,7 +120,7 @@ function scopeClause(scope: IsolationScope): string {
   // ClickHouse String DEFAULT '' the MV would produce). Callers MUST pass
   // through the same values that were staged (see editApplicator).
   return [
-    `tenant_id = ${sqlString(scope.tenantId ?? "")}`,
+    `tenant_id = ${sqlString(canonicalTenant(scope.tenantId))}`,
     `ontology_id = ${sqlString(scope.ontologyId ?? "")}`,
     `branch_id = ${sqlString(scope.branchId ?? "")}`,
   ].join(" AND ");
@@ -149,7 +150,7 @@ async function recordWatermark(
          last_confirmed_at = now(),
          updated_at = now()`,
       [
-        scope.tenantId ?? "",
+        canonicalTenant(scope.tenantId),
         scope.ontologyId ?? "",
         scope.branchId ?? "",
         linkTypeApiName,
@@ -292,9 +293,9 @@ export async function waitForLinkWatermark(args: {
         WHERE outbox_seq <= $1
           AND published_at IS NOT NULL
           AND dead_lettered_at IS NULL
-          AND COALESCE(tenant_id, '') = $2 AND COALESCE(ontology_id, '') = $3 AND COALESCE(branch_id, '') = $4
+          AND COALESCE(NULLIF(tenant_id, ''), 'default') = $2 AND COALESCE(ontology_id, '') = $3 AND COALESCE(branch_id, '') = $4
           AND link_type_api_name = $5`,
-      [args.minOffset, args.scope.tenantId ?? "", args.scope.ontologyId ?? "", args.scope.branchId ?? "", args.linkTypeApiName],
+      [args.minOffset, canonicalTenant(args.scope.tenantId), args.scope.ontologyId ?? "", args.scope.branchId ?? "", args.linkTypeApiName],
     );
     const pgSeqs = pending.rows.map((r) => Number(r.outbox_seq as unknown as number));
     if (pgSeqs.length > WATERMARK_WINDOW_LIMIT) {

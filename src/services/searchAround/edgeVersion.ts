@@ -90,3 +90,17 @@ SELECT setval(
 FROM pg_sequences s
 WHERE s.schemaname = current_schema()
   AND s.sequencename = 'link_cdc_outbox_outbox_seq_seq'`;
+
+/**
+
+/**
+ * The serving-layer tenant handshake. The write side normalizes "no
+ * tenant" to ""; the read side resolves "no tenant" to "default" via
+ * resolveRequestTenant(). If these never meet, a scope filter asks for
+ * "default" while the rows are stamped "" — the isolation fold makes
+ * them INVISIBLE to cross-scope readers. Collapse both surfaces.
+ */
+export function canonicalTenant(v: string | null | undefined): string {
+  const s = (v ?? "").trim();
+  return s === "" ? "default" : s;
+}

@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { query } from "../../db";
 import { incCounter, setGauge } from "../funnel/metrics";
-import { GUARD_OUTBOX_SEQUENCE_SQL } from "./edgeVersion";
+import { GUARD_OUTBOX_SEQUENCE_SQL, canonicalTenant } from "./edgeVersion";
 import {
   linkCdcTopic,
   publishRowsToTopic,
@@ -94,7 +94,7 @@ export async function stageLinkCdcEvent(
     // confirmation probes use the identical normalisation
     // (serving/edgeIndexWatermark.ts:scopeClause).
     branch_id: input.branchId ?? "",
-    tenant_id: input.tenantId ?? "",
+    tenant_id: canonicalTenant(input.tenantId),
     ontology_id: input.ontologyId ?? "",
   };
   const inserted = await tx.query(
@@ -108,7 +108,7 @@ export async function stageLinkCdcEvent(
     [
       input.eventId,
       linkCdcTopic(input.sourceObjectType, input.linkTypeApiName),
-      input.tenantId ?? null,
+      canonicalTenant(input.tenantId),
       input.ontologyId ?? null,
       input.branchId ?? null,
       input.linkTypeApiName,

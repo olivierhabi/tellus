@@ -12,8 +12,10 @@
 // moves to the serving index.
 // ---------------------------------------------------------------------------
 
-import { traverse } from "../searchAround/searchAroundService";
-import { buildReverseSql } from "../searchAround/clickhouseTraversal";
+import {
+  buildReverseSql,
+  runClickHouseTraversal,
+} from "../searchAround/clickhouseTraversal";
 import { getClickHouseClient } from "../searchAround/clickhouseClient";
 import { resolveLegacyCsvM2mPks } from "../linkResolverService";
 import { deriveMainBranchId } from "../branchContext";
@@ -29,6 +31,9 @@ export interface EdgeResolutionContext {
   branchId: string | null; // from the request branch header; null ⇒ main
   userMarkings: ReadonlySet<string>;
   tenantId: string;
+  /** API names (the link_type.profile.sources uuid columns are IDs) — resolved during weigh-time. */
+  sourceOtApiName: string;
+  targetOtApiName: string;
 }
 
 function toScope(ctx: EdgeResolutionContext): IsolationScope {
@@ -44,20 +49,23 @@ function toScope(ctx: EdgeResolutionContext): IsolationScope {
 }
 
 /**
- * Forward lookup: anchor sources → targets via traversal orchestrator
- * (Quickwit fast path + ClickHouse escalation, latest-state semantics).
+ * Forward lookup: anchor sources → targets DIRECTLY from the versioned
+ * edge index. Rationale (Stage 8): the LinkServingStore serves from the
+ * ClickHouse store ONLY — Quickwit is NOT part of the store's data path;
+ * an outage there must never translate into store unavailability. This
+ * runs the same runClickHouseTraversal SQL-shape the reverse flow uses,
+ * with the isolation + cap guards it enforces.
  */
 async function resolveForward(ctx: EdgeResolutionContext, anchorPks: string[]): Promise<string[]> {
   const lt = ctx.linkType;
-  const out = await traverse({
-    anchorObjectType: lt.source_object_type,
+  const out = await runClickHouseTraversal({
     anchorPks,
     hops: [
       {
         linkType: {
-          sourceObjectType: lt.source_object_type,
+          sourceObjectType: ctx.sourceOtApiName,
           linkName: lt.api_name,
-          targetObjectType: lt.target_object_type,
+          targetObjectType: ctx.targetOtApiName,
         },
       },
     ],
@@ -146,12 +154,24 @@ export async function maybeServingEdgeResolver(
   incCounter("serving_store_mode_total", { capability: weigh.capability, mode });
   if (mode === "legacy") return undefined;
 
+  // Serving-table keys derive from API names, while `link_type` stores
+  // `source_object_type` / `target_object_type` as UUIDs — resolve once
+  // per weigh call (see getObjectTypeApiName — the same helper the
+  // pre-cutover flow uses) and rely on the name-stable descriptor for
+  // every downstream step.
+  const { resolveObjectTypeApiName } = await import("../../models/linkType");
+  const [sourceOtApiName, targetOtApiName] = await Promise.all([
+    resolveObjectTypeApiName(weigh.linkType.source_object_type),
+    resolveObjectTypeApiName(weigh.linkType.target_object_type),
+  ]);
   const ctx: EdgeResolutionContext = {
     linkType: weigh.linkType,
     direction: weigh.direction,
     branchId: weigh.branchId,
     userMarkings: weigh.userMarkings,
     tenantId: weigh.tenantId,
+    sourceOtApiName,
+    targetOtApiName,
   };
   if (mode === "indexed") {
     return (pks) => resolveLinkedPks(ctx, pks);

@@ -735,17 +735,24 @@ export async function searchAround(
       body: injectSecurityFilter({ size: MAX_SOURCE, _source: ["__pk"], query: sourceQuery }, securityFilter, branchId),
     });
     const hitsObj = (resp as any).hits;
+
     const totalHits = typeof hitsObj.total === "object" ? hitsObj.total.value : hitsObj.total;
     sourcePKs = (hitsObj.hits as any[]).map((h: any) => h._source.__pk as string);
 
     if (totalHits > MAX_SOURCE) {
       warnings.push(`Source filter matched ${totalHits} objects but only first ${MAX_SOURCE} were used.`);
     }
-  } catch {
+  } catch (srcErr) {
+    if (process.env.OSV2_TRACE === "1") {
+      console.log(JSON.stringify({ t: "searchAround-src-err", error: (srcErr as Error).message.slice(0, 200) }));
+    }
     return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
   }
 
   if (sourcePKs.length === 0) {
+    if (process.env.OSV2_TRACE === "1") {
+      console.log(JSON.stringify({ t: "searchAround-src-no-hits" }));
+    }
     return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
   }
 

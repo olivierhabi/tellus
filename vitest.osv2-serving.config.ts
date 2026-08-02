@@ -36,6 +36,8 @@ export default defineConfig({
       // The Kafka-engine DDL emitted by the lane must use the INTERNAL
       // broker alias — the engine connects from inside the CH container.
       CLICKHOUSE_KAFKA_BROKERS: "kafka:29092",
+      OPENSEARCH_URL: "http://localhost:9200",
+      OS_INDEX_PREFIX: "osv2srv-ontology-",
       REDIS_URL: "redis://localhost:6379/15",
     },
   },
