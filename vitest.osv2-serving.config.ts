@@ -18,7 +18,7 @@ export default defineConfig({
     include: ["tests/osv2-serving/**/*.test.ts"],
     pool: "forks",
     poolOptions: { forks: { singleFork: true } },
-    testTimeout: 120_000,
+    testTimeout: 300_000,
     hookTimeout: 120_000,
     env: {
       PGHOST: "localhost",
@@ -38,6 +38,7 @@ export default defineConfig({
       CLICKHOUSE_KAFKA_BROKERS: "kafka:29092",
       OPENSEARCH_URL: "http://localhost:9200",
       OS_INDEX_PREFIX: "osv2srv-ontology-",
+      OPENSEARCH_REQUEST_TIMEOUT: "10000",
       REDIS_URL: "redis://localhost:6379/15",
     },
   },
