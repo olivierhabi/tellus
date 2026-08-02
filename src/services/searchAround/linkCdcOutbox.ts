@@ -23,9 +23,11 @@
 // must not read this table for success.
 // ---------------------------------------------------------------------------
 
+import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { query } from "../../db";
 import { incCounter, setGauge } from "../funnel/metrics";
+import { GUARD_OUTBOX_SEQUENCE_SQL } from "./edgeVersion";
 import {
   linkCdcTopic,
   publishRowsToTopic,
@@ -138,6 +140,26 @@ export async function stageLinkCdcEvent(
     [input.eventId, outboxSeq],
   );
   return { eventId: input.eventId, outboxSeq };
+}
+
+/**
+ * Backfill boundary (Stage 7): restate CURRENT edge truth through the
+ * outbox. MUST be called on a PoolClient whose transaction performed the
+ * current snapshot read — by construction the allocated versions correspond
+ * to the observed truth, so they may legitimately win over anything older.
+ * REPLAY of a historical snapshot is the BANNED twin: replay must flow the
+ * PUBLISHED payload with its ORIGINAL outbox_seq (re-delivered, never
+ * re-staged).
+ */
+export async function stageBackfillEdges(
+  tx: PoolClient,
+  edges: Array<Omit<StageLinkCdcInput, "eventId" | "operation">>,
+): Promise<StagedLinkCdcEvent[]> {
+  const out: StagedLinkCdcEvent[] = [];
+  for (const e of edges) {
+    out.push(await stageLinkCdcEvent(tx, { ...e, eventId: randomUUID(), operation: "ADD" }));
+  }
+  return out;
 }
 
 export interface LinkOutboxDrainResult {
@@ -269,10 +291,18 @@ async function scheduleRetry(rows: Array<{ event_id: string; publish_attempts: n
 /** Periodic drainer — call once from the server boot path. */
 export function startLinkCdcDrainer(intervalMs = 2_000): () => void {
   let running = false;
+  let guarded = false;
   const timer = setInterval(async () => {
     if (running) return;
     running = true;
     try {
+      if (!guarded) {
+        // DB-restore anomaly: a "table kept + sequence reset" restore would
+        // re-allocate seqs already in the table → equal versions →
+        // argMax nondeterminism. Guard runs once per boot.
+        await query(GUARD_OUTBOX_SEQUENCE_SQL);
+        guarded = true;
+      }
       await drainLinkOutboxOnce(500);
     } catch (err) {
       console.warn(

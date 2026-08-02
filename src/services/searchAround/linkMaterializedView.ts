@@ -222,7 +222,10 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
         operation,
         if(operation = 'ADD', toUInt8(0), toUInt8(1)) AS deleted,
         event_id,
-        event_ts_micros AS event_version,
+        -- Edge-version contract (Stage 7): the authoritative ordering is the
+        -- globally-allocated outbox_seq; the pre-outbox event_ts_micros is a
+        -- legacy fallback ONLY for replaying pre-157 snapshots.
+        if(outbox_seq > 0, outbox_seq, event_ts_micros) AS event_version,
         cdc_offset,
         outbox_seq,
         source_ts
@@ -271,9 +274,13 @@ export async function rebuildLinkIngestTopology(
 // ---------------------------------------------------------------------------
 // insertLinkRows — direct write path used for backfill and shadow tests. In
 // production the Kafka engine drives ingestion; this helper is for
-// programmatic seeding only. Writers MUST pass a monotonically increasing
-// event_version (event_ts_micros from the source event) — an older version
-// must never overwrite a newer indexed edge state.
+// programmatic seeding only.
+//
+// Edge-version contract (Stage 7): every row MUST declare its ordering
+// identity — outbox_seq (authoritative; writers through linkCdcOutbox) or
+// event_version (replay of a pre-outbox snapshot only). There is NO
+// wall-clock fallback: fabricated `now()` versions break clock-skew
+// invariants. Throws loudly when neither is supplied.
 // ---------------------------------------------------------------------------
 
 export interface LinkRow {
@@ -286,8 +293,9 @@ export interface LinkRow {
   /** Latest-version enqueue; REQUIRED for REMOVE/RETRACT. */
   operation?: "ADD" | "REMOVE" | "RETRACT";
   event_id?: string;
+  /** Legacy snapshot replay ONLY — new writers use outbox_seq. */
   event_version?: number;
-  /** Monotonic outbox offset (watermark confirmation handle). */
+  /** Monotonic outbox offset = authoritative edge_version. */
   outbox_seq?: number;
   ontology_id?: string;
   branch_id?: string;
@@ -300,8 +308,14 @@ export async function insertLinkRows(
   client: ClickHouseClient = getClickHouseClient()
 ): Promise<void> {
   const table = linkTableName(link);
-  const nowMicros = Date.now() * 1000;
   const normalized = rows.map((r) => {
+    const event_version =
+      (r.outbox_seq ?? 0) > 0 ? r.outbox_seq! : r.event_version;
+    if (!event_version || event_version <= 0) {
+      throw new Error(
+        `insertLinkRows: row for (${link.linkName}: ${r.source_pk}→${r.target_pk}) has no ordering identity: outbox_seq or event_version is REQUIRED`,
+      );
+    }
     const operation = r.operation ?? "ADD";
     return {
       tenant_id: r.tenant_id ?? "",
@@ -312,9 +326,9 @@ export async function insertLinkRows(
       link_props: JSON.stringify(r.link_props ?? {}),
       markings: r.markings ?? [],
       operation,
-      deleted: operation === "ADD" ? 0 : 1,
+      deleted: operation === "REMOVE" || operation === "RETRACT" ? 1 : 0,
       event_id: r.event_id ?? "",
-      event_version: r.event_version ?? nowMicros,
+      event_version,
       cdc_offset: r.cdc_offset ?? 0,
       outbox_seq: r.outbox_seq ?? 0,
       source_ts: toClickHouseDateTime64(r.source_ts),
