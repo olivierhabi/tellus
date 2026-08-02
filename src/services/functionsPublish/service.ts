@@ -44,6 +44,14 @@ import {
   normalizeSignature,
 } from "./signatureCompat";
 import {
+  canonicalTypeOfParameter,
+  computeSignatureHash,
+  readCanonicalSignature,
+  TYPESCRIPT_V2_POSITIONAL_V2,
+  type FunctionType,
+  type InvocationContract,
+} from "../functions/canonicalSignature";
+import {
   startLogRetentionMaintenance,
   type MaintenanceHandle,
 } from "./maintenance";
@@ -98,8 +106,21 @@ interface FunctionSource {
   functionKind: FunctionKind;
 }
 
+/**
+ * Persisted published signature. Each parameter carries the full canonical
+ * contract (position/hasDefault/typeModel) in addition to the original
+ * verbatim text fields — older consumers reading only {name,type,optional}
+ * upgrade on read via canonicalSignature.readCanonicalSignature.
+ */
 interface FunctionSignature {
-  parameters: Array<{ name: string; type: string; optional: boolean }>;
+  parameters: Array<{
+    name: string;
+    type: string;
+    optional: boolean;
+    position: number;
+    hasDefault: boolean;
+    typeModel: FunctionType;
+  }>;
   output: string;
 }
 
@@ -1114,13 +1135,24 @@ export class FunctionsPublishService {
                  retired_at = NULL, updated_at = now()`,
           [rid, request.repository_rid, fn.apiName, fn.path],
         );
+        // The invocation contract is persisted per immutable published
+        // version. All NEW publishes use the positional TypeScript v2
+        // contract; artifacts published before the contract column existed
+        // are backfilled (migration 156) to legacy-object-envelope-v1 and
+        // keep their original behavior byte-identically.
+        const invocationContract: InvocationContract = TYPESCRIPT_V2_POSITIONAL_V2;
+        const canonical = readCanonicalSignature(fn.signature);
+        const signatureHash = canonical
+          ? computeSignatureHash(invocationContract, canonical)
+          : null;
         await client.query(
           `INSERT INTO function_registry_function_version(
              function_rid, semver, branch, release_version_rid, commit_sha,
-             source_path, artifact_sha256, signature, function_kind
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+             source_path, artifact_sha256, signature, function_kind,
+             invocation_contract, signature_hash
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)
            ON CONFLICT(function_rid, branch, semver) DO NOTHING`,
-          [rid, request.semver, request.branch, releaseVersionRid, request.commit_sha, fn.path, artifactSha256, JSON.stringify(fn.signature), fn.functionKind],
+          [rid, request.semver, request.branch, releaseVersionRid, request.commit_sha, fn.path, artifactSha256, JSON.stringify(fn.signature), fn.functionKind, invocationContract, signatureHash],
         );
         result[fn.apiName] = rid;
       }
@@ -1507,10 +1539,13 @@ export function inspectPublishedFunction(path: string, source: string): Publishe
   }
   return {
     signature: {
-      parameters: declaration.parameters.map((parameter) => ({
+      parameters: declaration.parameters.map((parameter, position) => ({
         name: parameter.name.getText(file),
         type: parameter.type!.getText(file),
         optional: Boolean(parameter.questionToken || parameter.initializer),
+        position,
+        hasDefault: Boolean(parameter.initializer),
+        typeModel: canonicalTypeOfParameter(parameter.type),
       })),
       output: declaration.type.getText(file),
     },

@@ -19,6 +19,33 @@ import {
   encodeRegistryCursor,
   isFunctionRegistryRid,
 } from "../pagination.js";
+import { readCanonicalSignature } from "../../functions/canonicalSignature.js";
+import {
+  executionPolicy,
+  isPublishAuthorTrusted,
+} from "../../functions/executionPolicy.js";
+
+/**
+ * The canonical signature shape exposed to clients (Automate editors,
+ * Workshop, API consumers): uniform per-parameter
+ * {name, position, type, typeText, optional, hasDefault} regardless of
+ * whether the row was published before or after contractVersion 2.
+ */
+function canonicalParametersForResponse(signature: unknown): unknown[] {
+  const canonical = readCanonicalSignature(signature);
+  if (canonical) {
+    return canonical.parameters.map((parameter) => ({
+      name: parameter.name,
+      position: parameter.position,
+      type: parameter.typeText,
+      typeModel: parameter.type,
+      optional: parameter.optional,
+      hasDefault: parameter.hasDefault,
+    }));
+  }
+  const legacy = (signature as { parameters?: unknown[] } | null)?.parameters;
+  return Array.isArray(legacy) ? legacy : [];
+}
 
 export interface FunctionsRouterDeps {
   readonly pool: Pool;
@@ -248,6 +275,123 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
     });
   }));
 
+  // GET /functions/registry/legacy/versions — every AVAILABLE immutable
+  // version still published under the deprecated legacy-object-envelope-v1
+  // invocation contract. THE operational inventory for the contract
+  // migration burndown (republish targets). Superadmin only.
+  // Registered BEFORE /functions/registry/:functionRid on purpose.
+  router.get("/functions/registry/legacy/versions", asyncRoute(async (req: Request, res: Response) => {
+    const principal = req.codeReposPrincipal;
+    if (!principal) {
+      sendError(res, functionsError("Functions:Internal", { reason: "missing-principal" }));
+      return;
+    }
+    if (!principal.roles.some((role) => role.toLowerCase() === "tellus-superadmin")) {
+      sendError(res, functionsError("Functions:PermissionDenied", { reason: "superadmin-required" }));
+      return;
+    }
+    const rawLimit = typeof req.query.limit === "string" ? Number(req.query.limit) : 200;
+    if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 500) {
+      sendError(res, functionsError("Functions:InvalidArgument", { reason: "invalid-limit" }));
+      return;
+    }
+    const result = await deps.pool.query(
+      `SELECT v.function_rid, v.repository_rid, v.api_name, v.branch, v.semver,
+              v.artifact_sha256, v.signature_hash, v.created_at,
+              release.state AS release_state
+         FROM function_registry_function_version v
+         JOIN function_version release ON release.rid = v.release_version_rid
+        WHERE v.invocation_contract = 'legacy-object-envelope-v1'
+        ORDER BY v.created_at DESC
+        LIMIT $1`,
+      [rawLimit],
+    );
+    res.status(200).json({
+      invocationContract: "legacy-object-envelope-v1",
+      count: result.rowCount,
+      versions: result.rows.map((row: {
+        function_rid: string; repository_rid: string; api_name: string;
+        branch: string; semver: string; artifact_sha256: string;
+        signature_hash: string | null; created_at: Date | string;
+        release_state: string;
+      }) => ({
+        functionRid: row.function_rid,
+        repositoryRid: row.repository_rid,
+        apiName: row.api_name,
+        branch: row.branch,
+        semver: row.semver,
+        releaseState: row.release_state,
+        artifactSha256: row.artifact_sha256,
+        signatureHash: row.signature_hash,
+        publishedAt: iso(row.created_at),
+      })),
+    });
+  }));
+
+  // GET /functions/registry/legacy/status — contract migration burndown:
+  // version counts by contract, automations whose saved draft pins a legacy
+  // version, legacy execution counts over the trailing window, and the
+  // operator policy (kill switch + deprecation date). Superadmin only.
+  router.get("/functions/registry/legacy/status", asyncRoute(async (req: Request, res: Response) => {
+    const principal = req.codeReposPrincipal;
+    if (!principal) {
+      sendError(res, functionsError("Functions:Internal", { reason: "missing-principal" }));
+      return;
+    }
+    if (!principal.roles.some((role) => role.toLowerCase() === "tellus-superadmin")) {
+      sendError(res, functionsError("Functions:PermissionDenied", { reason: "superadmin-required" }));
+      return;
+    }
+    const [versionCounts, pinnedAutomations, recentExecutions] = await Promise.all([
+      deps.pool.query(
+        `SELECT invocation_contract, count(*)::int AS versions,
+                count(DISTINCT function_rid)::int AS functions
+           FROM function_registry_function_version
+          GROUP BY invocation_contract
+          ORDER BY invocation_contract`,
+      ),
+      // Saved automation drafts (primary Function effects) that pin a
+      // legacy-contract version. fallbackEffect references are excluded by
+      // design — a fallback that never saved a legacy pin stays invisible
+      // until the primary is migrated.
+      deps.pool.query(
+        `SELECT count(DISTINCT av.automation_id)::int AS automations
+           FROM automation_version av
+          CROSS JOIN LATERAL jsonb_array_elements(av.definition #> '{effects}') e
+          WHERE e ->> 'type' = 'function'
+            AND EXISTS (
+              SELECT 1
+                FROM function_registry_function_version fv
+               WHERE fv.function_rid = e ->> 'functionRid'
+                 AND fv.branch = e ->> 'branch'
+                 AND fv.semver = e ->> 'version'
+                 AND fv.invocation_contract = 'legacy-object-envelope-v1'
+            )`,
+      ),
+      deps.pool.query(
+        `SELECT invocation_contract, status, count(*)::int AS executions
+           FROM automation_effect_execution
+          WHERE invocation_contract IS NOT NULL
+            AND created_at >= now() - make_interval(days => 30)
+          GROUP BY invocation_contract, status
+          ORDER BY invocation_contract, status`,
+      ),
+    ]);
+    const policy = executionPolicy();
+    res.status(200).json({
+      versions: versionCounts.rows,
+      automationsPinningLegacyVersions: pinnedAutomations.rows[0]?.automations ?? 0,
+      executionsLast30Days: recentExecutions.rows,
+      policy: {
+        legacyContractDisabled: policy.legacyContractDisabled,
+        legacyDeprecationDate: policy.legacyDeprecationDate,
+        trustMode: policy.trustMode,
+      },
+      migrationGuide:
+        "Edit the function source (declare real parameters, drop the single-envelope parameter), republish via POST /api/code-repos/:rid/tags, then re-pin or auto-upgrade the automation. Never edit published artifacts in place.",
+    });
+  }));
+
   // Stable per-function resource. TypeScript v2 publication assigns one RID
   // per source path; `version` selects immutable signature/artifact metadata.
   router.get("/functions/registry/:functionRid", asyncRoute(async (req: Request, res: Response) => {
@@ -261,7 +405,8 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
     const result = await deps.pool.query(
       `SELECT f.rid, f.repository_rid, f.api_name, f.display_name, f.source_path,
               v.semver, v.branch, v.release_version_rid, v.commit_sha,
-              v.artifact_sha256, v.signature, v.function_kind, v.created_at
+              v.artifact_sha256, v.signature, v.function_kind,
+              v.invocation_contract, v.created_at
          FROM function_registry_function f
          JOIN function_registry_function_version v ON v.function_rid = f.rid
         WHERE f.rid = $1
@@ -276,7 +421,7 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
       sendError(res, functionsError("Functions:VersionNotFound", { functionRid, version }));
       return;
     }
-    const row = result.rows[0];
+        const row = result.rows[0];
     res.status(200).json({
       rid: row.rid,
       repositoryRid: row.repository_rid,
@@ -288,9 +433,10 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
       releaseVersionRid: row.release_version_rid,
       commitSha: row.commit_sha,
       artifactSha256: row.artifact_sha256,
-      parameters: row.signature?.parameters ?? [],
+      parameters: canonicalParametersForResponse(row.signature),
       output: row.signature?.output ?? null,
       functionKind: row.function_kind ?? null,
+      invocationContract: row.invocation_contract ?? "legacy-object-envelope-v1",
       publishedAt: row.created_at instanceof Date ? row.created_at.toISOString() : new Date(row.created_at).toISOString(),
     });
   }));
@@ -315,7 +461,8 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
               function.display_name, version.semver, version.branch,
               version.release_version_rid, version.commit_sha,
               version.artifact_sha256, version.signature,
-              version.function_kind, version.created_at
+              version.function_kind, version.invocation_contract,
+              version.created_at
          FROM function_registry_function function
          JOIN function_registry_function_version version
            ON version.function_rid = function.rid
@@ -361,9 +508,11 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
         releaseVersionRid: row.release_version_rid,
         commitSha: row.commit_sha,
         artifactSha256: row.artifact_sha256,
-        parameters: row.signature?.parameters ?? [],
+        parameters: canonicalParametersForResponse(row.signature),
         output: row.signature?.output ?? null,
         functionKind: row.function_kind ?? null,
+        invocationContract:
+          row.invocation_contract ?? "legacy-object-envelope-v1",
         publishedAt: iso(row.created_at),
       })),
     });
@@ -374,6 +523,22 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
     if (!isStructurallyRid(repositoryRid)) {
       sendError(res, functionsError("Functions:InvalidArgument", { reason: "invalid-repository-rid" }));
       return;
+    }
+    // Publish trust gate (execution security boundary): executable
+    // artifacts are accepted only from trusted authors while the executor
+    // is not an untrusted-code sandbox. See functions/executionPolicy.ts.
+    {
+      const principal = req.codeReposPrincipal;
+      if (!principal || !isPublishAuthorTrusted(principal.userId)) {
+        sendError(
+          res,
+          functionsError("Functions:PermissionDenied", {
+            reason:
+              "function-author-not-trusted: publication is restricted to trusted authors (FUNCTION_EXECUTION_TRUST_MODE) because the executor is not yet an untrusted-code sandbox.",
+          }),
+        );
+        return;
+      }
     }
     const v = validatePublishBody(req.body);
     if (!v.ok) {

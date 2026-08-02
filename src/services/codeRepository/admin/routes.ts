@@ -30,6 +30,10 @@ import type { Pool } from "pg";
 
 import { isRid, isStructurallyRid, mintFunctionVersionRid } from "../../codeRepos/contracts/rid";
 import { publishVersion, listVersions } from "../../functionsRegistry/store";
+import {
+  executionPolicy,
+  isPublishAuthorTrusted,
+} from "../../functions/executionPolicy";
 import { parseSemver, compareSemver, isPreviewRelease } from "../../functionsRegistry/semver";
 import {
   createS3FunctionArtifactStore,
@@ -1997,6 +2001,35 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
     try {
       const rid = req.params.rid;
       if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+
+      // Publish trust gate (execution security boundary): the current
+      // executor is worker_threads + vm — NOT an untrusted-code sandbox —
+      // so publishing executable Functions is restricted to trusted authors
+      // unless FUNCTION_EXECUTION_TRUST_MODE=open-development explicitly
+      // opts out (never honored in production). See
+      // functions/executionPolicy.ts and
+      // docs/operations/automate-function-invocation-contract.md.
+      const publishPrincipal = req.codeReposPrincipal;
+      if (!publishPrincipal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      if (!isPublishAuthorTrusted(publishPrincipal.userId)) {
+        console.warn(
+          JSON.stringify({
+            type: "functions.publish.trust_gate_denied",
+            repositoryRid: rid,
+            userId: publishPrincipal.userId,
+            trustMode: executionPolicy().trustMode,
+          }),
+        );
+        return sendError(
+          res,
+          codeReposError("CodeRepos:PermissionDenied", {
+            reason:
+              "function-author-not-trusted: this deployment restricts Function publication to trusted authors (FUNCTION_EXECUTION_TRUST_MODE=trusted-authors-only) because the executor is not yet an untrusted-code sandbox. Ask a platform administrator to add your user id to FUNCTION_TRUSTED_AUTHOR_IDS.",
+          }),
+        );
+      }
 
       const b = (req.body ?? {}) as { tag?: unknown; semver?: unknown; branch?: unknown; message?: unknown };
       const semverStr = typeof b.semver === "string" ? b.semver : typeof b.tag === "string" ? b.tag : "";
