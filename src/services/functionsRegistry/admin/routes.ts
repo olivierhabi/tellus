@@ -296,10 +296,11 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
       return;
     }
     const result = await deps.pool.query(
-      `SELECT v.function_rid, v.repository_rid, v.api_name, v.branch, v.semver,
+      `SELECT v.function_rid, f.repository_rid, f.api_name, v.branch, v.semver,
               v.artifact_sha256, v.signature_hash, v.created_at,
               release.state AS release_state
          FROM function_registry_function_version v
+         JOIN function_registry_function f ON f.rid = v.function_rid
          JOIN function_version release ON release.rid = v.release_version_rid
         WHERE v.invocation_contract = 'legacy-object-envelope-v1'
         ORDER BY v.created_at DESC
