@@ -21,7 +21,7 @@
 import type { PoolClient } from "pg";
 import { getClient, query } from "../db";
 import { OntologyError } from "../utils/queryErrors";
-import { publishLinkCdc } from "../services/searchAround/cdcLinkProducer";
+import { stageLinkCdcEvent } from "../services/searchAround/linkCdcOutbox";
 import { incCounter } from "../services/funnel/metrics";
 
 function genEventId(): string {
@@ -428,6 +428,7 @@ export async function applyEdits(
       // producer can emit v2.0.0 Avro payloads with full provenance.
       if (edit.linkEdits && edit.linkEdits.length > 0) {
         for (const linkEdit of edit.linkEdits) {
+          const linkEventId = executionContext.eventId ?? genEventId();
           await pgClient.query(
             `INSERT INTO link_edit
                (link_type_api_name, source_primary_key, target_primary_key,
@@ -443,7 +444,7 @@ export async function applyEdits(
               linkEdit.targetPrimaryKey,
               linkEdit.operation,
               executionContext.executionId,
-              executionContext.eventId ?? genEventId(),
+              linkEventId,
               "2.0.0",
               executionContext.executedBy,
               executionContext.actionRid ?? executionContext.actionTypeApiName,
@@ -456,6 +457,29 @@ export async function applyEdits(
               executionContext.branchId,
             ]
           );
+
+          // Transactional outbox (OSv2 parity): the CDC event for this
+          // link mutation commits atomically with the domain change in
+          // THIS transaction. The drainer (startLinkCdcDrainer) publishes
+          // with bounded backoff and dead-letters; a Kafka outage no
+          // longer silently loses link events, and the edit is never
+          // marked "indexed" merely because an outbox row exists.
+          const rawOp = (linkEdit.operation ?? "add") as string;
+          await stageLinkCdcEvent(pgClient, {
+            eventId: linkEventId,
+            sourceObjectType: edit.objectType,
+            linkTypeApiName: linkEdit.linkTypeApiName,
+            sourcePrimaryKey: edit.primaryKey,
+            targetPrimaryKey: linkEdit.targetPrimaryKey,
+            operation:
+              rawOp === "remove" ? "REMOVE" : rawOp === "retract" ? "RETRACT" : "ADD",
+            ontologyId,
+            branchId: executionContext.branchId,
+            actorPrincipalId: executionContext.executedBy,
+            actionRid: executionContext.actionRid ?? executionContext.actionTypeApiName ?? null,
+            correlationId: executionContext.correlationId ?? null,
+            causationId: executionContext.causationId ?? null,
+          });
 
           incCounter("tellus_link_edit_writes_total", {
             branch_id: executionContext.branchId,
@@ -537,17 +561,14 @@ export async function applyEdits(
     pgClient.release();
   }
 
-  // B10: publish link_edit rows to the CDC topic. Outside the PG txn so
-  // a down Kafka doesn't roll back the edit; if it fails the
-  // /api/v1/funnel/clickhouse/cdc-lag endpoint surfaces the drift.
+  // Link CDC events were staged into `link_cdc_outbox` INSIDE the edit
+  // transaction above (transactional outbox — nothing to publish here).
+  // Writeback overlay remains post-commit and fire-and-forget: it is a
+  // read-after-write cache, never the source of truth; it is retired by
+  // the sweeper only after confirmed index visibility.
   for (const edit of edits) {
     if (!edit.linkEdits || edit.linkEdits.length === 0) continue;
     for (const linkEdit of edit.linkEdits) {
-      // The source-type for a link_edit is the same object type the
-      // action modified; link direction is decoupled via source_pk /
-      // target_pk columns on the link table.
-      //
-      // LT-B3: emit full v2.0.0 provenance on the per-link CDC topic.
       const rawOp = (linkEdit.operation ?? "add") as string;
       const op: "ADD" | "REMOVE" | "RETRACT" =
         rawOp === "remove"
@@ -555,26 +576,8 @@ export async function applyEdits(
           : rawOp === "retract"
             ? "RETRACT"
             : "ADD";
-      void publishLinkCdc(edit.objectType, linkEdit.linkTypeApiName, {
-        source_pk: edit.primaryKey,
-        target_pk: linkEdit.targetPrimaryKey,
-        link_props: {},
-        markings: [],
-        schema_version: "2.0.0",
-        event_id: genEventId(),
-        event_ts_micros: Date.now() * 1000,
-        ontology_id: executionContext.ontologyId,
-        link_type_api_name: linkEdit.linkTypeApiName,
-        operation: op,
-        actor_principal_id: executionContext.executedBy,
-        action_rid: executionContext.actionRid ?? executionContext.actionTypeApiName ?? null,
-        correlation_id: executionContext.correlationId ?? null,
-        causation_id: executionContext.causationId ?? null,
-        direction: "forward",
-      });
-
       // FNL-H5 — writeback overlay for the link edit so the resolver
-      // sees the change immediately even if Quickwit/CH ingestion lags.
+      // sees the change immediately even if the edge index lags.
       void writeOverlayForLinkEdit({
         linkTypeApiName: linkEdit.linkTypeApiName,
         sourcePk: edit.primaryKey,

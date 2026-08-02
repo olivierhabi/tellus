@@ -49,9 +49,12 @@ async function getProducer(): Promise<Producer | null> {
         producer = p;
         console.log(`[kafka/cdc-links] producer connected to ${BROKERS.join(",")}`);
       } catch (err) {
-        disabled = true;
+        // Do NOT permanently disable on a transient connect failure:
+        // `producer` stays null and the next publish retries. The link
+        // outbox (linkCdcOutbox.ts) bounds retries with backoff, so
+        // retries naturally rate-limit and pickup is restart-safe.
         console.warn(
-          `[kafka/cdc-links] producer disabled — broker unreachable (${(err as Error).message})`
+          `[kafka/cdc-links] broker unreachable (${(err as Error).message}) — will retry`
         );
       } finally {
         connecting = null;
@@ -84,6 +87,9 @@ export interface LinkCdcRow {
   causation_id?: string | null;
   retracts_event_id?: string | null;
   direction?: "forward" | "reverse";
+  /** Isolation dimensions carried into the versioned edge index. */
+  branch_id?: string | null;
+  tenant_id?: string | null;
 }
 
 /**
@@ -130,6 +136,8 @@ function serialisePayload(row: LinkCdcRow): string {
     causation_id: row.causation_id ?? null,
     retracts_event_id: row.retracts_event_id ?? null,
     direction: row.direction ?? "forward",
+    branch_id: row.branch_id ?? null,
+    tenant_id: row.tenant_id ?? null,
   });
 }
 
@@ -263,6 +271,36 @@ export async function ensureLinkCdcTopic(
     if (/already exists|TOPIC_ALREADY_EXISTS/i.test(msg)) return true;
     console.warn(`[kafka/cdc-links] createTopics ${topic} failed: ${msg}`);
     return false;
+  }
+}
+
+/**
+ * Publish pre-serialised rows to an explicit topic. Used by the
+ * transactional outbox drainer (linkCdcOutbox.ts) — returns the number of
+ * messages the broker accepted; returns 0 on any failure so the caller
+ * can retry with backoff (never throws).
+ */
+export async function publishRowsToTopic(topic: string, rows: LinkCdcRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const p = await getProducer();
+  if (!p) return 0;
+  try {
+    await p.send({
+      topic,
+      messages: rows.map((row) => ({
+        key: `${row.source_pk}::${row.target_pk}`,
+        value: serialisePayload(row),
+        headers: {
+          schema_version: row.schema_version ?? "2.0.0",
+          operation: row.operation ?? "ADD",
+          event_id: row.event_id ?? "",
+        },
+      })),
+    });
+    return rows.length;
+  } catch (err) {
+    console.warn(`[kafka/cdc-links] publish to ${topic} failed: ${(err as Error).message}`);
+    return 0;
   }
 }
 

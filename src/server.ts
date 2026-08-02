@@ -98,6 +98,8 @@ import { shutdownKafka } from "./services/kafkaProducer";
 // workers (signal dispatcher + overlay sweeper).
 import funnelRouter from "./routes/funnel";
 import { startFunnelDispatcher, stopFunnelDispatcher } from "./services/funnel/funnelDispatcher";
+import { startLinkCdcDrainer } from "./services/searchAround/linkCdcOutbox";
+let stopLinkCdcDrainer: (() => void) | null = null;
 import {
   startPipelineDispatcher,
   stopPipelineDispatcher,
@@ -1417,6 +1419,20 @@ async function start(): Promise<void> {
       );
     }
 
+    // Transactional outbox drainer for link CDC (OSv2 parity): publishes
+    // outbox rows committed inside Action transactions to Kafka with
+    // bounded backoff; restart-safe and dead-letters after max attempts.
+    try {
+      if (process.env.LINK_CDC_DRAINER_DISABLED !== "true") {
+        stopLinkCdcDrainer = startLinkCdcDrainer();
+        console.log("Link CDC outbox drainer started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start link CDC drainer: ${(err as Error).message}`
+      );
+    }
+
     // Start Asynchronous Multi-Source Compilation Worker
     try {
       const { startDatasourceCompilerConsumer } = require("./services/orchestration/datasource-compiler-consumer");
@@ -1827,6 +1843,7 @@ async function shutdown(signal: string): Promise<void> {
     ["funnelDispatcher", stopFunnelDispatcher],
     ["pipelineDispatcher", stopPipelineDispatcher],
     ["overlaySweeper", stopOverlaySweeper],
+    ["linkCdcDrainer", () => stopLinkCdcDrainer?.()],
     ["replacementScheduler", stopReplacementScheduler],
     ["icebergMaintenance", stopIcebergMaintenance],
     ["temporalWorker", stopTemporalWorker],
