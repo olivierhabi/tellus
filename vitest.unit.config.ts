@@ -34,6 +34,11 @@ export default defineConfig({
       KEYCLOAK_ISSUER: "http://localhost:8086/realms/tellus",
       KEYCLOAK_URL: "http://localhost:8086",
       NODE_ENV: "test",
+      // Test lanes exercise publish ROUTES as the feature surface, not the
+      // author gate; the gate itself is covered by dedicated unit tests
+      // (tests/unit/functions/executionPolicy-unit.test.ts) under the real
+      // default mode. open-development is only honored outside production.
+      FUNCTION_EXECUTION_TRUST_MODE: "open-development",
     },
     include: [
       "tests/unit/**/*-unit.test.ts",

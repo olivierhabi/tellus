@@ -41,36 +41,44 @@ const TEMPLATE = "typescript-functions";
 const TEMPLATE_VERSION = "2.4.0";
 const FUNCTION_PATH = "typescript-functions/src/functions";
 
-// The Automate Function-effect runtime calls a 1-parameter (legacy
-// single-arg) Function with the WHOLE resolved `parameters` object as its
-// single argument (buildV2CallArgs in functionRuntime.ts only enters the
-// v2 `(client, ...params)` by-name path when the published signature has
-// >= 2 parameters — and that path treats the first param as the injected
-// `client`, which the activation validator would then require the user to
-// bind). So the canonical Automate Function shape is a single param that
-// receives the resolved parameters object and reads a field off it. The
-// binding key must equal the signature parameter name.
-//   verifyMarker: signature `{ input: { input: string } }` — compatible
-//   across v1↔v2 (same type); v3 renames the field (`input`→`marker`) which
-//   is a backward-incompatible input-contract change → requires MAJOR 2.0.0.
-const VERIFY_MARKER_V1 = `export default function verifyMarker(input: { input: string }): string {
-  return "fn-v1:" + input.input;
+// All functions seeded here are published through the REAL publication
+// pipeline and are therefore stamped with the positional
+// `typescript-v2-positional-v2` invocation contract (new publishes): every
+// configured parameter is resolved BY PUBLISHED NAME and invoked
+// POSITIONALLY in published order — no wrapper object, no injected client.
+// The binding key must equal the published parameter name.
+//   verifyMarker: signature `(input: string)` — compatible across v1↔v2
+//   (same signature); v3 renames the parameter (`input`→`marker`), which is
+//   a backward-incompatible input-contract change → requires MAJOR 2.0.0.
+const VERIFY_MARKER_V1 = `export default function verifyMarker(input: string): string {
+  return "fn-v1:" + input;
 }
 `;
-const VERIFY_MARKER_V2 = `export default function verifyMarker(input: { input: string }): string {
-  return "fn-v2:" + input.input;
+const VERIFY_MARKER_V2 = `export default function verifyMarker(input: string): string {
+  return "fn-v2:" + input;
 }
 `;
-const VERIFY_MARKER_V3 = `export default function verifyMarker(input: { marker: string }): string {
-  return "fn-v3:" + input.marker;
+const VERIFY_MARKER_V3 = `export default function verifyMarker(marker: string): string {
+  return "fn-v3:" + marker;
 }
 `;
 // verifyFail: throws predictably when the bound value is "boom" (scenario 2).
-const VERIFY_FAIL_SRC = `export default function verifyFail(input: { input: string }): string {
-  if (input.input === "boom") {
+const VERIFY_FAIL_SRC = `export default function verifyFail(input: string): string {
+  if (input === "boom") {
     throw new Error("verifyFail: predictable failure for boom");
   }
-  return "fail-ok:" + input.input;
+  return "fail-ok:" + input;
+}
+`;
+// helloWorld: the canonical "standard TypeScript v2" proof — one string
+// parameter, invoked positionally: helloWorld("Olivier") === "Hello, Olivier".
+const HELLO_WORLD_SRC = `export default function helloWorld(name: string): string {
+  return "Hello, " + name;
+}
+`;
+// typedParams: multi-parameter typed proof (string + number + boolean).
+const TYPED_PARAMS_SRC = `export default function typedParams(label: string, count: number, enabled: boolean): string {
+  return label + "|" + (count + 1) + "|" + (enabled ? "on" : "off");
 }
 `;
 
@@ -90,6 +98,8 @@ interface SeedOutput {
       v3: { semver: string; artifactSha256: string };
     };
     verifyFail: { functionRid: string; apiName: string; branch: string; v1: { semver: string; artifactSha256: string } };
+    helloWorld: { functionRid: string; apiName: string; branch: string; v1: { semver: string; artifactSha256: string } };
+    typedParams: { functionRid: string; apiName: string; branch: string; v1: { semver: string; artifactSha256: string } };
   };
   seedOwnerUserId: string;
 }
@@ -549,10 +559,12 @@ async function main() {
   })();
   const repoRid = await step("5/9 code repository (POST + saga)", seedRepo)();
   // --- Publish v1 at 1.0.0 -------------------------------------------------
-  await step("6a/9 commit v1 functions (verifyMarker+verifyFail)", async () => {
-    await commit(repoRid, "seed v1: verifyMarker + verifyFail", [
+  await step("6a/9 commit v1 functions (verifyMarker+verifyFail+helloWorld+typedParams)", async () => {
+    await commit(repoRid, "seed v1: verifyMarker + verifyFail + helloWorld + typedParams", [
       { path: `${FUNCTION_PATH}/verifyMarker.ts`, op: "add", content: VERIFY_MARKER_V1 },
       { path: `${FUNCTION_PATH}/verifyFail.ts`, op: "add", content: VERIFY_FAIL_SRC },
+      { path: `${FUNCTION_PATH}/helloWorld.ts`, op: "add", content: HELLO_WORLD_SRC },
+      { path: `${FUNCTION_PATH}/typedParams.ts`, op: "add", content: TYPED_PARAMS_SRC },
     ]);
   })();
   await step("6b/9 publish v1 1.0.0 (POST /tags → jemma)", () =>
@@ -602,6 +614,20 @@ async function main() {
       apiName: fail.apiName,
       branch: "main",
       v1: await resolveVersion(fail.functionRid, "1.0.0"),
+    };
+    const hello = await resolveFunction(undefined as any, "helloWorld");
+    out.functions.helloWorld = {
+      functionRid: hello.functionRid,
+      apiName: hello.apiName,
+      branch: "main",
+      v1: await resolveVersion(hello.functionRid, "1.0.0"),
+    };
+    const typed = await resolveFunction(undefined as any, "typedParams");
+    out.functions.typedParams = {
+      functionRid: typed.functionRid,
+      apiName: typed.apiName,
+      branch: "main",
+      v1: await resolveVersion(typed.functionRid, "1.0.0"),
     };
   })();
   require("fs").mkdirSync("/tmp/automate-verify-stack", { recursive: true });

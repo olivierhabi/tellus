@@ -19,6 +19,9 @@ export default defineConfig({
       PGDATABASE: process.env.PGDATABASE ?? "tellus_db",
       PGUSER: process.env.PGUSER ?? "tellus",
       PGPASSWORD: process.env.PGPASSWORD ?? "tellus123",
+      // Publish-author trust gate: exercised by dedicated tests; other lanes
+      // opt out explicitly (never honored in production).
+      FUNCTION_EXECUTION_TRUST_MODE: "open-development",
     },
   },
 });

@@ -93,6 +93,22 @@ done
 echo "  PASS (two consecutive independent runs)"
 
 echo ""
+echo "[4b/10] Function-effect positional contract — REAL UI cypress (helloWorld + typedParams)"
+# Drives the actual Automate UI end-to-end: create automation → add
+# Configure Function effect → search/select helloWorld → pin version 1.0.0 →
+# bind name = constant "Olivier" → save → trigger → persisted proof of
+# result "Hello, Olivier", the pinned typescript-v2-positional-v2 contract,
+# and typed constants (number/boolean) staying typed. No Function-effect
+# payload is constructed in the test.
+if ! ( cd "$FE_REPO" && env CI=true "${CYPRESS_ENV[@]}" corepack "pnpm@$FE_PNPM_VERSION" exec cypress run --headless --spec "cypress/e2e/automate-function-effect-ui-e2e.cy.ts" ) \
+    > "/tmp/automate-verify-gate-cypress-fnui.log" 2>&1; then
+  echo "  Function-effect UI cypress FAILED:"
+  tail -50 "/tmp/automate-verify-gate-cypress-fnui.log" | sed -e 's/^/    /'
+  exit 1
+fi
+echo "  Function-effect UI cypress PASS (helloWorld + typedParams)"
+
+echo ""
 echo "[5/10] Permission guard — realm-restricted owner check"
 KTOKEN=$(curl -sf -X POST -H "Content-Type: application/x-www-form-urlencoded" \
   -d "username=admin&password=admin&grant_type=password&client_id=admin-cli" \

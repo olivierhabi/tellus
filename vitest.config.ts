@@ -93,6 +93,9 @@ export default defineConfig({
       // Production code paths NEVER consult this header — the env var is the
       // single gate, and it is only set in test configs.
       CODE_REPOS_TEST_AUTH: "1",
+      // Publish-author trust gate: exercised by dedicated tests; other lanes
+      // opt out explicitly (never honored in production).
+      FUNCTION_EXECUTION_TRUST_MODE: "open-development",
     },
 
     // Coverage configuration — scoped to modules exercised by unit tests.
