@@ -984,6 +984,9 @@ export async function executeClaimedEffect(
         ownerUserId: row.owner_user_id,
         effect,
         parameters,
+        effectExecutionId: row.effect_execution_id,
+        automationId: row.automation_id,
+        effectId: effect.id,
       });
     } else if (effect.type === "notification") {
       output = await executeNotificationEffect({

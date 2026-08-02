@@ -15,6 +15,12 @@ import {
 } from "./compatibility";
 import { validateSchedule } from "./schedule";
 import { ObjectSet } from "../oss/objectSetDefinition";
+import { readCanonicalSignature } from "../functions/canonicalSignature";
+import {
+  unsupportedConfiguredParameters,
+  validateConstantValue,
+} from "../functions/parameterValidation";
+import { executionPolicy } from "../functions/executionPolicy";
 
 type Queryable = Pick<Pool, "query"> | Pick<PoolClient, "query">;
 
@@ -662,10 +668,12 @@ async function validateFunctionReference(
       parameters?: Array<{ name?: string; optional?: boolean }>;
       output?: string;
     } | null;
+    invocation_contract: string | null;
   }>(
     `SELECT function.repository_rid, function.api_name,
             release.artifact_sha256, release.state, release.runtime,
-            version.function_kind, version.signature
+            version.function_kind, version.signature,
+            version.invocation_contract
        FROM function_registry_function function
        JOIN function_registry_function_version version
          ON version.function_rid = function.rid
@@ -732,21 +740,119 @@ async function validateFunctionReference(
       ),
     );
   }
-  for (const parameter of row.signature?.parameters ?? []) {
-    if (
-      parameter.optional !== true &&
-      parameter.name &&
-      effect.parameters[parameter.name] === undefined
-    ) {
-      issues.push(
-        issue(
-          "FUNCTION_PARAMETER_REQUIRED",
-          `Function parameter '${parameter.name}' is required.`,
-          location.step,
-          `${location.path}.parameters.${parameter.name}`,
-          effect.id,
-        ),
-      );
+  if (row.invocation_contract === "typescript-v2-positional-v2") {
+    // Canonical typed validation (backend authoritative): constants are
+    // validated recursively against the published type model; missing
+    // required parameters, null misuse, and type mismatches are
+    // structured field errors. Dynamic bindings (condition/derived) are
+    // validated at execution time against the resolved value.
+    const canonical = readCanonicalSignature(row.signature);
+    if (canonical) {
+      // Honest support gate: type kinds with NO supported binding surface
+      // (ontology object references, object sets, unrecognised declared
+      // types) are a fatal rejection at save/activation time — the UI
+      // disables the control; hand-submitted configs die here; the
+      // executor repeats the check fail-closed for stale drafts.
+      for (const parameter of unsupportedConfiguredParameters(
+        canonical.parameters,
+        new Set(Object.keys(effect.parameters)),
+      )) {
+        issues.push(
+          issue(
+            "FUNCTION_PARAMETER_UNSUPPORTED_TYPE",
+            `Function parameter '${parameter.name}' has type '${parameter.typeText || parameter.type.kind}', which is not configurable in this release (ontology object references, object sets, and unrecognized declared types are not yet supported). Remove the binding or republish the Function with a supported parameter type.`,
+            location.step,
+            `${location.path}.parameters.${parameter.name}`,
+            effect.id,
+          ),
+        );
+      }
+      const knownNames = new Set(canonical.parameters.map((p) => p.name));
+      for (const parameter of canonical.parameters) {
+        if (parameter.type.kind === "client") continue; // injected
+        const binding = effect.parameters[parameter.name];
+        if (binding === undefined) {
+          if (!parameter.optional && !parameter.hasDefault) {
+            issues.push(
+              issue(
+                "FUNCTION_PARAMETER_REQUIRED",
+                `Function parameter '${parameter.name}' is required.`,
+                location.step,
+                `${location.path}.parameters.${parameter.name}`,
+                effect.id,
+              ),
+            );
+          }
+          continue;
+        }
+        if (binding.kind === "constant") {
+          for (const problem of validateConstantValue(parameter, binding.value)) {
+            issues.push(
+              issue(
+                problem.code === "FUNCTION_PARAMETER_MISSING"
+                  ? "FUNCTION_PARAMETER_REQUIRED"
+                  : "FUNCTION_PARAMETER_TYPE",
+                problem.message,
+                location.step,
+                `${location.path}.parameters.${problem.path}`,
+                effect.id,
+              ),
+            );
+          }
+        }
+      }
+      // Configured bindings that the published signature does not declare —
+      // warn (not fatal): they are ignored at execution.
+      for (const name of Object.keys(effect.parameters)) {
+        if (!knownNames.has(name)) {
+          issues.push(
+            issue(
+              "FUNCTION_PARAMETER_UNKNOWN",
+              `Configured parameter '${name}' is not declared by Function version ${effect.version} and will be ignored.`,
+              location.step,
+              `${location.path}.parameters.${name}`,
+              effect.id,
+              "warning",
+            ),
+          );
+        }
+      }
+    }
+  } else {
+    // Legacy invocation contract: preserved behavior plus a non-fatal
+    // deprecation warning carrying the operator-configured sunset date so
+    // activation surfaces and audits both see the migration signal.
+    const policy = executionPolicy();
+    issues.push(
+      issue(
+        "FUNCTION_LEGACY_CONTRACT_DEPRECATED",
+        `This Function version uses the deprecated legacy-object-envelope-v1 invocation contract.${
+          policy.legacyDeprecationDate
+            ? ` Scheduled for removal after ${policy.legacyDeprecationDate}.`
+            : ""
+        } Republish the Function to migrate it onto typescript-v2-positional-v2.`,
+        location.step,
+        `${location.path}.functionRid`,
+        effect.id,
+        "warning",
+      ),
+    );
+    for (const parameter of row.signature?.parameters ?? []) {
+      if (
+        parameter.optional !== true &&
+        parameter.name &&
+        effect.parameters[parameter.name] === undefined
+      ) {
+        issues.push(
+          issue(
+            "FUNCTION_PARAMETER_REQUIRED",
+            `Function parameter '${parameter.name}' is required.`,
+            location.step,
+            `${location.path}.parameters.${parameter.name}`,
+            effect.id,
+          ),
+        );
+      }
     }
   }
   if (owner) {

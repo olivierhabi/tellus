@@ -2,6 +2,11 @@ import type { Pool } from "pg";
 import { pool } from "../db";
 import { runSandboxedWithSdkAsync } from "../services/functionWorkerPool";
 import { parseSignatureParameters } from "../services/functionRuntime";
+import {
+  isInvocationContract,
+  readCanonicalSignature,
+  runtimeParametersFromCanonical,
+} from "../services/functions/canonicalSignature";
 import { resolveFunctionSource } from "../services/functionsRegistry/artifactStore";
 import { loadOntologySnapshot } from "../services/functions/ontologyRuntime";
 import { OntologyError } from "../utils/queryErrors";
@@ -34,9 +39,11 @@ export async function executeWebhookInputFunction(
     artifact_blob_id: string;
     signature: unknown;
     function_kind: string | null;
+    invocation_contract: string | null;
   }>(
     `SELECT f.repository_rid, f.api_name, fv.state, fv.runtime,
-            fv.manifest_json, fv.artifact_blob_id, v.signature, v.function_kind
+            fv.manifest_json, fv.artifact_blob_id, v.signature, v.function_kind,
+            v.invocation_contract
        FROM function_registry_function f
        JOIN function_registry_function_version v
          ON v.function_rid = f.rid
@@ -98,11 +105,20 @@ export async function executeWebhookInputFunction(
     objectTypes: importedTypes,
   });
   const signatureParameters = parseSignatureParameters(version.signature);
+  const invocationContract = isInvocationContract(version.invocation_contract)
+    ? version.invocation_contract
+    : "legacy-object-envelope-v1";
   const sandbox = await runSandboxedWithSdkAsync(
     transpileFunction(binding.apiName, source),
     options.arguments,
     snapshot,
-    signatureParameters ?? undefined,
+    {
+      contract: invocationContract,
+      parameters:
+        runtimeParametersFromCanonical(readCanonicalSignature(version.signature)) ??
+        signatureParameters ??
+        undefined,
+    },
   );
   if (sandbox.status !== "ok") {
     throw new OntologyError(

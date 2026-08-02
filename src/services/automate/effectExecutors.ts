@@ -10,12 +10,49 @@ import {
 import { getKeycloakAdminService } from "../keycloakAdminService";
 import {
   parseSignatureParameters,
+  type SandboxBinding,
 } from "../functionRuntime";
 import { runSandboxedWithSdkAsync } from "../functionWorkerPool";
 import { resolveFunctionSource } from "../functionsRegistry/artifactStore";
 import { loadOntologySnapshot } from "../functions/ontologyRuntime";
+import {
+  isInvocationContract,
+  readCanonicalSignature,
+  computeSignatureHash,
+  runtimeParametersFromCanonical,
+  LEGACY_OBJECT_ENVELOPE_V1,
+  TYPESCRIPT_V2_POSITIONAL_V2,
+  type InvocationContract,
+} from "../functions/canonicalSignature";
+import {
+  ParameterValidationError,
+  resolvePositionalArguments,
+  unsupportedConfiguredParameters,
+} from "../functions/parameterValidation";
+import { resolveCompatibleUpgrade } from "../functions/versionResolution";
+import {
+  executionPolicy,
+  isLegacyContractExecutionAllowed,
+} from "../functions/executionPolicy";
+import {
+  functionEffectExecutionsTotal,
+  functionLegacyContractExecutionsTotal,
+} from "../../metrics/functionInvocation";
 import type { EffectDraft, ValueBinding } from "./contracts";
 import { isExecutableOwner } from "./permissions";
+
+/**
+ * Structured observability for Function-effect execution. NEVER log secret
+ * or configured parameter VALUES — names, expected types, source kinds and
+ * redacted summaries only.
+ */
+function functionEffectLog(event: string, fields: Record<string, unknown>): void {
+  try {
+    console.log(JSON.stringify({ type: `automate.function.${event}`, ...fields }));
+  } catch {
+    /* logging must never break execution */
+  }
+}
 
 function transpileFunction(apiName: string, source: string): string {
   const ts = require("typescript") as typeof import("typescript");
@@ -47,11 +84,73 @@ export type ExecutableFunctionReference = {
   autoUpgrade: boolean;
 };
 
+interface RegistryVersionRow {
+  repository_rid: string;
+  api_name: string;
+  state: string;
+  runtime: string;
+  manifest_json: { sources?: Record<string, unknown> };
+  artifact_blob_id: string;
+  artifact_sha256: string;
+  signature: unknown;
+  function_kind: string | null;
+  semver: string;
+  invocation_contract: string | null;
+  signature_hash: string | null;
+}
+
+const SELECT_VERSION = `
+  SELECT function.repository_rid, function.api_name,
+         release.state, release.runtime, release.manifest_json,
+         release.artifact_blob_id, release.artifact_sha256,
+         version.signature, version.function_kind, version.semver,
+         version.invocation_contract, version.signature_hash
+    FROM function_registry_function function
+    JOIN function_registry_function_version version
+      ON version.function_rid = function.rid
+     AND version.branch = $2
+     AND version.semver = $3
+    JOIN function_version release
+      ON release.rid = version.release_version_rid
+   WHERE function.rid = $1`;
+
+function invocationContractOf(row: RegistryVersionRow): InvocationContract {
+  // The persisted artifact contract is authoritative; a NULL (unmigrated
+  // row) behaves exactly as the backfilled default.
+  return isInvocationContract(row.invocation_contract)
+    ? row.invocation_contract
+    : LEGACY_OBJECT_ENVELOPE_V1;
+}
+
+async function loadRegistryVersion(
+  functionRid: string,
+  branch: string,
+  semver: string,
+): Promise<RegistryVersionRow | undefined> {
+  const result = await pool.query<RegistryVersionRow>(SELECT_VERSION, [
+    functionRid,
+    branch,
+    semver,
+  ]);
+  return result.rows[0];
+}
+
 export async function executeFunctionEffect(input: {
   ontologyId: string;
   ownerUserId: string;
   effect: ExecutableFunctionReference;
   parameters: Record<string, unknown>;
+  /**
+   * When supplied (runtime effect row), the resolved immutable artifact is
+   * pinned ONCE on the row (resolved_function_semver +
+   * resolved_artifact_sha256) and every retry re-executes exactly that
+   * artifact — auto-upgrade never re-resolves "latest" mid-run.
+   */
+  effectExecutionId?: string;
+  /** Correlation identifiers for legacy/migration observability. Never used
+   *  to select execution behavior. */
+  automationId?: string;
+  effectId?: string;
 }): Promise<Record<string, unknown>> {
   const effect = input.effect;
   const [owner, roles] = await Promise.all([
@@ -116,33 +215,11 @@ export async function executeFunctionEffect(input: {
       status: 422,
     });
   }
-  const resolved = await pool.query<{
-    repository_rid: string;
-    api_name: string;
-    state: string;
-    runtime: string;
-    manifest_json: { sources?: Record<string, unknown> };
-    artifact_blob_id: string;
-    artifact_sha256: string;
-    signature: unknown;
-    function_kind: string | null;
-    semver: string;
-  }>(
-    `SELECT function.repository_rid, function.api_name,
-            release.state, release.runtime, release.manifest_json,
-            release.artifact_blob_id, release.artifact_sha256,
-            version.signature, version.function_kind, version.semver
-       FROM function_registry_function function
-       JOIN function_registry_function_version version
-         ON version.function_rid = function.rid
-        AND version.branch = $2
-        AND version.semver = $3
-       JOIN function_version release
-         ON release.rid = version.release_version_rid
-      WHERE function.rid = $1`,
-    [effect.functionRid, effect.branch, effect.version],
+  const pinnedVersion = await loadRegistryVersion(
+    effect.functionRid,
+    effect.branch,
+    effect.version,
   );
-  const pinnedVersion = resolved.rows[0];
   if (!pinnedVersion) {
     throw Object.assign(new Error("The pinned Function version was not found."), {
       code: "FUNCTION_VERSION_NOT_FOUND",
@@ -159,37 +236,101 @@ export async function executeFunctionEffect(input: {
       { code: "FUNCTION_VERSION_INCOMPATIBLE", status: 422 },
     );
   }
+
+  // ---------------------------------------------------------------------
+  // Immutable-artifact pinning: the version + artifact hash are resolved
+  // ONCE per effect execution and persisted on the execution row; every
+  // retry reads them back instead of re-resolving "latest"/auto-upgrading.
+  // ---------------------------------------------------------------------
+  let persistedPin: { semver: string; artifactSha256: string } | null = null;
+  if (input.effectExecutionId) {
+    const existing = await pool.query<{
+      resolved_function_semver: string | null;
+      resolved_artifact_sha256: string | null;
+    }>(
+      `SELECT resolved_function_semver, resolved_artifact_sha256
+         FROM automation_effect_execution
+        WHERE effect_execution_id = $1`,
+      [input.effectExecutionId],
+    );
+    const row = existing.rows[0];
+    if (row?.resolved_function_semver && row?.resolved_artifact_sha256) {
+      persistedPin = {
+        semver: row.resolved_function_semver,
+        artifactSha256: row.resolved_artifact_sha256,
+      };
+    }
+  }
+
   let version = pinnedVersion;
-  if (effect.autoUpgrade) {
-    const compatible = await pool.query<typeof pinnedVersion>(
-      `SELECT function.repository_rid, function.api_name,
-              release.state, release.runtime, release.manifest_json,
-              release.artifact_blob_id, release.artifact_sha256,
-              candidate.signature, candidate.function_kind, candidate.semver
-         FROM function_registry_function function
-         JOIN function_registry_function_version candidate
-           ON candidate.function_rid = function.rid
-          AND candidate.branch = $2
-         JOIN function_version release
-           ON release.rid = candidate.release_version_rid
-        WHERE function.rid = $1
-          AND candidate.signature = $3::jsonb
-          AND candidate.function_kind = $4
-          AND release.state = 'AVAILABLE'
-          AND release.runtime = 'NODE_20'
-        ORDER BY string_to_array(
-          split_part(candidate.semver, '-', 1), '.'
-        )::int[] DESC, candidate.created_at DESC
-        LIMIT 1`,
-      [
+  if (persistedPin) {
+    // Retry (or worker-recovery re-claim): re-execute the SAME artifact.
+    if (
+      persistedPin.semver !== effect.version ||
+      persistedPin.artifactSha256 !== effect.artifactSha256
+    ) {
+      const pinRow = await loadRegistryVersion(
         effect.functionRid,
         effect.branch,
-        JSON.stringify(pinnedVersion.signature),
-        pinnedVersion.function_kind,
-      ],
+        persistedPin.semver,
+      );
+      if (!pinRow || pinRow.artifact_sha256 !== persistedPin.artifactSha256) {
+        throw Object.assign(
+          new Error("The previously resolved Function artifact is no longer available."),
+          { code: "FUNCTION_VERSION_UNAVAILABLE", status: 422 },
+        );
+      }
+      version = pinRow;
+    }
+  } else if (effect.autoUpgrade) {
+    // Semantic-version range resolution: >=pinned <(major+1).0.0, stable
+    // candidates only, signature-compatible, same invocation contract.
+    const candidates = await pool.query<{
+      semver: string;
+      signature: unknown;
+      invocation_contract: string | null;
+    }>(
+      `SELECT candidate.semver, candidate.signature, candidate.invocation_contract
+         FROM function_registry_function_version candidate
+         JOIN function_version release
+           ON release.rid = candidate.release_version_rid
+        WHERE candidate.function_rid = $1
+          AND candidate.branch = $2
+          AND candidate.function_kind = $3
+          AND release.state = 'AVAILABLE'
+          AND release.runtime = 'NODE_20'`,
+      [effect.functionRid, effect.branch, pinnedVersion.function_kind],
     );
-    version = compatible.rows[0] ?? pinnedVersion;
+    const upgrade = resolveCompatibleUpgrade({
+      pinnedSemver: effect.version,
+      pinnedSignature: pinnedVersion.signature,
+      pinnedContract: invocationContractOf(pinnedVersion),
+      candidates: candidates.rows.map((row) => ({
+        semver: row.semver,
+        signature: row.signature,
+        invocationContract: invocationContractOf(row as RegistryVersionRow),
+      })),
+    });
+    if (upgrade) {
+      const upgraded = await loadRegistryVersion(
+        effect.functionRid,
+        effect.branch,
+        upgrade.semver,
+      );
+      if (upgraded) version = upgraded;
+    }
   }
+  functionEffectLog("resolve", {
+    functionRid: effect.functionRid,
+    apiName: effect.apiName,
+    branch: effect.branch,
+    configuredVersion: effect.version,
+    resolvedVersion: version.semver,
+    resolvedArtifactSha256: version.artifact_sha256.slice(0, 12),
+    autoUpgrade: effect.autoUpgrade,
+    autoUpgraded: version.semver !== effect.version,
+    invocationContract: invocationContractOf(version),
+  });
   if (
     version.state !== "AVAILABLE" ||
     version.runtime !== "NODE_20" ||
@@ -210,6 +351,146 @@ export async function executeFunctionEffect(input: {
       status: 422,
     });
   }
+
+  // ---------------------------------------------------------------------
+  // Invocation contract — execution branches ONLY on the persisted
+  // contract. The positional v2 contract validates every configured
+  // parameter against the canonical published type model (backend
+  // authoritative) and resolves positionally; the legacy contract keeps
+  // the pre-contract envelope behavior byte-identical.
+  // ---------------------------------------------------------------------
+  const contract = invocationContractOf(version);
+  const canonical = readCanonicalSignature(version.signature);
+  let binding: SandboxBinding;
+  let values: Record<string, unknown> = input.parameters;
+  if (contract === TYPESCRIPT_V2_POSITIONAL_V2) {
+    if (!canonical) {
+      throw Object.assign(
+        new Error("The published Function signature metadata is unavailable for positional invocation."),
+        { code: "FUNCTION_SIGNATURE_UNAVAILABLE", status: 422 },
+      );
+    }
+    // Fail closed on configurations for type kinds with no supported
+    // binding surface (stale configs saved before the save-time gate or
+    // submitted by hand): ontology object references, object sets, and
+    // unrecognised declared types are rejected with a stable code. See
+    // UNSUPPORTED_BINDING_TYPE_KINDS in functions/parameterValidation.ts.
+    const unsupported = unsupportedConfiguredParameters(
+      canonical.parameters,
+      new Set(Object.keys(input.parameters)),
+    );
+    if (unsupported.length > 0) {
+      functionEffectLog("unsupported_parameter_type", {
+        functionRid: effect.functionRid,
+        apiName: effect.apiName,
+        version: version.semver,
+        parameters: unsupported.map((p) => `${p.name}:${p.type.kind}`),
+      });
+      throw Object.assign(
+        new Error(
+          `Function parameter type(s) not configurable in this release: ${unsupported
+            .map((p) => `'${p.name}' (${p.type.kind})`)
+            .join(", ")}. Use a supported parameter type (see the Automate Function documentation).`,
+        ),
+        { code: "FUNCTION_PARAMETER_UNSUPPORTED_TYPE", status: 422 },
+      );
+    }
+    try {
+      const resolvedArgs = resolvePositionalArguments({
+        parameters: canonical.parameters,
+        values: input.parameters,
+        injectClient: () => ({}), // placeholder; the sandbox injects CLIENT_STUB
+      });
+      values = resolvedArgs.normalizedValues;
+      if (resolvedArgs.unknown.length > 0) {
+        functionEffectLog("unknown_parameters", {
+          functionRid: effect.functionRid,
+          apiName: effect.apiName,
+          version: version.semver,
+          names: resolvedArgs.unknown,
+        });
+      }
+    } catch (error) {
+      if (error instanceof ParameterValidationError) {
+        functionEffectLog("validation_failed", {
+          functionRid: effect.functionRid,
+          apiName: effect.apiName,
+          version: version.semver,
+          issues: error.issues.map((i) => ({ path: i.path, code: i.code })),
+        });
+        throw Object.assign(error, { code: error.code, status: error.status });
+      }
+      throw error;
+    }
+    binding = {
+      contract,
+      parameters: runtimeParametersFromCanonical(canonical),
+    };
+  } else {
+    // Legacy contract (deprecated, opt-out): SUM of policy + observability.
+    // FUNCTION_LEGACY_CONTRACT_DISABLED=true makes legacy executions a
+    // stable rejection; while enabled, every execution is counted
+    // (tellus_function_legacy_contract_executions_total) and logged with
+    // correlation identifiers — NEVER with parameter values.
+    const policy = executionPolicy();
+    if (!isLegacyContractExecutionAllowed(policy)) {
+      functionEffectLog("legacy_contract_rejected", {
+        functionRid: effect.functionRid,
+        apiName: effect.apiName,
+        version: version.semver,
+        automationId: input.automationId ?? null,
+        effectId: input.effectId ?? null,
+        reason: "FUNCTION_LEGACY_CONTRACT_DISABLED",
+      });
+      throw Object.assign(
+        new Error(
+          "This Function version uses the deprecated legacy-object-envelope-v1 " +
+            "invocation contract, which is disabled on this deployment (FUNCTION_LEGACY_CONTRACT_DISABLED). " +
+            "Republish the Function under the positional v2 contract (see the Automate Function documentation).",
+        ),
+        { code: "FUNCTION_LEGACY_CONTRACT_DISABLED", status: 422 },
+      );
+    }
+    functionLegacyContractExecutionsTotal.inc({ status: "executing" });
+    functionEffectLog("legacy_contract_execution", {
+      functionRid: effect.functionRid,
+      apiName: effect.apiName,
+      version: version.semver,
+      artifactSha256: version.artifact_sha256.slice(0, 12),
+      automationId: input.automationId ?? null,
+      effectId: input.effectId ?? null,
+      deprecationDate: policy.legacyDeprecationDate,
+      notice:
+        "Republish this Function to migrate it onto typescript-v2-positional-v2.",
+    });
+    binding = {
+      contract,
+      parameters: parseSignatureParameters(version.signature) ?? undefined,
+    };
+  }
+
+  const signatureHash =
+    version.signature_hash ??
+    (canonical ? computeSignatureHash(contract, canonical) : null);
+  if (input.effectExecutionId && !persistedPin) {
+    await pool.query(
+      `UPDATE automation_effect_execution
+          SET resolved_function_semver = $2,
+              resolved_artifact_sha256 = $3,
+              invocation_contract = $4,
+              signature_hash = $5,
+              updated_at = now()
+        WHERE effect_execution_id = $1`,
+      [
+        input.effectExecutionId,
+        version.semver,
+        version.artifact_sha256,
+        contract,
+        signatureHash,
+      ],
+    );
+  }
+
   const imports = await pool.query<{
     ontology_id: string;
     api_name: string;
@@ -227,13 +508,32 @@ export async function executeFunctionEffect(input: {
     ontologyId: input.ontologyId,
     objectTypes,
   });
+  const startedAt = Date.now();
   const result = await runSandboxedWithSdkAsync(
     transpileFunction(effect.apiName, source),
-    input.parameters,
+    values,
     snapshot,
-    parseSignatureParameters(version.signature) ?? undefined,
+    binding,
   );
+  functionEffectExecutionsTotal.inc({
+    contract,
+    status: result.status,
+  });
+  functionEffectLog("executed", {
+    functionRid: effect.functionRid,
+    apiName: effect.apiName,
+    version: version.semver,
+    invocationContract: contract,
+    status: result.status,
+    durationMs: Date.now() - startedAt,
+  });
   if (result.status !== "ok") {
+    functionEffectLog(result.status === "timeout" ? "timeout" : "failed", {
+      functionRid: effect.functionRid,
+      apiName: effect.apiName,
+      version: version.semver,
+      invocationContract: contract,
+    });
     throw Object.assign(
       new Error(result.errorMessage ?? "Function execution failed."),
       {
@@ -247,6 +547,12 @@ export async function executeFunctionEffect(input: {
   }
   const serialized = JSON.stringify(result.output ?? null);
   if (Buffer.byteLength(serialized) > 1_048_576) {
+    functionEffectLog("output_truncated", {
+      functionRid: effect.functionRid,
+      apiName: effect.apiName,
+      version: version.semver,
+      bytes: Buffer.byteLength(serialized),
+    });
     throw Object.assign(new Error("Function output exceeds the 1 MiB limit."), {
       code: "FUNCTION_OUTPUT_TOO_LARGE",
       status: 422,
@@ -259,6 +565,9 @@ export async function executeFunctionEffect(input: {
     version: version.semver,
     configuredVersion: effect.version,
     autoUpgraded: version.semver !== effect.version,
+    artifactSha256: version.artifact_sha256,
+    invocationContract: contract,
+    signatureHash,
   };
 }
 
@@ -377,6 +686,9 @@ export async function renderNotificationEffectContent(input: {
   ownerUserId: string;
   effect: Extract<EffectDraft, { type: "notification" }>;
   resolveBinding: (binding: ValueBinding) => unknown;
+  /** When called from effect execution, pins the content Function artifact
+   *  on the execution row (retries reuse the same artifact). */
+  effectExecutionId?: string;
 }): Promise<{
   heading: string;
   message: string;
@@ -425,6 +737,7 @@ export async function renderNotificationEffectContent(input: {
         input.resolveBinding(binding),
       ]),
     ),
+    effectExecutionId: input.effectExecutionId,
   });
   return {
     ...renderFunctionNotificationResult(executed.result, input.effect.locale),
@@ -531,6 +844,7 @@ export async function executeNotificationEffect(input: {
     ownerUserId: input.ownerUserId,
     effect,
     resolveBinding: input.resolveBinding,
+    effectExecutionId: input.effectExecutionId,
   });
   const { generation, ...renderedContent } = rendered;
   const recipients = [
