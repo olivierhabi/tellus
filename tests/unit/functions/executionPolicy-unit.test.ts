@@ -62,28 +62,39 @@ describe("isPublishAuthorTrusted", () => {
   it("denies everyone when the allowlist is empty (fail closed)", () => {
     process.env.FUNCTION_EXECUTION_TRUST_MODE = "trusted-authors-only";
     delete process.env.FUNCTION_TRUSTED_AUTHOR_IDS;
-    expect(isPublishAuthorTrusted("user-1")).toBe(false);
-    expect(isPublishAuthorTrusted("")).toBe(false);
-    expect(isPublishAuthorTrusted(null)).toBe(false);
-    expect(isPublishAuthorTrusted(undefined)).toBe(false);
+    expect(isPublishAuthorTrusted({ userId: "user-1" })).toBe(false);
+    expect(isPublishAuthorTrusted({ userId: "" })).toBe(false);
+    expect(isPublishAuthorTrusted({ userId: null })).toBe(false);
+    expect(isPublishAuthorTrusted({})).toBe(false);
   });
 
   it("admits exactly the allowlisted principals", () => {
     process.env.FUNCTION_EXECUTION_TRUST_MODE = "trusted-authors-only";
     process.env.FUNCTION_TRUSTED_AUTHOR_IDS =
       " 9e821d8e-aaaa alice@example.com ,bobi ";
-    expect(isPublishAuthorTrusted("9e821d8e-aaaa")).toBe(true);
-    expect(isPublishAuthorTrusted("alice@example.com")).toBe(true);
-    expect(isPublishAuthorTrusted("bobi")).toBe(true);
-    expect(isPublishAuthorTrusted("mallory")).toBe(false);
+    expect(isPublishAuthorTrusted({ userId: "9e821d8e-aaaa" })).toBe(true);
+    expect(isPublishAuthorTrusted({ userId: "alice@example.com" })).toBe(true);
+    expect(isPublishAuthorTrusted({ userId: "bobi" })).toBe(true);
+    expect(isPublishAuthorTrusted({ userId: "mallory" })).toBe(false);
+  });
+
+  it("matches the allowlist against EITHER the local id or the keycloak sub", () => {
+    process.env.FUNCTION_EXECUTION_TRUST_MODE = "trusted-authors-only";
+    process.env.FUNCTION_TRUSTED_AUTHOR_IDS = "kc-sub-123";
+    expect(
+      isPublishAuthorTrusted({ userId: "local-uuid", keycloakSub: "kc-sub-123" }),
+    ).toBe(true);
+    expect(
+      isPublishAuthorTrusted({ userId: "local-uuid", keycloakSub: "kc-sub-999" }),
+    ).toBe(false);
   });
 
   it("open-development admits any principal", () => {
     process.env.NODE_ENV = "test";
     process.env.FUNCTION_EXECUTION_TRUST_MODE = "open-development";
     delete process.env.FUNCTION_TRUSTED_AUTHOR_IDS;
-    expect(isPublishAuthorTrusted("mallory")).toBe(true);
-    expect(isPublishAuthorTrusted(null)).toBe(true);
+    expect(isPublishAuthorTrusted({ userId: "mallory" })).toBe(true);
+    expect(isPublishAuthorTrusted({})).toBe(true);
   });
 });
 

@@ -116,17 +116,21 @@ export function executionPolicy(): ExecutionPolicy {
 }
 
 /**
- * Admit or deny a Function publication for `authorId` under the current
- * trust mode. Pure with respect to the policy argument for testability;
- * route/service callers pass executionPolicy().
+ * Admit or deny a Function publication for the bound author identity under
+ * the current trust mode. Both the local users.id (`userId`) and the IdP
+ * identity (`keycloakSub`) are matched against the allowlist so operators
+ * can list whichever stable identifier they know. Pure with respect to the
+ * policy argument for testability.
  */
 export function isPublishAuthorTrusted(
-  authorId: string | null | undefined,
+  author: { userId?: string | null; keycloakSub?: string | null },
   policy: ExecutionPolicy = executionPolicy(),
 ): boolean {
   if (policy.trustMode === "open-development") return true;
-  if (!authorId) return false;
-  return policy.trustedAuthorIds.has(authorId);
+  const candidates = [author.userId, author.keycloakSub];
+  return candidates.some(
+    (id) => typeof id === "string" && id.length > 0 && policy.trustedAuthorIds.has(id),
+  );
 }
 
 /**

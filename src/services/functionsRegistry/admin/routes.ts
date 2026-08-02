@@ -529,7 +529,13 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
     // is not an untrusted-code sandbox. See functions/executionPolicy.ts.
     {
       const principal = req.codeReposPrincipal;
-      if (!principal || !isPublishAuthorTrusted(principal.userId)) {
+      if (
+        !principal ||
+        !isPublishAuthorTrusted({
+          userId: principal.userId,
+          keycloakSub: principal.keycloakSub,
+        })
+      ) {
         sendError(
           res,
           functionsError("Functions:PermissionDenied", {

@@ -2013,7 +2013,12 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       if (!publishPrincipal) {
         return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
       }
-      if (!isPublishAuthorTrusted(publishPrincipal.userId)) {
+      if (
+        !isPublishAuthorTrusted({
+          userId: publishPrincipal.userId,
+          keycloakSub: publishPrincipal.keycloakSub,
+        })
+      ) {
         console.warn(
           JSON.stringify({
             type: "functions.publish.trust_gate_denied",

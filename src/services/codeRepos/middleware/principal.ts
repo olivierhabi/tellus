@@ -30,6 +30,11 @@ import { requireTellusAuth } from "../../../middleware/tellusAuth";
 
 export interface CodeReposPrincipal {
   readonly userId: string;
+  /** Keycloak `sub` when the principal came from a JWT (undefined for
+   *  test-header principals and PATs without a mapped sub). Carried so
+   *  the Function publish trust gate (functions/executionPolicy.ts) can
+   *  match either the local users.id or the stable IdP identity. */
+  readonly keycloakSub?: string;
   readonly source: "cookie" | "bearer-jwt" | "pat" | "test";
   readonly roles: readonly string[];
   readonly scopes: readonly string[];
@@ -186,6 +191,7 @@ export function requireCodeReposAuth() {
       // Code-repos contract carries the same set plus 'test'; map directly.
       req.codeReposPrincipal = {
         userId: tp.userId,
+        keycloakSub: tp.keycloakSub ?? undefined,
         source: tp.source,
         roles: tp.roles,
         scopes: tp.scopes,
