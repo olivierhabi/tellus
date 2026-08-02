@@ -979,7 +979,29 @@ router.get(
 
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.get", branchId);
-      let obj = await executeGetObject(objectType, primaryKey, buildSecurityFilter(req.security), branchId);
+
+      // Stage-5 slice #1: object GET routed through objects.get rollout —
+      // the state-of-shape difference between modes is preserved.
+      const ontologyIdResult = await query(
+        "SELECT ontology_id FROM object_type WHERE api_name = $1",
+        [objectType],
+      );
+      const ontologyId = ontologyIdResult.rows[0] ? String(ontologyIdResult.rows[0].ontology_id) : "00000000-0000-0000-0000-000000000001";
+      const { resolveRequestTenant } = await import("../utils/requestTenant");
+      const { objectServingStoreGet } = await import("../services/serving/objectServingStore");
+      let obj = await objectServingStoreGet(
+        {
+          objectTypeApiName: objectType,
+          primaryKey,
+          scope: {
+            tenantId: resolveRequestTenant(req),
+            ontologyId,
+            branchId: branchId ?? "",
+          },
+        },
+        async (ot, pk) => (await import("../services/serving/pgObjectAsDoc")).pgObjectAsDoc(ontologyId, ot, pk),
+        async (args) => executeGetObject(args.objectTypeApiName, args.primaryKey, buildSecurityFilter(req.security), branchId),
+      );
 
       // B7: overlay read — if a recent edit is in the overlay but the
       // index hasn't absorbed it yet, the overlay is authoritative for
