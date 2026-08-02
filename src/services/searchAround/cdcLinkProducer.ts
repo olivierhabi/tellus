@@ -148,8 +148,15 @@ function sanitise(s: string): string {
   return s.replace(/[^A-Za-z0-9]/g, "_").toLowerCase();
 }
 
+/** Environment-scoped topic prefix — defaults preserve production naming;
+ *  isolated lanes (see vitest.osv2-serving.config.ts) pin their own so
+ *  parallel workstreams never share a CDC topic. */
+function topicPrefix(): string {
+  return (process.env.TELLUS_CDC_TOPIC_PREFIX ?? "cdc.links").replace(/\.+$/, "");
+}
+
 export function linkCdcTopic(sourceObjectType: string, linkName: string): string {
-  return `cdc.links.${sanitise(sourceObjectType)}.${sanitise(linkName)}`;
+  return `${topicPrefix()}.${sanitise(sourceObjectType)}.${sanitise(linkName)}`;
 }
 
 /**
