@@ -94,7 +94,9 @@ export async function migrateLinkStorage(
 
   await query(
     `UPDATE link_type
-        SET migration_started_at = now()
+        SET migration_started_at = now(),
+            migration_failed_at = NULL,
+            last_migration_error = NULL
       WHERE link_type_id = $1`,
     [linkType.link_type_id]
   );
@@ -106,16 +108,42 @@ export async function migrateLinkStorage(
     link_api_name: linkType.api_name,
   });
 
-  // Flip the flag whether or not the sidecar was available; when it
-  // wasn't we stay on the CSV path and record that fact so a re-try
-  // can pick it up later.
+  // TRUTHFULNESS FIX (OSv2 migration parity): the serving-backend flag
+  // flips ONLY when the target write confirmed success AND the row-count
+  // checksum matches the CSV source. Previously `storage_backend` flipped
+  // unconditionally, which silently switched traversal to an Iceberg table
+  // that may not exist (the `/edges` route then served empty results).
+  const rowCountMatches =
+    sidecarRes.ok && (sidecarRes.rows === undefined || sidecarRes.rows === csvRows);
+
+  if (!rowCountMatches) {
+    const reason = !sidecarRes.ok
+      ? (sidecarRes.error ?? "sidecar_unavailable")
+      : `row_count_mismatch: csv=${csvRows} sidecar=${sidecarRes.rows}`;
+    await query(
+      `UPDATE link_type
+          SET migration_failed_at = now(),
+              last_migration_error = $2
+        WHERE link_type_id = $1`,
+      [linkType.link_type_id, reason.slice(0, 500)]
+    );
+    throw appError(
+      "STORAGE_MIGRATION_FAILED",
+      `Migration of link type '${linkType.api_name}' to iceberg did not complete: ${reason}. ` +
+        `storage_backend is unchanged (${linkType.storage_backend ?? "csv_legacy"}); safe to retry.`,
+      { csvRows, sidecarRows: sidecarRes.rows ?? null }
+    );
+  }
+
   await query(
     `UPDATE link_type
         SET storage_backend = 'iceberg',
             iceberg_table_name = $2,
-            migration_completed_at = CASE WHEN $3::boolean THEN now() ELSE migration_completed_at END
+            migration_completed_at = now(),
+            migration_failed_at = NULL,
+            last_migration_error = NULL
       WHERE link_type_id = $1`,
-    [linkType.link_type_id, tableName, sidecarRes.ok]
+    [linkType.link_type_id, tableName]
   );
 
   const retainedUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();

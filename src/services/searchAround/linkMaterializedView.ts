@@ -1,23 +1,28 @@
 // ---------------------------------------------------------------------------
-// ClickHouse link materialized views — Task B10
+// ClickHouse link serving tables — versioned edge model (OSv2 parity).
 //
-// Per link type, we maintain one MergeTree table:
+// Per link type, one ReplacingMergeTree table:
 //
 //   link_<source_type>__<link_name>__<target_type> (
-//       source_pk    String,
-//       target_pk    String,
-//       link_props   JSON,
-//       markings     Array(String),
-//       source_ts    DateTime64(3),
-//       cdc_offset   UInt64
-//   )
-//   ORDER BY (source_pk, target_pk)
+//       tenant_id, ontology_id, branch_id,   -- isolation dimensions in the key
+//       source_pk, target_pk,                -- edge identity
+//       link_props, markings,
+//       operation (ADD|REMOVE|RETRACT), deleted, event_id,
+//       event_version, cdc_offset, source_ts, ingested_at
+//   ) ENGINE = ReplacingMergeTree(event_version)
+//   ORDER BY (tenant_id, ontology_id, branch_id, source_pk, target_pk)
 //
-// Rows are appended from a Kafka engine table fed by the same CDC stream
-// (`ontology.links` — see kafkaProducer.ts) and a materialized view that
-// transforms raw events into the flat form above. The 3-shard × 2-replica
-// topology is a deployment concern (docker-compose / helm), not this
-// module's — we only own the DDL and lag tracking.
+// Latest-state semantics:
+//   * ADD re-creates an edge; REMOVE/RETRACT write a tombstone row for the
+//     same identity with operation != 'ADD' (deleted=1).
+//   * ReplacingMergeTree(event_version) collapses to the highest version
+//     per identity; queries MUST use either FINAL or the argMax projection
+//     in clickhouseTraversal.ts; a newer tombstone hides all older ADDs,
+//     an older ADD can never resurrect a removed edge, and a duplicate
+//     event_id with identical version is idempotent.
+//
+// Rows arrive from the CDC Kafka stream (outbox-drained, see
+// linkCdcOutbox.ts) through a Kafka engine table + materialized view below.
 // ---------------------------------------------------------------------------
 
 import { ClickHouseClient, getClickHouseClient } from "./clickhouseClient";
@@ -48,37 +53,103 @@ function sanitize(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// DDL
+// DDL — versioned serving table
 // ---------------------------------------------------------------------------
 
+function versionedTableDdl(table: string): string {
+  return `
+    CREATE TABLE IF NOT EXISTS ${table} (
+      tenant_id      String DEFAULT '',
+      ontology_id    String DEFAULT '',
+      branch_id      String DEFAULT '',
+      source_pk      String,
+      target_pk      String,
+      link_props     String CODEC(ZSTD(3)),
+      markings       Array(String),
+      operation      LowCardinality(String) DEFAULT 'ADD',
+      deleted        UInt8 DEFAULT 0,
+      event_id       String DEFAULT '',
+      event_version  UInt64 DEFAULT 0,
+      cdc_offset     UInt64 DEFAULT 0,
+      source_ts      DateTime64(3) DEFAULT now64(3),
+      ingested_at    DateTime64(3) DEFAULT now64(3)
+    )
+    ENGINE = ReplacingMergeTree(event_version)
+    PARTITION BY toYYYYMM(source_ts)
+    ORDER BY (tenant_id, ontology_id, branch_id, source_pk, target_pk)
+    SETTINGS index_granularity = 8192
+  `;
+}
+
+async function getTableEngine(
+  table: string,
+  client: ClickHouseClient,
+): Promise<string | null> {
+  try {
+    const rows = await client.exec<{ engine: string }>(
+      `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${table}'`,
+    );
+    return rows[0]?.engine ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ensure the link type's serving table exists with the versioned
+ * (ReplacingMergeTree) engine. A legacy plain-MergeTree table with the
+ * same name is migrated in place: renamed to `<name>__legacy`, a versioned
+ * table created, and existing rows copied with their last known state.
+ * Copy-then-rename keeps reads consistent; the legacy table is retained
+ * for the rollback window and removed by ops.
+ */
 export async function ensureLinkTable(
   link: LinkTypeDescriptor,
   client: ClickHouseClient = getClickHouseClient()
 ): Promise<string> {
   const table = linkTableName(link);
+  const engine = await getTableEngine(table, client);
+  if (!engine) {
+    await client.command(versionedTableDdl(table));
+    return table;
+  }
+  if (engine.startsWith("ReplacingMergeTree")) return table;
+
+  // Legacy engine — migrate. Legacy rows have no version: give each
+  // identity its max cdc_offset as the version so existing fresh rows win
+  // over older duplicates after the copy.
+  const legacy = `${table}__legacy_mergetree`;
+  await client.command(`RENAME TABLE ${table} TO ${legacy}`);
+  await client.command(versionedTableDdl(table));
   await client.command(`
-    CREATE TABLE IF NOT EXISTS ${table} (
-      source_pk    String,
-      target_pk    String,
-      link_props   String CODEC(ZSTD(3)),
-      markings     Array(String),
-      source_ts    DateTime64(3) DEFAULT now64(3),
-      cdc_offset   UInt64 DEFAULT 0
-    )
-    ENGINE = MergeTree()
-    PARTITION BY toYYYYMM(source_ts)
-    ORDER BY (source_pk, target_pk)
-    SETTINGS index_granularity = 8192
+    INSERT INTO ${table}
+      (tenant_id, ontology_id, branch_id, source_pk, target_pk, link_props,
+       markings, operation, deleted, event_id, event_version, cdc_offset, source_ts)
+    SELECT
+      '', '', '', source_pk, target_pk, link_props,
+      markings, 'ADD', 0, '',
+      max(cdc_offset), max(cdc_offset), max(source_ts)
+    FROM ${legacy}
+    GROUP BY source_pk, target_pk, link_props, markings
   `);
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      type: "link_table_engine_migrated",
+      table,
+      legacy,
+      note: "legacy MergeTree renamed and copied into ReplacingMergeTree; drop the legacy table after verification",
+    }),
+  );
   return table;
 }
 
 // ---------------------------------------------------------------------------
 // Kafka engine + materialized view DDL
 //
-// In production these are created once per link type by a platform job.
-// We expose the DDL here so tests can stub ClickHouse and verify the
-// statements that would run.
+// The v2 payload (see cdcLinkProducer.serialisePayload) is mapped in full —
+// previously the operation/event columns were dropped at ingestion, so
+// REMOVE/RETRACT appended rows instead of tombstoning them.
 // ---------------------------------------------------------------------------
 
 export function kafkaIngestDdl(link: LinkTypeDescriptor): {
@@ -107,12 +178,18 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
     topic,
     kafkaDdl: `
       CREATE TABLE IF NOT EXISTS ${kafkaTable} (
-        source_pk    String,
-        target_pk    String,
-        link_props   String,
-        markings     Array(String),
-        source_ts    DateTime64(3),
-        cdc_offset   UInt64
+        source_pk        String,
+        target_pk        String,
+        link_props       String,
+        markings         Array(String),
+        source_ts        DateTime64(3),
+        cdc_offset       UInt64,
+        event_id         String,
+        event_ts_micros  UInt64,
+        ontology_id      String,
+        branch_id        String,
+        tenant_id        String,
+        operation        String
       )
       ENGINE = Kafka()
       SETTINGS
@@ -130,7 +207,14 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
       CREATE MATERIALIZED VIEW IF NOT EXISTS ${mv}
       TO ${target}
       AS SELECT
-        source_pk, target_pk, link_props, markings, source_ts, cdc_offset
+        tenant_id, ontology_id, branch_id,
+        source_pk, target_pk, link_props, markings,
+        operation,
+        if(operation = 'ADD', toUInt8(0), toUInt8(1)) AS deleted,
+        event_id,
+        event_ts_micros AS event_version,
+        cdc_offset,
+        source_ts
       FROM ${kafkaTable}
     `,
   };
@@ -156,9 +240,9 @@ export async function ensureLinkIngestTopology(
  * type. Used when the Kafka-engine DDL (broker address, topic, format)
  * changes so the existing tables stop pointing at a stale broker.
  *
- * The target MergeTree (the `link_<...>` table holding the actual
- * rows) is NOT dropped — only the ingest pipeline in front of it. Any
- * rows already materialised remain.
+ * The serving table (the `link_<...>` ReplacingMergeTree holding the
+ * actual rows) is NOT dropped — only the ingest pipeline in front of it.
+ * Any rows already materialised remain.
  */
 export async function rebuildLinkIngestTopology(
   link: LinkTypeDescriptor,
@@ -174,9 +258,11 @@ export async function rebuildLinkIngestTopology(
 }
 
 // ---------------------------------------------------------------------------
-// insertLinkRows — direct write path used for backfill and tests. In
+// insertLinkRows — direct write path used for backfill and shadow tests. In
 // production the Kafka engine drives ingestion; this helper is for
-// programmatic seeding only.
+// programmatic seeding only. Writers MUST pass a monotonically increasing
+// event_version (event_ts_micros from the source event) — an older version
+// must never overwrite a newer indexed edge state.
 // ---------------------------------------------------------------------------
 
 export interface LinkRow {
@@ -186,6 +272,13 @@ export interface LinkRow {
   markings?: string[];
   source_ts?: string;
   cdc_offset?: number;
+  /** Latest-version enqueue; REQUIRED for REMOVE/RETRACT. */
+  operation?: "ADD" | "REMOVE" | "RETRACT";
+  event_id?: string;
+  event_version?: number;
+  ontology_id?: string;
+  branch_id?: string;
+  tenant_id?: string;
 }
 
 export async function insertLinkRows(
@@ -194,13 +287,34 @@ export async function insertLinkRows(
   client: ClickHouseClient = getClickHouseClient()
 ): Promise<void> {
   const table = linkTableName(link);
-  const normalized = rows.map((r) => ({
-    source_pk: r.source_pk,
-    target_pk: r.target_pk,
-    link_props: JSON.stringify(r.link_props ?? {}),
-    markings: r.markings ?? [],
-    source_ts: r.source_ts ?? new Date().toISOString(),
-    cdc_offset: r.cdc_offset ?? 0,
-  }));
+  const nowMicros = Date.now() * 1000;
+  const normalized = rows.map((r) => {
+    const operation = r.operation ?? "ADD";
+    return {
+      tenant_id: r.tenant_id ?? "",
+      ontology_id: r.ontology_id ?? "",
+      branch_id: r.branch_id ?? "",
+      source_pk: r.source_pk,
+      target_pk: r.target_pk,
+      link_props: JSON.stringify(r.link_props ?? {}),
+      markings: r.markings ?? [],
+      operation,
+      deleted: operation === "ADD" ? 0 : 1,
+      event_id: r.event_id ?? "",
+      event_version: r.event_version ?? nowMicros,
+      cdc_offset: r.cdc_offset ?? 0,
+      source_ts: toClickHouseDateTime64(r.source_ts),
+    };
+  });
   await client.insertJsonEachRow(table, normalized);
+}
+
+function toClickHouseDateTime64(v?: string): string {
+  const d = v ? new Date(v) : new Date();
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.` +
+    `${pad(d.getUTCMilliseconds(), 3)}`
+  );
 }

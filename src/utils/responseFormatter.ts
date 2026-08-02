@@ -451,6 +451,7 @@ export const ERROR_CODES: Record<string, number> = {
   INSUFFICIENT_ROLE: 403,
   MARKING_ACCESS_DENIED: 403,
   ORG_ACCESS_DENIED: 403,
+  STORAGE_MIGRATION_FAILED: 500,
   // FOUNDRY-GAPS §8 — purpose-based access control (purposeGate middleware).
   PURPOSE_REQUIRED: 403,
   PURPOSE_UNKNOWN: 403,

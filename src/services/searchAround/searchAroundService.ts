@@ -32,7 +32,9 @@ import {
   ADMIN_MAX_CAP,
   DEFAULT_CAP,
   runClickHouseTraversal,
+  type TraversalIsolation,
 } from "./clickhouseTraversal";
+import { incCounter } from "../funnel/metrics";
 import type { LinkTypeDescriptor } from "./linkMaterializedView";
 import type { QuickwitClient } from "../quickwit/client";
 import type { ClickHouseClient } from "./clickhouseClient";
@@ -49,6 +51,12 @@ export interface TraverseInput {
   anchorPks: string[];
   hops: TraverseHop[];
   userMarkings: ReadonlySet<string>;
+  /**
+   * REQUIRED isolation scope. ClickHouse escalation embeds these in every
+   * subquery; an empty branch/ontology would fan the query across
+   * ontologies, so we throw when they're missing (fail closed).
+   */
+  isolation: TraversalIsolation;
   /** Default 100k. Admin override up to 1M (warns when exceeded). */
   maxRows?: number;
   /** Override the per-hop Quickwit size cap (tests). */
@@ -56,9 +64,27 @@ export interface TraverseInput {
   /** Stubs for tests. */
   quickwitClient?: QuickwitClient;
   clickhouseClient?: ClickHouseClient;
+  /**
+   * Endpoint (target-object) security lookup override — tests inject this
+   * so the fail-closed behavior is deterministic without a live PG.
+   * Production MUST use the default (object_instances).
+   */
+  endpointSecurityLookup?: EndpointSecurityLookup;
   /** Caller-supplied admin override flag (enables maxRows > DEFAULT_CAP). */
   adminOverride?: boolean;
 }
+
+export interface EndpointSecurityLookupResult {
+  /** pk → markings. A pk ABSENT from the map is DENIED (fail-closed). */
+  markings: Map<string, string[]>;
+  /** True when the security backend errored — caller must withhold results. */
+  error: boolean;
+}
+
+export type EndpointSecurityLookup = (
+  objectTypeApiName: string,
+  pks: string[],
+) => Promise<EndpointSecurityLookupResult>;
 
 export interface TraverseHopTrace {
   hopIndex: number;
@@ -103,6 +129,7 @@ export async function traverse(input: TraverseInput): Promise<TraverseResult> {
         anchorPks: current,
         hops: input.hops.slice(i),
         userMarkings: input.userMarkings,
+        isolation: input.isolation,
         maxRows: cap,
         client: input.clickhouseClient,
       });
@@ -153,6 +180,7 @@ export async function traverse(input: TraverseInput): Promise<TraverseResult> {
           anchorPks: current,
           hops: input.hops.slice(i),
           userMarkings: input.userMarkings,
+          isolation: input.isolation,
           maxRows: cap,
           client: input.clickhouseClient,
         });
@@ -175,16 +203,38 @@ export async function traverse(input: TraverseInput): Promise<TraverseResult> {
     }
   }
 
-  // B10 defense-in-depth: subtract target PKs whose row-level markings
-  // the user lacks. Link-level markings were enforced inside the hop;
-  // endpoint (target Object Type) markings are enforced here at the
-  // API boundary so traversals can never leak PKs the caller isn't
-  // cleared to see via B1 object_instances.
-  const finalPks = await dropPksUserCannotSee(
-    currentObjectType,
-    current,
-    input.userMarkings
-  );
+  // Defense-in-depth (FAIL-CLOSED): subtract target PKs whose row-level
+  // markings the user lacks. Link-level markings were enforced inside the
+  // hop; endpoint (target Object Type) markings are enforced here at the
+  // API boundary. A PK with no security row is DENIED (a stale
+  // system-of-record must not grant visibility), and a security backend
+  // error withholds ALL results rather than preserving potentially
+  // unauthorized ones.
+  const lookup = input.endpointSecurityLookup ?? defaultEndpointSecurityLookup;
+  const sec = await lookup(currentObjectType, current);
+  if (sec.error) {
+    warnings.push(
+      "security lookup failed — traversal results withheld (fail-closed)"
+    );
+  }
+  let denied = 0;
+  const finalPks = sec.error
+    ? []
+    : current.filter((pk) => {
+        const markings = sec.markings.get(pk);
+        // FAIL CLOSED: no security row for this PK ⇒ deny. (Previous
+        // behavior treated missing rows as visible — a leak vector.)
+        if (!markings || !userSees(markings, input.userMarkings)) {
+          denied += 1;
+          return false;
+        }
+        return true;
+      });
+  if (denied > 0) {
+    incCounter("traversal_authorization_denied_total", {
+      object_type: currentObjectType,
+    }, denied);
+  }
 
   return {
     targetPks: finalPks,
@@ -195,12 +245,13 @@ export async function traverse(input: TraverseInput): Promise<TraverseResult> {
   };
 }
 
-async function dropPksUserCannotSee(
+/** Production lookup: object_instances (fail-closed on error). */
+async function defaultEndpointSecurityLookup(
   objectTypeApiName: string,
-  pks: string[],
-  userMarkings: ReadonlySet<string>
-): Promise<string[]> {
-  if (pks.length === 0) return pks;
+  pks: string[]
+): Promise<EndpointSecurityLookupResult> {
+  const out = new Map<string, string[]>();
+  if (pks.length === 0) return { markings: out, error: false };
   try {
     const res = await query(
       `SELECT primary_key, markings
@@ -209,22 +260,24 @@ async function dropPksUserCannotSee(
           AND primary_key = ANY($2::text[])`,
       [objectTypeApiName, pks]
     );
-    const visibleByPk = new Map<string, string[]>();
     for (const row of res.rows as Array<{ primary_key: string; markings: string[] | null }>) {
-      visibleByPk.set(row.primary_key, row.markings ?? []);
+      out.set(row.primary_key, row.markings ?? []);
     }
-    // PKs absent from object_instances (streaming lag, legacy OTs without
-    // the B1 table populated) default to visible — we don't want a stale
-    // system-of-record to cause false negatives. The link-level filter
-    // upstream still enforces the conservative boundary.
-    return pks.filter((pk) => {
-      const markings = visibleByPk.get(pk);
-      if (!markings) return true;
-      return userSees(markings, userMarkings);
-    });
-  } catch {
-    // If object_instances is unavailable, keep the link-level decision.
-    return pks;
+    return { markings: out, error: false };
+  } catch (err) {
+    // FAIL CLOSED: never preserve potentially unauthorized results when
+    // the security backend errors.
+    incCounter("traversal_security_lookup_errors_total", {});
+    console.error(
+      JSON.stringify({
+        level: "error",
+        type: "traversal_security_lookup_failed",
+        object_type: objectTypeApiName,
+        pk_count: pks.length,
+        error: (err as Error).message,
+      })
+    );
+    return { markings: new Map(), error: true };
   }
 }
 
