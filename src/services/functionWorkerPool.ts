@@ -34,6 +34,7 @@ import {
   runSandboxedWithSdk,
   awaitSandboxPromise,
   type SandboxResult,
+  type SandboxBinding,
   type SignatureParameter,
 } from "./functionRuntime";
 import {
@@ -41,6 +42,7 @@ import {
   type OntologySnapshot,
   type OntologyEdit,
 } from "./functions/ontologyRuntime";
+import type { FunctionExecutor } from "./functionExecutor";
 
 export interface SandboxAsyncResult extends SandboxResult {
   readonly edits: OntologyEdit[];
@@ -82,8 +84,8 @@ interface Task {
   readonly transpiled: string;
   readonly input: unknown;
   readonly snapshot: OntologySnapshot;
-  /** Pinned version's published signature (Phase 4 primary binding). */
-  readonly signatureParams?: SignatureParameter[];
+  /** Pinned version's invocation contract + published signature. */
+  readonly binding?: SandboxBinding | SignatureParameter[];
 }
 interface Pending {
   readonly task: Task;
@@ -237,7 +239,7 @@ function dispatch(slot: Slot, pending: Pending): void {
     transpiled: pending.task.transpiled,
     input: pending.task.input,
     snapshot: pending.task.snapshot,
-    signatureParams: pending.task.signatureParams,
+    binding: pending.task.binding,
   });
 }
 
@@ -323,12 +325,12 @@ export async function runSandboxedWithSdkAsync(
   transpiled: string,
   input: unknown,
   snapshot: OntologySnapshot,
-  signatureParams?: SignatureParameter[],
+  binding?: SandboxBinding | SignatureParameter[],
 ): Promise<SandboxAsyncResult> {
   if (!POOL_ENABLED || !workerFile) {
-    return runSandboxedWithSdkSync(transpiled, input, snapshot, signatureParams);
+    return runSandboxedWithSdkSync(transpiled, input, snapshot, binding);
   }
-  return submitToPool({ transpiled, input, snapshot, signatureParams });
+  return submitToPool({ transpiled, input, snapshot, binding });
 }
 
 /**
@@ -339,7 +341,7 @@ export async function runSandboxedWithSdkSync(
   transpiled: string,
   input: unknown,
   snapshot: OntologySnapshot,
-  signatureParams?: SignatureParameter[],
+  binding?: SandboxBinding | SignatureParameter[],
 ): Promise<SandboxAsyncResult> {
   const { sdk, getEdits, getRequestedTypes } = buildOntologySdk(snapshot);
   let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
@@ -347,7 +349,7 @@ export async function runSandboxedWithSdkSync(
     Edits: sdk.Edits,
     createEditBatch: sdk.createEditBatch,
     __ontologyTypes: sdk.objectTypeDescriptors,
-  }, signatureParams);
+  }, binding);
   // Async function: the sandbox returned a Promise (vm can't await). Resolve it
   // here under the timeout — the sync fallback is the structural path (pool
   // unavailable), and it should still honor async Foundry functions.
@@ -362,6 +364,24 @@ export async function runSandboxedWithSdkSync(
     };
   }
   return { ...result, edits: result.status === "ok" ? getEdits() : [], requestedTypes: getRequestedTypes() };
+}
+
+/**
+ * The production FunctionExecutor (see functionExecutor.ts): the existing
+ * worker_threads pool behind the executor boundary. NOT a claimed security
+ * sandbox — full process/container isolation is the declared gap
+ * documented in functionExecutor.ts's header.
+ */
+export function createWorkerPoolExecutor(): FunctionExecutor {
+  return {
+    execute: (request) =>
+      runSandboxedWithSdkAsync(
+        request.transpiled,
+        request.input,
+        request.snapshot,
+        request.binding,
+      ),
+  };
 }
 
 // Test-only: reset pool state.

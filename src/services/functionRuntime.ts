@@ -224,6 +224,61 @@ const CLIENT_STUB: Readonly<Record<string, never>> = new Proxy(
 export interface SignatureParameter {
   name: string;
   optional: boolean;
+  /** Immutable published ordinal (v2 signatures). Legacy metadata upgrades
+   *  to the array index — NEVER object-key order. */
+  position?: number;
+  /** Published as an injected runtime dependency (canonical type kind
+   *  "client", e.g. the Foundry v2 edit `client: Client`). Injection is
+   *  signature-driven — NEVER arity-driven and never the first parameter
+   *  by assumption. */
+  injected?: "client";
+}
+
+/**
+ * The invocation contract persisted per published immutable version
+ * (function_registry_function_version.invocation_contract). Execution
+ * branches ONLY on this persisted value — never on arity, fn.length, or
+ * source parsing. (Mirror of canonicalSignature.ts's InvocationContract;
+ * redeclared so the runtime/worker never imports the validator.)
+ */
+export type InvocationContract =
+  | "legacy-object-envelope-v1"
+  | "typescript-v2-positional-v2";
+
+export const LEGACY_OBJECT_ENVELOPE_V1: InvocationContract =
+  "legacy-object-envelope-v1";
+
+/**
+ * Execution binding handed to the sandbox: the persisted invocation
+ * contract plus the published parameters. A bare SignatureParameter[]
+ * argument is ACCEPTED for backward compatibility (existing callers/tests)
+ * and ALWAYS treated as the legacy contract.
+ */
+export interface SandboxBinding {
+  contract: InvocationContract;
+  parameters?: SignatureParameter[];
+}
+
+export function normalizeSandboxBinding(
+  binding?: SandboxBinding | SignatureParameter[],
+): SandboxBinding {
+  if (!binding) return { contract: LEGACY_OBJECT_ENVELOPE_V1 };
+  if (Array.isArray(binding)) {
+    return {
+      contract: LEGACY_OBJECT_ENVELOPE_V1,
+      parameters: binding.map((p, index) => ({ ...p, position: p.position ?? index })),
+    };
+  }
+  if (binding.parameters) {
+    return {
+      contract: binding.contract,
+      parameters: binding.parameters.map((p, index) => ({
+        ...p,
+        position: p.position ?? index,
+      })),
+    };
+  }
+  return { contract: binding.contract };
 }
 
 /**
@@ -313,11 +368,51 @@ function buildV2CallArgs(
   return [CLIENT_STUB, ...params.slice(1).map((name) => bag[name])];
 }
 
+/**
+ * Positional v2 invocation (typescript-v2-positional-v2): every declared
+ * parameter is resolved BY PUBLISHED NAME and invoked POSITIONALLY in
+ * PUBLISHED ORDER. Zero params → fn(); one param → fn(value); many →
+ * fn(a, b, ...). Omitted optional parameters pass `undefined` so declared
+ * JS defaults apply. A parameter published as injected ("client") receives
+ * the placeholder client — signature-driven, never positional assumption.
+ * The full parameter object is NEVER passed as an argument here.
+ */
+export function buildPositionalCallArgs(
+  input: unknown,
+  parameters: SignatureParameter[] | undefined,
+): unknown[] {
+  const bag =
+    input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  return [...(parameters ?? [])]
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+    .map((parameter) =>
+      parameter.injected === "client" ? CLIENT_STUB : bag[parameter.name],
+    );
+}
+
+/**
+ * Single entry point for argument construction. Branches ONLY on the
+ * persisted invocation contract:
+ *   • typescript-v2-positional-v2 → buildPositionalCallArgs (never null)
+ *   • legacy-object-envelope-v1   → buildV2CallArgs (byte-identical
+ *     pre-contract behavior; null keeps the single-envelope fallback)
+ */
+function buildSandboxCallArgs(
+  fn: (...args: never[]) => unknown,
+  input: unknown,
+  binding: SandboxBinding,
+): unknown[] | null {
+  if (binding.contract === "typescript-v2-positional-v2") {
+    return buildPositionalCallArgs(input, binding.parameters);
+  }
+  return buildV2CallArgs(fn, input, binding.parameters);
+}
+
 export function runSandboxedWithSdk(
   transpiledCjs: string,
   input: unknown,
   sdkGlobals: Record<string, unknown>,
-  signatureParams?: SignatureParameter[],
+  binding?: SandboxBinding | SignatureParameter[],
 ): SandboxResult {
   const start = Date.now();
   const logs: string[] = [];
@@ -403,10 +498,10 @@ export function runSandboxedWithSdk(
   // binding, no execution).
   let callArgs: unknown[] | null;
   try {
-    callArgs = buildV2CallArgs(
+    callArgs = buildSandboxCallArgs(
       fn as (...args: never[]) => unknown,
       input,
-      signatureParams,
+      normalizeSandboxBinding(binding),
     );
   } catch (err) {
     return {
