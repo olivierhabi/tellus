@@ -1,7 +1,13 @@
 # ADR — OSv2 Serving-Index Parity: P0 Slice (Truthful Ack, Tombstones, Link Outbox, Edge Index, Rollout Flags)
 
 Date: 2026-08-02
-Status: Accepted (landed; rollout default stays `legacy`)
+Status: Accepted (committed; rollout default stays `legacy`)
+
+Landed on `fix/automate-function-production-hardening` as commits
+`3e4877b`, `1c995a5`, `8b492f0`, `a6b8bc8`, `3e65ff0`, `d5e48e9`
+(verified from a clean checkout at `d5e48e9`). An interleaved
+workstream (automate-functions hardening, `dff7601…9809d96`) shares the
+branch; no foreign hunks are present in the six commits above.
 
 ## Context
 
@@ -167,34 +173,83 @@ Migration probe verified forward + rollback on a fresh PG.
 - `src/services/serving/{contracts,servingFlags,shadowCompare,linkServingStore}.ts`.
 - `src/services/searchAround/linkMaterializedView.ts` — versioned schema + in-place engine upgrade + `insertLinkRows`.
 - `src/services/searchAround/clickhouseTraversal.ts` — argMax SQL, `buildReverseSql`, required isolation.
-- Tests under `tests/{unit,funnel/integration}/{links,funnel}` — 27 new unit + 25 new lane-level integration specs.
+- Tests: 6 new unit files (27 specs — truthful-indexing, streaming-tombstones,
+  link-cdc-outbox, link-storage-migrator, serving-rollout,
+  searchAround-edgeResolver) + expectation updates to 2 legacy suites
+  (`funnel-b6-b8-unit`, `funnel-b9-b10-unit`, 63 specs re-verified) +
+  3 new lane-level integration files (7 specs — link-cdc-outbox 3,
+  truthful-indexing 1, clickhouse-edges 3).
 
-## Test evidence (this session, lane times)
+## Test evidence (verified from a CLEAN CHECKOUT at `d5e48e9`, 2026-08-02)
 
-- `pnpm test:unit` → 292 files / 3712 tests, **pass**.
-- Integration (real PG + Kafka + ClickHouse):
-  - `link-cdc-outbox-integration` 3/3 (atomicity rollback proof, broker drain, idempotency);
-  - `truthful-indexing-integration` 1/1 — Quickwit down: `applied_to_index_at IS NULL`, `indexed=false`;
-  - `clickhouse-edges-integration` 3/3 — ADD/REMOVE/reADD lifecycle, cross-tenant empty, markings both directions;
-  - `funnel-instances-overlay-integration` 7/7;
-  - `failure-injection-integration` 10/10, `failure-injection-os-outage-integration` 1/1.
-- Tarball snapshot: `…/opencode/tellus-recovery/tellus-p0-slice-20260802-064233.tgz` — captured because an
-  external `git reset --hard` destroyed the uncommitted working tree
-  mid-session; please reclaim previously stashed work before relying on
-  any files not yet committed.
+- `pnpm exec tsc --noEmit` → **clean (exit 0)**.
+- `pnpm test:unit` → 292 files / **3722 tests pass**.
+- `pnpm exec eslint <all P0 files>` → 0 errors (2 pre-existing-style fs warnings).
+- Integration (real PG + Kafka + ClickHouse, lane `tellus_tests`):
+  `link-cdc-outbox-integration` 3/3 · `truthful-indexing-integration` 1/1 ·
+  `clickhouse-edges-integration` 3/3 → **7/7 pass**.
+- Migration probe 153/154/155: UP idempotent-reapply ✓, DOWN executes ✓,
+  schema restored ✓ (transactional probe on `tellus_tests`).
+- Pre-existing lanes re-run at `d5e48e9`: `funnel-instances-overlay` 7/7 ✓ and
+  `failure-injection` 10/10 ✓; `failure-injection-os-outage` 0/1 — **fails
+  IDENTICALLY at the pre-P0 base `335ec74` (not a P0 regression; environmental
+  — the shared `tellus_tests` lane is used concurrently by another workstream;
+  recorded as an open item).**
+- Recovery note: the 06:42 tarball
+  `…/opencode/tellus-recovery/tellus-p0-slice-20260802-064233.tgz` was verified
+  **byte-identical for all 39 P0 files** against the working tree (the
+  other agent's stash restore recovered them); no tarball extraction was
+  needed. The other agent's in-flight files preserved untouched:
+  `workflows.ts`/`mergeStage.ts`/`worker.ts`, functions/*, automate/*,
+  migration 156, funnel `activities.ts` `objectsIndexed` hunk (absorbed
+  into their commits separately).
+
+## Claim → code traceability (all verified against the committed tree)
+
+| ADR decision | Code path | Symbols / files | Tests proving it | Failure test | Rollout | Status |
+|---|---|---|---|---|---|---|
+| D-92 truthful ack | funnelDispatcher + temporal activities → indexing | `QuickwitPublishTimeoutError` (quickwit/indexingActivity.ts:151, throw :190); `recordIndexingDeferred`/`updatePendingIndexGauges` (funnel/indexingStage.ts:131,153) | truthful-indexing-unit; b6-b8-unit 'rejects with QuickwitPublishTimeoutError' | truthful-indexing-integration (applied_to_index_at NULL, indexed=false) | always-on | **Verified** |
+| D-92 repair pass | indexing stage batch construction | `buildFullIndexBatch` (funnel/indexingStage.ts:44) | truthful-indexing-unit (repair-from-instances + gone-instance tombstone) | — (no live-Quickwit repair probe yet) | always-on | **Partial** |
+| D-93 tombstones | streaming consumer → transform → sink | `transformTombstone`, `hashShard` (stage2-transform.ts:34,86); `StreamingDeleteUnattributableError` (streaming-consumer.ts:19); Osv2Sink loud-throw (osv2-sink.ts:50) | streaming-tombstones-unit (2) | unattributable-delete ⇒ no offset commit (unit) | always-on | **Partial** (sink→backend delivery not e2e-proven) |
+| D-94 outbox atomicity | action txn staging | `stageLinkCdcEvent` (linkCdcOutbox.ts:60) called inside `applyEdits` txn (editApplicator.ts) | link-cdc-outbox-integration #1 (rollback leaves NO row) | same | always-on | **Verified** |
+| D-94 drainer | outbox → broker | `drainLinkOutboxOnce` (:130), `startLinkCdcDrainer` (:228); backoff 250ms→60s, ≤20 attempts (:115-117); dead-letter | link-cdc-outbox-unit (5) + integration #2/#3 | broker-failure backoff + dead-letter unit | `LINK_CDC_DRAINER_DISABLED` | **Verified** |
+| D-94 producer recovery | kafkajs producer lifecycle | cdcLinkProducer.ts:50-59 (no permanent disable on connect failure) | — (no dedicated reconnection test) | — | always-on | **Partial** |
+| D-95 versioned edge schema | CH DDL + insert | `ensureLinkTable` `__legacy_mergetree` upgrade (linkMaterializedView.ts:116-141); `insertLinkRows` | clickhouse-edges-integration (ADD/REMOVE/re-ADD; engine upgrade in place) | — | build-time | **Verified** for insert/query; **Partial** for Kafka-engine live ingest (not e2e-wired) |
+| D-95 active-edge projection + reverse | CH SQL | argMax-per-identity, `buildReverseSql` (clickhouseTraversal.ts; throw at :87-88) | clickhouse-edges-integration (forward+reverse, out-of-order re-ADD) | — | always-on for CH path | **Verified** |
+| D-95 isolation required | CH SQL | `runClickHouseTraversal` throws without ontologyId/branchId (:83-88) | clickhouse-edges-integration (cross-tenant ⇒ empty) | cross-tenant probe (integration) | always-on | **Verified** |
+| D-96 fail-closed security | endpoint screening | `defaultEndpointSecurityLookup` (searchAroundService.ts); deny-on-missing (:225); withhold-on-error + `traversal_security_lookup_errors_total` (:270); `traversal_authorization_denied_total` (:234) | clickhouse-edges-integration (markings both directions) | markings-denied probes (integration) | always-on | **Verified** for edge-serving path; **Partial** as global model (PG lookup still the backend; Stage-4 indexed markings pending) |
+| D-97 migrator truthfulness | storage migration | `STORAGE_MIGRATION_FAILED` (linkStorageMigrator.ts:131; 500 in responseFormatter.ts:454; KNOWN_CODES in links.ts:111) | link-storage-migrator-unit (3) | sidecar-down + checksum-mismatch cases | always-on | **Verified** |
+| D-98 rollout resolution | flag table | `resolveServingMode` (servingFlags.ts:51; order :53-61; env fallback :71) | serving-rollout-unit (10) | missing-table ⇒ legacy fallback | DB table `serving_rollout` | **Verified** |
+| D-98 shadow compare | shadow mode | `compareShadow` (shadowCompare.ts:37); digests-only logs; `serving_shadow_compare_total`, `serving_shadow_indexed_latency_seconds` | serving-rollout-unit (canonicalization, mismatch, error-safe) | indexed-side error ⇒ mismatch, never throws | per-scope | **Partial** (no production traffic in shadow yet) |
+| D-98 wiring | routes + OSS traverse | `maybeServingEdgeResolver` (linkServingStore.ts:131); routes/links.ts searchAround; routes/objects.ts (2 routes); oss/productionDeps.ts traverse (2 call sites); `edgeResolver` seam (linkResolverService.ts) | searchAround-edgeResolver-unit (2) | empty-store ⇒ well-formed empty response | mode=legacy ⇒ no-op | **Verified** (code-path); behavior change only under shadow/indexed |
+
+Legend: **Verified** = code + dedicated positive AND failure test, run against
+`d5e48e9` from a clean checkout. **Partial** = code + some tests, one or more
+of the required proofs outstanding (named above). **Missing** = not started.
 
 ## Next steps (Phase 2 continuation)
 
-1. High-throughput Quickwit hop for edges: `ot_link_*` index + confirmed
-   acceptance criteria (hops ≤ 100k).
-2. Apply the same serving-store rollout to object search/get — the
-   ObjectServingStore contract is in place, wiring is the next slice.
-3. End-to-end CDC topology smoke (Kafka-engine → CH) in the lane stack
-   (image needs to be present in CI: `clickhouse/clickhouse-server:24.8-alpine`).
+1. **Link index confirmation watermark** (blocks Action completion):
+   `waitForWatermark` is declared on both store interfaces
+   (`serving/contracts.ts:74,132`, `StoreWatermarkTimeout` :82) but has
+   **no implementation** — implement confirmed edge watermarks keyed by
+   (tenant, ontology, branch, link type), wire Action completion to wait
+   for the required edge version, defer on timeout/outage, and expose
+   lag/wait/failure metrics. Do NOT treat `published_at` as visibility.
+2. Object search/get: wire the ObjectServingStore contract the same way
+   links are wired (rollout `legacy → shadow → indexed` per resource).
+3. End-to-end CDC topology test (Kafka-engine → CH MV → LinkServingStore
+   → public REST Search Around), image
+   `clickhouse/clickhouse-server:24.8-alpine` (present locally;
+   pin it in the CI lane config).
 4. Soak-gate thresholds: `serving_shadow_indexed_latency_seconds`,
    `traversal_authorization_denied_total`, dead-letter rate, watermark
    lag; define per-environment SLOs before any `→indexed` promotion.
 5. Benchmark suite (`tests/linkBenchmark.js` extension) for forward and
    reverse traversal at 1k / 100k / 1M edge fan-outs.
-6. Rollout to `shadow` for staging tenants per the deployment sequence
-   (in the ADR output), then promote `→indexed` after the soak window.
+6. Rollout to `shadow` for staging tenants per the deployment sequence,
+   then promote `→indexed` after the soak window; rollback = set the
+   rollout row back to `legacy` (code default is rollback-safe).
+7. Fix/flake-hunt `failure-injection-os-outage-integration` in the
+   shared lane (fails identically at `335ec74`; lane is used
+   concurrently — isolate or serialize with the other workstream).
