@@ -195,8 +195,22 @@ describe("inspectPublishedFunction — one shared analysis (signature + kind)", 
     expect(metadata.functionKind).toBe("edit");
     expect(metadata.signature).toEqual({
       parameters: [
-        { name: "client", type: "Client", optional: false },
-        { name: "orderId", type: "string", optional: false },
+        {
+          name: "client",
+          type: "Client",
+          optional: false,
+          position: 0,
+          hasDefault: false,
+          typeModel: { kind: "client" },
+        },
+        {
+          name: "orderId",
+          type: "string",
+          optional: false,
+          position: 1,
+          hasDefault: false,
+          typeModel: { kind: "string" },
+        },
       ],
       output: "OrderEdit[]",
     });

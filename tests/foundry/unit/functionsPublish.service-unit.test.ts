@@ -27,8 +27,22 @@ describe("TypeScript v2 functions-publish discovery", () => {
       "export default function hello(name: string, title?: string): string { return name; }",
     )).toEqual({
       parameters: [
-        { name: "name", type: "string", optional: false },
-        { name: "title", type: "string", optional: true },
+        {
+          name: "name",
+          type: "string",
+          optional: false,
+          position: 0,
+          hasDefault: false,
+          typeModel: { kind: "string" },
+        },
+        {
+          name: "title",
+          type: "string",
+          optional: true,
+          position: 1,
+          hasDefault: false,
+          typeModel: { kind: "string" },
+        },
       ],
       output: "string",
     });

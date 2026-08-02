@@ -3,6 +3,33 @@
 Isolated verify stack dedicated to the `tellus-automate-verify` realm, so the Automate platform can be verified end-to-end without disturbing the shared dev stack (ports 3000/3001).
 Every element of the full e2e evaluation chain runs inside it: dedicated PostgreSQL DB, shared OpenSearch, Keycloak realm, isolated MinIO bucket, isolated API (:3100) and FE (:3101).
 
+## Function invocation contract (canonical, migration 156)
+
+One canonical published contract drives publication, registry, Automate configuration, backend validation, runtime invocation, and version compatibility (`src/services/functions/canonicalSignature.ts`):
+
+- Each published parameter carries `{name, position, type (canonical recursive FunctionType), typeText, optional, hasDefault}`; order comes ONLY from immutable published `position` — never object-key order, source parsing, transpiled arity, or `fn.length`.
+- `function_registry_function_version.invocation_contract` is persisted per immutable version: `legacy-object-envelope-v1` (pre-contract artifacts, backfilled deterministically, behavior preserved byte-identically) or `typescript-v2-positional-v2` (all new publishes: every parameter resolves BY PUBLISHED NAME and invokes POSITIONALLY; a parameter typed `Client` is an injected dependency — signature-driven, never an assumed first parameter).
+- Execution branches ONLY on the persisted contract (`functionRuntime.buildSandboxCallArgs`). Backend validation (`functions/parameterValidation.ts`) is authoritative: `false`/`0`/`""` are valid, missing required rejected, `null` rejected unless `T | null` was published, numeric strings never coerce, dates `YYYY-MM-DD`, timestamps RFC-3339-with-zone (normalized to UTC), lists/structs validated recursively with precise paths.
+- Automatic upgrades resolve `>=pinned <major+1` (never below-1.0.0 pins, never prereleases, never a signature-incompatible or contract-changing candidate — optional-only appends allowed) and pin the resolved immutable artifact (`resolved_function_semver` + `resolved_artifact_sha256` + `invocation_contract` + `signature_hash`) ONCE per effect execution; retries re-execute that exact artifact.
+- Executor boundary: `src/services/functionExecutor.ts` (`FunctionExecutor`) — the worker_threads+`vm` pool sits behind it; it is NOT a claimed security boundary (gap documented in the file header). The full threat model, trust gate, and container/microVM follow-up spec live in `docs/operations/automate-function-invocation-contract.md`.
+- Migrating a legacy function onto the positional contract: edit the source (remove the single-envelope parameter; declare the real parameters), republish through `POST /:rid/tags` (new version rows stamp `typescript-v2-positional-v2` + canonical signature + `sha256:` signature hash), then re-pin or auto-upgrade the automation. Never edit published artifacts in place.
+
+## Production controls (runbook: docs/operations/automate-function-invocation-contract.md)
+
+- **Publish trust gate** (`functions/executionPolicy.ts`): `FUNCTION_EXECUTION_TRUST_MODE` defaults to `trusted-authors-only` — publishing executable Functions requires the principal in `FUNCTION_TRUSTED_AUTHOR_IDS` (enforced on `POST /api/code-repos/:rid/tags` AND `POST /api/functions/:repositoryRid/versions`; 403 `function-author-not-trusted`). `open-development` is refused in production. Test lanes opt out explicitly; the isolated verify stack allowlists owner+admin.
+- **Legacy deprecation controls**: metric `tellus_function_legacy_contract_executions_total` (+ `tellus_function_effect_executions_total{contract,status}`), structured log `automate.function.legacy_contract_execution` (with automationId/effectId, never parameter values), superadmin endpoints `GET /api/functions/registry/legacy/versions` and `GET /api/functions/registry/legacy/status` (burndown), UI warning callout on version selection, non-fatal activation warning `FUNCTION_LEGACY_CONTRACT_DEPRECATED`, kill switch `FUNCTION_LEGACY_CONTRACT_DISABLED=true` (422 `FUNCTION_LEGACY_CONTRACT_DISABLED`), informational `FUNCTION_LEGACY_CONTRACT_DEPRECATION_DATE`.
+- **Unsupported parameter types** (`objectSet` / `ontologyObject` / `unsupported` canonical kinds) are gated HONESTLY — no control is shown in the UI, and any configured binding is rejected at activation AND execution with 422 `FUNCTION_PARAMETER_UNSUPPORTED_TYPE`. Supported matrix: runbook §2.
+- **Migration validation**: `scripts/verify-migration-156.sh` (16 assertions on a scratch DB: pre-migration schema → legacy inserts → forward → old/new mixed operation → code rollback → forward recovery; idempotent re-apply).
+- **Cancellation semantics**: cancelling a queued trigger cancels its pending effects; fallback and automatic event retry are only scheduled from genuine exhausted failures (proven by an integration test).
+
+## Test lanes for this contract
+
+- Unit: `tests/unit/functions/canonicalContract-unit.test.ts`, `parameterValidation-unit.test.ts`, `positionalInvocation-unit.test.ts`, `versionResolution-unit.test.ts`.
+- Integration (real PG): `tests/integration/automate/function-effect-execution-integration.test.ts` (`vitest.automate.integration.config.ts`) — positional execution, typed/missing/null rejection, legacy envelope parity, semver resolution, retry artifact pinning, unsupported-type gating, legacy kill switch, cancellation safety.
+- Migration: `bash scripts/verify-migration-156.sh` (scratch DB, 16 assertions).
+- Policy: `tests/unit/functions/executionPolicy-unit.test.ts` (trust modes, allowlist, legacy switch, deprecation date).
+- Browser E2E (isolated stack): `tellus-fe/cypress/e2e/automate-function-effect-ui-e2e.cy.ts` — REAL publication flow + REAL Automate UI (no constructed payloads): helloWorld→"Hello, Olivier" positional v2 without a wrapper; typedParams typed constants.
+
 ## Execution layers
 
 | Layer | What it is |
@@ -65,6 +92,7 @@ lives in `deploy/temporal/dynamicconfig.yaml` (registered keys in MUTABLE
 
 ## Gate results (two consecutive runs, both clean)
 - **17/17 Function-version semantics**: v1 pinned, v2 autoUpgrade, v3 compatible-major incompatible rejected.
+- **2/2 Function-effect UI (positional contract)**: `helloWorld` → exactly `Hello, Olivier` via the real UI; typedParams typed constants.
 - **4/4 browser scenarios both runs** (each run is a fresh down→up→seed):
   - **S1** objects-modified→Function (live eval; unmonitored change no trigger, fullName monitored → Function v1).
   - **S2** failure→retries→fallback (attempt-count archived, fallback notification reaches owner inbox).

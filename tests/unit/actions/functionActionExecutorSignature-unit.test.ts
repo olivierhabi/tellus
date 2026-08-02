@@ -30,9 +30,18 @@ import { executeFunctionAction } from "../../../src/actions/functionActionExecut
 
 const ONTOLOGY_ID = "00000000-0000-0000-0000-000000000001";
 
-// The executor threads the PARSED metadata ({name, optional} only).
-const parsed = (signature: typeof V1_SIGNATURE) =>
-  signature.parameters.map(({ name, optional }) => ({ name, optional }));
+// The executor threads the parsed metadata as a contract-bound
+// SandboxBinding: unpinned rows (no invocation_contract column in these
+// fixtures) execute under the byte-identical legacy contract.
+const parsed = (signature: typeof V1_SIGNATURE) => ({
+  contract: "legacy-object-envelope-v1",
+  parameters: signature.parameters.map((parameter, position) => ({
+    name: parameter.name,
+    optional: parameter.optional,
+    position,
+    injected: parameter.type === "Client" ? ("client" as const) : undefined,
+  })),
+});
 
 function makeBinding(semver: string) {
   return {
@@ -189,7 +198,10 @@ describe("executeFunctionAction — signature-metadata binding (Phase 4)", () =>
 
     await invoke(db, "1.0.0");
 
-    expect(runSandboxMock.mock.calls[0][3]).toBeUndefined();
+    expect(runSandboxMock.mock.calls[0][3]).toEqual({
+      contract: "legacy-object-envelope-v1",
+      parameters: undefined,
+    });
   });
 
   it("falls back (undefined signatureParams) on malformed signature metadata", async () => {
@@ -220,6 +232,9 @@ describe("executeFunctionAction — signature-metadata binding (Phase 4)", () =>
 
     await invoke(db, "1.0.0");
 
-    expect(runSandboxMock.mock.calls[0][3]).toBeUndefined();
+    expect(runSandboxMock.mock.calls[0][3]).toEqual({
+      contract: "legacy-object-envelope-v1",
+      parameters: undefined,
+    });
   });
 });
