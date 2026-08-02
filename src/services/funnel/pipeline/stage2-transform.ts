@@ -10,6 +10,13 @@ export type TransformedObject = {
   shard: number;
   properties: Record<string, unknown>;
   sizeBytes: number;
+  /**
+   * Versioned-delete marker (OSv2 parity): a delete event MUST NOT be
+   * dropped; it is carried through the pipeline as a tombstone so the
+   * serving store converges to "absent" rather than keeping a stale
+   * active row. Sinks that cannot represent tombstones must fail loudly.
+   */
+  deleted?: boolean;
 };
 
 const MAX_PROPERTIES = 250;
@@ -24,7 +31,7 @@ export class FunnelTransformError extends Error {
   }
 }
 
-function hashShard(pk: string, shards: number): number {
+export function hashShard(pk: string, shards: number): number {
   // Simple FNV-1a 32-bit; deterministic across nodes.
   let h = 0x811c9dc5;
   for (let i = 0; i < pk.length; i++) {
@@ -68,5 +75,24 @@ export function transformRow(
     shard: hashShard(pk, binding.shardCount ?? 16),
     properties: props,
     sizeBytes,
+  };
+}
+
+/**
+ * Build a tombstone for a deleted object. Only the primary key is
+ * authoritative — user properties are dropped (they no longer exist) so
+ * the tombstone stays small and cannot leak deleted content.
+ */
+export function transformTombstone(
+  primaryKey: string,
+  binding: ObjectTypeBinding,
+): TransformedObject {
+  const pk = String(primaryKey);
+  return {
+    primaryKey: pk,
+    shard: hashShard(pk, binding.shardCount ?? 16),
+    properties: {},
+    sizeBytes: Buffer.byteLength(pk, "utf8"),
+    deleted: true,
   };
 }

@@ -6,8 +6,25 @@
 import type { Pool } from "pg";
 import { getKafkaClient } from "../../../lib/kafka";
 import type { ObjectTypeBinding } from "../contracts/object-type-binding";
-import { transformRow } from "./stage2-transform";
+import { transformRow, transformTombstone } from "./stage2-transform";
 import type { ShardIndexer } from "./stage3-index";
+import { incCounter } from "../metrics";
+
+/**
+ * A delete event we cannot attribute to a primary key. This is a loud
+ * stop (offset NOT committed) rather than a silent skip: deleting the
+ * wrong thing or losing a delete both violate the tombstone invariant
+ * (OSv2 parity — a delete must hide all older active versions).
+ */
+export class StreamingDeleteUnattributableError extends Error {
+  constructor(topic: string, partition: number, offset: string) {
+    super(
+      `delete event on ${topic}[${partition}]@${offset} carries no usable ` +
+        `primary key (need 'before' with the binding pkColumn)`,
+    );
+    this.name = "StreamingDeleteUnattributableError";
+  }
+}
 
 export interface CheckpointStore {
   load(bindingRid: string, topic: string, partition: number): Promise<bigint | null>;
@@ -53,11 +70,28 @@ export async function runStreaming(
     if (signal.aborted) break;
     const payload = JSON.parse(msg.value.toString("utf8")) as {
       op?: string;
+      before?: Record<string, unknown>;
       after?: Record<string, unknown>;
     };
-    if (payload.op === "d") continue;
-    const obj = transformRow(payload.after ?? {}, binding);
-    await indexer.push(obj);
+    if (payload.op === "d") {
+      // Tombstones (OSv2 parity): a streaming delete MUST produce a
+      // versioned tombstone, never a silent skip. Skipping would strand a
+      // deleted object as queryable forever (the previous behaviour).
+      const pk = payload.before?.[binding.pkColumn];
+      if (pk === undefined || pk === null) {
+        incCounter("funnel_streaming_delete_unattributable_total", {
+          object_type: binding.objectTypeRid,
+        });
+        throw new StreamingDeleteUnattributableError(topic, msg.partition, msg.offset);
+      }
+      await indexer.push(transformTombstone(String(pk), binding));
+      incCounter("funnel_streaming_tombstones_total", {
+        object_type: binding.objectTypeRid,
+      });
+    } else {
+      const obj = transformRow(payload.after ?? {}, binding);
+      await indexer.push(obj);
+    }
     if (Date.now() - lastCommitAt > 1000) {
       await indexer.flushAll();
       await checkpoints.save(binding.rid, topic, msg.partition, BigInt(msg.offset));
