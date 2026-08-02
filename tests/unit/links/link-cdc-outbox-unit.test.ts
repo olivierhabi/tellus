@@ -33,14 +33,18 @@ describe("stageLinkCdcEvent", () => {
       correlationId: "corr-1",
     });
 
-    expect(queries).toHaveLength(1);
-    expect(queries[0].sql).toContain("INSERT INTO link_cdc_outbox");
-    expect(queries[0].sql).toContain("ON CONFLICT (event_id) DO NOTHING");
-    expect(queries[0].params).toContain("cdc.links.order.ownedby");
-    expect(queries[0].params).toContain("REMOVE");
-    expect(queries[0].params).toContain("ont-1");
-    expect(queries[0].params).toContain("main");
-    const payload = JSON.parse(queries[0].params[10] as string);
+    // Migration 157: INSERT (RETURNING outbox_seq) + payload embed on the
+    // SAME tx — still atomic. (The row mock has no RETURNING row here, so
+    // the conflict branch issues a SELECT.)
+    expect(queries.find((q) => q.sql.includes("INSERT INTO link_cdc_outbox"))).toBeDefined();
+    const insert = queries.find((q) => q.sql.includes("INSERT INTO link_cdc_outbox"))!;
+    expect(insert.sql).toContain("ON CONFLICT (event_id) DO NOTHING");
+    expect(insert.sql).toContain("RETURNING outbox_seq");
+    expect(insert.params).toContain("cdc.links.order.ownedby");
+    expect(insert.params).toContain("REMOVE");
+    expect(insert.params).toContain("ont-1");
+    expect(insert.params).toContain("main");
+    const payload = JSON.parse(insert.params[10] as string);
     expect(payload.operation).toBe("REMOVE");
     expect(payload.event_id).toBe("11111111-1111-1111-1111-111111111111");
     expect(payload.branch_id).toBe("main");

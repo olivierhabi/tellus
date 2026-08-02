@@ -52,15 +52,24 @@ export interface StageLinkCdcInput {
   linkProps?: Record<string, unknown>;
 }
 
+export interface StagedLinkCdcEvent {
+  eventId: string;
+  /** Globally monotonic edge-event offset (BIGSERIAL), assigned at staging.
+   *  Used as the ack handle version for edge-index confirmation
+   *  (src/services/serving/edgeIndexWatermark.ts). */
+  outboxSeq: number;
+}
+
 /**
  * Stage a link CDC event. MUST be called on the PoolClient that is
  * writing the link_edit row so both commit atomically. Idempotent at the
  * row level on (event_id): a retried action attempt re-inserts safely.
+ * Returns the assigned monotonic outbox offset.
  */
 export async function stageLinkCdcEvent(
   tx: PoolClient,
   input: StageLinkCdcInput,
-): Promise<string> {
+): Promise<StagedLinkCdcEvent> {
   const payload: LinkCdcRow = {
     source_pk: input.sourcePrimaryKey,
     target_pk: input.targetPrimaryKey,
@@ -69,7 +78,6 @@ export async function stageLinkCdcEvent(
     schema_version: "2.0.0",
     event_id: input.eventId,
     event_ts_micros: input.eventTsMicros ?? Date.now() * 1000,
-    ontology_id: input.ontologyId ?? undefined,
     link_type_api_name: input.linkTypeApiName,
     operation: input.operation,
     actor_principal_id: input.actorPrincipalId ?? undefined,
@@ -78,16 +86,23 @@ export async function stageLinkCdcEvent(
     causation_id: input.causationId ?? null,
     retracts_event_id: input.retractsEventId ?? null,
     direction: "forward",
-    branch_id: input.branchId ?? null,
-    tenant_id: input.tenantId ?? null,
+    // Serving-index scope keys are ClickHouse Strings (DEFAULT ''): a JSON
+    // `null` would be a broken Kafka message at the engine, not a queryable
+    // value. Normalise to "" everywhere the payload feeds the edge index;
+    // confirmation probes use the identical normalisation
+    // (serving/edgeIndexWatermark.ts:scopeClause).
+    branch_id: input.branchId ?? "",
+    tenant_id: input.tenantId ?? "",
+    ontology_id: input.ontologyId ?? "",
   };
-  await tx.query(
+  const inserted = await tx.query(
     `INSERT INTO link_cdc_outbox
        (event_id, topic, tenant_id, ontology_id, branch_id,
         link_type_api_name, source_object_type,
         source_primary_key, target_primary_key, operation, payload)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-     ON CONFLICT (event_id) DO NOTHING`,
+     ON CONFLICT (event_id) DO NOTHING
+     RETURNING outbox_seq`,
     [
       input.eventId,
       linkCdcTopic(input.sourceObjectType, input.linkTypeApiName),
@@ -102,7 +117,27 @@ export async function stageLinkCdcEvent(
       JSON.stringify(payload),
     ],
   );
-  return input.eventId;
+  let outboxSeq = inserted.rows[0]?.outbox_seq as string | number | undefined;
+  if (outboxSeq === undefined) {
+    // Conflict path (retried action attempt): keep the original row and
+    // read its assigned seq. One logical event, one monotonic offset.
+    const existing = await tx.query(
+      `SELECT outbox_seq FROM link_cdc_outbox WHERE event_id = $1`,
+      [input.eventId],
+    );
+    outboxSeq = existing.rows[0]?.outbox_seq as string | number;
+    return { eventId: input.eventId, outboxSeq: Number(outboxSeq) };
+  }
+  outboxSeq = Number(outboxSeq); // node-pg serialises BIGINT as string
+  // Embed the assigned offset in the stored payload so the drainer does not
+  // need a second write and the index row carries it (outbox_seq column).
+  await tx.query(
+    `UPDATE link_cdc_outbox
+        SET payload = jsonb_set(payload, '{outbox_seq}', to_jsonb($2::bigint))
+      WHERE event_id = $1`,
+    [input.eventId, outboxSeq],
+  );
+  return { eventId: input.eventId, outboxSeq };
 }
 
 export interface LinkOutboxDrainResult {
@@ -132,22 +167,29 @@ export async function drainLinkOutboxOnce(
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
 ): Promise<LinkOutboxDrainResult> {
   const pending = await query(
-    `SELECT event_id, topic, payload, publish_attempts
+    `SELECT event_id, topic, payload, publish_attempts, outbox_seq
        FROM link_cdc_outbox
       WHERE published_at IS NULL
         AND dead_lettered_at IS NULL
         AND next_attempt_at <= now()
-      ORDER BY next_attempt_at
+      ORDER BY outbox_seq
       LIMIT $1
       FOR UPDATE SKIP LOCKED`,
     [batchSize],
   );
-  const rows = pending.rows as Array<{
+  const rows = (pending.rows as Array<{
     event_id: string;
     topic: string;
     payload: LinkCdcRow;
     publish_attempts: number;
-  }>;
+    outbox_seq: number;
+  }>).map((r) => ({
+    ...r,
+    // Defensive: rows staged before outbox_seq existed (migration 157)
+    // carry no offset in the payload; embed it now so the serving edge
+    // index always receives the monotonic offset.
+    payload: { ...r.payload, outbox_seq: r.payload?.outbox_seq ?? r.outbox_seq },
+  }));
   if (rows.length === 0) {
     setGauge("link_cdc_outbox_pending", 0);
     return { scanned: 0, published: 0, retrying: 0, deadLettered: 0 };

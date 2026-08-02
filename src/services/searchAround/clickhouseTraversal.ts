@@ -230,8 +230,10 @@ export function buildReverseSql(input: {
 /**
  * Quote a single string as a ClickHouse literal (isolation dimensions).
  * Mirrors arrayStringLiteral's escaping: backslash first, then quotes.
+ * Exported so sibling modules (e.g. edgeIndexWatermark) emit byte-identical
+ * literals for the same scope keys.
  */
-function sqlString(s: string): string {
+export function sqlString(s: string): string {
   return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
 }
 

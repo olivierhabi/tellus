@@ -71,6 +71,7 @@ function versionedTableDdl(table: string): string {
       event_id       String DEFAULT '',
       event_version  UInt64 DEFAULT 0,
       cdc_offset     UInt64 DEFAULT 0,
+      outbox_seq     UInt64 DEFAULT 0,
       source_ts      DateTime64(3) DEFAULT now64(3),
       ingested_at    DateTime64(3) DEFAULT now64(3)
     )
@@ -113,7 +114,15 @@ export async function ensureLinkTable(
     await client.command(versionedTableDdl(table));
     return table;
   }
-  if (engine.startsWith("ReplacingMergeTree")) return table;
+  if (engine.startsWith("ReplacingMergeTree")) {
+    // Idempotent schema upgrade (migration-157 era): the outbox offset
+    // column may be missing on tables created before it. ADD COLUMN is
+    // a pure metadata op in ClickHouse; rows default to 0.
+    await client.command(
+      `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS outbox_seq UInt64 DEFAULT 0`,
+    );
+    return table;
+  }
 
   // Legacy engine — migrate. Legacy rows have no version: give each
   // identity its max cdc_offset as the version so existing fresh rows win
@@ -189,7 +198,8 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
         ontology_id      String,
         branch_id        String,
         tenant_id        String,
-        operation        String
+        operation        String,
+        outbox_seq       UInt64 DEFAULT 0
       )
       ENGINE = Kafka()
       SETTINGS
@@ -214,6 +224,7 @@ export function kafkaIngestDdl(link: LinkTypeDescriptor): {
         event_id,
         event_ts_micros AS event_version,
         cdc_offset,
+        outbox_seq,
         source_ts
       FROM ${kafkaTable}
     `,
@@ -276,6 +287,8 @@ export interface LinkRow {
   operation?: "ADD" | "REMOVE" | "RETRACT";
   event_id?: string;
   event_version?: number;
+  /** Monotonic outbox offset (watermark confirmation handle). */
+  outbox_seq?: number;
   ontology_id?: string;
   branch_id?: string;
   tenant_id?: string;
@@ -303,6 +316,7 @@ export async function insertLinkRows(
       event_id: r.event_id ?? "",
       event_version: r.event_version ?? nowMicros,
       cdc_offset: r.cdc_offset ?? 0,
+      outbox_seq: r.outbox_seq ?? 0,
       source_ts: toClickHouseDateTime64(r.source_ts),
     };
   });

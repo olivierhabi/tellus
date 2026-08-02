@@ -35,6 +35,9 @@ export interface LaneEnv {
   TELLUS_TEST_BASE_URL: string;
   PORT: string;
   DATA_DIR: string;
+  CLICKHOUSE_URL: string;
+  CLICKHOUSE_USER: string;
+  CLICKHOUSE_PASSWORD: string;
 }
 
 export const LANE: LaneEnv = {
@@ -55,6 +58,11 @@ export const LANE: LaneEnv = {
   TELLUS_TEST_BASE_URL: "http://localhost:3302",
   PORT: "3302",
   DATA_DIR: "/tmp/ontology-testdata",
+  // The lane ClickHouse container authenticates as tellus (compose users.d);
+  // anonymous is denied → the lane must pin these or no CH test can pass.
+  CLICKHOUSE_URL: "http://localhost:8123",
+  CLICKHOUSE_USER: "tellus",
+  CLICKHOUSE_PASSWORD: "tellus_ch_pw",
 };
 
 /**

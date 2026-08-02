@@ -90,6 +90,9 @@ export interface LinkCdcRow {
   /** Isolation dimensions carried into the versioned edge index. */
   branch_id?: string | null;
   tenant_id?: string | null;
+  /** Globally monotonic outbox offset (migration 157); carried through to
+   *  the edge-index row (`outbox_seq` column) for watermark confirmation. */
+  outbox_seq?: number;
 }
 
 /**

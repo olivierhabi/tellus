@@ -106,6 +106,12 @@ export interface ApplyExecutionContext {
   actionRid?: string;
   eventId?: string;
   /**
+   * Tenant cb scope for link edge-index confirmation (Stage 3 watermark).
+   * Optional; null normalises to "" in the serving-index scope, matching
+   * the ClickHouse String DEFAULT '' the ingest MV produces.
+   */
+  tenantId?: string;
+  /**
    * F-P3-11 — durable-before-ack audit. Called AFTER all edits have been
    * inserted into ontology_edit/link_edit/object_instances (inside the
    * same PG transaction) but BEFORE the COMMIT. The hook MUST write the
@@ -190,6 +196,14 @@ export interface ApplyResult {
   failedEdits: FailedEdit[];
   /** OpenSearch indexing outcome — separate from PG durability. */
   indexingStatus: "success" | "partial" | "failed";
+  /**
+   * Link edge-index acknowledgement (OSv2 Stage 3). Present only when the
+   * action staged link CDC events AND LINK_INDEX_ACK_REQUIRED === "true";
+   * `confirmed: false` means the serving index had not confirmed the
+   * required edge version within the budget — NEVER fabricated. Absent
+   * means the barrier is not enabled in this environment.
+   */
+  linkIndexAck?: import("../services/serving/edgeIndexWatermark").EdgeAckConfirmation;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +237,8 @@ export async function applyEdits(
   const appliedEdits: AppliedEdit[] = [];
   // Map from "objectType::primaryKey" to the edit_id for indexed marking
   const editIdMap = new Map<string, string>();
+  // Stage-3 ack handles for staged link CDC events (post-commit barrier).
+  const linkIndexAckHandles: import("../services/serving/edgeIndexWatermark").EdgeIndexAckHandle[] = [];
 
   const pgClient = await getClient();
   try {
@@ -465,7 +481,7 @@ export async function applyEdits(
           // longer silently loses link events, and the edit is never
           // marked "indexed" merely because an outbox row exists.
           const rawOp = (linkEdit.operation ?? "add") as string;
-          await stageLinkCdcEvent(pgClient, {
+          const staged = await stageLinkCdcEvent(pgClient, {
             eventId: linkEventId,
             sourceObjectType: edit.objectType,
             linkTypeApiName: linkEdit.linkTypeApiName,
@@ -475,10 +491,20 @@ export async function applyEdits(
               rawOp === "remove" ? "REMOVE" : rawOp === "retract" ? "RETRACT" : "ADD",
             ontologyId,
             branchId: executionContext.branchId,
+            tenantId: executionContext.tenantId ?? null,
             actorPrincipalId: executionContext.executedBy,
             actionRid: executionContext.actionRid ?? executionContext.actionTypeApiName ?? null,
             correlationId: executionContext.correlationId ?? null,
             causationId: executionContext.causationId ?? null,
+          });
+          // ACK handle for the post-commit edge-index confirmation
+          // barrier (Stage 3): (eventId, monotonic outbox offset, scope).
+          linkIndexAckHandles.push({
+            eventId: staged.eventId,
+            outboxSeq: staged.outboxSeq,
+            linkTypeApiName: linkEdit.linkTypeApiName,
+            sourceObjectType: edit.objectType,
+            ontologyId,
           });
 
           incCounter("tellus_link_edit_writes_total", {
@@ -783,6 +809,70 @@ export async function applyEdits(
   }
 
   // -----------------------------------------------------------------
+  // Step 6b: Link edge-index READ-AFTER-WRITE barrier (OSv2 Stage 3).
+  //
+  // The Action must not report completed link mutations as queryable
+  // until the serving edge index has confirmed them (published_at is
+  // broker acceptance ONLY). Timeout/outage defers — the edit stays
+  // durable in PG (outbox + link_edit) and the response marks the ack
+  // as not confirmed; we NEVER fabricate completion. Gated:
+  // LINK_INDEX_ACK_REQUIRED=true (default OFF until the Kafka→
+  // ClickHouse ingest topology is live — enabling it pre-cutover would
+  // correctly defer every link Action).
+  // -----------------------------------------------------------------
+  let linkIndexAck: ApplyResult["linkIndexAck"];
+  if (
+    linkIndexAckHandles.length > 0 &&
+    process.env.LINK_INDEX_ACK_REQUIRED === "true"
+  ) {
+    const { confirmEdgeIndexVisibility } = await import(
+      "../services/serving/edgeIndexWatermark"
+    );
+    const timeoutMs = Number(process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000);
+    try {
+      // Handles carry their per-object-type ontology (resolved inside the
+      // loop); group by ontology so multi-ontology actions confirm each
+      // scope against its own edge index.
+      const results: NonNullable<ApplyResult["linkIndexAck"]>[] = [];
+      const byOntology = new Map<string, typeof linkIndexAckHandles>();
+      for (const h of linkIndexAckHandles) {
+        const list = byOntology.get(h.ontologyId) ?? [];
+        list.push(h);
+        byOntology.set(h.ontologyId, list);
+      }
+      for (const [ontologyId, handles] of byOntology) {
+        results.push(
+          await confirmEdgeIndexVisibility({
+            scope: {
+              tenantId: executionContext.tenantId ?? "",
+              ontologyId,
+              branchId: executionContext.branchId,
+            },
+            handles,
+            timeoutMs,
+          }),
+        );
+      }
+      linkIndexAck = {
+        confirmed: results.every((r) => r.confirmed),
+        deferred: results.reduce((a, r) => a + r.deferred, 0),
+        waitedMs: Math.max(...results.map((r) => r.waitedMs)),
+        reason: results.find((r) => !r.confirmed)?.reason,
+      };
+    } catch (err) {
+      linkIndexAck = {
+        confirmed: false,
+        deferred: linkIndexAckHandles.length,
+        waitedMs: timeoutMs,
+        reason: "index_outage",
+      };
+      console.warn(
+        `[link-index-ack] edge-index confirmation failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // -----------------------------------------------------------------
   // Step 7: Build and return result
   // -----------------------------------------------------------------
 
@@ -804,6 +894,7 @@ export async function applyEdits(
     appliedEdits,
     failedEdits,
     indexingStatus,
+    linkIndexAck,
   };
 }
 

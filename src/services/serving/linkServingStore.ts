@@ -17,6 +17,7 @@ import { buildReverseSql } from "../searchAround/clickhouseTraversal";
 import { getClickHouseClient } from "../searchAround/clickhouseClient";
 import { resolveLegacyCsvM2mPks } from "../linkResolverService";
 import { deriveMainBranchId } from "../branchContext";
+import { waitForLinkWatermark, type EdgeAckDeps } from "./edgeIndexWatermark";
 import type { LinkTypeRow } from "../../models/linkType";
 import type { IsolationScope } from "./contracts";
 
@@ -170,4 +171,34 @@ export async function maybeServingEdgeResolver(
     });
     return chosen;
   };
+}
+
+// ---------------------------------------------------------------------------
+// LinkServingStore.waitForWatermark — SOUND read-after-write barrier.
+//
+// `minOffset` is an outbox_seq (migration 157) chosen by the caller — the
+// Action path passes its staged offset. Resolves only when EVERY published
+// outbox row with outbox_seq <= minOffset for the scope is present in the
+// versioned edge index (set-difference confirmation; max(seq) alone would
+// be unsound under multi-partition delivery). Throws StoreWatermarkTimeout
+// on the deadline; a ClickHouse outage blocks until it resolves or the
+// deadline expires — never fabricates completion.
+// ---------------------------------------------------------------------------
+export async function waitForWatermark(args: {
+  scope: IsolationScope;
+  /** resourceType per the contract: here the link type api name. */
+  resourceType: string;
+  minOffset: number;
+  timeoutMs: number;
+  pollMs?: number;
+  deps?: EdgeAckDeps;
+}): Promise<void> {
+  return waitForLinkWatermark({
+    scope: args.scope,
+    linkTypeApiName: args.resourceType,
+    minOffset: args.minOffset,
+    timeoutMs: args.timeoutMs,
+    pollMs: args.pollMs,
+    deps: args.deps,
+  });
 }

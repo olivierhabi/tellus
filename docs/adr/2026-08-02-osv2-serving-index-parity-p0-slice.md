@@ -227,9 +227,37 @@ Legend: **Verified** = code + dedicated positive AND failure test, run against
 `d5e48e9` from a clean checkout. **Partial** = code + some tests, one or more
 of the required proofs outstanding (named above). **Missing** = not started.
 
-## Next steps (Phase 2 continuation)
+## Stage-3 addendum (2026-08-02 — link-index confirmation)
 
-1. **Link index confirmation watermark** (blocks Action completion):
+Implemented the read-after-write ack barrier:
+
+* Migration `157_link_index_confirmation.sql`: `link_cdc_outbox.outbox_seq
+  BIGSERIAL UNIQUE` (globally monotonic edge-event offset) +
+  `link_edge_watermarks` per (tenant, ontology, branch, link type)
+  observability table.
+* `src/services/serving/edgeIndexWatermark.ts`: `confirmEdgeIndexVisibility`
+  (SOUND per-event probing — a later seq can never mask an absent one) and
+  `waitForLinkWatermark` (SOUND set-difference against published outbox
+  rows ≤ minOffset; window-guarded by `WATERMARK_WINDOW_LIMIT`; throws
+  `StoreWatermarkTimeout`). Metrics: `link_index_ack_wait_seconds`,
+  `link_index_ack_deferred_total{reason}`, `link_edge_index_watermark`,
+  `link_edge_index_lag`.
+* `LinkServingStore.waitForWatermark` implemented (was interface-only).
+* `editApplicator.applyEdits` (Step 6b) waits for confirmation when
+  `LINK_INDEX_ACK_REQUIRED=true` (default OFF until the Kafka→CH ingest
+  topology is live); timeout/outage ⇒ `linkIndexAck.confirmed:false`
+  + deferred count — NEVER fabricated.
+* Evidence: `tests/unit/serving/edgeIndexWatermark-unit.test.ts` (11),
+  updated outbox unit (`RETURNING outbox_seq` + tx ff), integration
+  `tests/funnel/integration/link-index-ack-integration.test.ts` (4/4):
+  stage→drain→index→confirm chain on REAL PG+Kafka+CH (consumer stand-in
+  = `insertLinkRows`, pending self-replacement by the MV once Stage 8
+  wires it), deferred-on-outage, cross-scope invisibility, strict
+  `StoreWatermarkTimeout`, and the watermark does not advance on failed
+  confirmation.
+* Lane self-containment: `tests/laneEnv.ts` now pins the ClickHouse
+  credentials (the compose container requires `tellus`; anonymous is
+  denied). #
    `waitForWatermark` is declared on both store interfaces
    (`serving/contracts.ts:74,132`, `StoreWatermarkTimeout` :82) but has
    **no implementation** — implement confirmed edge watermarks keyed by
