@@ -943,6 +943,15 @@ export function makeProductionExecutorDeps(
           );
           let pageToken: string | null = null;
           const pks = grouped.get(targetType) ?? new Set<string>();
+          const { maybeServingEdgeResolver } = await import("../serving/linkServingStore");
+          const weeder = await maybeServingEdgeResolver({
+            linkType: concrete,
+            direction: "forward",
+            branchId: sec.branchId,
+            userMarkings: new Set(sec.markings),
+            tenantId: sec.tenant,
+            capability: "oss.traverse",
+          });
           do {
             const response = await linkSearchAround(
               concrete,
@@ -952,6 +961,7 @@ export function makeProductionExecutorDeps(
                   (anchorWhere as Record<string, unknown> | null) ?? undefined,
                 pageSize: 1000,
                 pageToken: pageToken ?? undefined,
+                edgeResolver: weeder,
               },
               scopedSecurityFilter,
               sec.branchId,
@@ -1008,6 +1018,15 @@ export function makeProductionExecutorDeps(
       }
       const targetPks: string[] = [];
       let pageToken: string | null = null;
+      const { maybeServingEdgeResolver } = await import("../serving/linkServingStore");
+      const weeder = await maybeServingEdgeResolver({
+        linkType: lt,
+        direction,
+        branchId: sec.branchId,
+        userMarkings: new Set(sec.markings),
+        tenantId: sec.tenant,
+        capability: "oss.traverse",
+      });
       do {
         const r = await linkSearchAround(
           lt,
@@ -1017,6 +1036,7 @@ export function makeProductionExecutorDeps(
               (anchorWhere as Record<string, unknown> | null) ?? undefined,
             pageSize: 1000,
             pageToken: pageToken ?? undefined,
+            edgeResolver: weeder,
           },
           scopedSecurityFilter,
           sec.branchId,

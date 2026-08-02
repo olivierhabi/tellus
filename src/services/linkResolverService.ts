@@ -53,6 +53,13 @@ export interface SearchAroundOptions {
    *  the regular `/search` route's `orderBy`; resolved against the
    *  resolve-side object type via `buildSortClause`. */
   orderBy?: Array<{ field: string; direction: string }>;
+  /**
+   * Injected edge-resolution seam (serving-store cutover): when set, the
+   * M2M branch calls this instead of parsing the CSV join table. Query
+   * shape, filters, pagination and security of the surrounding function
+   * are unchanged — only the edge PK lookup is delegated.
+   */
+  edgeResolver?: (sourcePKs: string[], direction: "forward" | "reverse") => Promise<string[]>;
 }
 
 export interface LinkAnalysis {
@@ -266,6 +273,29 @@ function parseJoinTableCSV(filePath: string): Array<{ source: string; target: st
     }
   }
   return rows;
+}
+
+/**
+ * Legacy M2M CSV edge resolution — extracted so the serving-store
+ * shadow-compare path uses the IDENTICAL code the production route used
+ * pre-cutover (visible for shadow tests; deprecated for new code).
+ */
+export function resolveLegacyCsvM2mPks(
+  linkType: LinkTypeRow,
+  sourcePKs: string[],
+  direction: "forward" | "reverse",
+): string[] {
+  const out = new Set<string>();
+  if (!linkType.join_table_file_path) return [];
+  const rows = parseJoinTableCSV(linkType.join_table_file_path);
+  for (const pk of sourcePKs) {
+    if (direction === "forward") {
+      rows.filter((r) => r.source === pk).forEach((r) => out.add(r.target));
+    } else {
+      rows.filter((r) => r.target === pk).forEach((r) => out.add(r.source));
+    }
+  }
+  return [...out];
 }
 
 function getTargetPKsFromJoinTable(filePath: string, sourcePK: string): string[] {
@@ -765,22 +795,30 @@ export async function searchAround(
     return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
   }
 
-  // For M2M with join table
-  if (cardinality === "MANY_TO_MANY" && linkType.join_table_file_path) {
-    const allTargetPKs = new Set<string>();
-    const rows = parseJoinTableCSV(linkType.join_table_file_path);
-    for (const pk of sourcePKs) {
-      if (direction === "forward") {
-        rows.filter((r) => r.source === pk).forEach((r) => allTargetPKs.add(r.target));
-      } else {
-        rows.filter((r) => r.target === pk).forEach((r) => allTargetPKs.add(r.source));
-      }
-    }
-    if (allTargetPKs.size === 0) {
+  // For M2M: injected serving-store edge resolver takes precedence over
+  // the legacy CSV join table (servingFlags: shadow/indexed modes).
+  if (cardinality === "MANY_TO_MANY" && options.edgeResolver) {
+    const linked = await options.edgeResolver(sourcePKs, direction);
+    if (linked.length === 0) {
       return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
     }
     const musts: Array<Record<string, unknown>> = [
-      { terms: { __pk: Array.from(allTargetPKs).slice(0, 100000) } },
+      { terms: { __pk: linked.slice(0, 100000) } },
+      ...targetFilterClauses,
+    ];
+    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, sortClause, securityFilter, branchId);
+    const nextPageToken = from + pageSize < total ? encodeToken(from + pageSize) : null;
+    return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
+  }
+
+  // For M2M with join table
+  if (cardinality === "MANY_TO_MANY" && linkType.join_table_file_path) {
+    const allTargetPKs = resolveLegacyCsvM2mPks(linkType, sourcePKs, direction);
+    if (allTargetPKs.length === 0) {
+      return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
+    }
+    const musts: Array<Record<string, unknown>> = [
+      { terms: { __pk: allTargetPKs.slice(0, 100000) } },
       ...targetFilterClauses,
     ];
     const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, sortClause, securityFilter, branchId);

@@ -59,6 +59,8 @@ import {
   OffsetTooDeepError,
 } from "../services/linkPagination";
 import { migrateLinkStorage } from "../services/linkStorageMigrator";
+import { maybeServingEdgeResolver } from "../services/serving/linkServingStore";
+import { resolveRequestTenant } from "../utils/requestTenant";
 
 // `router` is declared further below, alongside the `:apiName` param
 // resolver, so the resolver and the route handlers stay co-located.
@@ -106,6 +108,7 @@ const KNOWN_CODES = new Set([
   "INVALID_PARAMETER",
   "MAX_LINK_DEPTH_EXCEEDED",
   "JOIN_TABLE_REQUIRED",
+  "STORAGE_MIGRATION_FAILED",
   // LT-B1..B10 additions
   "ONE_TO_ONE_VIOLATION",
   "OFFSET_TOO_DEEP_USE_SEARCH_AFTER",
@@ -803,9 +806,28 @@ router.post("/:apiName/searchAround", async (req: Request, res: Response, next: 
       route: "links.searchAround",
       scoped: String(branchId !== null),
     });
-    const result = await searchAround(linkType, direction, {
+
+    // Serving-store cutover (OSv2 parity): per-scope rollout flag. The
+    // edge resolution is delegated to the serving store when the flag
+    // says shadow/indexed; filters, pagination, security and response
+    // shape stay in linkResolverService.searchAround so the public
+    // contract is bit-compatible across modes.
+    const searchOptions: import("../services/linkResolverService").SearchAroundOptions = {
       sourceFilter, targetFilter, pageSize, pageToken,
-    }, buildSecurityFilter(req.security), branchId);
+    };
+    if (linkType.cardinality === "MANY_TO_MANY") {
+      const edgeResolver = await maybeServingEdgeResolver({
+        linkType,
+        direction: direction as "forward" | "reverse",
+        branchId,
+        userMarkings: new Set(req.security?.markings ?? []),
+        tenantId: resolveRequestTenant(req),
+        capability: "links.searchAround",
+      });
+      if (edgeResolver) searchOptions.edgeResolver = edgeResolver;
+    }
+
+    const result = await searchAround(linkType, direction, searchOptions, buildSecurityFilter(req.security), branchId);
 
     return sendSuccess(res, result);
   } catch (err: any) {

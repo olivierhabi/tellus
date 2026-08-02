@@ -488,9 +488,27 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.searchAround", branchId);
-      const result = await searchAround(linkType, effectiveDirection, {
+      const searchOptions: import("../services/linkResolverService").SearchAroundOptions = {
         sourceFilter, targetFilter, pageSize, pageToken,
-      }, secFilter, branchId);
+      };
+      if (linkType.cardinality === "MANY_TO_MANY") {
+        // Serving-store cutover: per-scope rollout flag routes M2M edge
+        // resolution through the versioned index (shadow/indexed modes).
+        const { maybeServingEdgeResolver } = await import(
+          "../services/serving/linkServingStore"
+        );
+        const { resolveRequestTenant } = await import("../utils/requestTenant");
+        const edgeResolver = await maybeServingEdgeResolver({
+          linkType,
+          direction: effectiveDirection,
+          branchId,
+          userMarkings: new Set(req.security?.markings ?? []),
+          tenantId: resolveRequestTenant(req),
+          capability: "objects.searchAround",
+        });
+        if (edgeResolver) searchOptions.edgeResolver = edgeResolver;
+      }
+      const result = await searchAround(linkType, effectiveDirection, searchOptions, secFilter, branchId);
 
       return sendSuccess(res, result);
     } catch (err: any) {
@@ -544,6 +562,24 @@ router.post(
       const branchId = readBranchHeader(req);
       routeMetric(req, "objects.searchAround", branchId);
 
+      let edgeResolver:
+        | import("../services/linkResolverService").SearchAroundOptions["edgeResolver"]
+        | undefined;
+      if (linkType.cardinality === "MANY_TO_MANY") {
+        const { maybeServingEdgeResolver } = await import(
+          "../services/serving/linkServingStore"
+        );
+        const { resolveRequestTenant } = await import("../utils/requestTenant");
+        edgeResolver = await maybeServingEdgeResolver({
+          linkType,
+          direction,
+          branchId,
+          userMarkings: new Set(req.security?.markings ?? []),
+          tenantId: resolveRequestTenant(req),
+          capability: "objects.searchAround",
+        });
+      }
+
       const result = await searchAround(
         linkType,
         direction,
@@ -553,6 +589,7 @@ router.post(
           pageSize: $pageSize,
           pageToken: $pageToken,
           orderBy: $orderBy,
+          edgeResolver,
         },
         secFilter,
         branchId
