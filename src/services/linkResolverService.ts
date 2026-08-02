@@ -625,8 +625,14 @@ export async function countLinks(
       }
       case "MANY_TO_MANY": {
         if (linkType.join_table_file_path) {
+          // Stage-4 (indexed security): the CSV mask-direct count was a
+          // leak (no marking checks). Never count by CSV alone — honour
+          // the marking filter via the doc-side countIndex: target PKs from
+          // the join file are only the candidate list; countIndex applies
+          // `_security` correctly.
           const targetPKs = getTargetPKsFromJoinTable(linkType.join_table_file_path, objectPK);
-          return targetPKs.length;
+          if (targetPKs.length === 0) return 0;
+          return countIndex(getIndexName(targetOtApiName), { terms: { __pk: targetPKs } }, securityFilter, branchId);
         }
         const targetPropName = linkType.target_property_id
           ? await getPropertyApiName(linkType.target_property_id) : null;
@@ -653,8 +659,11 @@ export async function countLinks(
       }
       case "MANY_TO_MANY": {
         if (linkType.join_table_file_path) {
+          // Same Stage-4 closing: reverse count must also pass through
+          // the marking envelope, never CSV-only.
           const sourcePKs = getSourcePKsFromJoinTable(linkType.join_table_file_path, objectPK);
-          return sourcePKs.length;
+          if (sourcePKs.length === 0) return 0;
+          return countIndex(getIndexName(sourceOtApiName), { terms: { __pk: sourcePKs } }, securityFilter, branchId);
         }
         const sourcePropName = linkType.source_property_id
           ? await getPropertyApiName(linkType.source_property_id) : null;
