@@ -348,30 +348,34 @@ describe("B6 indexing activity", () => {
     expect(listCalls).toBeGreaterThanOrEqual(1);
   });
 
-  it("times out gracefully when no splits publish", async () => {
+  it("rejects with QuickwitPublishTimeoutError when no splits publish (no fabricated ack)", async () => {
+    // OSv2 parity: a publish-wait MUST fail loudly now — the old
+    // "graceful" behaviour returned whatever splits existed and the funnel
+    // then stamped applied_to_index_at for edits the index never confirmed
+    // (see funnel/indexingStage.ts for the invariant).
     const client = new QuickwitClient({
       baseUrl: "http://qw",
       fetchImpl: (async () =>
         new Response(JSON.stringify({ splits: [] }), { status: 200 })) as never,
     });
-    const result = await runIndexingActivity({
-      ontologyId: "o",
-      objectTypeApiName: "X",
-      primaryKeyApiName: "id",
-      reader: async function* () {
-        yield {
-          rows: [{ primary_key: "A", properties: {}, operation: "INSERT", version: 1 }],
-          editIds: [],
-          kafkaOffsetHigh: 42,
-        };
-      } as never,
-      publishPollMs: 1,
-      publishTimeoutMs: 50, // short so the test is fast
-      client,
-      publishDoc: async () => 42,
-    });
-    expect(result.publishedSplitIds).toEqual([]);
-    expect(result.rowsStreamed).toBe(1);
+    await expect(
+      runIndexingActivity({
+        ontologyId: "o",
+        objectTypeApiName: "X",
+        primaryKeyApiName: "id",
+        reader: async function* () {
+          yield {
+            rows: [{ primary_key: "A", properties: {}, operation: "INSERT", version: 1 }],
+            editIds: [],
+            kafkaOffsetHigh: 42,
+          };
+        } as never,
+        publishPollMs: 1,
+        publishTimeoutMs: 50, // short so the test is fast
+        client,
+        publishDoc: async () => 42,
+      }),
+    ).rejects.toMatchObject({ name: "QuickwitPublishTimeoutError", targetOffset: 42 });
   });
 });
 
