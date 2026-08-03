@@ -187,6 +187,11 @@ router.post(
             result: result.result,
             affectedObjects: result.affectedObjects,
             durationMs: result.durationMs,
+            // OSv2 read-after-write verdict (only present when
+            // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
+            ...(result.linkIndexAck
+              ? { linkIndexAck: result.linkIndexAck }
+              : {}),
           };
 
           // NOTE: real-time object-change notifications are owned

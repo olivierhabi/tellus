@@ -153,6 +153,14 @@ export interface ExecutionResult {
   errorMessage: string | null;
   affectedObjects: AffectedObject[];
   durationMs: number;
+  /**
+   * OSv2 read-after-write acknowledgement (Step 6b, editApplicator).
+   * Present ONLY when the execution staged link CDC events AND
+   * LINK_INDEX_ACK_REQUIRED=true. `confirmed:false` means the PG edit is
+   * durable but the serving edge index had NOT confirmed visibility by
+   * the deadline — callers MUST NOT treat the Action as fully complete.
+   */
+  linkIndexAck?: import("./editApplicator").ApplyResult["linkIndexAck"];
   validation?: {
     result: "VALID" | "INVALID";
     submissionCriteria: Array<{
@@ -1141,6 +1149,13 @@ export async function executeAction(
       primaryKey: e.primaryKey,
       operation: e.operation,
     }));
+
+    // OSv2 ack transparency: surface the edge-index confirmation verdict so
+    // the REST contract can distinguish "confirmed queryable" from
+    // "deferred (durable in PG, index not yet caught up)".
+    if (application.linkIndexAck) {
+      result.linkIndexAck = application.linkIndexAck;
+    }
 
     // -----------------------------------------------------------------
     // STAGE 7: real-time object notifications (FOUNDRY-GAPS §5 Object
