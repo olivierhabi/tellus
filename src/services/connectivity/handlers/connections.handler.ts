@@ -396,8 +396,17 @@ export const getConnection = instrument(
   const user = extractUser(req);
   requireScope(user, "connectivity:read");
   const conn = await repo.findByRid(req.params.rid, user.tenant);
+  // Keep detail and list contracts consistent: metadata panels should never
+  // have to fall back to opaque Keycloak subject IDs merely because the
+  // connection was fetched by RID. Resolution is cached and best-effort.
+  const names = await resolvePrincipalNames([conn.createdBy, conn.updatedBy]);
+  const enriched = {
+    ...conn,
+    createdByName: names.get(conn.createdBy) ?? null,
+    updatedByName: names.get(conn.updatedBy) ?? null,
+  };
   setConnectivityEtag(res, conn.version);
-  res.status(200).json(conn);
+  res.status(200).json(enriched);
 });
 
 export const listConnections = instrument(

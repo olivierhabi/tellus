@@ -77,6 +77,19 @@ import {
 // (e.g. to self-heal out-of-band PG drift).
 const MERGE_DELTA = (process.env.MERGE_DELTA ?? "1") !== "0";
 
+/**
+ * Snapshot history can outlive `object_instances` (for example after a
+ * table restore). In that state an identical source snapshot produces a
+ * zero delta even though the materialized store is empty, so the PG tail
+ * must be rebuilt in full.
+ */
+export function requiresFullPgTail(
+  expectedActiveRows: number,
+  materializedRows: number,
+): boolean {
+  return expectedActiveRows !== materializedRows;
+}
+
 export type EditStrategy = "user_edit_wins" | "latest_wins";
 
 /** A single backing datasource contributing to this Object Type. */
@@ -654,6 +667,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
   const localMergedFile = path.join(mergedDir, "merged.parquet");
 
   let mergedRowCount = 0;
+  let activeRowCount = 0;
   let mergedParquetRef: ParquetRef | null = null;
   let upserts = 0;
   let deletes = 0;
@@ -1122,8 +1136,15 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       `SELECT CAST(count(*) AS VARCHAR) AS c FROM merged_result`,
     );
     mergedRowCount = Number(countRes[0]?.c ?? 0);
+    const activeCountRes = await queryAll<{ c: string }>(
+      conn,
+      `SELECT CAST(count(*) AS VARCHAR) AS c
+         FROM merged_result
+        WHERE operation IS DISTINCT FROM 'delete'`,
+    );
+    activeRowCount = Number(activeCountRes[0]?.c ?? 0);
     console.log(
-      `[merge-sql] ${input.objectTypeApiName} merged_result rows=${mergedRowCount}`,
+      `[merge-sql] ${input.objectTypeApiName} merged_result rows=${mergedRowCount} active=${activeRowCount}`,
     );
 
     // 12. COPY the merged result straight to a local parquet (flat memory —
@@ -1202,7 +1223,21 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       // PG-side safety net against false positives).
       let tailFile = localMergedFile;
       let tailRowCount = mergedRowCount;
-      if (MERGE_DELTA) {
+      const materializedCountRes = await query(
+        `SELECT count(*)::int AS n
+           FROM object_instances
+          WHERE ontology_id = $1 AND object_type_api_name = $2`,
+        [input.ontologyId, input.objectTypeApiName],
+      );
+      const materializedRows = Number(materializedCountRes.rows[0]?.n ?? 0);
+      const forceFullTail = requiresFullPgTail(activeRowCount, materializedRows);
+      if (forceFullTail) {
+        console.warn(
+          `[merge-sql] ${input.objectTypeApiName} materialized-count drift ` +
+            `expected=${activeRowCount} actual=${materializedRows} — full PG tail`,
+        );
+      }
+      if (MERGE_DELTA && !forceFullTail) {
         try {
           const tDelta = Date.now();
           const prevRes = await query(

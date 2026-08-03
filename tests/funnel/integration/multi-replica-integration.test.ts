@@ -39,9 +39,20 @@ function spawnReplica(opts: {
   const receiptFile = path.join("/tmp", `replica-receipts-${STAMP}-${opts.label}.log`);
   const logFile = path.join("/tmp", `replica-log-${STAMP}-${opts.label}.log`);
   const out = fs.openSync(logFile, "w");
+  // Run the TypeScript entry point in the spawned Node process directly.
+  // `npx tsx` adds an npm/npx wrapper, so killing `ChildProcess.pid` only
+  // killed that wrapper and orphaned the actual long-lived worker.
   const child = spawn(
-    "npx",
-    ["tsx", "scripts/funnel-probe/replicaWorker.ts", "--label", opts.label, "--object-types", OT],
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "scripts/funnel-probe/replicaWorker.ts",
+      "--label",
+      opts.label,
+      "--object-types",
+      OT,
+    ],
     {
       cwd: path.resolve(__dirname, "../../.."),
       env: {
@@ -120,7 +131,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const c of children) { try { c.kill("SIGKILL"); } catch { /* fine */ } }
+  for (const c of children) {
+    try {
+      c.kill("SIGKILL");
+    } catch {
+      // Already stopped.
+    }
+  }
   await db.query(`DELETE FROM ontology_edit WHERE object_type_api_name = $1`, [OT]).catch(() => undefined);
   await db.query(`DELETE FROM object_instances WHERE object_type_api_name = $1`, [OT]).catch(() => undefined);
   await db.query(`DELETE FROM funnel_run WHERE object_type_api_name = $1`, [OT]).catch(() => undefined);
@@ -206,30 +223,16 @@ describe("multi-replica fleet correctness", () => {
       console.log("FUNN_ISO_CONCURRENT_POLLER_PROOF=" + JSON.stringify(concurrentPollers));
 
       // 4) Hard-kill A mid-activity (SIGKILL = unclean death).
-      // tsx-script encapsulation: children[0].pid is the node/WRAPPER's pid —
-      // dispatch SIGKILL against the ONE process that carries pid-in-its
-      // identity (its receipts file's pid) TO make sure the container's real
-      // worker process dies, not just the outer runner.
+      // `spawnReplica` directly owns the Node worker, so this kill exercises
+      // an unclean death of the actual Temporal poller rather than an npx
+      // wrapper process.
       {
-        const { execFileSync } = await import("child_process");
-        const apidLogs = readReceipts("A");
-        if (apidLogs.length > 0) {
-          const tsxPid = apidLogs[0].pid;
-          if (tsxPid) {
-            try {
-              process.kill(tsxPid, "SIGKILL");
-            } catch {
-              /* already gone */
-            }
-          }
-        }
-        // ALWAYS also hit OUTER (spawn-wrapper) pid — kill whatever it is.
-        const wrapperPid = children[0]?.pid;
-        if (wrapperPid) {
+        const workerPid = children[0]?.pid;
+        if (workerPid) {
           try {
-            process.kill(wrapperPid, "SIGKILL");
+            process.kill(workerPid, "SIGKILL");
           } catch {
-            /* op already terminated */
+            // Already stopped.
           }
         }
       }
@@ -289,8 +292,14 @@ describe("multi-replica fleet correctness", () => {
     async () => {
       const receiptFile = path.join("/tmp", `replica-receipts-${STAMP}-FOREIGN.log`);
       const bad = spawn(
-        "npx",
-        ["tsx", "scripts/funnel-probe/replicaWorker.ts", "--label", "FOREIGN"],
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "scripts/funnel-probe/replicaWorker.ts",
+          "--label",
+          "FOREIGN",
+        ],
         {
           cwd: path.resolve(__dirname, "../../.."),
           env: {

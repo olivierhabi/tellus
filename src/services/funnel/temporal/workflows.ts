@@ -322,7 +322,7 @@ export async function ObjectTypeFunnelWorkflow(
         await projectStageToPostgres({
           ...input,
           currentStage: "indexing",
-          objectsIndexed: merge.upserts,
+          objectsIndexed: merge.objectsIndexed,
           completedPrevious: "merge",
           runKey,
           stageOutput: {
@@ -357,15 +357,15 @@ export async function ObjectTypeFunnelWorkflow(
         await projectStageToPostgres({
           ...input,
           currentStage: null,
+          objectsIndexed: merge.objectsIndexed,
           completedPrevious: "hydration",
           runKey,
           stageOutput: { prefetched: hydration.prefetched },
         });
 
         // Terminal projection: flip the UI badge from 'indexing' → 'indexed'
-        // and stamp `funnel_state.objects_indexed` with the merge stage's
-        // upsert count (which is the count of distinct primary keys
-        // surfaced from the backing datasource on this run). The shared
+        // and stamp `funnel_state.objects_indexed` with the materialized
+        // object cardinality (not this run's mutation delta). The shared
         // helper additionally broadcasts a `funnel_state.changed` WebSocket
         // event so the OT overview page updates in sub-second latency.
         await projectFunnelTerminalActivity({
@@ -374,7 +374,7 @@ export async function ObjectTypeFunnelWorkflow(
           objectTypeRid: input.objectTypeRid,
           environmentId: input.environmentId,
           status: "indexed",
-          objectsIndexed: merge.upserts,
+          objectsIndexed: merge.objectsIndexed,
           funnelRunId,
           runKey,
         });

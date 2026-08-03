@@ -51,6 +51,41 @@ let temporalClient: Client | null = null;
 let workerIdentitySnapshot: EnvironmentIdentity | null = null;
 let workerDatabaseEnvironmentId: string | null = null;
 let workerVersioningSnapshot: import("./versioning").WorkerVersioningConfig | null = null;
+let workerRestartTimer: ReturnType<typeof setTimeout> | null = null;
+let workerStopping = false;
+
+const WORKER_RESTART_DELAY_MS = 2_000;
+
+function clearWorkerRuntime(expectedWorker?: Worker): void {
+  // A delayed completion from an older worker must never clear a newer one.
+  if (expectedWorker && workerInstance !== expectedWorker) return;
+  workerInstance = null;
+  temporalClient = null;
+  workerIdentitySnapshot = null;
+  workerDatabaseEnvironmentId = null;
+  workerVersioningSnapshot = null;
+}
+
+function scheduleWorkerRestart(reason: string): void {
+  if (
+    workerStopping ||
+    process.env.TEMPORAL_WORKER_DISABLED === "true" ||
+    workerRestartTimer
+  ) {
+    return;
+  }
+  console.warn(
+    `[temporal] worker unavailable (${reason}); retrying in ${WORKER_RESTART_DELAY_MS}ms`,
+  );
+  workerRestartTimer = setTimeout(() => {
+    workerRestartTimer = null;
+    void startTemporalWorker().then((started) => {
+      if (!started) scheduleWorkerRestart("restart attempt failed");
+    }).catch((err) => {
+      scheduleWorkerRestart((err as Error).message);
+    });
+  }, WORKER_RESTART_DELAY_MS);
+}
 
 // ---------------------------------------------------------------------------
 // Workflow identity
@@ -196,13 +231,18 @@ async function ensureNamespace(
 // ---------------------------------------------------------------------------
 
 export async function startTemporalWorker(): Promise<boolean> {
+  if (workerInstance && temporalClient) return true;
+  workerStopping = false;
   // Throws DeploymentConfigurationError in strict mode when identity
   // fields are absent — startup MUST fail loudly, not fall back to a
   // shared default (that default was the split-brain).
   const identity = getEnvironmentIdentity();
 
   const conn = await tryConnect(identity.temporalAddress);
-  if (!conn) return false;
+  if (!conn) {
+    scheduleWorkerRestart("Temporal connection unavailable");
+    return false;
+  }
 
   // Namespace gate — refuses to poll a namespace that doesn't exist.
   await ensureNamespace(conn.client, identity);
@@ -266,20 +306,29 @@ export async function startTemporalWorker(): Promise<boolean> {
       });
       routingProvisioned = route.provisioned;
     }
-    void workerInstance.run().catch(async (err) => {
-      console.error(`[temporal] worker run failed: ${(err as Error).message}`);
-      try {
-        const { recordTemporalFailure } = await import(
-          "../../pipelines/metrics"
-        );
-        recordTemporalFailure(
-          "worker",
-          (err as Error).name ?? "unknown",
-        );
-      } catch {
-        /* ignore */
-      }
-    });
+    const runningWorker = workerInstance;
+    void runningWorker.run().then(
+      () => {
+        clearWorkerRuntime(runningWorker);
+        scheduleWorkerRestart("run loop stopped");
+      },
+      async (err) => {
+        console.error(`[temporal] worker run failed: ${(err as Error).message}`);
+        clearWorkerRuntime(runningWorker);
+        try {
+          const { recordTemporalFailure } = await import(
+            "../../pipelines/metrics"
+          );
+          recordTemporalFailure(
+            "worker",
+            (err as Error).name ?? "unknown",
+          );
+        } catch {
+          /* ignore */
+        }
+        scheduleWorkerRestart((err as Error).message);
+      },
+    );
     console.log(
       JSON.stringify({
         level: "info",
@@ -295,23 +344,26 @@ export async function startTemporalWorker(): Promise<boolean> {
     return true;
   } catch (err) {
     console.warn(`[temporal] worker bootstrap failed: ${(err as Error).message}`);
+    clearWorkerRuntime();
+    scheduleWorkerRestart((err as Error).message);
     return false;
   }
 }
 
 export async function stopTemporalWorker(): Promise<void> {
+  workerStopping = true;
+  if (workerRestartTimer) {
+    clearTimeout(workerRestartTimer);
+    workerRestartTimer = null;
+  }
   if (workerInstance) {
     try {
       workerInstance.shutdown();
     } catch {
       /* ignore */
     }
-    workerInstance = null;
   }
-  temporalClient = null;
-  workerIdentitySnapshot = null;
-  workerDatabaseEnvironmentId = null;
-  workerVersioningSnapshot = null;
+  clearWorkerRuntime();
 }
 
 // ---------------------------------------------------------------------------

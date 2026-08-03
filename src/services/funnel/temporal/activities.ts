@@ -344,12 +344,14 @@ export async function runMergeActivity(
   upserts: number;
   deletes: number;
   editIds: string[];
-  /** Count of merged rows (upserts + deletes). Carried instead of the
+  /** Count of rows in the merged snapshot. Carried instead of the
    *  full `mergedRows` array — the SQL merge path does NOT materialise
    *  mergedRows (they live in the merged parquet_ref); the Indexing stage
    *  re-reads them from the merged snapshot by `mergedSnapshotId` only
    *  when Quickwit is reachable. */
   mergedRowCount: number;
+  /** Current materialized object cardinality after the merge. */
+  objectsIndexed: number;
 }> {
   return withStageInstrumentation("merge", input.objectTypeApiName, async () =>
     runMergeActivityImpl(input)
@@ -368,6 +370,7 @@ async function runMergeActivityImpl(
   deletes: number;
   editIds: string[];
   mergedRowCount: number;
+  objectsIndexed: number;
 }> {
   await fence(input);
   writeStageReceipt("merge");
@@ -397,14 +400,22 @@ async function runMergeActivityImpl(
     mergedOutputFileLocation: `${mergedTable.location}/data/${new Date().toISOString()}.parquet`,
     runKey: input.runKey,
   });
+  const objectCountResult = await query(
+    `SELECT count(*)::int AS n
+       FROM object_instances
+      WHERE ontology_id = $1 AND object_type_api_name = $2`,
+    [input.ontologyId, input.objectTypeApiName],
+  );
   return {
     mergedSnapshotId: out.snapshotId,
     upserts: out.upserts,
     deletes: out.deletes,
     editIds: pending.map((e) => e.edit_id),
-    // The SQL path does NOT materialise mergedRows (pass-by-reference); the
-    // count is upserts + deletes.
-    mergedRowCount: out.upserts + out.deletes,
+    // `upserts + deletes` is this run's mutation delta and can be zero for
+    // an unchanged 746-row snapshot. Use persisted snapshot cardinality.
+    mergedRowCount: out.parquetRef?.rowCount ?? out.mergedRows.length,
+    // Terminal/UI state needs current cardinality, not mutation count.
+    objectsIndexed: Number(objectCountResult.rows[0]?.n ?? 0),
   };
 }
 
