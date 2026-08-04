@@ -20,6 +20,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { sendError } from "../utils/responseFormatter";
+import { probeExecutionIndexVisibility } from "../actions/linkIndexAckHttp";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,6 +43,10 @@ interface FormattedAuditEntry {
   executedAt: string;
   sourceIp: string | null;
   branchId: string | null;
+  /** ADDITIVE (flag-on + link events staged) serving-index read-after-write
+   *  verdict (linkIndexAckHttp.ts). Absent ⇒ byte-compatible with the
+   *  pre-contract audit body. See GET /log/:executionId doc. */
+  indexVisibility?: "PENDING" | "VISIBLE";
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +313,15 @@ globalAuditRouter.get(
  * GET /log/:executionId
  *
  * Returns a single audit log entry by execution ID. Returns 404 if not found.
+ *
+ * Index-visibility overlay (LINK_INDEX_ACK_REQUIRED=true only):
+ * when the flag is ON and the execution STAGED link CDC events, the
+ * body gains an ADDITIVE `indexVisibility: "PENDING" | "VISIBLE"`
+ * field — the serving-edge read-after-write verdict probed FRESH per
+ * poll via the SAME per-event_id barrier the write path used. Flag OFF
+ * ⇒ field ABSENT ⇒ byte-compatible with the pre-contract audit body
+ * (invariant #2). `result` documents the PG commit outcome; the two
+ * vocabularies are intentionally separate.
  */
 globalAuditRouter.get(
   "/log/:executionId",
@@ -336,7 +350,15 @@ globalAuditRouter.get(
         );
       }
 
-      return res.status(200).json(formatAuditEntry(result.rows[0]));
+      const entry = formatAuditEntry(result.rows[0]);
+      // 202 is terminal: idempotency replays it verbatim forever — the
+      // pollable statusUrl is a deferred client's ONLY signal the index
+      // caught up. Flag-gated so flag-off responses stay byte-compatible.
+      if (process.env.LINK_INDEX_ACK_REQUIRED === "true") {
+        const visibility = await probeExecutionIndexVisibility({ executionId });
+        if (visibility !== null) entry.indexVisibility = visibility;
+      }
+      return res.status(200).json(entry);
     } catch (err: any) {
       next(err);
     }

@@ -67,7 +67,11 @@ export interface EdgeAckConfirmation {
 
 /** Injectable seams (unit tests substitute; production uses ambient PG/CH). */
 export interface EdgeAckDeps {
-  chExec?: <T>(sql: string) => Promise<T[]>;
+  /** `opts.timeoutMs` is an ADVISORY per-call fetch abort (remaining ack
+   *  deadline); implementations MAY ignore it — the barrier additionally
+   *  races every probe against deadline + BARRIER_EPSILON_MS, so a seam
+   *  that ignores the hint still cannot overrun the hard bound. */
+  chExec?: <T>(sql: string, opts?: { timeoutMs?: number }) => Promise<T[]>;
   pgQuery?: (
     text: string,
     params?: unknown[],
@@ -81,6 +85,26 @@ export interface EdgeAckDeps {
 const DEFAULT_POLL_MS = 200;
 /** Set-diff window guard — a single wait never scans beyond this many rows. */
 export const WATERMARK_WINDOW_LIMIT = 10_000;
+/**
+ * Hard bound on barrier overshoot: resolution must land within
+ * deadline + BARRIER_EPSILON_MS (a committed edit must be answered
+ * 202-timely under the request budget — the middleware only grants the
+ * ack deadline + headroom, so a barrier that outruns it re-introduces
+ * the 504-on-commit hazard this contract exists to kill).
+ */
+export const BARRIER_EPSILON_MS = 250;
+
+/** Sentinel thrown by the deadline race — a SLOW probe is NOT an outage:
+ *  the index may simply be lagging behind the barrier window, which is
+ *  exactly the "timeout" outcome (202 per-item pending), not "index_outage"
+ *  (which must mean the index ERRORED, not lagged). Typed so the catch
+ *  can distinguish it from a real probe throw. */
+export class AckProbeDeadlineBound extends Error {
+  constructor() {
+    super("ack_probe_deadline_bound");
+    this.name = "AckProbeDeadlineBound";
+  }
+}
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -192,7 +216,7 @@ export async function confirmEdgeIndexVisibility(args: {
   if (args.handles.length === 0) {
     return { confirmed: true, deferred: 0, waitedMs: 0 };
   }
-  const chExec = deps.chExec ?? (<T>(sql: string) => getClickHouseClient().exec<T>(sql));
+  const chExec = deps.chExec ?? (<T>(sql: string, opts?: { timeoutMs?: number }) => getClickHouseClient().exec<T>(sql, opts));
   const pg = deps.pgQuery ?? query;
   const resolve = deps.resolveDescriptor ?? ((name: string) => resolveLinkDescriptor(name, pg));
   const sleep = deps.sleep ?? defaultSleep;
@@ -215,30 +239,61 @@ export async function confirmEdgeIndexVisibility(args: {
   while (remaining.length > 0) {
     const stillPending: EdgeIndexAckHandle[] = [];
     for (const h of remaining) {
+      // DEADLINE-AWARE PROBING: each probe is bounded by the REMAINING
+      // deadline (never the client's 30 s default), and a race at
+      // remaining + ε guarantees the barrier resolves by deadline + ε
+      // even against injected chExec seams that ignore the advisory
+      // hint (or the client's own retry stacking). Never START a probe
+      // whose floor already exceeds the remaining deadline — the item
+      // defers instead of blocking on latency it cannot possibly use.
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        stillPending.push(h);
+        continue;
+      }
       const desc = descriptors.get(h.linkTypeApiName)!;
       const table = linkTableName(desc);
       try {
-        const rows = await chExec<{ hits: number; max_seq: number; max_version: number }>(
-          `SELECT countIf(event_id = ${sqlString(h.eventId)}) AS hits,
-                  max(outbox_seq) AS max_seq,
-                  max(event_version) AS max_version
-             FROM ${table}
-            WHERE ${scopeFilter}`,
-        );
+        // The seam's optional `timeoutMs` is not passed here on purpose:
+        // bounding the per-attempt FETCH would abort a SLOW-but-healthy
+        // probe mid-flight and present it as `index_outage` (a connect-
+        // error) — losing the "timeout" semantics a lagging index must
+        // keep. The Promise.race below is the ONLY bound: a slow probe
+        // leaks in the background (capped by the client's own 30 s) and
+        // the barrier stays reason="timeout".
+        const rows = await Promise.race([
+          chExec<{ hits: number; max_seq: number; max_version: number }>(
+            `SELECT countIf(event_id = ${sqlString(h.eventId)}) AS hits,
+                    max(outbox_seq) AS max_seq,
+                    max(event_version) AS max_version
+               FROM ${table}
+              WHERE ${scopeFilter}`,
+          ),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new AckProbeDeadlineBound()),
+              remainingMs + BARRIER_EPSILON_MS,
+            ),
+          ),
+        ]);
         const r = rows[0];
         if (r && Number(r.hits) > 0) {
           await recordWatermark(pg, args.scope, h.linkTypeApiName, Number(r.max_seq), Number(r.max_version));
           continue; // confirmed — drop from the pending set
         }
-      } catch {
-        sawOutage = true;
+      } catch (err) {
+        // A deadline-bound probe is NOT an outage — it's a lag that
+        // exceeds the deadline window. "index_outage" stays reserved for
+        // probes that ERRORED (real CH throw) so clients/readiness can
+        // tell the two apart.
+        if (!(err instanceof AckProbeDeadlineBound)) sawOutage = true;
       }
       stillPending.push(h);
     }
     remaining = stillPending;
     if (remaining.length === 0) break;
     if (Date.now() >= deadline) break;
-    await sleep(pollMs);
+    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
   }
 
   const waitedMs = Date.now() - t0;

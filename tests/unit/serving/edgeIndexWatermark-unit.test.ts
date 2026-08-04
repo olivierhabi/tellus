@@ -18,6 +18,7 @@ import {
   confirmEdgeIndexVisibility,
   waitForLinkWatermark,
   WATERMARK_WINDOW_LIMIT,
+  BARRIER_EPSILON_MS,
 } from "../../../src/services/serving/edgeIndexWatermark";
 import {
   stageLinkCdcEvent,
@@ -152,6 +153,66 @@ describe("confirmEdgeIndexVisibility", () => {
     const out = await confirmEdgeIndexVisibility({ scope: SCOPE, handles: [], timeoutMs: 100, deps });
     expect(out).toEqual({ confirmed: true, deferred: 0, waitedMs: 0 });
     expect(calls.sql).toEqual([]);
+  });
+
+  // -- Fix 3: deadline-aware probes ---------------------------------------
+
+  it("resolves by deadline + ε even when a probe hangs past the deadline (never 504-ready on commit)", async () => {
+    // A CH probe that takes 3 s — far past the 100 ms barrier budget —
+    // simulates the overshoot (~2.8 s) found in the manual transcript.
+    const hangCh = async <T>(_sql: string): Promise<T[]> =>
+      new Promise<T[]>((r) => setTimeout(() => r([] as unknown as T[]), 3_000));
+    const t0 = Date.now();
+    const out = await confirmEdgeIndexVisibility({
+      scope: SCOPE,
+      handles: [{ eventId: "e5", outboxSeq: 1, linkTypeApiName: "ownedBy", sourceObjectType: "SrcType", ontologyId: "ont-1" }],
+      timeoutMs: 100,
+      pollMs: 50,
+      deps: { chExec: hangCh, pgQuery: async () => ({ rows: [] }), resolveDescriptor: async () => DESCRIPTOR, sleep: async () => {} },
+    });
+    const waited = Date.now() - t0;
+    expect(out.confirmed).toBe(false);
+    // A SLOW-but-non-erroring probe is a LAG, not an outage — reason="timeout".
+    expect(out.reason).toBe("timeout");
+    // HARD INVARIANT: overshoot ≤ BARRIER_EPSILON_MS.
+    expect(waited).toBeLessThanOrEqual(100 + BARRIER_EPSILON_MS + 50);
+  });
+
+  it("never STARTS a probe whose floor already exceeds the remaining deadline (timeoutMs exhausted ⇒ pre-defer without probing)", async () => {
+    // Hang-forever chExec with a tight 50ms timeout — only ONE kick is
+    // possible, and the loop's remaining<=0 path defers WITHOUT probing.
+    let probed = 0;
+    const hangCh = async <T>(): Promise<T[]> => {
+      probed += 1;
+      return new Promise<T[]>(() => {}); // never resolves — would hang the test
+    };
+    const out = await confirmEdgeIndexVisibility({
+      scope: SCOPE,
+      handles: [{ eventId: "e6", outboxSeq: 1, linkTypeApiName: "ownedBy", sourceObjectType: "SrcType", ontologyId: "ont-1" }],
+      timeoutMs: 40, // expire by the time the loop wakes after the sleep cap
+      pollMs: 5,
+      deps: { chExec: hangCh, pgQuery: async () => ({ rows: [] }), resolveDescriptor: async () => DESCRIPTOR, sleep: async () => {} },
+    });
+    // The race-bound overshoot still ≤ ε; and a probe that errored would
+    // set sawOutage — but a hang that the deadline race bounds stays "timeout".
+    expect(out.confirmed).toBe(false);
+    expect(out.reason).toBe("timeout");
+    expect(probed).toBeLessThanOrEqual(2); // rounds started only while remaining>0
+  });
+
+  it("timeoutMs=0 ⇒ pre-defers WITHOUT ever probing (used by route-side budget pre-defer)", async () => {
+    let probed = 0;
+    const countingCh = async <T>(): Promise<T[]> => { probed += 1; return [{}] as unknown as T[]; };
+    const out = await confirmEdgeIndexVisibility({
+      scope: SCOPE,
+      handles: [{ eventId: "e7", outboxSeq: 1, linkTypeApiName: "ownedBy", sourceObjectType: "SrcType", ontologyId: "ont-1" }],
+      timeoutMs: 0,
+      deps: { chExec: countingCh, pgQuery: async () => ({ rows: [] }), resolveDescriptor: async () => DESCRIPTOR, sleep: async () => {} },
+    });
+    expect(probed).toBe(0); // remaining <= 0 ⇒ never started
+    expect(out.confirmed).toBe(false);
+    expect(out.deferred).toBe(1);
+    expect(out.reason).toBe("timeout");
   });
 });
 

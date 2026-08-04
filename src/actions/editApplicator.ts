@@ -112,6 +112,15 @@ export interface ApplyExecutionContext {
    */
   tenantId?: string;
   /**
+   * Optional per-execution ceiling (ms) for the Step 6b read-after-write
+   * barrier. Routes thread the REMAINING request budget here so a batch
+   * item pre-defers its ack (202 COMMITTED_INDEX_PENDING) instead of
+   * overrunning the request-budget middleware (which would 504 a
+   * committed mutation — the exact double-apply hazard the contract
+   * forbids). When absent, LINK_INDEX_ACK_TIMEOUT_MS applies.
+   */
+  ackBudgetMs?: number;
+  /**
    * F-P3-11 — durable-before-ack audit. Called AFTER all edits have been
    * inserted into ontology_edit/link_edit/object_instances (inside the
    * same PG transaction) but BEFORE the COMMIT. The hook MUST write the
@@ -828,11 +837,17 @@ export async function applyEdits(
     const { confirmEdgeIndexVisibility } = await import(
       "../services/serving/edgeIndexWatermark"
     );
-    const timeoutMs = Number(process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000);
+    // The barrier ceiling: the route may shrink it per request (batch
+    // handlers pre-defer items rather than let the request-budget
+    // middleware 504 a committed mutation — see server.ts budgetFor).
+    const timeoutMs =
+      executionContext.ackBudgetMs ??
+      Number(process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000);
     try {
       // Handles carry their per-object-type ontology (resolved inside the
       // loop); group by ontology so multi-ontology actions confirm each
-      // scope against its own edge index.
+      // scope against its own edge index. The groups share ONE absolute
+      // deadline: without that, K ontologies could block K × timeoutMs.
       const results: NonNullable<ApplyResult["linkIndexAck"]>[] = [];
       const byOntology = new Map<string, typeof linkIndexAckHandles>();
       for (const h of linkIndexAckHandles) {
@@ -840,6 +855,7 @@ export async function applyEdits(
         list.push(h);
         byOntology.set(h.ontologyId, list);
       }
+      const sharedDeadline = Date.now() + timeoutMs;
       for (const [ontologyId, handles] of byOntology) {
         results.push(
           await confirmEdgeIndexVisibility({
@@ -849,7 +865,7 @@ export async function applyEdits(
               branchId: executionContext.branchId,
             },
             handles,
-            timeoutMs,
+            timeoutMs: Math.max(0, sharedDeadline - Date.now()),
           }),
         );
       }

@@ -430,6 +430,69 @@ import { requestTimeoutMiddleware } from "./middleware/requestTimeout";
 const UPLOAD_REQUEST_TIMEOUT_MS = Number(
   process.env.UPLOAD_REQUEST_TIMEOUT_MS ?? 10 * 60 * 1000,
 );
+// Actions /apply|applyBatch can legitimately outlast the data-plane budget
+// when LINK_INDEX_ACK_REQUIRED=true: the read-after-write barrier blocks
+// up to LINK_INDEX_ACK_TIMEOUT_MS for the serving edge index while the PG
+// commit is ALREADY durable — its terminal answer is 202
+// COMMITTED_INDEX_PENDING (actions/linkIndexAckHttp.ts). Without this
+// extension, the 5s data-plane timer fires first and surfaces the
+// committed mutation as a 504, inviting client retries of an
+// already-applied edit.
+//
+// The barrier wait is ADDITIVE to the action's ordinary work — and for
+// applyBatch it is MULTIPLICATIVE: batch items execute sequentially and
+// EACH is a full action execution (rule compile + PG tx + OS writeback)
+// that waits on its own barrier. A stalled N-item batch can therefore
+// block up to N × (ordinary work + ack deadline). The budget is
+//   N × (data-plane allowance + ack deadline + 2 s of route headroom),
+// with N read from the parsed body (express.json is mounted above) and
+// clamped to the route's MAX_BATCH_SIZE; /apply and malformed bodies
+// count as N=1, which reduces to exactly the single-apply budget.
+// It applies ONLY when the flag is on.
+const ACK_BUDGET_DATAPLANE_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 5_000);
+const ACK_BUDGET_BARRIER_MS = Number(process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000);
+const ACK_BUDGET_HEADROOM_MS = 2_000;
+const ACK_BUDGET_MAX_ITEMS = 100; // equals routes/actions.ts MAX_BATCH_SIZE
+// Ceiling for the ack-aware budget: 100-item batches at generous
+// per-item allowances would otherwise hold connections for many minutes
+// (the ceiling was previously emergent = N × perItem, unbounded). When
+// the cap truncates the budget, the batch route pre-defers later items'
+// acks (ackBudgetMs → 0 ⇒ per-item 202 pending) instead of overrunning
+// the wire deadline — invariant: a COMMITTED item is answered 202,
+// never 504. Upload budgets are governed separately
+// (UPLOAD_REQUEST_TIMEOUT_MS), not by this cap.
+const MAX_REQUEST_BUDGET_MS = Number(process.env.MAX_REQUEST_BUDGET_MS ?? 120_000);
+const actionAckBudgetFor = (req: Request): number | undefined =>
+  process.env.LINK_INDEX_ACK_REQUIRED === "true"
+    ? Math.min(
+        Math.min(
+          ACK_BUDGET_MAX_ITEMS,
+          Math.max(
+            1,
+            /\/applyBatch$/.test(req.path) &&
+              Array.isArray(
+                (req.body as { requests?: unknown } | undefined)?.requests,
+              )
+              ? ((req.body as { requests: unknown[] }).requests.length || 1)
+              : 1,
+          ),
+        ) *
+          (ACK_BUDGET_DATAPLANE_MS + ACK_BUDGET_BARRIER_MS + ACK_BUDGET_HEADROOM_MS),
+        MAX_REQUEST_BUDGET_MS,
+      )
+    : undefined;
+
+// ---------------------------------------------------------------------------
+// LINK_INDEX_ACK_REQUIRED startup invariant (Fix 2 — config half). The
+// flag vouches that a committed link mutation is queryable through the
+// indexed serving store; enabling it against a legacy/shadow mode would
+// have the barrier assert visibility of a store the read path may not
+// use. Boot FAILS for the misconfiguration below (a wrong process serving
+// traffic is worse than no process); runtime shapes (CH schema/consumer
+// liveness) are gated at /health/ready instead (src/routes/healthReady.ts).
+// ---------------------------------------------------------------------------
+import { assertLinkIndexAckStartupConfig } from "./services/serving/ackStartup";
+assertLinkIndexAckStartupConfig();
 app.use(requestTimeoutMiddleware({
   exemptPaths: [
     "/api/v1/code-repositories",
@@ -439,6 +502,16 @@ app.use(requestTimeoutMiddleware({
   extendedBudgetFor: (req) =>
     req.method === "POST" && /\/(upload|transactions)$/.test(req.path),
   extendedTimeoutMs: UPLOAD_REQUEST_TIMEOUT_MS,
+  budgetFor: (req) =>
+    // NOTE: the route-interception regex covers ONLY apply|applyBatch.
+    // routes/bulkActions.ts (applyBulk) is currently UNMOUNTED; if it is
+    // ever mounted it MUST be added to this regex in the same change —
+    // shipping applyBulk without the ack budget lets the data-plane
+    // timer 504 committed ack-blocking mutations (invariant #1).
+    req.method === "POST" &&
+    /\/actions\/[^/]+\/(apply|applyBatch)$/.test(req.path)
+      ? actionAckBudgetFor(req)
+      : undefined,
 }));
 {
   const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];

@@ -55,6 +55,17 @@ export interface RequestTimeoutOptions {
    * complexity budget, but need a larger end-to-end envelope.
    */
   exactAggregationTimeoutMs?: number;
+  /**
+   * Full per-request budget override (evaluated BEFORE the
+   * aggregate/upload predicate chain): when it returns a number, that
+   * number IS the wall-clock budget. Used by routes whose own internal
+   * deadline legitimately outlasts the data-plane budget and whose
+   * terminal outcome must reach the wire (e.g. the /apply link-index
+   * ack barrier: its 202 COMMITTED_INDEX_PENDING is the honest answer —
+   * a 504 on a committed mutation invites retries of already-applied
+   * edits; see actions/linkIndexAckHttp.ts).
+   */
+  budgetFor?: (req: Request) => number | undefined;
 }
 
 /** Attach `req.timeoutSignal: AbortSignal` and arm a 504 on expiry. */
@@ -86,11 +97,24 @@ export function requestTimeoutMiddleware(opts: RequestTimeoutOptions = {}) {
     const isObjectSetAggregate =
       req.method === "POST" &&
       /^\/api\/v2\/ontologies\/[^/]+\/objectSets\/aggregate$/.test(req.path);
-    const budget = isObjectSetAggregate
-      ? exactAggregationTimeoutMs
-      : opts.extendedBudgetFor?.(req)
-        ? extendedTimeoutMs
-        : timeoutMs;
+    const customBudget = opts.budgetFor?.(req);
+    const budget =
+      customBudget ??
+      (isObjectSetAggregate
+        ? exactAggregationTimeoutMs
+        : opts.extendedBudgetFor?.(req)
+          ? extendedTimeoutMs
+          : timeoutMs);
+
+    // Expose the wire deadline so routes can pre-defer work whose own
+    // internal waits would OVERRUN it (the applyBatch link-ack barrier:
+    // a committed item MUST be answered 202, never left to the 504
+    // fallback below). Read-only for handlers; not part of the response.
+    // Express always provides res.locals; the ||= defends against test
+    // harnesses that build a bare EventEmitter as res.
+    res.locals ||= {};
+    (res.locals as Record<string, unknown>).requestBudgetDeadlineAt =
+      Date.now() + budget;
 
     const controller = new AbortController();
     (req as unknown as { timeoutSignal: AbortSignal }).timeoutSignal = controller.signal;

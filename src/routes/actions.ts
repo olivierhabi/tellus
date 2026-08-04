@@ -21,6 +21,15 @@ import crypto from "crypto";
 import { Router, Request, Response, NextFunction } from "express";
 import { executeAction } from "../actions/actionExecutor";
 import {
+  mapApplyExecutionToHttp,
+  assertApplyOutcomeInvariant,
+  collectPendingAcks,
+  assertBatchAckOutcomeInvariant,
+  COMMITTED_INDEX_PENDING,
+  perItemAckBudgetMs,
+  type BatchAckCandidate,
+} from "../actions/linkIndexAckHttp";
+import {
   validateAction,
   getDefaultOntologyId,
 } from "../actions/actionValidator";
@@ -182,17 +191,28 @@ router.post(
             context,
           );
 
-          const successBody = {
-            executionId: result.executionId,
-            result: result.result,
-            affectedObjects: result.affectedObjects,
-            durationMs: result.durationMs,
-            // OSv2 read-after-write verdict (only present when
-            // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
-            ...(result.linkIndexAck
-              ? { linkIndexAck: result.linkIndexAck }
-              : {}),
-          };
+          // OSv2 read-after-write verdict (linkIndexAck, only present when
+          // LINK_INDEX_ACK_REQUIRED=true and link edits were staged):
+          //   confirmed/absent → 200 success body (byte-compatible);
+          //   committed but NOT confirmed by the deadline →
+          //   202 COMMITTED_INDEX_PENDING + executionId + pollable
+          //   statusUrl. A post-commit link-index deferral is NEVER a
+          //   client-visible failure — the mapper enforces that invariant
+          //   (see actions/linkIndexAckHttp.ts).
+          const outcome = mapApplyExecutionToHttp(result);
+          assertApplyOutcomeInvariant(outcome);
+
+          // Step 4a: cache success
+          if (idempotencyKey) {
+            await storeIdempotencyKey(
+              idempotencyKey,
+              actionTypeApiName,
+              result.executionId,
+              { _httpStatus: outcome.status, _isError: false, ...outcome.body },
+            );
+          }
+
+          res.status(outcome.status).json(outcome.body);
 
           // NOTE: real-time object-change notifications are owned
           // exclusively by the action executor (actionExecutor
@@ -204,18 +224,6 @@ router.post(
           // duplicate events for every mutation and was removed.
           // Do not re-add emission here (pinned by
           // tests/unit/actions/actionExecutorFunctionEvents-unit.test.ts).
-
-          // Step 4a: cache success
-          if (idempotencyKey) {
-            await storeIdempotencyKey(
-              idempotencyKey,
-              actionTypeApiName,
-              result.executionId,
-              { _httpStatus: 200, _isError: false, ...successBody },
-            );
-          }
-
-          res.status(200).json(successBody);
         } catch (err: unknown) {
           // Step 4b: cache error (same key → same error on retry)
           if (err instanceof OntologyError && idempotencyKey) {
@@ -346,15 +354,61 @@ router.post(
         }
       }
 
+      // Idempotency (Task 21 pattern, same _httpStatus semantics as /apply).
+      // A retried batch with the same key replays the cached outcome —
+      // including a 202 COMMITTED_INDEX_PENDING — without re-executing any
+      // item. The cache namespace `${actionTypeApiName}#applyBatch` keeps a
+      // single key colliding between /apply and /applyBatch from falsely
+      // replaying the wrong shape (the module's cross-action-type guard
+      // then returns null → first-time execution, matching pre-existing
+      // behaviour for keys that were never honored here).
+      const idempotencyKey = req.headers["idempotency-key"] as
+        | string
+        | undefined;
+      const batchCacheName = `${actionTypeApiName}#applyBatch`;
+
+      // Core execute+store closure (same shape as /apply's doExecute).
+      const doExecute = async () => {
+        if (idempotencyKey) {
+          const cached = await checkIdempotencyKey(
+            idempotencyKey,
+            batchCacheName,
+          );
+          if (cached) {
+            const { _httpStatus, _isError, ...cachedBody } = cached as {
+              _httpStatus: number;
+              _isError: boolean;
+              [key: string]: unknown;
+            };
+            const status =
+              typeof _httpStatus === "number" ? _httpStatus : 200;
+            res.setHeader("X-Idempotency-Cached", "true");
+            res.status(status).json(cachedBody);
+            return;
+          }
+        }
+
       // Execute each request sequentially (matches Palantir's inline edit behavior)
       const results: Array<Record<string, unknown>> = [];
       let successCount = 0;
       let failedCount = 0;
       let totalAffectedObjects = 0;
+      const envAckTimeoutMs = Number(
+        process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000,
+      );
 
       for (let i = 0; i < body.requests.length; i++) {
         const item = body.requests[i];
         const parameters = item.parameters || {};
+
+        // Pre-defer the ack when the wire budget is nearly spent: an
+        // item must be answered 202-per-item-pending, never left for
+        // the timeout middleware to 504 AFTER its PG commit.
+        const ackBudgetMs = perItemAckBudgetMs({
+          localsDeadlineAt: (res.locals as Record<string, unknown>)
+            .requestBudgetDeadlineAt,
+          envAckTimeoutMs,
+        });
 
         // Build execution context for this individual request
         const context = {
@@ -365,6 +419,7 @@ router.post(
             req.socket.remoteAddress ||
             null,
           branchId: item.branchId || body.branchId || null,
+          ...(ackBudgetMs !== undefined ? { ackBudgetMs } : {}),
         };
 
         try {
@@ -388,6 +443,11 @@ router.post(
               executionId: result.executionId,
               affectedObjects: result.affectedObjects,
               scaleLimitReached: true,
+              // OSv2 read-after-write verdict (present only when
+              // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
+              ...(result.linkIndexAck
+                ? { linkIndexAck: result.linkIndexAck }
+                : {}),
               errorMessage:
                 `Total affected objects across batch (${totalAffectedObjects}) exceeds ` +
                 `the limit of ${MAX_BATCH_AFFECTED_OBJECTS}. Remaining requests skipped.`,
@@ -414,6 +474,11 @@ router.post(
             success: true,
             executionId: result.executionId,
             affectedObjects: result.affectedObjects,
+            // OSv2 read-after-write verdict (present only when
+            // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
+            ...(result.linkIndexAck
+              ? { linkIndexAck: result.linkIndexAck }
+              : {}),
           });
         } catch (err: any) {
           failedCount++;
@@ -440,14 +505,67 @@ router.post(
 
       const totalDurationMs = Date.now() - batchStartTime;
 
-      return res.status(200).json({
+      // OSv2 read-after-write aggregation (single rule for all batch
+      // surfaces — actions/linkIndexAckHttp.ts): the WHOLE response is
+      // 202 result:COMMITTED_INDEX_PENDING iff ANY committed item's
+      // edge-index ack is unconfirmed; each pending item carries its own
+      // pollable statusUrl. An index deferral is NEVER a per-item failure
+      // nor an error status — the items are already committed in PG and a
+      // failure shape would invite retries of applied mutations.
+      const pendingAcks = collectPendingAcks(
+        results as Array<Record<string, unknown>> & BatchAckCandidate[],
+      );
+      if (pendingAcks.length > 0) {
+        const urlByIndex = new Map(
+          pendingAcks.map((p) => [p.index, p.statusUrl]),
+        );
+        for (const r of results) {
+          const u = urlByIndex.get(r.index as number);
+          if (u) r.statusUrl = u;
+        }
+      }
+      const batchOutcome = {
+        status: pendingAcks.length > 0 ? 202 : 200,
+        pendingCount: pendingAcks.length,
+        ...(pendingAcks.length > 0
+          ? { result: COMMITTED_INDEX_PENDING }
+          : {}),
+      };
+      assertBatchAckOutcomeInvariant(batchOutcome);
+
+      const responseBody = {
         batchId,
         totalRequests: body.requests.length,
         successCount,
         failedCount,
         results,
         totalDurationMs,
-      });
+        ...(batchOutcome.result ? { result: batchOutcome.result } : {}),
+      };
+
+      // Step 4a (batch idempotency): cache the outcome — a retry replays
+      // the SAME status (a 202 stays a 202) without re-executing any item.
+      if (idempotencyKey) {
+        await storeIdempotencyKey(
+          idempotencyKey,
+          batchCacheName,
+          batchId,
+          {
+            _httpStatus: batchOutcome.status,
+            _isError: false,
+            ...responseBody,
+          },
+        );
+      }
+
+      return res.status(batchOutcome.status).json(responseBody);
+      };
+
+      if (idempotencyKey) {
+        await withIdempotencyLock(idempotencyKey, doExecute);
+      } else {
+        await doExecute();
+      }
     } catch (err: any) {
       // Batch-level errors (invalid body, over limit) → 400 via error handler
       if (err instanceof OntologyError) return next(err);
@@ -724,15 +842,54 @@ batchRouter.post(
         }
       }
 
+      // Idempotency (Task 21 pattern, same _httpStatus semantics as
+      // the ontology-scoped applyBatch above).
+      const idempotencyKey = req.headers["idempotency-key"] as
+        | string
+        | undefined;
+      const batchCacheName = `${actionTypeApiName}#applyBatch`;
+
+      const doExecute = async () => {
+        if (idempotencyKey) {
+          const cached = await checkIdempotencyKey(
+            idempotencyKey,
+            batchCacheName,
+          );
+          if (cached) {
+            const { _httpStatus, _isError, ...cachedBody } = cached as {
+              _httpStatus: number;
+              _isError: boolean;
+              [key: string]: unknown;
+            };
+            const status =
+              typeof _httpStatus === "number" ? _httpStatus : 200;
+            res.setHeader("X-Idempotency-Cached", "true");
+            res.status(status).json(cachedBody);
+            return;
+          }
+        }
+
       // Execute each request sequentially
       const results: Array<Record<string, unknown>> = [];
       let successCount = 0;
       let failedCount = 0;
       let totalAffectedObjects = 0;
+      const envAckTimeoutMs = Number(
+        process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000,
+      );
 
       for (let i = 0; i < body.requests.length; i++) {
         const item = body.requests[i];
         const parameters = item.parameters || {};
+
+        // Pre-defer the ack when the wire budget is nearly spent (see
+        // the ontology-scoped applyBatch above): an item must be
+        // answered 202-per-item-pending, never 504'd after its commit.
+        const ackBudgetMs = perItemAckBudgetMs({
+          localsDeadlineAt: (res.locals as Record<string, unknown>)
+            .requestBudgetDeadlineAt,
+          envAckTimeoutMs,
+        });
 
         // Phase 6.1 — thread req.security into the batch context too
         // so the per-iteration executeAction call runs Stage 1c against
@@ -756,6 +913,7 @@ batchRouter.post(
           branchId: item.branchId || body.branchId || null,
           roles: (req as any).user?.roles || [],
           groups: (req as any).user?.groups || [],
+          ...(ackBudgetMs !== undefined ? { ackBudgetMs } : {}),
           ...(secBatch
             ? {
                 subjectKind: (secBatch.systemPrincipal
@@ -790,6 +948,11 @@ batchRouter.post(
               executionId: result.executionId,
               affectedObjects: result.affectedObjects,
               scaleLimitReached: true,
+              // OSv2 read-after-write verdict (present only when
+              // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
+              ...(result.linkIndexAck
+                ? { linkIndexAck: result.linkIndexAck }
+                : {}),
               errorMessage:
                 `Total affected objects across batch (${totalAffectedObjects}) exceeds ` +
                 `the limit of ${MAX_BATCH_AFFECTED_OBJECTS}. Remaining requests skipped.`,
@@ -816,6 +979,11 @@ batchRouter.post(
             success: true,
             executionId: result.executionId,
             affectedObjects: result.affectedObjects,
+            // OSv2 read-after-write verdict (present only when
+            // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
+            ...(result.linkIndexAck
+              ? { linkIndexAck: result.linkIndexAck }
+              : {}),
           });
         } catch (err: any) {
           failedCount++;
@@ -841,14 +1009,63 @@ batchRouter.post(
 
       const totalDurationMs = Date.now() - batchStartTime;
 
-      return res.status(200).json({
+      // OSv2 read-after-write aggregation (single rule for all batch
+      // surfaces — actions/linkIndexAckHttp.ts). Whole-batch 202 iff ANY
+      // committed item's edge-index ack is unconfirmed; pending items
+      // carry their own pollable statusUrl; a post-commit deferral is
+      // NEVER an error status nor a per-item failure.
+      const pendingAcks = collectPendingAcks(
+        results as Array<Record<string, unknown>> & BatchAckCandidate[],
+      );
+      if (pendingAcks.length > 0) {
+        const urlByIndex = new Map(
+          pendingAcks.map((p) => [p.index, p.statusUrl]),
+        );
+        for (const r of results) {
+          const u = urlByIndex.get(r.index as number);
+          if (u) r.statusUrl = u;
+        }
+      }
+      const batchOutcome = {
+        status: pendingAcks.length > 0 ? 202 : 200,
+        pendingCount: pendingAcks.length,
+        ...(pendingAcks.length > 0
+          ? { result: COMMITTED_INDEX_PENDING }
+          : {}),
+      };
+      assertBatchAckOutcomeInvariant(batchOutcome);
+
+      const responseBody = {
         batchId,
         totalRequests: body.requests.length,
         successCount,
         failedCount,
         results,
         totalDurationMs,
-      });
+        ...(batchOutcome.result ? { result: batchOutcome.result } : {}),
+      };
+
+      if (idempotencyKey) {
+        await storeIdempotencyKey(
+          idempotencyKey,
+          batchCacheName,
+          batchId,
+          {
+            _httpStatus: batchOutcome.status,
+            _isError: false,
+            ...responseBody,
+          },
+        );
+      }
+
+      return res.status(batchOutcome.status).json(responseBody);
+      };
+
+      if (idempotencyKey) {
+        await withIdempotencyLock(idempotencyKey, doExecute);
+      } else {
+        await doExecute();
+      }
     } catch (err: any) {
       if (err instanceof OntologyError) return next(err);
       next(err);

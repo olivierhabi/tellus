@@ -96,6 +96,10 @@ export default defineConfig({
       // Publish-author trust gate: exercised by dedicated tests; other lanes
       // opt out explicitly (never honored in production).
       FUNCTION_EXECUTION_TRUST_MODE: "open-development",
+      // Same ceiling the osv2 lane raised in e9f7ec4: the spawned lane
+      // server's boot-time indexing storm can hold OpenSearch writes past
+      // the 5 s default, flaking tests that seed OS docs directly.
+      OPENSEARCH_REQUEST_TIMEOUT: "10000",
     },
 
     // Coverage configuration — scoped to modules exercised by unit tests.

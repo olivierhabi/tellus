@@ -364,8 +364,13 @@ describe("STAGE 2 — Action read-after-write (linkIndexAck REST contract)", () 
     try {
       const r = await applyAction(app, adderApi, { sourcePk: "s-2", targetPk: "t-2" }, fix);
       console.log("[ack-OUTAGE] status/body:", r.status, JSON.stringify(r.body).slice(0, 500));
-      expect(r.status).toBe(200);
-      expect(r.body.result).toBe("success"); // PG edit is DURABLE regardless
+      // Committed PG edit + unconfirmed ack ⇒ 202 COMMITTED_INDEX_PENDING —
+      // NEVER a client-visible failure (the mutation is durable in PG).
+      expect(r.status).toBe(202);
+      expect(r.status).not.toBeGreaterThanOrEqual(400);
+      expect(r.body.result).toBe("COMMITTED_INDEX_PENDING");
+      expect(r.body.executionId).toBeDefined();
+      expect(r.body.statusUrl).toBe(`/api/v1/audit/log/${r.body.executionId}`);
       expect(r.body.linkIndexAck).toBeDefined();
       expect(r.body.linkIndexAck.confirmed).toBe(false); // NOT fabricated
       expect(r.body.linkIndexAck.reason).toBe("timeout");
@@ -400,8 +405,12 @@ describe("STAGE 2 — Action read-after-write (linkIndexAck REST contract)", () 
       await ch().command(`DROP TABLE IF EXISTS ${tbl}__kafka`);
       const r1 = await applyAction(app, adderApi, { sourcePk: "s-1", targetPk: "t-1" }, fix);
       console.log("[ack-RECOVER] deferred status/body:", r1.status, JSON.stringify(r1.body).slice(0, 500));
-      expect(r1.status).toBe(200);
-      expect(r1.body.result).toBe("success"); // PG/OS durable regardless
+      // Committed PG edit + unconfirmed ack ⇒ 202 COMMITTED_INDEX_PENDING —
+      // NEVER a client-visible failure (the mutation is durable in PG).
+      expect(r1.status).toBe(202);
+      expect(r1.body.result).toBe("COMMITTED_INDEX_PENDING"); // PG/OS durable regardless
+      expect(r1.body.executionId).toBeDefined();
+      expect(r1.body.statusUrl).toBe(`/api/v1/audit/log/${r1.body.executionId}`);
       expect(r1.body.linkIndexAck).toBeDefined();
       expect(r1.body.linkIndexAck.confirmed).toBe(false); // edge NOT queryable
       expect(r1.body.linkIndexAck.reason).toBe("timeout");

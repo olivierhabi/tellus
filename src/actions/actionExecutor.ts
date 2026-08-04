@@ -135,6 +135,13 @@ export interface ExecutionContext {
   returnValidationErrors?: boolean;
   /** Public applyBatch does not support notification side effects. */
   suppressNotifications?: boolean;
+  /**
+   * Optional ceiling (ms) for the Step 6b link ack barrier. Batch routes
+   * thread the REMAINING request-budget per item so a committed item
+   * pre-defers (202) instead of the timeout middleware 504-ing the wire.
+   * Absent ⇒ LINK_INDEX_ACK_TIMEOUT_MS applies (default behavior).
+   */
+  ackBudgetMs?: number;
 }
 
 /** A single affected object in the result. */
@@ -1085,6 +1092,11 @@ export async function executeAction(
       semanticsVersion: semantics.semanticsVersion,
       plannedLockIdentities: v2PlannedLocks,
       v2RevalidateAfterLock: v2Revalidate,
+      // Per-item ack barrier ceiling (batch routes pre-defer rather than
+      // let the request-budget middleware 504 a committed mutation).
+      ...(context.ackBudgetMs !== undefined
+        ? { ackBudgetMs: context.ackBudgetMs }
+        : {}),
     };
 
     // Phase 6 — v2 only: wrap applyEdits in bounded deadlock/serialization
