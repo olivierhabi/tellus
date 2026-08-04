@@ -48,6 +48,24 @@ function asArray(v: unknown): unknown[] {
   return Array.isArray(v) ? v : v == null ? [] : [v];
 }
 
+/**
+ * Evaluate a B18/B19/C21 predicate `{ parameter, operator, value }` against a
+ * map of resolved parameter values (sync, IO-free). Shared by the conditional
+ * overrides (parameterValidator Step 5c) and is consistent with the FE
+ * `lib/predicate.ts` model + the submission-criteria `compare`.
+ */
+export function evalParamPredicate(
+  predicate: { parameter?: string; operator?: SubmissionOperator; value?: unknown },
+  params: Record<string, unknown>,
+): boolean {
+  if (!predicate || typeof predicate !== "object" || !predicate.parameter) return true;
+  return compare(
+    params[predicate.parameter],
+    (predicate.operator ?? "exists") as SubmissionOperator,
+    predicate.value,
+  );
+}
+
 function compare(actual: unknown, op: SubmissionOperator, expected: unknown): boolean {
   switch (op) {
     case "exists":

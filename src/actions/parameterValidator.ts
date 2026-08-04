@@ -18,6 +18,8 @@
 //   Step 6: Return result
 // ---------------------------------------------------------------------------
 
+import { evalParamPredicate } from "./submissionCriteria";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -136,6 +138,61 @@ function propertyByApiName(
   return undefined;
 }
 
+/**
+ * C21 — collect the apiNames of parameters that live in a HIDDEN form-content
+ * section, so the required check (Step 2) does not block submission when a
+ * section is predicate-hidden or statically hidden. A section is hidden when:
+ *   - `visibility === "hidden"` (static), or
+ *   - `visibility` is an object with a `predicate` and that predicate does
+ *     NOT hold over the provided parameter values (predicate-driven visibility).
+ * The form-content layout is persisted on the FIRST parameter's `formContent`
+ * field (FE authoring convention). Returns an empty set when there is no
+ * form-content (backward compatible — nothing is hidden).
+ */
+function computeHiddenSectionParams(
+  parameterDefinitions: ParameterDefinition[],
+  providedParameters: Record<string, unknown>,
+): Set<string> {
+  const out = new Set<string>();
+  const first = parameterDefinitions[0] as ParameterDefinition & {
+    formContent?: unknown;
+  };
+  const formContent = first?.formContent as
+    | { items?: unknown[] }
+    | undefined;
+  if (!formContent || !Array.isArray(formContent.items)) return out;
+  for (const raw of formContent.items) {
+    const item = raw as {
+      kind?: string;
+      visibility?: unknown;
+      parameterApiNames?: string[];
+    };
+    if (!item || item.kind !== "section") continue;
+    let hidden = false;
+    const vis = item.visibility;
+    if (vis === "hidden") hidden = true;
+    else if (vis && typeof vis === "object" && "predicate" in vis) {
+      const pred = (vis as { predicate: unknown }).predicate;
+      if (pred && typeof pred === "object") {
+        try {
+          hidden = !evalParamPredicate(
+            pred as never,
+            providedParameters,
+          );
+        } catch {
+          hidden = true; // fail-closed: an unresolvable predicate hides the section
+        }
+      }
+    }
+    if (hidden && Array.isArray(item.parameterApiNames)) {
+      for (const apiName of item.parameterApiNames) {
+        if (typeof apiName === "string") out.add(apiName);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Main function
 // ---------------------------------------------------------------------------
@@ -182,10 +239,15 @@ export async function validateParameters(
   }
 
   // -----------------------------------------------------------------------
-  // Step 2: Check required parameters
+  // Step 2: Check required parameters (C21: skip params in a hidden
+  // form-content section — predicate-hidden or statically hidden).
   // -----------------------------------------------------------------------
+  const hiddenSectionParams = computeHiddenSectionParams(
+    parameterDefinitions,
+    providedParameters,
+  );
   for (const def of parameterDefinitions) {
-    if (def.required === true) {
+    if (def.required === true && !hiddenSectionParams.has(def.apiName)) {
       const value = providedParameters[def.apiName];
       // fix(F34): a required string parameter supplied as "" or whitespace-only
       // is missing (the Workshop form already enforces this client-side; the
@@ -349,6 +411,59 @@ export async function validateParameters(
         // Fail-soft: skip enforcement if the object can't be fetched; the
         // existence check (Step 4) remains authoritative.
         continue;
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 5c: Conditional parameter overrides (B18/B19). A parameter's
+  // `conditionalOverrides` are evaluated against the resolved params; the
+  // first override whose `when` predicate holds yields the effective
+  // {required, visible, allowedValues}. Enforce the EFFECTIVE constraints on
+  // the apply/API path (never trust the client): an effectively-required AND
+  // visible parameter must be present; an allowedValues override validates
+  // the value. An effectively-hidden parameter is not required (and the FE
+  // filters it from submission). Backward compatible: no overrides ⇒ the
+  // authored constraints (already enforced in Steps 2/5) stand.
+  // -----------------------------------------------------------------------
+  for (const def of parameterDefinitions) {
+    const overrides = (def as unknown as { conditionalOverrides?: unknown[] })
+      .conditionalOverrides;
+    if (!Array.isArray(overrides) || overrides.length === 0) continue;
+    let eff: Record<string, unknown> | null = null;
+    for (const ov of overrides) {
+      const o = ov as { when?: unknown };
+      if (o && o.when && evalParamPredicate(o.when as never, resolved)) {
+        eff = ov as Record<string, unknown>;
+        break; // first-match-wins
+      }
+    }
+    if (!eff) continue;
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(eff, k);
+    const effVisible = has("visible") ? eff.visible : null;
+    if (effVisible === false) continue; // effectively hidden ⇒ not required
+    if (has("required") && eff.required === true) {
+      const v = resolved[def.apiName];
+      const blank =
+        v === undefined || v === null || v === "" ||
+        (Array.isArray(v) && v.length === 0);
+      if (blank) {
+        errors.push(
+          `Required parameter '${def.apiName}' (${def.displayName}) is missing (conditionally required)`,
+        );
+      }
+    }
+    if (has("allowedValues") && Array.isArray(eff.allowedValues) && eff.allowedValues.length > 0) {
+      const v = resolved[def.apiName];
+      const allowed = eff.allowedValues as unknown[];
+      if (
+        v !== undefined && v !== null && v !== "" &&
+        !allowed.includes(v) &&
+        !allowed.map(String).includes(String(v))
+      ) {
+        errors.push(
+          `Parameter '${def.apiName}' must be one of the conditionally-allowed values: ${(eff.allowedValues as unknown[]).map(String).join(", ")}`,
+        );
       }
     }
   }
