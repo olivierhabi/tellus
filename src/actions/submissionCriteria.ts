@@ -275,7 +275,16 @@ export async function resolveObjectPropertyOperands(
     try {
       const obj = await fetcher(objectType, String(pk));
       if (obj == null) continue;
-      out[`${c.parameter}.${c.objectProperty}`] = obj[c.objectProperty];
+      // The persisted object document can be keyed by apiName (camelCase) OR
+      // by the backing DB column (snake_case — legacy/seed objects). Try
+      // apiName first, then snake_case, so the operand resolves regardless.
+      const apiName = c.objectProperty;
+      let value = obj[apiName];
+      if (value === undefined) {
+        const snake = apiName.replace(/[A-Z]/g, (ch) => `_${ch.toLowerCase()}`);
+        if (snake !== apiName) value = obj[snake];
+      }
+      out[`${c.parameter}.${c.objectProperty}`] = value;
     } catch {
       // Fail-soft: leave the operand unresolved; the evaluator fail-closes.
       continue;

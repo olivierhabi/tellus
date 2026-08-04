@@ -116,6 +116,26 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIMESTAMP_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
+/**
+ * Read a property value from a fetched object by its authoring apiName
+ * (camelCase). The persisted object document can be keyed by EITHER the
+ * apiName (camelCase — objects created by the BE action runtime) OR the
+ * backing DB column name (snake_case — legacy/seed objects). Try apiName
+ * first, then its snake_case form, so B13 (default-from-object-property)
+ * and B15 (cascade filter) resolve against the live object state regardless
+ * of which storage convention the object used.
+ */
+function propertyByApiName(
+  obj: Record<string, unknown> | null,
+  apiName: string,
+): unknown {
+  if (!obj || typeof apiName !== "string" || apiName === "") return undefined;
+  if (obj[apiName] !== undefined) return obj[apiName];
+  const snake = apiName.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  if (snake !== apiName && obj[snake] !== undefined) return obj[snake];
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Main function
 // ---------------------------------------------------------------------------
@@ -238,8 +258,9 @@ export async function validateParameters(
       if (!sourceObjectType || sourcePk == null || sourcePk === "") continue;
       try {
         const obj = await objectFetcher(sourceObjectType, String(sourcePk));
-        if (obj && obj[objectProperty] !== undefined && obj[objectProperty] !== null) {
-          resolved[def.apiName] = obj[objectProperty];
+        const v = propertyByApiName(obj, objectProperty);
+        if (v !== undefined && v !== null) {
+          resolved[def.apiName] = v;
         }
       } catch {
         // Fail-soft: leave the value unset; required/blank handling applies.
@@ -315,7 +336,7 @@ export async function validateParameters(
       try {
         const obj = await objectFetcher(def.objectType, String(pk));
         if (obj == null) continue; // existence already enforced in Step 4
-        const actual = obj[spec.property];
+        const actual = propertyByApiName(obj, spec.property);
         const ok =
           actual === upstream ||
           String(actual) === String(upstream);
