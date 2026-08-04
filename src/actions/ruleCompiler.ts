@@ -513,6 +513,26 @@ async function compileModifyObject(
     propertyValues[propName] = value;
   }
 
+  // 3b. Reject primary key modifications. The v1 compiler previously mapped
+  // the PK property verbatim into the update edit — silently RENAMING the
+  // object's primary key (the v2 modifyObjectRule.ts:255 guard never ran on
+  // this path). Mirror that guard here: a modifyObject rule may NOT write the
+  // primary key property; identity comes from `objectReference` only.
+  const pkPropName = await getPrimaryKeyPropertyName(
+    executionContext.ontologyId, rule.objectType, errors
+  );
+  if (!pkPropName) return; // error already added
+  if (propertyValues[pkPropName] !== undefined && propertyValues[pkPropName] !== primaryKey) {
+    errors.push(
+      `Cannot modify the primary key property '${pkPropName}' of an existing object. ` +
+      `Primary keys are immutable. To change an object's primary key, delete it and create a new object.`
+    );
+    return;
+  }
+  // The PK mapping, when present and equal to the target's PK, is a no-op —
+  // drop it so a parameters→all-properties mapping doesn't write the key.
+  delete propertyValues[pkPropName];
+
   // 4. Generate edit
   edits.push({
     objectType: rule.objectType,
@@ -1093,6 +1113,23 @@ async function compileLinkRule(
     } catch {
       errors.push(
         `${rule.type} rule at index ${ruleIndex}: could not resolve foreign key property for link type '${rule.linkType}'`
+      );
+      return;
+    }
+
+    // fix(A5): reject FK writes that target the FK-bearing object's primary
+    // key property. A misconfigured link type can point source_property_id/
+    // target_property_id at the object's PK; the addLink rule would then
+    // silently RENAME the FK-bearing object. Reject at compile (the same
+    // PK-immutability contract enforced for modifyObject rules).
+    const fkObjTypeDef = await objectTypeService.getByApiName(
+      executionContext.ontologyId,
+      fkObjectType,
+    );
+    const fkPkPropertyId = fkObjTypeDef.objectType.primary_key_property_id as string | null;
+    if (fkPkPropertyId && fkPropertyId === fkPkPropertyId) {
+      errors.push(
+        `${rule.type} rule at index ${ruleIndex}: link type '${rule.linkType}' foreign-key property '${fkPropertyApiName}' is the primary key of object type '${fkObjectType}'; a link may not write the primary key.`
       );
       return;
     }

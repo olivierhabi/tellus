@@ -35,7 +35,7 @@ import { DEFAULT_EGRESS_POLICY } from "../services/webhookSafeTransport";
 import * as https from "https";
 import * as http from "http";
 import { applyEdits } from "./editApplicator";
-import { evaluateSubmissionCriteria } from "./submissionCriteria";
+import { evaluateSubmissionCriteria, resolveObjectPropertyOperands } from "./submissionCriteria";
 import { fireActionWebhooks } from "./actionWebhooks";
 import { sendNotifications } from "./sideEffectNotifier";
 import {
@@ -531,7 +531,8 @@ export async function executeAction(
     const validation = await validateParameters(
       parameterDefinitions,
       parameters,
-      objectExists
+      objectExists,
+      fetchObject
     );
 
     if (!validation.valid) {
@@ -563,6 +564,16 @@ export async function executeAction(
     // markings) is enforced separately; this gates on the inputs/preconditions.
     // -----------------------------------------------------------------
     {
+      // D27 — pre-resolve object-property operands (conditions of the form
+      // `{ parameter, objectProperty }`) against the live referenced-object
+      // state before evaluating criteria, so the pure evaluator can compare
+      // against the object's property without doing IO.
+      const objectPropertyValues = await resolveObjectPropertyOperands(
+        actionType.submission_criteria,
+        resolvedParameters as Record<string, unknown>,
+        actionType.parameters as ReadonlyArray<{ apiName: string; objectType?: string }>,
+        fetchObject,
+      );
       const submission = evaluateSubmissionCriteria(
         actionType.submission_criteria,
         resolvedParameters as Record<string, unknown>,
@@ -571,6 +582,7 @@ export async function executeAction(
           roles: context.roles ?? [],
           groups: context.groups ?? [],
         },
+        objectPropertyValues,
       );
       if (!submission.ok) {
         result.failureType = "unclassified";

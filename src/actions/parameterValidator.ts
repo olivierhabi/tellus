@@ -22,6 +22,16 @@
 // Types
 // ---------------------------------------------------------------------------
 
+/** A single field of a struct parameter (Foundry-style struct authoring). */
+export interface StructFieldDefinition {
+  apiName: string;
+  displayName?: string;
+  /** Primitive types only: string, boolean, integer, long, byte, short,
+   * double, float, decimal, date, timestamp. */
+  type: string;
+  required?: boolean;
+}
+
 /** A single parameter definition from action_type.parameters. */
 export interface ParameterDefinition {
   apiName: string;
@@ -33,6 +43,20 @@ export interface ParameterDefinition {
   interfaceId?: string;
   defaultValue?: unknown;
   constraints?: ParameterConstraints;
+  /** Field schema for struct parameters. When present, struct values are
+   * coerced field-by-field and unknown keys are rejected. */
+  structFields?: StructFieldDefinition[];
+  /**
+   * B13 — resolve this parameter's default from a PROPERTY of the object
+   * referenced by another (object_reference) parameter, against the live
+   * object state at submit time. Applied in Step 3b AFTER static defaults and
+   * BEFORE type coercion, so the resolved value is type-validated. Only used
+   * when the parameter's own value is unset (user edits override).
+   */
+  defaultFromObjectReference?: {
+    parameter: string;
+    objectProperty: string;
+  };
 }
 
 /** Constraint rules for a parameter. */
@@ -52,6 +76,16 @@ export type ObjectExistsChecker = (
   objectType: string,
   primaryKey: string
 ) => Promise<boolean>;
+
+/**
+ * Async function to fetch an object's persisted properties (B13 —
+ * property-derived defaults need the referenced object's property value).
+ * Returns the object document or null if not found.
+ */
+export type ObjectFetcher = (
+  objectType: string,
+  primaryKey: string
+) => Promise<Record<string, unknown> | null>;
 
 /** Result of parameter validation. */
 export interface ValidationResult {
@@ -97,7 +131,8 @@ const TIMESTAMP_RE =
 export async function validateParameters(
   parameterDefinitions: ParameterDefinition[],
   providedParameters: Record<string, unknown>,
-  objectExistsChecker: ObjectExistsChecker
+  objectExistsChecker: ObjectExistsChecker,
+  objectFetcher?: ObjectFetcher
 ): Promise<ValidationResult> {
   const errors: string[] = [];
   const resolved: Record<string, unknown> = {};
@@ -132,7 +167,15 @@ export async function validateParameters(
   for (const def of parameterDefinitions) {
     if (def.required === true) {
       const value = providedParameters[def.apiName];
-      if (value === undefined || value === null) {
+      // fix(F34): a required string parameter supplied as "" or whitespace-only
+      // is missing (the Workshop form already enforces this client-side; the
+      // API path must not persist whitespace PKs).
+      const blankString =
+        def.type === "string" &&
+        typeof value === "string" &&
+        value.trim() === "" &&
+        !(def.constraints?.allowedValues ?? []).includes(value);
+      if (value === undefined || value === null || blankString) {
         errors.push(
           `Required parameter '${def.apiName}' (${def.displayName}) is missing`
         );
@@ -166,6 +209,42 @@ export async function validateParameters(
     } else {
       // Required parameter — already verified as present in step 2
       resolved[def.apiName] = provided;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 3b: Property-derived defaults (B13). A parameter whose value is
+  // still unset and carries `defaultFromObjectReference` resolves its default
+  // from a PROPERTY of the object referenced by another (object_reference)
+  // parameter, fetched against the live object state. Runs AFTER static
+  // defaults and BEFORE type coercion so the resolved value is type-validated.
+  // A missing fetcher / unfound object / absent property leaves the value
+  // unset (fall through to required/blank handling); never fabricates a value.
+  // -----------------------------------------------------------------------
+  if (objectFetcher) {
+    for (const def of parameterDefinitions) {
+      if (!def.defaultFromObjectReference) continue;
+      const current = resolved[def.apiName];
+      const isBlank =
+        current === undefined ||
+        current === null ||
+        current === "" ||
+        (Array.isArray(current) && current.length === 0);
+      if (!isBlank) continue;
+      const { parameter: sourceParam, objectProperty } = def.defaultFromObjectReference;
+      const sourceDef = defMap.get(sourceParam);
+      const sourceObjectType = sourceDef?.objectType;
+      const sourcePk = resolved[sourceParam];
+      if (!sourceObjectType || sourcePk == null || sourcePk === "") continue;
+      try {
+        const obj = await objectFetcher(sourceObjectType, String(sourcePk));
+        if (obj && obj[objectProperty] !== undefined && obj[objectProperty] !== null) {
+          resolved[def.apiName] = obj[objectProperty];
+        }
+      } catch {
+        // Fail-soft: leave the value unset; required/blank handling applies.
+        continue;
+      }
     }
   }
 
@@ -211,6 +290,46 @@ export async function validateParameters(
     if (value === undefined || value === null) continue;
 
     validateConstraints(def, value, errors);
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 5b: Object-reference cascade filter enforcement (B15). A
+  // `constraints.filterByObjectReference: { parameter, property }` declares
+  // that the selected object's `property` must equal the upstream parameter's
+  // resolved value. The UI filters the dropdown; the BE enforces it on the
+  // apply/API path so a client bypass (submitting an option that no longer
+  // satisfies the filter) is rejected. Runs after coercion so the value is a
+  // resolved PK and the upstream param is resolved too.
+  // -----------------------------------------------------------------------
+  if (objectFetcher) {
+    for (const def of parameterDefinitions) {
+      const spec = (def.constraints as unknown as Record<string, unknown> | undefined)
+        ?.filterByObjectReference as
+        | { parameter: string; property: string }
+        | undefined;
+      if (!spec || !spec.parameter || !spec.property) continue;
+      const pk = resolved[def.apiName];
+      if (pk == null || pk === "") continue;
+      if (!def.objectType) continue;
+      const upstream = resolved[spec.parameter];
+      try {
+        const obj = await objectFetcher(def.objectType, String(pk));
+        if (obj == null) continue; // existence already enforced in Step 4
+        const actual = obj[spec.property];
+        const ok =
+          actual === upstream ||
+          String(actual) === String(upstream);
+        if (!ok) {
+          errors.push(
+            `Parameter '${def.apiName}' object's '${spec.property}' is '${JSON.stringify(actual)}' which does not match the cascade filter (upstream '${spec.parameter}'='${JSON.stringify(upstream)}'); select an option that satisfies the filter.`,
+          );
+        }
+      } catch {
+        // Fail-soft: skip enforcement if the object can't be fetched; the
+        // existence check (Step 4) remains authoritative.
+        continue;
+      }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -312,7 +431,7 @@ async function validateAndCoerceType(
       return coerceGeoshape(apiName, value, errors);
 
     case "struct":
-      return coerceStruct(apiName, value, errors);
+      return coerceStruct(apiName, value, def, errors);
 
     case "attachment":
     case "marking":
@@ -801,9 +920,47 @@ function coerceGeoshape(
 }
 
 // --- Struct ---
+
+/** Field-aware scalar coercion for struct members (primitive types only). */
+function coerceStructField(
+  fieldPath: string,
+  fieldType: string,
+  raw: unknown,
+  errors: string[],
+): unknown {
+  switch (fieldType) {
+    case "string":
+      return coerceString(fieldPath, raw, errors);
+    case "boolean":
+      return coerceBoolean(fieldPath, raw, errors);
+    case "integer":
+      return coerceInteger(fieldPath, raw, errors);
+    case "byte":
+      return coerceBoundedInteger(fieldPath, raw, -128, 127, "byte", errors);
+    case "short":
+      return coerceBoundedInteger(fieldPath, raw, -32768, 32767, "short", errors);
+    case "long":
+      return coerceLong(fieldPath, raw, errors);
+    case "double":
+    case "float":
+    case "decimal":
+      return coerceDouble(fieldPath, raw, fieldType, errors);
+    case "date":
+      return coerceDate(fieldPath, raw, errors);
+    case "timestamp":
+      return coerceTimestamp(fieldPath, raw, errors);
+    default:
+      errors.push(
+        `Struct field '${fieldPath}' has unsupported type '${fieldType}'.`,
+      );
+      return undefined;
+  }
+}
+
 function coerceStruct(
   apiName: string,
   value: unknown,
+  def: ParameterDefinition,
   errors: string[]
 ): Record<string, unknown> | undefined {
   if (
@@ -818,7 +975,50 @@ function coerceStruct(
     );
     return undefined;
   }
-  return value as Record<string, unknown>;
+  const record = value as Record<string, unknown>;
+  const fields = def.structFields;
+  if (!Array.isArray(fields) || fields.length === 0) {
+    // No authored schema — legacy pass-through (plain object).
+    return record;
+  }
+
+  // Authored struct schema (Foundry semantics): required fields must be
+  // present, unknown keys are rejected, known fields are coerced by type.
+  const byName = new Map(fields.map((field) => [field.apiName, field]));
+  for (const key of Object.keys(record)) {
+    if (!byName.has(key)) {
+      errors.push(
+        `Parameter '${apiName}' contains unknown struct field '${key}'.`,
+      );
+    }
+  }
+  const out: Record<string, unknown> = {};
+  let failed = false;
+  for (const field of fields) {
+    const raw = record[field.apiName];
+    if (raw === undefined || raw === null) {
+      if (field.required) {
+        errors.push(
+          `Parameter '${apiName}.${field.apiName}' is required.`,
+        );
+        failed = true;
+      }
+      continue;
+    }
+    const before = errors.length;
+    const coerced = coerceStructField(
+      `${apiName}.${field.apiName}`,
+      field.type,
+      raw,
+      errors,
+    );
+    if (errors.length !== before || coerced === undefined) {
+      failed = true;
+      continue;
+    }
+    out[field.apiName] = coerced;
+  }
+  return failed ? undefined : out;
 }
 
 // ---------------------------------------------------------------------------

@@ -68,6 +68,21 @@ export const moduleDefinitionSchema = z
     variables: z.array(z.unknown()).default([]),
     widgets: z.array(z.unknown()).default([]),
     sections: z.array(z.unknown()).optional(),
+    // E29/E30 — module-level event definitions referenced by button widgets.
+    // Optional + backward compatible; a button whose `config.buttonGroup
+    // .buttons[].events[].id` matches one of these dispatches it on click and
+    // the matching event assigns `value` to `variableId`.
+    events: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1),
+            variableId: z.string().min(1).optional(),
+            value: z.unknown().optional(),
+          })
+          .strict(),
+      )
+      .optional(),
     header: moduleHeaderSchema,
     layout: z
       .object({

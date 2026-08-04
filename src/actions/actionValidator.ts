@@ -27,7 +27,7 @@ import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import type { CompiledEdit } from "./ruleCompiler";
-import { evaluateSubmissionCriteria, type SubmissionSubject } from "./submissionCriteria";
+import { evaluateSubmissionCriteria, resolveObjectPropertyOperands, type SubmissionSubject } from "./submissionCriteria";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
@@ -193,7 +193,8 @@ export async function validateAction(
   const validation = await validateParameters(
     actionType.parameters as ParameterDefinition[],
     parameters,
-    objectExists
+    objectExists,
+    fetchObject
   );
 
   if (!validation.valid) {
@@ -211,10 +212,19 @@ export async function validateAction(
     groups: [],
   };
 
+  // D27 — pre-resolve object-property operands against the live referenced-
+  // object state before evaluating criteria (same path as the executor).
+  const objectPropertyValues = await resolveObjectPropertyOperands(
+    actionType.submission_criteria,
+    resolvedParameters as Record<string, unknown>,
+    actionType.parameters as ReadonlyArray<{ apiName: string; objectType?: string }>,
+    fetchObject,
+  );
   const submission = evaluateSubmissionCriteria(
     actionType.submission_criteria,
     resolvedParameters as Record<string, unknown>,
     subject,
+    objectPropertyValues,
   );
 
   if (!submission.ok) {

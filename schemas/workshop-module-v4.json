@@ -43,6 +43,20 @@
       "type": "array",
       "items": { "$ref": "#/$defs/section" }
     },
+    "events": {
+      "type": "array",
+      "description": "Module-level event definitions (E29/E30). A button whose `config.buttonGroup.buttons[].events[].id` references one of these ids dispatches it on click; the matching event sets `variableId` to `value`, populating Workshop variables that feed action-parameter defaults and conditional button state. Optional and backward compatible — modules authored without events behave exactly as before.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
+          "variableId": { "type": "string", "minLength": 1 },
+          "value": { "description": "Any JSON value assigned to the variable when the event fires." }
+        }
+      }
+    },
     "header": {
       "type": "object",
       "additionalProperties": false,
