@@ -185,6 +185,19 @@ async function getByApiName(ontologyId: string, apiName: string) {
       .map((lt: any) => {
         const isSource = lt.source_object_type === objectType.object_type_id;
         const isTarget = lt.target_object_type === objectType.object_type_id;
+        // A5/A6 — surface, at config time, whether this link's foreign-key
+        // property IS the primary key of the FK-bearing object type (the
+        // linked-type misconfiguration that would silently rename an object).
+        // For a forward link the FK sits on the SOURCE (this object); for a
+        // reverse/bidirectional link the FK sits on the TARGET (this object).
+        // Either way the FK-bearing object is THIS object type, so compare the
+        // relevant FK property id to this object's primary_key_property_id.
+        const fkPropertyId = isSource
+          ? lt.source_property_id
+          : lt.target_property_id;
+        const isFkPrimaryKey =
+          fkPropertyId != null &&
+          fkPropertyId === objectType.primary_key_property_id;
         if (isSource && isTarget) {
           // Self-referential — show as forward
           return {
@@ -193,6 +206,7 @@ async function getByApiName(ontologyId: string, apiName: string) {
             targetObjectType: apiName, // self-ref points to itself
             cardinality: lt.cardinality,
             direction: "forward",
+            isFkPrimaryKey,
           };
         } else if (isSource) {
           return {
@@ -201,6 +215,7 @@ async function getByApiName(ontologyId: string, apiName: string) {
             targetObjectType: lt._targetApiName, // resolved below
             cardinality: lt.cardinality,
             direction: "forward",
+            isFkPrimaryKey,
           };
         } else if (isTarget && lt.is_bidirectional) {
           return {
@@ -209,6 +224,7 @@ async function getByApiName(ontologyId: string, apiName: string) {
             targetObjectType: lt._sourceApiName, // resolved below
             cardinality: invertCardinality(lt.cardinality),
             direction: "reverse",
+            isFkPrimaryKey,
           };
         }
         // Non-bidirectional link where this object is the target — skip
