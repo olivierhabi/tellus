@@ -61,6 +61,7 @@ import {
 import { migrateLinkStorage } from "../services/linkStorageMigrator";
 import { maybeServingEdgeResolver } from "../services/serving/linkServingStore";
 import { resolveRequestTenant } from "../utils/requestTenant";
+import { query } from "../db";
 
 // `router` is declared further below, alongside the `:apiName` param
 // resolver, so the resolver and the route handlers stay co-located.
@@ -262,8 +263,44 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
     const nextPageToken = offset + size < linkTypes.length
       ? encodePageToken(offset + size) : undefined;
 
+    // A5/A6 — enrich each linkType with `isFkPrimaryKey` (the FK property IS
+    // the PK of the FK-bearing object type) by comparing the link's FK
+    // property id to the source/target object type's primary_key_property_id.
+    // For a forward link the FK is on the source; for a bidirectional reverse
+    // the FK is on the target too. (Cheap per-page: one query per unique
+    // object-type referenced.)
+    const pkCache = new Map<string, string | null>();
+    const pkOf = async (ot: string): Promise<string | null> => {
+      if (!ot || pkCache.has(ot)) return pkCache.get(ot) ?? null;
+      try {
+        const r = await query(
+          "SELECT primary_key_property_id FROM object_type WHERE object_type_id = $1",
+          [ot],
+        );
+        const pk = (r.rows[0] as any)?.primary_key_property_id ?? null;
+        pkCache.set(ot, pk);
+        return pk;
+      } catch {
+        pkCache.set(ot, null);
+        return null;
+      }
+    };
+
+    const formatted = await Promise.all(
+      paged.map(async (lt: any) => {
+        const sp = lt.source_property_id;
+        const tp = lt.target_property_id;
+        const spk = sp ? await pkOf(lt.source_object_type) : null;
+        const tpk = tp && lt.is_bidirectional ? await pkOf(lt.target_object_type) : null;
+        const isFkPk =
+          (sp != null && spk != null && sp === spk) ||
+          (tp != null && tpk != null && tp === tpk);
+        return formatLinkType(lt, Boolean(isFkPk));
+      }),
+    );
+
     return sendSuccess(res, {
-      data: paged.map(formatLinkType),
+      data: formatted,
       totalCount: linkTypes.length,
       nextPageToken: nextPageToken || null,
     });
@@ -333,7 +370,7 @@ router.post("/import", requireOntologyWrite, async (req: Request, res: Response,
     const result = await linkTypeModel.bulkInsert(ontologyId, linkTypes);
 
     return sendSuccess(res, {
-      created: result.created.map(formatLinkType),
+      created: result.created.map((lt: any) => formatLinkType(lt)),
       skipped: result.skipped,
       failed: result.failed,
       summary: {
@@ -1010,7 +1047,7 @@ router.post("/:apiName/validateMigration", async (req: Request, res: Response, n
 // Format helper
 // ---------------------------------------------------------------------------
 
-function formatLinkType(row: any): Record<string, unknown> {
+function formatLinkType(row: any, isFkPrimaryKey: boolean = false): Record<string, unknown> {
   return {
     linkTypeId: row.link_type_id,
     apiName: row.api_name,
@@ -1025,6 +1062,9 @@ function formatLinkType(row: any): Record<string, unknown> {
     joinTableSourceColumn: row.join_table_source_column || null,
     joinTableTargetColumn: row.join_table_target_column || null,
     isBidirectional: row.is_bidirectional || false,
+    // A5/A6 — whether the link's FK property IS the PK of the FK-bearing
+    // object type; the FE surfaces a config-time editor error per the brief.
+    isFkPrimaryKey,
     // LT-B1
     storageBackend: row.storage_backend ?? "csv_legacy",
     icebergTableName: row.iceberg_table_name ?? null,
