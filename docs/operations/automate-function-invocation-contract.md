@@ -93,20 +93,34 @@ limits, and single-attempt failure isolation (no sync fallback). It does
 **not** provide: kernel-level isolation, network or filesystem denial,
 child-process denial, or secret isolation beyond the env allowlist.
 
-Consequences are enforced in code:
+Consequences are enforced in code (`authorizePublish()` in
+`functions/executionPolicy.ts`, migration 164):
 
-* `FUNCTION_EXECUTION_TRUST_MODE=trusted-authors-only` (**default**):
-  only principals in `FUNCTION_TRUSTED_AUTHOR_IDS` (exact match against the
-  bound principal user id) may publish executable Functions
-  (`POST /api/code-repos/:rid/tags` and
-  `POST /api/functions/:repositoryRid/versions` — 403
-  `CodeRepos:PermissionDenied` / `Functions:PermissionDenied`,
-  reason `function-author-not-trusted`).
+* **Keycloak publish role**: callers whose token carries
+  `FUNCTION_PUBLISH_ROLE` (default `function:publish`) may publish globally.
+* **DB grants** (`function_publish_grants`): active, non-revoked,
+  non-expired grants scoped `global` or to one repository RID, matched on
+  the local `users.id` or the Keycloak `sub`. Superadmins manage them via
+  `POST|DELETE|GET /api/v1/functions/admin/function-publish-grants`
+  (revocation is effective on the next request — no restart). Prefer
+  time-bound grants (`expiresAt`).
+* **Legacy env allowlist** (`FUNCTION_TRUSTED_AUTHOR_IDS`): still honored
+  as a deprecated migration fallback — a once-per-process warning is logged
+  and admissions are audited with `decision_source: env_allowlist`. Import
+  entries with `scripts/import-function-trusted-authors.ts`, then unset it.
 * `FUNCTION_EXECUTION_TRUST_MODE=open-development`: explicit development
   override. **Refused when `NODE_ENV=production`** (falls back to
   trusted-authors-only, logs `functions.execution_policy.open_mode_refused`).
+* Anything else is denied (403 `CodeRepos:PermissionDenied` /
+  `Functions:PermissionDenied`). Every decision — allow AND deny — is
+  persisted to `function_publish_audit_log` (query it via
+  `GET /api/v1/functions/admin/function-publish-audit-log`); an allow whose
+  audit write fails is refused (500 `publish-audit-unavailable`) because
+  publication is security-sensitive. Grants/authorization state are never
+  cached across requests.
 * Test lanes set `open-development` explicitly; the gate itself has dedicated
-  tests (`tests/unit/functions/executionPolicy-unit.test.ts`).
+  tests (`tests/unit/functions/executionPolicy-unit.test.ts`,
+  `tests/integration/code-repos/functions/publish-grants-integration.test.ts`).
 
 ### Threat model (documented, not mitigated by vm/worker_threads)
 A malicious function artifact can: consume CPU/memory within the worker's
