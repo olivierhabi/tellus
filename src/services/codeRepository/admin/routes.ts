@@ -31,8 +31,7 @@ import type { Pool } from "pg";
 import { isRid, isStructurallyRid, mintFunctionVersionRid } from "../../codeRepos/contracts/rid";
 import { publishVersion, listVersions } from "../../functionsRegistry/store";
 import {
-  executionPolicy,
-  isPublishAuthorTrusted,
+  authorizePublish,
 } from "../../functions/executionPolicy";
 import { parseSemver, compareSemver, isPreviewRelease } from "../../functionsRegistry/semver";
 import {
@@ -2002,36 +2001,52 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       const rid = req.params.rid;
       if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
 
-      // Publish trust gate (execution security boundary): the current
-      // executor is worker_threads + vm — NOT an untrusted-code sandbox —
-      // so publishing executable Functions is restricted to trusted authors
-      // unless FUNCTION_EXECUTION_TRUST_MODE=open-development explicitly
-      // opts out (never honored in production). See
-      // functions/executionPolicy.ts and
+      // Publish authorization gate (execution security boundary): the
+      // current executor is worker_threads + vm — NOT an untrusted-code
+      // sandbox — so publishing executable Functions requires the publish
+      // role, an active function_publish_grants entry, the legacy env
+      // allowlist (deprecated), or open-development mode (never honored in
+      // production). Every decision is persisted to
+      // function_publish_audit_log; an allow whose audit write fails is
+      // refused. See functions/executionPolicy.ts and
       // docs/operations/automate-function-invocation-contract.md.
       const publishPrincipal = req.codeReposPrincipal;
       if (!publishPrincipal) {
         return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
       }
-      if (
-        !isPublishAuthorTrusted({
-          userId: publishPrincipal.userId,
-          keycloakSub: publishPrincipal.keycloakSub,
-        })
-      ) {
+      // Read the tag early so the audit record can carry release_tag; full
+      // SemVer validation happens below after the authorization check.
+      const requestedTag = typeof (req.body as { semver?: unknown })?.semver === "string"
+        ? ((req.body as { semver: string }).semver)
+        : typeof (req.body as { tag?: unknown })?.tag === "string"
+          ? ((req.body as { tag: string }).tag)
+          : null;
+      const publishDecision = await authorizePublish(pool, {
+        localUserId: publishPrincipal.userId,
+        keycloakSub: publishPrincipal.keycloakSub,
+        roles: publishPrincipal.roles,
+        repositoryRid: rid,
+        releaseTag: requestedTag,
+      });
+      if (!publishDecision.allowed) {
         console.warn(
           JSON.stringify({
-            type: "functions.publish.trust_gate_denied",
+            type: "functions.publish.authorization_denied",
             repositoryRid: rid,
             userId: publishPrincipal.userId,
-            trustMode: executionPolicy().trustMode,
+            reason: publishDecision.reason,
           }),
         );
+        if (publishDecision.auditFailed) {
+          return sendError(
+            res,
+            codeReposError("CodeRepos:Internal", { reason: "publish-audit-unavailable" }),
+          );
+        }
         return sendError(
           res,
           codeReposError("CodeRepos:PermissionDenied", {
-            reason:
-              "function-author-not-trusted: this deployment restricts Function publication to trusted authors (FUNCTION_EXECUTION_TRUST_MODE=trusted-authors-only) because the executor is not yet an untrusted-code sandbox. Ask a platform administrator to add your user id to FUNCTION_TRUSTED_AUTHOR_IDS.",
+            reason: publishDecision.reason,
           }),
         );
       }

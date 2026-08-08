@@ -21,8 +21,8 @@ import {
 } from "../pagination.js";
 import { readCanonicalSignature } from "../../functions/canonicalSignature.js";
 import {
+  authorizePublish,
   executionPolicy,
-  isPublishAuthorTrusted,
 } from "../../functions/executionPolicy.js";
 
 /**
@@ -525,24 +525,49 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
       sendError(res, functionsError("Functions:InvalidArgument", { reason: "invalid-repository-rid" }));
       return;
     }
-    // Publish trust gate (execution security boundary): executable
-    // artifacts are accepted only from trusted authors while the executor
-    // is not an untrusted-code sandbox. See functions/executionPolicy.ts.
+    // Publish authorization gate (execution security boundary): executable
+    // artifacts are accepted only from authorized authors while the executor
+    // is not an untrusted-code sandbox. Every decision is persisted to
+    // function_publish_audit_log; an allow whose audit write fails is
+    // refused. See functions/executionPolicy.ts.
     {
       const principal = req.codeReposPrincipal;
-      if (
-        !principal ||
-        !isPublishAuthorTrusted({
-          userId: principal.userId,
-          keycloakSub: principal.keycloakSub,
-        })
-      ) {
+      if (!principal) {
         sendError(
           res,
-          functionsError("Functions:PermissionDenied", {
-            reason:
-              "function-author-not-trusted: publication is restricted to trusted authors (FUNCTION_EXECUTION_TRUST_MODE) because the executor is not yet an untrusted-code sandbox.",
+          functionsError("Functions:Unauthenticated", { reason: "principal-not-bound" }),
+        );
+        return;
+      }
+      const decision = await authorizePublish(deps.pool, {
+        localUserId: principal.userId,
+        keycloakSub: principal.keycloakSub,
+        roles: principal.roles,
+        repositoryRid,
+        releaseTag:
+          typeof (req.body as { semver?: unknown })?.semver === "string"
+            ? (req.body as { semver: string }).semver
+            : null,
+      });
+      if (!decision.allowed) {
+        console.warn(
+          JSON.stringify({
+            type: "functions.publish.authorization_denied",
+            repositoryRid,
+            userId: principal.userId,
+            reason: decision.reason,
           }),
+        );
+        if (decision.auditFailed) {
+          sendError(
+            res,
+            functionsError("Functions:Internal", { reason: "publish-audit-unavailable" }),
+          );
+          return;
+        }
+        sendError(
+          res,
+          functionsError("Functions:PermissionDenied", { reason: decision.reason }),
         );
         return;
       }
