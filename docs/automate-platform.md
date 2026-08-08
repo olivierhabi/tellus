@@ -141,6 +141,7 @@ administrator groups are supported. Inaccessible records are not disclosed.
 | `POST /api/v1/automations/preview/notification` | `{ effect }` | Sanitized render; never sends |
 | `POST /api/v1/automations/preview/threshold` | ontology ID and threshold condition | Permission-aware dry evaluation of metrics and pinned Boolean Functions |
 | `POST /api/v1/automations/drafts` | ontology ID, optional definition | Server draft, revision and ETag |
+| `POST /api/v1/automations/repin` | `{ actionTypeId, strategy: "latest-compatible", dryRun }` | Fleet re-pin of action pins to the current definition via the compatibility classifier; dry-run returns identical classification with zero writes; applied migrations audit `AUTOMATION_EFFECT_PIN_UPGRADED` |
 | `GET /api/v1/automations` | ontology, cursor, limit | Permission-filtered paginated list |
 | `GET /api/v1/automations/:id` | none | Definition, state, revision and ETag |
 | `PATCH /api/v1/automations/:id/draft` | revision, definition | Updated draft or version conflict |
@@ -167,6 +168,19 @@ Errors use stable codes such as `AUTOMATION_DEFINITION_INVALID`,
 `AUTOMATION_VERSION_CONFLICT`, `ACTION_SCHEMA_CHANGED`,
 `BINDING_TYPE_MISMATCH`, and `OWNER_PERMISSION_DENIED`. Responses do not expose
 internal stack traces.
+
+Action-effect pins are tracked in four tiers on activation validation:
+`ACTION_DEFINITION_CHANGED_COMPATIBLE` (warning — pin auto-refreshed on
+activation, `AUTOMATION_EFFECT_PIN_UPGRADED` audit), content-only refreshes
+(`AUTOMATION_EFFECT_PIN_REFRESHED`), `ACTION_DEFINITION_CHANGED_BREAKING`
+(hard error carrying a structural `changes[]` summary plus remediation:
+re-select the action type in the effect editor), and the legacy alias
+`ACTION_DEFINITION_CHANGED` for pins whose pre-history snapshot is
+unknowable. See `src/services/automate/actionDefinitionCompat.ts` for the
+evolution rule table (the single source of truth); edit-time call sites:
+`POST /api/v1/ontology/:ontologyId/actionTypes/:apiName/blastRadius`
+(pre-save blast radius) and the `blastRadius` field on the action-type PATCH
+response.
 
 ## Persistence
 
