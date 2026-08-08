@@ -19,6 +19,7 @@ import {
   transitionAutomation,
   updateDraft,
 } from "../services/automate/repository";
+import { repinAutomationsForActionType } from "../services/automate/repin";
 import {
   validateAutomationDraft,
   validateAutomationForActivation,
@@ -57,6 +58,11 @@ const TransitionSchema = z.object({
 const PreviewThresholdSchema = z.object({
   ontologyId: DatabaseUuidSchema,
   condition: ThresholdConditionSchema,
+});
+const RepinSchema = z.object({
+  actionTypeId: DatabaseUuidSchema,
+  strategy: z.literal("latest-compatible"),
+  dryRun: z.boolean(),
 });
 
 function actor(req: Request): { id: string; displayName?: string } {
@@ -102,6 +108,10 @@ function sendAutomationError(
   res: Response,
   error: unknown,
 ): void {
+  if (!(error instanceof AutomationServiceError) && !(error instanceof z.ZodError)) {
+    // The 500 wrapper otherwise erases the cause — always log it.
+    console.error("[automations] unhandled error", error);
+  }
   const serviceError =
     error instanceof AutomationServiceError
       ? error
@@ -279,6 +289,29 @@ router.post(
         candidate.status ?? 422,
       );
     }
+  }),
+);
+
+/**
+ * Bulk re-pin every Automate Action effect pinned to a given Action Type
+ * onto the current definition — strictly via the compatibility classifier.
+ * dryRun=true: report-only, zero writes, zero audit events.
+ */
+router.post(
+  "/repin",
+  requireOntologyWrite,
+  handler(async (req, res) => {
+    const body = RepinSchema.parse(req.body);
+    const principal = actor(req);
+    const outcome = await repinAutomationsForActionType({
+      actionTypeId: body.actionTypeId,
+      tenantId: resolveRequestTenant(req),
+      actorUserId: principal.id,
+      strategy: body.strategy,
+      dryRun: body.dryRun,
+      requestId: requestId(req),
+    });
+    res.status(200).json({ data: outcome });
   }),
 );
 
