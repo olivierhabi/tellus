@@ -491,7 +491,7 @@ export type PinCheck =
  *     ACTION_DEFINITION_CHANGED applies — deprecated alias, kept for
  *     old null-hash pins.
  */
-function checkPinnedActionDefinition(
+export function checkPinnedActionDefinition(
   effect: Extract<EffectDraft, { type: "action" }>,
   row: ActionTypeValidationRow,
   pinnedCanonical?: unknown | null,
@@ -615,7 +615,7 @@ function checkPinnedActionDefinition(
   };
 }
 
-type ActionTypeValidationRow = {
+export type ActionTypeValidationRow = {
   action_type_id: string;
   api_name: string;
   is_enabled: boolean;
