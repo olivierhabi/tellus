@@ -33,10 +33,15 @@ import { publishVersion, listVersions } from "../../functionsRegistry/store";
 import {
   authorizePublish,
 } from "../../functions/executionPolicy";
+import {
+  FUNCTION_IDENTITY_RE,
+  parseFunctionPath,
+} from "../../functions/discovery";
 import { parseSemver, compareSemver, isPreviewRelease } from "../../functionsRegistry/semver";
 import {
   createS3FunctionArtifactStore,
   FunctionArtifactError,
+  resolveFunctionSource,
 } from "../../functionsRegistry/artifactStore";
 import { ERROR_CODES } from "../../codeRepos/contracts/errors";
 import { requireCodeReposAuth } from "../../codeRepos/middleware/principal";
@@ -2131,13 +2136,15 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         return sendError(res, codeReposError("CodeRepos:Internal", { reason: "tree-read-failed" }));
       }
       const commitSha = tree.treeSha; // content-pinned identifier of the release tree
-      const FN_RE = /(^|\/)src\/functions\/([A-Za-z_][A-Za-z0-9_]*)\.ts$/;
       const discovered: Array<{ apiName: string; path: string }> = [];
       for (const entry of tree.entries) {
         if (entry.type !== "blob") continue;
-        if (entry.name.includes(".test.")) continue;
-        const m = FN_RE.exec(entry.path);
-        if (m) discovered.push({ apiName: m[2], path: entry.path });
+        // Shared identity rules (functions/discovery.ts): nested folders
+        // under src/functions/ are first-class; the path is the identity.
+        const parsed = parseFunctionPath(entry.path);
+        if (parsed !== null && parsed.runtime === "NODE_20") {
+          discovered.push({ apiName: parsed.apiName, path: entry.path });
+        }
       }
       if (discovered.length === 0) {
         return sendError(res, codeReposError("CodeRepos:NoFunctionsToPublish", { branch }));
@@ -2320,6 +2327,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       type MergedFunctionRow = {
         apiName: string;
         versionRid: string | null;
+        /** Stable registry RID for deep-links (function_registry_function). */
+        functionRid: string | null;
         semver: string | null;
         branch: string;
         isPreview: boolean;
@@ -2328,6 +2337,13 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         publishedAt: string | null;
         source: "published" | "working_tree";
         path: string | null;
+        /** Path under `src/functions/` WITH extension (e.g. "orders/calc.ts")
+         *  — drives the FE's subdirectory grouping (Foundry parity). */
+        relativePath: string | null;
+        /** True when the row exists ONLY as an uncommitted draft. */
+        draftOnly: boolean;
+        /** True when a committed file has an open (uncommitted) draft edit. */
+        hasDraft: boolean;
         /** Object-type apiName the function binds to (from `@ontology/sdk`
          *  import / `ObjectSet<X>`), or null for a pure utility. The FE
          *  overlays the ontology display name + icon + colour. */
@@ -2369,13 +2385,22 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         for (const r of rowsRes.rows) {
           const exportsRaw = r.manifest_json?.exports;
           if (!Array.isArray(exportsRaw)) continue;
+          // Ontology bindings stamped at publish time (functionsPublish
+          // worker, manifest.objectTypes). Historical manifests predate the
+          // field — their rows fall back to live-tree inference below.
+          const manifestObjectTypes =
+            r.manifest_json && typeof (r.manifest_json as { objectTypes?: unknown }).objectTypes === "object"
+              ? ((r.manifest_json as { objectTypes: Record<string, unknown> }).objectTypes)
+              : null;
           for (const name of exportsRaw) {
             if (typeof name !== "string" || name.length === 0) continue;
             const prev = byApiName.get(name);
             if (prev === undefined || compareSemverLoose(r.semver, prev.semver ?? "") > 0) {
+              const stamped = manifestObjectTypes?.[name];
               byApiName.set(name, {
                 apiName: name,
                 versionRid: r.rid,
+                functionRid: null, // resolved per-export below (registry deep-link)
                 semver: r.semver,
                 branch: r.branch,
                 isPreview: r.is_preview,
@@ -2388,10 +2413,12 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                     : new Date(r.published_at).toISOString(),
                 source: "published",
                 path: null,
-                // Stamped from the working-tree source below (published
-                // versions share their apiName's `src/functions/<name>.ts`
-                // file on the branch); stays null for published-only fns.
-                objectTypeName: null,
+                relativePath: null,
+                draftOnly: false,
+                hasDraft: false,
+                // Publish-time binding from manifest.objectTypes when present;
+                // historical manifests fall back to live-tree inference below.
+                objectTypeName: typeof stamped === "string" ? stamped : null,
                 objectTypeIcon: null,
               });
             }
@@ -2430,18 +2457,16 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           depth: 5,
         });
         if (tree.kind === "ok") {
-          const FUNCTIONS_DIR_RE = /(^|\/)src\/functions\/([A-Za-z_][A-Za-z0-9_]*)\.(ts|py)$/;
           for (const entry of tree.entries) {
             if (entry.type !== "blob") continue;
-            const m = FUNCTIONS_DIR_RE.exec(entry.path);
-            if (m === null) continue;
-            const apiName = m[2];
-            const ext = m[3];
-            // Skip test files and obvious non-functions defensively (the
-            // convention says one function per file, but a `helloWorld.test.ts`
-            // sibling could land in the same directory in real repos).
-            if (apiName.endsWith("Test") || entry.name.includes(".test.")) continue;
-            if (wtSeen.has(apiName)) continue; // one working-tree entry per apiName
+            // Shared identity rules (functions/discovery.ts): nested folders
+            // supported — identity is the path under src/functions/ without
+            // extension ("orders/calc"); root files keep their basename.
+            const parsed = parseFunctionPath(entry.path);
+            if (parsed === null) continue;
+            const { apiName } = parsed;
+            const ext = parsed.relativePath.endsWith(".py") ? "py" : "ts";
+            if (wtSeen.has(apiName)) continue; // one working-tree entry per identity
             wtSeen.add(apiName);
             // Infer the bound object type from the source. TS only — Python
             // functions use a different convention and surface null (utility)
@@ -2467,14 +2492,18 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             workingTree.push({
               apiName,
               versionRid: null,
+              functionRid: null,
               semver: null,
               branch,
               isPreview: true,
-              runtime: ext === "py" ? "PY_311" : "NODE_20",
+              runtime: parsed.runtime,
               commitSha: null,
               publishedAt: null,
               source: "working_tree",
               path: entry.path,
+              relativePath: parsed.relativePath,
+              draftOnly: false,
+              hasDraft: false,
               objectTypeName,
               objectTypeIcon: null, // FE overlays icon/colour from the ontology
             });
@@ -2485,12 +2514,85 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         // published-versions response.
       }
 
-      // Stamp the bound object type onto published rows too (by apiName), so
-      // the FE's published-first dedup keeps the type. Published-only functions
-      // with no working-tree file stay null.
+      // ---- Draft overlay (Foundry live-preview parity) ---------------------
+      // Uncommitted editor work must appear in Live Preview BEFORE any
+      // commit. Drafts are per-user (principal_sub), read fresh. A draft
+      //     * editing a tracked file     → row content re-inferred from DRAFT
+      //     * adding a NEW function file → extra row flagged draftOnly
+      // File deletions are not drafts — the FE commits deletes immediately.
+      const wtByApiName = new Map(workingTree.map((row) => [row.apiName, row]));
+      const publishPrincipal = req.codeReposPrincipal;
+      if (publishPrincipal) {
+        try {
+          const principalSub = isUuidV4(publishPrincipal.userId)
+            ? publishPrincipal.userId
+            : derivePrincipalSubUuid(publishPrincipal.userId);
+          const drafts = await listDrafts(pool, { principalSub, repositoryRid: rid, branch });
+          for (const draft of drafts) {
+            const parsed = parseFunctionPath(draft.path);
+            if (parsed === null) continue;
+            const existing = wtByApiName.get(parsed.apiName);
+            const objectTypeName =
+              parsed.runtime === "NODE_20" ? inferFunctionObjectType(draft.content) : null;
+            objectTypeByApi.set(parsed.apiName, objectTypeName);
+            if (existing) {
+              // Draft wins over HEAD: the Live Preview tab reflects the
+              // editor, not the last commit.
+              existing.objectTypeName = objectTypeName;
+              existing.hasDraft = true;
+            } else {
+              const row: MergedFunctionRow = {
+                apiName: parsed.apiName,
+                versionRid: null,
+                functionRid: null,
+                semver: null,
+                branch,
+                isPreview: true,
+                runtime: parsed.runtime,
+                commitSha: null,
+                publishedAt: null,
+                source: "working_tree",
+                path: draft.path,
+                relativePath: parsed.relativePath,
+                draftOnly: true,
+                hasDraft: true,
+                objectTypeName,
+                objectTypeIcon: null,
+              };
+              workingTree.push(row);
+              wtByApiName.set(parsed.apiName, row);
+            }
+          }
+        } catch {
+          // Draft overlay is best-effort — the committed discovery above is
+          // authoritative on its own.
+        }
+      }
+
+      // Stamp the bound object type onto published rows WITHOUT a publish-time
+      // `objectTypes` entry (historical manifests) via live-tree inference.
       for (const row of byApiName.values()) {
-        if (objectTypeByApi.has(row.apiName)) {
+        if (row.objectTypeName === null && objectTypeByApi.has(row.apiName)) {
           row.objectTypeName = objectTypeByApi.get(row.apiName) ?? null;
+        }
+      }
+
+      // Resolve registry function RIDs for deep-links (one query for all
+      // published exports on this repo; retired rows excluded).
+      if (byApiName.size > 0) {
+        try {
+          const apiNames = [...byApiName.keys()];
+          const ridRes = await pool.query<{ rid: string; api_name: string }>(
+            `SELECT rid, api_name FROM function_registry_function
+              WHERE repository_rid = $1 AND api_name = ANY($2::text[]) AND retired_at IS NULL`,
+            [rid, apiNames],
+          );
+          const ridByApi = new Map(ridRes.rows.map((r) => [r.api_name, r.rid]));
+          for (const row of byApiName.values()) {
+            row.functionRid = ridByApi.get(row.apiName) ?? null;
+          }
+        } catch {
+          // Deep-link enrichment is optional — never fail the listing for it.
         }
       }
 
@@ -2534,12 +2636,14 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         applyEdits?: unknown;
       };
       const apiName = typeof body.apiName === "string" ? body.apiName : "";
-      if (!apiName || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiName) || apiName.length > 128) {
+      // Identity can be a plain identifier ("calc") or a directory-qualified
+      // path under src/functions/ ("orders/calc") — see functions/discovery.ts.
+      if (!apiName || !FUNCTION_IDENTITY_RE.test(apiName) || apiName.length > 256) {
         return sendError(
           res,
           codeReposError("CodeRepos:InvalidArgumentBody", {
             field: "apiName",
-            reason: "required; must match [A-Za-z_][A-Za-z0-9_]{0,127}",
+            reason: "required; must be a function identity (identifier or nested path under src/functions/)",
           }),
         );
       }
@@ -2652,21 +2756,25 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       } else if (body.source === "published") {
         // Path B (published) — run the artifact registered by Tag & Release.
         // Resolve the highest-semver AVAILABLE version on the branch and pull
-        // the function's source from its bundle manifest.
+        // the function's source through resolveFunctionSource: compact
+        // bundle manifests read from the artifact store, historical inline
+        // manifests (manifest.sources) keep working.
         const versions = await listVersions(deps.pool, rid, { branch, includeYanked: false });
-        let chosen: { semver: string; sources: Record<string, string> } | null = null;
+        let chosen: { semver: string; source: string } | null = null;
         for (const v of versions) {
-          const m = v.manifest as { sources?: Record<string, unknown> };
-          const src = m.sources && typeof m.sources[apiName] === "string" ? (m.sources[apiName] as string) : null;
+          const src = await resolveFunctionSource(
+            { manifest_json: v.manifest as { sources?: Record<string, unknown> } | null, artifact_blob_id: v.artifactBlobId },
+            apiName,
+          );
           if (src === null) continue;
           if (chosen === null || compareSemver(parseSemver(v.semver), parseSemver(chosen.semver)) > 0) {
-            chosen = { semver: v.semver, sources: { [apiName]: src } };
+            chosen = { semver: v.semver, source: src };
           }
         }
         if (chosen === null) {
           return sendError(res, codeReposError("CodeRepos:FunctionNotFound", { apiName, source: "published" }));
         }
-        source = chosen.sources[apiName];
+        source = chosen.source;
         runtime = "NODE_20";
         resolvedPath = `published:${chosen.semver}`;
       } else {
@@ -2682,6 +2790,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         if (tree.kind !== "ok") {
           return sendError(res, codeReposError("CodeRepos:FunctionNotFound", { apiName }));
         }
+        // apiName is the identity (path under src/functions/ without ext),
+        // so nested functions resolve to src/functions/<identity>.{ts,py}.
         const FN_RE = new RegExp(
           `(^|\\/)src\\/functions\\/${apiName.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\.(ts|py)$`,
         );

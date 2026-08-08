@@ -35,6 +35,10 @@ const MIGS = [
   "051_code_repos_audit.sql",
   "053_b2_code_repository.sql",
   "055_b8_functions_registry.sql",
+  // 104: draft overlay in GET /:rid/functions (Live Preview sees editor state)
+  "104_uncommitted_drafts.sql",
+  // 116: function_registry_function — deep-link rids on published rows
+  "116_functions_publish_jobs.sql",
 ];
 
 let schema: TestSchema;
@@ -339,5 +343,132 @@ describe("B2-C-13 — GET /api/v1/code-repositories/:rid/functions (integration)
     const res = await withAuth(request(app).get(`/api/v1/code-repositories/${fakeRid}/functions`));
     expect(res.status).toBe(404);
     expect(res.body.errorName).toBe("CodeRepos:RepositoryNotFound");
+  });
+});
+
+describe("B2-C-13 — subdirectory identity, draft overlay, manifest bindings (Foundry parity)", () => {
+  const TS_FN = "export default function calc(): number { return 1; }";
+  const TS_TYPED =
+    'import { Objects } from "@ontology/sdk";\nexport default function helloWorld(): Promise<number> { return Promise.resolve(1); }';
+
+  async function putDrafts(rid: string, path: string, content: string): Promise<void> {
+    const r = await withAuth(
+      request(app)
+        .put(`/api/v1/code-repositories/${rid}/branches/main/drafts`)
+        .set("Idempotency-Key", nextIdem()),
+    ).send({ drafts: [{ path, content }] });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+  }
+
+  it("discovers nested functions with path identity (orders/calc) + relativePath", async () => {
+    const rid = await createRepo("nested-discovery");
+    stemma.commitFiles({
+      repositoryRid: rid,
+      branch: "main",
+      message: "add nested fn",
+      files: [
+        {
+          path: "typescript-functions/src/functions/orders/calc.ts",
+          content: new TextEncoder().encode(TS_FN),
+          mode: "100644",
+        },
+      ],
+    });
+    const res = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}/functions`));
+    expect(res.status).toBe(200);
+    const nested = res.body.data.find(
+      (r: { apiName: string }) => r.apiName === "orders/calc",
+    );
+    expect(nested).toBeDefined();
+    expect(nested.source).toBe("working_tree");
+    expect(nested.relativePath).toBe("orders/calc.ts");
+    expect(nested.path).toBe("typescript-functions/src/functions/orders/calc.ts");
+    // Root-level function keeps its historical basename identity.
+    const root = res.body.data.find((r: { apiName: string }) => r.apiName === "helloWorld");
+    expect(root.relativePath).toBe("helloWorld.ts");
+  });
+
+  it("overlays draft-only functions (uncommitted, pre-commit) with draftOnly=true", async () => {
+    const rid = await createRepo("draft-only");
+    await putDrafts(rid, "typescript-functions/src/functions/newIdea.ts", TS_FN);
+    const res = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}/functions`));
+    const row = res.body.data.find((r: { apiName: string }) => r.apiName === "newIdea");
+    expect(row).toBeDefined();
+    expect(row.source).toBe("working_tree");
+    expect(row.draftOnly).toBe(true);
+    expect(row.path).toBe("typescript-functions/src/functions/newIdea.ts");
+  });
+
+  it("flags edited files with hasDraft=true and re-reads the binding from the draft", async () => {
+    const rid = await createRepo("draft-edit");
+    await putDrafts(rid, "typescript-functions/src/functions/helloWorld.ts", TS_TYPED);
+    const res = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}/functions`));
+    const row = res.body.data.find((r: { apiName: string }) => r.apiName === "helloWorld");
+    expect(row).toBeDefined();
+    expect(row.source).toBe("working_tree");
+    expect(row.hasDraft).toBe(true);
+    expect(row.draftOnly).toBe(false);
+  });
+
+  it("serves objectTypeName from the publish-time manifest, not the live tree", async () => {
+    const rid = await createRepo("manifest-binding");
+    const out = await publishVersion(schema.pool, {
+      rid: mintVersionRid(),
+      repositoryRid: rid,
+      branch: "main",
+      isPreview: false,
+      semver: "1.0.0",
+      commitSha: sha256("commit-manifest-binding").slice(0, 40),
+      runtime: "NODE_20",
+      artifactBlobId: "blob-manifest-binding",
+      artifactSha256: sha256("manifest-binding"),
+      artifactBytes: 1234,
+      manifest: { exports: ["pricingFn"], objectTypes: { pricingFn: "OlivierOrderJune" } },
+    });
+    expect(out.outcome).toBe("inserted");
+    const res = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}/functions`));
+    const row = res.body.data.find((r: { apiName: string }) => r.apiName === "pricingFn");
+    expect(row).toBeDefined();
+    expect(row.source).toBe("published");
+    expect(row.objectTypeName).toBe("OlivierOrderJune");
+  });
+
+  it("attaches the registry functionRid to published rows (deep-link)", async () => {
+    const rid = await createRepo("deep-link");
+    await schema.pool.query(
+      `INSERT INTO function_registry_function (rid, repository_rid, api_name, display_name, source_path)
+       VALUES ('ri.function-registry.main.function.${randomUUID()}', $1, 'helloWorld', 'helloWorld', 'typescript-functions/src/functions/helloWorld.ts')`,
+      [rid],
+    );
+    await seedPublish({ rid, apiName: "helloWorld", branch: "main", semver: "1.0.0", artifactSeed: "dl-1" });
+    const res = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}/functions`));
+    const row = res.body.data.find(
+      (r: { apiName: string; source: string }) => r.apiName === "helloWorld" && r.source === "published",
+    );
+    expect(row.functionRid).toMatch(/^ri\.function-registry\.main\.function\./);
+  });
+
+  it("publishes a nested function with its path identity end-to-end (invoke)", async () => {
+    const rid = await createRepo("nested-invoke");
+    stemma.commitFiles({
+      repositoryRid: rid,
+      branch: "main",
+      message: "add nested fn",
+      files: [
+        {
+          path: "typescript-functions/src/functions/orders/calc.ts",
+          content: new TextEncoder().encode(TS_FN),
+          mode: "100644",
+        },
+      ],
+    });
+    const res = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/functions/invoke`)
+        .set("Idempotency-Key", nextIdem()),
+    ).send({ apiName: "orders/calc", args: {}, source: "working_tree" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.body.result).toBe("1"); // numbers JSON-serialize on the wire
   });
 });

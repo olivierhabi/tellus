@@ -51,6 +51,8 @@ import {
   type FunctionType,
   type InvocationContract,
 } from "../functions/canonicalSignature";
+import { parseFunctionPath } from "../functions/discovery";
+import { inferFunctionObjectType } from "../codeRepository/functionObjectType";
 import {
   startLogRetentionMaintenance,
   type MaintenanceHandle,
@@ -939,7 +941,12 @@ export class FunctionsPublishService {
       const source = new TextDecoder().decode(blob.content);
       const metadata = inspectPublishedFunction(path, source);
       work.functions.push({
-        apiName: fileStem(path),
+        // Foundry parity: identity is the path relative to src/functions/
+        // WITHOUT the extension — root-level files keep their historic
+        // basename ("calc"), nested files are namespaced ("orders/calc"), so
+        // same-named files in different folders never collide. See
+        // functions/discovery.ts.
+        apiName: parseFunctionPath(path)?.apiName ?? fileStem(path),
         path,
         source,
         signature: metadata.signature,
@@ -1077,6 +1084,12 @@ export class FunctionsPublishService {
         work.functions.map((fn) => [fn.apiName, normalizeSignature(fn.signature)]),
       ),
       sourcePaths: Object.fromEntries(work.functions.map((fn) => [fn.apiName, fn.path])),
+      // Ontology binding captured AT PUBLISH TIME — the Published tab serves
+      // this from the immutable manifest, so a later working-tree refactor
+      // can never mislabel a released version. null = pure utility.
+      objectTypes: Object.fromEntries(
+        work.functions.map((fn) => [fn.apiName, inferFunctionObjectType(fn.source)]),
+      ),
       artifactFormat: "functions-publish-bundle/v1",
       runtime: "NODE_20",
       functionCount: work.functions.length,
