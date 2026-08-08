@@ -2,12 +2,18 @@ import type { Pool, PoolClient } from "pg";
 import {
   AutomationDraftSchema,
   type AutomationDraft,
+  type ActionEffectRepin,
   type EffectDraft,
   type ValidationIssue,
   type ValidationResult,
   type ValueBinding,
   type ThresholdExpression,
 } from "./contracts";
+import {
+  classifyActionDefinitionChange,
+  summarizeChanges,
+} from "./actionDefinitionCompat";
+import { actionDefinitionInputFromRow } from "../../actions/actionDefinitionCanonical";
 import {
   CONDITION_COMPATIBILITY,
   supportsEvaluationMode,
@@ -31,8 +37,9 @@ function issue(
   path?: string,
   effectId?: string,
   severity: ValidationIssue["severity"] = "error",
+  details?: Record<string, unknown>,
 ): ValidationIssue {
-  return { code, message, severity, step, path, effectId };
+  return { code, message, severity, step, path, effectId, details };
 }
 
 function collectBindings(effect: EffectDraft): ValueBinding[] {
@@ -461,55 +468,221 @@ export function validateAutomationDraft(raw: unknown): ValidationResult {
   };
 }
 
+type ActionValidationOutcome = {
+  issues: ValidationIssue[];
+  repin?: ActionEffectRepin;
+};
+
+/** Result of checking an effect's action-type pin against the live row. */
+export type PinCheck =
+  | { status: "unchanged" }
+  | { status: "repin"; repin: ActionEffectRepin; warning?: ValidationIssue }
+  | { status: "rejected"; issue: ValidationIssue };
+
+/**
+ * Pin check (Task 1 + Task 3 tiers):
+ *   • version equal                    → unchanged.
+ *   • versions differ AND both hashes present AND equal (content identical)
+ *     → REPIN "refreshed" (no issue, no noise).
+ *   • versions differ, hashes unknown/differ → classified by
+ *     actionDefinitionCompat (Task 3): compatible evolves the pin with a
+ *     warning; breaking rejects with a diff summary. When classification is
+ *     impossible (no history for the pinned version) the legacy hard error
+ *     ACTION_DEFINITION_CHANGED applies — deprecated alias, kept for
+ *     old null-hash pins.
+ */
+function checkPinnedActionDefinition(
+  effect: Extract<EffectDraft, { type: "action" }>,
+  row: ActionTypeValidationRow,
+  pinnedCanonical?: unknown | null,
+): PinCheck {
+  const currentVersion = row.definition_version ?? 1;
+  if (row.api_name === effect.actionApiName && currentVersion === effect.definitionVersion) {
+    return { status: "unchanged" };
+  }
+  if (row.api_name !== effect.actionApiName) {
+    return {
+      status: "rejected",
+      issue: issue(
+        "ACTION_DEFINITION_CHANGED_BREAKING",
+        `Action Type renamed: pin references '${effect.actionApiName}' but the current row is '${row.api_name}'. Open the effect editor, re-select the Action Type and verify its parameters.`,
+        "effects",
+        "effects.actionTypeId",
+        effect.id,
+        "error",
+        {
+          changes: [
+            {
+              code: "ACTION_TYPE_RENAMED",
+              severity: "breaking",
+              message: `action type apiName changed '${effect.actionApiName}' → '${row.api_name}'`,
+            },
+          ],
+        },
+      ),
+    };
+  }
+  // Identical content, different version: cosmetic/display-only edit.
+  if (
+    effect.definitionHash !== null &&
+    row.definition_hash !== null &&
+    effect.definitionHash === row.definition_hash
+  ) {
+    return {
+      status: "repin",
+      repin: {
+        effectId: effect.id,
+        actionTypeId: row.action_type_id,
+        actionApiName: row.api_name,
+        kind: "refreshed",
+        previousDefinitionVersion: effect.definitionVersion ?? currentVersion,
+        definitionVersion: currentVersion,
+        definitionHash: row.definition_hash,
+      },
+    };
+  }
+  // Task 3 seam: structural classification replaces this fallback when a
+  // history snapshot exists for the pinned version.
+  if (pinnedCanonical != null) {
+    const classification = classifyActionDefinitionChange(
+      pinnedCanonical,
+      actionDefinitionInputFromRow(row),
+    );
+    if (classification.kind === "identical") {
+      // Content-equal but hash missing on one side (lazy backfill era).
+      return {
+        status: "repin",
+        repin: {
+          effectId: effect.id,
+          actionTypeId: row.action_type_id,
+          actionApiName: row.api_name,
+          kind: "refreshed",
+          previousDefinitionVersion: effect.definitionVersion ?? currentVersion,
+          definitionVersion: currentVersion,
+          definitionHash: row.definition_hash,
+          changes: classification.changes,
+        },
+      };
+    }
+    if (classification.kind === "compatible") {
+      return {
+        status: "repin",
+        repin: {
+          effectId: effect.id,
+          actionTypeId: row.action_type_id,
+          actionApiName: row.api_name,
+          kind: "upgraded",
+          previousDefinitionVersion: effect.definitionVersion ?? currentVersion,
+          definitionVersion: currentVersion,
+          definitionHash: row.definition_hash,
+          changes: classification.changes,
+        },
+        warning: issue(
+          "ACTION_DEFINITION_CHANGED_COMPATIBLE",
+          `The selected Action Type definition changed compatibly (${summarizeChanges(classification.changes)}); the pin will be refreshed to the current definition on activation.`,
+          "effects",
+          "effects.actionTypeId",
+          effect.id,
+          "warning",
+          { changes: classification.changes },
+        ),
+      };
+    }
+    return {
+      status: "rejected",
+      issue: issue(
+        "ACTION_DEFINITION_CHANGED_BREAKING",
+        `The selected Action Type definition changed incompatibly (${summarizeChanges(classification.changes)}). Remediation: open the effect editor, re-select the Action Type, verify its parameters, then activate again.`,
+        "effects",
+        "effects.actionTypeId",
+        effect.id,
+        "error",
+        { changes: classification.changes },
+      ),
+    };
+  }
+  // Legacy path: pinned hash unknown (pre-pin era draft). Hard error —
+  // the deprecated-alias behavior retained for compatibility clients.
+  return {
+    status: "rejected",
+    issue: issue(
+      "ACTION_DEFINITION_CHANGED",
+      "The selected Action Type definition changed; review and reselect it. (Open the effect editor, re-select the Action Type and verify its parameters, then activate again.)",
+      "effects",
+      "effects.actionTypeId",
+      effect.id,
+    ),
+  };
+}
+
+type ActionTypeValidationRow = {
+  action_type_id: string;
+  api_name: string;
+  is_enabled: boolean;
+  definition_version: number | null;
+  definition_hash: string | null;
+  parameters: Array<{
+    apiName?: string;
+    required?: boolean;
+    type?: string;
+  }>;
+  rules?: unknown;
+  submission_criteria?: unknown;
+  side_effects?: unknown;
+  writeback_config?: unknown;
+  function_config?: unknown;
+  semantics_version?: number | null;
+  execution_mode?: string | null;
+  delete_policy?: string | null;
+};
+
+const ACTION_TYPE_VALIDATION_SELECT = `SELECT action_type_id, api_name, is_enabled,
+       COALESCE(definition_version, 1) AS definition_version,
+       definition_hash, parameters, rules,
+       submission_criteria, side_effects, writeback_config, function_config,
+       semantics_version, execution_mode, delete_policy
+  FROM action_type
+ WHERE ontology_id = $1 AND action_type_id = $2`;
+
 async function validateActionReference(
   db: Queryable,
   draft: AutomationDraft,
   effect: Extract<EffectDraft, { type: "action" }>,
-): Promise<ValidationIssue[]> {
+): Promise<ActionValidationOutcome> {
   if (
     !effect.actionTypeId ||
     !effect.actionApiName ||
     effect.definitionVersion === null
   ) {
-    return [
-      issue(
-        "ACTION_REQUIRED",
-        "Select an Action Type before activation.",
-        "effects",
-        "effects.actionTypeId",
-        effect.id,
-      ),
-    ];
+    return {
+      issues: [
+        issue(
+          "ACTION_REQUIRED",
+          "Select an Action Type before activation.",
+          "effects",
+          "effects.actionTypeId",
+          effect.id,
+        ),
+      ],
+    };
   }
-  const result = await db.query<{
-    action_type_id: string;
-    api_name: string;
-    is_enabled: boolean;
-    definition_version: number;
-    definition_hash: string | null;
-    parameters: Array<{
-      apiName?: string;
-      required?: boolean;
-      type?: string;
-    }>;
-  }>(
-    `SELECT action_type_id, api_name, is_enabled, definition_version,
-            definition_hash, parameters
-       FROM action_type
-      WHERE ontology_id = $1 AND action_type_id = $2`,
+  const result = await db.query<ActionTypeValidationRow>(
+    ACTION_TYPE_VALIDATION_SELECT,
     [draft.ontologyId, effect.actionTypeId],
   );
   const row = result.rows[0];
   if (!row) {
-    return [
-      issue(
-        "ACTION_NOT_FOUND",
-        "The selected Action Type no longer exists.",
-        "effects",
-        "effects.actionTypeId",
-        effect.id,
-      ),
-    ];
+    return {
+      issues: [
+        issue(
+          "ACTION_NOT_FOUND",
+          "The selected Action Type no longer exists.",
+          "effects",
+          "effects.actionTypeId",
+          effect.id,
+        ),
+      ],
+    };
   }
   const issues: ValidationIssue[] = [];
   if (!row.is_enabled) {
@@ -523,21 +696,30 @@ async function validateActionReference(
       ),
     );
   }
+  // When the pin's version/hash does not match the live row, fetch the
+  // pinned version's canonical snapshot (immutable history) so the
+  // compatibility classifier can distinguish cosmetic/compatible evolution
+  // from breaking change instead of treating EVERY drift as an error.
+  let pinnedCanonical: unknown | null = null;
   if (
     row.api_name !== effect.actionApiName ||
-    row.definition_version !== effect.definitionVersion ||
-    row.definition_hash !== effect.definitionHash
+    (row.definition_version ?? 1) !== effect.definitionVersion
   ) {
-    issues.push(
-      issue(
-        "ACTION_DEFINITION_CHANGED",
-        "The selected Action Type definition changed; review and reselect it.",
-        "effects",
-        "effects.actionTypeId",
-        effect.id,
-      ),
+    const history = await db.query<{ definition: unknown }>(
+      `SELECT definition
+         FROM action_type_definition_history
+        WHERE action_type_id = $1 AND definition_version = $2`,
+      [effect.actionTypeId, effect.definitionVersion],
     );
+    pinnedCanonical = history.rows[0]?.definition ?? null;
   }
+  const pin = checkPinnedActionDefinition(effect, row, pinnedCanonical);
+  if (pin.status === "rejected") {
+    issues.push(pin.issue);
+  } else if (pin.status === "repin" && pin.warning) {
+    issues.push(pin.warning);
+  }
+  const repin = pin.status === "repin" ? pin.repin : undefined;
   for (const parameter of row.parameters ?? []) {
     const binding = parameter.apiName
       ? effect.parameters[parameter.apiName]
@@ -610,7 +792,7 @@ async function validateActionReference(
       }
     }
   }
-  return issues;
+  return { issues, ...(repin ? { repin } : {}) };
 }
 
 type FunctionReference = {
@@ -1051,6 +1233,7 @@ export async function validateAutomationForActivation(
   const base = validateAutomationDraft(raw);
   if (!base.normalizedDraft) return base;
   const issues = [...base.issues];
+  const repins: ActionEffectRepin[] = [];
   const draft = base.normalizedDraft;
   const ownerResult = automationId
     ? await db.query<{
@@ -1157,14 +1340,18 @@ export async function validateAutomationForActivation(
       }
     }
     if (effect.type === "action") {
-      issues.push(...(await validateActionReference(db, draft, effect)));
+      const outcome = await validateActionReference(db, draft, effect);
+      issues.push(...outcome.issues);
+      if (outcome.repin) repins.push(outcome.repin);
     }
     if (effect.type === "function") {
       issues.push(...(await validateFunctionReference(db, effect, owner)));
     }
     const fallback = effect.fallbackEffect;
     if (fallback?.type === "action") {
-      issues.push(...(await validateActionReference(db, draft, fallback)));
+      const outcome = await validateActionReference(db, draft, fallback);
+      issues.push(...outcome.issues);
+      if (outcome.repin) repins.push(outcome.repin);
     } else if (fallback?.type === "function") {
       issues.push(...(await validateFunctionReference(db, fallback, owner)));
     } else if (fallback?.type === "logic") {
@@ -1247,5 +1434,6 @@ export async function validateAutomationForActivation(
     valid: !issues.some((entry) => entry.severity === "error"),
     issues,
     normalizedDraft: draft,
+    ...(repins.length > 0 ? { repins } : {}),
   };
 }

@@ -30,6 +30,10 @@ import {
   type MigrationReport,
 } from "../actions/actionMigrationAnalysis";
 import { hashActionDefinition } from "../actions/actionDefinitionHash";
+import {
+  actionDefinitionInputFromRow,
+  canonicalizeActionDefinition,
+} from "../actions/actionDefinitionCanonical";
 import { defaultSchemaLookup } from "../actions/objectReferenceResolver";
 import {
   recordMigration,
@@ -37,6 +41,62 @@ import {
   type ActionMigrationLogRow,
 } from "./actionMigrationLog";
 import type { PoolClient } from "pg";
+
+/**
+ * Pin-artifact sync (Automate effect pinning).
+ *
+ * After ANY write that lands a new action-type definition, persist the two
+ * artifacts Automate pins evaluate against:
+ *
+ *   1. action_type.definition_hash — content-addressed sha256 of the
+ *      canonical semantic definition (see actionDefinitionCanonical.ts),
+ *      computed from the post-write row so column + hash can never drift
+ *      apart. Guarded with IS DISTINCT FROM: a no-op write stays a no-op.
+ *   2. action_type_definition_history — immutable per-version snapshot
+ *      (INSERT ... ON CONFLICT DO NOTHING) so a future pin at THIS version
+ *      remains classifiable after the row later moves on.
+ *
+ * Also normalizes legacy rows whose definition_version is still NULL
+ * (created before migration 132's trigger existed) to 1 — the value effect
+ * pins carry for such rows.
+ *
+ * Call with the surrounding transaction's client when inside one (the
+ * migrate/rollback paths) so artifacts commit atomically with the
+ * definition change; otherwise the pool is used and the two statements are
+ * best-effort-atomic (a crash mid-way is repaired on the next save).
+ */
+export async function syncDefinitionPinArtifacts(
+  row: ActionTypeRow,
+  client?: Pick<PoolClient, "query">,
+): Promise<{ definitionHash: string; definitionVersion: number }> {
+  const input = actionDefinitionInputFromRow(row);
+  const definitionHash = hashActionDefinition(input);
+  const definitionVersion = row.definition_version ?? 1;
+  const run = (text: string, values: unknown[]) =>
+    client ? client.query(text, values) : query(text, values);
+  await run(
+    `UPDATE action_type
+        SET definition_hash = $2,
+            definition_version = $3
+      WHERE action_type_id = $1
+        AND (definition_hash IS DISTINCT FROM $2
+             OR definition_version IS DISTINCT FROM $3)`,
+    [row.action_type_id, definitionHash, definitionVersion],
+  );
+  await run(
+    `INSERT INTO action_type_definition_history (
+       action_type_id, definition_version, definition_hash, definition
+     ) VALUES ($1,$2,$3,$4::jsonb)
+     ON CONFLICT (action_type_id, definition_version) DO NOTHING`,
+    [
+      row.action_type_id,
+      definitionVersion,
+      definitionHash,
+      JSON.stringify(canonicalizeActionDefinition(input)),
+    ],
+  );
+  return { definitionHash, definitionVersion };
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -244,7 +304,9 @@ async function createActionType(
           : null,
       ]
     );
-    return result.rows[0] as ActionTypeRow;
+    const created = result.rows[0] as ActionTypeRow;
+    await syncDefinitionPinArtifacts(created);
+    return created;
   } catch (err: unknown) {
     const pgErr = err as { code?: string };
     if (pgErr.code === "23505") {
@@ -410,7 +472,9 @@ async function updateActionType(
     );
   }
 
-  return result.rows[0] as ActionTypeRow;
+  const updated = result.rows[0] as ActionTypeRow;
+  await syncDefinitionPinArtifacts(updated);
+  return updated;
 }
 
 /**
@@ -683,6 +747,9 @@ export async function migrateActionTypeWithDefinition(
         },
         pg,
       );
+      // Persist pin artifacts in the SAME transaction: the v2 definition
+      // version becomes classifiable for Automate pins immediately.
+      await syncDefinitionPinArtifacts(migrated, pg);
       return { migrated, log: logRow, analysis };
     },
   );
@@ -834,6 +901,8 @@ export async function rollbackActionTypeMigration(
         },
         pg,
       );
+      // Same-transaction pin artifacts for the restored v1 definition.
+      await syncDefinitionPinArtifacts(restoredRow, pg);
       return { rolledBack: restoredRow, log: logRow };
     },
   );

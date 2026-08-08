@@ -5,6 +5,7 @@ import { canonicalJson } from "../audit/canonicalJson";
 import {
   AUTOMATION_SCHEMA_VERSION,
   AutomationDraftSchema,
+  type ActionEffectRepin,
   type AutomationDraft,
   type AutomationStatus,
   type PrincipalReference,
@@ -378,6 +379,30 @@ export async function updateDraft(input: {
   );
 }
 
+/**
+ * Move validated action-effect pins onto their resolved definition
+ * version+hash, in-place on the draft, matching by effect id. Handles
+ * fallback effect chains (a repin may target a fallback action effect).
+ */
+function applyEffectRepins(
+  definition: AutomationDraft,
+  repins: ActionEffectRepin[],
+): void {
+  const byId = new Map(repins.map((pin) => [pin.effectId, pin]));
+  const walk = (
+    effect: AutomationDraft["effects"][number] | undefined,
+  ): void => {
+    if (!effect) return;
+    const pin = byId.get(effect.id);
+    if (pin && effect.type === "action") {
+      effect.definitionVersion = pin.definitionVersion;
+      effect.definitionHash = pin.definitionHash;
+    }
+    if (effect.fallbackEffect) walk(effect.fallbackEffect);
+  };
+  for (const effect of definition.effects) walk(effect);
+}
+
 function hashDefinition(definition: AutomationDraft): string {
   return crypto
     .createHash("sha256")
@@ -473,6 +498,12 @@ export async function activateAutomation(input: {
       );
     }
     const definition = validation.normalizedDraft;
+    // Apply validated pin rewrites BEFORE the definition hash + version
+    // insert so the ACTIVATED version carries the re-pinned effect — this
+    // keeps execution + retry deterministic on the resolved definition.
+    if (validation.repins && validation.repins.length > 0) {
+      applyEffectRepins(definition, validation.repins);
+    }
     const nextVersion = (current.currentVersion ?? 0) + 1;
     const definitionHash = hashDefinition(definition);
     await client.query(
@@ -488,6 +519,28 @@ export async function activateAutomation(input: {
         input.actorUserId,
       ],
     );
+    if (validation.repins && validation.repins.length > 0) {
+      for (const pin of validation.repins) {
+        await appendAutomationAudit(client, {
+          automationId: current.automationId,
+          automationVersion: nextVersion,
+          actorUserId: input.actorUserId,
+          eventType:
+            pin.kind === "upgraded"
+              ? "AUTOMATION_EFFECT_PIN_UPGRADED"
+              : "AUTOMATION_EFFECT_PIN_REFRESHED",
+          details: {
+            effectId: pin.effectId,
+            actionTypeId: pin.actionTypeId,
+            actionApiName: pin.actionApiName,
+            previousDefinitionVersion: pin.previousDefinitionVersion,
+            definitionVersion: pin.definitionVersion,
+            definitionHash: pin.definitionHash,
+            changes: pin.changes ?? [],
+          },
+        });
+      }
+    }
     let nextRunAt: Date | null = null;
     if ("schedule" in definition.condition && definition.condition.schedule) {
       nextRunAt = nextScheduleOccurrence(definition.condition.schedule, new Date());

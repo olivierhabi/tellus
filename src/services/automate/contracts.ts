@@ -395,10 +395,36 @@ export interface ValidationIssue {
   step: WizardValidationStep;
   effectId?: string;
   path?: string;
+  /** Structured payload attached to machine-actionable issues (e.g. the
+   *  classified change list for ACTION_DEFINITION_CHANGED_*). Clients
+   *  branch on `code`, never on message text. */
+  details?: Record<string, unknown>;
+}
+
+/**
+ * A pin-rewrite requested by validation and applied atomically at
+ * activation time: the effect's action-type pin is moved to the version +
+ * hash the classifier validated against. `kind`:
+ *   - "refreshed" — content-identical definition, only version/hash move
+ *     (audit: AUTOMATION_EFFECT_PIN_REFRESHED),
+ *   - "upgraded"  — compatible (non-breaking) evolution accepted
+ *     (audit: AUTOMATION_EFFECT_PIN_UPGRADED).
+ * Breaking changes NEVER appear here: they fail validation instead.
+ */
+export interface ActionEffectRepin {
+  effectId: string;
+  actionTypeId: string;
+  actionApiName: string;
+  kind: "refreshed" | "upgraded";
+  previousDefinitionVersion: number;
+  definitionVersion: number;
+  definitionHash: string | null;
+  changes?: Array<{ code: string; severity: string; message: string }>;
 }
 
 export interface ValidationResult {
   valid: boolean;
   issues: ValidationIssue[];
   normalizedDraft?: AutomationDraft;
+  repins?: ActionEffectRepin[];
 }

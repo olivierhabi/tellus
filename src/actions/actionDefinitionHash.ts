@@ -19,40 +19,27 @@
 
 import { createHash } from "node:crypto";
 
-export interface ActionDefinitionHashInput {
-  parameters: unknown;
-  rules: unknown;
-  semanticsVersion?: number | null;
-  executionMode?: string | null;
-  deletePolicy?: string | null;
-  functionConfig?: unknown;
-}
+import {
+  canonicalActionDefinitionString,
+  type ActionDefinitionInput,
+} from "./actionDefinitionCanonical";
 
-/**
- * Deterministic JSON canonicalization: stringified with sorted keys. Handles
- * plain JSON-serializable inputs (objects, arrays, primitives). `undefined`
- * and `null` are normalized to `null` so a column set to `null` after migration
-// 124 backfill hashes the same as one that was always null.
- */
-function canonicalJson(value: unknown): string {
-  const normalized = value === undefined ? null : value;
-  return JSON.stringify(normalized, (_k, v) =>
-    v === undefined ? null : v,
-  );
-}
+export interface ActionDefinitionHashInput extends ActionDefinitionInput {}
 
 /**
  * Compute the canonical sha256 hash of an action-type definition.
  * Returns a hex string. Pure: no I/O, no side-effects.
+ *
+ * Since the pin-hash rollout this delegates to the STRICT canonicalizer in
+ * actionDefinitionCanonical.ts (object keys sorted recursively, parameters
+ * sorted by apiName and reduced to {apiName, dataType, required,
+ * defaultValue}) so that a hash stamped onto an Automate effect pin is
+ * byte-identical to the hash recomputed at validation time from the DB row.
+ * The previous JSON.stringify-based canonicalization kept insertion key
+ * order and could disagree across producers of the same definition.
  */
 export function hashActionDefinition(input: ActionDefinitionHashInput): string {
-  const canonical = canonicalJson({
-    parameters: input.parameters,
-    rules: input.rules,
-    semanticsVersion: input.semanticsVersion ?? null,
-    executionMode: input.executionMode ?? null,
-    deletePolicy: input.deletePolicy ?? null,
-    functionConfig: input.functionConfig ?? null,
-  });
-  return createHash("sha256").update(canonical, "utf8").digest("hex");
+  return createHash("sha256")
+    .update(canonicalActionDefinitionString(input), "utf8")
+    .digest("hex");
 }
