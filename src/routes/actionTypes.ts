@@ -463,7 +463,16 @@ export function formatActionType(row: Record<string, any>): Record<string, unkno
     // <version>` for the safe-update contract. NULL → 1 (migration 132
     // backfills every row with definition_version=1).
     definitionVersion: row.definition_version ?? 1,
-    definitionHash: row.definition_hash ?? null,
+    // Read-path fallback: rows written before the pin-identity rollout carry
+    // definition_hash NULL (the 165 backfill stamped history snapshots only).
+    // Computing the canonical hash on read is what lets the frontend stamp
+    // definitionHash onto pre-rollout automation pins without requiring a
+    // no-op save of every action type first. The value is the SAME scheme
+    // syncDefinitionPinArtifacts() will persist on the next write, so the
+    // read/write surfaces can never diverge.
+    definitionHash:
+      row.definition_hash ??
+      hashActionDefinition(actionDefinitionInputFromRow(row)),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     createdBy: row.created_by,
