@@ -19,7 +19,9 @@
 
 import { randomUUID } from "node:crypto";
 import { Router, Request, Response, NextFunction } from "express";
-import { query } from "../db";
+import { pool, query } from "../db";
+import { computeActionTypeBlastRadius } from "../services/automate/blastRadius";
+import { actionDefinitionInputFromRow } from "../actions/actionDefinitionCanonical";
 import { resolveFunctionSource } from "../services/functionsRegistry/artifactStore";
 import {
   createActionType,
@@ -729,6 +731,46 @@ async function validateParameters(
       }
     }
 
+    // structFields — Foundry-style struct authoring: a struct parameter
+    // declares its fields so forms render a sub-form and execution
+    // coerces/validates each field (see parameterValidator.coerceStruct).
+    if (p.structFields !== undefined) {
+      if (paramType !== "struct") {
+        errors.push(
+          `${idx}.structFields is only valid for struct parameters, not '${paramType}'.`,
+        );
+      } else if (!Array.isArray(p.structFields)) {
+        errors.push(`${idx}.structFields must be an array.`);
+      } else {
+        const VALID_STRUCT_FIELD_TYPES = new Set([
+          "string", "boolean", "integer", "long", "byte", "short",
+          "double", "float", "decimal", "date", "timestamp",
+        ]);
+        const seenFields = new Set<string>();
+        (p.structFields as Array<Record<string, unknown>>).forEach((field, fi) => {
+          const fidx = `${idx}.structFields[${fi}]`;
+          if (!field || typeof field !== "object") {
+            errors.push(`${fidx} must be an object.`);
+            return;
+          }
+          if (!field.apiName || typeof field.apiName !== "string" || field.apiName.trim() === "") {
+            errors.push(`${fidx}.apiName is required and must be a non-empty string.`);
+          } else if (seenFields.has(field.apiName)) {
+            errors.push(`${fidx}.apiName '${field.apiName}' is duplicated within the struct.`);
+          }
+          if (typeof field.apiName === "string") seenFields.add(field.apiName);
+          if (!field.type || typeof field.type !== "string" || !VALID_STRUCT_FIELD_TYPES.has(field.type)) {
+            errors.push(
+              `${fidx}.type must be one of: ${Array.from(VALID_STRUCT_FIELD_TYPES).join(", ")}.`,
+            );
+          }
+          if (field.required !== undefined && typeof field.required !== "boolean") {
+            errors.push(`${fidx}.required must be a boolean.`);
+          }
+        });
+      }
+    }
+
     // constraints validation
     if (p.constraints && typeof p.constraints === "object") {
       const c = p.constraints as Record<string, unknown>;
@@ -1215,6 +1257,22 @@ async function validateRules(
 // Persistence accepts NULL (no writeback). When body.writebackConfig is
 // undefined → null (no writeback). When present → structurally validated.
 // ---------------------------------------------------------------------------
+
+/**
+ * Foundry parity: a webhook-backed action (writeback and/or webhook side
+ * effect) is meaningful even with zero object-edit rules — Foundry's
+ * webhook tutorial attaches the webhook in Logic and requires no edit
+ * rules. The legacy "enabled actions must declare at least one rule" guard
+ * therefore applies only when no webhook binding is present.
+ */
+function hasWebhookBinding(writeback: unknown, sideEffects: unknown): boolean {
+  const wb = (writeback ?? undefined) as Record<string, unknown> | undefined;
+  const se = (sideEffects ?? undefined) as Record<string, unknown> | undefined;
+  return (
+    typeof wb?.webhookId === "string" ||
+    (Array.isArray(se?.webhooks) && (se.webhooks as unknown[]).length > 0)
+  );
+}
 
 async function validateWritebackConfig(
   wb: unknown,
@@ -2167,9 +2225,14 @@ router.post(
       const isFunctionAction = body.executionMode === "function";
       const isDraft = body.isEnabled === false;
       const rules = body.rules ?? [];
+      // Webhook-backed actions are meaningful with zero edit rules — the
+      // binding IS the action's logic (mappings completed in Logic).
       if (
         !Array.isArray(rules) ||
-        (!isFunctionAction && !isDraft && rules.length === 0)
+        (!isFunctionAction &&
+          !isDraft &&
+          !hasWebhookBinding(body.writebackConfig, body.sideEffects) &&
+          rules.length === 0)
       ) {
         sendError(
           res,
@@ -2230,13 +2293,18 @@ router.post(
       // Phase 4 — writeback_config validation (one-writeback-per-action
       // invariant is structural in DB migration 130; this validates the
       // shape, the webhook reference, and the input-mapping's ValueSources).
+      // Creation is the authoring boundary: shape/status/membership of the
+      // webhook binding are validated here, but input-mapping COMPLETENESS
+      // (requireComplete) is not — the UI flow authors mappings in Logic
+      // after create. Completeness is enforced at the next checkpoint:
+      // PATCH on an enabled action re-validates with requireComplete=true.
       const wbErrors = await validateWritebackConfig(
         body.writebackConfig,
         ontologyId,
         paramNames,
         params,
         resolveRequestTenant(req),
-        !isDraft,
+        false,
       );
       if (wbErrors.length > 0) {
         sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
@@ -2265,7 +2333,7 @@ router.post(
         params,
         ontologyId,
         resolveRequestTenant(req),
-        !isDraft,
+        false,
       );
       if (sideEffectErrors.length > 0) {
         sendError(res, "SIDE_EFFECTS_INVALID", sideEffectErrors.join(" "), {
@@ -2663,7 +2731,8 @@ const updateActionTypeHandler = async (
       ) {
         const rulesToValidate = effectiveRules;
         if (!Array.isArray(rulesToValidate) || rulesToValidate.length === 0) {
-          if (resultingEnabled) {
+          // Webhook-backed actions need no edit rules (see POST create).
+          if (resultingEnabled && !hasWebhookBinding(effectiveWriteback, effectiveSideEffects)) {
             sendError(
               res,
               "VALIDATION_FAILED",
@@ -2843,6 +2912,21 @@ const updateActionTypeHandler = async (
 
       const updatedRow = await updateActionType(ontologyId, actionApiName, updates);
 
+      // Post-save blast radius: same classification the pre-save preview
+      // returned, recomputed against the now-persisted definition.
+      let postSaveBlastRadius: import("../services/automate/blastRadius").BlastRadiusResult | null = null;
+      try {
+        postSaveBlastRadius = await computeActionTypeBlastRadius(
+          pool,
+          resolveRequestTenant(req),
+          updatedRow.action_type_id,
+          actionDefinitionInputFromRow(updatedRow),
+          updatedRow.definition_version ?? 1,
+        );
+      } catch {
+        postSaveBlastRadius = null; // advisory only — never fails the save
+      }
+
       // Build response — include migration warnings if any exist
       const responseData: Record<string, unknown> = formatActionType(updatedRow);
       if (!migration.safe) {
@@ -2850,6 +2934,9 @@ const updateActionTypeHandler = async (
           ...migration.warnings,
           ...migration.breakingChanges,
         ];
+      }
+      if (postSaveBlastRadius && postSaveBlastRadius.total > 0) {
+        responseData.blastRadius = postSaveBlastRadius;
       }
 
       sendSuccess(res, responseData);
@@ -2865,6 +2952,57 @@ const updateActionTypeHandler = async (
 // PUT is the established Tellus route. PATCH is intentionally supported as
 // an equivalent partial-update alias so clients that follow the OpenAPI-style
 // update convention do not fail at routing before validation/persistence.
+// ---------------------------------------------------------------------------
+// Pre-save blast radius preview. Body = the same partial-update payload as
+// PUT /:actionApiName. Returns the classifier-driven per-pin verdicts over
+// every automation (draft or active version) pinning this action type —
+// so UIs can warn BEFORE the save happens.
+// ---------------------------------------------------------------------------
+router.post(
+  "/:actionApiName/blastRadius",
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { ontologyId, actionApiName } = req.params;
+      const existing = await getActionType(ontologyId, actionApiName);
+      if (!existing) {
+        sendError(res, "ACTION_TYPE_NOT_FOUND", `Action type '${actionApiName}' not found.`);
+        return;
+      }
+      const body = req.body ?? {};
+      // Candidate = existing semantic columns with candidate payload merged
+      // (omitted fields stay) — mirrors updateActionType's merge semantics.
+      const candidate = actionDefinitionInputFromRow({
+        ...existing,
+        ...(body.parameters !== undefined ? { parameters: body.parameters } : {}),
+        ...(body.rules !== undefined ? { rules: body.rules } : {}),
+        ...(body.submissionCriteria !== undefined ? { submission_criteria: body.submissionCriteria } : {}),
+        ...(body.sideEffects !== undefined ? { side_effects: body.sideEffects } : {}),
+        ...(body.writebackConfig !== undefined ? { writeback_config: body.writebackConfig } : {}),
+        ...(body.functionConfig !== undefined ? { function_config: body.functionConfig } : {}),
+        ...(body.semanticsVersion !== undefined || body.executionMode !== undefined || body.deletePolicy !== undefined
+          ? {
+              semantics_version: body.semanticsVersion ?? existing.semantics_version,
+              execution_mode: body.executionMode ?? existing.execution_mode,
+              delete_policy: body.deletePolicy ?? existing.delete_policy,
+            }
+          : {}),
+      });
+      const blastRadius = await computeActionTypeBlastRadius(
+        pool,
+        resolveRequestTenant(req),
+        existing.action_type_id,
+        candidate,
+        // The bump trigger increments the version on semantic drift — the
+        // new version is what pins will eventually point at.
+        (existing.definition_version ?? 1) + 1,
+      );
+      res.status(200).json({ data: { actionTypeId: existing.action_type_id, actionApiName, blastRadius } });
+    } catch (err: any) {
+      next(err);
+    }
+  },
+);
+
 router
   .route("/:actionApiName")
   .put(updateActionTypeHandler)
