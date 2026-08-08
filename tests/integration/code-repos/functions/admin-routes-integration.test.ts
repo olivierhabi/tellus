@@ -70,6 +70,10 @@ describe("B8 — Functions Registry admin routes (integration)", () => {
     await ctx.applyMigrationSql(loadSql("src/migrations/050_stemma_ddl.sql"));
     await ctx.applyMigrationSql(loadSql("src/migrations/051_code_repos_audit.sql"));
     await ctx.applyMigrationSql(loadSql("src/migrations/055_b8_functions_registry.sql"));
+    // Publish authorization gate migrations: authorizePublish() persists every
+    // decision to function_publish_audit_log (admission here comes from the
+    // lane's FUNCTION_EXECUTION_TRUST_MODE=open-development).
+    await ctx.applyMigrationSql(loadSql("src/migrations/164_function_publish_authz.sql"));
     process.env.CODE_REPOS_TEST_AUTH = "1";
     app = express();
     app.use(createFunctionsRouter({ pool: ctx.pool }));
