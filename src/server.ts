@@ -920,6 +920,15 @@ app.use(
 // via resolve. Mounted here so /api/v1/functions/* is live in the running
 // product (previously the router existed but was never wired up).
 import { createFunctionsRouter } from "./services/functionsRegistry/admin/routes";
+import { createFunctionPublishAdminRouter } from "./services/functions/admin/routes";
+import { logFunctionPublishPolicySummary } from "./services/functions/executionPolicy";
+// Function publish grant management (superadmin). Mounted BEFORE the
+// /api/v1/functions registry router: Express matches mounts in registration
+// order and /api/v1/functions is a prefix of /api/v1/functions/admin, so the
+// more specific mount must come first. The router mounts requireCodeReposAuth
+// itself (two-layer pattern); /api/v1/functions is already allowlisted in
+// globalAuth, which covers this sub-prefix.
+app.use("/api/v1/functions/admin", createFunctionPublishAdminRouter({ pool }));
 // The registry router declares its routes as `/functions/:rid/...` (it was
 // authored to mount at the root of a standalone app). Re-base it under
 // `/api/v1/functions` by prepending `/functions` to the post-mount URL — this
@@ -1463,6 +1472,10 @@ async function start(): Promise<void> {
       console.log(
         `Ontology Engine started on port ${PORT} | PostgreSQL connected`
       );
+      // Operator visibility into the Function publish authorization policy:
+      // trust mode, publish role, live grant count, and whether the
+      // deprecated env allowlist is still configured. Never blocks boot.
+      void logFunctionPublishPolicySummary(pool);
     });
     functionsPublishService.start();
     if (process.env.AUTOMATE_RUNTIME_DISABLED !== "true") {
