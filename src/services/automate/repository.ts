@@ -506,49 +506,63 @@ export async function activateAutomation(input: {
     }
     const nextVersion = (current.currentVersion ?? 0) + 1;
     const definitionHash = hashDefinition(definition);
-    await client.query(
-      `INSERT INTO automation_version (
-         automation_id, version, schema_version, definition, definition_hash, created_by
-       ) VALUES ($1,$2,$3,$4::jsonb,$5,$6)`,
-      [
-        current.automationId,
-        nextVersion,
-        definition.schemaVersion,
-        JSON.stringify(definition),
-        definitionHash,
-        input.actorUserId,
-      ],
+    // Idempotent activation: if this exact normalized definition was already
+    // activated (byte-identical definition hash), reuse that version instead
+    // of inserting a duplicate row — re-activating an unchanged automation
+    // must be a no-op success, not a 23505 unique violation.
+    const reused = await client.query<{ version: number }>(
+      `SELECT version FROM automation_version
+        WHERE automation_id = $1 AND definition_hash = $2`,
+      [current.automationId, definitionHash],
     );
-    if (validation.repins && validation.repins.length > 0) {
-      for (const pin of validation.repins) {
-        await appendAutomationAudit(client, {
-          automationId: current.automationId,
-          automationVersion: nextVersion,
-          actorUserId: input.actorUserId,
-          eventType:
-            pin.kind === "upgraded"
-              ? "AUTOMATION_EFFECT_PIN_UPGRADED"
-              : "AUTOMATION_EFFECT_PIN_REFRESHED",
-          details: {
-            effectId: pin.effectId,
-            actionTypeId: pin.actionTypeId,
-            actionApiName: pin.actionApiName,
-            previousDefinitionVersion: pin.previousDefinitionVersion,
-            definitionVersion: pin.definitionVersion,
-            definitionHash: pin.definitionHash,
-            changes: pin.changes ?? [],
-          },
-        });
+    const reusedVersion = reused.rows[0]?.version ?? null;
+    const activatedVersion = reusedVersion ?? nextVersion;
+    if (reusedVersion === null) {
+      await client.query(
+        `INSERT INTO automation_version (
+           automation_id, version, schema_version, definition, definition_hash, created_by
+         ) VALUES ($1,$2,$3,$4::jsonb,$5,$6)`,
+        [
+          current.automationId,
+          nextVersion,
+          definition.schemaVersion,
+          JSON.stringify(definition),
+          definitionHash,
+          input.actorUserId,
+        ],
+      );
+      if (validation.repins && validation.repins.length > 0) {
+        for (const pin of validation.repins) {
+          await appendAutomationAudit(client, {
+            automationId: current.automationId,
+            automationVersion: nextVersion,
+            actorUserId: input.actorUserId,
+            eventType:
+              pin.kind === "upgraded"
+                ? "AUTOMATION_EFFECT_PIN_UPGRADED"
+                : "AUTOMATION_EFFECT_PIN_REFRESHED",
+            details: {
+              effectId: pin.effectId,
+              actionTypeId: pin.actionTypeId,
+              actionApiName: pin.actionApiName,
+              previousDefinitionVersion: pin.previousDefinitionVersion,
+              definitionVersion: pin.definitionVersion,
+              definitionHash: pin.definitionHash,
+              changes: pin.changes ?? [],
+            },
+          });
+        }
       }
     }
     let nextRunAt: Date | null = null;
     if ("schedule" in definition.condition && definition.condition.schedule) {
       nextRunAt = nextScheduleOccurrence(definition.condition.schedule, new Date());
     }
-    await client.query(
-      `DELETE FROM automation_dependency WHERE child_automation_id = $1`,
-      [current.automationId],
-    );
+    if (reusedVersion === null) {
+      await client.query(
+        `DELETE FROM automation_dependency WHERE child_automation_id = $1`,
+        [current.automationId],
+      );
     if (definition.condition.type === "automation-dependency") {
       await client.query(
         `INSERT INTO automation_dependency (
@@ -702,6 +716,7 @@ export async function activateAutomation(input: {
         });
       }
     }
+    }
     const updated = await client.query<AutomationRow>(
       `UPDATE automation
           SET status = 'active',
@@ -714,14 +729,17 @@ export async function activateAutomation(input: {
               updated_at = now()
         WHERE automation_id = $1
         RETURNING *`,
-      [current.automationId, nextVersion, nextRunAt],
+      [current.automationId, activatedVersion, nextRunAt],
     );
     await appendAutomationAudit(client, {
       automationId: current.automationId,
-      automationVersion: nextVersion,
+      automationVersion: activatedVersion,
       actorUserId: input.actorUserId,
       eventType: "automation.activated",
-      details: { definitionHash },
+      details: {
+        definitionHash,
+        ...(reusedVersion !== null ? { reusedVersion } : {}),
+      },
     });
     const responseRecord = mapRow(updated.rows[0]);
     await client.query(
@@ -740,6 +758,242 @@ export async function activateAutomation(input: {
     );
     await client.query("COMMIT");
     return responseRecord;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getManualExecutionOptions(input: {
+  automationId: string;
+  tenantId: string;
+  actorUserId: string;
+}): Promise<{
+  automationId: string;
+  version: number;
+  effects: Array<{ id: string; name: string; type: string; order: number }>;
+}> {
+  // Apply the same authorization checks as the execute path: getAutomation
+  // enforces tenant + owner/administrator access, throwing 404 for missing or
+  // inaccessible automations without leaking existence.
+  const record = await getAutomation(
+    input.automationId,
+    input.tenantId,
+    input.actorUserId,
+  );
+  if (record.status !== "active" || record.currentVersion == null) {
+    throw new AutomationServiceError(
+      "AUTOMATION_NOT_EXECUTABLE",
+      "Only an active automation can be manually executed.",
+      409,
+    );
+  }
+  const version = await pool.query<{ definition: unknown }>(
+    `SELECT definition FROM automation_version
+      WHERE automation_id = $1 AND version = $2`,
+    [input.automationId, record.currentVersion],
+  );
+  const definition = AutomationDraftSchema.parse(version.rows[0]?.definition);
+  return {
+    automationId: input.automationId,
+    version: record.currentVersion,
+    // The executable effects are the active immutable definition's effects —
+    // never the draft — so a draft edit after activation can never produce a
+    // phantom/missing/misnamed effect in the execute dialog.
+    effects: definition.effects
+      .map((effect) => ({
+        id: effect.id,
+        name: effect.name,
+        type: effect.type,
+        order: effect.order,
+      }))
+      .sort((a, b) => a.order - b.order),
+  };
+}
+
+export async function executeAutomationManually(input: {
+  automationId: string;
+  tenantId: string;
+  actorUserId: string;
+  idempotencyKey: string;
+  sendCompletionNotification: boolean;
+  selectedEffectIds: string[];
+  securitySnapshot: Record<string, unknown>;
+  requestId?: string;
+  /**
+   * The active automation version the caller rendered options from, fetched
+   * from `GET /automations/:id/manual-execution-options`. The execute path
+   * rejects with 409 AUTOMATION_VERSION_STALE when this no longer matches the
+   * current active version, so a draft republish can never be executed
+   * against a stale effect list the user never saw.
+   */
+  expectedVersion: number;
+}): Promise<{ triggerEventId: string; reused: boolean }> {
+  await getAutomation(input.automationId, input.tenantId, input.actorUserId);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext($1))",
+      [`automate-manual:${input.tenantId}:${input.actorUserId}:${input.idempotencyKey}`],
+    );
+    const requestHash = crypto
+      .createHash("sha256")
+      .update(canonicalJson({
+        operation: "manual-execution",
+        automationId: input.automationId,
+        sendCompletionNotification: input.sendCompletionNotification,
+        selectedEffectIds: [...input.selectedEffectIds].sort(),
+      }))
+      .digest("hex");
+    const prior = await client.query<{
+      request_hash: string;
+      automation_id: string;
+      response: { triggerEventId?: unknown } | null;
+    }>(
+      `SELECT request_hash, automation_id, response
+         FROM automation_idempotency
+        WHERE tenant_id = $1 AND owner_user_id = $2
+          AND idempotency_key = $3 AND expires_at > now()`,
+      [input.tenantId, input.actorUserId, input.idempotencyKey],
+    );
+    if (prior.rows[0]) {
+      const existing = prior.rows[0];
+      if (
+        existing.request_hash !== requestHash ||
+        existing.automation_id !== input.automationId ||
+        typeof existing.response?.triggerEventId !== "string"
+      ) {
+        throw new AutomationServiceError(
+          "IDEMPOTENCY_KEY_REUSED",
+          "The Idempotency-Key was already used for a different request.",
+          409,
+        );
+      }
+      await client.query("COMMIT");
+      return { triggerEventId: existing.response.triggerEventId, reused: true };
+    }
+
+    const locked = await client.query<{
+      status: AutomationStatus;
+      current_version: number | null;
+    }>(
+      `SELECT status, current_version
+         FROM automation
+        WHERE automation_id = $1 AND tenant_id = $2
+        FOR UPDATE`,
+      [input.automationId, input.tenantId],
+    );
+    const automation = locked.rows[0];
+    if (!automation || automation.status !== "active" || automation.current_version === null) {
+      throw new AutomationServiceError(
+        "AUTOMATION_NOT_EXECUTABLE",
+        "Only an active automation can be manually executed.",
+        409,
+      );
+    }
+    if (input.expectedVersion !== automation.current_version) {
+      throw new AutomationServiceError(
+        "AUTOMATION_VERSION_STALE",
+        "The automation was republished. Refresh manual execution options.",
+        409,
+        {
+          expectedVersion: input.expectedVersion,
+          activeVersion: automation.current_version,
+        },
+      );
+    }
+    const version = await client.query<{ definition: unknown }>(
+      `SELECT definition FROM automation_version
+        WHERE automation_id = $1 AND version = $2`,
+      [input.automationId, automation.current_version],
+    );
+    const definition = AutomationDraftSchema.parse(version.rows[0]?.definition);
+    const selectedEffectIds = new Set(input.selectedEffectIds);
+    const unknownEffectIds = input.selectedEffectIds.filter(
+      (effectId) => !definition.effects.some((effect) => effect.id === effectId),
+    );
+    if (unknownEffectIds.length > 0) {
+      throw new AutomationServiceError(
+        "AUTOMATION_EFFECT_NOT_FOUND",
+        "One or more selected effects do not exist in the active automation version.",
+        400,
+        { effectIds: unknownEffectIds },
+      );
+    }
+    const now = new Date().toISOString();
+    const triggerKey =
+      `manual:${input.tenantId}:${input.actorUserId}:${input.idempotencyKey}`;
+    const inserted = await client.query<{ trigger_event_id: string }>(
+      `INSERT INTO automation_trigger_event (
+         automation_id, automation_version, trigger_key, trigger_type,
+         condition_output, status, scheduled_for, execution_principal
+       ) VALUES ($1,$2,$3,'manual',$4::jsonb,'queued',now(),$5::jsonb)
+       RETURNING trigger_event_id`,
+      [
+        input.automationId,
+        automation.current_version,
+        triggerKey,
+        JSON.stringify({
+          triggeredAt: now,
+          __manualExecution: {
+            requestedByUserId: input.actorUserId,
+            sendCompletionNotification: input.sendCompletionNotification,
+          },
+        }),
+        JSON.stringify({
+          kind: "user",
+          id: input.actorUserId,
+          security: input.securitySnapshot,
+        }),
+      ],
+    );
+    const triggerEventId = inserted.rows[0].trigger_event_id;
+    for (const effect of definition.effects.filter((item) => selectedEffectIds.has(item.id))) {
+      await client.query(
+        `INSERT INTO automation_effect_execution (
+           trigger_event_id, effect_id, effect_type, effect_order, max_attempts
+         ) VALUES ($1,$2,$3,$4,$5)`,
+        [
+          triggerEventId,
+          effect.id,
+          effect.type,
+          effect.order,
+          effect.retry.enabled ? effect.retry.maxAttempts : 1,
+        ],
+      );
+    }
+    const response = { triggerEventId, reused: false };
+    await client.query(
+      `INSERT INTO automation_idempotency (
+         tenant_id, owner_user_id, idempotency_key, request_hash,
+         automation_id, response
+       ) VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+      [
+        input.tenantId,
+        input.actorUserId,
+        input.idempotencyKey,
+        requestHash,
+        input.automationId,
+        JSON.stringify(response),
+      ],
+    );
+    await appendAutomationAudit(client, {
+      automationId: input.automationId,
+      automationVersion: automation.current_version,
+      actorUserId: input.actorUserId,
+      eventType: "automation.manual_execution_created",
+      requestId: input.requestId,
+      details: {
+        triggerEventId,
+        sendCompletionNotification: input.sendCompletionNotification,
+        selectedEffectIds: input.selectedEffectIds,
+      },
+    });
+    await client.query("COMMIT");
+    return response;
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;

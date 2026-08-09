@@ -5,7 +5,9 @@ import {
   AutomationServiceError,
   activateAutomation,
   createDraft,
+  executeAutomationManually,
   getExecutionDetails,
+  getManualExecutionOptions,
   listAutomationAudit,
   listConditionEvaluations,
   listExecutionHistory,
@@ -172,6 +174,17 @@ afterEach(async () => {
     [tenantId],
   );
   await pool.query(
+    `DELETE FROM notification_inbox
+      WHERE execution_id IN (
+        SELECT trigger_event_id::text
+          FROM automation_trigger_event
+         WHERE automation_id IN (
+           SELECT automation_id FROM automation WHERE tenant_id = $1
+         )
+      )`,
+    [tenantId],
+  );
+  await pool.query(
     `DELETE FROM automation_dependency dependency
       WHERE dependency.child_automation_id IN (
               SELECT automation_id FROM automation WHERE tenant_id = $1
@@ -211,6 +224,59 @@ afterAll(async () => {
 });
 
 describe("Automate repository and durable scheduling", () => {
+  it("creates one durable manual trigger and replays the idempotent response", async () => {
+    const { created, updated } = await createConfiguredAutomation();
+    await activateAutomation({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: updated.draftRevision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const idempotencyKey = crypto.randomUUID();
+    const input = {
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      idempotencyKey,
+      sendCompletionNotification: true,
+      selectedEffectIds: [updated.draftDefinition.effects[0].id],
+      securitySnapshot: { roles: ["tellus-superadmin"] },
+      expectedVersion: 1,
+    };
+
+    const first = await executeAutomationManually(input);
+    const replay = await executeAutomationManually(input);
+
+    expect(first.reused).toBe(false);
+    expect(replay).toEqual({ triggerEventId: first.triggerEventId, reused: true });
+    const durable = await pool.query<{
+      trigger_type: string;
+      status: string;
+      condition_output: Record<string, unknown>;
+      effect_count: string | number;
+    }>(
+      `SELECT trigger.trigger_type, trigger.status, trigger.condition_output,
+              count(effect.effect_execution_id) AS effect_count
+         FROM automation_trigger_event trigger
+         LEFT JOIN automation_effect_execution effect USING (trigger_event_id)
+        WHERE trigger.trigger_event_id = $1
+        GROUP BY trigger.trigger_event_id`,
+      [first.triggerEventId],
+    );
+    expect(durable.rows[0]).toMatchObject({
+      trigger_type: "manual",
+      status: "queued",
+      condition_output: {
+        __manualExecution: {
+          requestedByUserId: actorUserId,
+          sendCompletionNotification: true,
+        },
+      },
+      effect_count: "1",
+    });
+  });
+
   it("persists drafts, rejects stale revisions, and creates an immutable version", async () => {
     const { created, updated } = await createConfiguredAutomation();
     await expect(
@@ -1344,5 +1410,189 @@ describe("Automate repository and durable scheduling", () => {
         "AUTOMATION_EVENT_RETRIES_EXHAUSTED",
       );
     }
+  });
+});
+
+describe("Manual execution readiness — active version guard + options", () => {
+  function notificationEffectFor(id: string, name: string, order: number) {
+    return {
+      id,
+      name,
+      order,
+      type: "notification" as const,
+      recipients: {
+        static: [
+          {
+            kind: "user" as const,
+            id: actorUserId,
+            displayName: "Manual readiness owner",
+          },
+        ],
+        dynamic: [],
+      },
+      channels: ["in_app" as const],
+      content: {
+        kind: "plain" as const,
+        heading: name,
+        message: "Manual readiness trigger.",
+        useSystemFallback: false,
+      },
+      grouping: { mode: "all" as const, propertyApiNames: [] },
+      locale: "en-US",
+      retry: {
+        enabled: false,
+        strategy: "constant" as const,
+        maxAttempts: 1,
+        delaySeconds: 1,
+        multiplier: 1,
+        maxDelaySeconds: 1,
+        jitter: { kind: "none" as const },
+        retryAllFailures: false,
+      },
+    };
+  }
+
+  async function createActivatedTwoEffectAutomation() {
+    const effectA = crypto.randomUUID();
+    const effectB = crypto.randomUUID();
+    const created = await createDraft({
+      tenantId,
+      ontologyId,
+      actorUserId,
+      securitySnapshot: {
+        roles: ["tellus-superadmin"],
+        markings: [],
+        cbac: [],
+        organizations: [],
+        markingBypass: false,
+      },
+    });
+    createdIds.push(created.automationId);
+    const updated = await updateDraft({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: created.draftRevision,
+      definition: {
+        ...created.draftDefinition,
+        name: `Manual readiness ${created.automationId}`,
+        condition: {
+          type: "time",
+          evaluationMode: "scheduled",
+          schedule: {
+            kind: "cron",
+            expression: "0 0 * * *",
+            timezone: "UTC",
+            missedRunPolicy: "skip",
+          },
+        },
+        effects: [notificationEffectFor(effectA, "Effect A", 0), notificationEffectFor(effectB, "Effect B", 1)],
+      },
+    });
+    const activated = await activateAutomation({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: updated.draftRevision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    return { created, activated, effectA, effectB };
+  }
+
+  it("manual-execution-options returns the active version and its effects", async () => {
+    const { created, effectA, effectB } = await createActivatedTwoEffectAutomation();
+    const options = await getManualExecutionOptions({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+    });
+    expect(options.version).toBe(1);
+    expect(options.effects).toEqual([
+      { id: effectA, name: "Effect A", type: "notification", order: 0 },
+      { id: effectB, name: "Effect B", type: "notification", order: 1 },
+    ]);
+  });
+
+  it("options reflects the ACTIVE version, not later draft edits", async () => {
+    const { created, activated, effectA, effectB } = await createActivatedTwoEffectAutomation();
+    // Edit the draft to add a third effect and rename an existing one WITHOUT
+    // activating — options must still return the two active effects, never the
+    // draft's phantom third or the renamed label.
+    await updateDraft({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: activated.draftRevision,
+      definition: {
+        ...created.draftDefinition,
+        effects: [
+          notificationEffectFor(effectA, "Effect A", 0),
+          notificationEffectFor(effectB, "Effect B renamed in draft", 1),
+          notificationEffectFor(crypto.randomUUID(), "Effect C draft-only", 2),
+        ],
+      } as never,
+    });
+    const options = await getManualExecutionOptions({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+    });
+    expect(options.version).toBe(1);
+    expect(options.effects.map((effect) => effect.id)).toEqual([effectA, effectB]);
+    expect(options.effects.map((effect) => effect.name)).toEqual(["Effect A", "Effect B"]);
+  });
+
+  it("executes only the selected subset of active effects", async () => {
+    const { created, effectA, effectB } = await createActivatedTwoEffectAutomation();
+    const result = await executeAutomationManually({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      idempotencyKey: crypto.randomUUID(),
+      sendCompletionNotification: false,
+      selectedEffectIds: [effectA],
+      expectedVersion: 1,
+      securitySnapshot: { roles: ["tellus-superadmin"] },
+    });
+    const effectRows = await pool.query<{ effect_id: string }>(
+      `SELECT effect_id FROM automation_effect_execution WHERE trigger_event_id = $1`,
+      [result.triggerEventId],
+    );
+    const executedIds = effectRows.rows.map((row) => row.effect_id);
+    expect(executedIds).toEqual([effectA]);
+    expect(executedIds).not.toContain(effectB);
+  });
+
+  it("rejects a stale expectedVersion guard with 409 AUTOMATION_VERSION_STALE", async () => {
+    const { created, effectA } = await createActivatedTwoEffectAutomation();
+    await expect(
+      executeAutomationManually({
+        automationId: created.automationId,
+        tenantId,
+        actorUserId,
+        idempotencyKey: crypto.randomUUID(),
+        sendCompletionNotification: false,
+        selectedEffectIds: [effectA],
+        expectedVersion: 999,
+        securitySnapshot: { roles: ["tellus-superadmin"] },
+      }),
+    ).rejects.toMatchObject({ code: "AUTOMATION_VERSION_STALE", status: 409 });
+  });
+
+  it("rejects unknown effect ids with 400 AUTOMATION_EFFECT_NOT_FOUND", async () => {
+    const { created } = await createActivatedTwoEffectAutomation();
+    const unknownEffect = crypto.randomUUID();
+    await expect(
+      executeAutomationManually({
+        automationId: created.automationId,
+        tenantId,
+        actorUserId,
+        idempotencyKey: crypto.randomUUID(),
+        sendCompletionNotification: false,
+        selectedEffectIds: [unknownEffect],
+        expectedVersion: 1,
+        securitySnapshot: { roles: ["tellus-superadmin"] },
+      }),
+    ).rejects.toMatchObject({ code: "AUTOMATION_EFFECT_NOT_FOUND", status: 400 });
   });
 });

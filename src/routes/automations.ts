@@ -8,9 +8,11 @@ import {
   AutomationServiceError,
   activateAutomation,
   createDraft,
+  executeAutomationManually,
   cancelTriggerEvent,
   getAutomation,
   getExecutionDetails,
+  getManualExecutionOptions,
   listAutomations,
   listAutomationAudit,
   listConditionEvaluations,
@@ -54,6 +56,15 @@ const ActivateSchema = z.object({
 });
 const TransitionSchema = z.object({
   reason: z.string().trim().min(1).max(2_000).optional(),
+});
+const ManualExecutionSchema = z.object({
+  sendCompletionNotification: z.boolean().default(false),
+  selectedEffectIds: z.array(z.string().uuid()).min(1),
+  /**
+   * The active version the caller rendered options from. The execute path
+   * rejects with 409 when this no longer matches the active version.
+   */
+  expectedVersion: z.number().int().min(1),
 });
 const PreviewThresholdSchema = z.object({
   ontologyId: DatabaseUuidSchema,
@@ -454,6 +465,57 @@ router.post(
       idempotencyKey,
     });
     res.status(200).json({ data: record });
+  }),
+);
+
+router.get(
+  "/:automationId/manual-execution-options",
+  requireOntologyWrite,
+  handler(async (req, res) => {
+    const principal = actor(req);
+    const options = await getManualExecutionOptions({
+      automationId: parseId(req),
+      tenantId: resolveRequestTenant(req),
+      actorUserId: principal.id,
+    });
+    res.status(200).json({ data: options });
+  }),
+);
+
+router.post(
+  "/:automationId/execute",
+  requireOntologyWrite,
+  handler(async (req, res) => {
+    const principal = actor(req);
+    const body = ManualExecutionSchema.parse(req.body ?? {});
+    const idempotencyKey = req.header("Idempotency-Key");
+    if (!idempotencyKey || idempotencyKey.length > 500) {
+      throw new AutomationServiceError(
+        "IDEMPOTENCY_KEY_REQUIRED",
+        "A valid Idempotency-Key header is required.",
+        400,
+      );
+    }
+    const result = await executeAutomationManually({
+      automationId: parseId(req),
+      tenantId: resolveRequestTenant(req),
+      actorUserId: principal.id,
+      idempotencyKey,
+      sendCompletionNotification: body.sendCompletionNotification,
+      selectedEffectIds: body.selectedEffectIds,
+      expectedVersion: body.expectedVersion,
+      securitySnapshot: {
+        roles: (req as unknown as { user?: { roles?: string[] } }).user?.roles ?? [],
+        groups: (req as unknown as { user?: { groups?: string[] } }).user?.groups ?? [],
+        markings: req.security?.markings ?? [],
+        cbac: req.security?.cbac ?? [],
+        organizations: req.security?.organizations ?? [],
+        markingMode: req.security?.markingMode ?? "disjunctive",
+        markingBypass: req.security?.markingBypass === true,
+      },
+      requestId: requestId(req),
+    });
+    res.status(result.reused ? 200 : 201).json({ data: result });
   }),
 );
 
