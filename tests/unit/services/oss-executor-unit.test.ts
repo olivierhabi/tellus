@@ -860,6 +860,47 @@ describe("aggregateObjectSet", () => {
     ]);
   });
 
+  it("paginates ungrouped exactDistinct instead of labelling cardinality accurate", async () => {
+    const compiled = await compileObjectSet(os, { now: () => NOW });
+    const requests: Array<Record<string, unknown>> = [];
+    const deps: ExecutorDeps = {
+      keywordOf: async (_type, field) => field,
+      translateWhere: async () => ({ match_all: {} }),
+      search: async (_type, body) => {
+        requests.push(body);
+        const after = ((body.aggs as Record<string, { composite: { after?: Record<string, unknown> } }>).__composite).composite.after;
+        return {
+          hits: [],
+          total: 3,
+          aggregations: {
+            __composite: after
+              ? { buckets: [{ key: { __distinct: "c" } }] }
+              : {
+                  buckets: [{ key: { __distinct: "a" } }, { key: { __distinct: "b" } }],
+                  after_key: { __distinct: "b" },
+                },
+          },
+        };
+      },
+    };
+    const result = await aggregateObjectSet(
+      compiled,
+      {
+        objectSet: os,
+        aggregation: [{ type: "exactDistinct", field: "value", name: "unique" }],
+        groupBy: [],
+        accuracy: "REQUIRE_ACCURATE",
+      },
+      ctx,
+      deps,
+    );
+    expect(requests).toHaveLength(2);
+    expect(result).toEqual({
+      accuracy: "ACCURATE",
+      data: [{ group: {}, metrics: [{ name: "unique", value: 3 }] }],
+    });
+  });
+
   it("aggregates the composed transaction/scenario view", async () => {
     const compiled = await compileObjectSet(os, { now: () => NOW });
     const deps: ExecutorDeps = {

@@ -1073,6 +1073,30 @@ export async function aggregateObjectSet(
       "approximatePercentile cannot be computed over a cross-object-type set.",
     );
   }
+
+  // OpenSearch's cardinality aggregation is HyperLogLog-based even when its
+  // precision threshold is maximized. It must never back a response labelled
+  // ACCURATE. The common chart category-count request is ungrouped and only
+  // asks for exactDistinct, so enumerate distinct values through composite
+  // pagination and return the exact count.
+  if (
+    req.accuracy === "REQUIRE_ACCURATE" &&
+    req.groupBy.length === 0 &&
+    req.aggregation.length > 0 &&
+    req.aggregation.every((aggregation) => aggregation.type === "exactDistinct")
+  ) {
+    const distinct = await executeExactDistinctAggregations(plans, req, deps);
+    return {
+      accuracy: "ACCURATE",
+      data: [{
+        group: {},
+        metrics: req.aggregation.map((aggregation, index) => {
+          const name = aggregation.name ?? `exactDistinct_${aggregation.field}_${index}`;
+          return { name, value: distinct.get(name)?.get("{}") ?? 0 };
+        }),
+      }],
+    };
+  }
   if (
     plans.length > 1 &&
     req.aggregation.some(
@@ -1292,13 +1316,27 @@ async function executeExactDistinctAggregations(
             { metric: metric.name, pages: page - 1 },
           );
         }
-        const built = buildCompositeV2Aggs(
-          [],
-          req.groupBy,
-          keywordOf,
-          after,
-          EXACT_AGG_PAGE_SIZE,
-        );
+        const built = req.groupBy.length === 0
+          ? {
+              aggs: {
+                __composite: {
+                  composite: {
+                    size: EXACT_AGG_PAGE_SIZE,
+                    sources: [] as Array<Record<string, unknown>>,
+                    ...(after ? { after } : {}),
+                  },
+                },
+              },
+              sourceNames: [] as string[],
+              groupNames: [] as string[],
+            }
+          : buildCompositeV2Aggs(
+              [],
+              req.groupBy,
+              keywordOf,
+              after,
+              EXACT_AGG_PAGE_SIZE,
+            );
         const root = built.aggs.__composite as {
           composite: {
             sources: Array<Record<string, unknown>>;
