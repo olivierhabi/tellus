@@ -1008,17 +1008,65 @@ export async function listExecutionHistory(input: {
   actorUserId: string;
   limit: number;
   before?: string;
+  /**
+   * Optional server-side filter on trigger type (e.g. "manual"). Validated
+   * and applied in SQL — never trusted from the client alone.
+   */
+  triggerType?: string;
+  /**
+   * "me" restricts manual triggers to those requested by the calling user
+   * (condition_output.__manualExecution.requestedByUserId = actorUserId).
+   */
+  requestedBy?: "me";
 }): Promise<Array<Record<string, unknown>>> {
-  await getAutomation(
+  const record = await getAutomation(
     input.automationId,
     input.tenantId,
     input.actorUserId,
   );
-  const values: unknown[] = [input.automationId, input.limit];
-  const beforeClause = input.before
-    ? "AND t.created_at < $3::timestamptz"
-    : "";
-  if (input.before) values.push(input.before);
+  // historyScope is an authorization control, not just a display preference.
+  // "owner" (user-scoped) hides other users' manual executions from every
+  // caller, including administrators; "project" (project-scoped) leaves the
+  // view unrestricted. Non-manual triggers are automation-wide (scheduled /
+  // dependency-driven) and remain visible in both scopes.
+  const userScoped = record.draftDefinition.settings.historyScope === "owner";
+
+  const values: unknown[] = [];
+  const clauses: string[] = ["t.automation_id = $1"];
+  let paramIdx = 1;
+  values.push(input.automationId);
+  paramIdx++;
+
+  if (input.triggerType) {
+    values.push(input.triggerType);
+    clauses.push(`t.trigger_type = $${paramIdx}`);
+    paramIdx++;
+  }
+
+  // "requested by me" filter: only manual triggers carry a requesting user,
+  // so scope the filter to manual triggers whose requestedByUserId matches.
+  const applyRequestedByMe =
+    input.requestedBy === "me" || userScoped;
+  if (applyRequestedByMe) {
+    values.push(input.actorUserId);
+    clauses.push(
+      `(t.trigger_type <> 'manual' OR ` +
+        `t.condition_output->'__manualExecution'->>'requestedByUserId' = $${paramIdx})`,
+    );
+    paramIdx++;
+  }
+
+  // Pagination cursor (created_at + trigger_event_id ordering).
+  if (input.before) {
+    values.push(input.before);
+    clauses.push(`t.created_at < $${paramIdx}::timestamptz`);
+    paramIdx++;
+  }
+
+  values.push(input.limit);
+  const limitIdx = paramIdx;
+
+  const where = clauses.join(" AND ");
   const result = await pool.query<Record<string, unknown>>(
     `SELECT t.trigger_event_id AS "triggerEventId",
             t.automation_version AS "automationVersion",
@@ -1065,7 +1113,7 @@ export async function listExecutionHistory(input: {
                     )
                       FROM automation_effect_attempt attempt
                      WHERE attempt.effect_execution_id =
-                           e.effect_execution_id
+                            e.effect_execution_id
                   ), '[]'::jsonb)
                 ) ORDER BY e.effect_order, e.created_at
               ) FILTER (WHERE e.effect_execution_id IS NOT NULL),
@@ -1074,11 +1122,10 @@ export async function listExecutionHistory(input: {
        FROM automation_trigger_event t
        LEFT JOIN automation_effect_execution e
          ON e.trigger_event_id = t.trigger_event_id
-      WHERE t.automation_id = $1
-        ${beforeClause}
+      WHERE ${where}
       GROUP BY t.trigger_event_id
       ORDER BY t.created_at DESC, t.trigger_event_id
-      LIMIT $2`,
+      LIMIT $${limitIdx}`,
     values,
   );
   return result.rows;

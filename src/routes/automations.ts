@@ -524,6 +524,18 @@ router.get(
   handler(async (req, res) => {
     const principal = actor(req);
     const limit = Math.min(Math.max(Number(req.query.limit ?? 50), 1), 200);
+    // Server-side filters validated and applied in SQL. triggerType is
+    // constrained to the known trigger-type vocabulary; requestedBy only
+    // accepts "me" (the calling user) — arbitrary user ids are not honored.
+    const triggerType =
+      typeof req.query.triggerType === "string" &&
+      ["manual", "scheduled", "automation-dependency", "threshold-crossed"].includes(
+        req.query.triggerType,
+      )
+        ? req.query.triggerType
+        : undefined;
+    const requestedBy =
+      req.query.requestedBy === "me" ? ("me" as const) : undefined;
     const history = await listExecutionHistory({
       automationId: parseId(req),
       tenantId: resolveRequestTenant(req),
@@ -531,6 +543,8 @@ router.get(
       limit,
       before:
         typeof req.query.before === "string" ? req.query.before : undefined,
+      triggerType,
+      requestedBy,
     });
     res.status(200).json({ data: history });
   }),

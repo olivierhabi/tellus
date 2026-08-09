@@ -1838,3 +1838,178 @@ describe("Manual execution cancellation — atomic with worker claiming (P1-3)",
     expect(inbox.rows[0].template_parameters.status).toBe("cancelled");
   });
 });
+
+describe("Manual execution history — historyScope + server-side filters (P1-4)", () => {
+  const otherUserId = crypto.randomUUID();
+  const historyScopeNotificationEffect = (id: string) => ({
+    id,
+    name: "History scope effect",
+    order: 0,
+    type: "notification" as const,
+    recipients: {
+      static: [{ kind: "user" as const, id: actorUserId, displayName: "Owner" }],
+      dynamic: [],
+    },
+    channels: ["in_app" as const],
+    content: {
+      kind: "plain" as const,
+      heading: "History scope",
+      message: "History scope trigger.",
+      useSystemFallback: false,
+    },
+    grouping: { mode: "all" as const, propertyApiNames: [] },
+    locale: "en-US",
+    retry: {
+      enabled: false,
+      strategy: "constant" as const,
+      maxAttempts: 1,
+      delaySeconds: 1,
+      multiplier: 1,
+      maxDelaySeconds: 1,
+      jitter: { kind: "none" as const },
+      retryAllFailures: false,
+    },
+  });
+
+  async function createActivatedForHistoryScope(scope: "owner" | "project") {
+    const effectId = crypto.randomUUID();
+    const created = await createDraft({
+      tenantId,
+      ontologyId,
+      actorUserId,
+      securitySnapshot: {
+        roles: ["tellus-superadmin"],
+        markings: [],
+        cbac: [],
+        organizations: [],
+        markingBypass: false,
+      },
+    });
+    createdIds.push(created.automationId);
+    const updated = await updateDraft({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: created.draftRevision,
+      definition: {
+        ...created.draftDefinition,
+        name: `History scope ${created.automationId}`,
+        condition: {
+          type: "time",
+          evaluationMode: "scheduled",
+          schedule: {
+            kind: "cron",
+            expression: "0 0 * * *",
+            timezone: "UTC",
+            missedRunPolicy: "skip",
+          },
+        },
+        effects: [historyScopeNotificationEffect(effectId)],
+        settings: {
+          ...created.draftDefinition.settings,
+          // Both the owner and the second user are administrators so the
+          // second user can pass getAutomation() authorization.
+          administrators: [
+            { kind: "user" as const, id: actorUserId, displayName: "Owner" },
+            { kind: "user" as const, id: otherUserId, displayName: "Other" },
+          ],
+          historyScope: scope,
+        },
+      },
+    });
+    const activated = await activateAutomation({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: updated.draftRevision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    return { created, activated, effectId };
+  }
+
+  async function manualExecutionBy(
+    automationId: string,
+    effectId: string,
+    userId: string,
+  ) {
+    return executeAutomationManually({
+      automationId,
+      tenantId,
+      actorUserId: userId,
+      idempotencyKey: crypto.randomUUID(),
+      sendCompletionNotification: false,
+      selectedEffectIds: [effectId],
+      expectedVersion: 1,
+      securitySnapshot: { roles: ["tellus-superadmin"] },
+    });
+  }
+
+  function requestedBy(row: Record<string, unknown>): string | undefined {
+    const cond = row.conditionOutput as
+      | { __manualExecution?: { requestedByUserId?: string } }
+      | undefined;
+    return cond?.__manualExecution?.requestedByUserId;
+  }
+
+  it("user-scoped history hides another user's manual executions from an administrator", async () => {
+    const { created, effectId } = await createActivatedForHistoryScope("owner");
+    const other = await manualExecutionBy(created.automationId, effectId, otherUserId);
+    const mine = await manualExecutionBy(created.automationId, effectId, actorUserId);
+    const rows = await listExecutionHistory({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId, // owner + administrator
+      limit: 50,
+    });
+    const ids = new Set(rows.map((row) => row.triggerEventId));
+    expect(ids.has(mine.triggerEventId)).toBe(true);
+    // The other user's manual execution is hidden even from an administrator.
+    expect(ids.has(other.triggerEventId)).toBe(false);
+  });
+
+  it("project-scoped history shows another user's manual executions", async () => {
+    const { created, effectId } = await createActivatedForHistoryScope("project");
+    const other = await manualExecutionBy(created.automationId, effectId, otherUserId);
+    const mine = await manualExecutionBy(created.automationId, effectId, actorUserId);
+    const rows = await listExecutionHistory({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      limit: 50,
+    });
+    const ids = new Set(rows.map((row) => row.triggerEventId));
+    expect(ids.has(mine.triggerEventId)).toBe(true);
+    expect(ids.has(other.triggerEventId)).toBe(true);
+  });
+
+  it("requestedBy=me filters to the caller's own manual executions in project scope", async () => {
+    const { created, effectId } = await createActivatedForHistoryScope("project");
+    const other = await manualExecutionBy(created.automationId, effectId, otherUserId);
+    const mine = await manualExecutionBy(created.automationId, effectId, actorUserId);
+    const rows = await listExecutionHistory({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      limit: 50,
+      requestedBy: "me",
+    });
+    const ids = new Set(rows.map((row) => row.triggerEventId));
+    expect(ids.has(mine.triggerEventId)).toBe(true);
+    expect(ids.has(other.triggerEventId)).toBe(false);
+    expect(rows.every((row) => requestedBy(row) === actorUserId)).toBe(true);
+  });
+
+  it("triggerType=manual filters to manual triggers only", async () => {
+    const { created, effectId } = await createActivatedForHistoryScope("project");
+    await manualExecutionBy(created.automationId, effectId, actorUserId);
+    const rows = await listExecutionHistory({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      limit: 50,
+      triggerType: "manual",
+    });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((row) => row.triggerType === "manual")).toBe(true);
+  });
+});

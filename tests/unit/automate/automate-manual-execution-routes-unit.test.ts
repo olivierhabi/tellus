@@ -304,3 +304,39 @@ describe("POST /:automationId/execute — HTTP contract", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe("GET /:automationId/history — server-side filters (P1-4)", () => {
+  it("accepts triggerType and requestedBy query params and passes them through", async () => {
+    repoMock.listExecutionHistory.mockResolvedValue([]);
+    const res = await request(makeApp(authedUser)).get(
+      `/api/v1/automations/${AUTOMATION_ID}/history?triggerType=manual&requestedBy=me`,
+    );
+    expect(res.status).toBe(200);
+    expect(repoMock.listExecutionHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        triggerType: "manual",
+        requestedBy: "me",
+      }),
+    );
+  });
+
+  it("ignores an unknown triggerType value", async () => {
+    repoMock.listExecutionHistory.mockResolvedValue([]);
+    await request(makeApp(authedUser)).get(
+      `/api/v1/automations/${AUTOMATION_ID}/history?triggerType=bogus`,
+    );
+    expect(repoMock.listExecutionHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ triggerType: undefined }),
+    );
+  });
+
+  it("ignores a requestedBy value other than 'me'", async () => {
+    repoMock.listExecutionHistory.mockResolvedValue([]);
+    await request(makeApp(authedUser)).get(
+      `/api/v1/automations/${AUTOMATION_ID}/history?requestedBy=someone-else`,
+    );
+    expect(repoMock.listExecutionHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ requestedBy: undefined }),
+    );
+  });
+});
