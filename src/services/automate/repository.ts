@@ -1397,26 +1397,101 @@ export async function cancelTriggerEvent(input: {
     input.tenantId,
     input.actorUserId,
   );
-  const running = await pool.query(
-    `SELECT 1 FROM automation_effect_execution
-      WHERE trigger_event_id = $1 AND status IN ('claimed','running')
-      LIMIT 1`,
-    [input.triggerEventId],
-  );
-  if (running.rowCount) {
-    throw new AutomationServiceError(
-      "AUTOMATION_EXECUTION_CANCELLATION_UNSAFE",
-      "An effect is already running and its canonical runtime does not support cancellation.",
-      409,
-    );
-  }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // Lock the trigger row first so cancellation and worker claiming
+    // serialize on the same row. A worker claiming an effect of this trigger
+    // blocks here until cancellation decides; cancellation that runs first
+    // flips the trigger to 'cancelled'/'cancelling' and the worker's claim
+    // query excludes cancelled/cancelling triggers.
+    const trigger = await client.query<{
+      status: string;
+      condition_output: Record<string, unknown>;
+      automation_version: number | null;
+    }>(
+      `SELECT status, condition_output, automation_version
+         FROM automation_trigger_event
+        WHERE trigger_event_id = $1 AND automation_id = $2
+        FOR UPDATE`,
+      [input.triggerEventId, input.automationId],
+    );
+    if (!trigger.rows[0]) {
+      throw new AutomationServiceError(
+        "AUTOMATION_EXECUTION_NOT_FOUND",
+        "The trigger event does not exist.",
+        404,
+      );
+    }
+    const triggerStatus = trigger.rows[0].status;
+    if (triggerStatus !== "queued" && triggerStatus !== "running") {
+      // Already terminal (succeeded/failed/partially_failed/cancelled/skipped)
+      // or already 'cancelling'. There is nothing to cancel.
+      throw new AutomationServiceError(
+        "AUTOMATION_EXECUTION_NOT_CANCELLABLE",
+        "The trigger event is not cancellable.",
+        409,
+      );
+    }
+    // Lock the effect rows and recheck their states under the lock.
+    const effects = await client.query<{ status: string }>(
+      `SELECT status FROM automation_effect_execution
+        WHERE trigger_event_id = $1
+        FOR UPDATE`,
+      [input.triggerEventId],
+    );
+    const inFlight = effects.rows.some((row) =>
+      ["claimed", "running"].includes(row.status),
+    );
+    const cancelPendingEffects = () =>
+      client.query(
+        `UPDATE automation_effect_execution
+            SET status = 'cancelled', completed_at = now(), updated_at = now()
+          WHERE trigger_event_id = $1 AND status IN ('pending','retrying')`,
+        [input.triggerEventId],
+      );
+    if (inFlight) {
+      // An effect is already claimed/running and the canonical runtime cannot
+      // interrupt it. Transition the trigger to 'cancelling' (compare-and-set
+      // against the locked status) so finalization completes it as 'cancelled'
+      // once the in-flight effect settles, and cancel the still-pending/
+      // retrying effects now. The final state is never 'cancelled' with an
+      // effect still executing: it is 'cancelling' until finalization flips it.
+      const cancelling = await client.query(
+        `UPDATE automation_trigger_event
+            SET status = 'cancelling'
+          WHERE trigger_event_id = $1
+            AND automation_id = $2
+            AND status IN ('queued','running')`,
+        [input.triggerEventId, input.automationId],
+      );
+      if (!cancelling.rowCount) {
+        // The status changed under us despite the lock — impossible for a
+        // concurrent writer, but fail closed rather than corrupt state.
+        throw new AutomationServiceError(
+          "AUTOMATION_EXECUTION_NOT_CANCELLABLE",
+          "The trigger event is not cancellable.",
+          409,
+        );
+      }
+      await cancelPendingEffects();
+      await appendAutomationAudit(client, {
+        automationId: input.automationId,
+        automationVersion: trigger.rows[0].automation_version,
+        actorUserId: input.actorUserId,
+        eventType: "automation.execution_cancelling",
+        details: { triggerEventId: input.triggerEventId },
+      });
+      await client.query("COMMIT");
+      return;
+    }
+    // No effect is in flight: cancel the trigger atomically (compare-and-set)
+    // and cancel the pending/retrying effects in the same transaction.
     const event = await client.query(
       `UPDATE automation_trigger_event
           SET status = 'cancelled', completed_at = now()
-        WHERE trigger_event_id = $1 AND automation_id = $2
+        WHERE trigger_event_id = $1
+          AND automation_id = $2
           AND status IN ('queued','running')
         RETURNING trigger_event_id`,
       [input.triggerEventId, input.automationId],
@@ -1428,16 +1503,45 @@ export async function cancelTriggerEvent(input: {
         409,
       );
     }
-    await client.query(
-      `UPDATE automation_effect_execution
-          SET status = 'cancelled', completed_at = now(), updated_at = now()
-        WHERE trigger_event_id = $1
-          AND status IN ('pending','retrying')`,
-      [input.triggerEventId],
-    );
+    await cancelPendingEffects();
+    // Create a completion notification for a cancelled manual execution when
+    // the caller opted in, mirroring the finalization path for other outcomes.
+    const manual = trigger.rows[0].condition_output?.__manualExecution as
+      | { requestedByUserId?: unknown; sendCompletionNotification?: unknown }
+      | undefined;
+    if (
+      manual?.sendCompletionNotification === true &&
+      typeof manual.requestedByUserId === "string"
+    ) {
+      const ontology = await client.query<{ ontology_id: string }>(
+        `SELECT ontology_id FROM automation WHERE automation_id = $1`,
+        [input.automationId],
+      );
+      const ontologyId = ontology.rows[0]?.ontology_id;
+      if (ontologyId) {
+        await client.query(
+          `INSERT INTO notification_inbox (
+             recipient_user_id, template_id, template_parameters, channel,
+             action_type_api_name, execution_id, ontology_id
+           ) VALUES ($1,'automate.manual-execution-complete',$2::jsonb,
+                     'in_app','tellus-automate',$3,$4)`,
+          [
+            manual.requestedByUserId,
+            JSON.stringify({
+              automationId: input.automationId,
+              triggerEventId: input.triggerEventId,
+              status: "cancelled",
+              message: "Manual automation execution completed with status: cancelled.",
+            }),
+            input.triggerEventId,
+            ontologyId,
+          ],
+        );
+      }
+    }
     await appendAutomationAudit(client, {
       automationId: input.automationId,
-      automationVersion: null,
+      automationVersion: trigger.rows[0].automation_version,
       actorUserId: input.actorUserId,
       eventType: "automation.execution_cancelled",
       details: { triggerEventId: input.triggerEventId },

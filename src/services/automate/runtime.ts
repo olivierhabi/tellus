@@ -422,6 +422,7 @@ export async function claimAutomateEffects(input: {
           (e.status IN ('claimed','running') AND e.lease_expires_at <= $2)
         )
           AND a.status NOT IN ('archived','disabled')
+          AND t.status NOT IN ('cancelled','cancelling')
           AND ($5::text IS NULL OR a.tenant_id = $5)
           AND (t.scheduled_for IS NULL OR t.scheduled_for <= $2)
           AND (
@@ -668,20 +669,58 @@ async function finalizeTrigger(triggerEventId: string): Promise<void> {
       automation_version: number;
       condition_output: Record<string, unknown>;
       definition: unknown;
+      ontology_id: string;
+      status: string;
     }>(
       `UPDATE automation_trigger_event t
-          SET status = $2, completed_at = now()
+          SET status = CASE WHEN t.status = 'cancelling' THEN 'cancelled' ELSE $2 END,
+              completed_at = now()
          FROM automation_version v
         WHERE t.trigger_event_id = $1
+          AND t.completed_at IS NULL
           AND v.automation_id = t.automation_id
           AND v.version = t.automation_version
         RETURNING t.automation_id, t.automation_version,
-                  t.condition_output, v.definition`,
+                  t.condition_output, v.definition,
+                  (SELECT ontology_id FROM automation
+                    WHERE automation_id = t.automation_id) AS ontology_id,
+                  t.status`,
       [triggerEventId, status],
     );
     const automationId = event.rows[0]?.automation_id;
     if (automationId) {
       const definition = AutomationDraftSchema.parse(event.rows[0].definition);
+      const manual = event.rows[0].condition_output.__manualExecution as
+        | { requestedByUserId?: unknown; sendCompletionNotification?: unknown }
+        | undefined;
+      if (
+        manual?.sendCompletionNotification === true &&
+        typeof manual.requestedByUserId === "string"
+      ) {
+        // Use the actual finalized status (which is 'cancelled' when the
+        // trigger was 'cancelling' before finalization) so completion
+        // notifications cover success, failure, partial failure, and
+        // cancellation accurately.
+        const finalStatus = event.rows[0].status;
+        await client.query(
+          `INSERT INTO notification_inbox (
+             recipient_user_id, template_id, template_parameters, channel,
+             action_type_api_name, execution_id, ontology_id
+            ) VALUES ($1,'automate.manual-execution-complete',$2::jsonb,
+                      'in_app','tellus-automate',$3,$4)`,
+          [
+            manual.requestedByUserId,
+            JSON.stringify({
+              automationId,
+              triggerEventId,
+              status: finalStatus,
+              message: `Manual automation execution completed with status: ${finalStatus}.`,
+            }),
+            triggerEventId,
+            event.rows[0].ontology_id,
+          ],
+        );
+      }
       const outcomes = await client.query<{
         status: "succeeded" | "failed" | "partially_failed";
       }>(
@@ -956,6 +995,29 @@ export async function executeClaimedEffect(
     row.effect_execution_id,
     workerId,
   );
+  // Last-check: the trigger may have been cancelled between our claim and the
+  // moment we are about to execute side effects. Never run side effects for a
+  // cancelled/cancelling trigger — abort this effect cleanly and finalize.
+  {
+    const triggerState = await pool.query<{ status: string }>(
+      `SELECT status FROM automation_trigger_event
+        WHERE trigger_event_id = $1`,
+      [row.trigger_event_id],
+    );
+    const ts = triggerState.rows[0]?.status;
+    if (ts === "cancelled" || ts === "cancelling") {
+      await stopHeartbeat();
+      await pool.query(
+        `UPDATE automation_effect_execution
+            SET status = 'cancelled', completed_at = now(),
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+          WHERE effect_execution_id = $1 AND lease_owner = $2`,
+        [row.effect_execution_id, workerId],
+      );
+      await finalizeTrigger(row.trigger_event_id);
+      return;
+    }
+  }
   try {
     const effectOutputs = await previousEffectOutputs(row.trigger_event_id);
     const bindingContext = {

@@ -4,6 +4,7 @@ import { pool } from "../../../src/db";
 import {
   AutomationServiceError,
   activateAutomation,
+  cancelTriggerEvent,
   createDraft,
   executeAutomationManually,
   getExecutionDetails,
@@ -1594,5 +1595,246 @@ describe("Manual execution readiness — active version guard + options", () => 
         securitySnapshot: { roles: ["tellus-superadmin"] },
       }),
     ).rejects.toMatchObject({ code: "AUTOMATION_EFFECT_NOT_FOUND", status: 400 });
+  });
+});
+
+describe("Manual execution cancellation — atomic with worker claiming (P1-3)", () => {
+  function notificationEffectFor(id: string, name: string, order: number) {
+    return {
+      id,
+      name,
+      order,
+      type: "notification" as const,
+      recipients: {
+        static: [
+          { kind: "user" as const, id: actorUserId, displayName: "Owner" },
+        ],
+        dynamic: [],
+      },
+      channels: ["in_app" as const],
+      content: {
+        kind: "plain" as const,
+        heading: name,
+        message: "Cancellation race trigger.",
+        useSystemFallback: false,
+      },
+      grouping: { mode: "all" as const, propertyApiNames: [] },
+      locale: "en-US",
+      retry: {
+        enabled: false,
+        strategy: "constant" as const,
+        maxAttempts: 1,
+        delaySeconds: 1,
+        multiplier: 1,
+        maxDelaySeconds: 1,
+        jitter: { kind: "none" as const },
+        retryAllFailures: false,
+      },
+    };
+  }
+
+  async function createActivatedSingleEffectAutomation() {
+    const effectId = crypto.randomUUID();
+    const created = await createDraft({
+      tenantId,
+      ontologyId,
+      actorUserId,
+      securitySnapshot: {
+        roles: ["tellus-superadmin"],
+        markings: [],
+        cbac: [],
+        organizations: [],
+        markingBypass: false,
+      },
+    });
+    createdIds.push(created.automationId);
+    const updated = await updateDraft({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: created.draftRevision,
+      definition: {
+        ...created.draftDefinition,
+        name: `Cancel race ${created.automationId}`,
+        condition: {
+          type: "time",
+          evaluationMode: "scheduled",
+          schedule: {
+            kind: "cron",
+            expression: "0 0 * * *",
+            timezone: "UTC",
+            missedRunPolicy: "skip",
+          },
+        },
+        effects: [notificationEffectFor(effectId, "Solo effect", 0)],
+      },
+    });
+    const activated = await activateAutomation({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      expectedRevision: updated.draftRevision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    return { created, activated, effectId };
+  }
+
+  it("a cancelled trigger with an in-flight effect is 'cancelling', never 'cancelled', until the effect settles", async () => {
+    const { created, effectId } = await createActivatedSingleEffectAutomation();
+    const exec = await executeAutomationManually({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      idempotencyKey: crypto.randomUUID(),
+      sendCompletionNotification: false,
+      selectedEffectIds: [effectId],
+      expectedVersion: 1,
+      securitySnapshot: { roles: ["tellus-superadmin"] },
+    });
+
+    // A worker claims the effect (simulating an in-flight side effect).
+    const claimed = await claimAutomateEffects({
+      workerId: "cancel-race-worker",
+      tenantId,
+    });
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0].effect_id).toBe(effectId);
+
+    // Cancellation runs while the effect is claimed/running. It must NOT mark
+    // the trigger 'cancelled' with an effect still executing.
+    await cancelTriggerEvent({
+      automationId: created.automationId,
+      triggerEventId: exec.triggerEventId,
+      tenantId,
+      actorUserId,
+    });
+    const mid = await pool.query<{ status: string }>(
+      `SELECT status FROM automation_trigger_event WHERE trigger_event_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(mid.rows[0]?.status).toBe("cancelling");
+
+    // The claimed effect is still claimed (the runtime cannot interrupt it).
+    const effectMid = await pool.query<{ status: string }>(
+      `SELECT status FROM automation_effect_execution WHERE trigger_event_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(effectMid.rows[0]?.status).toBe("claimed");
+
+    // The worker finishes the in-flight effect; finalization must then flip
+    // the 'cancelling' trigger to 'cancelled' (never succeeded/failed).
+    await executeClaimedEffect(claimed[0], "cancel-race-worker");
+    const final = await pool.query<{ status: string }>(
+      `SELECT status FROM automation_trigger_event WHERE trigger_event_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(final.rows[0]?.status).toBe("cancelled");
+  });
+
+  it("workers do not claim effects for a cancelled trigger", async () => {
+    const { created, effectId } = await createActivatedSingleEffectAutomation();
+    const exec = await executeAutomationManually({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      idempotencyKey: crypto.randomUUID(),
+      sendCompletionNotification: false,
+      selectedEffectIds: [effectId],
+      expectedVersion: 1,
+      securitySnapshot: { roles: ["tellus-superadmin"] },
+    });
+    // Cancel before any worker claims — the effect is pending and gets cancelled.
+    await cancelTriggerEvent({
+      automationId: created.automationId,
+      triggerEventId: exec.triggerEventId,
+      tenantId,
+      actorUserId,
+    });
+    const claimed = await claimAutomateEffects({
+      workerId: "post-cancel-worker",
+      tenantId,
+    });
+    expect(claimed).toEqual([]);
+    const trigger = await pool.query<{ status: string }>(
+      `SELECT status FROM automation_trigger_event WHERE trigger_event_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(trigger.rows[0]?.status).toBe("cancelled");
+  });
+
+  it("a worker aborts execution (last-check) when the trigger is cancelled between claim and side-effect", async () => {
+    const { created, effectId } = await createActivatedSingleEffectAutomation();
+    const exec = await executeAutomationManually({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      idempotencyKey: crypto.randomUUID(),
+      sendCompletionNotification: false,
+      selectedEffectIds: [effectId],
+      expectedVersion: 1,
+      securitySnapshot: { roles: ["tellus-superadmin"] },
+    });
+    const claimed = await claimAutomateEffects({
+      workerId: "last-check-worker",
+      tenantId,
+    });
+    expect(claimed).toHaveLength(1);
+
+    // Cancel between claim and execution. The trigger becomes 'cancelling'.
+    await cancelTriggerEvent({
+      automationId: created.automationId,
+      triggerEventId: exec.triggerEventId,
+      tenantId,
+      actorUserId,
+    });
+
+    // The worker's last-check must abort: the effect becomes 'cancelled' and
+    // the notification side effect never runs (no effect-output inbox row).
+    await executeClaimedEffect(claimed[0], "last-check-worker");
+    const effect = await pool.query<{ status: string }>(
+      `SELECT status FROM automation_effect_execution WHERE trigger_event_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(effect.rows[0]?.status).toBe("cancelled");
+    const trigger = await pool.query<{ status: string }>(
+      `SELECT status FROM automation_trigger_event WHERE trigger_event_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(trigger.rows[0]?.status).toBe("cancelled");
+    // No completion notification was requested and the side effect was
+    // skipped, so no inbox row should exist for this trigger.
+    const inbox = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM notification_inbox WHERE execution_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(inbox.rows[0]?.n).toBe(0);
+  });
+
+  it("creates a cancellation completion notification when the caller opted in (direct cancel)", async () => {
+    const { created, effectId } = await createActivatedSingleEffectAutomation();
+    const exec = await executeAutomationManually({
+      automationId: created.automationId,
+      tenantId,
+      actorUserId,
+      idempotencyKey: crypto.randomUUID(),
+      sendCompletionNotification: true,
+      selectedEffectIds: [effectId],
+      expectedVersion: 1,
+      securitySnapshot: { roles: ["tellus-superadmin"] },
+    });
+    await cancelTriggerEvent({
+      automationId: created.automationId,
+      triggerEventId: exec.triggerEventId,
+      tenantId,
+      actorUserId,
+    });
+    const inbox = await pool.query<{
+      template_parameters: { status?: string };
+    }>(
+      `SELECT template_parameters FROM notification_inbox WHERE execution_id = $1`,
+      [exec.triggerEventId],
+    );
+    expect(inbox.rows).toHaveLength(1);
+    expect(inbox.rows[0].template_parameters.status).toBe("cancelled");
   });
 });
