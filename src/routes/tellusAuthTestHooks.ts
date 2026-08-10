@@ -46,6 +46,8 @@ function envelope(code: string, status: number, message: string, req: Request) {
 }
 
 function sendError(err: unknown, req: Request, res: Response) {
+  // eslint-disable-next-line no-console
+  console.error('[login-bypass:sendError]', err instanceof Error ? `${err.name}: ${err.message}\n${err.stack}` : String(err));
   if (err instanceof AppError) {
     return res.status(err.statusCode).json(envelope(err.code, err.statusCode, err.message, req));
   }

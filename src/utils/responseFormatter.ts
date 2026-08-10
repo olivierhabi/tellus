@@ -300,6 +300,7 @@ export function formatProperty(dbRow: DbRow): Record<string, unknown> {
     isArray: dbRow.is_array,
     ordinal: dbRow.ordinal,
     conditionalFormatting: dbRow.conditional_formatting ?? null,
+    inlineEditActionId: (dbRow.inline_edit_action_id as string | null) ?? null,
   };
 }
 

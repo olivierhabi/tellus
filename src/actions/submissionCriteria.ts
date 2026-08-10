@@ -118,6 +118,34 @@ interface Condition {
    * comparison then runs against the live object state at submit time.
    */
   objectProperty?: string;
+  /**
+   * B1 (cross-functionality engagement) — stale-form / "previousStatus"
+   * detection. When set alongside `{ parameter, objectProperty }`, the RHS of
+   * the comparison is the value of THIS other parameter (typically a hidden
+   * client-side param populated from the same object property at form-open
+   * time via `defaultFromObjectReference`), instead of the static `value`.
+   * The LHS (`parameter.objectProperty`) is re-resolved from the LIVE object
+   * at submit time by `resolveObjectPropertyOperands`. So:
+   *   { parameter:"<pkParam>", objectProperty:"status",
+   *     operator:"eq", compareParameter:"_previousStatus",
+   *     objectType:"OlivierOrderJune" }
+   * passes iff the target object's CURRENT status equals the cached client
+   * value — stale-form rejection is the LHS ≠ RHS case. Additive + opt-in:
+   * when `compareParameter` is absent the existing D27 (object-property vs
+   * static `value`) behaviour is unchanged.
+   */
+  compareParameter?: string;
+  /**
+   * B1 — the object type to fetch the live object from, when the condition's
+   * `parameter` is a STRING primary-key parameter (NOT an object_reference
+   * with its own `objectType`). When present, `resolveObjectPropertyOperands`
+   * uses this `objectType` + the parameter's value as the PK to fetch the live
+   * object (falling back to the paramDef's `objectType` for D27
+   * object_reference parameters). Lets a `{parameter:"orderId",
+   * objectType:"OlivierOrderJune"}` condition resolve without an
+   * object_reference param.
+   */
+  objectType?: string;
 }
 
 function evalCondition(
@@ -153,16 +181,30 @@ function evalCondition(
     } else {
       actual = parameters[cond.parameter];
     }
-    const ok = compare(actual, op, cond.value);
+    // B1: when compareParameter is set, the RHS is the value of another
+    // parameter (the cached client-side _previousStatus), not the static
+    // `value`. resolveObjectPropertyOperands already pre-resolved the LHS
+    // (the live object's property) into objectPropertyValues.
+    const expected = cond.compareParameter
+      ? parameters[cond.compareParameter]
+      : cond.value;
+    const ok = compare(actual, op, expected);
     const operandLabel = cond.objectProperty
       ? `${cond.parameter}.${cond.objectProperty}`
       : cond.parameter;
+    const rhsLabel = cond.compareParameter
+      ? ` (vs cached parameter '${cond.compareParameter}'=${JSON.stringify(expected)})`
+      : (NUMERIC_OPS.has((cond.operator ?? "exists") as SubmissionOperator) || ["eq","ne","in","nin"].includes((cond.operator ?? "exists") as string)
+          ? ` (vs ${JSON.stringify(cond.value)})`
+          : "");
     return {
       ok,
       reason: ok ? "" : (custom ?? `${cond.objectProperty ? "object property" : "parameter"} '${operandLabel}' ${op}${
-        NUMERIC_OPS.has(op) || op === "eq" || op === "ne" || op === "in" || op === "nin"
-          ? ` ${JSON.stringify(cond.value)}`
-          : ""
+        cond.compareParameter
+          ? rhsLabel
+          : (NUMERIC_OPS.has(op) || op === "eq" || op === "ne" || op === "in" || op === "nin"
+              ? ` ${JSON.stringify(cond.value)}`
+              : "")
       } not satisfied (was ${JSON.stringify(actual)})`),
     };
   }
@@ -287,7 +329,11 @@ export async function resolveObjectPropertyOperands(
     const c = cond as Condition;
     if (!c.parameter || !c.objectProperty) continue;
     const def = defMap.get(c.parameter);
-    const objectType = def?.objectType;
+    // B1: a condition may carry its own `objectType` so a STRING primary-key
+    // parameter (no paramDef.objectType) can still resolve a live object
+    // property. Fall back to the paramDef's `objectType` for D27
+    // object_reference parameters.
+    const objectType = c.objectType ?? def?.objectType;
     const pk = parameters[c.parameter];
     if (!objectType || pk == null || pk === "") continue;
     try {

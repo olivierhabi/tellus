@@ -88,6 +88,12 @@ import {
 /** Context provided by the caller (route handler). */
 export interface ExecutionContext {
   executedBy: string;
+  /**
+   * UI/request trace identifier. When supplied it is propagated unchanged to
+   * action plans, writebacks, and audit entries; executionId remains the
+   * immutable identifier of this particular execution.
+   */
+  correlationId?: string;
   sourceIp?: string | null;
   branchId?: string | null;
   /** Tenant scope for data-connection webhook resolution during the
@@ -303,6 +309,7 @@ export async function executeAction(
 ): Promise<ExecutionResult> {
   const startTime = Date.now();
   const executionId = crypto.randomUUID();
+  const correlationId = context.correlationId || executionId;
 
   // Phase 8 — observability: action_execution_total, partitioned by semantics version.
   try {
@@ -359,7 +366,7 @@ export async function executeAction(
     // Phase 8 — thread semantics + correlation id into the audit row.
     semantics_version: semantics?.semanticsVersion ?? null,
     execution_mode: semantics?.executionMode ?? null,
-    correlation_id: executionId,
+    correlation_id: correlationId,
   } as AuditLogEntry & { semantics_version: number | null; execution_mode: string | null; correlation_id: string });
 
   try {
@@ -380,17 +387,10 @@ export async function executeAction(
       return result;
     }
 
-    if (!actionType.is_enabled) {
-      result.failureType = "unclassified";
-      result.errorMessage = `Action type '${actionTypeApiName}' is disabled`;
-      pendingError = new OntologyError(
-        `Action type '${actionTypeApiName}' is disabled`,
-        "ACTION_DISABLED",
-        undefined,
-        { actionTypeApiName, executionId }
-      );
-      return result;
-    }
+    // Foundry parity: `is_enabled` is cosmetic metadata and no longer gates
+    // execution (Foundry action types have no enable/disable lifecycle —
+    // saved = applyable). Apply-time safety lives in the writeback executor's
+    // non-active-webhook refusal and the validators below, not here.
 
     // -----------------------------------------------------------------
     // STAGE 1b: Action Semantics Enforcement (Phase 6)
@@ -910,7 +910,7 @@ export async function executeAction(
         return result;
       }
       const plan = buildActionPlan(semantics.semanticsVersion as 1 | 2, planBuild.steps, {
-        executionId, correlationId: executionId,
+        executionId, correlationId,
       });
       if (!plan.plan || !plan.plan.valid) {
         const errs = plan.errors.length ? plan.errors : plan.plan?.errors ?? [];
@@ -936,7 +936,7 @@ export async function executeAction(
         );
         if (!reBuild.ok || !reBuild.steps) return reBuild.errors;
         const rePlan = buildActionPlan(semantics.semanticsVersion as 1 | 2, reBuild.steps, {
-          executionId, correlationId: executionId,
+          executionId, correlationId,
         });
         return (rePlan.errors.length ? rePlan.errors : rePlan.plan?.errors ?? []);
       };

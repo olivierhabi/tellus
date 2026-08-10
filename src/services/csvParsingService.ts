@@ -180,7 +180,19 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
       //   - duplicates suffixed `_2`, `_3`, …
       // and emits a single-line structured warning when it had to fix
       // anything (event=csv_header_sanitized) for log alerting.
-      columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
+      // Capture the schema from the header itself. Previously `columnNames`
+      // was initialised from the first data record, which meant a valid
+      // header-only CSV produced zero columns. Foundry's no-datasource object
+      // type flow intentionally creates an empty permissioning dataset, so a
+      // schema must not depend on the presence of user data.
+      columns: (h: string[]) => {
+        const names = sanitizeCsvHeader(h, { source: filePath });
+        columnNames = names;
+        for (const name of names) {
+          accumulators.set(name, new ColumnAccumulator());
+        }
+        return names;
+      },
       skip_empty_lines: true,
       trim: true,
       relax_column_count: true,
@@ -213,12 +225,6 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
       let record: Record<string, string>;
       while ((record = parser.read()) !== null) {
         rowCount++;
-        if (columnNames.length === 0) {
-          columnNames = Object.keys(record);
-          for (const col of columnNames) {
-            accumulators.set(col, new ColumnAccumulator());
-          }
-        }
         if (!doneAnalyzing) {
           if (previewRows.length < PREVIEW_ROWS) {
             previewRows.push({ ...record });

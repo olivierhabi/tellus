@@ -82,6 +82,12 @@ function stateForProbeError(err: unknown): "AUTH_FAILED" | "TLS_FAILED" | "UNREA
 /**
  * Probe every active PostgreSQL connection once. Exported for tests.
  * Returns a tally of probe outcomes.
+ *
+ * F7 — health-probe egress is DIRECT: `getPool(rid)` opens a backend pg.Pool
+ * that connects straight to the configured Postgres host (see
+ * connectors/postgresql/pool.ts). The agent (if `workerType === "agentProxy"`)
+ * is consulted only as a liveness gate, never as a tunnel. Every probe's
+ * direct egress is recorded to `connectivity_egress_audit_log`.
  */
 export async function probeAll(): Promise<{ healthy: number; unhealthy: number }> {
   // Least-recently-checked first; skip connections probed within one poll
@@ -90,7 +96,7 @@ export async function probeAll(): Promise<{ healthy: number; unhealthy: number }
 
   let healthy = 0;
   let unhealthy = 0;
-  for (const { rid, connectorType } of targets) {
+  for (const { rid, tenant, connectorType } of targets) {
     if (connectorType !== "postgresql") continue;
     try {
       const pg = await getPool(rid);

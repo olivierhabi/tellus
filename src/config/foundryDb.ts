@@ -14,7 +14,7 @@ const foundryDb: Knex = knex({
     user: envWithDefault('PGUSER', 'tellus'),
     password: requireSecret('PGPASSWORD', 'Postgres password is required.'),
   },
-  pool: { min: 2, max: 10 },
+  pool: { min: 2, max: parseInt(envWithDefault('PG_POOL_MAX', '10'), 10) },
 });
 
 export default foundryDb;

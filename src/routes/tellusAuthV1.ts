@@ -479,6 +479,63 @@ router.post('/refresh', csrfSameOrigin, async (req: Request, res: Response) => {
     if (!refresh) {
       throw new AppError('No refresh token cookie', 401, 'REFRESH_TOKEN_MISSING');
     }
+
+    // Dev-only test-auth bypass — when NODE_ENV !== 'production' AND
+    // TELLUS_TEST_HOOKS=1, a refresh token starting with "test-auth:" is
+    // accepted without a Keycloak refresh grant. Returns a synthetic
+    // accessToken + tokenInfo so the FE's silentRefresh() hydrates
+    // without Keycloak. The userId is extracted from the token.
+    if (
+      refresh.startsWith('test-auth:') &&
+      process.env.NODE_ENV !== 'production' &&
+      process.env.TELLUS_TEST_HOOKS === '1'
+    ) {
+      const raw = refresh.slice('test-auth:'.length).trim();
+      const colonIdx = raw.indexOf(':');
+      const userId = colonIdx === -1 ? raw : raw.slice(0, colonIdx);
+      const rolePart = colonIdx === -1 ? undefined : raw.slice(colonIdx + 1);
+      const roles = rolePart
+        ? rolePart.split(',').map((r) => r.trim()).filter(Boolean)
+        : ['ontology-editor', 'default-roles-tellus'];
+      const now = Math.floor(Date.now() / 1000);
+      const accessToken = `test-auth:${userId}`;
+      const absoluteExpiryMs = Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
+      setSessionCookies(res, accessToken, refresh, absoluteExpiryMs);
+      const markings = roles.filter((r) => r.startsWith('marking:'));
+      const realmRoles = roles.filter((r) => !r.startsWith('marking:'));
+      res.json({
+        success: true,
+        data: {
+          tokenType: 'Bearer',
+          accessToken,
+          expiresIn: 3600,
+          tokenInfo: {
+            sub: userId,
+            jti: `test-jti-${now}`,
+            org: 'tellus',
+            email: `test-${userId.slice(0, 8)}@tellus.local`,
+            preferredUsername: `test-${userId.slice(0, 8)}@tellus.local`,
+            name: 'Test User',
+            givenName: 'Test',
+            familyName: 'User',
+            realmRoles,
+            markings: markings,
+            orgs: ['tellus'],
+            cbacClearance: null,
+            sessionScope: [],
+            exp: now + 3600,
+            iat: now,
+            iss: `${process.env.KEYCLOAK_URL ?? 'http://127.0.0.1:8086'}/realms/${process.env.KEYCLOAK_REALM ?? 'tellus'}`,
+            hasWebAuthn: false,
+          },
+          sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+          sessionExpiresAt: absoluteExpiryMs,
+          idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
+        },
+      });
+      return;
+    }
+
     const result = await tellusAuthService.refreshSession(refresh);
     // Absolute cap is anchored at the ORIGINAL interactive login (the marker).
     // Refresh ROTATES the access/refresh tokens but must NOT extend the window

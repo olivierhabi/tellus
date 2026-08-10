@@ -121,7 +121,7 @@ describe("source-linked webhook contracts", () => {
       displayName: "Create ticket",
       configuration: configuration(),
     });
-    expect(valid.status).toBe("draft");
+    expect(valid.status).toBe("active");
     expect(valid.configuration.storage.retentionDays).toBe(180);
     expect(valid.configuration.executionPolicy.timeoutSeconds).toBe(20);
   });

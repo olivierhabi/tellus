@@ -200,6 +200,17 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 504,
     errorCode: ERROR_CODES.INTERNAL,
   },
+  // PublishedArtifactMissing — a function_version row is AVAILABLE but its
+  // content-addressed bundle is absent from object storage (e.g. the object
+  // store was rebuilt while Postgres metadata survived). 500 INTERNAL: the
+  // inconsistency is server-side, not caller-caused. The `parameters.reason`
+  // tells the user how to recover (republish). Individual missing versions
+  // are skipped during resolution; this fires only when NO AVAILABLE version
+  // of the function could be resolved.
+  "CodeRepos:PublishedArtifactMissing": {
+    status: 500,
+    errorCode: ERROR_CODES.INTERNAL,
+  },
   // -------------------------------------------------------------------------
   // InvalidArgumentBody — body.args is present but not a plain object.
   // The invoke contract is `{apiName, branch?, args?}` and `args` must be a

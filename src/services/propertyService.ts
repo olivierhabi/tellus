@@ -35,6 +35,13 @@ interface UpdateInput {
   ordinal?: number;
   /** Replace the property's conditional-formatting rules (null clears them). */
   conditionalFormatting?: unknown;
+  /**
+   * Inline-edit action-type binding (Foundry Pillar 1). Set to an action-type
+   * apiName to make this property inline-editable; null/empty clears the
+   * binding. Defense in depth: the route layer validates eligibility before
+   * persisting — this service stores whatever the route passes.
+   */
+  inlineEditActionId?: string | null;
   // Not updatable — checked and rejected:
   apiName?: string;
   baseType?: string;
@@ -237,11 +244,19 @@ async function update(
         : null
     );
   }
+  if (data.inlineEditActionId !== undefined) {
+    setClauses.push(`inline_edit_action_id = $${paramIndex++}`);
+    values.push(
+      data.inlineEditActionId && String(data.inlineEditActionId).length > 0
+        ? String(data.inlineEditActionId)
+        : null
+    );
+  }
 
   if (setClauses.length === 0) {
     throw appError(
       "INVALID_PARAMETER",
-      "At least one updatable field (displayName, description, isRequired, ordinal, conditionalFormatting) must be provided."
+      "At least one updatable field (displayName, description, isRequired, ordinal, conditionalFormatting, inlineEditActionId) must be provided."
     );
   }
 

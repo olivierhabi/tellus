@@ -457,7 +457,7 @@ export async function completeExecution(params: {
         SET status=$2, output_summary=$3, error_code=$4, error_message=$5,
             http_status=$6, duration_ms=$7, external_system_changed=$8,
             completed_at=now()
-      WHERE rid=$1`,
+      WHERE rid=$1 AND status IN ('queued','running')`,
     [
       params.executionRid,
       params.status,
@@ -602,4 +602,30 @@ export async function getExecution(
       nextAttemptAt: row.next_attempt_at,
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Orphan recovery — F2 fix. On boot (and periodically), sweep executions left
+// in 'queued' or 'running' by a process death. These are orphaned: the
+// executor process that created them died before completing.
+//
+// Strategy: mark stale queued/running executions as 'failed' with an
+// ORPHANED error code, so the execution history is accurate and the
+// idempotency replay returns a terminal (not stale-running) result.
+// A future enhancement can re-enqueue truly-idempotent executions.
+// ---------------------------------------------------------------------------
+
+/** Mark executions in queued/running older than the threshold as failed. */
+export async function reapOrphanedExecutions(staleAfterMs: number = 5 * 60 * 1000): Promise<number> {
+  const result = await pool.query(
+    `UPDATE connectivity_webhook_execution
+        SET status='failed',
+            error_code='ORPHANED',
+            error_message='Execution was orphaned by a process death and reaped on recovery',
+            completed_at=now()
+      WHERE status IN ('queued','running')
+        AND created_at < now() - ($1::bigint || ' milliseconds')::interval`,
+    [staleAfterMs],
+  );
+  return result.rowCount ?? 0;
 }

@@ -154,12 +154,9 @@ export async function validateAction(
     return { valid: false, errors: ["Action type not found"] };
   }
 
-  if (!actionType.is_enabled) {
-    return {
-      valid: false,
-      errors: [`Action type '${actionTypeApiName}' is disabled`],
-    };
-  }
+  // Foundry parity: `is_enabled` is cosmetic and never gates validation.
+  // Webhook lifecycle safety remains at apply time (writeback executor
+  // refuses non-active webhooks; failurePolicy 'abort' halts before edits).
 
   // -----------------------------------------------------------------
   // STAGE 1b: Action semantics availability

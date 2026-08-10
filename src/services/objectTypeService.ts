@@ -1129,6 +1129,7 @@ async function getStatistics(ontologyId: string, apiName: string) {
 interface BatchCreateInput {
   apiName: string;
   displayName: string;
+  pluralName?: string | null;
   description?: string | null;
   icon?: string;
   iconColor?: string;
@@ -1173,6 +1174,7 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
   const {
     apiName,
     displayName,
+    pluralName = null,
     description = null,
     icon = "cube",
     iconColor = "#1565C0",
@@ -1258,13 +1260,14 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
       try {
         const otResult = await client.query(
           `INSERT INTO object_type
-             (ontology_id, api_name, display_name, description, icon, icon_color, status, requested_api_name)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             (ontology_id, api_name, display_name, plural_name, description, icon, icon_color, status, requested_api_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING *`,
           [
             ontologyId,
             finalApiName,
             displayName,
+            pluralName,
             description,
             icon,
             iconColor,

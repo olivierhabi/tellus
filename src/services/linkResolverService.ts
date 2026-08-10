@@ -13,7 +13,7 @@ import { query } from "../db";
 import { appError } from "../utils/appError";
 import type { LinkTypeRow, Cardinality } from "../models/linkType";
 import { incCounter, observeHistogram } from "./funnel/metrics";
-import { buildSortClause } from "./queryTranslator";
+import { buildSortClause, translateFilter } from "./queryTranslator";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -45,6 +45,9 @@ export interface LinkCountResult {
 
 export interface SearchAroundOptions {
   sourceFilter?: Record<string, unknown>;
+  /** Canonical ontology-search where DSL. Prefer this for Workshop linked
+   * filters; `sourceFilter` remains for legacy flat equality maps. */
+  sourceWhere?: Record<string, unknown>;
   targetFilter?: Record<string, unknown>;
   pageSize?: number;
   pageToken?: string;
@@ -524,8 +527,23 @@ async function resolveReverse(
     case "ONE_TO_ONE": {
       if (linkType.source_property_id) {
         const sourcePropName = await getPropertyApiName(linkType.source_property_id);
+        // fix(A5): reverse ONE_TO_ONE resolves the linked SOURCE object by
+        // searching the SOURCE FK property for the TARGET pk. `term` on a
+        // `.keyword` subfield fails when the OS mapping's FK property is
+        // text-analysed (no .keyword multi-field) — the per-application-query
+        // dash-separated pk is tokenised and the term query token ≠ indexed
+        // token. Add a `match_phrase` should-clause (matches text-analysed
+        // fields) so reverse reads work across both mappings.
         const musts: Array<Record<string, unknown>> = [
-          { term: { [termField(sourcePropName)]: targetPK } },
+          {
+            bool: {
+              minimum_should_match: 1,
+              should: [
+                { term: { [termField(sourcePropName)]: targetPK } },
+                { match_phrase: { [sourcePropName]: targetPK } },
+              ],
+            },
+          },
           ...filterClauses,
         ];
         const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1, undefined, securityFilter, branchId);
@@ -730,10 +748,11 @@ export async function searchAround(
   const searchOtApiName = direction === "forward" ? sourceOtApiName : targetOtApiName;
   const searchIndexName = getIndexName(searchOtApiName);
   const sourceFilterClauses = buildFilterClauses(options.sourceFilter);
-
-  const sourceQuery: Record<string, unknown> = sourceFilterClauses.length > 0
-    ? { bool: { must: sourceFilterClauses } }
-    : { match_all: {} };
+  const sourceQuery: Record<string, unknown> = options.sourceWhere
+    ? await translateFilter(options.sourceWhere, searchOtApiName)
+    : sourceFilterClauses.length > 0
+      ? { bool: { must: sourceFilterClauses } }
+      : { match_all: {} };
 
   let sourcePKs: string[] = [];
   const MAX_SOURCE = 100000;

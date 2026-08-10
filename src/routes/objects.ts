@@ -25,7 +25,7 @@ import {
   validateAggregateQuery,
 } from "../services/queryValidator";
 import { resolveLinks, countLinks, searchAround, validateForeignKeys } from "../services/linkResolverService";
-import linkTypeModel from "../models/linkType";
+import linkTypeModel, { resolveObjectTypeApiName } from "../models/linkType";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { appError } from "../utils/appError";
 import { buildSecurityFilter } from "../middleware/securityContext";
@@ -46,6 +46,73 @@ const router = Router();
 // FOUNDRY-GAPS §8 — cell-level marking redaction at read time. Stateless over
 // the shared `query` pool, so one instance is reused across requests.
 const cellMarkingService = new CellMarkingService();
+
+type LinkedWhere = {
+  type: "linked";
+  ontologyId: string;
+  linkTypeApiName: string;
+  targetObjectTypeApiName: string;
+  targetWhere?: Record<string, unknown>;
+  negated?: boolean;
+};
+
+/** Resolve Filter List linked predicates into a primary-key predicate before
+ * normal schema validation/query translation. Resolution happens against the
+ * complete target result set (cursor-paged) and the canonical link service,
+ * so aggregate/facet/chart queries all share identical traversal semantics. */
+async function resolveLinkedWhere(
+  where: unknown,
+  sourceObjectType: string,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
+): Promise<unknown> {
+  if (!where || typeof where !== "object" || Array.isArray(where)) return where;
+  const node = where as Record<string, unknown>;
+  if (node.type === "and" || node.type === "or") {
+    const children = Array.isArray(node.value) ? node.value : [];
+    return { ...node, value: await Promise.all(children.map((child) => resolveLinkedWhere(child, sourceObjectType, securityFilter, branchId))) };
+  }
+  if (node.type === "not") {
+    const children = Array.isArray(node.value) ? node.value : [];
+    return { ...node, value: await Promise.all(children.map((child) => resolveLinkedWhere(child, sourceObjectType, securityFilter, branchId))) };
+  }
+  if (node.type !== "linked") return where;
+
+  const linked = node as unknown as LinkedWhere;
+  if (!linked.ontologyId || !linked.linkTypeApiName || !linked.targetObjectTypeApiName) {
+    throw appError("INVALID_ARGUMENT", "Linked filter requires ontologyId, linkTypeApiName, and targetObjectTypeApiName.");
+  }
+  const linkType = await linkTypeModel.getByApiName(linked.ontologyId, linked.linkTypeApiName);
+  if (!linkType) throw appError("NOT_FOUND", `Link type '${linked.linkTypeApiName}' was not found.`);
+  const linkSourceType = await resolveObjectTypeApiName(linkType.source_object_type);
+  const linkTargetType = await resolveObjectTypeApiName(linkType.target_object_type);
+  const direction: "forward" | "reverse" = linkSourceType === sourceObjectType ? "reverse" : "forward";
+  const targetType = direction === "reverse" ? linkTargetType : linkSourceType;
+  if (targetType !== linked.targetObjectTypeApiName) {
+    throw appError("INVALID_ARGUMENT", `Linked filter target '${linked.targetObjectTypeApiName}' is incompatible with '${linked.linkTypeApiName}'.`);
+  }
+
+  if (linked.targetWhere) {
+    await validateSearchQuery({ where: linked.targetWhere, $pageSize: 1 }, targetType);
+  }
+  const sourcePks = new Set<string>();
+  let pageToken: string | undefined;
+  do {
+    const resolved = await searchAround(linkType, direction, {
+      pageSize: 1000,
+      ...(pageToken ? { pageToken } : {}),
+      ...(linked.targetWhere ? { sourceWhere: linked.targetWhere } : {}),
+    }, securityFilter, branchId);
+    for (const object of resolved.linkedObjects) if (object.__pk != null) sourcePks.add(String(object.__pk));
+    pageToken = resolved.nextPageToken ?? undefined;
+    if (sourcePks.size > 100_000) throw appError("INVALID_ARGUMENT", "Linked filter exceeds the 100,000 source safety limit; narrow the linked predicate.");
+  } while (pageToken);
+  // The public validator intentionally rejects empty `in` arrays. Preserve
+  // match-none semantics with an impossible reserved PK sentinel instead of
+  // widening an empty traversal to the complete source set.
+  const predicate = { type: "in", field: "__pk", value: sourcePks.size ? Array.from(sourcePks) : ["__tellus_no_link_match__"] };
+  return linked.negated ? { type: "not", value: [predicate] } : predicate;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -291,6 +358,7 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.search", branchId);
+      body.where = await resolveLinkedWhere(body.where, objectType, secFilter, branchId);
       const validated = await validateSearchQuery(body, objectType);
       const rawResult = await executeSearch(objectType, {
         where: validated.where,
@@ -390,7 +458,9 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.aggregate", branchId);
-      const validated = await validateAggregateQuery(req.body || {}, objectType);
+      const aggregateBody = { ...(req.body || {}) };
+      aggregateBody.where = await resolveLinkedWhere(aggregateBody.where, objectType, secFilter, branchId);
+      const validated = await validateAggregateQuery(aggregateBody, objectType);
       const result = await executeAggregate(objectType, {
         where: validated.where,
         aggregations: validated.aggregations,

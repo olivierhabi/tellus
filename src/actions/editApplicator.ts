@@ -22,7 +22,8 @@ import type { PoolClient } from "pg";
 import { getClient, query } from "../db";
 import { OntologyError } from "../utils/queryErrors";
 import { stageLinkCdcEvent } from "../services/searchAround/linkCdcOutbox";
-import { incCounter } from "../services/funnel/metrics";
+import { incCounter, observeHistogram } from "../services/funnel/metrics";
+import { persistStickyVisibleVerdict } from "./linkIndexAckHttp";
 
 function genEventId(): string {
   try {
@@ -244,6 +245,10 @@ export async function applyEdits(
   // -----------------------------------------------------------------
 
   const appliedEdits: AppliedEdit[] = [];
+  // Wall-clock of the PG COMMIT — basis for SLO #1 (commit-to-queryable
+  // latency, measured only on the in-band-confirmed 200 path). Stamped
+  // right after `COMMIT` below; stays 0 on a pre-commit failure path.
+  let tCommit = 0;
   // Map from "objectType::primaryKey" to the edit_id for indexed marking
   const editIdMap = new Map<string, string>();
   // Stage-3 ack handles for staged link CDC events (post-commit barrier).
@@ -589,6 +594,7 @@ export async function applyEdits(
 
     // Step 3: Commit the PG transaction
     await pgClient.query("COMMIT");
+    tCommit = Date.now();
   } catch (err) {
     await pgClient.query("ROLLBACK").catch(() => {});
     throw err;
@@ -884,6 +890,33 @@ export async function applyEdits(
       };
       console.warn(
         `[link-index-ack] edge-index confirmation failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // Step 6c: Write-barrier STICKY verdict (closes the shape-1 gap).
+  //
+  // When the IN-BAND ack barrier confirmed (the 200 path), persist the
+  // monotonic VISIBLE verdict NOW — at the moment of confirmation, BEFORE
+  // any later ReplacingMergeTree merge can collapse the serving row. A
+  // wire-confirmed 200 whose CH row later merge-collapses would otherwise
+  // read PENDING on its FIRST statusUrl poll (no sticky yet, event_id row
+  // gone); persisting here makes the verdict durable regardless of later
+  // merges. SHARED writer with the status probe (persistStickyVisibleVerdict
+  // in linkIndexAckHttp.ts — single source of truth, no forked INSERT).
+  //
+  // Best-effort: the helper swallows+logs+counts a PG failure and NEVER
+  // throws, so the 200 response is unaffected. Also SLO #1: the
+  // commit-to-queryable latency, sampled only on the confirmed path.
+  // -----------------------------------------------------------------
+  if (linkIndexAck?.confirmed) {
+    await persistStickyVisibleVerdict(executionContext.executionId);
+    if (tCommit > 0) {
+      observeHistogram(
+        "link_index_commit_to_queryable_seconds",
+        (Date.now() - tCommit) / 1000,
+        { resource_type: "link" },
       );
     }
   }

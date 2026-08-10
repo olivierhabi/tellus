@@ -60,6 +60,12 @@ export const STANDARD_ERROR_CODES: Record<string, { status: number; name: string
   },
   INVALID_EXECUTION_MODE:     { status: 422, name: "InvalidExecutionModeError" },
   INVALID_DELETE_POLICY:      { status: 422, name: "InvalidDeletePolicyError" },
+  // B1 (cross-functionality engagement) — submission criteria rejection is a
+  // client-input failure (422), NOT a server error. Without this entry the
+  // OntologyError defaults to 500, mis-classifying the criterion rejection
+  // (the executor correctly throws SUBMISSION_CRITERIA_NOT_MET; the route's
+  // error middleware maps the code → status via this registry).
+  SUBMISSION_CRITERIA_NOT_MET: { status: 422, name: "SubmissionCriteriaNotMetError" },
   DEADLOCK_RETRY_EXHAUSTED:   { status: 500, name: "DeadlockRetryExhaustedError" },
 
   // General API errors

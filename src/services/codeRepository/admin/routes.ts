@@ -55,11 +55,69 @@ import {
   type OntologyEdit,
   type OntologySnapshot,
 } from "../../functions/ontologyRuntime";
+import { inspectTypeScriptV2Function } from "../../functionsPublish/service";
+import type { FunctionType } from "../../functions/canonicalSignature";
+
+/** Wire shape for a function's input signature on the functions listing —
+ * normalized from EITHER the publish-time manifest
+ * (`manifest.signatures`, recorded by the functionsPublish worker) or a
+ * live TS-AST inspection of the working-tree source (same canonical model —
+ * functions/canonicalSignature.ts). `null` means "couldn't derive"
+ * (unannotated params, legacy layout) → the FE falls back to the JSON tab.
+ */
+interface ListingSignature {
+  readonly parameters: ReadonlyArray<{
+    readonly name: string;
+    readonly position: number;
+    readonly type: string;
+    readonly typeModel: FunctionType;
+    readonly optional: boolean;
+    readonly hasDefault: boolean;
+  }>;
+  readonly output: string | null;
+}
+
+/** Defensive normalization of a persisted manifest signature record. */
+function toWireSignature(raw: unknown): ListingSignature | null {
+  if (!raw || typeof raw !== "object") return null;
+  const rec = raw as { parameters?: unknown; output?: unknown };
+  if (!Array.isArray(rec.parameters)) return null;
+  const parameters = rec.parameters
+    .filter((p): p is Record<string, unknown> => !!p && typeof p === "object")
+    .map((p, i) => ({
+      name: String(p.name ?? ""),
+      position: typeof p.position === "number" ? p.position : i,
+      type: String(p.type ?? ""),
+      typeModel: (p.typeModel && typeof p.typeModel === "object"
+        ? p.typeModel
+        : { kind: "unsupported", typeText: String(p.type ?? "") }) as FunctionType,
+      optional: Boolean(p.optional),
+      hasDefault: Boolean(p.hasDefault),
+    }));
+  return {
+    parameters,
+    output: typeof rec.output === "string" ? rec.output : null,
+  };
+}
+
+/** Derive the wire signature from live TypeScript source. Fail-open: any
+ * shape that inspectTypeScriptV2Function rejects (no default export,
+ * unannotated types) yields null so the FE shows its JSON-tab fallback
+ * instead of a half-correct form. */
+function deriveSignatureFromSource(path: string, source: string): ListingSignature | null {
+  try {
+    const sig = inspectTypeScriptV2Function(path, source);
+    return toWireSignature(sig);
+  } catch {
+    return null;
+  }
+}
 import {
   createTtlCache,
   transpileCacheKey,
 } from "./invokeCache";
 import { runSandboxedWithSdkAsync } from "../../functionWorkerPool";
+import type { SandboxBinding } from "../../functionRuntime";
 import {
   executeCreateRepositorySaga,
   type SagaExecutorDeps,
@@ -143,6 +201,22 @@ const snapshotCache = createTtlCache<string, OntologySnapshot>({
   maxEntries: 8,
   ttlMs: SNAPSHOT_TTL_MS,
 });
+
+/**
+ * Unwrap a returned ObjectSet to its row array for the wire. Duck-typed (the
+ * ObjectSet class is private to ontologyRuntime and worker results lose their
+ * prototype crossing postMessage): the canonical serialized shape is exactly
+ * `{ rows: Object[] }` — a genuine user value with that single-key shape is
+ * not a supported return type risk (Palantir never uses `rows`; their object
+ * collections are `data`-shaped).
+ */
+function unwrapObjectSetRows(v: unknown): unknown {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const rec = v as Record<string, unknown>;
+    if (Object.keys(rec).length === 1 && Array.isArray(rec.rows)) return rec.rows;
+  }
+  return v;
+}
 
 export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
   const router = Router();
@@ -2349,6 +2423,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
          *  overlays the ontology display name + icon + colour. */
         objectTypeName: string | null;
         objectTypeIcon: string | null;
+        /** Function input signature (null = not derivable) — drives the
+         *  Functions tester's signature-driven Form tab. */
+        signature: ListingSignature | null;
       };
       const byApiName = new Map<string, MergedFunctionRow>();
 
@@ -2374,7 +2451,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           // 1184) as a raw ISO string, not a JS Date (src/db.ts). So this is
           // a string at runtime — never call Date methods on it directly.
           published_at: string | Date;
-          manifest_json: { exports?: unknown };
+          manifest_json: { exports?: unknown; signatures?: unknown; objectTypes?: unknown };
         }>(
           `SELECT rid, branch, semver, is_preview, runtime, commit_sha, published_at, manifest_json
              FROM function_version
@@ -2420,6 +2497,12 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 // historical manifests fall back to live-tree inference below.
                 objectTypeName: typeof stamped === "string" ? stamped : null,
                 objectTypeIcon: null,
+                // Publish-time canonical signature (manifest.signatures) —
+                // historical manifests predating the field fall back to the
+                // live-tree derivation stamped below.
+                signature: toWireSignature(
+                  (r.manifest_json?.signatures as Record<string, unknown> | undefined)?.[name] ?? null,
+                ),
               });
             }
           }
@@ -2473,6 +2556,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             // for now. Per-file try/catch so one unreadable file can't blank
             // detection for the rest.
             let objectTypeName: string | null = null;
+            let signature: ListingSignature | null = null;
             if (ext === "ts") {
               try {
                 const blob = await deps.stemma.readBlob({
@@ -2483,6 +2567,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 if (blob.kind === "ok") {
                   const src = new TextDecoder("utf-8").decode(blob.content);
                   objectTypeName = inferFunctionObjectType(src);
+                  // Same read already pays for the source: derive the input
+                  // signature in the same pass (no extra I/O).
+                  signature = deriveSignatureFromSource(entry.path, src);
                 }
               } catch {
                 // Best-effort: a read failure leaves this fn untyped (utility).
@@ -2506,6 +2593,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
               hasDraft: false,
               objectTypeName,
               objectTypeIcon: null, // FE overlays icon/colour from the ontology
+              signature,
             });
           }
         }
@@ -2534,12 +2622,19 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             const existing = wtByApiName.get(parsed.apiName);
             const objectTypeName =
               parsed.runtime === "NODE_20" ? inferFunctionObjectType(draft.content) : null;
+            // The signature follows the DRAFT's source (Live Preview reflects
+            // the editor, not HEAD) — same derivation pass as tree entries.
+            const signature =
+              parsed.runtime === "NODE_20"
+                ? deriveSignatureFromSource(draft.path, draft.content)
+                : null;
             objectTypeByApi.set(parsed.apiName, objectTypeName);
             if (existing) {
               // Draft wins over HEAD: the Live Preview tab reflects the
               // editor, not the last commit.
               existing.objectTypeName = objectTypeName;
               existing.hasDraft = true;
+              existing.signature = signature;
             } else {
               const row: MergedFunctionRow = {
                 apiName: parsed.apiName,
@@ -2558,6 +2653,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 hasDraft: true,
                 objectTypeName,
                 objectTypeIcon: null,
+                signature,
               };
               workingTree.push(row);
               wtByApiName.set(parsed.apiName, row);
@@ -2574,6 +2670,12 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       for (const row of byApiName.values()) {
         if (row.objectTypeName === null && objectTypeByApi.has(row.apiName)) {
           row.objectTypeName = objectTypeByApi.get(row.apiName) ?? null;
+        }
+        // Historical manifests predating manifest.signatures: derive from the
+        // live working-tree source (same apiName convention) when available.
+        if (row.signature === null && objectTypeByApi.has(row.apiName)) {
+          const wt = workingTree.find((w) => w.apiName === row.apiName);
+          if (wt?.signature) row.signature = wt.signature;
         }
       }
 
@@ -2599,6 +2701,10 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       const data = [...byApiName.values(), ...workingTree].sort((a, b) =>
         a.apiName.localeCompare(b.apiName) || a.source.localeCompare(b.source),
       );
+      // The response embeds live working-tree + draft state; it must never
+      // be served from a browser/intermediary cache or the IDE's Live
+      // Preview would lag file adds/removes.
+      res.setHeader("Cache-Control", "no-store");
       res
         .status(200)
         .type("application/json")
@@ -2621,6 +2727,17 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
   // -------------------------------------------------------------------------
   router.post("/:rid/functions/invoke", auth, async (req, res, next) => {
     try {
+      // Wall-clock origin for performance.phases (all phase times use
+      // Date.now() — never performance.now() — because the sandbox runs in a
+      // worker thread whose perf-hooks time origin differs).
+      const t0 = Date.now();
+      const phases: Array<{
+        name: string;
+        startOffsetMs: number;
+        durationMs: number;
+        depth?: number;
+        calls?: number;
+      }> = [];
       const rid = req.params.rid;
       if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
 
@@ -2761,17 +2878,51 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         // manifests (manifest.sources) keep working.
         const versions = await listVersions(deps.pool, rid, { branch, includeYanked: false });
         let chosen: { semver: string; source: string } | null = null;
+        // One version whose content-addressed bundle is gone (object store
+        // rebuilt while Postgres metadata survived) must not poison invokes —
+        // previously any ARTIFACT_NOT_FOUND escaped the loop and 500'd the
+        // whole published-invoke path even though a healthy newer version
+        // already resolved. Skip per-version, and only when NO version
+        // delivers a source do we surface an actionable envelope.
+        let artifactFailure: { semver: string; code: string } | null = null;
         for (const v of versions) {
-          const src = await resolveFunctionSource(
-            { manifest_json: v.manifest as { sources?: Record<string, unknown> } | null, artifact_blob_id: v.artifactBlobId },
-            apiName,
-          );
+          let src: string | null;
+          try {
+            src = await resolveFunctionSource(
+              { manifest_json: v.manifest as { sources?: Record<string, unknown> } | null, artifact_blob_id: v.artifactBlobId },
+              apiName,
+            );
+          } catch (e) {
+            if (e instanceof FunctionArtifactError) {
+              console.warn(
+                `[functions/invoke] published artifact unavailable for ${apiName} ` +
+                  `at ${rid}@${branch}:${v.semver} — skipping version: [${e.code}] ${e.message}`,
+              );
+              artifactFailure ??= { semver: v.semver, code: e.code };
+              continue;
+            }
+            throw e;
+          }
           if (src === null) continue;
           if (chosen === null || compareSemver(parseSemver(v.semver), parseSemver(chosen.semver)) > 0) {
             chosen = { semver: v.semver, source: src };
           }
         }
         if (chosen === null) {
+          if (artifactFailure) {
+            return sendError(
+              res,
+              codeReposError("CodeRepos:PublishedArtifactMissing", {
+                apiName,
+                branch,
+                semver: artifactFailure.semver,
+                artifactErrorCode: artifactFailure.code,
+                reason:
+                  `Published artifact for "${apiName}" (${artifactFailure.semver}) ` +
+                  `is missing from object storage — try republishing the release.`,
+              }),
+            );
+          }
           return sendError(res, codeReposError("CodeRepos:FunctionNotFound", { apiName, source: "published" }));
         }
         source = chosen.source;
@@ -2911,6 +3062,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       const snapshotKey = ontologyId
         ? `${ontologyId}:${[...importedTypes].sort().join(",")}`
         : "";
+      const snapshotStartAt = Date.now();
       let snapshot: OntologySnapshot | undefined =
         ontologyId ? snapshotCache.get(snapshotKey) : undefined;
       if (ontologyId && !snapshot) {
@@ -2937,6 +3089,15 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         snapshotCache.set(snapshotKey, loaded);
         snapshot = loaded;
       }
+      if (ontologyId) {
+        // The one real object-loading I/O phase of this pipeline (a cached
+        // hit measures ~0 ms — the bar collapses, which is truthful).
+        phases.push({
+          name: "Load ontology snapshot",
+          startOffsetMs: snapshotStartAt - t0,
+          durationMs: Date.now() - snapshotStartAt,
+        });
+      }
       const resolvedSnapshot: OntologySnapshot = snapshot ?? {
         byType: new Map(),
         ontologyId: "",
@@ -2946,12 +3107,54 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         // in a repo that imports nothing has no `@ontology/sdk` types).
         importedTypes: [] as readonly string[],
       };
+      // Invocation contract: when the function's annotation-derived signature
+      // has ≥2 parameters, bind them POSITIONALLY by name — the tester must
+      // match how published functions/Actions invoke (typescript-v2-positional-
+      // v2), NOT the legacy "(CLIENT_STUB first) + envelope" heuristic, which
+      // produced a throwing client-stub as the FIRST argument for ordinary
+      // multi-parameter functions (e.g. `range(start, end)` got `start =
+      // stub`, crashing at first property access). 0–1-parameter functions
+      // keep the legacy envelope (fn(bag)) — preserving every existing
+      // single-envelope caller (Workshop function columns, Live Preview).
+      let binding: SandboxBinding | undefined;
+      {
+        const sig = deriveSignatureFromSource(resolvedPath ?? `${apiName}.ts`, source);
+        if (sig !== null && sig.parameters.length >= 2) {
+          binding = {
+            contract: "typescript-v2-positional-v2",
+            parameters: sig.parameters.map((p) => ({
+              name: p.name,
+              optional: p.optional,
+              position: p.position,
+              injected: p.typeModel.kind === "client" ? ("client" as const) : undefined,
+            })),
+          };
+        }
+      }
       // Execute the sandboxed function OFF the main event loop (a worker
       // pool) so a long-running function cannot starve concurrent request
       // handling (e.g. object-search reads → 504). Falls back to inline
       // sync execution if the pool is unavailable. Edits are collected by
       // the SDK during execution and returned with the result.
-      const result = await runSandboxedWithSdkAsync(transpiled, input, resolvedSnapshot);
+      const execStartAt = Date.now();
+      const result = await runSandboxedWithSdkAsync(transpiled, input, resolvedSnapshot, binding);
+      phases.push({
+        name: "Execute function",
+        startOffsetMs: execStartAt - t0,
+        durationMs: Date.now() - execStartAt,
+      });
+      // Child phases: the object types the function loaded DURING execution,
+      // indented under "Execute function" (Foundry: "Load objects from
+      // arguments" bars nested inside the execution window).
+      for (const load of result.objectLoads ?? []) {
+        phases.push({
+          name: `Load objects: ${load.objectType}`,
+          startOffsetMs: load.firstStartAt - t0,
+          durationMs: load.totalDurationMs,
+          depth: 1,
+          calls: load.calls,
+        });
+      }
       // Resource-imports scoping is enforced fail-silently above (only imported
       // object types are loaded into the snapshot, so Objects.search on a
       // non-imported type returns an empty ObjectSet). To turn that silent empty
@@ -2984,6 +3187,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // Action committing the batch to the Ontology system-of-record.
       let editsApplied: { created: number; updated: number; deleted: number; linked: number; unlinked: number } | null = null;
       if (result.status === "ok" && collectedEdits.length > 0 && body.applyEdits === true && ontologyId) {
+        const editsStartAt = Date.now();
         try {
           editsApplied = await applyEdits(deps.pool, {
             ontologyId,
@@ -2996,6 +3200,11 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             message: (e as Error)?.message ?? "unknown",
           }));
         }
+        phases.push({
+          name: "Apply edits",
+          startOffsetMs: editsStartAt - t0,
+          durationMs: Date.now() - editsStartAt,
+        });
       }
 
       // Partition captured logs into stdout/stderr (the runtime tags
@@ -3022,6 +3231,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 (stderrLines.length > 0 ? "\n" + stderrLines.join("\n") : ""),
               status: "timeout",
               unimportedAccessedTypes,
+              performance: { phases },
             }),
           );
       }
@@ -3041,18 +3251,28 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 (stderrLines.length > 0 ? "\n" + stderrLines.join("\n") : ""),
               status: "error",
               unimportedAccessedTypes,
+              performance: { phases },
             }),
           );
       }
 
       // Stringify the result so the wire shape is always a string per the
       // FE contract; objects/numbers/booleans are JSON.stringified.
+      // A returned ObjectSet must be serialized as its row ARRAY — never as
+      // the internal `{"rows":[...]}` representation (Palantir object
+      // collections are array/`data`-shaped; the FE renders arrays as result
+      // tables). Duck-typed, not instanceof: worker results cross postMessage
+      // (structured clone), which strips the ObjectSet prototype. The
+      // single-key shape cannot collide with the edit-batch contract (edits
+      // are `Object.isArray(output) && every(isEdit)` — a {rows:[...]}
+      // wrapper is never an array).
+      const outputForWire = unwrapObjectSetRows(result.output);
       const serialized =
-        typeof result.output === "string"
-          ? result.output
-          : result.output === undefined
+        typeof outputForWire === "string"
+          ? outputForWire
+          : outputForWire === undefined
             ? ""
-            : JSON.stringify(result.output);
+            : JSON.stringify(outputForWire);
 
       return res
         .status(200)
@@ -3074,6 +3294,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
               objectTypes: resolvedSnapshot.objectTypes,
             },
             unimportedAccessedTypes,
+            performance: { phases },
           }),
         );
     } catch (err) {

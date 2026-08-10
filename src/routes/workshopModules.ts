@@ -519,9 +519,12 @@ const filterValueSchema = z.object({
     "date-timeline",
     "id-multi",
     "enum-multi",
+    "boolean-single",
   ]),
   property: z.string().min(1),
   value: z.unknown(),
+  operator: z.enum(["is", "null", "contain"]).optional(),
+  negated: z.boolean().optional(),
 });
 
 const loadObjectSetSchema = z.object({

@@ -39,6 +39,7 @@ import {
 } from "./functionRuntime";
 import {
   buildOntologySdk,
+  type ObjectLoadTiming,
   type OntologySnapshot,
   type OntologyEdit,
 } from "./functions/ontologyRuntime";
@@ -48,6 +49,8 @@ export interface SandboxAsyncResult extends SandboxResult {
   readonly edits: OntologyEdit[];
   /** Object types the function queried via Objects.search/get (post-run). */
   readonly requestedTypes: string[];
+  /** Per-type object-load timings (wall-clock Date.now, cross-thread safe). */
+  readonly objectLoads: ObjectLoadTiming[];
 }
 
 // ---- Worker file resolution + dev/prod execArgv ---------------------------
@@ -142,14 +145,14 @@ function spawnSlot(): Slot | null {
     const worker = new Worker(workerFile, workerOptions());
     const slot: Slot = { worker, busy: false, current: null, dead: false };
 
-    worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[]; requestedTypes?: string[] }) => {
+    worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[]; requestedTypes?: string[]; objectLoads?: ObjectLoadTiming[] }) => {
       if (msg?.type === "__ready__") return;
       const pending = slot.current;
       slot.current = null;
       slot.busy = false;
       if (pending && msg && typeof msg.id === "number" && msg.result) {
         clearTimeout(pending.timer);
-        pending.resolve({ ...msg.result, edits: msg.edits ?? [], requestedTypes: msg.requestedTypes ?? [] });
+        pending.resolve({ ...msg.result, edits: msg.edits ?? [], requestedTypes: msg.requestedTypes ?? [], objectLoads: msg.objectLoads ?? [] });
       } else if (pending) {
         // Malformed worker response — fail this ONE task, keep the worker.
         clearTimeout(pending.timer);
@@ -216,6 +219,7 @@ function errorResult(message: string): SandboxAsyncResult {
     logs: [],
     edits: [],
     requestedTypes: [],
+    objectLoads: [],
   };
 }
 
@@ -311,6 +315,7 @@ function timeoutResult(): SandboxAsyncResult {
     logs: [],
     edits: [],
     requestedTypes: [],
+    objectLoads: [],
   };
 }
 
@@ -343,7 +348,7 @@ export async function runSandboxedWithSdkSync(
   snapshot: OntologySnapshot,
   binding?: SandboxBinding | SignatureParameter[],
 ): Promise<SandboxAsyncResult> {
-  const { sdk, getEdits, getRequestedTypes } = buildOntologySdk(snapshot);
+  const { sdk, getEdits, getRequestedTypes, getObjectLoads } = buildOntologySdk(snapshot);
   let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
     Objects: sdk.Objects,
     Edits: sdk.Edits,
@@ -363,7 +368,7 @@ export async function runSandboxedWithSdkSync(
       pendingPromise: undefined,
     };
   }
-  return { ...result, edits: result.status === "ok" ? getEdits() : [], requestedTypes: getRequestedTypes() };
+  return { ...result, edits: result.status === "ok" ? getEdits() : [], requestedTypes: getRequestedTypes(), objectLoads: getObjectLoads() };
 }
 
 /**

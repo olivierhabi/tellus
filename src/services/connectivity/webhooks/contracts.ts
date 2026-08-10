@@ -344,7 +344,7 @@ export const WebhookCreateRequest = z.object({
   apiName: ApiName,
   displayName: z.string().min(1).max(256),
   description: z.string().max(4000).default(""),
-  status: z.enum(["draft", "ready", "active"]).default("draft"),
+  status: z.enum(["draft", "ready", "active"]).default("active"),
   configuration: WebhookVersionConfiguration,
 });
 export type WebhookCreateRequest = z.infer<typeof WebhookCreateRequest>;

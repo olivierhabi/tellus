@@ -282,6 +282,23 @@ export const CdcSettings = z.object({
 });
 export type CdcSettings = z.infer<typeof CdcSettings>;
 
+/**
+ * Connection-level egress routing model (F7).
+ *
+ * - `"direct"` (default): webhook + health-probe + worker egress originates
+ *   from the backend Node process directly (node:http/https). The agent is a
+ *   LIVENESS GATE ONLY — it does not tunnel outbound traffic. Customers
+ *   expecting agent-proxied egress MUST opt into `"agent-tunnel"` explicitly
+ *   and accept the UI warning that ships with the default.
+ * - `"agent-tunnel"`: reserved for the future SOCKS/tunnel routing path
+ *   (B6). The backend currently treats this identically to `"direct"` (a
+ *   direct egress is still performed) and emits a warning in the audit log;
+ *   the field exists so the contract + UI can model the choice ahead of the
+ *   transport implementation.
+ */
+export const EgressMode = z.enum(["direct", "agent-tunnel"]);
+export type EgressMode = z.infer<typeof EgressMode>;
+
 export const ConnectionSettings = z.object({
   export: ExportSettings.default({
     exportsEnabled: false,
@@ -309,6 +326,12 @@ export const ConnectionSettings = z.object({
   cdc: CdcSettings.optional(),
   /** Free-form labels shown on the source Overview. */
   tags: z.array(z.string()).optional(),
+  /**
+   * Connection-level egress routing model (F7). See {@link EgressMode}.
+   * Defaults to `"direct"` — the backend opens sockets to the external
+   * system directly; the agent (if any) is a liveness gate only.
+   */
+  egressMode: EgressMode.default("direct"),
 });
 export type ConnectionSettings = z.infer<typeof ConnectionSettings>;
 
@@ -351,6 +374,7 @@ export const Connection = z.object({
       allowPipelineUdfs: false,
       allowVirtualTables: true,
     },
+    egressMode: "direct",
   }),
   version: z.number().int().positive(),
   createdAt: z.string().datetime(),
@@ -392,6 +416,18 @@ export const ConnectionCreateRequest = z.object({
    * `client_key` secret and sets config.postgres.clientKeyEncrypted instead.
    */
   clientKeyPem: z.string().min(1).max(64 * 1024).optional(),
+  /**
+   * F3 — inline secrets. When provided, the handler writes each entry to the
+   * credential vault in the SAME request as the connection insert. The
+   * connection + secrets are atomic: if any secret write fails, the handler
+   * performs a COMPENSATING soft-delete of the just-created connection and
+   * returns the error so the client can retry from scratch (no partial state
+   * is left behind). Map of credential field name → base64-encoded plaintext.
+   * Field names must be in the vault's credential-field vocabulary.
+   */
+  secrets: z
+    .record(z.string().min(1).max(64), z.string().min(1).max(64 * 1024))
+    .optional(),
 }).superRefine((v, ctx) => {
   if (v.workerType === "agentProxy" && !v.agentGroupRid) {
     ctx.addIssue({
@@ -439,7 +475,12 @@ export type ConnectionListResponse = z.infer<typeof ConnectionListResponse>;
 
 // --- TableImport (B5 — surfaced here for OpenAPI completeness) ------------
 
-export const TableImportMode = z.enum(["SNAPSHOT", "APPEND", "STREAMING_CHANGELOG"]);
+// The de-facto literals are lowercase: "snapshot", "append", "cdc". The CDC
+// handler (cdc/handlers.ts:67) injects mode:"cdc" into the table_imports row;
+// the worker (foundry-worker/entrypoint.ts:78) reads strategy==="cdc". The
+// imports contract (imports/contracts.ts:28) validates ["snapshot","append"]
+// for the non-CDC path. Aligning the formal enum to match reality.
+export const TableImportMode = z.enum(["snapshot", "append", "cdc"]);
 export type TableImportMode = z.infer<typeof TableImportMode>;
 
 export const TableImport = z.object({

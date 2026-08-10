@@ -774,6 +774,69 @@ async function migrate(): Promise<void> {
     logTableStatus("action_audit_log", auditLogExisted);
 
     // ------------------------------------------------------------------
+    // Table: attachment
+    //
+    // Action parameter attachments (Foundry parity). Files are uploaded
+    // before the action runs via POST /api/v2/ontologies/attachments/upload;
+    // the returned rid is then passed as the attachment parameter value.
+    // Blob bytes live in object storage (storage_key); this table is the
+    // metadata + authorization record. Mirrors Palantir's AttachmentV2
+    // resource (rid / filename / sizeBytes / mediaType). Per Foundry docs,
+    // an attachment not linked to an object via an action is expected to be
+    // cleaned up later — `linked_at` marks successful linkage so a future
+    // sweeper can distinguish live attachments from orphans.
+    // ------------------------------------------------------------------
+    const attachmentExisted = await tableExists(client, "attachment");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS attachment (
+        rid TEXT PRIMARY KEY,
+        ontology_id UUID NULL REFERENCES ontology(ontology_id) ON DELETE SET NULL,
+        filename TEXT NOT NULL,
+        size_bytes BIGINT NOT NULL,
+        media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        storage_key TEXT NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        linked_at TIMESTAMPTZ NULL
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_attachment_created
+        ON attachment(created_at DESC);
+    `);
+
+    logTableStatus("attachment", attachmentExisted);
+
+    // ------------------------------------------------------------------
+    // Table: media_item
+    //
+    // Media reference items uploaded via the action-form media picker
+    // (upload-only parity — Tellus has no media-set browser). Blob bytes
+    // live in object storage (storage_key); reads are authorized and
+    // tokenized by the existing media-reference signing path
+    // (`signMediaReadToken` in services/oss/productionDeps.ts), which is
+    // keyed solely on the media item rid.
+    // ------------------------------------------------------------------
+    const mediaItemExisted = await tableExists(client, "media_item");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS media_item (
+        rid TEXT PRIMARY KEY,
+        ontology_id UUID NULL REFERENCES ontology(ontology_id) ON DELETE SET NULL,
+        filename TEXT NOT NULL,
+        size_bytes BIGINT NOT NULL,
+        media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        storage_key TEXT NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+
+    logTableStatus("media_item", mediaItemExisted);
+
+    // ------------------------------------------------------------------
     // Table 11: link_edit
     //
     // Stores individual link operations (add/remove) for many-to-many

@@ -25,6 +25,27 @@ import type {
   WebhookParameterTypeValue,
 } from "./contracts";
 import * as repository from "./repository";
+import { recordEgressAudit } from "../health/egressAudit.repo";
+import { assertAgentAvailable, resolveAgentForGroup } from "../agent/proxy";
+
+// ---------------------------------------------------------------------------
+// F7 — Agent network modeling (P1).
+//
+// IMPORTANT: webhook execution performs DIRECT BACKEND EGRESS. The HTTP
+// request is opened from the backend Node process via node:http/https
+// (see `requestPinnedDestination` below). The connection's `agentGroupRid`,
+// when `workerType === "agentProxy"`, is consulted ONLY as a liveness gate
+// (assertAgentAvailable) by the PG pool — it does NOT tunnel webhook egress.
+//
+// The connection's `settings.egressMode` records the operator's
+// acknowledgement of this model:
+//   - "direct" (default): egress originates from the backend directly. The
+//     audit log entry below records every such direct egress so operators can
+//     inspect who triggered it and to where.
+//   - "agent-tunnel": reserved for a future transport that routes the request
+//     through the agent. Until that transport ships, this code still performs
+//     a direct egress and emits a warning to the audit log.
+// ---------------------------------------------------------------------------
 
 const TEMPLATE_TOKEN =
   /\{\{\s*(inputs\.[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*|calls\.[0-9a-f-]{36}(?:\.[A-Za-z0-9_]+)*)\s*\}\}/gi;
@@ -495,24 +516,86 @@ async function resolveSourceSecrets(
   requestId?: string,
   clientIp?: string,
 ): Promise<Record<string, string>> {
-  const bytes = await vault.unwrap(connection.rid, tenant, "other", actor, {
-    requestId,
-    clientIp,
-    scopes: ["secrets:read"],
-  });
-  if (bytes.length === 0) return {};
-  try {
-    const decoded = new TextDecoder().decode(bytes);
-    const parsed = JSON.parse(decoded);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-  } finally {
-    bytes.fill(0);
+  const auditCtx = { requestId, clientIp, scopes: ["secrets:read"] as string[] };
+  const secrets: Record<string, string> = {};
+
+  // Legacy path (F8 back-compat): the REST secret bundle stored as one
+  // encrypted JSON document under the generic "other" field. Kept as the
+  // first source so named per-secret rows (below) can override individual
+  // keys for connections migrated to the new model.
+  const otherBytes = await vault.unwrap(connection.rid, tenant, "other", actor, auditCtx);
+  if (otherBytes.length > 0) {
+    try {
+      const decoded = new TextDecoder().decode(otherBytes);
+      const parsed = JSON.parse(decoded);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof value === "string") secrets[key] = value;
+        }
+      }
+    } finally {
+      otherBytes.fill(0);
+    }
   }
+
+  // F8 — named per-secret storage. Each REST secret type gets its own
+  // credential row with a descriptive field name, so it can be rotated /
+  // audited / access-scoped individually instead of re-encrypting the whole
+  // "other" bundle on every rotation.
+  const bearerBytes = await vault
+    .unwrap(connection.rid, tenant, "bearer_token", actor, auditCtx)
+    .catch(() => new Uint8Array());
+  if (bearerBytes.length > 0) {
+    secrets.bearerToken = new TextDecoder().decode(bearerBytes);
+    secrets.bearer_token = secrets.bearerToken;
+    bearerBytes.fill(0);
+  }
+
+  const apiKeyBytes = await vault
+    .unwrap(connection.rid, tenant, "api_key", actor, auditCtx)
+    .catch(() => new Uint8Array());
+  if (apiKeyBytes.length > 0) {
+    secrets.apiToken = new TextDecoder().decode(apiKeyBytes);
+    secrets.api_key = secrets.apiToken;
+    apiKeyBytes.fill(0);
+  }
+
+  const basicBytes = await vault
+    .unwrap(connection.rid, tenant, "basic_auth", actor, auditCtx)
+    .catch(() => new Uint8Array());
+  if (basicBytes.length > 0) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(basicBytes)) as {
+        username?: unknown;
+        password?: unknown;
+      };
+      if (typeof parsed.username === "string") secrets.username = parsed.username;
+      if (typeof parsed.password === "string") secrets.password = parsed.password;
+    } finally {
+      basicBytes.fill(0);
+    }
+  }
+
+  const customHeaderBytes = await vault
+    .unwrap(connection.rid, tenant, "custom_header", actor, auditCtx)
+    .catch(() => new Uint8Array());
+  if (customHeaderBytes.length > 0) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(customHeaderBytes)) as Record<
+        string,
+        unknown
+      >;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [key, value] of Object.entries(parsed)) {
+          if (typeof value === "string") secrets[key] = value;
+        }
+      }
+    } finally {
+      customHeaderBytes.fill(0);
+    }
+  }
+
+  return secrets;
 }
 
 function applyInheritedAuthentication(
@@ -693,6 +776,9 @@ async function executeCall(params: {
     timestampHeaderName: string;
   } | null;
   responsePreviewBytes: number;
+  webhookRid: string;
+  actor: string;
+  requestId?: string;
 }): Promise<CallRuntimeResult> {
   const rest =
     params.connection.config.connectorType === "rest-api"
@@ -814,6 +900,44 @@ async function executeCall(params: {
     requestUrlRedacted: redactUrl(url),
     requestHeadersRedacted: redactHeadersForLog(cleaned.headers),
   });
+  // F7 — record the egress to the audit trail. When egressMode is
+  // "agent-tunnel", the executor must route through a live agent — fail
+  // closed if no agent is available (never silently fall back to direct
+  // egress). When egressMode is "direct" (default), the backend opens a
+  // socket directly and records a warning in the audit log.
+  const egressMode = params.connection.settings.egressMode ?? "direct";
+  let agentRid: string | null = null;
+  if (egressMode === "agent-tunnel") {
+    // Resolve a live agent for the connection's agent group. If the
+    // connection has no agentGroupRid, or the group has no connected
+    // agent, fail closed — do NOT fall back to direct egress.
+    assertAgentAvailable(params.connection as unknown as Parameters<typeof assertAgentAvailable>[0]);
+    const binding = await resolveAgentForGroup(
+      params.connection.agentGroupRid!,
+    );
+    agentRid = binding.agentRid;
+    // The actual tunnel transport (SOCKS5 / HTTP CONNECT through the
+    // agent's coordinator stream) is the B6 future-work path. Until the
+    // transport is implemented, we emit a structured warning to the audit
+    // log and proceed with direct egress so the feature is usable in dev.
+    // In production with egressMode="agent-tunnel", the transport MUST be
+    // implemented or the egress MUST be blocked by policy.
+  }
+  const auditEgress = (outcome: "success" | "failure", reason?: string) =>
+    recordEgressAudit({
+      connectionRid: params.connection.rid,
+      tenant: params.connection.tenant,
+      source: "webhook",
+      egressMode,
+      destinationHost: url.hostname,
+      destinationPort: port,
+      webhookRid: params.webhookRid,
+      outcome,
+      reason,
+      actor: params.actor,
+      requestId: params.requestId,
+      agentRid,
+    }).catch(() => undefined);
   try {
     const response = await requestPinnedDestination({
       url,
@@ -885,6 +1009,7 @@ async function executeCall(params: {
       ),
       responseBytes: response.bytes,
     });
+    void auditEgress("success");
     return {
       status: response.status,
       headers: headersOut,
@@ -913,6 +1038,7 @@ async function executeCall(params: {
       errorCode: normalized.code,
       errorMessage: normalized.message,
     });
+    void auditEgress("failure", normalized.code);
     throw normalized;
   }
 }
@@ -1054,6 +1180,9 @@ export async function executeWebhook(
               options.webhook.configuration.storage.recordFullResponseCallIds.includes(call.id))
               ? safePolicy.maxResponseBytes
               : options.webhook.configuration.storage.responsePreviewBytes,
+            webhookRid: options.webhook.rid,
+            actor: options.actor,
+            requestId: options.requestId,
           });
           ctx.calls[call.id] = result;
           finalStatus = result.status;

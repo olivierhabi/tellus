@@ -1,4 +1,29 @@
 import "dotenv/config";
+// Dev-only runtime CA injection. NODE_EXTRA_CA_CERTS is a Node-native
+// bootstrap env var read before any JS executes, so dotenv can't set it in
+// time. Instead we expose TELLUS_DEV_EXTRA_CA_CERTS (loaded by dotenv above)
+// and push the CA into the running TLS root store at startup. This lets the
+// local case-management sandbox self-signed cert be trusted from .env alone,
+// surviving restarts without an inline shell export. No-op in production
+// (guard on NODE_ENV === "development") and silently skipped if the file is
+// missing/unset.
+if (process.env.NODE_ENV === "development" && process.env.TELLUS_DEV_EXTRA_CA_CERTS) {
+  try {
+    const https = require("node:https");
+    const fs = require("node:fs");
+    const caPath = process.env.TELLUS_DEV_EXTRA_CA_CERTS;
+    if (fs.existsSync(caPath)) {
+      const ca = fs.readFileSync(caPath, "utf8");
+      // The webhook executor issues HTTPS egress via the default global agent
+      // (no custom `agent` option in requestPinnedDestination), so injecting
+      // the CA here makes all dev HTTPS egress trust the sandbox cert.
+      https.globalAgent.options.ca = [ca];
+      console.log(`[dev-ca] Loaded extra CA from ${caPath}`);
+    }
+  } catch (e) {
+    console.warn(`[dev-ca] Failed to load extra CA:`, (e as Error).message);
+  }
+}
 // PB-B9: bootstrap OTel BEFORE any instrumented library (pg, express,
 // @temporalio/client, kafkajs) so auto-instrumentations patch the
 // module graph on first require.
@@ -61,6 +86,8 @@ import objectsV2Router from "./routes/v2/objectsV2";
 import linksV2Router from "./routes/v2/linksV2";
 import actionsV2Router from "./routes/v2/actionsV2";
 import omsV2Router from "./routes/v2/omsV2";
+import attachmentsV2Router from "./routes/v2/attachmentsV2";
+import mediaV2Router from "./routes/v2/mediaV2";
 import healthRouter from "./routes/health";
 import editsRouter from "./routes/edits";
 import reindexStatusRouter from "./routes/reindexStatus";
@@ -1151,6 +1178,13 @@ app.use(objectsRouter);
 // OSS v2 / OSv2 / OMS v2 surface (canonical ObjectSet engine).
 // Thin adapters — same securityContext + branch middleware as v1.
 // ---------------------------------------------------------------------------
+// Foundry-parity attachment upload (no :ontology segment — public path is
+// /api/v2/ontologies/attachments/upload) plus the upload-only media picker.
+// Mounted before the :ontology routers so `attachments` / `media` are never
+// swallowed into the ontology-parameter slot; non-matching sub-paths fall
+// through to the :ontology routers below regardless.
+app.use("/api/v2/ontologies", attachmentsV2Router);
+app.use("/api/v2/ontologies/:ontology/media", mediaV2Router);
 app.use("/api/v2/ontologies/:ontology", objectSetsV2Router);
 app.use("/api/v2/ontologies/:ontology", objectsV2Router);
 app.use("/api/v2/ontologies/:ontology", linksV2Router);

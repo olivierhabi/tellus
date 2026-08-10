@@ -56,6 +56,7 @@ import {
 } from "../services/connectivity/webhooks/repository";
 import { findByRid as findConnectionByRid } from "../services/connectivity/store/connections.repo";
 import { executeWebhook as executeConnectivityWebhook } from "../services/connectivity/webhooks/executor";
+import { warnLegacyWebhookDispatch } from "../services/connectivity/webhooks/router";
 import {
   assertEgressUrl,
   assertMethod,
@@ -211,6 +212,11 @@ export async function executeWriteback(
   if (isConnectivityWebhookRef(config.webhookId)) {
     return executeConnectivityWriteback(config, ctx);
   }
+
+  // F9 — legacy direct-HTTP path (System C). DEPRECATED. Emit a warning so
+  // operators can track the remaining legacy footprint; new bindings MUST
+  // use a connectivity webhook RID. See docs/data-connection/webhook-systems.md.
+  warnLegacyWebhookDispatch(config.webhookId, "writebackExecutor.executeWriteback");
 
   // 1. Load the webhook version (immutable).
   const webhook: WebhookDefinitionRow | null = await getWebhookByNameVersion(

@@ -52,6 +52,7 @@ import { getKeycloakAdminService } from "../../services/keycloakAdminService";
 import { executeWebhook } from "../connectivity/webhooks/executor";
 import * as connectivityWebhooks from "../connectivity/webhooks/repository";
 import * as connectivityConnections from "../connectivity/store/connections.repo";
+import { warnLegacyWebhookDispatch } from "../connectivity/webhooks/router";
 import { query } from "../../db";
 import { executeWebhookInputFunction } from "../../actions/webhookInputFunctionExecutor";
 
@@ -256,6 +257,15 @@ export const productionWebhookDispatch: SideEffectDispatchFn = async (job) => {
     headers: payload.spec?.headers ?? {},
     timeoutMs: payload.spec?.timeoutMs ?? 5_000,
   };
+  // F9 — legacy inline-URL writeback (System C). DEPRECATED. Emit a warning
+  // so operators can track the remaining legacy footprint; new action
+  // side-effects MUST bind a connectivity webhook RID
+  // (`payload.spec.kind === "connectivity"`). See
+  // docs/data-connection/webhook-systems.md.
+  warnLegacyWebhookDispatch(
+    spec.url || "(inline-url)",
+    "sideEffectWorker.productionWebhookDispatch",
+  );
   const context: ActionWebhookPayload = {
     executionId: String(payload.context?.executionId ?? ""),
     actionTypeApiName: String(payload.context?.actionTypeApiName ?? ""),

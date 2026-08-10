@@ -58,6 +58,7 @@
     "test:connectivity": "vitest run tests/connectivity",
     "test:connectivity:unit": "vitest run tests/connectivity/unit",
     "test:connectivity:integration": "vitest run tests/connectivity/integration",
+    "test:connectivity:api-qa": "bash scripts/qa/api-tests/run-api-tests.sh",
     "auth:bootstrap": "bash scripts/bootstrap-keycloak.sh",
     "auth:verify": "bash scripts/verify-auth-all.sh",
     "auth:verify:realm": "bash scripts/verify-auth-realm.sh",

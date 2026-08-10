@@ -21,6 +21,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { sendError } from "../utils/responseFormatter";
 import { probeExecutionIndexVisibility } from "../actions/linkIndexAckHttp";
+import { observeHistogram } from "../services/funnel/metrics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -355,7 +356,12 @@ globalAuditRouter.get(
       // pollable statusUrl is a deferred client's ONLY signal the index
       // caught up. Flag-gated so flag-off responses stay byte-compatible.
       if (process.env.LINK_INDEX_ACK_REQUIRED === "true") {
+        // SLO #2: statusUrl poll latency (p99 ≤ 1.5s target). The probe
+        // runs ONE bounded CH query per scope group; the sticky-verdict
+        // short-circuit makes post-VISIBLE polls ~free (no CH touch).
+        const tPoll = Date.now();
         const visibility = await probeExecutionIndexVisibility({ executionId });
+        observeHistogram("status_url_poll_seconds", (Date.now() - tPoll) / 1000);
         if (visibility !== null) entry.indexVisibility = visibility;
       }
       return res.status(200).json(entry);

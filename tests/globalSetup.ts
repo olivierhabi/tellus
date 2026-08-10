@@ -236,6 +236,16 @@ function runKeycloakBootstrap(): void {
   if (r.status !== 0) {
     console.error("[globalSetup] keycloak stdout:", r.stdout?.slice(-500));
     console.error("[globalSetup] keycloak stderr:", r.stderr?.slice(-500));
+    if (process.env.TELLUS_TEST_HOOKS === "1") {
+      // Test-auth bypass is active — Keycloak is not required for the
+      // integration suites. Warn but do not abort.
+      console.warn(
+        "[globalSetup] bootstrap-keycloak.sh failed (exit " +
+          r.status +
+          ") — continuing because TELLUS_TEST_HOOKS=1 (test-auth bypass active).",
+      );
+      return;
+    }
     throw new Error(
       `[globalSetup] bootstrap-keycloak.sh failed with exit code ${r.status}`,
     );
@@ -364,8 +374,22 @@ export async function setup(): Promise<void> {
 
   // Step 0.6: Bootstrap Keycloak test realm + users so auth-dependent
   // integration suites can log in as cypress@tellus.local / Password123!.
-  // Idempotent and fast on a re-run (all upserts are HTTP 409-safe).
-  runKeycloakBootstrap();
+  // Idempotent and fast on a re-rerun (all upserts are HTTP 409-safe).
+  //
+  // When TELLUS_TEST_HOOKS=1 (the test-auth bypass via X-Tellus-Test-Auth
+  // header), Keycloak is NOT required — the spawned BE accepts synthetic
+  // claims from the header. Allow skipping the bootstrap (and tolerate its
+  // failures) so suites can run in environments where Keycloak is flaky or
+  // absent (e.g. local dev, CI without a healthy Keycloak container).
+  if (process.env.TELLUS_TEST_HOOKS === "1" && process.env.TELLUS_SKIP_KC_BOOTSTRAP !== "0") {
+    console.log(
+      "[globalSetup] TELLUS_TEST_HOOKS=1 — skipping Keycloak bootstrap " +
+        "(test-auth bypass is active on the spawned BE). " +
+        "Set TELLUS_SKIP_KC_BOOTSTRAP=0 to force bootstrap.",
+    );
+  } else {
+    runKeycloakBootstrap();
+  }
 
   const serverPath = path.join(ROOT, "src/server.ts");
 

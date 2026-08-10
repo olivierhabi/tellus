@@ -35,6 +35,7 @@ import * as connectorTypesHandler from "./handlers/connector-types.handler";
 import * as foldersHandler from "./handlers/folders.handler";
 import * as egressPoliciesHandler from "./handlers/egress-policies.handler";
 import * as webhooksHandler from "./webhooks/handlers";
+import { startWebhookReaper, stopWebhookReaper } from "./webhooks/reaper.worker";
 import * as outbox from "./store/outbox";
 import {
   startRotationWorker,
@@ -328,6 +329,7 @@ export function createConnectivityRouter(): Router {
  *   - B2: credential rotation worker.
  *   - B3: connection health prober.
  *   - B5: table-import scheduler.
+ *   - F2: webhook execution reaper (orphan recovery).
  * Safe to call multiple times.
  */
 export function initConnectivity(): void {
@@ -337,6 +339,7 @@ export function initConnectivity(): void {
   startRotationWorker();
   startHealthProber();
   startTableImportScheduler();
+  startWebhookReaper();
 }
 
 /** Stop background workers and drain PG pools for graceful shutdown. */
@@ -345,6 +348,7 @@ export async function shutdownConnectivity(): Promise<void> {
   stopRotationWorker();
   stopHealthProber();
   stopTableImportScheduler();
+  stopWebhookReaper();
   await drainPgPools().catch(() => undefined);
 }
 

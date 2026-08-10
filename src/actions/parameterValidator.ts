@@ -58,6 +58,13 @@ export interface ParameterDefinition {
   defaultFromObjectReference?: {
     parameter: string;
     objectProperty: string;
+    /**
+     * B1 (cross-functionality) — explicit object type for the referenced
+     * object, when the source `parameter` is a STRING primary-key param (no
+     * `objectType` on the source param's own def). Falls back to the source
+     * param's `objectType` (the D13 object_reference case).
+     */
+    objectType?: string;
   };
 }
 
@@ -315,7 +322,9 @@ export async function validateParameters(
       if (!isBlank) continue;
       const { parameter: sourceParam, objectProperty } = def.defaultFromObjectReference;
       const sourceDef = defMap.get(sourceParam);
-      const sourceObjectType = sourceDef?.objectType;
+      // B1: honor an explicit `objectType` on the spec so a STRING primary-key
+      // source parameter (no sourceDef.objectType) can resolve too.
+      const sourceObjectType = def.defaultFromObjectReference.objectType ?? sourceDef?.objectType;
       const sourcePk = resolved[sourceParam];
       if (!sourceObjectType || sourcePk == null || sourcePk === "") continue;
       try {

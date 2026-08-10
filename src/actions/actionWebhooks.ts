@@ -80,6 +80,11 @@ export function parseWebhookSpecs(sideEffects: unknown): ActionWebhookSpec[] {
  * uses (same SSRF guard + same timeout + same fetch). Identical semantics
  * preserve backward compatibility for existing tests + reduce the Phase 5
  * implementation scope to a refactor, not a rewrite.
+ *
+ * @deprecated F9 — System C (legacy inline-URL writeback). New action
+ *   side-effects MUST bind a connectivity webhook RID and dispatch through
+ *   System A (`executeWebhook`). This function emits a runtime deprecation
+ *   warning on every call. See docs/data-connection/webhook-systems.md.
  */
 export async function deliverOneWebhook(
   spec: ActionWebhookSpec,

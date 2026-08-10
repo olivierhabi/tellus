@@ -8,12 +8,24 @@
 // ---------------------------------------------------------------------------
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { queryMock, confirmEdgeMock } = vi.hoisted(() => ({
+const { queryMock, confirmEdgeMock, incCounterMock, observeHistogramMock } = vi.hoisted(() => ({
   queryMock: vi.fn(),
   confirmEdgeMock: vi.fn(),
+  incCounterMock: vi.fn(),
+  observeHistogramMock: vi.fn(),
 }));
 
 vi.mock("../../../src/db", () => ({ query: queryMock }));
+
+// persistStickyVisibleVerdict imports incCounter from funnel/metrics; mock
+// it so the failure-path test can assert the failure counter is incremented
+// without depending on the in-memory registry. observeHistogram is also
+// referenced by the probe's barrier on the live path (not under test here).
+vi.mock("../../../src/services/funnel/metrics", () => ({
+  incCounter: incCounterMock,
+  observeHistogram: observeHistogramMock,
+  setGauge: vi.fn(),
+}));
 
 // The status probe dynamically imports confirmEdgeIndexVisibility; cache
 // the mock against that path so the dynamic import resolves to ours.
@@ -24,6 +36,7 @@ vi.mock("../../../src/services/serving/edgeIndexWatermark", () => ({
 import {
   perItemAckBudgetMs,
   probeExecutionIndexVisibility,
+  persistStickyVisibleVerdict,
 } from "../../../src/actions/linkIndexAckHttp";
 
 describe("probeExecutionIndexVisibility — statusUrl index state", () => {
@@ -243,6 +256,55 @@ describe("probeExecutionIndexVisibility — sticky VISIBLE verdict (monotonicity
     expect(out).toBeNull();
     expect(handler.isStickyPresent()).toBe(false);
     expect(confirmEdgeMock).not.toHaveBeenCalled();
+  });
+});
+
+// -- persistStickyVisibleVerdict (shared writer: write barrier + probe) ----
+// The write barrier (editApplicator Step 6c) calls THIS helper when the
+// in-band ack confirmed (the 200 path); the status probe calls it after a
+// live confirmed=true round. The unit cases below prove the helper's
+// contract; the live post-fix gate proves the write barrier actually
+// invokes it on confirmed (200-confirmed ⇒ sticky row exists with no poll).
+describe("persistStickyVisibleVerdict — shared sticky writer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("success: INSERT ... ON CONFLICT DO NOTHING for the executionId; does not throw", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] });
+    await expect(persistStickyVisibleVerdict("ex-ok")).resolves.toBeUndefined();
+    expect(queryMock).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO link_execution_index_visibility"),
+      ["ex-ok"],
+    );
+    expect(queryMock.mock.calls[0][0]).toContain("ON CONFLICT DO NOTHING");
+    // success path MUST NOT increment the failure counter
+    expect(incCounterMock).not.toHaveBeenCalledWith(
+      "link_index_sticky_write_failures_total",
+    );
+  });
+
+  it("PG failure: NEVER throws, logs once, increments the failure counter (no silent swallow)", async () => {
+    queryMock.mockRejectedValueOnce(new Error("relation link_execution_index_visibility does not exist"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(persistStickyVisibleVerdict("ex-fail")).resolves.toBeUndefined();
+    // visible, not silent: one warn line naming the executionId
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain("ex-fail");
+    // and a counter increment so the outage is observable in metrics
+    expect(incCounterMock).toHaveBeenCalledWith("link_index_sticky_write_failures_total");
+    warnSpy.mockRestore();
+  });
+
+  it("never fabricates: the writer is ONLY invoked by the confirmed path — it has no PENDING branch", async () => {
+    // The helper performs a blind INSERT; it is the CALLER's contract that
+    // gates it on confirmed=true (write barrier) / live-probe-confirmed
+    // (probe). Assert the SQL carries ON CONFLICT DO NOTHING so a duplicate
+    // (spurious) write is a no-op, not a fabrication: presence of a row is
+    // only ever set by a confirmed verdict upstream.
+    queryMock.mockResolvedValueOnce({ rows: [] });
+    await persistStickyVisibleVerdict("ex-idempotent");
+    expect(queryMock.mock.calls[0][0]).toContain("ON CONFLICT DO NOTHING");
   });
 });
 

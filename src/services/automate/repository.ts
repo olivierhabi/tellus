@@ -848,33 +848,44 @@ export async function executeAutomationManually(input: {
         selectedEffectIds: [...input.selectedEffectIds].sort(),
       }))
       .digest("hex");
+    // Lock the existing idempotency record (if any) so a concurrent same-key
+    // request on a DIFFERENT advisory-hash collision cannot interleave. The
+    // advisory lock above already serializes same-key requests; this row lock
+    // is defence-in-depth for the expired-replacement path.
     const prior = await client.query<{
       request_hash: string;
       automation_id: string;
       response: { triggerEventId?: unknown } | null;
+      expires_at: Date;
     }>(
-      `SELECT request_hash, automation_id, response
+      `SELECT request_hash, automation_id, response, expires_at
          FROM automation_idempotency
         WHERE tenant_id = $1 AND owner_user_id = $2
-          AND idempotency_key = $3 AND expires_at > now()`,
+          AND idempotency_key = $3
+        FOR UPDATE`,
       [input.tenantId, input.actorUserId, input.idempotencyKey],
     );
     if (prior.rows[0]) {
-      const existing = prior.rows[0];
-      if (
-        existing.request_hash !== requestHash ||
-        existing.automation_id !== input.automationId ||
-        typeof existing.response?.triggerEventId !== "string"
-      ) {
-        throw new AutomationServiceError(
-          "IDEMPOTENCY_KEY_REUSED",
-          "The Idempotency-Key was already used for a different request.",
-          409,
-        );
+      const expiresAt = new Date(prior.rows[0].expires_at);
+      if (expiresAt > new Date()) {
+        const existing = prior.rows[0];
+        if (
+          existing.request_hash !== requestHash ||
+          existing.automation_id !== input.automationId ||
+          typeof existing.response?.triggerEventId !== "string"
+        ) {
+          throw new AutomationServiceError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "The Idempotency-Key was already used for a different request.",
+            409,
+          );
+        }
+        await client.query("COMMIT");
+        return { triggerEventId: existing.response.triggerEventId, reused: true };
       }
-      await client.query("COMMIT");
-      return { triggerEventId: existing.response.triggerEventId, reused: true };
     }
+    // Either no prior record, or an expired one that we will atomically
+    // replace below via ON CONFLICT. Proceed to create the execution.
 
     const locked = await client.query<{
       status: AutomationStatus;
@@ -966,11 +977,24 @@ export async function executeAutomationManually(input: {
       );
     }
     const response = { triggerEventId, reused: false };
-    await client.query(
+    // Atomically insert or replace an expired record. The ON CONFLICT DO
+    // UPDATE only fires when the existing row is expired (expires_at < now());
+    // an unexpired same-key row was already handled by the replay/409 check
+    // above, so if the WHERE clause does not match we have a genuine conflict
+    // and must fail rather than silently overwrite a live record.
+    const upserted = await client.query<{ replaced: boolean }>(
       `INSERT INTO automation_idempotency (
          tenant_id, owner_user_id, idempotency_key, request_hash,
          automation_id, response
-       ) VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+       ) VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+       ON CONFLICT (tenant_id, owner_user_id, idempotency_key)
+       DO UPDATE SET request_hash = EXCLUDED.request_hash,
+                     automation_id = EXCLUDED.automation_id,
+                     response = EXCLUDED.response,
+                     created_at = now(),
+                     expires_at = now() + interval '24 hours'
+       WHERE automation_idempotency.expires_at < now()
+       RETURNING true AS replaced`,
       [
         input.tenantId,
         input.actorUserId,
@@ -980,6 +1004,18 @@ export async function executeAutomationManually(input: {
         JSON.stringify(response),
       ],
     );
+    if (upserted.rowCount === 0) {
+      // The ON CONFLICT WHERE clause did not match — the existing row is
+      // unexpired, which means a concurrent writer committed a replayable
+      // record between our prior SELECT and this INSERT. Roll back the
+      // trigger/effect creation and replay the stored response instead of
+      // leaving an orphaned trigger.
+      throw new AutomationServiceError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "The Idempotency-Key was already used for a different request.",
+        409,
+      );
+    }
     await appendAutomationAudit(client, {
       automationId: input.automationId,
       automationVersion: automation.current_version,
@@ -1000,6 +1036,29 @@ export async function executeAutomationManually(input: {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Delete expired `automation_idempotency` rows. Safe to run concurrently:
+ * deletes only rows whose `expires_at < now()`, bounded by `batchSize` so a
+ * long cleanup does not hold the table. Returns the number of rows removed.
+ */
+export async function cleanupExpiredIdempotencyRecords(input: {
+  batchSize?: number;
+} = {}): Promise<number> {
+  const batchSize = Math.min(Math.max(input.batchSize ?? 1_000, 1), 10_000);
+  const result = await pool.query<{ count: number }>(
+    `WITH deleted AS (
+       DELETE FROM automation_idempotency
+        WHERE expires_at < now()
+        ORDER BY expires_at
+        LIMIT $1
+        RETURNING 1
+     )
+     SELECT count(*)::int AS count FROM deleted`,
+    [batchSize],
+  );
+  return result.rows[0]?.count ?? 0;
 }
 
 export async function listExecutionHistory(input: {

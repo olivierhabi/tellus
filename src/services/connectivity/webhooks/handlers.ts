@@ -220,7 +220,7 @@ export const createWebhook = handler("create", async (req, res) => {
     apiName: parsed.data.apiName,
     displayName: parsed.data.displayName,
     description: parsed.data.description,
-    status: parsed.data.status,
+    status: "active",
     configuration: parsed.data.configuration,
     actor: user.id,
   });

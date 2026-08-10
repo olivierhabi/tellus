@@ -19,6 +19,7 @@
 import { parentPort } from "worker_threads";
 import {
   buildOntologySdk,
+  type ObjectLoadTiming,
   type OntologySnapshot,
   type OntologyEdit,
 } from "./functions/ontologyRuntime";
@@ -41,6 +42,8 @@ interface WorkerResponse {
   readonly edits: OntologyEdit[];
   /** Object types the function queried via Objects.search/get (post-run). */
   readonly requestedTypes: string[];
+  /** Per-type object-load timings (wall-clock Date.now, cross-thread safe). */
+  readonly objectLoads: ObjectLoadTiming[];
 }
 
 if (!parentPort) {
@@ -52,7 +55,7 @@ const port = parentPort;
 port.on("message", async (msg: WorkerRequest) => {
   const { id, transpiled, input, snapshot, binding } = msg;
   try {
-    const { sdk, getEdits, getRequestedTypes } = buildOntologySdk(snapshot);
+    const { sdk, getEdits, getRequestedTypes, getObjectLoads } = buildOntologySdk(snapshot);
     let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
       Objects: sdk.Objects,
       Edits: sdk.Edits,
@@ -78,7 +81,11 @@ port.on("message", async (msg: WorkerRequest) => {
     // Requested types are collected regardless of run status — a function
     // that queried a non-imported type then threw still surfaces the warning.
     const requestedTypes = getRequestedTypes();
-    const response: WorkerResponse = { id, result, edits, requestedTypes };
+    // Object-load timings are read regardless of run status (same rationale
+    // as requestedTypes: a function that loaded objects then threw still has
+    // meaningful phases for the performance waterline).
+    const objectLoads = getObjectLoads();
+    const response: WorkerResponse = { id, result, edits, requestedTypes, objectLoads };
     port.postMessage(response);
   } catch (err) {
     // runSandboxedWithSdk catches its own vm errors; this is a belt-and-braces
@@ -90,7 +97,7 @@ port.on("message", async (msg: WorkerRequest) => {
       errorMessage: err instanceof Error ? err.message : String(err),
       logs: [],
     };
-    const response: WorkerResponse = { id, result, edits: [], requestedTypes: [] };
+    const response: WorkerResponse = { id, result, edits: [], requestedTypes: [], objectLoads: [] };
     port.postMessage(response);
   }
 });

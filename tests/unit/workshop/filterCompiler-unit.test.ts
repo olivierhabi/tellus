@@ -61,6 +61,42 @@ describe("B07 C-02: COMPAT matrix exhaustive", () => {
 });
 
 describe("B07 C-01: uiKind → predicate shape", () => {
+  it("CONTAIN compiles to prefix predicates and never substring wildcards", () => {
+    expect(compileFilter({
+      uiKind: "id-multi",
+      property: "orderId",
+      operator: "contain",
+      value: ["id0001"],
+    }, ctx)).toEqual({ type: "prefix", field: "orderId", value: "id0001" });
+  });
+
+  it("supports NULL and negated NULL", () => {
+    expect(compileFilter({
+      uiKind: "string-multi",
+      property: "assignee",
+      operator: "null",
+      value: [],
+    }, ctx)).toEqual({ type: "isNull", field: "assignee" });
+    expect(compileFilter({
+      uiKind: "string-multi",
+      property: "assignee",
+      operator: "null",
+      negated: true,
+      value: [],
+    }, ctx)).toEqual({ type: "not", clause: { type: "isNull", field: "assignee" } });
+  });
+
+  it("supports boolean filters and general negation", () => {
+    expect(compileFilter({
+      uiKind: "boolean-single",
+      property: "isVip",
+      negated: true,
+      value: true,
+    }, ctx)).toEqual({
+      type: "not",
+      clause: { type: "term", field: "isVip", value: true },
+    });
+  });
   it("string-eq with values → terms", () => {
     const p = compileFilter(
       { uiKind: "string-eq", property: "itemName", value: ["a", "b"] },

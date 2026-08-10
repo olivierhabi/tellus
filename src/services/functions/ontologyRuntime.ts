@@ -219,6 +219,17 @@ function toNumber(v: unknown): number {
   return 0;
 }
 
+/**
+ * Wire-boundary type guard: `v` is a returned ObjectSet. The invoke route
+ * uses this to serialize the set as its row ARRAY instead of the internal
+ * `{"rows":[...]}` representation — Palantir's public surface exposes object
+ * collections as plain arrays (`data` in the REST/Ontology API), never with
+ * an internal `rows` key.
+ */
+export function isObjectSet(v: unknown): v is ObjectSet {
+  return v instanceof ObjectSet;
+}
+
 // ---------------------------------------------------------------------------
 // createEditBatch — Foundry TypeScript Functions v2 Ontology-edits API.
 // (https://www.palantir.com/docs/foundry/functions/typescript-v2-ontology-edits)
@@ -371,6 +382,31 @@ export interface OntologySdk {
   readonly objectTypeDescriptors: Record<string, { apiName: string }>;
 }
 
+/**
+ * Per-object-type access timing accumulated during execution — one entry per
+ * object TYPE (not per call), so a function calling `Objects.get` in a loop
+ * yields a single aggregated record (`calls` keeps the multiplicity).
+ *
+ * Accuracy note: snapshot reads are in-memory `Map.get`s — the real loading
+ * I/O happened at snapshot build time (tracked by the route's
+ * "Load ontology snapshot" phase). These timings measure the cost of the
+ * materialisation + property bind per access from the function's perspective,
+ * which is the in-executor counterpart of Foundry's "Load objects from
+ * arguments/links" waterfall bars. Timestamps are wall-clock `Date.now()`
+ * (NOT `performance.now()`) so offsets are comparable across worker threads
+ * (each worker has its own perf-hooks time origin).
+ */
+export interface ObjectLoadTiming {
+  readonly objectType: string;
+  readonly calls: number;
+  /** Wall-clock timestamp of the FIRST access to this type. */
+  readonly firstStartAt: number;
+  /** Wall-clock timestamp of the LAST access START to this type. */
+  readonly lastStartAt: number;
+  /** Cumulative time spent inside search/get for this type. */
+  readonly totalDurationMs: number;
+}
+
 export interface BuiltSdk {
   readonly sdk: OntologySdk;
   /** The edits collected during execution (read after the function returns). */
@@ -385,6 +421,8 @@ export interface BuiltSdk {
    * `Objects.types()` is NOT recorded — it lists loaded types, not a request.
    */
   getRequestedTypes(): string[];
+  /** Per-type access timings (performance.phases source). */
+  getObjectLoads(): ObjectLoadTiming[];
 }
 
 export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
@@ -393,16 +431,36 @@ export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
   // Insertion-ordered; duplicates collapse (a Set). Read post-run by the
   // worker and threaded back to the invoke route for the import diff.
   const requestedTypes = new Set<string>();
+  const objectLoads = new Map<
+    string,
+    { calls: number; firstStartAt: number; lastStartAt: number; totalDurationMs: number }
+  >();
+  const recordLoad = (objectType: string, startAt: number, durationMs: number): void => {
+    const prev = objectLoads.get(objectType);
+    if (prev) {
+      prev.calls += 1;
+      prev.lastStartAt = startAt;
+      prev.totalDurationMs += durationMs;
+    } else {
+      objectLoads.set(objectType, { calls: 1, firstStartAt: startAt, lastStartAt: startAt, totalDurationMs: durationMs });
+    }
+  };
   const sdk: OntologySdk = {
     Objects: {
       search(objectType: string): ObjectSet {
+        const startAt = Date.now();
         requestedTypes.add(String(objectType));
         const bucket = snapshot.byType.get(objectType);
-        return new ObjectSet(bucket ? [...bucket.values()] : []);
+        const out = new ObjectSet(bucket ? [...bucket.values()] : []);
+        recordLoad(String(objectType), startAt, Date.now() - startAt);
+        return out;
       },
       get(objectType: string, primaryKey: string): OntologyObject | undefined {
+        const startAt = Date.now();
         requestedTypes.add(String(objectType));
-        return snapshot.byType.get(objectType)?.get(String(primaryKey));
+        const out = snapshot.byType.get(objectType)?.get(String(primaryKey));
+        recordLoad(String(objectType), startAt, Date.now() - startAt);
+        return out;
       },
       types(): string[] {
         return [...snapshot.byType.keys()];
@@ -446,7 +504,19 @@ export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
       ).map((t) => [t, { apiName: t }]),
     ),
   };
-  return { sdk, getEdits: () => edits.slice(), getRequestedTypes: () => [...requestedTypes] };
+  return {
+    sdk,
+    getEdits: () => edits.slice(),
+    getRequestedTypes: () => [...requestedTypes],
+    getObjectLoads: () =>
+      [...objectLoads.entries()].map(([objectType, t]) => ({
+        objectType,
+        calls: t.calls,
+        firstStartAt: t.firstStartAt,
+        lastStartAt: t.lastStartAt,
+        totalDurationMs: t.totalDurationMs,
+      })),
+  };
 }
 
 function cryptoRandomId(): string {

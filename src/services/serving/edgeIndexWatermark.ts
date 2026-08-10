@@ -216,6 +216,11 @@ export async function confirmEdgeIndexVisibility(args: {
   if (args.handles.length === 0) {
     return { confirmed: true, deferred: 0, waitedMs: 0 };
   }
+  // SLO #4 (ack timeout rate): one attempt per real barrier invocation
+  // (non-empty handles). `link_index_ack_deferred_total{reason="timeout"}`
+  // (incremented below) divided by this counter = the deadline-bound
+  // probe rate; `{reason="index_outage"}` is the separate CH-errored bucket.
+  incCounter("link_index_ack_attempts_total");
   const chExec = deps.chExec ?? (<T>(sql: string, opts?: { timeoutMs?: number }) => getClickHouseClient().exec<T>(sql, opts));
   const pg = deps.pgQuery ?? query;
   const resolve = deps.resolveDescriptor ?? ((name: string) => resolveLinkDescriptor(name, pg));

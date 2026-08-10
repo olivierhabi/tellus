@@ -28,6 +28,7 @@
 import type { EdgeAckConfirmation } from "../services/serving/edgeIndexWatermark";
 import type { AuditResult } from "../models/actionAuditLog";
 import { query } from "../db";
+import { incCounter } from "../services/funnel/metrics";
 
 /** Default per-call budget for the statusUrl index-visibility probe (ms).
  *  The endpoint is pollable — one bounded probe per scope group keeps it
@@ -198,21 +199,11 @@ export async function probeExecutionIndexVisibility(args: {
     if (!verdict.confirmed) return "PENDING";
   }
 
-  // Persist the FIRST VISIBLE verdict: INSERT-only, ON CONFLICT DO
-  // NOTHING. First writer wins; the row is never updated or downgraded.
-  // Best-effort: a PG error (table absent pre-migration-159, transient
-  // connection) is swallowed -- the RETURN value is still VISIBLE (a
-  // real probe confirmed it); the NEXT poll will retry the write.
-  try {
-    await query(
-      `INSERT INTO link_execution_index_visibility (execution_id)
-       VALUES ($1)
-       ON CONFLICT DO NOTHING`,
-      [args.executionId],
-    );
-  } catch {
-    // Sticky write failed -- return VISIBLE anyway; next poll retries.
-  }
+  // Persist the FIRST VISIBLE verdict via the SHARED writer (also used by
+  // the editApplicator write barrier). Best-effort: a PG error is logged +
+  // counted (never silently swallowed) but the RETURN value is still
+  // VISIBLE — a real probe confirmed it.
+  await persistStickyVisibleVerdict(args.executionId);
   return "VISIBLE";
 }
 
@@ -220,6 +211,49 @@ export async function probeExecutionIndexVisibility(args: {
  *  mounted at /api/v1/audit in server.ts). */
 export function actionExecutionStatusUrl(executionId: string): string {
   return `/api/v1/audit/log/${executionId}`;
+}
+
+// ---------------------------------------------------------------------------
+// Shared sticky-verdict writer (migration 159).
+//
+// TWO writers persist a monotonic VISIBLE verdict for an execution into
+// `link_execution_index_visibility` (INSERT-only, ON CONFLICT DO NOTHING):
+//   1. the status probe `probeExecutionIndexVisibility` — after a REAL
+//      confirmEdgeIndexVisibility round returned confirmed=true for every
+//      staged event (the polling client's catch-up signal);
+//   2. the editApplicator write barrier (Step 6b) — when the IN-BAND ack
+//      barrier returned confirmed=true on the 200 path. Closing the
+//      "shape-1" gap: a wire-confirmed 200 whose CH row later
+//      merge-collapses would otherwise read PENDING on its first statusUrl
+//      poll (no sticky yet, event_id gone); persisting the verdict at the
+//      moment of in-band confirmation (before any later merge) kills that.
+//
+// Single source of truth: both writers call THIS helper. Best-effort: a PG
+// failure MUST NOT affect the caller's response (the 200 stays 200, the
+// probe still returns VISIBLE) — but it is logged once AND counted
+// (link_index_sticky_write_failures_total). No silent retry loop: a broken
+// sticky table is an outage ops needs to see, not mask. First writer wins
+// (ON CONFLICT DO NOTHING); the row is never updated or downgraded.
+// ---------------------------------------------------------------------------
+export async function persistStickyVisibleVerdict(
+  executionId: string,
+): Promise<void> {
+  try {
+    await query(
+      `INSERT INTO link_execution_index_visibility (execution_id)
+       VALUES ($1)
+       ON CONFLICT DO NOTHING`,
+      [executionId],
+    );
+  } catch (err) {
+    // Swallowed (the 200 / VISIBLE verdict is unaffected) BUT visible:
+    // one warn + one counter increment. No retry — the next poll / next
+    // confirmed apply retries the write naturally.
+    console.warn(
+      `[sticky-verdict] write failed for ${executionId}: ${(err as Error).message}`,
+    );
+    incCounter("link_index_sticky_write_failures_total");
+  }
 }
 
 /**
@@ -316,6 +350,10 @@ export function mapApplyExecutionToHttp(
         statusUrl: actionExecutionStatusUrl(result.executionId),
       },
     };
+    // SLO #3 (202 rate): a committed mutation whose serving-edge ack was
+    // NOT confirmed in-band → 202 deferral. Denominator bucket for the
+    // flag-on 202 rate = 202_deferred / (202_deferred + 200_confirmed).
+    incCounter("link_index_ack_outcome_total", { result: "202_deferred" });
     assertApplyOutcomeInvariant(outcome);
     return outcome;
   }
@@ -332,6 +370,15 @@ export function mapApplyExecutionToHttp(
       ...(result.linkIndexAck ? { linkIndexAck: result.linkIndexAck } : {}),
     },
   };
+  // SLO #3: 200 confirmed-in-band (flag on + ack confirmed) vs the flag-off
+  // / no-link-events 200 (separate bucket so the 202 rate denominator
+  // excludes flag-off traffic where the ack contract isn't vouching).
+  incCounter(
+    "link_index_ack_outcome_total",
+    result.linkIndexAck?.confirmed
+      ? { result: "200_confirmed" }
+      : { result: "200_no_ack" },
+  );
   assertApplyOutcomeInvariant(outcome);
   return outcome;
 }

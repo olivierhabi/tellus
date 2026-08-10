@@ -42,12 +42,31 @@ import {
   withIdempotencyLock,
 } from "../actions/idempotency";
 import { actionRateLimiter, batchRateLimiter } from "../middleware/rateLimiter";
+import { planInlineEditBatch } from "../actions/inlineEditBatch";
+import { sendError } from "../utils/responseFormatter";
+import { query } from "../db";
 
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 const router = Router({ mergeParams: true });
+
+/**
+ * Preserve the request-level trace ID for every action execution in a batch.
+ * The correlation middleware normally populates `req.correlationId`; reading
+ * the header as a fallback keeps this router safe when mounted independently.
+ */
+function requestCorrelationId(req: Request): string | undefined {
+  const fromMiddleware = (req as { correlationId?: unknown }).correlationId;
+  if (typeof fromMiddleware === "string" && fromMiddleware.trim()) {
+    return fromMiddleware;
+  }
+  const fromHeader = req.headers["x-correlation-id"];
+  return typeof fromHeader === "string" && fromHeader.trim()
+    ? fromHeader
+    : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // POST /:actionTypeApiName/apply — Execute an action
@@ -133,6 +152,10 @@ router.post(
         | undefined;
       const context = {
         executedBy: (req as any).user?.id || "system",
+        // The correlation middleware preserves a caller-provided value in
+        // req.correlationId. Read the header as a fallback for route-level
+        // tests and deployments that mount this router before that middleware.
+        correlationId: requestCorrelationId(req),
         tenant: resolveRequestTenant(req),
         sourceIp:
           (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
@@ -413,6 +436,7 @@ router.post(
         // Build execution context for this individual request
         const context = {
           executedBy: (req as any).user?.id || "system",
+          correlationId: requestCorrelationId(req),
           tenant: resolveRequestTenant(req),
           sourceIp:
             (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
@@ -905,6 +929,7 @@ batchRouter.post(
           | undefined;
         const context = {
           executedBy: (req as any).user?.id || "system",
+          correlationId: requestCorrelationId(req),
           tenant: resolveRequestTenant(req),
           sourceIp:
             (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
@@ -1071,6 +1096,176 @@ batchRouter.post(
       next(err);
     }
   }
+);
+
+// ---------------------------------------------------------------------------
+// POST /inlineEditBatch — All-or-nothing bulk inline-edit submission (Pillar 3)
+//
+// Foundry: "edits will be submitted all at once and will succeed if they all
+// pass parameter and global submission criteria for the corresponding object."
+// "Actions will return an error if an inline edit attempts to edit the same
+// object twice."
+//
+// This endpoint:
+//   1. Plans the batch (validate, conflict-check, coalesce) via
+//      planInlineEditBatch.
+//   2. If any edit fails validation OR a conflict is detected → commit
+//      nothing, return per-edit errors (HTTP 422).
+//   3. If all pass → execute each coalesced edit sequentially via
+//      executeAction. If a LATE execution failure occurs (network/race),
+//      earlier commits stand but the response reports the failure — this
+//      is an edge case that pre-validation should prevent.
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/inlineEditBatch",
+  batchRateLimiter,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId } = req.params;
+      if (!ontologyId) {
+        throw new OntologyError(
+          "ontologyId is required",
+          "INVALID_PARAMETER",
+          undefined,
+          { parameterName: "ontologyId" },
+        );
+      }
+
+      const body = req.body || {};
+      if (!body.edits || !Array.isArray(body.edits) || body.edits.length === 0) {
+        throw new OntologyError(
+          "edits must be a non-empty array",
+          "INVALID_PARAMETER",
+          400,
+          { parameterName: "edits" },
+        );
+      }
+
+      if (body.edits.length > MAX_BATCH_SIZE) {
+        throw new OntologyError(
+          `Batch size ${body.edits.length} exceeds the maximum of ${MAX_BATCH_SIZE} edits`,
+          "SCALE_LIMIT_EXCEEDED",
+          400,
+          { batchSize: body.edits.length, maxBatchSize: MAX_BATCH_SIZE },
+        );
+      }
+
+      // Resolve PK parameter names for each action referenced in the batch.
+      // The client sends the actionApiName per edit (from the property's
+      // ontology metadata); we look up the action's object_reference parameter
+      // to construct the action's parameter object.
+      const allActionNames: string[] = (body.edits as Array<{ actionApiName?: string }>)
+        .map((e) => e.actionApiName)
+        .filter((x: string | undefined): x is string => typeof x === "string" && x.length > 0);
+      const actionApiNames = [...new Set<string>(allActionNames)];
+
+      const pkParameterMap = new Map<string, string>();
+      for (const actionApiName of actionApiNames) {
+        const rows = await query(
+          // Foundry parity: is_enabled is cosmetic — do not exclude rows
+          // whose flag is false; apply-time guards handle real safety.
+          `SELECT parameters FROM action_type
+           WHERE ontology_id = $1 AND api_name = $2`,
+          [ontologyId, actionApiName],
+        );
+        if (rows.rows.length === 0) {
+          return sendError(
+            res,
+            "INLINE_EDIT_ACTION_NOT_FOUND",
+            `Action type "${actionApiName}" was not found in this ontology.`,
+          );
+        }
+        const params = rows.rows[0].parameters as Array<{ apiName: string; type: string }>;
+        const pkParam = params.find((p) => p.type === "object_reference");
+        if (!pkParam) {
+          return sendError(
+            res,
+            "INLINE_EDIT_ACTION_INELIGIBLE",
+            `Action type "${actionApiName}" has no object_reference parameter and cannot serve inline edits.`,
+          );
+        }
+        pkParameterMap.set(actionApiName, pkParam.apiName as string);
+      }
+
+      // Plan the batch (pure: validate + conflict-check + coalesce).
+      const plan = planInlineEditBatch(body.edits, pkParameterMap);
+
+      // All-or-nothing: if any edit is invalid or a conflict exists, commit NOTHING.
+      if (!plan.allValid || plan.conflicts.length > 0) {
+        return res.status(422).json({
+          batchId: crypto.randomUUID(),
+          submitted: false,
+          totalEdits: body.edits.length,
+          results: plan.results,
+          conflicts: plan.conflicts,
+          error: "One or more edits failed validation. No edits were committed.",
+        });
+      }
+
+      // Execute each coalesced edit sequentially.
+      const results: Array<Record<string, unknown>> = [];
+      let successCount = 0;
+      let failedCount = 0;
+      const context = {
+        executedBy: (req as any).user?.id || "system",
+        correlationId: requestCorrelationId(req),
+        tenant: resolveRequestTenant(req),
+        sourceIp:
+          (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+          req.socket.remoteAddress ||
+          null,
+        branchId: body.branchId || null,
+      };
+
+      for (let i = 0; i < plan.edits.length; i++) {
+        const edit = plan.edits[i];
+        try {
+          const result = await executeAction(
+            ontologyId,
+            edit.actionApiName,
+            edit.parameters,
+            context,
+          );
+          successCount++;
+          results.push({
+            index: i,
+            success: true,
+            executionId: result.executionId,
+            affectedObjects: result.affectedObjects,
+            sourceIndices: edit.sourceIndices,
+          });
+        } catch (err: any) {
+          failedCount++;
+          results.push({
+            index: i,
+            success: false,
+            executionId: err instanceof OntologyError
+              ? (err.parameters?.executionId as string) || null
+              : null,
+            failureType: err instanceof OntologyError
+              ? mapErrorCodeToFailureType(err.code)
+              : "unclassified",
+            errorMessage: err.message || "Unknown error",
+            sourceIndices: edit.sourceIndices,
+          });
+        }
+      }
+
+      return res.status(failedCount > 0 ? 207 : 200).json({
+        batchId: crypto.randomUUID(),
+        submitted: true,
+        totalEdits: body.edits.length,
+        coalescedEdits: plan.edits.length,
+        successCount,
+        failedCount,
+        results,
+      });
+    } catch (err: any) {
+      if (err instanceof OntologyError) return next(err);
+      next(err);
+    }
+  },
 );
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,8 @@ export default defineConfig({
       "tests/**/*-unit.test.ts",
       "tests/**/*-integration.test.ts",
       "tests/**/*-e2e.test.ts",
+      // QA connectivity suite is named with a dotted suffix per request.
+      "tests/connectivity/integration/qa-additional.integration.test.ts",
     ],
     exclude: ["node_modules", "dist"],
 

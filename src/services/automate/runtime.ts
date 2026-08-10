@@ -30,6 +30,7 @@ import {
 } from "./effectExecutors";
 import {
   appendAutomationAudit,
+  cleanupExpiredIdempotencyRecords,
   retryTriggerEvent,
 } from "./repository";
 
@@ -1238,6 +1239,19 @@ export async function runAutomateWorkerOnce(input: {
 
 let loopAbort: AbortController | null = null;
 
+// Idempotency-record cleanup is throttled to run far less frequently than the
+// worker poll. Configurable via env so production can tune it without a code
+// change. Defaults: run at most once per 10 minutes, deleting up to 1000
+// expired rows per pass.
+const IDEMPOTENCY_CLEANUP_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.AUTOMATE_IDEMPOTENCY_CLEANUP_INTERVAL_MS ?? 600_000),
+);
+const IDEMPOTENCY_CLEANUP_BATCH = Math.min(
+  Math.max(Number(process.env.AUTOMATE_IDEMPOTENCY_CLEANUP_BATCH ?? 1_000), 1),
+  10_000,
+);
+
 export function startAutomateRuntime(): void {
   if (loopAbort) return;
   loopAbort = new AbortController();
@@ -1249,6 +1263,7 @@ export function startAutomateRuntime(): void {
     250,
     Number(process.env.AUTOMATE_POLL_INTERVAL_MS ?? 2_000),
   );
+  let lastCleanupAt = 0;
   const loop = async (): Promise<void> => {
     while (!signal.aborted) {
       try {
@@ -1256,6 +1271,22 @@ export function startAutomateRuntime(): void {
         await runAutomateConditionEvaluatorOnce({ workerId });
         await runAutomateLiveEventsOnce();
         await runAutomateWorkerOnce({ workerId });
+        // Periodic cleanup of expired idempotency records. Throttled so it
+        // does not run on every poll; runs only when the interval has
+        // elapsed since the last pass.
+        const nowMs = Date.now();
+        if (nowMs - lastCleanupAt >= IDEMPOTENCY_CLEANUP_INTERVAL_MS) {
+          lastCleanupAt = nowMs;
+          const removed = await cleanupExpiredIdempotencyRecords({
+            batchSize: IDEMPOTENCY_CLEANUP_BATCH,
+          });
+          if (removed > 0) {
+            console.log(JSON.stringify({
+              type: "automate.idempotency.cleanup",
+              removed,
+            }));
+          }
+        }
       } catch (error) {
         console.error(JSON.stringify({
           type: "automate.runtime.error",
