@@ -159,6 +159,17 @@ async function functionExpectedOutputs(root: string) {
   );
 }
 
+const markingCanaries = (index: number) => index === 1
+  ? [
+      "CANARY-CREDIT_RISK-1",
+      "CANARY-FINANCIAL_DETAIL-1",
+      "CANARY-PII_ID-1",
+      "CANARY-PCI_PAN_MASKED-1",
+    ]
+  : ["", "", "", ""];
+
+const CANARY_HEADERS = ["qaCreditRiskCanary", "qaFinancialDetailCanary", "qaPiiIdCanary", "qaPciPanMaskedCanary"];
+
 async function generateBankOfKigali(root: string, random: Random, scale: number) {
   const customers: unknown[][] = [];
   const accounts: unknown[][] = [];
@@ -171,7 +182,7 @@ async function generateBankOfKigali(root: string, random: Random, scale: number)
     const id = `${RUN_PREFIX}-BK-C-${String(index).padStart(7, "0")}`;
     const highRisk = index % 10 === 0;
     const canary = index === 1 ? "CANARY-CREDITRISK-000123" : "";
-    customers.push([id, syntheticNationalId(index), `Synthetic Customer ${index}`, index % 3 === 0 ? "SME" : "RETAIL", highRisk ? canary || "HIGH" : "STANDARD"]);
+    customers.push([id, syntheticNationalId(index), `Synthetic Customer ${index}`, index % 3 === 0 ? "SME" : "RETAIL", highRisk ? canary || "HIGH" : "STANDARD", ...markingCanaries(index)]);
     accounts.push([`${RUN_PREFIX}-BK-A-${String(index).padStart(7, "0")}`, id, (10_000 + random.int(0, 900_000)).toFixed(2), index % 2 ? "CURRENT" : "SAVINGS", index % 2 ? "KIGALI" : "HUYE", "ACTIVE"]);
     const app = `${RUN_PREFIX}-BK-L-${String(index).padStart(7, "0")}`;
     applications.push([app, id, (50_000 + random.int(0, 950_000)).toFixed(2), index % 7 === 0 ? "UNDER_REVIEW" : "SUBMITTED", iso(index * 30), `analyst-${index % 12}`, highRisk ? "BREACH" : "ON_TRACK", 1]);
@@ -180,7 +191,7 @@ async function generateBankOfKigali(root: string, random: Random, scale: number)
     if (index % 7 === 0) decisions.push([`${RUN_PREFIX}-BK-D-${String(index).padStart(7, "0")}`, app, "PENDING", "", "", ""]);
   }
   return Promise.all([
-    writeCsv(root, "a-bk/customers.csv", ["customerId", "nationalId", "name", "segment", "riskClass"], customers),
+    writeCsv(root, "a-bk/customers.csv", ["customerId", "nationalId", "name", "segment", "riskClass", ...CANARY_HEADERS], customers),
     writeCsv(root, "a-bk/customer_accounts.csv", ["accountId", "customerId", "balance", "product", "branch", "status"], accounts),
     writeCsv(root, "a-bk/loan_applications.csv", ["applicationId", "customerId", "requestedLimit", "status", "submittedAt", "assignedAnalyst", "sla", "versionToken"], applications),
     writeCsv(root, "a-bk/risk_assessments.csv", ["assessmentId", "applicationId", "score", "band", "assessedAt", "modelVersion"], assessments),
@@ -200,7 +211,7 @@ async function generateIrembo(root: string, random: Random, count: number) {
     const citizenId = `${RUN_PREFIX}-IR-C-${String(index).padStart(7, "0")}`;
     const clearanceId = `${RUN_PREFIX}-IR-T-${String(index).padStart(7, "0")}`;
     const stale = index % 8 === 0;
-    citizens.push([citizenId, syntheticNationalId(100_000 + index), `Synthetic Citizen ${index}`, "ACTIVE", "NIDA", `nida-${index}`, "nida-v1"]);
+    citizens.push([citizenId, syntheticNationalId(100_000 + index), `Synthetic Citizen ${index}`, "ACTIVE", "NIDA", `nida-${index}`, "nida-v1", ...markingCanaries(index)]);
     // Expiry and source freshness are separate failure dimensions. Keeping
     // them independent lets the override prove that a fresh re-sync resolves
     // staleness without silently bypassing an expired clearance.
@@ -215,7 +226,7 @@ async function generateIrembo(root: string, random: Random, count: number) {
     verifications.push([`${RUN_PREFIX}-IR-V-${String(index).padStart(7, "0")}`, `${RUN_PREFIX}-IR-LTC-${String(index).padStart(7, "0")}`, stale ? "STALE" : "VERIFIED", iso(index * 15), "RRA", `verify-${index}`, "source-event-v2"]);
   }
   return Promise.all([
-    writeCsv(root, "b-irembo/citizens.csv", ["citizenId", "nationalId", "name", "status", "sourceSystem", "sourceIdentifier", "pipelineVersion"], citizens),
+    writeCsv(root, "b-irembo/citizens.csv", ["citizenId", "nationalId", "name", "status", "sourceSystem", "sourceIdentifier", "pipelineVersion", ...CANARY_HEADERS], citizens),
     writeCsv(root, "b-irembo/tax_clearances.csv", ["clearanceId", "citizenId", "status", "taxpayerId", "sourceSystem", "sourceIdentifier", "ingestedAt", "pipelineVersion"], clearances),
     writeCsv(root, "b-irembo/land_parcels.csv", ["parcelId", "district", "size", "titleStatus", "sourceSystem", "sourceIdentifier", "pipelineVersion"], parcels),
     writeCsv(root, "b-irembo/land_transfer_cases.csv", ["caseId", "citizenId", "clearanceId", "parcelId", "status", "submittedAt", "exceptionType", "sla", "versionToken"], cases),
@@ -234,7 +245,7 @@ async function generateRSwitch(root: string, random: Random, count: number) {
     const pan = luhn(`411111${String(index).padStart(9, "0")}`);
     const settled = index % 11 === 0;
     const duplicate = index % 13 === 0;
-    transactions.push([transactionId, (1_000 + random.int(0, 9_999_999)).toFixed(2), "RWF", settled ? "00" : "91", settled ? "SETTLED" : "FAILED", iso(index % 4_000), index % 2 ? "BK" : "EQTY", index % 9 === 0 ? "HIGH" : "NORMAL", index % 10 === 0 ? "BREACH" : "ON_TRACK", duplicate ? "DUPLICATE" : "ELIGIBLE", 1]);
+    transactions.push([transactionId, (1_000 + random.int(0, 9_999_999)).toFixed(2), "RWF", settled ? "00" : "91", settled ? "SETTLED" : "FAILED", iso(index % 4_000), index % 2 ? "BK" : "EQTY", index % 9 === 0 ? "HIGH" : "NORMAL", index % 10 === 0 ? "BREACH" : "ON_TRACK", duplicate ? "DUPLICATE" : "ELIGIBLE", 1, ...markingCanaries(index)]);
     messages.push([`${RUN_PREFIX}-RS-MSG-${String(index).padStart(8, "0")}`, transactionId, "0210", token(pan), `${pan.slice(0, 6)}${"*".repeat(6)}${pan.slice(-4)}`, iso(index % 4_000)]);
     // Deliberately raw, synthetic PAN fixture for the ingestion boundary
     // only. It must be tokenized before any ontology/index/export/log output.
@@ -243,7 +254,7 @@ async function generateRSwitch(root: string, random: Random, count: number) {
     if (index % 100 === 1) batches.push([`${RUN_PREFIX}-RS-B-${String(index).padStart(7, "0")}`, index % 2 ? "BK" : "EQTY", (1_000_000 + random.int(0, 100_000_000)).toFixed(2), "OPEN", "2026-08-10T18:00:00.000Z"]);
   }
   return Promise.all([
-    writeCsv(root, "c-rswitch/payment_transactions.csv", ["transactionId", "amount", "currency", "responseCode", "status", "createdAt", "bank", "riskTier", "slaSeverity", "reconciliationEligibility", "versionToken"], transactions),
+    writeCsv(root, "c-rswitch/payment_transactions.csv", ["transactionId", "amount", "currency", "responseCode", "status", "createdAt", "bank", "riskTier", "slaSeverity", "reconciliationEligibility", "versionToken", ...CANARY_HEADERS], transactions),
     writeCsv(root, "c-rswitch/message_envelopes.csv", ["messageId", "transactionId", "mti", "panToken", "maskedPan", "receivedAt"], messages),
     writeCsv(root, "c-rswitch/dispute_cases.csv", ["disputeId", "transactionId", "reason", "status", "owner", "sla"], disputes),
     writeCsv(root, "c-rswitch/settlement_batches.csv", ["batchId", "bank", "value", "status", "cutoff"], batches),
@@ -259,7 +270,7 @@ async function generatePindo(root: string, random: Random, routeCount: number, s
   for (let index = 1; index <= routeCount; index += 1) {
     const unhealthy = index % 10 === 0;
     const routeId = `${RUN_PREFIX}-PI-R-${String(index).padStart(7, "0")}`;
-    routes.push([routeId, index % 2 ? "MTN" : "AIRTEL", index % 3 ? "KIGALI" : "EASTERN", unhealthy ? "UNHEALTHY" : "HEALTHY", 10_000, unhealthy ? 5_000 : 220, unhealthy ? 0.25 : 0.002, 1]);
+    routes.push([routeId, index % 2 ? "MTN" : "AIRTEL", index % 3 ? "KIGALI" : "EASTERN", unhealthy ? "UNHEALTHY" : "HEALTHY", 10_000, unhealthy ? 5_000 : 220, unhealthy ? 0.25 : 0.002, 1, ...markingCanaries(index)]);
     policies.push([`${RUN_PREFIX}-PI-P-${String(index).padStart(7, "0")}`, routeId, 1_000, 300, 600, 1, "fallback-healthy", "true"]);
   }
   for (let index = 1; index <= sampleCount; index += 1) {
@@ -268,7 +279,7 @@ async function generatePindo(root: string, random: Random, routeCount: number, s
     samples.push([`${RUN_PREFIX}-PI-S-${String(index).padStart(8, "0")}`, `${RUN_PREFIX}-PI-R-${String(routeIndex).padStart(7, "0")}`, iso(index), unhealthy ? 4_000 + random.int(0, 2_000) : 150 + random.int(0, 120), unhealthy ? "TIMEOUT" : ""]);
   }
   return Promise.all([
-    writeCsv(root, "d-pindo/carrier_routes.csv", ["routeId", "carrier", "region", "state", "capacity", "p95Latency", "errorRate", "versionToken"], routes),
+    writeCsv(root, "d-pindo/carrier_routes.csv", ["routeId", "carrier", "region", "state", "capacity", "p95Latency", "errorRate", "versionToken", ...CANARY_HEADERS], routes),
     writeCsv(root, "d-pindo/latency_samples.csv", ["sampleId", "routeId", "measuredAt", "latencyMs", "errorCode"], samples),
     writeCsv(root, "d-pindo/failover_policies.csv", ["policyId", "routeId", "threshold", "breachHoldDown", "recoveryHoldDown", "maxFailoversPerWindow", "targetConstraints", "killSwitch"], policies),
     writeCsv(root, "d-pindo/scenario_expected_outputs.csv", ["routeId", "expectedHealth", "expectedRecommendation"], routes.slice(0, Math.min(100, routes.length)).map((row) => [row[0], row[3] === "UNHEALTHY" ? "DEGRADED" : "HEALTHY", "fallback-healthy"])),

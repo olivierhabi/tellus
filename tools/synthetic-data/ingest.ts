@@ -89,7 +89,23 @@ async function ensureObjectType(base: string, ontology: string, type: string, he
   const result = await fetch(`${base}/api/v1/ontology/${ontology}/objectTypes/${type}`, {
     headers: { "X-Tellus-Test-Auth": EDITOR },
   });
-  if (result.ok) return false;
+  if (result.ok) {
+    const detail = await result.json() as Record<string, any>;
+    const serialized = JSON.stringify(detail);
+    const missing = headers.filter((header) =>
+      !serialized.includes(`\"apiName\":\"${header}\"`) &&
+      !serialized.includes(`\"api_name\":\"${header}\"`));
+    if (missing.length > 0) {
+      await api(base, `/api/v1/ontology/${ontology}/objectTypes/${type}/properties/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          properties: missing.map((apiName) => ({ apiName, displayName: apiName, baseType: "string" })),
+        }),
+      });
+    }
+    return missing.length > 0;
+  }
   if (result.status !== 404) throw new Error(`GET object type ${type} -> ${result.status}: ${(await result.text()).slice(0, 500)}`);
   await api(base, `/api/v1/ontology/${ontology}/objectTypes/batch`, {
     method: "POST",
