@@ -201,7 +201,11 @@ async function generateIrembo(root: string, random: Random, count: number) {
     const clearanceId = `${RUN_PREFIX}-IR-T-${String(index).padStart(7, "0")}`;
     const stale = index % 8 === 0;
     citizens.push([citizenId, syntheticNationalId(100_000 + index), `Synthetic Citizen ${index}`, "ACTIVE", "NIDA", `nida-${index}`, "nida-v1"]);
-    clearances.push([clearanceId, citizenId, stale ? "EXPIRED" : "VALID", `TAX-${index}`, "RRA", `rra-${index}`, stale ? iso(60 * 24 * 90) : iso(60 * 12), "rra-sync-v2"]);
+    // Expiry and source freshness are separate failure dimensions. Keeping
+    // them independent lets the override prove that a fresh re-sync resolves
+    // staleness without silently bypassing an expired clearance.
+    const expiredClearance = index % 10 === 0;
+    clearances.push([clearanceId, citizenId, expiredClearance ? "EXPIRED" : "VALID", `TAX-${index}`, "RRA", `rra-${index}`, expiredClearance ? iso(60 * 24 * 90) : iso(60 * 12), "rra-sync-v2"]);
     parcels.push([`${RUN_PREFIX}-IR-P-${String(index).padStart(7, "0")}`, index % 2 ? "KIGALI" : "EASTERN", (100 + random.int(0, 900)).toFixed(1), "CLEAR", "LAND_AUTHORITY", `parcel-${index}`, "land-v3"]);
     // Keep the source-snapshot timestamp independent from row position so the
     // freshness gate is deterministic: every normal row is inside the six-hour
