@@ -554,6 +554,54 @@ export async function executeAction(
 
     const resolvedParameters = validation.resolvedParameters!;
 
+    // A stale client read must surface as the typed OCC error even when the
+    // winning write also changed a status used by submission criteria. This
+    // read is diagnostic ordering only; editApplicator repeats the check under
+    // FOR UPDATE in the mutation transaction and remains authoritative.
+    if (context.expectedVersion !== undefined) {
+      const modifyRule = (actionType.rules as Array<Record<string, any>>).find(
+        (rule) => rule.type === "modifyObject" && rule.objectReference?.source === "parameter",
+      );
+      const criteria = actionType.submission_criteria as {
+        conditions?: Array<Record<string, any>>;
+      } | null;
+      const objectCondition = criteria?.conditions?.find(
+        (condition) => typeof condition.parameter === "string" && typeof condition.objectType === "string",
+      );
+      const targetObjectType = modifyRule?.objectType ?? objectCondition?.objectType;
+      const parameterName = modifyRule?.objectReference?.param ?? objectCondition?.parameter;
+      const primaryKey = typeof parameterName === "string"
+        ? resolvedParameters[parameterName]
+        : undefined;
+      if (typeof targetObjectType === "string" && primaryKey != null) {
+        const versionResult = await pgQuery(
+          `SELECT version FROM object_instances
+            WHERE object_type_api_name = $1 AND primary_key = $2`,
+          [targetObjectType, String(primaryKey)],
+        );
+        if ((versionResult.rowCount ?? 0) > 0) {
+          const actualVersion = Number(versionResult.rows[0].version);
+          if (actualVersion !== context.expectedVersion) {
+            result.failureType = "concurrency_conflict";
+            result.errorMessage = "Object was modified by another user";
+            pendingError = new OntologyError(
+              result.errorMessage,
+              "CONCURRENCY_CONFLICT",
+              409,
+              {
+                executionId,
+                expectedVersion: context.expectedVersion,
+                actualVersion,
+                objectType: targetObjectType,
+                primaryKey: String(primaryKey),
+              },
+            );
+            return result;
+          }
+        }
+      }
+    }
+
     // -----------------------------------------------------------------
     // STAGE 3: Submission criteria (FOUNDRY-GAPS §5)
     //
