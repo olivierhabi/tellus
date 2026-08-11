@@ -15,6 +15,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { rwandaFunctionsV2, type RwandaFunctionName } from "../../src/qa/rwanda/functionsV2";
 
 type Tier = "functional" | "scale";
 type Args = { tier: Tier; seed: number; out: string };
@@ -127,6 +128,37 @@ function token(value: string): string {
 const now = "2026-08-10T08:00:00.000Z";
 const iso = (offsetMinutes: number) => new Date(Date.parse(now) - offsetMinutes * 60_000).toISOString();
 
+export const FUNCTION_FIXTURE_INPUTS: Record<RwandaFunctionName, Record<string, unknown>> = {
+  calculateCreditRiskV2: { score: 92 },
+  validateCreditLimitV2: { requestedLimit: 500_000, policyCeiling: 1_000_000 },
+  detectAffordabilityExceptionV2: { monthlyIncome: 100_000, monthlyCommitment: 50_000, maxRatio: 0.4 },
+  validateRraTaxClearanceV2: { clearanceId: "QA-RW-IR-T-0000001", status: "VALID", expiresAt: "2026-09-01T00:00:00Z", now },
+  verifyNationalIdMatchV2: { nationalId: "9990000000000012", recordNationalId: "9990000000000012" },
+  detectLandTitleConflictV2: { titleStatus: "CONFLICT", exceptionType: "TITLE_CONFLICT" },
+  classifyIso8583FailureV2: { responseCode: "91" },
+  isReconciliationEligibleV2: { status: "FAILED", reconciliationEligibility: "ELIGIBLE" },
+  calculateTransactionSlaV2: { createdAt: "2026-08-10T03:00:00Z", now, breachMinutes: 240 },
+  buildBulkReconciliationResultV2: { transactions: [{ transactionId: "QA-RW-RS-TX-00000001", status: "FAILED", reconciliationEligibility: "ELIGIBLE" }] },
+  calculateCarrierHealthV2: { p95Latency: 1_200, errorRate: 0.01, sampleAt: "2026-08-10T07:59:00Z", now, threshold: 1_000 },
+  recommendFailoverRouteV2: { routes: [{ routeId: "fallback-a", state: "HEALTHY", capacity: 100, currentLoad: 10 }, { routeId: "fallback-b", state: "HEALTHY", capacity: 50, currentLoad: 10 }] },
+  validateRouteSwitchV2: { route: { state: "UNHEALTHY" }, target: { state: "HEALTHY", capacity: 100, currentLoad: 10 }, policy: { killSwitch: true } },
+};
+
+export function expectedFunctionRows(): unknown[][] {
+  return (Object.keys(rwandaFunctionsV2) as RwandaFunctionName[]).map((functionName) => {
+    const input = FUNCTION_FIXTURE_INPUTS[functionName];
+    return [functionName, JSON.stringify(input), JSON.stringify(rwandaFunctionsV2[functionName](input as never))];
+  });
+}
+
+async function functionExpectedOutputs(root: string) {
+  return Promise.all(
+    ["a-bk", "b-irembo", "c-rswitch", "d-pindo"].map((scenario) =>
+      writeCsv(root, `${scenario}/expected_outputs.csv`, ["functionName", "inputJson", "expectedOutputJson"], expectedFunctionRows()),
+    ),
+  );
+}
+
 async function generateBankOfKigali(root: string, random: Random, scale: number) {
   const customers: unknown[][] = [];
   const accounts: unknown[][] = [];
@@ -154,7 +186,7 @@ async function generateBankOfKigali(root: string, random: Random, scale: number)
     writeCsv(root, "a-bk/risk_assessments.csv", ["assessmentId", "applicationId", "score", "band", "assessedAt", "modelVersion"], assessments),
     writeCsv(root, "a-bk/collateral.csv", ["collateralId", "applicationId", "type", "value", "valuationDate"], collateral),
     writeCsv(root, "a-bk/credit_decisions.csv", ["decisionId", "applicationId", "decision", "approvedLimit", "rationale", "approver"], decisions),
-    writeCsv(root, "a-bk/expected_outputs.csv", ["applicationId", "expectedScore", "expectedBand", "explanation"], applications.slice(0, Math.min(100, applications.length)).map((row, i) => [row[0], assessments[i]![2], assessments[i]![3], Number(assessments[i]![2]) >= 90 ? "High synthetic risk" : "Within policy"])),
+    writeCsv(root, "a-bk/scenario_expected_outputs.csv", ["applicationId", "expectedScore", "expectedBand", "explanation"], applications.slice(0, Math.min(100, applications.length)).map((row, i) => [row[0], assessments[i]![2], assessments[i]![3], Number(assessments[i]![2]) >= 90 ? "High synthetic risk" : "Within policy"])),
   ]);
 }
 
@@ -208,7 +240,7 @@ async function generateRSwitch(root: string, random: Random, count: number) {
     writeCsv(root, "c-rswitch/dispute_cases.csv", ["disputeId", "transactionId", "reason", "status", "owner", "sla"], disputes),
     writeCsv(root, "c-rswitch/settlement_batches.csv", ["batchId", "bank", "value", "status", "cutoff"], batches),
     writeCsv(root, "c-rswitch/ingestion-inputs/raw_iso8583.csv", ["transactionId", "field2Pan", "mti", "receivedAt"], rawIso8583),
-    writeCsv(root, "c-rswitch/expected_outputs.csv", ["transactionId", "expectedEligibility", "expectedReason"], transactions.slice(0, Math.min(500, transactions.length)).map((row) => [row[0], row[9] === "ELIGIBLE" ? "true" : "false", row[9]])),
+    writeCsv(root, "c-rswitch/scenario_expected_outputs.csv", ["transactionId", "expectedEligibility", "expectedReason"], transactions.slice(0, Math.min(500, transactions.length)).map((row) => [row[0], row[9] === "ELIGIBLE" ? "true" : "false", row[9]])),
   ]);
 }
 
@@ -231,7 +263,7 @@ async function generatePindo(root: string, random: Random, routeCount: number, s
     writeCsv(root, "d-pindo/carrier_routes.csv", ["routeId", "carrier", "region", "state", "capacity", "p95Latency", "errorRate", "versionToken"], routes),
     writeCsv(root, "d-pindo/latency_samples.csv", ["sampleId", "routeId", "measuredAt", "latencyMs", "errorCode"], samples),
     writeCsv(root, "d-pindo/failover_policies.csv", ["policyId", "routeId", "threshold", "breachHoldDown", "recoveryHoldDown", "maxFailoversPerWindow", "targetConstraints", "killSwitch"], policies),
-    writeCsv(root, "d-pindo/expected_outputs.csv", ["routeId", "expectedHealth", "expectedRecommendation"], routes.slice(0, Math.min(100, routes.length)).map((row) => [row[0], row[3] === "UNHEALTHY" ? "DEGRADED" : "HEALTHY", "fallback-healthy"])),
+    writeCsv(root, "d-pindo/scenario_expected_outputs.csv", ["routeId", "expectedHealth", "expectedRecommendation"], routes.slice(0, Math.min(100, routes.length)).map((row) => [row[0], row[3] === "UNHEALTHY" ? "DEGRADED" : "HEALTHY", "fallback-healthy"])),
   ]);
 }
 
@@ -260,6 +292,7 @@ async function main() {
     generateRSwitch(args.out, random, sizes.rs),
     generatePindo(args.out, random, sizes.routes, sizes.samples),
     dirtyFixtures(args.out),
+    functionExpectedOutputs(args.out),
   ])).flat();
   const manifest = {
     generatorVersion: GENERATOR_VERSION,
@@ -274,4 +307,4 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ output: args.out, files: outputs.length, manifestSha256: verification })}\n`);
 }
 
-void main();
+if (require.main === module) void main();
