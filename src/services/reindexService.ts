@@ -771,6 +771,28 @@ export async function reindexObjectType(
     await setPipelineStage(objectTypeApiName, "indexing");
 
     const indexName = getIndexName(objectTypeApiName);
+    // Snapshot the serving generation before creating the replacement. A
+    // Funnel sync can create the canonical index asynchronously; resolving it
+    // after a long bulk write would mistake that concurrent index for the
+    // generation this run must preserve as rollback state.
+    let servingIndices: string[] = [];
+    let canonicalIsAlias = false;
+    try {
+      const aliases = await client.indices.getAlias({ name: indexName });
+      const aliasBody = (aliases as any)?.body ?? {};
+      servingIndices = Object.keys(aliasBody);
+      canonicalIsAlias = servingIndices.length > 0;
+      rollbackIndexName =
+        servingIndices.find(
+          (candidate) =>
+            aliasBody[candidate]?.aliases?.[indexName]?.is_write_index === true,
+        ) ??
+        servingIndices[0] ??
+        null;
+    } catch {
+      const exists = await client.indices.exists({ index: indexName });
+      if ((exists as any)?.body === true) servingIndices = [indexName];
+    }
     // Millisecond timestamps alone collide when a previously interrupted
     // process is restarted with a restored/frozen clock. The replacement is
     // never a durable identifier, so add entropy while retaining a sortable
@@ -1003,30 +1025,6 @@ export async function reindexObjectType(
       );
     }
 
-    // Resolve the current serving generation. Older installations may still
-    // have a concrete index at the canonical name. Since OpenSearch cannot
-    // create an alias with the same name as a concrete index, copy that
-    // generation to a retained rollback sibling before the atomic
-    // remove-index/add-alias transition.
-    let servingIndices: string[] = [];
-    let canonicalIsAlias = false;
-    try {
-      const aliases = await client.indices.getAlias({ name: indexName });
-      const aliasBody = (aliases as any)?.body ?? {};
-      servingIndices = Object.keys(aliasBody);
-      canonicalIsAlias = servingIndices.length > 0;
-      rollbackIndexName =
-        servingIndices.find(
-          (candidate) =>
-            aliasBody[candidate]?.aliases?.[indexName]?.is_write_index === true,
-        ) ??
-        servingIndices[0] ??
-        null;
-    } catch {
-      const exists = await client.indices.exists({ index: indexName });
-      if ((exists as any)?.body === true) servingIndices = [indexName];
-    }
-
     if (!canonicalIsAlias && servingIndices.includes(indexName)) {
       rollbackIndexName =
         `${indexName}-rollback-${Date.now().toString(36)}`;
@@ -1060,6 +1058,38 @@ export async function reindexObjectType(
           `Rollback copy count mismatch: expected ${expectedRollbackCount}, got ${actualRollbackCount}.`,
           { failedAtStep: "opensearch_rollback_copy" },
         );
+      }
+    }
+
+    // If no serving generation existed when this run started, a concurrently
+    // dispatched Funnel sync may have created the canonical index while the
+    // replacement was bulk-indexing. It cannot be a rollback source, because
+    // it was never serving at this run's snapshot. Only remove it when it has
+    // converged to the exact replacement cardinality; otherwise fail closed
+    // rather than cutting over around an incomplete concurrent writer.
+    if (!canonicalIsAlias && servingIndices.length === 0) {
+      const lateCanonicalExists = await client.indices.exists({ index: indexName });
+      if ((lateCanonicalExists as any)?.body === true) {
+        let actualLateCanonicalCount = -1;
+        // The competing sync may have created its index just before its final
+        // bulk/refresh. Give that in-flight writer a short, bounded window to
+        // converge; a different or stalled writer is still rejected below.
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const lateCanonicalCount = await client.count({ index: indexName });
+          actualLateCanonicalCount = Number(
+            (lateCanonicalCount as any)?.body?.count ?? 0,
+          );
+          if (actualLateCanonicalCount === totalDocs) break;
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        if (actualLateCanonicalCount !== totalDocs) {
+          throw appError(
+            "REINDEX_FAILED",
+            `Concurrent canonical index count mismatch: expected ${totalDocs}, got ${actualLateCanonicalCount}.`,
+            { failedAtStep: "opensearch_concurrent_indexing" },
+          );
+        }
+        servingIndices = [indexName];
       }
     }
 
