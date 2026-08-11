@@ -119,6 +119,8 @@ export interface WritebackExecutionContext {
   actor: string;
   /** Stable per-execution UUID — used to derive the idempotency key. */
   executionId: string;
+  /** End-to-end action trace identifier supplied by the Workshop client. */
+  correlationId?: string;
   /** Optional: the existing ontologyId scope (defence-in-depth on the
    * webhookId's ontology). The executor uses the action_type's
    * ontologyId from the actionExecutor; this is passed through for the
@@ -309,6 +311,7 @@ export async function executeWriteback(
     "Accept": "application/json",
     "X-Idempotency-Key": idempotencyKey,
     "X-Trace-Id": ctx.executionId,
+    "X-Tellus-Correlation-Id": ctx.correlationId ?? ctx.executionId,
     "X-Actor": ctx.actor,
     // Phase 6 will replace this with a real SecretReference resolver
     // against Tellus's secrets manager; for Phase 4, the webhook's
@@ -570,6 +573,7 @@ async function executeConnectivityWriteback(
       kind: "production",
       inputs: config.inputs,
       idempotencyKey,
+      correlationId: ctx.correlationId ?? ctx.executionId,
     });
   } catch (e: any) {
     return {

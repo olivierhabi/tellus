@@ -749,6 +749,7 @@ export async function executeAction(
           ontologyId,
           actionTypeApiName,
           executionId,
+          correlationId,
           tenant: context.tenant,
         });
         if (wbRes.kind === "ok") {

@@ -79,6 +79,7 @@ function webhookRow(opts: Partial<{ status: string; method: string; endpointUrl:
 const CTX: WritebackExecutionContext = {
   actor: "test-actor",
   executionId: "exec-1",
+  correlationId: "corr-qa-123",
   ontologyId: "ont-1",
 };
 
@@ -128,6 +129,16 @@ describe("executeWriteback — happy path", () => {
     expect(r.kind).toBe("ok");
     if (r.kind !== "ok") return;
     expect(r.outputs).toEqual({});
+  });
+
+  it("forwards the action correlation ID to a legacy webhook", async () => {
+    let outboundHeaders: Record<string, string> | undefined;
+    const http: HttpRequestFn = async ({ headers }) => {
+      outboundHeaders = headers;
+      return { status: 204, body: "{}", contentType: "application/json", headers: {} };
+    };
+    await executeWriteback(CONFIG, CTX, POLICY, http);
+    expect(outboundHeaders?.["X-Tellus-Correlation-Id"]).toBe("corr-qa-123");
   });
 
   it("returns ok with content-type 'application/json; charset=utf-8'", async () => {
@@ -475,6 +486,7 @@ describe("executeWriteback — connectivity webhook path", () => {
         tenant: "default",
         inputs: { message: "hello" },
         idempotencyKey: r.idempotencyKey,
+        correlationId: "corr-qa-123",
       }),
     );
     // The legacy registry path is never consulted.

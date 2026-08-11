@@ -70,6 +70,8 @@ export interface ExecuteWebhookOptions {
   kind: "test" | "production";
   inputs: Record<string, unknown>;
   idempotencyKey?: string;
+  /** Correlation supplied by the action/request that caused this execution. */
+  correlationId?: string;
   requestId?: string;
   clientIp?: string;
 }
@@ -1097,7 +1099,9 @@ export async function executeWebhook(
   }
   validateExecutionInputs(options.webhook, options.inputs);
 
-  const correlationId = randomUUID();
+  // Preserve a caller's action correlation through retries and execution
+  // history. Interactive/manual executions retain the generated fallback.
+  const correlationId = options.correlationId ?? randomUUID();
   const idem = idempotencyHash(
     options.webhook.rid,
     options.idempotencyKey,

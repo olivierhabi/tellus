@@ -75,6 +75,7 @@ export type AuditAction =
   | 'reauth.fail'
   // superadmin console
   | 'admin.user.create'
+  | 'admin.user.invite'
   | 'admin.user.delete'
   | 'admin.user.enable'
   | 'admin.user.disable'

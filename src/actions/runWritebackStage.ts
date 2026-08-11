@@ -109,6 +109,8 @@ export interface RunWritebackInput {
   /** The action execution's UUID — for the X-Tellus-Execution-Id + the
    * structured diagnostic log + the surfaced error envelope. */
   executionId: string;
+  /** Action/request trace identifier forwarded to external integrations. */
+  correlationId?: string;
   /** Tenant scope for data-connection webhook resolution (the
    * connectivity store is tenant-scoped). Threaded from the route's
    * authenticated principal; the writeback executor falls back to
@@ -284,7 +286,13 @@ export async function runWritebackStage(input: RunWritebackInput): Promise<RunWr
 
     writebackResult = await executeWriteback(
       executableConfig,
-      { actor: input.executedBy, executionId: input.executionId, ontologyId: input.ontologyId, tenant: input.tenant },
+      {
+        actor: input.executedBy,
+        executionId: input.executionId,
+        correlationId: input.correlationId,
+        ontologyId: input.ontologyId,
+        tenant: input.tenant,
+      },
       buildEgressPolicy(),
       httpRequest,
     );
