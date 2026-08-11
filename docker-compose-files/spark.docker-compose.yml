@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Apache Spark — large-scale batch compute (opt-in fallback)
+# ---------------------------------------------------------------------------
+# Spec equivalent: "Spark for distributed batch processing" (techstack §3.3).
+# By default the platform uses Polars / DuckDB single-node compute; Spark
+# is reserved for jobs >50 GB or those needing true distributed shuffle.
+#
+# Submit jobs to the master with:
+#   docker exec -it tellus-spark-master \
+#     spark-submit --master spark://spark-master:7077 …
+# ---------------------------------------------------------------------------
+services:
+  spark-master:
+    image: apache/spark:3.5.3
+    container_name: tellus-spark-master
+    restart: unless-stopped
+    user: root
+    command:
+      - /bin/bash
+      - -c
+      - "/opt/spark/sbin/start-master.sh && tail -F /opt/spark/logs/*"
+    environment:
+      SPARK_MASTER_HOST: 0.0.0.0
+      SPARK_NO_DAEMONIZE: "1"
+    ports:
+      - "127.0.0.1:7077:7077"   # cluster RPC
+      - "127.0.0.1:8084:8080"   # master web UI (remapped)
+
+  spark-worker:
+    image: apache/spark:3.5.3
+    container_name: tellus-spark-worker
+    restart: unless-stopped
+    user: root
+    depends_on: [spark-master]
+    command:
+      - /bin/bash
+      - -c
+      - "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -F /opt/spark/logs/*"
+    environment:
+      SPARK_NO_DAEMONIZE: "1"

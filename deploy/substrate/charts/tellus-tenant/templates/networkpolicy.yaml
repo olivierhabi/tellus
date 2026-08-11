@@ -1,0 +1,36 @@
+{{- if .Values.networkIsolation }}
+# Default-deny cross-namespace ingress with controlled exceptions.
+# East-west isolation is Cilium-enforced on the substrate
+# (verify-substrate.sh §3 proves the deny works).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tellus-tenant.fullname" . }}-default-deny
+  namespace: {{ include "tellus-tenant.namespace" . }}
+  labels:
+    {{- include "tellus-tenant.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    # Traffic from namespaces labeled for this tenant (enrollment model).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tellus.io/tenant: {{ .Values.tenant | quote }}
+    {{- if .Values.networkPolicy.allowSameNamespace }}
+    # Explicit same-namespace allow (covers CNIs that treat namespaceSelector
+    # narrowly, and co-located deps in local stacks).
+    - from:
+        - podSelector: {}
+    {{- end }}
+    {{- if .Values.networkPolicy.allowProbePorts }}
+    # Health probe ports — some CNIs enforce kubelet probe traffic via NP.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.containerPort }}
+    {{- end }}
+    {{- with .Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

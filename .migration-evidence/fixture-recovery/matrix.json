@@ -1,0 +1,17 @@
+{
+  "generatedAtUtc": "2026-08-01T17:00:03.660Z",
+  "ontologyRid": "00000000-0000-0000-0000-000000000001",
+  "objectType": "AvtOrderFixture",
+  "stats": {
+    "source rows": 746,
+    "merged rows": 746,
+    "indexed object instances": 746,
+    "open search docs": 746,
+    "API visible objects": 746,
+    "foreign database writes": 0,
+    "foreign index writes": 0,
+    "foreign bucket writes": 0,
+    "missing required stages": 0,
+    "environment mismatches": 0
+  }
+}

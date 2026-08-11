@@ -1,0 +1,234 @@
+# Helm values for the local kind/k3d Tellus stack.
+# Applied by scripts/k8s-local-up.sh against deploy/substrate/charts/tellus-tenant.
+#
+# This is intentionally a *minimal but production-shaped* profile:
+# hard deps (Postgres + MinIO/S3 + OpenSearch + Redis), hardened pods,
+# proper probes, secrets via Secret envFrom, NodePort for host access.
+
+tenant: local
+fullnameOverride: tellus
+namespaceOverride: tenant-local
+createNamespace: false # namespace.yaml owns labels / PSS mode
+
+networkIsolation: true
+networkPolicy:
+  allowSameNamespace: true
+  allowProbePorts: true
+
+resourceQuota:
+  enabled: true
+  # Must cover app + co-located deps (postgres/minio/opensearch/redis).
+  requestsCpu: "4"
+  requestsMemory: 6Gi
+  limitsCpu: "8"
+  limitsMemory: 12Gi
+  pods: "30"
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+  scaleDownStabilizationSeconds: 120
+
+replicaCount: 1
+
+image:
+  repository: tellus/app
+  tag: local
+  pullPolicy: IfNotPresent
+
+containerPort: 3000
+
+service:
+  type: NodePort
+  port: 80
+  nodePort: 30000
+
+podDisruptionBudget:
+  enabled: false
+
+serviceAccount:
+  create: true
+  automount: false
+
+podSecurity:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+  readOnlyRootFilesystem: true
+
+# Probes — prefer process-only liveness + dependency readiness.
+# /api/v1/system/* are auth-allowlisted (globalAuth); /health is also allowlisted.
+probes:
+  startup:
+    enabled: true
+    path: /api/v1/system/liveness
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 60 # migrations on cold DB can take a few minutes
+  liveness:
+    enabled: true
+    path: /api/v1/system/liveness
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /api/v1/system/readiness
+    initialDelaySeconds: 0
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 6
+
+probePath: /api/v1/system/readiness
+
+persistence:
+  data:
+    enabled: true
+    mountPath: /app/data
+    emptyDir:
+      sizeLimit: 1Gi
+
+lifecycle:
+  preStopSleepSeconds: 3
+
+terminationGracePeriodSeconds: 30
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 1536Mi
+
+# Bootstrap empty Postgres via init container (same image as the app).
+migrate:
+  enabled: true
+
+# Non-secret config. Secrets come from tellus-local-credentials via existingSecret.
+env:
+  NODE_ENV: production
+  # After the migrate init container, gate should find zero pending work.
+  # Keep strict so local mirrors production fail-closed behaviour.
+  TELLUS_MIGRATION_GATE: strict
+  # Soften optional deps so the API serves without Kafka/Temporal workers.
+  FUNNEL_DISPATCHER_DISABLED: "true"
+  PGHOST: postgres
+  PGPORT: "5432"
+  PGDATABASE: tellus_db
+  PGUSER: tellus
+  OPENSEARCH_URL: http://opensearch:9200
+  S3_ENDPOINT: http://minio:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: tellus-uploads
+  S3_FORCE_PATH_STYLE: "true"
+  REDIS_URL: redis://:tellus_local_redis_pw@redis:6379
+  DATA_DIR: /app/data
+  # Keep OTel off unless a collector is present in the local stack.
+  OTEL_SDK_DISABLED: "true"
+  # Production fail-closed Keycloak config (src/auth/keycloakConfig.ts).
+  # No Keycloak pod in the minimal stack — values are set so the process
+  # boots; OIDC login itself is not exercised until Keycloak is added.
+  KEYCLOAK_REALM: tellus
+  KEYCLOAK_BASE_URL: http://keycloak.tenant-local.svc.cluster.local:8086
+  KEYCLOAK_URL: http://keycloak.tenant-local.svc.cluster.local:8086
+  KEYCLOAK_CLIENT_ID: tellus-frontend
+
+# Keys from deploy/local-k8s/deps/00-secrets.yaml become env vars.
+existingSecret: tellus-local-credentials
+
+secret:
+  enabled: false
+
+configMap:
+  enabled: false
+
+# Wait for hard dependencies before the app process starts.
+initContainers:
+  - name: wait-postgres
+    image: postgres:16-alpine
+    imagePullPolicy: IfNotPresent
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "waiting for postgres…"
+        until pg_isready -h postgres -p 5432 -U tellus -d tellus_db; do sleep 2; done
+        echo "postgres is ready"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+      seccompProfile:
+        type: RuntimeDefault
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+  - name: wait-minio
+    image: busybox:1.36
+    imagePullPolicy: IfNotPresent
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "waiting for minio…"
+        until wget -q -O /dev/null http://minio:9000/minio/health/ready; do sleep 2; done
+        echo "minio is ready"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+      seccompProfile:
+        type: RuntimeDefault
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 32Mi
+  - name: wait-opensearch
+    image: busybox:1.36
+    imagePullPolicy: IfNotPresent
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "waiting for opensearch…"
+        until wget -q -O /dev/null http://opensearch:9200/_cluster/health; do sleep 3; done
+        echo "opensearch is ready"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+      seccompProfile:
+        type: RuntimeDefault
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 32Mi
+
+podAnnotations:
+  tellus.io/stack: local-k8s

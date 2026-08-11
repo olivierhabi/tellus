@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# TimescaleDB — time-series property storage
+# ---------------------------------------------------------------------------
+# Spec equivalent: "TimescaleDB or InfluxDB" (techstack §Time Series Store).
+# This image is a drop-in replacement for the regular postgres container —
+# it's PostgreSQL 16 with TimescaleDB pre-installed, so the same connection
+# URL serves two workloads in one DB:
+#
+#   1. The Ontology metadata (object_types, link_types, etc.)
+#   2. Time-series property values stored in TimescaleDB hypertables
+#
+# When this compose file is included, comment out the plain postgres image
+# from postgres.docker-compose.yml — the two would clash on port 5432.
+# ---------------------------------------------------------------------------
+services:
+  postgres-ts:
+    image: timescale/timescaledb-ha:pg16
+    container_name: tellus-timescale
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tellus_db}
+      POSTGRES_USER: ${DB_USER:-tellus}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-tellus123}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - tsdata:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-tellus} -d $${POSTGRES_DB:-tellus_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  tsdata:

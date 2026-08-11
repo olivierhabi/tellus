@@ -1,0 +1,337 @@
+[
+  {
+    "name": "Version History Flow",
+    "context": "This scene shows the first deliverable: making the dead Version History dialog reachable. The History button in the workbench toolbar opens a new history dialog kind in the Zustand store, which HistoryDialog reads to render the already-plumbed version hooks.",
+    "nodes": [
+      {
+        "id": "node_1",
+        "shape": "textbox",
+        "x": 40,
+        "y": 20,
+        "label": "Deliverable 1: Wire Version History",
+        "color": "transparent",
+        "border_color": "transparent",
+        "text_alignment": "left"
+      },
+      {
+        "id": "node_2",
+        "shape": "rectangle",
+        "x": 60,
+        "y": 120,
+        "label": "WorkbenchToolbar\nonToggleHistory",
+        "color": "#3b82f6",
+        "border_color": "#1d4ed8",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_3",
+        "shape": "rectangle",
+        "x": 360,
+        "y": 120,
+        "label": "store.ts\ndialog: history",
+        "color": "#8b5cf6",
+        "border_color": "#6d28d9",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_4",
+        "shape": "rectangle",
+        "x": 660,
+        "y": 120,
+        "label": "HistoryDialog\nisOpen fix",
+        "color": "#3b82f6",
+        "border_color": "#1d4ed8",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_5",
+        "shape": "rectangle",
+        "x": 660,
+        "y": 320,
+        "label": "useVersions /\nuseRevertToVersion",
+        "color": "#22c55e",
+        "border_color": "#16a34a",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_6",
+        "shape": "database",
+        "x": 680,
+        "y": 480,
+        "label": "/versions API",
+        "color": "#10b981",
+        "border_color": "#059669",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_7",
+        "shape": "textbox",
+        "x": 360,
+        "y": 240,
+        "label": "openDialog /\ncloseDialog reused",
+        "color": "transparent",
+        "border_color": "transparent",
+        "text_alignment": "center"
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "from": "node_2",
+        "from_handle": "right",
+        "to": "node_3",
+        "to_handle": "left"
+      },
+      {
+        "id": "edge_2",
+        "from": "node_3",
+        "from_handle": "right",
+        "to": "node_4",
+        "to_handle": "left"
+      },
+      {
+        "id": "edge_3",
+        "from": "node_4",
+        "from_handle": "bottom",
+        "to": "node_5",
+        "to_handle": "top"
+      },
+      {
+        "id": "edge_4",
+        "from": "node_5",
+        "from_handle": "bottom",
+        "to": "node_6",
+        "to_handle": "top"
+      }
+    ],
+    "code": []
+  },
+  {
+    "name": "Interactive Edit Plumbing",
+    "context": "This scene depicts the shared-interface change that makes parameter and formula cards writeable. The optional onSubmitInstructions handler flows from the editor page down through CanvasView and Card into the plugin context, where plugins emit updateCardConfig instructions through the existing optimistic OT path. GraphView is shown as unaffected since it never renders Card.",
+    "nodes": [
+      {
+        "id": "node_1",
+        "shape": "textbox",
+        "x": 40,
+        "y": 20,
+        "label": "Deliverable 2: onSubmitInstructions threading",
+        "color": "transparent",
+        "border_color": "transparent",
+        "text_alignment": "left"
+      },
+      {
+        "id": "node_2",
+        "shape": "rectangle",
+        "x": 60,
+        "y": 120,
+        "label": "[rid]/page.tsx\nsubmitInstructions",
+        "color": "#6366f1",
+        "border_color": "#4338ca",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_3",
+        "shape": "rectangle",
+        "x": 60,
+        "y": 320,
+        "label": "CanvasView\nProps.onSubmit",
+        "color": "#3b82f6",
+        "border_color": "#1d4ed8",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_4",
+        "shape": "rectangle",
+        "x": 340,
+        "y": 320,
+        "label": "Card.tsx\nforward prop",
+        "color": "#3b82f6",
+        "border_color": "#1d4ed8",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_5",
+        "shape": "rectangle",
+        "x": 620,
+        "y": 320,
+        "label": "registry.ts\nCardPluginContext",
+        "color": "#f59e0b",
+        "border_color": "#d97706",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_6",
+        "shape": "rectangle",
+        "x": 620,
+        "y": 500,
+        "label": "plugins.tsx\nparam/formula edit",
+        "color": "#a855f7",
+        "border_color": "#7e22ce",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_7",
+        "shape": "diamond",
+        "x": 360,
+        "y": 490,
+        "label": "updateCardConfig",
+        "color": "#8b5cf6",
+        "border_color": "#6d28d9",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_8",
+        "shape": "rectangle",
+        "x": 380,
+        "y": 120,
+        "label": "GraphView\n(unaffected)",
+        "color": "#64748b",
+        "border_color": "#475569",
+        "text_alignment": "center"
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "from": "node_2",
+        "from_handle": "bottom",
+        "to": "node_3",
+        "to_handle": "top"
+      },
+      {
+        "id": "edge_2",
+        "from": "node_3",
+        "from_handle": "right",
+        "to": "node_4",
+        "to_handle": "left"
+      },
+      {
+        "id": "edge_3",
+        "from": "node_4",
+        "from_handle": "right",
+        "to": "node_5",
+        "to_handle": "left"
+      },
+      {
+        "id": "edge_4",
+        "from": "node_5",
+        "from_handle": "bottom",
+        "to": "node_6",
+        "to_handle": "top"
+      },
+      {
+        "id": "edge_5",
+        "from": "node_6",
+        "from_handle": "left",
+        "to": "node_7",
+        "to_handle": "right"
+      },
+      {
+        "id": "edge_6",
+        "from": "node_7",
+        "from_handle": "top",
+        "to": "node_2",
+        "to_handle": "bottom"
+      }
+    ],
+    "code": []
+  },
+  {
+    "name": "Card Output Rendering",
+    "context": "This scene shows the third deliverable: compute-backed plugins routing their result through a shape check so that rows render as a structured ObjectSetTable instead of raw JSON. KeyValuePreview is kept only as a last-resort fallback for non-tabular shapes.",
+    "nodes": [
+      {
+        "id": "node_1",
+        "shape": "textbox",
+        "x": 40,
+        "y": 20,
+        "label": "Deliverable 3: Structured outputs",
+        "color": "transparent",
+        "border_color": "transparent",
+        "text_alignment": "left"
+      },
+      {
+        "id": "node_2",
+        "shape": "rectangle",
+        "x": 60,
+        "y": 160,
+        "label": "Compute plugins\nFilter/Search/Mat/Fn",
+        "color": "#a855f7",
+        "border_color": "#7e22ce",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_3",
+        "shape": "rectangle",
+        "x": 380,
+        "y": 160,
+        "label": "ComputeWrap\nresult.inline",
+        "color": "#06b6d4",
+        "border_color": "#0891b2",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_4",
+        "shape": "diamond",
+        "x": 680,
+        "y": 130,
+        "label": "rows[]?",
+        "color": "#8b5cf6",
+        "border_color": "#6d28d9",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_5",
+        "shape": "rectangle",
+        "x": 980,
+        "y": 60,
+        "label": "ObjectSetTable",
+        "color": "#22c55e",
+        "border_color": "#16a34a",
+        "text_alignment": "center"
+      },
+      {
+        "id": "node_6",
+        "shape": "rectangle",
+        "x": 980,
+        "y": 260,
+        "label": "KeyValuePreview\n(fallback)",
+        "color": "#64748b",
+        "border_color": "#475569",
+        "text_alignment": "center"
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "from": "node_2",
+        "from_handle": "right",
+        "to": "node_3",
+        "to_handle": "left"
+      },
+      {
+        "id": "edge_2",
+        "from": "node_3",
+        "from_handle": "right",
+        "to": "node_4",
+        "to_handle": "left"
+      },
+      {
+        "id": "edge_3",
+        "from": "node_4",
+        "from_handle": "top",
+        "to": "node_5",
+        "to_handle": "left"
+      },
+      {
+        "id": "edge_4",
+        "from": "node_4",
+        "from_handle": "bottom",
+        "to": "node_6",
+        "to_handle": "left"
+      }
+    ],
+    "code": []
+  }
+]

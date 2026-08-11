@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Redis — Writeback Overlay store (Task B7)
+# ---------------------------------------------------------------------------
+# The overlay (`src/services/overlay/redisStore.ts`) lazy-loads the `redis`
+# npm package and connects to `REDIS_URL`. If unset or unreachable, the
+# overlay falls back to an in-process map store, so this service is
+# optional for test runs but required for multi-replica correctness.
+#
+# TTL on overlay keys = quickwit_commit_timeout_secs * 3 (default 180s),
+# so memory pressure is bounded by edit rate × 180s × avg-doc-size.
+# ---------------------------------------------------------------------------
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: tellus-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "no"                            # overlay is a cache; durability unnecessary
+      - --maxmemory
+      - "1gb"
+      - --maxmemory-policy
+      - allkeys-lru                    # evict oldest overlays under pressure
+      - --save
+      - ""
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  redis_data:

@@ -1,0 +1,251 @@
+# Per-tenant Tellus stack values. Each enrolled tenant is one release:
+#   helm install tenant-acme deploy/substrate/charts/tellus-tenant \
+#     --set tenant=acme --set image.repository=ghcr.io/tellus/tellus --set image.tag=1.0.0
+#
+# Local kind/k3d smoke (full env + deps): see deploy/local-k8s/values-local.yaml
+# and scripts/k8s-local-up.sh.
+
+# The tenant slug — drives the default namespace name (enrollment = namespace)
+# and labels. Override the namespace with namespaceOverride when needed.
+tenant: acme
+
+# Optional hard overrides (empty = derive from tenant).
+fullnameOverride: ""
+namespaceOverride: ""
+
+# Create the tenant namespace as part of the release (PSS-restricted enforced).
+createNamespace: true
+
+# Default-deny cross-namespace ingress so tenants are isolated east-west
+# (Cilium-enforced on the substrate; see verify-substrate.sh §2).
+# NOTE: when true, only traffic from namespaces labeled tellus.io/tenant=<tenant>
+# is allowed in. Local stacks that co-locate deps in the same namespace still
+# work because the namespace carries that label.
+networkIsolation: true
+
+# Extra NetworkPolicy ingress rules (merged when networkIsolation is true).
+# Use for kubelet probes, ingress controllers, or mesh sidecars.
+networkPolicy:
+  # Allow in-namespace pods (by podSelector {}) in addition to namespaceSelector.
+  allowSameNamespace: true
+  # Allow all cluster traffic to health ports (helps CNIs that enforce probes).
+  allowProbePorts: true
+  extraIngress: []
+
+# Per-tenant resource ceiling.
+resourceQuota:
+  enabled: true
+  requestsCpu: "4"
+  requestsMemory: 8Gi
+  limitsCpu: "8"
+  limitsMemory: 16Gi
+  pods: "50"
+
+# FOUNDRY-GAPS §3 — horizontal autoscaling. Local-testable on k3d/kind with
+# metrics-server. When enabled the Deployment omits a static replica count and
+# an HPA owns scaling between min/max on the CPU/memory utilisation targets.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # Optional memory target; omitted from the HPA when null.
+  targetMemoryUtilizationPercentage: null
+  # Scale-down stabilization (seconds) to avoid flapping.
+  scaleDownStabilizationSeconds: 120
+
+replicaCount: 1
+
+# Rolling update strategy — surge without full downtime on multi-replica.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# Allow cold boots (migrate init + dependency waits) before marking Progressing failed.
+progressDeadlineSeconds: 900
+
+image:
+  # The real chart points at the Tellus image; the substrate smoke test
+  # overrides this with a pullable image to prove scheduling end-to-end.
+  repository: ghcr.io/tellus/tellus
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Application listens on 3000 (Dockerfile EXPOSE / compose). Substrate smoke
+# overrides this to 8080 for nginxinc/nginx-unprivileged.
+containerPort: 3000
+
+# Application env — non-secret config. Secrets come from secret / existingSecret,
+# never inlined in git for production.
+env:
+  NODE_ENV: production
+  TELLUS_TENANT: "" # defaulted to .Values.tenant in the template when empty
+
+# Optional ConfigMap-backed env (merged with env above via envFrom).
+configMap:
+  enabled: false
+  data: {}
+
+# Optional chart-managed Secret for local / non-ESO environments.
+# Production should set existingSecret (External Secrets / CSI) instead.
+secret:
+  enabled: false
+  data: {}
+  # stringData keys are written as-is (not base64) by Helm into Secret.stringData.
+  stringData: {}
+
+# Name of a pre-existing Secret (e.g. ESO target). Keys become env vars via envFrom.
+existingSecret: ""
+
+# Extra env entries with full valueFrom support (list form).
+# Example:
+#   - name: PGPASSWORD
+#     valueFrom:
+#       secretKeyRef:
+#         name: tellus-pg-credentials
+#         key: PGPASSWORD
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+service:
+  type: ClusterIP
+  port: 80
+  # Optional NodePort (used by kind port-mappings for local access).
+  nodePort: null
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: tellus.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Pod disruption budget — keep capacity during voluntary disruptions.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automount: false
+
+# Pod hardening. Tellus app image runs as uid/gid 999 (Dockerfile appuser).
+# Substrate smoke overrides runAsUser for nginx-unprivileged (101).
+podSecurity:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+  readOnlyRootFilesystem: true
+runtimeClassName: "" # set to "gvisor" for user-code-adjacent workloads
+
+# Probes — production defaults for the Tellus API.
+# Substrate smoke overrides probePath to / for nginx.
+probes:
+  startup:
+    enabled: true
+    path: /api/v1/system/liveness
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 30
+  liveness:
+    enabled: true
+    path: /api/v1/system/liveness
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /api/v1/system/readiness
+    initialDelaySeconds: 0
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# Backward-compat single path used only when probes.readiness.path is empty.
+probePath: /api/v1/system/readiness
+
+# Writable volumes (required when readOnlyRootFilesystem is true).
+# DATA_DIR defaults to /app/data in the Dockerfile.
+persistence:
+  data:
+    enabled: true
+    mountPath: /app/data
+    # emptyDir for local; set sizeLimit to cap node disk usage.
+    emptyDir:
+      sizeLimit: 2Gi
+    # Optional PVC instead of emptyDir (set emptyDir: null and configure claim).
+    existingClaim: ""
+    storageClass: ""
+    size: 5Gi
+    accessModes:
+      - ReadWriteOnce
+
+# Graceful shutdown window (Express should drain within this).
+terminationGracePeriodSeconds: 30
+
+# Optional preStop sleep so ALB/kube-proxy can stop sending traffic first.
+lifecycle:
+  preStopSleepSeconds: 5
+
+# Optional init containers (e.g. wait-for-postgres).
+initContainers: []
+
+# Schema bootstrap / migrate init container (same image as the app).
+# Production CD should usually run migrate as a discrete Job; for local
+# kind/k3d and single-replica boots, an init container is the reliable path
+# on an empty database (the boot migration gate assumes the ledger exists).
+migrate:
+  enabled: false
+  # Runs after user-supplied initContainers (so wait-for-postgres can go first).
+  command:
+    - /bin/sh
+    - -c
+    - |
+      set -e
+      echo "running schema migrations…"
+      node dist/migrate.js
+      node dist/foundryMigrate.js || true
+      node dist/migrateAuth.js || true
+      echo "migrations complete"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Optional extra volume mounts / volumes.
+extraVolumeMounts: []
+extraVolumes: []
+
+# Scheduling.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# Pod annotations (e.g. reloader.stakater.com/auto: "true").
+podAnnotations: {}

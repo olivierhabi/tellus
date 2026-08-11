@@ -1,0 +1,11 @@
+apiVersion: v2
+name: tellus-tenant
+description: >-
+  Per-tenant Tellus stack as a Helm release — the Kubernetes substrate analog
+  of the per-tenant Docker Compose project. FOUNDRY-GAPS §3: "enrollment =
+  namespace". One release == one enrolled tenant, materialised as an isolated
+  namespace (PSS-restricted) with a default-deny cross-namespace NetworkPolicy,
+  a ResourceQuota, and the tenant's application Deployment + Service.
+type: application
+version: 0.2.0
+appVersion: "1.0.0"

@@ -1,0 +1,8 @@
+                run_id                |  status   | error_message 
+--------------------------------------+-----------+---------------
+ 46b37f19-1174-4615-8640-3cc5017cf51c | completed | 
+ 92c2857a-a7ff-4e1a-b8b7-cbbff05e0d86 | completed | 
+ c6e9a646-2f59-45b5-9051-328aa21e2ce1 | completed | 
+ 7e40a587-9724-4227-b05e-8297c2ac6cbc | completed | 
+(4 rows)
+

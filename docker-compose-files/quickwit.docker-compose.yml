@@ -1,0 +1,78 @@
+# ---------------------------------------------------------------------------
+# Quickwit — Object Storage V2 / Search backbone (Tasks B6, B8, B9)
+# ---------------------------------------------------------------------------
+# Spec equivalent: Palantir's Object Storage V2 search engine. We run a
+# single-node Quickwit in "quickwit" combo mode (metastore + indexer +
+# searcher + control-plane + janitor all in one process) — fine for dev,
+# not for the 200 GB NVMe-per-searcher topology B8 targets in production.
+#
+# Storage: S3-compatible, pointed at the MinIO container from
+# `minio.docker-compose.yml`. The bucket `quickwit-indexes` is created by
+# the one-shot `quickwit-init` container below.
+#
+# Wired to the same Redpanda broker `redpanda.docker-compose.yml` creates,
+# so B6's indexing activity can feed `merged.<object_type>` topics directly
+# into Quickwit's native Kafka source.
+#
+# Compose this with the stack via:
+#   docker compose \
+#     -f docker-compose-files/minio.docker-compose.yml \
+#     -f docker-compose-files/redpanda.docker-compose.yml \
+#     -f docker-compose-files/quickwit.docker-compose.yml \
+#     up -d
+# ---------------------------------------------------------------------------
+
+services:
+  quickwit:
+    image: quickwit/quickwit:0.8.2
+    container_name: tellus-quickwit
+    restart: unless-stopped
+    command: ["run"]
+    environment:
+      # Storage — point the Quickwit metastore and index files at MinIO.
+      QW_CONFIG: /quickwit/quickwit.yaml
+      # Expose the whole S3 surface; Quickwit reads these at boot.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_REGION: us-east-1
+      # The sample config we bind below uses variable substitution.
+      QW_CLUSTER_ENDPOINT: http://quickwit:7280
+      QW_S3_ENDPOINT: http://minio:9000
+    ports:
+      - "127.0.0.1:7280:7280"   # REST / gRPC-gateway
+      - "127.0.0.1:7281:7281"   # gRPC
+    volumes:
+      - quickwit_data:/quickwit/qwdata
+      - ./quickwit/quickwit.yaml:/quickwit/quickwit.yaml:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7280/api/v1/cluster || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # One-shot: create the MinIO bucket Quickwit's index storage lives in,
+  # then exit. Runs after minio-init so the alias is already configured.
+  quickwit-bucket-init:
+    image: minio/mc:RELEASE.2024-10-02T08-27-28Z
+    container_name: tellus-quickwit-bucket-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set tellus http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin};
+        mc mb --ignore-existing tellus/quickwit-indexes;
+        echo 'Quickwit bucket ready';
+      "
+    restart: "no"
+
+volumes:
+  quickwit_data:

@@ -1,0 +1,17 @@
+<!--
+  ClickHouse Kafka-engine default broker + named collection.
+  Every `link_<source>__<name>__<target>__kafka` table the B10 DDL emits
+  references `kafka_broker_list = '<env>'`; by default that expands to
+  `redpanda:29092` when the compose network is up. The named collection
+  below lets DDL authors use `kafka_handle` instead of repeating brokers.
+-->
+<clickhouse>
+  <named_collections>
+    <kafka_handle>
+      <kafka_broker_list>redpanda:29092</kafka_broker_list>
+      <kafka_group_name>clickhouse-b10</kafka_group_name>
+      <kafka_format>JSONEachRow</kafka_format>
+      <kafka_num_consumers>2</kafka_num_consumers>
+    </kafka_handle>
+  </named_collections>
+</clickhouse>

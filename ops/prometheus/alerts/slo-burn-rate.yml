@@ -1,0 +1,160 @@
+# ---------------------------------------------------------------------------
+# ops/prometheus/alerts/slo-burn-rate.yml
+#
+# Appendix M.1.10 closure — SLO error-budget burn-rate alerts.
+#
+# Per docs/SLO.md the SLOs are 99.9% availability (error budget 0.1%),
+# p99 reads < 250 ms, p99 actions < 800 ms. These alerts fire on the
+# rate at which the error budget is being consumed.
+#
+# Standard Google SRE multi-window multi-burn-rate alerting:
+#   - 2% budget in 1h  → warning  (long-tail degradation)
+#   - 5% budget in 6h  → warning  (slow leak)
+#   - 10% budget in 24h → critical (budget will be exhausted in 10 days)
+#
+# Calculation: at 99.9% SLO, budget = 0.1% = 0.001. Burn rate B% over
+# window W means errors / requests > B * 0.001 / (W in hours / 720h)
+# where 720h = 30 days (the SLO evaluation window).
+# ---------------------------------------------------------------------------
+groups:
+  - name: tellus-slo-burn-rate
+    interval: 1m
+    rules:
+      # -----------------------------------------------------------------
+      # Availability — 99.9% over 30 days.
+      # -----------------------------------------------------------------
+      - alert: TellusSloBurnRate1h2pct
+        expr: |
+          (sum(rate(tellus_http_requests_total{status=~"5.."}[1h]))
+            / sum(rate(tellus_http_requests_total[1h]))) > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: warning
+          slo: availability
+          window: 1h
+        annotations:
+          summary: "Tellus burning 2% of error budget in 1h"
+          runbook: "docs/RUNBOOK.md#slo-burn-rate"
+
+      - alert: TellusSloBurnRate6h5pct
+        expr: |
+          (sum(rate(tellus_http_requests_total{status=~"5.."}[6h]))
+            / sum(rate(tellus_http_requests_total[6h]))) > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: warning
+          slo: availability
+          window: 6h
+        annotations:
+          summary: "Tellus burning 5% of error budget in 6h"
+          runbook: "docs/RUNBOOK.md#slo-burn-rate"
+
+      - alert: TellusSloBurnRate24h10pct
+        expr: |
+          (sum(rate(tellus_http_requests_total{status=~"5.."}[24h]))
+            / sum(rate(tellus_http_requests_total[24h]))) > (3 * 0.001)
+        for: 30m
+        labels:
+          severity: critical
+          slo: availability
+          window: 24h
+        annotations:
+          summary: "Tellus burning 10% of error budget in 24h (exhaust in ~10 days)"
+          runbook: "docs/RUNBOOK.md#slo-burn-rate"
+
+      # -----------------------------------------------------------------
+      # Read latency — p99 < 250 ms.
+      # -----------------------------------------------------------------
+      - alert: TellusReadP99High
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(
+              tellus_http_request_duration_seconds_bucket{method="GET"}[5m]
+            ))
+          ) > 0.250
+        for: 5m
+        labels:
+          severity: warning
+          slo: read_p99
+        annotations:
+          summary: "Tellus read p99 > 250 ms"
+          runbook: "docs/RUNBOOK.md#read-p99"
+
+      # -----------------------------------------------------------------
+      # Action latency — p99 < 800 ms.
+      # -----------------------------------------------------------------
+      - alert: TellusActionP99High
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(
+              tellus_http_request_duration_seconds_bucket{route=~".*/apply$"}[5m]
+            ))
+          ) > 0.800
+        for: 5m
+        labels:
+          severity: warning
+          slo: action_p99
+        annotations:
+          summary: "Tellus action p99 > 800 ms"
+          runbook: "docs/RUNBOOK.md#action-p99"
+
+      # -----------------------------------------------------------------
+      # F-P3-11 audit chain integrity — any break is Sev-1.
+      # -----------------------------------------------------------------
+      - alert: TellusAuditChainBreak
+        expr: increase(tellus_audit_chain_breaks_total[5m]) > 0
+        labels:
+          severity: critical
+          incident_class: regulatory
+        annotations:
+          summary: "Audit hash chain break detected — regulatory incident"
+          runbook: "docs/AUDIT_CONTRACT.md#5-operational-runbook"
+
+      - alert: TellusAuditVerifierStalled
+        expr: (time() - tellus_audit_chain_verified_at) > (26 * 3600)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit verifier has not completed in > 26 hours"
+          runbook: "docs/AUDIT_CONTRACT.md#52-alert-tellus_audit_chain_verified_at-lags"
+
+      # -----------------------------------------------------------------
+      # F-P5-06 PG pool saturation.
+      # -----------------------------------------------------------------
+      - alert: TellusPgPoolSaturation
+        expr: max by (pool) (tellus_pg_pool_saturation) > 0.8
+        for: 2m
+        labels:
+          severity: warning
+          slo: pg_pool
+        annotations:
+          summary: "PG pool {{ $labels.pool }} saturation > 80%"
+          runbook: "docs/RUNBOOK.md#pg-pool-saturation"
+
+      # -----------------------------------------------------------------
+      # F-P4-13 event-loop lag — native DuckDB/polars freezes.
+      # -----------------------------------------------------------------
+      - alert: TellusEventLoopLagHigh
+        expr: tellus_event_loop_lag_ms > 200
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event loop lag > 200 ms — likely DuckDB/polars freeze"
+          runbook: "docs/RUNBOOK.md#event-loop-lag"
+
+      # -----------------------------------------------------------------
+      # F-P3-18 CBAC — sustained deny rate may indicate misconfiguration
+      # or active attack.
+      # -----------------------------------------------------------------
+      - alert: TellusCbacDenyBurst
+        expr: |
+          sum by (resource_kind, reason) (rate(tellus_cbac_deny_total[5m]))
+            > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CBAC deny rate > 5/s on {{ $labels.resource_kind }} for {{ $labels.reason }}"
+          runbook: "docs/RUNBOOK.md#cbac-deny-burst"

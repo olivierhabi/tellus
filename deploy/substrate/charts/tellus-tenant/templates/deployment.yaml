@@ -1,0 +1,269 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tellus-tenant.fullname" . }}
+  namespace: {{ include "tellus-tenant.namespace" . }}
+  labels:
+    {{- include "tellus-tenant.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds | default 600 }}
+  selector:
+    matchLabels:
+      {{- include "tellus-tenant.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.strategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.strategy.rollingUpdate.maxSurge }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "tellus-tenant.selectorLabels" . | nindent 8 }}
+        {{- include "tellus-tenant.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "tellus-tenant.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.runtimeClassName }}
+      runtimeClassName: {{ .Values.runtimeClassName }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: {{ .Values.podSecurity.runAsNonRoot }}
+        {{- if .Values.podSecurity.runAsUser }}
+        runAsUser: {{ .Values.podSecurity.runAsUser }}
+        {{- end }}
+        {{- if .Values.podSecurity.runAsGroup }}
+        runAsGroup: {{ .Values.podSecurity.runAsGroup }}
+        {{- end }}
+        {{- if .Values.podSecurity.fsGroup }}
+        fsGroup: {{ .Values.podSecurity.fsGroup }}
+        {{- end }}
+        {{- if .Values.podSecurity.fsGroupChangePolicy }}
+        fsGroupChangePolicy: {{ .Values.podSecurity.fsGroupChangePolicy }}
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if or .Values.initContainers .Values.migrate.enabled }}
+      initContainers:
+        {{- with .Values.initContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.migrate.enabled }}
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.migrate.command | nindent 12 }}
+          env:
+            - name: TELLUS_TENANT
+              value: {{ default .Values.tenant .Values.env.TELLUS_TENANT | quote }}
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+            {{- range $k, $v := .Values.env }}
+            {{- if and $v (ne $k "TELLUS_TENANT") (ne $k "PORT") }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            {{- if .Values.configMap.enabled }}
+            - configMapRef:
+                name: {{ include "tellus-tenant.fullname" . }}-config
+            {{- end }}
+            {{- if .Values.secret.enabled }}
+            - secretRef:
+                name: {{ include "tellus-tenant.fullname" . }}-secret
+            {{- end }}
+            {{- if .Values.existingSecret }}
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: {{ .Values.podSecurity.readOnlyRootFilesystem }}
+            runAsNonRoot: {{ .Values.podSecurity.runAsNonRoot }}
+            {{- if .Values.podSecurity.runAsUser }}
+            runAsUser: {{ .Values.podSecurity.runAsUser }}
+            {{- end }}
+            capabilities:
+              drop: [ALL]
+          {{- if .Values.podSecurity.readOnlyRootFilesystem }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: app-data
+              mountPath: {{ .Values.persistence.data.mountPath | default "/app/data" }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: tellus
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: {{ .Values.podSecurity.readOnlyRootFilesystem }}
+            runAsNonRoot: {{ .Values.podSecurity.runAsNonRoot }}
+            {{- if .Values.podSecurity.runAsUser }}
+            runAsUser: {{ .Values.podSecurity.runAsUser }}
+            {{- end }}
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: TELLUS_TENANT
+              value: {{ default .Values.tenant .Values.env.TELLUS_TENANT | quote }}
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+            {{- range $k, $v := .Values.env }}
+            {{- if and $v (ne $k "TELLUS_TENANT") (ne $k "PORT") }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            {{- if .Values.configMap.enabled }}
+            - configMapRef:
+                name: {{ include "tellus-tenant.fullname" . }}-config
+            {{- end }}
+            {{- if .Values.secret.enabled }}
+            - secretRef:
+                name: {{ include "tellus-tenant.fullname" . }}-secret
+            {{- end }}
+            {{- if .Values.existingSecret }}
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ default .Values.probePath .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if gt (int .Values.lifecycle.preStopSleepSeconds) 0 }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep {{ .Values.lifecycle.preStopSleepSeconds }}"]
+          {{- end }}
+          {{- if or .Values.podSecurity.readOnlyRootFilesystem .Values.persistence.data.enabled .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- if .Values.podSecurity.readOnlyRootFilesystem }}
+            - name: tmp
+              mountPath: /tmp
+            - name: varcache
+              mountPath: /var/cache
+            - name: varcache-nginx
+              mountPath: /var/cache/nginx
+            - name: varrun
+              mountPath: /var/run
+            {{- end }}
+            {{- if .Values.persistence.data.enabled }}
+            - name: app-data
+              mountPath: {{ .Values.persistence.data.mountPath }}
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.podSecurity.readOnlyRootFilesystem .Values.persistence.data.enabled .Values.extraVolumes }}
+      volumes:
+        {{- if .Values.podSecurity.readOnlyRootFilesystem }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: varcache
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: varcache-nginx
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: varrun
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- end }}
+        {{- if .Values.persistence.data.enabled }}
+        - name: app-data
+          {{- if .Values.persistence.data.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.data.existingClaim }}
+          {{- else if .Values.persistence.data.emptyDir }}
+          emptyDir:
+            {{- toYaml .Values.persistence.data.emptyDir | nindent 12 }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "tellus-tenant.fullname" . }}-data
+          {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

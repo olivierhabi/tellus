@@ -1,0 +1,1 @@
+JSON report written to /Users/olivierhabimana/Desktop/projects/tellus/artifacts/negative-tests/gate-02.stashed.json

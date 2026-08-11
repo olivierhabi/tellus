@@ -1,0 +1,18 @@
+{{- if and .Values.persistence.data.enabled (not .Values.persistence.data.existingClaim) (not .Values.persistence.data.emptyDir) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "tellus-tenant.fullname" . }}-data
+  namespace: {{ include "tellus-tenant.namespace" . }}
+  labels:
+    {{- include "tellus-tenant.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.data.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.data.size }}
+  {{- if .Values.persistence.data.storageClass }}
+  storageClassName: {{ .Values.persistence.data.storageClass | quote }}
+  {{- end }}
+{{- end }}
