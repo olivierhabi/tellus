@@ -936,8 +936,18 @@ export async function reindexObjectType(
          FROM object_instances
         WHERE ontology_id = $1
           AND branch_id = $2
-          AND object_type_api_name = $3`,
-      [ontologyId, deriveMainBranchId(ontologyId), objectTypeApiName],
+          AND object_type_api_name = $3
+          -- A recreated datasource can legitimately omit a row that remains
+          -- in object_instances from a prior action/writeback. Only update
+          -- documents materialized into this replacement index; otherwise
+          -- OpenSearch rejects the bulk update as a missing document.
+          AND primary_key = ANY($4::text[])`,
+      [
+        ontologyId,
+        deriveMainBranchId(ontologyId),
+        objectTypeApiName,
+        [...objectMap.keys()],
+      ],
     );
     for (let offset = 0; offset < versionRows.rows.length; offset += 1_000) {
       const versionBody: Array<Record<string, unknown>> = [];
