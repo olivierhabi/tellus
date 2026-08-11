@@ -301,6 +301,14 @@ export function formatProperty(dbRow: DbRow): Record<string, unknown> {
     ordinal: dbRow.ordinal,
     conditionalFormatting: dbRow.conditional_formatting ?? null,
     inlineEditActionId: (dbRow.inline_edit_action_id as string | null) ?? null,
+    // Column-level visibility markings (migration 045 / Rwanda QA §3.3). An
+    // unset marking projects as an empty array — never null — so clients can
+    // rely on the field's presence.
+    markingRequired: Array.isArray(dbRow.marking_required)
+      ? dbRow.marking_required
+      : dbRow.marking_required
+        ? [dbRow.marking_required]
+        : [],
   };
 }
 

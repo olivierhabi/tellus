@@ -33,6 +33,10 @@ import { query, withTransaction } from "../../db";
 import { appError } from "../../utils/appError";
 import { incCounter, observeHistogram } from "../funnel/metrics";
 import {
+  loadRestrictedProperties,
+  stripRestrictedRows,
+} from "../security/propertyMarkingGuard";
+import {
   EXPORT_DOWNLOAD_TTL_MS,
   EXPORT_PAGE_SIZE,
   MAX_EXPORT_ROWS,
@@ -160,6 +164,14 @@ export async function executeExportActivity(
     const securityContext = parseSnapshot(job.security_context_snapshot);
     const branchId = job.branch_id_snapshot ?? null;
 
+    // Rwanda QA §3.3/§6.5 — exports never contain marking-restricted
+    // properties for the requesting principal, in any format (file contents,
+    // headers, or metadata). Columns the principal cannot read are omitted
+    // from the written rows entirely.
+    const restricted = job.object_type_api_name
+      ? await loadRestrictedProperties(job.object_type_api_name)
+      : new Map<string, string[]>();
+
     // Format writer is in-memory for the engineering surface — the
     // production-soak path replaces this with a streamed multipart
     // upload. We assemble in a Buffer so unit tests can inspect bytes.
@@ -173,6 +185,11 @@ export async function executeExportActivity(
       pageSize: EXPORT_PAGE_SIZE,
     })) {
       for (const row of page.rows) {
+        stripRestrictedRows(
+          [row],
+          securityContext as { markings?: string[]; markingBypass?: boolean },
+          restricted,
+        );
         rowCount += 1;
         if (rowCount > MAX_EXPORT_ROWS) {
           throw appError(

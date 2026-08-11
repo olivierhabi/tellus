@@ -39,6 +39,7 @@ import { generateIndexMapping } from "./opensearch/indexMappingGenerator";
 import { getObjectBuffer, getObjectStream } from "./storageService";
 import { parseCsvReadable } from "./indexing/streamingCsv";
 import { ensureDocumentSecurity } from "./security/documentSecurity";
+import { bulkUpsertInstances } from "../models/objectInstance";
 import { deterministicObjectRid } from "./objectIdentity";
 import type { PropertyInput } from "./mapping/typeMapper";
 
@@ -870,35 +871,49 @@ export async function reindexObjectType(
       batchDocs = 0;
     };
 
+    const instanceRows: import("../models/objectInstance").UpsertInstanceInput[] = [];
     for (const [pk, doc] of objectMap) {
       // Phase A4 (F-03) — stamp `_security.markings` via the shared helper
       // so reindexed docs are visible to marking-constrained users. The
       // helper is idempotent: if the source doc already carries
       // `_security`, its classification is preserved.
+      const secured = ensureDocumentSecurity({
+        __pk: pk,
+        // Phase 2 (object identity): persist-stable rid on reindex.
+        __rid:
+          (doc.__rid as string | undefined) ??
+          deterministicObjectRid(ontologyId, objectTypeApiName, pk),
+        __objectType: objectTypeApiName,
+        __ontology: ontologyId,
+        __lastModified: new Date().toISOString(),
+        __version: 1,
+        ...doc,
+      });
       batch.push({ index: { _index: replacementIndexName, _id: pk } });
-      batch.push(
-        ensureDocumentSecurity({
-          __pk: pk,
-          // Phase 2 (object identity): persist-stable rid on reindex.
-          __rid:
-            (doc.__rid as string | undefined) ??
-            deterministicObjectRid(ontologyId, objectTypeApiName, pk),
-          __objectType: objectTypeApiName,
-          __ontology: ontologyId,
-          __lastModified: new Date().toISOString(),
-          __version: 1,
-          ...doc,
-        }),
-      );
+      batch.push(secured);
+      // Rwanda QA §3.4 — the direct read-by-primary-key path resolves from
+      // object_instances; a datasource reindex must leave it populated too,
+      // otherwise read-your-writes breaks for every datasource-backed type.
+      instanceRows.push({
+        ontology_id: ontologyId,
+        object_type_api_name: objectTypeApiName,
+        primary_key: pk,
+        properties: doc,
+        markings: secured._security?.markings ?? [],
+        source_datasource_id: null,
+        source_transaction_id: lastTransactionId ?? null,
+      });
       batchDocs++;
       processedDocs++;
       if (batchDocs >= BULK_BATCH_DOCS) {
         await flushBatch(processedDocs >= totalDocs ? "wait_for" : false);
+        await bulkUpsertInstances(instanceRows.splice(0));
       }
     }
     // Flush any trailing partial batch (no-op if the last full batch above
     // already wait_for'd — in which case `batch` is empty).
     await flushBatch("wait_for");
+    await bulkUpsertInstances(instanceRows.splice(0));
 
     if (bulkErrors.length > 0) {
       throw appError(

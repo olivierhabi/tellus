@@ -48,6 +48,11 @@ import {
 import { recordOssV2AuditBestEffort } from "../../services/oss/audit";
 import { requireOntology } from "./ontologyParam";
 import type { CompiledObjectSet } from "../../services/oss/objectSetCompiler";
+import {
+  enforceQueryMarkings,
+  stripRestrictedRows,
+  type SecurityLike,
+} from "../../services/security/propertyMarkingGuard";
 import linkTypeModel, {
   resolveObjectTypeApiName,
 } from "../../models/linkType";
@@ -364,6 +369,61 @@ function expandInterfaceSelection<T extends {
   } as T;
 }
 
+/**
+ * Rwanda QA §3.3 — enforce property markings across every compiled plan of an
+ * object set: rejects filters/order-by on restricted properties and returns
+ * the per-type restricted maps for result stripping.
+ */
+async function enforceObjectSetMarkings(
+  compiled: CompiledObjectSet,
+  ontologyId: string,
+  security: SecurityLike,
+): Promise<Map<string, Map<string, string[]>>> {
+  const byType = new Map<string, Map<string, string[]>>();
+  for (const plan of compiled.plans) {
+    if (!plan.objectType) continue;
+    const whereFields = new Set<string>();
+    collectFields(plan.where, whereFields);
+    if (plan.searchAroundSourceWhere) collectFields(plan.searchAroundSourceWhere, whereFields);
+    const restricted = await enforceQueryMarkings({
+      objectTypeApiName: plan.objectType,
+      ontologyId,
+      where: plan.where,
+      security,
+    });
+    byType.set(plan.objectType, restricted);
+  }
+  return byType;
+}
+
+function stripObjectSetRows(
+  rows: Array<Record<string, unknown>>,
+  compiled: CompiledObjectSet,
+  security: SecurityLike,
+  restricted: Map<string, Map<string, string[]>>,
+): void {
+  // Rows do not reliably carry their owning type; apply the union of
+  // restricted columns of all planned types. A column restricted on any
+  // planned type is omitted unless the caller holds its markings — this can
+  // never widen visibility, only narrow it across types.
+  const union = new Map<string, string[]>();
+  for (const map of restricted.values()) {
+    for (const [k, v] of map) union.set(k, v);
+  }
+  stripRestrictedRows(rows, security, union);
+}
+
+function collectFields(where: unknown, out: Set<string>): void {
+  if (!where || typeof where !== "object" || Array.isArray(where)) return;
+  const node = where as Record<string, unknown>;
+  if (typeof node.field === "string" && node.field) out.add(node.field);
+  for (const key of ["filters", "value", "filter", "children"] as const) {
+    const child = node[key];
+    if (Array.isArray(child)) for (const entry of child) collectFields(entry, out);
+    else if (child && typeof child === "object") collectFields(child, out);
+  }
+}
+
 function omitEmptyPageToken<T extends { nextPageToken: string | null }>(
   result: T,
 ): Omit<T, "nextPageToken"> & { nextPageToken?: string } {
@@ -473,7 +533,12 @@ router.post(
         }),
       );
       const { executorDeps, ctx } = await makeCtx(req, ontologyId, query);
+      // Rwanda QA §3.3 — reject predicates on marking-restricted properties
+      // and strip restricted columns from the serialized result.
+      const security = requireSecurityContext(req);
+      const restricted = await enforceObjectSetMarkings(compiled, ontologyId, security);
       const result = await loadObjectSet(compiled, parsed, ctx, executorDeps);
+      stripObjectSetRows(result.data as Array<Record<string, unknown>>, compiled, security, restricted);
       auditRead(req, ontologyId, query, {
         objectTypes: compiled.plans.length,
         snapshot: parsed.snapshot === true,
@@ -523,7 +588,11 @@ router.post(
         }),
       );
       const { executorDeps, ctx } = await makeCtx(req, ontologyId, query);
+      // Rwanda QA §3.3 — same marking enforcement as loadObjects.
+      const security = requireSecurityContext(req);
+      const restricted = await enforceObjectSetMarkings(compiled, ontologyId, security);
       const result = await loadObjectSet(compiled, parsed, ctx, executorDeps);
+      stripObjectSetRows(result.data as Array<Record<string, unknown>>, compiled, security, restricted);
       auditRead(req, ontologyId, query, {
         objectTypes: compiled.plans.length,
         snapshot: parsed.snapshot === true,

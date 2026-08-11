@@ -29,6 +29,10 @@ import { toV2Error } from "../../services/oss/v2Errors";
 import { requireOntology } from "./ontologyParam";
 import { deriveMainBranchId } from "../../services/branchContext";
 import { deterministicObjectRid } from "../../services/objectIdentity";
+import {
+  omitUnauthorizedProperties,
+  type PropertyMarking,
+} from "../../services/security/propertyMarkingProjection";
 
 const router = Router({ mergeParams: true });
 
@@ -215,6 +219,25 @@ router.get(
           },
         );
       }
+      // The v2 direct-read path returns a flat object document. Apply the
+      // property projection here as well: selecting v2 must never bypass the
+      // marking enforcement used by the v1 direct-read route and object sets.
+      const security = requireSecurityContext(req);
+      const markings = await query(
+        `SELECT p.api_name, p.marking_required
+           FROM property p
+           JOIN object_type ot ON ot.object_type_id = p.object_type_id
+          WHERE ot.ontology_id = $1
+            AND ot.api_name = $2
+            AND p.marking_required IS NOT NULL`,
+        [ontologyId, req.params.objectType],
+      );
+      omitUnauthorizedProperties(
+        obj as Record<string, unknown>,
+        markings.rows as PropertyMarking[],
+        new Set(security.markings),
+        security.markingBypass,
+      );
       const excludeRid = req.query.excludeRid === "true";
       const out: Record<string, unknown> = { ...obj };
       if (excludeRid) {

@@ -6,6 +6,9 @@
  * 
  * Run with: npx tsx src/foundryMigrate.ts
  */
+// Standalone entrypoint (no server.ts bootstrap): load PGHOST/PGUSER/…
+// from .env, otherwise pool.connect() fails before any migration log.
+import "dotenv/config";
 import { pool } from "./db";
 
 async function migrateFoundry(): Promise<void> {
@@ -865,17 +868,24 @@ async function migrateFoundry(): Promise<void> {
                                parent_folder_rid, project_rid, space_rid,
                                created_by, created_at, updated_by, updated_at,
                                legacy_uuid)
-        SELECT 'ri.compass.main.project.' || p.id::text,
-               'compass', 'PROJECT', p.name,
-               NULL,
-               'ri.compass.main.project.' || p.id::text,
-               $1,
-               p.owner_id, p.created_at, p.owner_id, p.updated_at,
-               p.id
-        FROM projects p
-        ON CONFLICT (legacy_uuid) DO NOTHING
-        `,
-        [ROOT_SPACE_RID],
+         SELECT 'ri.compass.main.project.' || p.id::text,
+                'compass', 'PROJECT', p.name,
+                NULL,
+                'ri.compass.main.project.' || p.id::text,
+                $1,
+                -- Tolerate orphan owner_id (dev/e2e seeds can reference a
+                -- user row that no longer exists — the column has no FK).
+                -- Fall back to the seed user so resources.created_by's
+                -- FK never aborts the whole migration.
+                COALESCE((SELECT u.id FROM users u WHERE u.id = p.owner_id), $2),
+                p.created_at,
+                COALESCE((SELECT u.id FROM users u WHERE u.id = p.owner_id), $2),
+                p.updated_at,
+                p.id
+         FROM projects p
+         ON CONFLICT (legacy_uuid) DO NOTHING
+         `,
+        [ROOT_SPACE_RID, seedUserId],
       );
 
       // Folder backfill. parent_folder_rid points at the parent folder's
@@ -896,15 +906,19 @@ async function migrateFoundry(): Promise<void> {
                END,
                'ri.compass.main.project.' || f.project_id::text,
                $1,
-               COALESCE(
-                 (SELECT owner_id FROM projects WHERE id = f.project_id),
-                 (SELECT id FROM users ORDER BY created_at LIMIT 1)
-               ),
-               f.created_at,
-               COALESCE(
-                 (SELECT owner_id FROM projects WHERE id = f.project_id),
-                 (SELECT id FROM users ORDER BY created_at LIMIT 1)
-               ),
+                COALESCE(
+                  (SELECT u.id FROM users u
+                     JOIN projects p ON p.owner_id = u.id
+                     WHERE p.id = f.project_id),
+                  (SELECT id FROM users ORDER BY created_at LIMIT 1)
+                ),
+                f.created_at,
+                COALESCE(
+                  (SELECT u.id FROM users u
+                     JOIN projects p ON p.owner_id = u.id
+                     WHERE p.id = f.project_id),
+                  (SELECT id FROM users ORDER BY created_at LIMIT 1)
+                ),
                f.updated_at,
                f.id
         FROM folders f
@@ -926,19 +940,23 @@ async function migrateFoundry(): Promise<void> {
                (SELECT 'ri.compass.main.project.' || f.project_id::text
                   FROM folders f WHERE f.id = d.folder_id),
                $1,
-               COALESCE(
-                 (SELECT p.owner_id
-                    FROM folders f JOIN projects p ON p.id = f.project_id
-                   WHERE f.id = d.folder_id),
-                 (SELECT id FROM users ORDER BY created_at LIMIT 1)
-               ),
-               d.created_at,
-               COALESCE(
-                 (SELECT p.owner_id
-                    FROM folders f JOIN projects p ON p.id = f.project_id
-                   WHERE f.id = d.folder_id),
-                 (SELECT id FROM users ORDER BY created_at LIMIT 1)
-               ),
+                COALESCE(
+                  (SELECT u.id
+                     FROM folders f
+                     JOIN projects p ON p.id = f.project_id
+                     JOIN users u ON u.id = p.owner_id
+                    WHERE f.id = d.folder_id),
+                  (SELECT id FROM users ORDER BY created_at LIMIT 1)
+                ),
+                d.created_at,
+                COALESCE(
+                  (SELECT u.id
+                     FROM folders f
+                     JOIN projects p ON p.id = f.project_id
+                     JOIN users u ON u.id = p.owner_id
+                    WHERE f.id = d.folder_id),
+                  (SELECT id FROM users ORDER BY created_at LIMIT 1)
+                ),
                d.updated_at,
                d.id
         FROM foundry_datasets d

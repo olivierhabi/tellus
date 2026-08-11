@@ -40,12 +40,67 @@ import {
 import { getOverlayStore, markOverlayDegraded } from "../services/overlay/getOverlayStore";
 import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 import { CellMarkingService, redactCells } from "../services/security/cellMarkingService";
+import {
+  enforceQueryMarkings,
+  stripRestrictedRows,
+} from "../services/security/propertyMarkingGuard";
 
 const router = Router();
 
 // FOUNDRY-GAPS §8 — cell-level marking redaction at read time. Stateless over
 // the shared `query` pool, so one instance is reused across requests.
 const cellMarkingService = new CellMarkingService();
+
+export type PropertyMarking = {
+  api_name: string;
+  column_name?: string | null;
+  marking_required: string[] | string | null;
+};
+
+function snakeCase(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+/**
+ * Enforce the property-projection rule used by direct reads: unavailable
+ * properties are omitted, never nulled or masked in the client. PostgreSQL
+ * returns `text[]` for the current schema, while the string branch keeps
+ * mixed-version deployments safe during migration 045.
+ */
+export function omitUnauthorizedProperties(
+  properties: Record<string, unknown>,
+  markings: readonly PropertyMarking[],
+  grantedMarkings: ReadonlySet<string>,
+  markingBypass = false,
+): string[] {
+  if (markingBypass) return [];
+  const omitted: string[] = [];
+  for (const row of markings) {
+    const required = Array.isArray(row.marking_required)
+      ? row.marking_required
+      : typeof row.marking_required === "string" && row.marking_required
+        ? [row.marking_required]
+        : [];
+    if (required.length === 0 || required.every((marking) => grantedMarkings.has(marking))) {
+      continue;
+    }
+    // Object-serving documents can use the ontology API name or the mapped
+    // datasource column. Remove every representation so an API-name policy
+    // cannot leak through a snake_case backing field on direct reads.
+    const aliases = new Set([row.api_name, snakeCase(row.api_name)]);
+    if (row.column_name) aliases.add(row.column_name);
+    let found = false;
+    for (const property of aliases) {
+      if (!Object.prototype.hasOwnProperty.call(properties, property)) continue;
+      delete properties[property];
+      found = true;
+    }
+    if (found) {
+      omitted.push(row.api_name);
+    }
+  }
+  return omitted;
+}
 
 type LinkedWhere = {
   type: "linked";
@@ -360,6 +415,14 @@ router.post(
       routeMetric(req, "objects.search", branchId);
       body.where = await resolveLinkedWhere(body.where, objectType, secFilter, branchId);
       const validated = await validateSearchQuery(body, objectType);
+      // Rwanda QA §3.3 — reject predicates on marking-restricted properties
+      // and strip restricted columns from the serialized result.
+      const restricted = await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        where: validated.where,
+        orderBy: validated.$orderBy,
+        security: req.security,
+      });
       const rawResult = await executeSearch(objectType, {
         where: validated.where,
         $orderBy: validated.$orderBy,
@@ -372,6 +435,7 @@ router.post(
       // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
       // the index document for matching PKs; misses pass through.
       const result = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where, branchId);
+      stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       // B9: shadow-diff during soak. Fire-and-forget — hurts neither
       // latency nor correctness if Quickwit is unreachable.
@@ -421,6 +485,12 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.searchFullText", branchId);
+      const restricted = await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        where,
+        orderBy: $orderBy,
+        security: req.security,
+      });
       const rawResult = await executeFullTextSearch(objectType, searchQuery.trim(), {
         where,
         $orderBy,
@@ -430,6 +500,7 @@ router.post(
       }, secFilter, branchId);
       // B7: overlay merge for immediate edit visibility.
       const result = await mergeWithOverlay(objectType, rawResult, undefined, branchId);
+      stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -461,6 +532,13 @@ router.post(
       const aggregateBody = { ...(req.body || {}) };
       aggregateBody.where = await resolveLinkedWhere(aggregateBody.where, objectType, secFilter, branchId);
       const validated = await validateAggregateQuery(aggregateBody, objectType);
+      // Rwanda QA §3.3 — aggregates never include restricted properties.
+      await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        where: validated.where,
+        aggregations: validated.aggregations,
+        security: req.security,
+      });
       const result = await executeAggregate(objectType, {
         where: validated.where,
         aggregations: validated.aggregations,
@@ -498,6 +576,12 @@ router.get(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.list", branchId);
+      // Rwanda QA §3.3 — sort/select on restricted properties is rejected.
+      const restricted = await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        orderBy: validated.orderBy,
+        security: req.security,
+      });
       const rawResult = await executeSearch(objectType, {
         $orderBy: validated.orderBy.length > 0 ? validated.orderBy : undefined,
         $pageSize: validated.pageSize,
@@ -506,6 +590,7 @@ router.get(
       }, secFilter, branchId);
       // B7: overlay merge — recent edits visible within 1s.
       const result = await mergeWithOverlay(objectType, rawResult, undefined, branchId);
+      stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -1142,17 +1227,19 @@ router.get(
           [objectType]
         );
         if (propResult.rows.length > 0) {
-          const userMarkings = new Set(
-            ((req as any).security?.markings as string[]) || []
-          );
-          const properties = (obj as { properties?: Record<string, unknown> }).properties;
+          const security = (req as any).security;
+          const userMarkings = new Set((security?.markings as string[]) || []);
+          const nestedProperties = (obj as { properties?: Record<string, unknown> }).properties;
+          const properties = nestedProperties && typeof nestedProperties === "object"
+            ? nestedProperties
+            : (obj as Record<string, unknown>);
           if (properties) {
-            for (const row of propResult.rows) {
-              const required = row.marking_required as string;
-              if (!userMarkings.has(required)) {
-                delete properties[row.api_name as string];
-              }
-            }
+            omitUnauthorizedProperties(
+              properties,
+              propResult.rows as PropertyMarking[],
+              userMarkings,
+              security?.markingBypass === true,
+            );
           }
         }
       } catch {
