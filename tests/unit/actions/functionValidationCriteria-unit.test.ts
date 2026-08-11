@@ -24,7 +24,9 @@ describe("pinned function-backed action validation", () => {
       description: "credit limit rejected",
     }] };
     await expect(evaluateFunctionValidationCriteria("o1", criteria, { limit: 500_000 })).resolves.toEqual([]);
-    await expect(evaluateFunctionValidationCriteria("o1", criteria, { limit: 2_000_000 })).resolves.toEqual(["credit limit rejected"]);
+    await expect(evaluateFunctionValidationCriteria("o1", criteria, { limit: 2_000_000 })).resolves.toEqual([
+      "credit limit rejected: requestedLimit exceeds policy ceiling 1000000",
+    ]);
     expect(queryMock).toHaveBeenCalledWith(expect.stringContaining("v.version_number = $3"), ["o1", "validateCreditLimitV2", 2]);
   });
 

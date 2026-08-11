@@ -132,7 +132,7 @@ export const FUNCTION_FIXTURE_INPUTS: Record<RwandaFunctionName, Record<string, 
   calculateCreditRiskV2: { score: 92 },
   validateCreditLimitV2: { requestedLimit: 500_000, policyCeiling: 1_000_000 },
   detectAffordabilityExceptionV2: { monthlyIncome: 100_000, monthlyCommitment: 50_000, maxRatio: 0.4 },
-  validateRraTaxClearanceV2: { clearanceId: "QA-RW-IR-T-0000001", status: "VALID", expiresAt: "2026-09-01T00:00:00Z", now },
+  validateRraTaxClearanceV2: { clearanceId: "QA-RW-IR-T-0000001", status: "VALID", expiresAt: "2026-09-01T00:00:00Z", syncedAt: "2026-08-10T06:00:00Z", freshnessSlaMinutes: 360, now },
   verifyNationalIdMatchV2: { nationalId: "9990000000000012", recordNationalId: "9990000000000012" },
   detectLandTitleConflictV2: { titleStatus: "CONFLICT", exceptionType: "TITLE_CONFLICT" },
   classifyIso8583FailureV2: { responseCode: "91" },
@@ -203,7 +203,11 @@ async function generateIrembo(root: string, random: Random, count: number) {
     citizens.push([citizenId, syntheticNationalId(100_000 + index), `Synthetic Citizen ${index}`, "ACTIVE", "NIDA", `nida-${index}`, "nida-v1"]);
     clearances.push([clearanceId, citizenId, stale ? "EXPIRED" : "VALID", `TAX-${index}`, "RRA", `rra-${index}`, stale ? iso(60 * 24 * 90) : iso(60 * 12), "rra-sync-v2"]);
     parcels.push([`${RUN_PREFIX}-IR-P-${String(index).padStart(7, "0")}`, index % 2 ? "KIGALI" : "EASTERN", (100 + random.int(0, 900)).toFixed(1), "CLEAR", "LAND_AUTHORITY", `parcel-${index}`, "land-v3"]);
-    cases.push([`${RUN_PREFIX}-IR-LTC-${String(index).padStart(7, "0")}`, citizenId, clearanceId, `${RUN_PREFIX}-IR-P-${String(index).padStart(7, "0")}`, stale ? "APPROVAL_PENDING" : "TITLE_REVIEWED", iso(index * 50), index % 11 === 0 ? "TITLE_CONFLICT" : "", stale ? "STALE_SOURCE" : "ON_TRACK", 1]);
+    // Keep the source-snapshot timestamp independent from row position so the
+    // freshness gate is deterministic: every normal row is inside the six-hour
+    // SLA and every deliberately stale row is outside it.
+    const sourceAgeMinutes = stale ? 480 + (index % 6) * 15 : (index % 6) * 45;
+    cases.push([`${RUN_PREFIX}-IR-LTC-${String(index).padStart(7, "0")}`, citizenId, clearanceId, `${RUN_PREFIX}-IR-P-${String(index).padStart(7, "0")}`, stale ? "APPROVAL_PENDING" : "TITLE_REVIEWED", iso(sourceAgeMinutes), index % 11 === 0 ? "TITLE_CONFLICT" : "", stale ? "STALE_SOURCE" : "ON_TRACK", 1]);
     verifications.push([`${RUN_PREFIX}-IR-V-${String(index).padStart(7, "0")}`, `${RUN_PREFIX}-IR-LTC-${String(index).padStart(7, "0")}`, stale ? "STALE" : "VERIFIED", iso(index * 15), "RRA", `verify-${index}`, "source-event-v2"]);
   }
   return Promise.all([

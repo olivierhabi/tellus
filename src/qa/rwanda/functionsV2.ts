@@ -30,6 +30,11 @@ export const rwandaFunctionsV2 = {
     if (!text(input.clearanceId)) failures.push("clearanceId missing");
     if (text(input.status) !== "VALID") failures.push(`clearance status is ${text(input.status)}`);
     if (input.expiresAt && Date.parse(text(input.expiresAt)) <= Date.parse(text(input.now))) failures.push("clearance expired");
+    if (input.syncedAt) {
+      const ageMinutes = Math.floor((Date.parse(text(input.now)) - Date.parse(text(input.syncedAt))) / 60_000);
+      if (!Number.isFinite(ageMinutes) || ageMinutes < 0) failures.push("source sync timestamp is invalid");
+      else if (ageMinutes > number(input.freshnessSlaMinutes ?? 360)) failures.push("stale source data");
+    }
     if (input.citizenId && input.clearanceCitizenId && input.citizenId !== input.clearanceCitizenId) failures.push("clearance citizen mismatch");
     return { valid: failures.length === 0, failures };
   },
@@ -92,7 +97,10 @@ export type RwandaFunctionName = keyof typeof rwandaFunctionsV2;
 
 /** Source persisted in the legacy inline Functions registry. */
 export function inlineSource(name: RwandaFunctionName): string {
-  const methods = Object.values(rwandaFunctionsV2)
+  const selected = name === "buildBulkReconciliationResultV2"
+    ? [rwandaFunctionsV2.isReconciliationEligibleV2, rwandaFunctionsV2.buildBulkReconciliationResultV2]
+    : [rwandaFunctionsV2[name]];
+  const methods = selected
     .map((fn) => fn.toString())
     .join(",\n");
   return `export default (input) => {

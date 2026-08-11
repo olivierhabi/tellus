@@ -61,7 +61,11 @@ export async function evaluateFunctionValidationCriteria(
     const result = runSandboxed(String(published.rows[0].source_code), input);
     const output = result.output as Record<string, unknown> | null;
     if (result.status !== "ok" || output?.[config.resultField] !== true) {
-      failures.push(condition.description ?? `${config.apiName} rejected the action`);
+      const summary = condition.description ?? `${config.apiName} rejected the action`;
+      const details = Array.isArray(output?.failures)
+        ? output.failures.filter((item): item is string => typeof item === "string" && item.length > 0)
+        : [];
+      failures.push(details.length > 0 ? `${summary}: ${details.join(", ")}` : summary);
     }
   }
   return failures;

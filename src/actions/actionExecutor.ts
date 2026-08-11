@@ -31,6 +31,7 @@ import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import { executeWriteback, type WritebackConfig, type WritebackResult, type HttpRequestFn, type HttpResponseSimulated } from "./writebackExecutor";
 import { runWritebackStage } from "./runWritebackStage";
+import { rwandaQaFailure } from "../qa/rwanda/failureInjection";
 import { DEFAULT_EGRESS_POLICY } from "../services/webhookSafeTransport";
 import * as https from "https";
 import * as http from "http";
@@ -797,6 +798,17 @@ export async function executeAction(
     // window (the gap when the external side acknowledges but the
     // local apply-edits COMMIT rolls back).
     // -----------------------------------------------------------------
+    const injectedFailure = rwandaQaFailure(actionTypeApiName, resolvedParameters);
+    if (injectedFailure) {
+      pendingError = new OntologyError(
+        injectedFailure.message,
+        injectedFailure.code,
+        502,
+        { executionId, correlationId },
+      );
+      return result;
+    }
+
     let writebackOutputs: Record<string, unknown> | undefined;
     if (actionType.writeback_config != null) {
       try {
