@@ -1,18 +1,18 @@
 {
   "environment": "qa-local",
   "functions": {
-    "calculateCreditRiskV2": 1,
-    "validateCreditLimitV2": 1,
-    "detectAffordabilityExceptionV2": 1,
-    "validateRraTaxClearanceV2": 1,
-    "verifyNationalIdMatchV2": 1,
-    "detectLandTitleConflictV2": 1,
-    "classifyIso8583FailureV2": 1,
-    "isReconciliationEligibleV2": 1,
-    "calculateTransactionSlaV2": 1,
-    "buildBulkReconciliationResultV2": 1,
-    "calculateCarrierHealthV2": 1,
-    "recommendFailoverRouteV2": 1,
-    "validateRouteSwitchV2": 1
+    "calculateCreditRiskV2": 3,
+    "validateCreditLimitV2": 2,
+    "detectAffordabilityExceptionV2": 2,
+    "validateRraTaxClearanceV2": 2,
+    "verifyNationalIdMatchV2": 2,
+    "detectLandTitleConflictV2": 2,
+    "classifyIso8583FailureV2": 2,
+    "isReconciliationEligibleV2": 2,
+    "calculateTransactionSlaV2": 2,
+    "buildBulkReconciliationResultV2": 2,
+    "calculateCarrierHealthV2": 2,
+    "recommendFailoverRouteV2": 2,
+    "validateRouteSwitchV2": 2
   }
 }

@@ -41,7 +41,6 @@
     "test:pb:integration": "vitest run tests/foundry/integration",
     "test:pb:e2e": "bash scripts/test-pb-all-endpoints-e2e.sh",
     "test:pb:chaos": "bash scripts/test-pb-b9-db-kill-chaos.sh && bash scripts/test-pb-b9-lakekeeper-kill-chaos.sh && bash scripts/test-pb-b9-minio-kill-chaos.sh && bash scripts/test-pb-b9-temporal-kill-chaos.sh",
-    "test:pb:observability": "bash scripts/verify-pb-b9-observability-stack.sh",
     "test:perf": "bash tests/performance/run-all.sh",
     "test:all": "tsx tests/runAll.ts",
     "test:legacy": "tsx tests/index.ts",

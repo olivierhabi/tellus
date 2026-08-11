@@ -36,6 +36,7 @@ import * as https from "https";
 import * as http from "http";
 import { applyEdits } from "./editApplicator";
 import { evaluateSubmissionCriteria, resolveObjectPropertyOperands } from "./submissionCriteria";
+import { evaluateFunctionValidationCriteria } from "./functionValidationCriteria";
 import { fireActionWebhooks } from "./actionWebhooks";
 import { sendNotifications } from "./sideEffectNotifier";
 import {
@@ -612,6 +613,11 @@ export async function executeAction(
     // markings) is enforced separately; this gates on the inputs/preconditions.
     // -----------------------------------------------------------------
     {
+      const functionFailures = await evaluateFunctionValidationCriteria(
+        ontologyId,
+        actionType.submission_criteria,
+        resolvedParameters as Record<string, unknown>,
+      );
       // D27 — pre-resolve object-property operands (conditions of the form
       // `{ parameter, objectProperty }`) against the live referenced-object
       // state before evaluating criteria, so the pure evaluator can compare
@@ -632,6 +638,10 @@ export async function executeAction(
         },
         objectPropertyValues,
       );
+      if (functionFailures.length > 0) {
+        submission.ok = false;
+        submission.failures.push(...functionFailures);
+      }
       if (!submission.ok) {
         result.failureType = "unclassified";
         result.errorMessage = `Submission criteria not met: ${submission.failures.join("; ")}`;

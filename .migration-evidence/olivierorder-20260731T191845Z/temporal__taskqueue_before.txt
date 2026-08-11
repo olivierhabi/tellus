@@ -1,8 +1,0 @@
-Task Queue Statistics:
-    BuildID    TaskQueueType  ApproximateBacklogCount  ApproximateBacklogAge  BacklogIncreaseRate  TasksAddRate  TasksDispatchRate
-  UNVERSIONED  workflow                             0  0s                                       0             0                  0
-  UNVERSIONED  activity                             0  0s                                       0             0                  0
-Pollers:
-    BuildID    TaskQueueType            Identity            LastAccessTime  RatePerSecond
-  UNVERSIONED  workflow       66944@Olivier-HABIMANA.local  34 seconds ago         100000
-  UNVERSIONED  activity       66944@Olivier-HABIMANA.local  35 seconds ago         100000

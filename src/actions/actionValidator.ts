@@ -28,6 +28,7 @@ import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import type { CompiledEdit } from "./ruleCompiler";
 import { evaluateSubmissionCriteria, resolveObjectPropertyOperands, type SubmissionSubject } from "./submissionCriteria";
+import { evaluateFunctionValidationCriteria } from "./functionValidationCriteria";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
@@ -226,6 +227,15 @@ export async function validateAction(
     subject,
     objectPropertyValues,
   );
+  const functionFailures = await evaluateFunctionValidationCriteria(
+    ontologyId,
+    actionType.submission_criteria,
+    resolvedParameters as Record<string, unknown>,
+  );
+  if (functionFailures.length > 0) {
+    submission.ok = false;
+    submission.failures.push(...functionFailures);
+  }
 
   if (!submission.ok) {
     return {

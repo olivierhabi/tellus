@@ -1,9 +1,0 @@
-# FUNN-ISO-3 — Worker Versioning (server-1.25 task-queue Build-ID
-# assignment/redirect rules). Registered key names verified against
-# temporalio/temporal@v1.25.2 common/dynamicconfig/constants.go.
-frontend.workerVersioningDataAPIs:
-  - value: true
-frontend.workerVersioningWorkflowAPIs:
-  - value: true
-frontend.workerVersioningRuleAPIs:
-  - value: true

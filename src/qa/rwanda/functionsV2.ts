@@ -5,7 +5,7 @@ const text = (value: unknown): string => String(value ?? "");
 
 export const rwandaFunctionsV2 = {
   calculateCreditRiskV2(input: JsonRecord) {
-    const score = number(input.score);
+    const score = input.score == null ? (text(input.riskTier) === "HIGH" ? 92 : 50) : number(input.score);
     const band = score >= 90 ? "HIGH" : score >= 70 ? "MEDIUM" : "LOW";
     return { score, band, explanation: score >= 90 ? "High synthetic risk" : score >= 70 ? "Manual review threshold" : "Within policy" };
   },
