@@ -192,28 +192,23 @@ async function deleteIndex(
 ): Promise<DeleteIndexResult> {
   const indexName = getIndexName(objectTypeApiName);
 
-  // Check if the index exists
+  // A crash between replacement-index creation and alias swap can leave a
+  // concrete `-replacement-*` generation after the base alias/type has gone.
+  // It is not returned by `exists(indexName)`, but it will collide with a later
+  // deterministic reindex and leaks shards between QA runs.
   const { body: exists } = await client.indices.exists({ index: indexName });
-
-  if (!exists) {
-    return {
-      success: true,
-      indexName,
-      message: `Index '${indexName}' does not exist, nothing to delete`,
-    };
-  }
 
   // A reindex replaces the original concrete index with an alias pointing at
   // a generation.  OpenSearch refuses `DELETE <alias>` (and leaving those
   // generations behind exhausts the shard budget in repeated QA runs), so
   // resolve the alias to its concrete targets first.  A direct index retains
   // the old one-element target list.
-  let deleteTargets = [indexName];
+  const deleteTargets = new Set<string>();
+  if (exists) deleteTargets.add(indexName);
   try {
     const aliases = await client.indices.getAlias({ name: indexName });
     const aliasBody = (aliases as { body?: Record<string, unknown> }).body ?? aliases;
-    const concrete = Object.keys(aliasBody as Record<string, unknown>);
-    if (concrete.length > 0) deleteTargets = concrete;
+    for (const concrete of Object.keys(aliasBody as Record<string, unknown>)) deleteTargets.add(concrete);
   } catch (err: unknown) {
     const status = (err as { statusCode?: number; meta?: { statusCode?: number } }).statusCode
       ?? (err as { meta?: { statusCode?: number } }).meta?.statusCode;
@@ -222,9 +217,27 @@ async function deleteIndex(
     if (status !== 404) throw err;
   }
 
+  try {
+    const generations = await client.indices.get({ index: `${indexName}-replacement-*` });
+    const generationBody = (generations as { body?: Record<string, unknown> }).body ?? generations;
+    for (const concrete of Object.keys(generationBody as Record<string, unknown>)) deleteTargets.add(concrete);
+  } catch (err: unknown) {
+    const status = (err as { statusCode?: number; meta?: { statusCode?: number } }).statusCode
+      ?? (err as { meta?: { statusCode?: number } }).meta?.statusCode;
+    if (status !== 404) throw err;
+  }
+
+  if (deleteTargets.size === 0) {
+    return {
+      success: true,
+      indexName,
+      message: `Index '${indexName}' and its replacement generations do not exist, nothing to delete`,
+    };
+  }
+
   // Delete the concrete index or all concrete alias generations.
   try {
-    await client.indices.delete({ index: deleteTargets.join(",") });
+    await client.indices.delete({ index: [...deleteTargets].join(",") });
   } catch (err: unknown) {
     throw new Error(
       `Failed to delete index '${indexName}': ${extractErrorMessage(err)}`
@@ -245,7 +258,7 @@ async function deleteIndex(
   const deadline = Date.now() + pollTimeoutMs;
   for (;;) {
     const { body: stillExists } = await client.indices.exists({
-      index: indexName,
+      index: `${indexName},${indexName}-replacement-*`,
     });
     if (!stillExists) break;
     if (Date.now() >= deadline) {
