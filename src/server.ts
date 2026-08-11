@@ -1515,16 +1515,20 @@ async function start(): Promise<void> {
     functionsPublishService.start();
     if (process.env.AUTOMATE_RUNTIME_DISABLED !== "true") {
       startAutomateRuntime();
-      // Rwanda QA §7.3: independent one-minute, durable policy evaluator.
-      // Failures are contained here; each decision is itself persisted in the
-      // automation audit table for operator review and retry diagnosis.
+      console.log("Automate durable scheduler and worker started");
+    }
+    // Rwanda QA §7.3: independent one-minute, durable policy evaluator.
+    // It is independently switchable for focused clean browser suites, whose
+    // fixture ingestion creates transient routes before the scenario under
+    // test starts. Production keeps this enabled by default.
+    if (process.env.PINDO_AUTOMATION_DISABLED !== "true") {
       const runPindo = () => void runRwandaPindoAutomationOnce().catch((error) =>
         console.error("rwanda-pindo-automation failed", error),
       );
       runPindo();
       const pindoTimer = setInterval(runPindo, 60_000);
       pindoTimer.unref();
-      console.log("Automate durable scheduler and worker started");
+      console.log("Rwanda Pindo automation scheduler started");
     }
 
     startDeveloperConsoleReconciliationWorker(foundryDb as unknown as import('knex').Knex);

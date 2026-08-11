@@ -52,6 +52,9 @@ export function evaluatePindoFailover(
     if (index > 0 && at(sample.measuredAt) - at(ordered[index - 1]!.measuredAt) > policy.maxTelemetryGapMs) return result("SUPPRESSED", "telemetry gap exceeds policy");
   }
   const latest = ordered[ordered.length - 1]!;
+  if (nowMs - at(latest.measuredAt) > policy.maxTelemetryGapMs) {
+    return result("SUPPRESSED", "telemetry gap: latest sample is stale");
+  }
   const breached = latest.latencyMs >= policy.breachThresholdMs;
   if (state.activeRoute === "primary") {
     state.recoverySince = undefined;

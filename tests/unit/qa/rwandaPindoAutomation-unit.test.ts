@@ -21,6 +21,16 @@ describe("Rwanda Pindo sustained-breach automation policy", () => {
   it("rejects corrupt telemetry", () => {
     expect(evaluatePindoFailover(sample("2026-08-10T08:01:00Z", -1), policy, { activeRoute: "primary", failovers: [] }, "2026-08-10T08:00:00Z").outcome).toBe("SUPPRESSED");
   });
+  it("refuses stale telemetry rather than failing over on an old breach", () => {
+    expect(
+      evaluatePindoFailover(
+        sample("2026-08-10T07:58:00Z", 2_000),
+        policy,
+        { activeRoute: "primary", breachSince: "2026-08-10T07:57:00Z", failovers: [] },
+        "2026-08-10T08:00:00Z",
+      ),
+    ).toMatchObject({ outcome: "SUPPRESSED", reason: "telemetry gap: latest sample is stale" });
+  });
   it("prevents oscillation until recovery hold-down completes", () => {
     const held = evaluatePindoFailover(sample("2026-08-10T07:59:30Z", 100), policy, { activeRoute: "fallback", recoverySince: "2026-08-10T07:59:00Z", failovers: [] }, "2026-08-10T08:00:00Z");
     expect(held.outcome).toBe("NOOP");
