@@ -45,6 +45,10 @@ import { actionRateLimiter, batchRateLimiter } from "../middleware/rateLimiter";
 import { planInlineEditBatch } from "../actions/inlineEditBatch";
 import { sendError } from "../utils/responseFormatter";
 import { query } from "../db";
+import {
+  executeRwandaRswitchBulkReconciliation,
+  RWANDA_RSWITCH_BULK_ACTION,
+} from "../qa/rwanda/rSwitchBulkReconciliationRoute";
 
 // ---------------------------------------------------------------------------
 // Router
@@ -348,6 +352,49 @@ router.post(
           400,
           { parameterName: "requests" }
         );
+      }
+
+      // Rwanda QA §6.3 is a domain batch rather than the generic 100-item
+      // applyBatch surface: clients submit one requestId for the complete
+      // selection and the server owns invisible 100-target chunks plus the
+      // durable transaction+settlement-batch reservation.
+      if (actionTypeApiName === RWANDA_RSWITCH_BULK_ACTION) {
+        const requestId = req.headers["idempotency-key"];
+        if (typeof requestId !== "string" || !requestId.trim()) {
+          throw new OntologyError("Idempotency-Key requestId is required", "INVALID_PARAMETER", 400);
+        }
+        const run = async () => {
+          const result = await executeRwandaRswitchBulkReconciliation({
+            ontologyId,
+            requestId,
+            requests: body.requests,
+            contextFor: (index) => {
+              const item = body.requests[index] ?? {};
+              const sec = (req as any).security as
+                | { userId: string; markings: string[]; cbac: string[]; systemPrincipal: boolean; markingBypass: boolean }
+                | undefined;
+              return {
+                executedBy: (req as any).user?.id || "system",
+                correlationId: requestCorrelationId(req),
+                tenant: resolveRequestTenant(req),
+                sourceIp: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null,
+                branchId: item.branchId || body.branchId || null,
+                roles: (req as any).user?.roles || [],
+                groups: (req as any).user?.groups || [],
+                ...(sec ? {
+                  subjectKind: (sec.systemPrincipal ? "service" : "user") as "user" | "service",
+                  subjectIdentifier: sec.userId || (req as any).user?.id || "anonymous",
+                  subjectMarkings: sec.markings ?? [],
+                  subjectCbac: sec.cbac ?? [],
+                  markBypass: sec.markingBypass === true,
+                } : {}),
+              };
+            },
+          });
+          return res.status(200).json(result);
+        };
+        await withIdempotencyLock(`rwanda-bulk:${requestId}`, run);
+        return;
       }
 
       if (body.requests.length > MAX_BATCH_SIZE) {
@@ -810,6 +857,29 @@ validateRouter.post(
 
 const batchRouter = Router({ mergeParams: true });
 
+function rwandaBulkExecutionContext(req: Request, body: any, index: number) {
+  const item = body.requests[index] ?? {};
+  const sec = (req as any).security as
+    | { userId: string; markings: string[]; cbac: string[]; systemPrincipal: boolean; markingBypass: boolean }
+    | undefined;
+  return {
+    executedBy: (req as any).user?.id || "system",
+    correlationId: requestCorrelationId(req),
+    tenant: resolveRequestTenant(req),
+    sourceIp: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null,
+    branchId: item.branchId || body.branchId || null,
+    roles: (req as any).user?.roles || [],
+    groups: (req as any).user?.groups || [],
+    ...(sec ? {
+      subjectKind: (sec.systemPrincipal ? "service" : "user") as "user" | "service",
+      subjectIdentifier: sec.userId || (req as any).user?.id || "anonymous",
+      subjectMarkings: sec.markings ?? [],
+      subjectCbac: sec.cbac ?? [],
+      markBypass: sec.markingBypass === true,
+    } : {}),
+  };
+}
+
 batchRouter.post(
   "/:actionTypeApiName/applyBatch",
   batchRateLimiter,
@@ -854,6 +924,23 @@ batchRouter.post(
           400,
           { parameterName: "requests" }
         );
+      }
+
+      if (actionTypeApiName === RWANDA_RSWITCH_BULK_ACTION) {
+        const requestId = req.headers["idempotency-key"];
+        if (typeof requestId !== "string" || !requestId.trim()) {
+          throw new OntologyError("Idempotency-Key requestId is required", "INVALID_PARAMETER", 400);
+        }
+        await withIdempotencyLock(`rwanda-bulk:${requestId}`, async () => {
+          const result = await executeRwandaRswitchBulkReconciliation({
+            ontologyId: defaultId,
+            requestId,
+            requests: body.requests,
+            contextFor: (index) => rwandaBulkExecutionContext(req, body, index),
+          });
+          res.status(200).json(result);
+        });
+        return;
       }
 
       if (body.requests.length > MAX_BATCH_SIZE) {

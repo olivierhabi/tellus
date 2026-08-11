@@ -65,6 +65,7 @@ import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
 import { query as pgQuery } from "../db";
+import type { PoolClient } from "pg";
 import { resolveSemanticsForRow } from "../models/actionType";
 import {
   getActionSemanticsExecutionAvailability,
@@ -150,6 +151,14 @@ export interface ExecutionContext {
    * Absent ⇒ LINK_INDEX_ACK_TIMEOUT_MS applies (default behavior).
    */
   ackBudgetMs?: number;
+  /**
+   * Optional domain write performed in the same PostgreSQL transaction as
+   * the action edits and durable audit entry.  This is intentionally an
+   * executor-level hook (rather than a route-side write) for business
+   * invariants that must never be observed without their corresponding
+   * ontology mutation, such as Rwanda settlement-key reservation.
+   */
+  beforeAuditCommitHook?: (client: PoolClient) => Promise<void>;
 }
 
 /** A single affected object in the result. */
@@ -712,6 +721,7 @@ export async function executeAction(
           result.result = "success";
           result.affectedObjects = affectedObjects;
           result.durationMs = Date.now() - startTime;
+          await context.beforeAuditCommitHook?.(client);
           await appendAuditRow(client, buildAuditEntry());
           auditCommitted = true;
         },
@@ -1089,6 +1099,7 @@ export async function executeAction(
     const preCommitHook = async (pg: any) => {
       // Recompute duration at commit time for a tighter audit number.
       result.durationMs = Date.now() - startTime;
+      await context.beforeAuditCommitHook?.(pg);
       const entry = buildAuditEntry();
       await appendAuditRow(pg, entry);
       auditCommitted = true;
