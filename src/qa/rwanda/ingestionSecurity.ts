@@ -42,7 +42,7 @@ export function parseCsv(csv: string): CsvTable {
 }
 
 function escape(value: string): string {
-  return /[",\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
 export function serializeCsv(headers: readonly string[], rows: readonly (readonly string[])[]): string {
