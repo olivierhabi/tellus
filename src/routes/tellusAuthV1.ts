@@ -2021,6 +2021,11 @@ router.post(
         emailVerified: parsed.data.emailVerified ?? true,
       });
 
+      // Grant the standard member role bundle — without an ontology-*
+      // role every content route fails closed, and without a marking
+      // role marked content is invisible.
+      const roles = await kcAdmin().assignDefaultMemberRoles(userId);
+
       await emitAuditEvent({
         keycloakSub: actor.sub,
         category: 'admin',
@@ -2030,6 +2035,7 @@ router.post(
         details: {
           targetUserId: userId,
           targetEmail: parsed.data.email,
+          assignedRoles: roles,
         },
       });
 
@@ -2043,7 +2049,149 @@ router.post(
           lastName: parsed.data.lastName ?? null,
           enabled: parsed.data.enabled ?? true,
           emailVerified: parsed.data.emailVerified ?? true,
-          roles: [] as string[],
+          roles,
+        },
+      });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+// --- Invite --------------------------------------------------------------
+
+/**
+ * Generate a temporary password guaranteed to satisfy the tellus realm's
+ * password policy (12+ chars, upper, lower, digit, symbol). Symbols are
+ * drawn from a subset of Keycloak's default `specialChars` list that
+ * survives shell-copying without escapes.
+ */
+function generateInvitePassword(): string {
+  const uppers = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lowers = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!#$%&*+-=?@';
+  const pick = (pool: string) => pool[crypto.randomInt(0, pool.length)];
+  const pools = [uppers, lowers, digits, symbols];
+  // Guarantee one char from every policy category, then fill the rest
+  // from the union and shuffle so category positions aren't predictable.
+  const chars = pools.map(pick);
+  const union = pools.join('');
+  while (chars.length < 16) chars.push(pick(union));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
+
+const InviteUserSchema = z.object({
+  email: z.string().email().max(320),
+  firstName: z.string().min(1).max(128),
+  lastName: z.string().min(1).max(128),
+  /**
+   * Optional admin-provided initial password. When omitted, the backend
+   * generates a cryptographically random one that satisfies the realm
+   * policy. Either way the credentials are delivered through the email
+   * outbox — never returned in the response.
+   */
+  password: z.string().min(12).max(256).optional(),
+});
+
+/**
+ * POST /admin/users/invite — the Control Panel "Send invite" flow.
+ *
+ * Creates the Keycloak account with a cryptographically random temporary
+ * password (never set manually, never returned), then enqueues an
+ * invitation email carrying the credentials through the email outbox
+ * (emailOutboxService — logfile sender in dev, pluggable SES/SMTP sender
+ * in production). emailVerified stays false so the admin console can
+ * distinguish invited-not-yet-activated accounts from fully active ones;
+ * the mandatory passkey-enrollment gate applies on first login as usual.
+ *
+ * The temporary password is intentionally absent from the response body:
+ * the email outbox is the single credential-delivery channel.
+ */
+router.post(
+  '/admin/users/invite',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = InviteUserSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+
+      const existing = await kcAdmin().findUserByEmail(parsed.data.email);
+      if (existing) {
+        throw new AppError(
+          'A user with this email already exists',
+          409,
+          'USER_ALREADY_EXISTS',
+        );
+      }
+
+      const temporaryPassword = parsed.data.password ?? generateInvitePassword();
+      const userId = await kcAdmin().createUser({
+        username: parsed.data.email,
+        email: parsed.data.email,
+        firstName: parsed.data.firstName,
+        lastName: parsed.data.lastName,
+        password: temporaryPassword,
+        enabled: true,
+        emailVerified: false,
+      });
+
+      // Grant the standard member role bundle — without an ontology-*
+      // role every content route fails closed, and without a marking
+      // role marked content is invisible.
+      const roles = await kcAdmin().assignDefaultMemberRoles(userId);
+
+      await emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.user.invite',
+        result: 'SUCCESS',
+        req,
+        details: {
+          targetUserId: userId,
+          targetEmail: parsed.data.email,
+          assignedRoles: roles,
+        },
+      });
+
+      try {
+        const rendered = renderEmail(
+          'user-invited',
+          "You've been invited to Tellus",
+          {
+            firstName: parsed.data.firstName,
+            email: parsed.data.email,
+            temporaryPassword,
+            invitedBy: actor.email ?? actor.preferred_username ?? actor.sub,
+            tellusOrigin: process.env.TELLUS_FRONTEND_URL || 'http://localhost:3001',
+          },
+        );
+        await enqueueEmail({ to: parsed.data.email, rendered });
+      } catch {
+        /* template/infrastructure failure must never roll back the invite —
+           the account exists and the admin can resend credentials manually. */
+      }
+
+      res.status(201).json({
+        success: true,
+        data: {
+          id: userId,
+          username: parsed.data.email,
+          email: parsed.data.email,
+          firstName: parsed.data.firstName,
+          lastName: parsed.data.lastName,
+          enabled: true,
+          emailVerified: false,
+          roles,
+          inviteEmailQueued: true,
         },
       });
     } catch (err) {

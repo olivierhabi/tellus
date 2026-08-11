@@ -681,6 +681,35 @@ export class KeycloakAdminService {
     }));
   }
 
+  /**
+   * Realm roles granted to every newly provisioned member. Mirrors the
+   * standard (non-admin) member archetype from
+   * scripts/bootstrap-keycloak.sh: `ontology-editor` for content
+   * read/write, plus every non-admin security marking so the user can
+   * see org content — TOP_SECRET stays an admin-only grant. Without
+   * these, every content route (requireRole / dataPlaneGuard) fails
+   * closed and the user can sign in but see nothing.
+   */
+  static readonly DEFAULT_MEMBER_ROLES: readonly string[] = [
+    'ontology-editor',
+    'marking:PUBLIC',
+    'marking:CONFIDENTIAL',
+    'marking:SECRET',
+  ];
+
+  /**
+   * Grant the standard member role bundle to a user. Idempotent per
+   * role (assignRealmRoleToUser skips already-held roles) and ordered —
+   * each ensure/assign failure propagates so a half-provisioned user
+   * surfaces as a route error instead of a silent accessless account.
+   */
+  async assignDefaultMemberRoles(userId: string): Promise<string[]> {
+    for (const roleName of KeycloakAdminService.DEFAULT_MEMBER_ROLES) {
+      await this.assignRealmRoleToUser(userId, roleName);
+    }
+    return [...KeycloakAdminService.DEFAULT_MEMBER_ROLES];
+  }
+
   async assignRealmRoleToUser(userId: string, roleName: string): Promise<void> {
     const role = await this.ensureRealmRole(roleName);
     const current = await this.listUserRealmRoles(userId);

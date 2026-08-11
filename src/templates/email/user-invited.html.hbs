@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>You've been invited to Tellus</title>
+  </head>
+  <body style="font-family: -apple-system, Segoe UI, Helvetica, sans-serif; background: #f7f8fa; margin: 0; padding: 24px; color: #1c2127;">
+    <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 20px;">You've been invited to Tellus</h1>
+      <p style="color: #4b5563; margin: 0 0 16px 0;">{{invitedBy}} created an account for you.</p>
+
+      <p>Hi {{firstName}},</p>
+      <p>
+        Sign in with your email and the temporary password below. You will
+        be asked to register a passkey before your session is created —
+        the passkey replaces the temporary password as your day-to-day
+        sign-in method.
+      </p>
+
+      <table style="width: 100%; border-collapse: collapse; background: #f3f4f6; border-radius: 8px; margin: 16px 0;">
+        <tbody>
+          <tr>
+            <td style="padding: 8px 12px; color: #6b7280; width: 150px;">Sign in at</td>
+            <td style="padding: 8px 12px;"><a href="{{tellusOrigin}}/login">{{tellusOrigin}}/login</a></td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 12px; color: #6b7280;">Email</td>
+            <td style="padding: 8px 12px;"><code>{{email}}</code></td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 12px; color: #6b7280;">Temporary password</td>
+            <td style="padding: 8px 12px;"><code>{{temporaryPassword}}</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p style="margin: 16px 0;"><b>Keep this email private</b> — it contains a working temporary password. Do not forward it.</p>
+      <p style="margin: 16px 0;"><b>Not expecting this?</b> Contact {{invitedBy}} or your administrator before signing in; the account can be disabled before it is ever used.</p>
+
+      <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+      <p style="color: #9ca3af; font-size: 12px; margin: 0;">
+        Tellus · {{tellusOrigin}}
+      </p>
+    </div>
+  </body>
+</html>

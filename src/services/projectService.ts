@@ -95,8 +95,39 @@ export class ProjectService {
     });
   }
 
+  /**
+   * Org-shared read visibility (knex subquery, must be nested inside
+   * `.where(projectId, ...)` / `.where({ owner_id })` OR-combinators by
+   * callers that pass a `projects` table alias of `projects`).
+   *
+   * A project is visible to a user when at least one of its
+   * organizations is also one of the user's organizations. Together with
+   * the auto-enroll triggers (users + projects join the default org at
+   * creation), this gives every org member read access to every project
+   * in their org — without it `listProjects` was owner-only and plain
+   * members saw an empty file browser for anything they didn't create.
+   *
+   * Intentionally READ-scoped: mutations (createFolder/update/delete,
+   * project update/delete, uploads) remain owner/membership-gated.
+   */
+  private orgSharedProjects(userId: string) {
+    return this.knex('project_organizations')
+      .select(this.knex.raw('1'))
+      .whereRaw(
+        "project_organizations.project_rid = 'ri.compass.main.project.' || projects.id::text",
+      )
+      .whereExists(
+        this.knex('user_organizations')
+          .select(this.knex.raw('1'))
+          .whereRaw('user_organizations.org_id = project_organizations.org_id')
+          .where('user_organizations.user_id', userId),
+      );
+  }
+
   async listProjects(ownerId: string, fields?: string[]) {
-    const query = this.knex('projects').where({ owner_id: ownerId });
+    const query = this.knex('projects').where((qb) => {
+      qb.where({ owner_id: ownerId }).orWhereExists(this.orgSharedProjects(ownerId));
+    });
     if (fields && fields.length > 0) {
       query.select(fields.map(f => `projects.${f}`));
     }
@@ -114,8 +145,17 @@ export class ProjectService {
 
   async getProjectById(projectId: string, ownerId: string) {
     const rows = await this.knex.raw(
-      `SELECT p.*, COALESCE(json_agg(json_build_object('id', f.id, 'name', f.name, 'createdAt', f.created_at) ORDER BY f.name ASC) FILTER (WHERE f.id IS NOT NULL), '[]'::json) AS root_folders FROM projects p LEFT JOIN folders f ON f.project_id = p.id AND f.parent_folder_id IS NULL WHERE p.id = ? AND p.owner_id = ? GROUP BY p.id`,
-      [projectId, ownerId]
+      `SELECT p.*, COALESCE(json_agg(json_build_object('id', f.id, 'name', f.name, 'createdAt', f.created_at) ORDER BY f.name ASC) FILTER (WHERE f.id IS NOT NULL), '[]'::json) AS root_folders
+         FROM projects p
+         LEFT JOIN folders f ON f.project_id = p.id AND f.parent_folder_id IS NULL
+         WHERE p.id = ?
+           AND (p.owner_id = ? OR EXISTS (
+                 SELECT 1 FROM project_organizations po
+                 JOIN user_organizations uo ON uo.org_id = po.org_id
+                 WHERE po.project_rid = 'ri.compass.main.project.' || p.id::text
+                   AND uo.user_id = ?))
+         GROUP BY p.id`,
+      [projectId, ownerId, ownerId]
     );
     return rows.rows[0] || null;
   }
