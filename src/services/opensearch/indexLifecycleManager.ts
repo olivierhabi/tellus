@@ -208,7 +208,13 @@ async function deleteIndex(
   try {
     const aliases = await client.indices.getAlias({ name: indexName });
     const aliasBody = (aliases as { body?: Record<string, unknown> }).body ?? aliases;
-    for (const concrete of Object.keys(aliasBody as Record<string, unknown>)) deleteTargets.add(concrete);
+    const concrete = Object.keys(aliasBody as Record<string, unknown>);
+    if (concrete.length > 0) {
+      // OpenSearch will not accept an alias in a delete expression, even when
+      // the same request also names its concrete target.
+      deleteTargets.delete(indexName);
+      for (const target of concrete) deleteTargets.add(target);
+    }
   } catch (err: unknown) {
     const status = (err as { statusCode?: number; meta?: { statusCode?: number } }).statusCode
       ?? (err as { meta?: { statusCode?: number } }).meta?.statusCode;
