@@ -11,6 +11,7 @@
  */
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { quarantineDirtyCsv, sanitizeIso8583Csv } from "../../src/qa/rwanda/ingestionSecurity";
 
 const EDITOR = "633a9660-e374-41c6-87e0-d213cf50623d";
 const ADMIN = "bdaba072-16f3-41c2-91f8-b367065ec578";
@@ -72,17 +73,28 @@ async function ontologyId(base: string) {
   return id;
 }
 
-async function upload(base: string, file: string, name: string) {
-  const bytes = await readFile(file);
+async function uploadBytes(base: string, bytes: Uint8Array, filename: string, name: string) {
   const form = new FormData();
   form.append("name", name);
-  form.append("description", `Synthetic Rwanda QA fixture: ${path.basename(file)}`);
+  form.append("description", `Synthetic Rwanda QA fixture: ${filename}`);
   form.append("transactionType", "SNAPSHOT");
-  form.append("file", new Blob([bytes], { type: "text/csv" }), path.basename(file));
+  form.append("file", new Blob([bytes], { type: "text/csv" }), filename);
   const result = await api(base, "/api/v1/datasets/upload", { method: "POST", body: form });
   const id = result.data?.dataset?.datasetId ?? result.data?.dataset_id ?? result.dataset?.datasetId ?? result.dataset_id;
-  if (typeof id !== "string") throw new Error(`Upload did not return a dataset ID for ${file}: ${JSON.stringify(result).slice(0, 500)}`);
+  if (typeof id !== "string") throw new Error(`Upload did not return a dataset ID for ${filename}: ${JSON.stringify(result).slice(0, 500)}`);
   return id;
+}
+
+async function ingestCsv(base: string, ontology: string, uploaded: Uploaded[], type: string, csv: string, filename: string) {
+  const header = columns(csv);
+  await ensureObjectType(base, ontology, type, header);
+  const datasetId = await uploadBytes(base, Buffer.from(csv), filename, `qa-rw-${path.basename(filename, ".csv")}`);
+  await api(base, `/api/v1/ontology/${ontology}/objectTypes/${type}/datasource`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ datasetId, primaryKeyColumn: header[0], columnMapping: Object.fromEntries(header.map((column) => [column, column])) }),
+  });
+  uploaded.push({ apiName: type, datasetId });
+  await api(base, `/api/v1/ontology/${ontology}/objectTypes/${type}/reindex?force=true`, { method: "POST" }, ADMIN);
 }
 
 async function ensureObjectType(base: string, ontology: string, type: string, headers: string[]) {
@@ -132,20 +144,24 @@ export async function ingestFunctionalFixtures(options = args()): Promise<Upload
     for (const file of files) {
       const type = apiName(file);
       const csv = await readFile(file, "utf8");
-      const header = columns(csv);
-      await ensureObjectType(options.base, ontology, type, header);
-      const datasetId = await upload(options.base, file, `qa-rw-${path.basename(file, ".csv")}`);
-      await api(options.base, `/api/v1/ontology/${ontology}/objectTypes/${type}/datasource`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ datasetId, primaryKeyColumn: header[0], columnMapping: Object.fromEntries(header.map((column) => [column, column])) }),
-      });
-      uploaded.push({ apiName: type, datasetId });
-      // Reindex is deliberately admin-only: the test harness uses the
-      // seeded admin identity for this backend lifecycle operation while
-      // all user journeys remain browser-driven as their acting role.
-      await api(options.base, `/api/v1/ontology/${ontology}/objectTypes/${type}/reindex?force=true`, { method: "POST" }, ADMIN);
+      await ingestCsv(options.base, ontology, uploaded, type, csv, path.basename(file));
     }
+    // Raw ISO-8583 is intentionally transformed before it reaches the
+    // supported upload/datasource/reindex pipeline.  No datasource schema or
+    // diagnostic contains field2Pan.
+    const rawIso = await readFile(path.join(options.out, "c-rswitch/ingestion-inputs/raw_iso8583.csv"), "utf8");
+    await ingestCsv(options.base, ontology, uploaded, "QaRwRswitchSanitizedIso8583", sanitizeIso8583Csv(rawIso), "sanitized_iso8583.csv");
+
+    // Rejected source rows are materialized as an indexed, audit-visible
+    // dataset.  Diagnostics deliberately carry reasons and row numbers only.
+    const entries = await readdir(options.out, { recursive: true, withFileTypes: true });
+    const quarantined = (await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.startsWith("dirty_")).map(async (entry) => {
+      const file = path.join(entry.parentPath, entry.name);
+      return quarantineDirtyCsv(entry.name, await readFile(file, "utf8"));
+    }))).flat();
+    const report = ["quarantineId,sourceFile,rowNumber,reasonCode,reason", ...quarantined.map((record, index) =>
+      `QA-RW-Q-${String(index + 1).padStart(6, "0")},${record.sourceFile},${record.rowNumber},${record.reasonCode},${record.reason}`)].join("\n") + "\n";
+    await ingestCsv(options.base, ontology, uploaded, "QaRwIngestionQuarantine", report, "ingestion_quarantine.csv");
     console.log(JSON.stringify({ ingested: uploaded.length, namespace: "QA-RW", objectTypes: uploaded.map(({ apiName }) => apiName) }));
     return uploaded;
   } catch (error) {
