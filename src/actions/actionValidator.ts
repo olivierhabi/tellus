@@ -205,8 +205,11 @@ export async function validateAction(
   // -----------------------------------------------------------------
   const subject: SubmissionSubject = {
     username: context?.executedBy ?? undefined,
-    roles: [],
-    groups: [],
+    // Role/group predicates must use the caller's identity, same as
+    // actionExecutor.ts Stage 3 — otherwise /validate rejects every
+    // role-gated action that /apply would accept.
+    roles: context?.roles ?? [],
+    groups: context?.groups ?? [],
   };
 
   // D27 — pre-resolve object-property operands against the live referenced-
