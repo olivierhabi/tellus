@@ -44,6 +44,7 @@ interface FormattedAuditEntry {
   executedAt: string;
   sourceIp: string | null;
   branchId: string | null;
+  correlationId: string | null;
   /** ADDITIVE (flag-on + link events staged) serving-index read-after-write
    *  verdict (linkIndexAckHttp.ts). Absent ⇒ byte-compatible with the
    *  pre-contract audit body. See GET /log/:executionId doc. */
@@ -72,6 +73,7 @@ function formatAuditEntry(row: Record<string, any>): FormattedAuditEntry {
     executedAt: row.executed_at,
     sourceIp: row.source_ip ?? null,
     branchId: row.branch_id ?? null,
+    correlationId: row.correlation_id ?? null,
   };
 }
 
