@@ -44,6 +44,10 @@ vi.mock("../../../src/middleware/securityContext", () => ({
   buildSecurityFilter: () => ({ bool: { filter: [] } }),
   requireSecurityContext: (req: { security: unknown }) => req.security,
 }));
+vi.mock("../../../src/services/security/propertyMarkingGuard", () => ({
+  enforceQueryMarkings: vi.fn(async () => new Map()),
+  stripRestrictedRows: vi.fn(),
+}));
 vi.mock("../../../src/services/oss/readContext", () => ({
   resolveReadContexts: async () => ({ transaction: null, scenario: null }),
   composeReadContextLinkTargets: mocks.composeReadContextLinkTargets,

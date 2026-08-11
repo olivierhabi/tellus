@@ -65,9 +65,11 @@ const AUDIT_ROW = {
   executed_at: "2026-08-03T12:00:00.000Z",
   source_ip: null,
   branch_id: null,
+  correlation_id: null,
 };
 
-// The 14 legacy fields — the contract pre-overlay.
+// The stable audit fields — correlationId was added by the Rwanda traceability
+// contract and is independent of the optional index-visibility overlay.
 const LEGACY_KEYS = [
   "auditId",
   "actionTypeApiName",
@@ -84,6 +86,7 @@ const LEGACY_KEYS = [
   "executedAt",
   "sourceIp",
   "branchId",
+  "correlationId",
 ];
 
 beforeEach(() => {
