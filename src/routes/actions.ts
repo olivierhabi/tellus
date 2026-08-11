@@ -439,7 +439,13 @@ router.post(
           envAckTimeoutMs,
         });
 
-        // Build execution context for this individual request
+        // Build execution context for this individual request. Preserve the
+        // same role/CBAC/marking principal as single apply and the default-
+        // ontology batch mount; otherwise role criteria fail only on this
+        // ontology-scoped batch path.
+        const secBatch = (req as any).security as
+          | { userId: string; markings: string[]; cbac: string[]; systemPrincipal: boolean; markingBypass: boolean }
+          | undefined;
         const context = {
           executedBy: (req as any).user?.id || "system",
           correlationId: requestCorrelationId(req),
@@ -449,7 +455,18 @@ router.post(
             req.socket.remoteAddress ||
             null,
           branchId: item.branchId || body.branchId || null,
+          roles: (req as any).user?.roles || [],
+          groups: (req as any).user?.groups || [],
           ...(ackBudgetMs !== undefined ? { ackBudgetMs } : {}),
+          ...(secBatch
+            ? {
+                subjectKind: (secBatch.systemPrincipal ? "service" : "user") as "user" | "service" | "token" | "anonymous",
+                subjectIdentifier: secBatch.userId || (req as any).user?.id || "anonymous",
+                subjectMarkings: secBatch.markings ?? [],
+                subjectCbac: secBatch.cbac ?? [],
+                markBypass: secBatch.markingBypass === true,
+              }
+            : {}),
         };
 
         try {
