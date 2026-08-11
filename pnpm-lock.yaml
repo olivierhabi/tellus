@@ -164,6 +164,9 @@ importers:
       swagger-ui-express:
         specifier: ^5.0.1
         version: 5.0.1(express@4.22.1)
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
       uuid:
         specifier: ^13.0.0
         version: 13.0.0
@@ -267,9 +270,6 @@ importers:
       tsx:
         specifier: ^4.21.0
         version: 4.21.0
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@25.4.0)(esbuild@0.27.3)(terser@5.46.1)(tsx@4.21.0)(yaml@2.9.0)

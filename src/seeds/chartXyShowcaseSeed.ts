@@ -684,7 +684,8 @@ function buildDefinition(scenarioRid: string): Record<string, unknown> {
 async function main() {
   const current = await getModule(TARGET_RID);
   const { etag } = await getModuleEtag(TARGET_RID);
-  const ontologyId = current.ontologyRid.split(".").at(-1) ?? current.ontologyRid;
+  const ontologyRidParts = current.ontologyRid.split(".");
+  const ontologyId = ontologyRidParts[ontologyRidParts.length - 1] ?? current.ontologyRid;
   await ensureParityFunctions(ontologyId);
 
   const scenario = await createReadContext({

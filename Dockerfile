@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ---------------------------------------------------------------------------
 # Multi-stage Dockerfile for Ontology Engine
 #
@@ -18,7 +19,9 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@latest-10 --activate
 
 COPY package.json pnpm-lock.yaml tsconfig.json ./
-RUN pnpm install --frozen-lockfile --ignore-scripts
+RUN --mount=type=cache,id=tellus-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm config set fetch-retries 5 \
+    && pnpm install --frozen-lockfile --ignore-scripts
 
 COPY src/ src/
 COPY scripts/ scripts/
@@ -44,7 +47,9 @@ RUN corepack enable && corepack prepare pnpm@latest-10 --activate
 RUN groupadd --system appgroup && useradd --system --gid appgroup appuser
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod --ignore-scripts && pnpm store prune
+RUN --mount=type=cache,id=tellus-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm config set fetch-retries 5 \
+    && pnpm install --frozen-lockfile --prod --ignore-scripts
 
 COPY --from=builder /app/dist/ dist/
 

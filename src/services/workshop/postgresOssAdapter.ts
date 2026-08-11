@@ -89,6 +89,16 @@ function compilePredicate(p: Predicate, params: unknown[]): string {
       params.push(p.value.replace(/\*/g, "%"));
       return `${col}::text ILIKE $${params.length}`;
     }
+    case "prefix": {
+      const col = COL_MAP[p.field];
+      if (!col) return "FALSE";
+      params.push(`${p.value}%`);
+      return `${col}::text ILIKE $${params.length}`;
+    }
+    case "isNull": {
+      const col = COL_MAP[p.field];
+      return col ? `${col} IS NULL` : "FALSE";
+    }
     case "range": {
       const col = COL_MAP[p.field];
       if (!col) return "FALSE";
@@ -166,6 +176,15 @@ function compileJsonbPredicate(p: Predicate, params: unknown[]): string {
       const lhs = jsonbField(p.field, params);
       params.push(p.value.replace(/\*/g, "%"));
       return `${lhs} ILIKE $${params.length}`;
+    }
+    case "prefix": {
+      const lhs = jsonbField(p.field, params);
+      params.push(`${p.value}%`);
+      return `${lhs} ILIKE $${params.length}`;
+    }
+    case "isNull": {
+      const lhs = jsonbField(p.field, params);
+      return `${lhs} IS NULL`;
     }
     case "range": {
       const lhs = jsonbField(p.field, params);
