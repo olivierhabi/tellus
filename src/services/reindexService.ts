@@ -797,27 +797,47 @@ export async function reindexObjectType(
     // process is restarted with a restored/frozen clock. The replacement is
     // never a durable identifier, so add entropy while retaining a sortable
     // timestamp prefix for operations and lifecycle cleanup.
-    replacementIndexName =
-      `${indexName}-replacement-${Date.now().toString(36)}-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-
     // =================================================================
     // Step 8: Create an isolated sibling index. The serving index/alias is
     // left untouched until every replacement document has landed.
     // =================================================================
     try {
-      const generated = await generateIndexMapping(
-        objectTypeApiName,
-        ontologyId,
-      );
-      await client.indices.create({
-        index: replacementIndexName,
-        body: generated.mapping as unknown as Record<string, unknown>,
-      });
+      const generated = await generateIndexMapping(objectTypeApiName, ontologyId);
+      let created = false;
+      let lastCreateError: Error | null = null;
+      // An interrupted client can receive a create retry after OpenSearch has
+      // already accepted the first request. Treat name contention as a normal
+      // allocation retry; any other create failure remains terminal.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        replacementIndexName =
+          `${indexName}-replacement-${Date.now().toString(36)}-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        try {
+          await client.indices.create({
+            index: replacementIndexName,
+            body: generated.mapping as unknown as Record<string, unknown>,
+          });
+          created = true;
+          break;
+        } catch (err: any) {
+          lastCreateError = err;
+          if (!String(err?.message ?? err).includes("resource_already_exists_exception")) {
+            throw err;
+          }
+        }
+      }
+      if (!created) throw lastCreateError ?? new Error("replacement index allocation failed");
     } catch (err: any) {
       throw appError(
         "REINDEX_FAILED",
         `Failed to create replacement OpenSearch index '${replacementIndexName}': ${err.message}`,
         { failedAtStep: "opensearch_indexing" }
+      );
+    }
+    if (!replacementIndexName) {
+      throw appError(
+        "REINDEX_FAILED",
+        "Replacement index allocation completed without an index name.",
+        { failedAtStep: "opensearch_indexing" },
       );
     }
 
