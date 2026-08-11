@@ -336,10 +336,15 @@ export function initConnectivity(): void {
   if (process.env.TELLUS_DISABLE_CONNECTIVITY_POLLER !== "1") {
     outbox.startPoller();
   }
-  startRotationWorker();
-  startHealthProber();
-  startTableImportScheduler();
-  startWebhookReaper();
+  // Focused, isolated QA browser campaigns exercise the request-serving
+  // routes but must not drain unrelated production work queues from the
+  // shared development database. The normal product default remains on.
+  if (process.env.CONNECTIVITY_WORKERS_DISABLED !== "true") {
+    startRotationWorker();
+    startHealthProber();
+    startTableImportScheduler();
+    startWebhookReaper();
+  }
 }
 
 /** Stop background workers and drain PG pools for graceful shutdown. */

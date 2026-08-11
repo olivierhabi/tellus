@@ -635,6 +635,13 @@ export async function applyEdits(
 
   const failedEdits: FailedEdit[] = [];
   const successfulEditIds: string[] = [];
+  // A clean browser campaign validates the durable action contract through
+  // PostgreSQL + the writeback overlay. It must not synchronously compete
+  // with a large fixture reindex for the eventual OpenSearch projection.
+  // Production retains in-band indexing by default; this explicit switch is
+  // only for isolated harnesses that have their own projection evidence.
+  const deferSearchProjection =
+    process.env.ACTION_SEARCH_PROJECTION_DEFERRED === "true";
 
   const bulkBody: Array<Record<string, unknown>> = [];
 
@@ -713,7 +720,15 @@ export async function applyEdits(
   }
 
   // Execute bulk request if there are operations
-  if (bulkBody.length > 0) {
+  if (deferSearchProjection) {
+    for (const edit of edits) {
+      failedEdits.push({
+        objectType: edit.objectType,
+        primaryKey: edit.primaryKey,
+        error: "Search projection deferred by ACTION_SEARCH_PROJECTION_DEFERRED",
+      });
+    }
+  } else if (bulkBody.length > 0) {
     try {
       const { body } = await opensearchClient.bulk({ body: bulkBody });
 

@@ -1512,7 +1512,9 @@ async function start(): Promise<void> {
       // deprecated env allowlist is still configured. Never blocks boot.
       void logFunctionPublishPolicySummary(pool);
     });
-    functionsPublishService.start();
+    if (process.env.FUNCTIONS_PUBLISH_SERVICE_DISABLED !== "true") {
+      functionsPublishService.start();
+    }
     if (process.env.AUTOMATE_RUNTIME_DISABLED !== "true") {
       startAutomateRuntime();
       console.log("Automate durable scheduler and worker started");
@@ -1531,8 +1533,10 @@ async function start(): Promise<void> {
       console.log("Rwanda Pindo automation scheduler started");
     }
 
-    startDeveloperConsoleReconciliationWorker(foundryDb as unknown as import('knex').Knex);
-    startDeveloperConsoleArtifactBuildWorker(foundryDb as unknown as import('knex').Knex);
+    if (process.env.DEVELOPER_CONSOLE_WORKERS_DISABLED !== "true") {
+      startDeveloperConsoleReconciliationWorker(foundryDb as unknown as import('knex').Knex);
+      startDeveloperConsoleArtifactBuildWorker(foundryDb as unknown as import('knex').Knex);
+    }
 
     // Object Data Funnel background workers.
     //
@@ -1569,9 +1573,11 @@ async function start(): Promise<void> {
 
     // Start Asynchronous Multi-Source Compilation Worker
     try {
-      const { startDatasourceCompilerConsumer } = require("./services/orchestration/datasource-compiler-consumer");
-      startDatasourceCompilerConsumer();
-      console.log("Multi-Source Compilation Worker started");
+      if (process.env.DATASOURCE_COMPILER_CONSUMER_DISABLED !== "true") {
+        const { startDatasourceCompilerConsumer } = require("./services/orchestration/datasource-compiler-consumer");
+        startDatasourceCompilerConsumer();
+        console.log("Multi-Source Compilation Worker started");
+      }
     } catch (err) {
       console.warn(`WARNING: could not start Multi-Source Compilation Worker: ${(err as Error).message}`);
     }
