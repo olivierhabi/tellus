@@ -207,6 +207,7 @@ async function generateIrembo(root: string, random: Random, count: number) {
   const parcels: unknown[][] = [];
   const cases: unknown[][] = [];
   const verifications: unknown[][] = [];
+  const workflowHistory: unknown[][] = [];
   for (let index = 1; index <= count; index += 1) {
     const citizenId = `${RUN_PREFIX}-IR-C-${String(index).padStart(7, "0")}`;
     const clearanceId = `${RUN_PREFIX}-IR-T-${String(index).padStart(7, "0")}`;
@@ -223,6 +224,7 @@ async function generateIrembo(root: string, random: Random, count: number) {
     // SLA and every deliberately stale row is outside it.
     const sourceAgeMinutes = stale ? 480 + (index % 6) * 15 : (index % 6) * 45;
     cases.push([`${RUN_PREFIX}-IR-LTC-${String(index).padStart(7, "0")}`, citizenId, clearanceId, `${RUN_PREFIX}-IR-P-${String(index).padStart(7, "0")}`, stale ? "APPROVAL_PENDING" : "TITLE_REVIEWED", iso(sourceAgeMinutes), index % 11 === 0 ? "TITLE_CONFLICT" : "", stale ? "STALE_SOURCE" : "ON_TRACK", 1]);
+    workflowHistory.push([`${RUN_PREFIX}-IR-H-${String(index).padStart(7, "0")}`, `${RUN_PREFIX}-IR-LTC-${String(index).padStart(7, "0")}`, "SUBMITTED", stale ? "APPROVAL_PENDING" : "TITLE_REVIEWED", "seeded-workflow", iso(sourceAgeMinutes)]);
     verifications.push([`${RUN_PREFIX}-IR-V-${String(index).padStart(7, "0")}`, `${RUN_PREFIX}-IR-LTC-${String(index).padStart(7, "0")}`, stale ? "STALE" : "VERIFIED", iso(index * 15), "RRA", `verify-${index}`, "source-event-v2"]);
   }
   return Promise.all([
@@ -231,6 +233,7 @@ async function generateIrembo(root: string, random: Random, count: number) {
     writeCsv(root, "b-irembo/land_parcels.csv", ["parcelId", "district", "size", "titleStatus", "sourceSystem", "sourceIdentifier", "pipelineVersion"], parcels),
     writeCsv(root, "b-irembo/land_transfer_cases.csv", ["caseId", "citizenId", "clearanceId", "parcelId", "status", "submittedAt", "exceptionType", "sla", "versionToken"], cases),
     writeCsv(root, "b-irembo/agency_verifications.csv", ["verificationId", "caseId", "result", "verifiedAt", "agency", "requestId", "pipelineVersion"], verifications),
+    writeCsv(root, "b-irembo/workflow_stage_history.csv", ["historyId", "caseId", "fromStage", "toStage", "actor", "recordedAt"], workflowHistory),
   ]);
 }
 
