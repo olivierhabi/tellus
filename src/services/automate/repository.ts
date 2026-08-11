@@ -1048,11 +1048,16 @@ export async function cleanupExpiredIdempotencyRecords(input: {
 } = {}): Promise<number> {
   const batchSize = Math.min(Math.max(input.batchSize ?? 1_000, 1), 10_000);
   const result = await pool.query<{ count: number }>(
-    `WITH deleted AS (
-       DELETE FROM automation_idempotency
+    `WITH candidates AS (
+       SELECT ctid
+         FROM automation_idempotency
         WHERE expires_at < now()
         ORDER BY expires_at
         LIMIT $1
+        FOR UPDATE SKIP LOCKED
+     ), deleted AS (
+       DELETE FROM automation_idempotency
+        WHERE ctid IN (SELECT ctid FROM candidates)
         RETURNING 1
      )
      SELECT count(*)::int AS count FROM deleted`,
