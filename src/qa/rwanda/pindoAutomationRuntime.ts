@@ -11,7 +11,7 @@ const policyFor = (properties: Record<string, unknown>): FailoverPolicy => ({
   recoveryHoldDownMs: Number(properties.recoveryHoldDown ?? 600) * 1_000,
   maxFailoversPerWindow: Number(properties.maxFailoversPerWindow ?? 1),
   rateWindowMs: 3_600_000,
-  killSwitch: String(properties.killSwitch ?? "false") !== "true",
+  killSwitch: String(properties.killSwitch ?? "false") === "true",
   maxTelemetryGapMs: 60_000,
 });
 
