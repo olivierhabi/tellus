@@ -185,16 +185,17 @@ export class TellusAuthService {
       scope: 'openid profile email offline_access',
     });
 
-    // F-P4-08: bound the password-grant call. Keycloak p99 under normal
-    // load is ~300ms; 5s gives generous slack while still preventing a
-    // frozen authenticator from starving login traffic.
+    // F-P4-08: bound the password-grant call. A cold local/CI Keycloak can
+    // legitimately take longer than five seconds while realm caches warm.
+    // Ten seconds keeps the request bounded without turning that startup
+    // condition into a flaky authentication failure.
     const res = await fetch(
       `${this.issuer}/protocol/openid-connect/token`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.timeout(10_000),
       },
     );
 
