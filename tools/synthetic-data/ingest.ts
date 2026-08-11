@@ -9,7 +9,7 @@
  * Usage:
  *   npx tsx tools/synthetic-data/ingest.ts --out /tmp/tellus-rwanda-qa
  */
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { quarantineDirtyCsv, sanitizeIso8583Csv } from "../../src/qa/rwanda/ingestionSecurity";
 
@@ -31,6 +31,7 @@ function args() {
     out: path.resolve(out),
     base: get("--base", process.env.TELLUS_QA_BASE ?? DEFAULT_BASE)!,
     cleanup: values.includes("--cleanup"),
+    receipt: path.resolve(get("--receipt", path.join(out, "ingestion-receipt.json"))!),
   };
 }
 
@@ -162,6 +163,9 @@ export async function ingestFunctionalFixtures(options = args()): Promise<Upload
     const report = ["quarantineId,sourceFile,rowNumber,reasonCode,reason", ...quarantined.map((record, index) =>
       `QA-RW-Q-${String(index + 1).padStart(6, "0")},${record.sourceFile},${record.rowNumber},${record.reasonCode},${record.reason}`)].join("\n") + "\n";
     await ingestCsv(options.base, ontology, uploaded, "QaRwIngestionQuarantine", report, "ingestion_quarantine.csv");
+    await writeFile(options.receipt, JSON.stringify({
+      version: 1, namespace: "QA-RW", ontology, uploaded,
+    }, null, 2));
     console.log(JSON.stringify({ ingested: uploaded.length, namespace: "QA-RW", objectTypes: uploaded.map(({ apiName }) => apiName) }));
     return uploaded;
   } catch (error) {
@@ -186,12 +190,13 @@ export async function cleanupFunctionalFixtures(base: string, ontology: string, 
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const options = args();
-  ingestFunctionalFixtures(options)
-    .then(async (uploaded) => {
-      if (!options.cleanup) return;
-      const ontology = await ontologyId(options.base);
-      await cleanupFunctionalFixtures(options.base, ontology, uploaded);
+  (options.cleanup
+    ? readFile(options.receipt, "utf8").then(async (source) => {
+      const receipt = JSON.parse(source) as { ontology: string; uploaded: Uploaded[]; namespace?: string };
+      if (!receipt.ontology || !Array.isArray(receipt.uploaded)) throw new Error("Invalid Rwanda ingestion cleanup receipt");
+      await cleanupFunctionalFixtures(options.base, receipt.ontology, receipt.uploaded);
       console.log(JSON.stringify({ cleanupVerified: true, namespace: "QA-RW" }));
     })
+    : ingestFunctionalFixtures(options))
     .catch((error) => { console.error(error); process.exitCode = 1; });
 }
