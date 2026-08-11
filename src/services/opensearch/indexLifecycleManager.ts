@@ -203,9 +203,28 @@ async function deleteIndex(
     };
   }
 
-  // Delete the index
+  // A reindex replaces the original concrete index with an alias pointing at
+  // a generation.  OpenSearch refuses `DELETE <alias>` (and leaving those
+  // generations behind exhausts the shard budget in repeated QA runs), so
+  // resolve the alias to its concrete targets first.  A direct index retains
+  // the old one-element target list.
+  let deleteTargets = [indexName];
   try {
-    await client.indices.delete({ index: indexName });
+    const aliases = await client.indices.getAlias({ name: indexName });
+    const aliasBody = (aliases as { body?: Record<string, unknown> }).body ?? aliases;
+    const concrete = Object.keys(aliasBody as Record<string, unknown>);
+    if (concrete.length > 0) deleteTargets = concrete;
+  } catch (err: unknown) {
+    const status = (err as { statusCode?: number; meta?: { statusCode?: number } }).statusCode
+      ?? (err as { meta?: { statusCode?: number } }).meta?.statusCode;
+    // A 404 means this is a direct index, not an alias. Other failures are
+    // handled by the delete below so callers receive actionable context.
+    if (status !== 404) throw err;
+  }
+
+  // Delete the concrete index or all concrete alias generations.
+  try {
+    await client.indices.delete({ index: deleteTargets.join(",") });
   } catch (err: unknown) {
     throw new Error(
       `Failed to delete index '${indexName}': ${extractErrorMessage(err)}`
