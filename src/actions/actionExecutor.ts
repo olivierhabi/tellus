@@ -1028,19 +1028,11 @@ export async function executeAction(
         return result;
       }
 
-      if (compilation.edits.length > 1) {
-        result.failureType = "unclassified";
-        result.errorMessage =
-          "Optimistic concurrency control is only supported for single-object actions";
-        pendingError = new OntologyError(
-          result.errorMessage,
-          "INVALID_PARAMETER",
-          400,
-          { executionId }
-        );
-        return result;
-      }
-
+      // The client-read token guards the action's primary (first modify)
+      // target. Additional edits execute in the same transaction and roll
+      // back with it if that target is stale. This preserves OCC for chained
+      // actions such as approval + decision recording without pretending a
+      // single version token can describe every secondary object.
       occTarget = {
         objectType: modifyEdits[0].objectType,
         primaryKey: modifyEdits[0].primaryKey,
