@@ -42,6 +42,7 @@ import { ensureDocumentSecurity } from "./security/documentSecurity";
 import { bulkUpsertInstances } from "../models/objectInstance";
 import { deterministicObjectRid } from "./objectIdentity";
 import type { PropertyInput } from "./mapping/typeMapper";
+import { deriveMainBranchId } from "./branchContext";
 
 // ---------------------------------------------------------------------------
 // Pipeline stage tracking — matches the 4-stage Funnel spec
@@ -49,6 +50,16 @@ import type { PropertyInput } from "./mapping/typeMapper";
 // ---------------------------------------------------------------------------
 
 type PipelineStage = "changelog" | "merge_changes" | "indexing" | "hydration";
+
+/** Keep the live generation and at most one immediate rollback generation. */
+export function obsoleteReindexGenerations(
+  generations: readonly string[],
+  live: string,
+  rollback: string | null,
+): string[] {
+  const retained = new Set([live, ...(rollback ? [rollback] : [])]);
+  return generations.filter((index) => !retained.has(index));
+}
 
 /**
  * Write the live pipeline stage into `funnel_pipeline_state`. Called
@@ -915,6 +926,40 @@ export async function reindexObjectType(
     await flushBatch("wait_for");
     await bulkUpsertInstances(instanceRows.splice(0));
 
+    // The datasource documents above are assembled before Object Storage's
+    // upsert decides whether an existing row keeps or increments its version.
+    // Synchronize the authoritative versions into the replacement index
+    // before cutover; hard-coding `__version: 1` made every browser selection
+    // stale after the second seed/reindex run.
+    const versionRows = await query(
+      `SELECT primary_key, version
+         FROM object_instances
+        WHERE ontology_id = $1
+          AND branch_id = $2
+          AND object_type_api_name = $3`,
+      [ontologyId, deriveMainBranchId(ontologyId), objectTypeApiName],
+    );
+    for (let offset = 0; offset < versionRows.rows.length; offset += 1_000) {
+      const versionBody: Array<Record<string, unknown>> = [];
+      for (const row of versionRows.rows.slice(offset, offset + 1_000)) {
+        versionBody.push({ update: { _index: replacementIndexName, _id: row.primary_key } });
+        versionBody.push({ doc: { __version: Number(row.version) } });
+      }
+      if (versionBody.length > 0) {
+        const versionResult = await client.bulk({
+          body: versionBody,
+          refresh: offset + 1_000 >= versionRows.rows.length ? "wait_for" : false,
+        } as any);
+        if ((versionResult as any)?.body?.errors) {
+          throw appError(
+            "REINDEX_FAILED",
+            "Failed to synchronize object versions into the replacement index.",
+            { failedAtStep: "opensearch_version_sync" },
+          );
+        }
+      }
+    }
+
     if (bulkErrors.length > 0) {
       throw appError(
         "REINDEX_FAILED",
@@ -1030,6 +1075,31 @@ export async function reindexObjectType(
           ? `; rollback generation retained as '${rollbackIndexName}'`
           : ""),
     );
+
+    // Successful reindexes used to retain every historical sibling forever.
+    // Frequent clean-seed QA runs therefore exhausted OpenSearch's shard
+    // ceiling. Retain only the live generation and its immediate predecessor;
+    // older siblings have no alias and cannot participate in rollback.
+    try {
+      const generations = await client.indices.get({
+        index: `${indexName}-replacement-*,${indexName}-rollback-*`,
+        allow_no_indices: true,
+        ignore_unavailable: true,
+      } as any);
+      const names = Object.keys((generations as any)?.body ?? {});
+      const obsolete = obsoleteReindexGenerations(
+        names,
+        replacementIndexName,
+        rollbackIndexName,
+      );
+      if (obsolete.length > 0) {
+        await client.indices.delete({ index: obsolete.join(",") });
+      }
+    } catch (cleanupError) {
+      console.warn(
+        `[Reindex] historical generation cleanup failed (best-effort): ${(cleanupError as Error).message}`,
+      );
+    }
 
     // =================================================================
     // Stage 4: HYDRATION — mark the `ontology_edit` rows as indexed
