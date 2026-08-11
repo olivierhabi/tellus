@@ -58,10 +58,10 @@ describe("formatActionType", () => {
     });
   });
 
-  it("falls back to definitionVersion=1 + null hash when the column is missing (pre-132 legacy)", () => {
+  it("falls back to definitionVersion=1 + a canonical hash for pre-132 legacy rows", () => {
     expect(formatActionType({} as any)).toMatchObject({
       definitionVersion: 1,
-      definitionHash: null,
+      definitionHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
   });
 });
