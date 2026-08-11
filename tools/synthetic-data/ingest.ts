@@ -18,6 +18,18 @@ const ADMIN = "bdaba072-16f3-41c2-91f8-b367065ec578";
 const DEFAULT_BASE = "http://127.0.0.1:3000";
 
 type Uploaded = { apiName: string; datasetId: string };
+type Scenario = "a-bk" | "b-irembo" | "c-rswitch" | "d-pindo";
+
+function parseScenarios(value?: string): Set<Scenario> | undefined {
+  if (!value) return undefined;
+  const scenarios = new Set(value.split(",").map((item) => item.trim()).filter(Boolean) as Scenario[]);
+  for (const scenario of scenarios) {
+    if (!(["a-bk", "b-irembo", "c-rswitch", "d-pindo"] as string[]).includes(scenario)) {
+      throw new Error(`Unknown Rwanda QA scenario '${scenario}'.`);
+    }
+  }
+  return scenarios;
+}
 
 function args() {
   const values = process.argv.slice(2);
@@ -30,6 +42,7 @@ function args() {
   return {
     out: path.resolve(out),
     base: get("--base", process.env.TELLUS_QA_BASE ?? DEFAULT_BASE)!,
+    scenarios: parseScenarios(get("--scenarios", process.env.TELLUS_QA_SCENARIOS)),
     cleanup: values.includes("--cleanup"),
     receipt: path.resolve(get("--receipt", path.join(out, "ingestion-receipt.json"))!),
   };
@@ -46,12 +59,13 @@ async function api(base: string, pathname: string, init: RequestInit = {}, user 
   return body as Record<string, any>;
 }
 
-async function csvs(root: string): Promise<string[]> {
+async function csvs(root: string, scenarios?: Set<Scenario>): Promise<string[]> {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   return entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(".csv"))
     .map((entry) => path.join(entry.parentPath, entry.name))
-    .filter((file) => !/\/expected_outputs\.csv$|\/dirty_|\/ingestion-inputs\//.test(file));
+    .filter((file) => !/\/expected_outputs\.csv$|\/dirty_|\/ingestion-inputs\//.test(file))
+    .filter((file) => !scenarios || scenarios.has(path.basename(path.dirname(file)) as Scenario));
 }
 
 function apiName(file: string) {
@@ -103,11 +117,16 @@ async function ensureObjectType(base: string, ontology: string, type: string, he
     headers: { "X-Tellus-Test-Auth": EDITOR },
   });
   if (result.ok) {
-    const detail = await result.json() as Record<string, any>;
-    const serialized = JSON.stringify(detail);
-    const missing = headers.filter((header) =>
-      !serialized.includes(`\"apiName\":\"${header}\"`) &&
-      !serialized.includes(`\"api_name\":\"${header}\"`));
+    // Do not infer properties from the object-type detail response. That
+    // response includes datasource/mapping metadata, which can mention a
+    // column that has not actually been persisted as an ontology property.
+    // The runner uses a clean, reusable QA database, so schema existence must
+    // be checked against the authoritative property collection endpoint.
+    const properties = await api(base, `/api/v1/ontology/${ontology}/objectTypes/${type}/properties`);
+    const rows = Array.isArray(properties.data) ? properties.data : [];
+    const existing = new Set(rows.map((property: Record<string, unknown>) =>
+      String(property.apiName ?? property.api_name ?? "")));
+    const missing = headers.filter((header) => !existing.has(header));
     if (missing.length > 0) {
       await api(base, `/api/v1/ontology/${ontology}/objectTypes/${type}/properties/batch`, {
         method: "POST",
@@ -139,7 +158,7 @@ export async function ingestFunctionalFixtures(options = args()): Promise<Upload
   const manifest = JSON.parse(await readFile(path.join(options.out, "manifest.json"), "utf8")) as { tier?: string };
   if (manifest.tier !== "functional") throw new Error("Only functional-tier data may be ingested by this QA helper");
   const ontology = await ontologyId(options.base);
-  const files = await csvs(options.out);
+  const files = await csvs(options.out, options.scenarios);
   const uploaded: Uploaded[] = [];
   try {
     for (const file of files) {
@@ -150,13 +169,16 @@ export async function ingestFunctionalFixtures(options = args()): Promise<Upload
     // Raw ISO-8583 is intentionally transformed before it reaches the
     // supported upload/datasource/reindex pipeline.  No datasource schema or
     // diagnostic contains field2Pan.
-    const rawIso = await readFile(path.join(options.out, "c-rswitch/ingestion-inputs/raw_iso8583.csv"), "utf8");
-    await ingestCsv(options.base, ontology, uploaded, "QaRwRswitchSanitizedIso8583", sanitizeIso8583Csv(rawIso), "sanitized_iso8583.csv");
+    if (!options.scenarios || options.scenarios.has("c-rswitch")) {
+      const rawIso = await readFile(path.join(options.out, "c-rswitch/ingestion-inputs/raw_iso8583.csv"), "utf8");
+      await ingestCsv(options.base, ontology, uploaded, "QaRwRswitchSanitizedIso8583", sanitizeIso8583Csv(rawIso), "sanitized_iso8583.csv");
+    }
 
     // Rejected source rows are materialized as an indexed, audit-visible
     // dataset.  Diagnostics deliberately carry reasons and row numbers only.
     const entries = await readdir(options.out, { recursive: true, withFileTypes: true });
-    const quarantined = (await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.startsWith("dirty_")).map(async (entry) => {
+    const quarantined = (await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.startsWith("dirty_") &&
+      (!options.scenarios || options.scenarios.has(path.basename(entry.parentPath) as Scenario))).map(async (entry) => {
       const file = path.join(entry.parentPath, entry.name);
       return quarantineDirtyCsv(entry.name, await readFile(file, "utf8"));
     }))).flat();
