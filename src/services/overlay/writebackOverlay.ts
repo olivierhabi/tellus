@@ -385,7 +385,7 @@ export async function applyOverlayToResults(
   const store = storeOverride ?? (await getOverlayStore());
 
   const pks = hits
-    .map((h) => asString(h.__pk))
+    .map(primaryKeyOf)
     .filter((pk): pk is string => pk !== null);
   if (pks.length === 0) return hits;
 
@@ -404,7 +404,7 @@ export async function applyOverlayToResults(
 
   const out: Array<Record<string, unknown>> = [];
   for (const hit of hits) {
-    const pk = asString(hit.__pk);
+    const pk = primaryKeyOf(hit);
     if (pk === null) {
       out.push(hit);
       continue;
@@ -490,6 +490,14 @@ function asString(v: unknown): string | null {
   return null;
 }
 
+// OpenSearch/Quickwit hits expose `__pk`, whereas the object-serving path
+// serializes the same identity as `__primaryKey`. Overlay reconciliation must
+// treat those representations as one object; otherwise an indexed writeback
+// record is returned once as a base hit and again as an overlay-only extra.
+function primaryKeyOf(doc: Record<string, unknown>): string | null {
+  return asString(doc.__pk) ?? asString(doc.__primaryKey);
+}
+
 function numberOrNull(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   return null;
@@ -520,11 +528,11 @@ export async function mergeOverlayIntoSearch(
   // Dedup by PK — a PK already in `replaced` must not appear again.
   const seen = new Set<string>();
   for (const h of replaced) {
-    const pk = asString(h.__pk);
+    const pk = primaryKeyOf(h);
     if (pk) seen.add(pk);
   }
   for (const e of extras) {
-    const pk = asString(e.__pk);
+    const pk = primaryKeyOf(e);
     if (pk && !seen.has(pk)) {
       replaced.push(e);
       seen.add(pk);

@@ -571,7 +571,9 @@ describe("B7 overlay query merge", () => {
     );
     const out = await mergeOverlayIntoSearch({
       objectType: "Orders",
-      hits: [{ __pk: "O-1", __version: 1, status: "open" }],
+      // The object-serving path uses __primaryKey instead of __pk. It must
+      // still replace/dedupe the overlay record under the same business key.
+      hits: [{ __primaryKey: "O-1", __version: 1, status: "open" }],
       filter: () => true,
       store,
     });
