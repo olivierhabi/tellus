@@ -169,6 +169,42 @@ describe("Automate domain", () => {
     expect(AutomationDraftSchema.parse(value).effects[0].fallbackEffect?.type)
       .toBe("action");
   });
+
+  it("normalizes legacy fallback notifications so queued automations remain executable", () => {
+    const value = draft();
+    value.effects[0] = {
+      ...value.effects[0],
+      fallbackEffect: {
+        id: "55555555-5555-4555-8555-555555555555",
+        name: "Legacy notification",
+        order: 1,
+        type: "notification",
+        content: { kind: "plain", heading: "Failure", message: "Retry exhausted" },
+      },
+    } as typeof value.effects[number];
+
+    const fallback = AutomationDraftSchema.parse(value).effects[0].fallbackEffect;
+    expect(fallback).toMatchObject({
+        retry: { enabled: true, maxAttempts: 3, jitter: { kind: "none" } },
+      recipients: { static: [], dynamic: [] },
+      channels: [],
+      grouping: { mode: "all", propertyApiNames: [] },
+    });
+  });
+
+  it("fills a missing jitter field in persisted retry policy", () => {
+    const value = draft();
+    value.effects[0] = {
+      ...value.effects[0],
+      fallbackEffect: {
+        ...value.effects[0],
+        id: "66666666-6666-4666-8666-666666666666",
+        retry: { ...value.effects[0].retry, jitter: undefined },
+      },
+    } as typeof value.effects[number];
+    expect(AutomationDraftSchema.parse(value).effects[0].fallbackEffect)
+      .toMatchObject({ retry: { jitter: { kind: "none" } } });
+  });
 });
 
 describe("Automate schedules", () => {

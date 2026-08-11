@@ -210,15 +210,29 @@ export const RetryPolicySchema = z.object({
       kind: z.literal("duration"),
       durationSeconds: z.number().min(0).max(86_400),
     }),
-  ]),
+  ]).default({ kind: "none" }),
   retryAllFailures: z.boolean().default(false),
 });
+
+// Older persisted automation versions predate typed retry configuration. Keep
+// them executable after an upgrade; newly authored effects still receive the
+// same explicit normalized policy when saved.
+const DefaultRetryPolicy = {
+  enabled: true,
+  strategy: "constant" as const,
+  maxAttempts: 3,
+  delaySeconds: 10,
+  multiplier: 2,
+  maxDelaySeconds: 3_600,
+  jitter: { kind: "none" as const },
+  retryAllFailures: false,
+};
 
 const EffectBaseSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).max(500),
   order: z.number().int().min(0).max(1_000),
-  retry: RetryPolicySchema,
+  retry: RetryPolicySchema.default(DefaultRetryPolicy),
 });
 
 const ActionEffectCoreSchema = EffectBaseSchema.extend({
@@ -258,8 +272,8 @@ const NotificationEffectCoreSchema = EffectBaseSchema.extend({
   recipients: z.object({
     static: z.array(PrincipalReferenceSchema).max(1_000).default([]),
     dynamic: z.array(ValueBindingSchema).max(100).default([]),
-  }),
-  channels: z.array(z.enum(["in_app", "email"])).max(2),
+  }).default({ static: [], dynamic: [] }),
+  channels: z.array(z.enum(["in_app", "email"])).max(2).default([]),
   content: z.discriminatedUnion("kind", [
     z.object({
       kind: z.literal("plain"),
@@ -291,7 +305,7 @@ const NotificationEffectCoreSchema = EffectBaseSchema.extend({
   grouping: z.object({
     mode: z.enum(["all", "per-object", "properties"]),
     propertyApiNames: z.array(z.string().min(1).max(500)).max(20).default([]),
-  }),
+  }).default({ mode: "all", propertyApiNames: [] }),
   locale: z.string().min(2).max(100).default("en-US"),
 });
 
