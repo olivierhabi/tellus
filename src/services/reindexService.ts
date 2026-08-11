@@ -28,6 +28,7 @@
 
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "node:crypto";
 import { query, getClient } from "../db";
 import { appError } from "../utils/appError";
 import { convertValue } from "./indexing/typeConverter";
@@ -770,8 +771,12 @@ export async function reindexObjectType(
     await setPipelineStage(objectTypeApiName, "indexing");
 
     const indexName = getIndexName(objectTypeApiName);
+    // Millisecond timestamps alone collide when a previously interrupted
+    // process is restarted with a restored/frozen clock. The replacement is
+    // never a durable identifier, so add entropy while retaining a sortable
+    // timestamp prefix for operations and lifecycle cleanup.
     replacementIndexName =
-      `${indexName}-replacement-${Date.now().toString(36)}`;
+      `${indexName}-replacement-${Date.now().toString(36)}-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
     // =================================================================
     // Step 8: Create an isolated sibling index. The serving index/alias is
