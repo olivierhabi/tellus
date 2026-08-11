@@ -39,6 +39,22 @@ function requiredMarkings(row: RestrictedMarking): string[] {
 }
 
 /**
+ * Function-backed values inherit the union of every input property's
+ * markings. A caller must hold the complete union, which is the restrictive
+ * interpretation required by Rwanda QA plan §3.3.4.
+ */
+export function inheritFunctionColumnMarkings(
+  inputProperties: readonly string[],
+  restricted: ReadonlyMap<string, readonly string[]>,
+): string[] {
+  const inherited = new Set<string>();
+  for (const property of inputProperties) {
+    for (const marking of restricted.get(property) ?? []) inherited.add(marking);
+  }
+  return [...inherited].sort();
+}
+
+/**
  * Load the set of properties on `objectTypeApiName` that carry a required
  * marking, keyed by property apiName. Properties with NULL or empty
  * `marking_required` are unrestricted and excluded.
@@ -64,9 +80,12 @@ export async function loadRestrictedProperties(
     }
     return map;
   } catch (err: any) {
-    // property.marking_required may not exist on a pre-045 schema — fail open
-    // there rather than breaking pre-migration deployments.
-    if (err?.code === "42703") return new Map();
+    // Migration 045 is mandatory. An emergency compatibility escape hatch is
+    // explicit and noisy; the secure default is fail closed.
+    if (err?.code === "42703" && process.env.ALLOW_PRE_MARKING_SCHEMA === "1") {
+      console.warn("[security] ALLOW_PRE_MARKING_SCHEMA=1: property marking enforcement is DISABLED; apply migration 045 immediately");
+      return new Map();
+    }
     throw err;
   }
 }

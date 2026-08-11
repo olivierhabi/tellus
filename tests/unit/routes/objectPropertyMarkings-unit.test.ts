@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { omitUnauthorizedProperties } from "../../../src/services/security/propertyMarkingProjection";
+import { inheritFunctionColumnMarkings } from "../../../src/services/security/propertyMarkingGuard";
 
 describe("direct-object property marking projection", () => {
+  it("inherits the most restrictive union for function-backed columns", () => {
+    const restricted = new Map<string, string[]>([
+      ["score", ["CREDIT_RISK"]],
+      ["requestedLimit", ["FINANCIAL_DETAIL", "CREDIT_RISK"]],
+    ]);
+    expect(inheritFunctionColumnMarkings(["score", "requestedLimit", "publicName"], restricted))
+      .toEqual(["CREDIT_RISK", "FINANCIAL_DETAIL"]);
+  });
   it("keeps a property only when every required marking is granted", () => {
     const properties = {
       publicName: "Synthetic customer",
