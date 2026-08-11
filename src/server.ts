@@ -79,6 +79,7 @@ import {
   startAutomateRuntime,
   stopAutomateRuntime,
 } from "./services/automate/runtime";
+import { runRwandaPindoAutomationOnce } from "./qa/rwanda/pindoAutomationRuntime";
 import { actionAuditRouter, globalAuditRouter } from "./routes/auditLog";
 import objectsRouter from "./routes/objects";
 import objectSetsV2Router from "./routes/v2/objectSetsV2";
@@ -1514,6 +1515,15 @@ async function start(): Promise<void> {
     functionsPublishService.start();
     if (process.env.AUTOMATE_RUNTIME_DISABLED !== "true") {
       startAutomateRuntime();
+      // Rwanda QA §7.3: independent one-minute, durable policy evaluator.
+      // Failures are contained here; each decision is itself persisted in the
+      // automation audit table for operator review and retry diagnosis.
+      const runPindo = () => void runRwandaPindoAutomationOnce().catch((error) =>
+        console.error("rwanda-pindo-automation failed", error),
+      );
+      runPindo();
+      const pindoTimer = setInterval(runPindo, 60_000);
+      pindoTimer.unref();
       console.log("Automate durable scheduler and worker started");
     }
 
