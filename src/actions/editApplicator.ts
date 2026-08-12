@@ -121,6 +121,8 @@ export interface ApplyExecutionContext {
    * forbids). When absent, LINK_INDEX_ACK_TIMEOUT_MS applies.
    */
   ackBudgetMs?: number;
+  /** Caller-owned transaction for an atomic batch chunk. */
+  transactionClient?: PoolClient;
   /**
    * F-P3-11 — durable-before-ack audit. Called AFTER all edits have been
    * inserted into ontology_edit/link_edit/object_instances (inside the
@@ -254,9 +256,10 @@ export async function applyEdits(
   // Stage-3 ack handles for staged link CDC events (post-commit barrier).
   const linkIndexAckHandles: import("../services/serving/edgeIndexWatermark").EdgeIndexAckHandle[] = [];
 
-  const pgClient = await getClient();
+  const ownsTransaction = !executionContext.transactionClient;
+  const pgClient = executionContext.transactionClient ?? await getClient();
   try {
-    await pgClient.query("BEGIN");
+    if (ownsTransaction) await pgClient.query("BEGIN");
 
     // F-05: Atomic optimistic concurrency check — inside the PG
     // transaction so no concurrent writer can slip between the read
@@ -316,7 +319,7 @@ export async function applyEdits(
         currentVersion !== undefined &&
         currentVersion !== executionContext.expectedVersion
       ) {
-        await pgClient.query("ROLLBACK");
+        if (ownsTransaction) await pgClient.query("ROLLBACK");
         // Do NOT release pgClient here — the finally block at the end
         // of this try/catch handles release unconditionally. Releasing
         // here causes a double-release: throw → catch → ROLLBACK on
@@ -353,7 +356,7 @@ export async function applyEdits(
       if (executionContext.v2RevalidateAfterLock) {
         const revalErrors = await executionContext.v2RevalidateAfterLock(pgClient);
         if (revalErrors.length > 0) {
-          await pgClient.query("ROLLBACK");
+          if (ownsTransaction) await pgClient.query("ROLLBACK");
           const first = revalErrors[0];
           throw new OntologyError(
             first.message,
@@ -593,13 +596,15 @@ export async function applyEdits(
     }
 
     // Step 3: Commit the PG transaction
-    await pgClient.query("COMMIT");
-    tCommit = Date.now();
+    if (ownsTransaction) {
+      await pgClient.query("COMMIT");
+      tCommit = Date.now();
+    }
   } catch (err) {
-    await pgClient.query("ROLLBACK").catch(() => {});
+    if (ownsTransaction) await pgClient.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
-    pgClient.release();
+    if (ownsTransaction) pgClient.release();
   }
 
   // Link CDC events were staged into `link_cdc_outbox` INSIDE the edit

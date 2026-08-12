@@ -152,6 +152,12 @@ export interface ExecutionContext {
    */
   ackBudgetMs?: number;
   /**
+   * A caller-owned transaction for an atomic domain batch. The normal action
+   * path continues to own its transaction when this is absent. Batch callers
+   * must use a savepoint per item and commit or roll back the enclosing chunk.
+   */
+  transactionClient?: PoolClient;
+  /**
    * Optional domain write performed in the same PostgreSQL transaction as
    * the action edits and durable audit entry.  This is intentionally an
    * executor-level hook (rather than a route-side write) for business
@@ -1177,6 +1183,7 @@ export async function executeAction(
       branchId: resolvedBranchId,
       semanticsVersion: semantics.semanticsVersion,
       plannedLockIdentities: v2PlannedLocks,
+      transactionClient: context.transactionClient,
       v2RevalidateAfterLock: v2Revalidate,
       // Per-item ack barrier ceiling (batch routes pre-defer rather than
       // let the request-budget middleware 504 a committed mutation).
