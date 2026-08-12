@@ -443,6 +443,18 @@ function convertTimestamp(raw: string): string {
     "$1T$2"
   );
 
+  // STRICT: only accept ISO-8601-shaped strings. Passing anything else to
+  // `new Date()` would fall into JS's lenient, implementation- and
+  // timezone-dependent parsing (e.g. "7/30/23" parses as mid might local
+  // time — which converted wrongly across server timezones and silently
+  // disagreed with the strict `convertDate` rules above).
+  const isoShape = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/.test(spaceTs);
+  if (!isoShape) {
+    throw new Error(
+      `Cannot convert '${raw}' to timestamp. Accepted: ISO 8601, YYYY-MM-DD HH:mm:ss, epoch ms/s`
+    );
+  }
+
   const d = new Date(spaceTs);
   if (!isNaN(d.getTime())) return d.toISOString();
 

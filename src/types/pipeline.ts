@@ -254,6 +254,13 @@ const FilterConditionSchema = z.object({
    * Ignored for unary operators (is_null, is_not_null).
    */
   value: z.string().optional(),
+  /**
+   * When true, `value` is interpreted as the name of another column and the
+   * condition compares column-to-column (Palantir Pipeline Builder parity:
+   * the right operand can be a column OR a literal value).
+   * When false/omitted, `value` is a literal.
+   */
+  valueIsColumn: z.boolean().optional(),
   /** When true and operator is is_not_null, treat "" as null. */
   treatEmptyAsNull: z.boolean().optional(),
 });

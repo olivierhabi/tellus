@@ -506,18 +506,29 @@ function sourceRef(catalog: string, s: BatchSourceTable): string {
 function renderCondition(c: FilterCondition): string {
   const col = quoteIdent(c.column);
   const val = () => `'${escapeSql(c.value ?? "")}'`;
+  // Right-hand operand: literal by default; column reference when the
+  // condition compares column-to-column (valueIsColumn).
+  const rhs = c.valueIsColumn
+    ? `CAST(${quoteIdent(c.value ?? "")} AS VARCHAR)`
+    : val();
   const colStr = `CAST(${col} AS VARCHAR)`;
   switch (c.operator) {
     case "eq":
-      return `${colStr} = ${val()}`;
+      return `${colStr} = ${rhs}`;
     case "neq":
-      return `${colStr} <> ${val()}`;
+      return `${colStr} <> ${rhs}`;
     case "starts_with":
-      return `${colStr} LIKE '${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `starts_with(${colStr}, ${rhs})`
+        : `${colStr} LIKE '${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
     case "ends_with":
-      return `${colStr} LIKE '%${escapeLike(c.value ?? "")}' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `ends_with(${colStr}, ${rhs})`
+        : `${colStr} LIKE '%${escapeLike(c.value ?? "")}' ESCAPE '\\'`;
     case "contains":
-      return `${colStr} LIKE '%${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `strpos(${colStr}, ${rhs}) > 0`
+        : `${colStr} LIKE '%${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
     case "is_null":
       return c.treatEmptyAsNull
         ? `(${col} IS NULL OR ${colStr} = '')`

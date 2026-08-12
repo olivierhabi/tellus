@@ -316,20 +316,32 @@ function flinkCondition(c: {
   column: string;
   operator: string;
   value?: string;
+  valueIsColumn?: boolean;
 }): string {
   const col = quoteIdent(c.column);
   const v = (c.value ?? "").replace(/'/g, "''");
+  // Right-hand operand: literal by default; column reference when the
+  // condition compares column-to-column (valueIsColumn).
+  const rhs = c.valueIsColumn
+    ? `CAST(${quoteIdent(c.value ?? "")} AS STRING)`
+    : `'${v}'`;
   switch (c.operator) {
     case "eq":
-      return `CAST(${col} AS STRING) = '${v}'`;
+      return `CAST(${col} AS STRING) = ${rhs}`;
     case "neq":
-      return `CAST(${col} AS STRING) <> '${v}'`;
+      return `CAST(${col} AS STRING) <> ${rhs}`;
     case "starts_with":
-      return `CAST(${col} AS STRING) LIKE '${v}%'`;
+      return c.valueIsColumn
+        ? `CAST(${col} AS STRING) LIKE ${rhs} || '%'`
+        : `CAST(${col} AS STRING) LIKE '${v}%'`;
     case "ends_with":
-      return `CAST(${col} AS STRING) LIKE '%${v}'`;
+      return c.valueIsColumn
+        ? `CAST(${col} AS STRING) LIKE '%' || ${rhs}`
+        : `CAST(${col} AS STRING) LIKE '%${v}'`;
     case "contains":
-      return `CAST(${col} AS STRING) LIKE '%${v}%'`;
+      return c.valueIsColumn
+        ? `CAST(${col} AS STRING) LIKE '%' || ${rhs} || '%'`
+        : `CAST(${col} AS STRING) LIKE '%${v}%'`;
     case "is_null":
       return `${col} IS NULL`;
     case "is_not_null":

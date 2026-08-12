@@ -87,6 +87,8 @@ export interface FilterCondition {
     | "regex_find"
     | "regex_match";
   value?: string;
+  /** When true, `value` names another column (column-to-column comparison). */
+  valueIsColumn?: boolean;
   treatEmptyAsNull?: boolean;
 }
 export interface DropStep {
@@ -314,17 +316,28 @@ function compileCondition(c: FilterCondition): string {
   // and using NULLIF for the comparisons.
   const s = `NULLIF(NULLIF(CAST(${col} AS VARCHAR), ''), 'null')`;
   const v = (c.value ?? "").replace(/'/g, "''");
+  // Right-hand operand: literal by default, column reference when the
+  // condition compares column-to-column (valueIsColumn).
+  const rhs = c.valueIsColumn
+    ? `CAST(${quoteIdent(c.value ?? "")} AS VARCHAR)`
+    : `'${v}'`;
   switch (c.operator) {
     case "eq":
-      return `${s} = '${v}'`;
+      return `${s} = ${rhs}`;
     case "neq":
-      return `${s} IS NULL OR ${s} <> '${v}'`;
+      return `${s} IS NULL OR ${s} <> ${rhs}`;
     case "starts_with":
-      return `${s} LIKE '${likeEscape(v)}%' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `${s} IS NOT NULL AND starts_with(${s}, ${rhs})`
+        : `${s} LIKE '${likeEscape(v)}%' ESCAPE '\\'`;
     case "ends_with":
-      return `${s} LIKE '%${likeEscape(v)}' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `${s} IS NOT NULL AND ends_with(${s}, ${rhs})`
+        : `${s} LIKE '%${likeEscape(v)}' ESCAPE '\\'`;
     case "contains":
-      return `${s} LIKE '%${likeEscape(v)}%' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `${s} IS NOT NULL AND contains(${s}, ${rhs})`
+        : `${s} LIKE '%${likeEscape(v)}%' ESCAPE '\\'`;
     case "is_null":
       return `${s} IS NULL`;
     case "is_not_null":
@@ -334,9 +347,9 @@ function compileCondition(c: FilterCondition): string {
       // Default: "" is a value, only null/undefined/'null' count as null.
       return `NULLIF(CAST(${col} AS VARCHAR), 'null') IS NOT NULL`;
     case "regex_find":
-      return `${s} IS NOT NULL AND regexp_matches(${s}, '${v}')`;
+      return `${s} IS NOT NULL AND regexp_matches(${s}, ${rhs})`;
     case "regex_match":
-      return `${s} IS NOT NULL AND regexp_matches(${s}, '^${v}$')`;
+      return `${s} IS NOT NULL AND regexp_matches(${s}, '^' || ${rhs} || '$')`;
     default:
       return "TRUE";
   }

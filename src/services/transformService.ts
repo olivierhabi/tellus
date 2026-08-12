@@ -319,6 +319,17 @@ export class TransformService {
         );
       }
       cond.column = cleanCol;
+      if (cond.valueIsColumn && cond.value) {
+        const cleanValueCol = stripBom(cond.value);
+        if (!effectiveCols.some((c) => stripBom(c.name) === cleanValueCol)) {
+          throw new AppError(
+            `Comparison column "${cleanValueCol}" does not exist. Available: ${effectiveCols.map((c) => stripBom(c.name)).join(', ')}`,
+            400,
+            'VALIDATION_ERROR',
+          );
+        }
+        cond.value = cleanValueCol;
+      }
     }
 
     // Read CSV rows, then replay prior transforms in the chain
@@ -445,6 +456,12 @@ export class TransformService {
           'VALIDATION_ERROR',
         );
       }
+    }
+
+    // Refuse to drop every column — the DuckDB build compiler enforces the
+    // same rule ("Drop removed every column.").
+    if (colsToDrop.size >= effectiveCols.length) {
+      throw new AppError('Drop removed every column.', 400, 'DROP_ALL_COLUMNS');
     }
 
     // Read and replay prior transforms
@@ -2145,6 +2162,9 @@ export class TransformService {
           }
           return out;
         });
+        if (result.length > 0 && Object.keys(result[0]).length === 0) {
+          throw new AppError('Drop removed every column.', 400, 'DROP_ALL_COLUMNS');
+        }
       } else if (fn === 'Rename') {
         const renames = (tx.renames ?? []) as Array<{ from: string; to: string }>;
         const map = new Map(renames.map((r) => [stripBom(r.from), r.to]));
@@ -2213,6 +2233,11 @@ export class TransformService {
 
     const op = cond.operator as FilterOperator;
 
+    // Right-hand operand: literal by default; when valueIsColumn is set the
+    // value names another column, so resolve it from the row. A missing
+    // right-hand column compares as empty string (never matches eq).
+    const rhs = cond.valueIsColumn ? (row[cond.value ?? ''] ?? '') : (cond.value ?? '');
+
     switch (op) {
       case 'is_null':
         // is_null always treats empty string as null (CSV semantics)
@@ -2222,24 +2247,24 @@ export class TransformService {
         return isNotNullEffective;
 
       case 'eq':
-        return !isNullValue && raw === (cond.value ?? '');
+        return !isNullValue && raw === rhs;
 
       case 'neq':
-        return isNullValue || raw !== (cond.value ?? '');
+        return isNullValue || raw !== rhs;
 
       case 'starts_with':
-        return !isNullValue && raw.startsWith(cond.value ?? '');
+        return !isNullValue && raw.startsWith(rhs);
 
       case 'ends_with':
-        return !isNullValue && raw.endsWith(cond.value ?? '');
+        return !isNullValue && raw.endsWith(rhs);
 
       case 'contains':
-        return !isNullValue && raw.includes(cond.value ?? '');
+        return !isNullValue && raw.includes(rhs);
 
       case 'regex_find': {
         if (isNullValue || !cond.value) return false;
         try {
-          return new RegExp(cond.value).test(raw);
+          return new RegExp(rhs).test(raw);
         } catch {
           return false;
         }
@@ -2248,7 +2273,7 @@ export class TransformService {
       case 'regex_match': {
         if (isNullValue || !cond.value) return false;
         try {
-          const re = new RegExp(`^${cond.value}$`);
+          const re = new RegExp(`^${rhs}$`);
           return re.test(raw);
         } catch {
           return false;
