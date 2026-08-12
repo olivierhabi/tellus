@@ -20,7 +20,7 @@ function reasonFromError(error: unknown): string {
     if (error.code === "DUPLICATE_BUSINESS_KEY") return error.code;
     if (error.code === "CONCURRENCY_CONFLICT") return "STALE_VERSION";
     if (error.code === "PERMISSION_DENIED") return "PERMISSION_DENIED";
-    if (error.code === "SUBMISSION_CRITERIA_FAILED") return "INELIGIBLE";
+    if (error.code === "SUBMISSION_CRITERIA_FAILED" || error.code === "SUBMISSION_CRITERIA_NOT_MET") return "INELIGIBLE";
     return error.code;
   }
   return "EXECUTION_FAILED";
@@ -34,6 +34,7 @@ function isPerRecordRejection(error: unknown): boolean {
     "CONCURRENCY_CONFLICT",
     "PERMISSION_DENIED",
     "SUBMISSION_CRITERIA_FAILED",
+    "SUBMISSION_CRITERIA_NOT_MET",
     "INVALID_PARAMETER",
   ]).has(error.code);
 }
@@ -103,6 +104,7 @@ export async function executeRwandaRswitchBulkReconciliation(input: {
             {
               ...contextFor(index),
               transactionClient: client,
+              deferSearchProjection: true,
               beforeAuditCommitHook: async (hookClient) => {
                 const inserted = await hookClient.query(
                   `INSERT INTO rwanda_bulk_reconciliation_business_key

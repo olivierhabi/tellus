@@ -82,4 +82,31 @@ describe("Rwanda RSwitch production bulk route", () => {
 
     expect(clients[0].query).toHaveBeenCalledWith("ROLLBACK TO SAVEPOINT rwanda_bulk_1");
   });
+
+  it("returns a partial result when the action executor reports its real submission-criteria code", async () => {
+    executeAction
+      .mockRejectedValueOnce(new OntologyError("not eligible", "SUBMISSION_CRITERIA_NOT_MET", 422))
+      .mockImplementationOnce(async (_ontologyId, _action, _parameters, context) => {
+        await context.beforeAuditCommitHook(context.transactionClient);
+        return { executionId: "audit-eligible" };
+      });
+
+    const result = await executeRwandaRswitchBulkReconciliation({
+      ontologyId: "ontology-1",
+      requestId: "request-partial",
+      requests: [
+        { parameters: { transactionId: "tx-ineligible", batchId: "settlement-1" } },
+        { parameters: { transactionId: "tx-eligible", batchId: "settlement-1" } },
+      ],
+      contextFor: () => ({ executedBy: "recon-specialist" }),
+    });
+
+    expect(result).toMatchObject({
+      outcome: "PARTIAL_FAILURE",
+      perRecordResults: [
+        { transactionId: "tx-ineligible", outcome: "REJECTED", reasonCode: "INELIGIBLE" },
+        { transactionId: "tx-eligible", outcome: "RECONCILED", auditId: "audit-eligible" },
+      ],
+    });
+  });
 });

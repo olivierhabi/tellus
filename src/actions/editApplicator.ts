@@ -124,6 +124,13 @@ export interface ApplyExecutionContext {
   /** Caller-owned transaction for an atomic batch chunk. */
   transactionClient?: PoolClient;
   /**
+   * Batch routes can defer individual OpenSearch writes until after their
+   * database chunk commits. This prevents N in-band projections from holding
+   * a shared transaction open; the durable edit-store/reindex path remains
+   * the source of truth.
+   */
+  deferSearchProjection?: boolean;
+  /**
    * F-P3-11 — durable-before-ack audit. Called AFTER all edits have been
    * inserted into ontology_edit/link_edit/object_instances (inside the
    * same PG transaction) but BEFORE the COMMIT. The hook MUST write the
@@ -646,6 +653,7 @@ export async function applyEdits(
   // Production retains in-band indexing by default; this explicit switch is
   // only for isolated harnesses that have their own projection evidence.
   const deferSearchProjection =
+    executionContext.deferSearchProjection === true ||
     process.env.ACTION_SEARCH_PROJECTION_DEFERRED === "true";
 
   const bulkBody: Array<Record<string, unknown>> = [];

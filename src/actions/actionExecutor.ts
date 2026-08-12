@@ -157,6 +157,8 @@ export interface ExecutionContext {
    * must use a savepoint per item and commit or roll back the enclosing chunk.
    */
   transactionClient?: PoolClient;
+  /** Defer per-item search projection for a caller-owned atomic batch. */
+  deferSearchProjection?: boolean;
   /**
    * Optional domain write performed in the same PostgreSQL transaction as
    * the action edits and durable audit entry.  This is intentionally an
@@ -1184,6 +1186,7 @@ export async function executeAction(
       semanticsVersion: semantics.semanticsVersion,
       plannedLockIdentities: v2PlannedLocks,
       transactionClient: context.transactionClient,
+      deferSearchProjection: context.deferSearchProjection,
       v2RevalidateAfterLock: v2Revalidate,
       // Per-item ack barrier ceiling (batch routes pre-defer rather than
       // let the request-budget middleware 504 a committed mutation).
@@ -1435,7 +1438,18 @@ export async function executeAction(
     // client sees the real contract violation.
     if (!auditCommitted) {
       try {
-        await logStandaloneFailureAudit(buildAuditEntry());
+        // An atomic batch keeps the hash-chain transaction lock for its
+        // complete chunk. Opening a second connection for an expected
+        // per-record rejection would wait on that lock forever. Append on the
+        // caller-owned transaction instead; the route's item savepoint then
+        // decides whether the failed attempt's audit is retained or rolled
+        // back with its rejected mutation.
+        if (context.transactionClient) {
+          await appendAuditRow(context.transactionClient, buildAuditEntry());
+          auditCommitted = true;
+        } else {
+          await logStandaloneFailureAudit(buildAuditEntry());
+        }
       } catch (auditErr) {
         if (auditErr instanceof AuditDurabilityError) {
           incCounter("tellus_action_audit_rollback_total", { reason: "standalone" });
