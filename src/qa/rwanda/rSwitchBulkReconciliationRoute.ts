@@ -67,157 +67,185 @@ export async function executeRwandaRswitchBulkReconciliation(input: {
   );
 
   const perRecordResults: PerRecordReconciliationResult[] = [];
-  for (let offset = 0; offset < requests.length; offset += CHUNK_SIZE) {
-    const chunk = requests.slice(offset, offset + CHUNK_SIZE);
-    const chunkResults = await withTransaction(async (client) => {
-      const results: PerRecordReconciliationResult[] = [];
-      const targets: PreparedTarget[] = [];
-      for (let itemOffset = 0; itemOffset < chunk.length; itemOffset += 1) {
-        const index = offset + itemOffset;
-        const parameters = chunk[itemOffset]?.parameters ?? {};
-        const transactionId = typeof parameters.transactionId === "string" ? parameters.transactionId : "";
-        const batchId = typeof parameters.batchId === "string" ? parameters.batchId : "";
-        const context = contextFor(index);
-        if (!transactionId || !batchId) {
-          results.push(rejected(transactionId, "INVALID_TARGET"));
-        } else if (!canReconcile(context)) {
-          results.push(rejected(transactionId, "PERMISSION_DENIED"));
-        } else {
-          targets.push({ index, transactionId, batchId, context });
+  try {
+    for (let offset = 0; offset < requests.length; offset += CHUNK_SIZE) {
+      const chunk = requests.slice(offset, offset + CHUNK_SIZE);
+      const chunkResults = await withTransaction(async (client) => {
+        const results: PerRecordReconciliationResult[] = [];
+        const targets: PreparedTarget[] = [];
+        for (let itemOffset = 0; itemOffset < chunk.length; itemOffset += 1) {
+          const index = offset + itemOffset;
+          const parameters = chunk[itemOffset]?.parameters ?? {};
+          const transactionId = typeof parameters.transactionId === "string" ? parameters.transactionId : "";
+          const batchId = typeof parameters.batchId === "string" ? parameters.batchId : "";
+          const context = contextFor(index);
+          if (!transactionId || !batchId) {
+            results.push(rejected(transactionId, "INVALID_TARGET"));
+          } else if (!canReconcile(context)) {
+            results.push(rejected(transactionId, "PERMISSION_DENIED"));
+          } else {
+            targets.push({ index, transactionId, batchId, context });
+          }
         }
-      }
-      if (targets.length === 0) return results;
+        if (targets.length === 0) return results;
 
-      // A request originates from one authenticated caller.  Do not silently
-      // collapse an unusual mixed-branch programmatic batch: reject only the
-      // divergent targets rather than writing them into the main branch.
-      const branchId = targets[0]!.context.branchId ?? deriveMainBranchId(ontologyId);
-      const branchTargets = targets.filter((target) =>
-        (target.context.branchId ?? deriveMainBranchId(ontologyId)) === branchId,
-      );
-      for (const target of targets) {
-        if (!branchTargets.includes(target)) results.push(rejected(target.transactionId, "INVALID_TARGET"));
-      }
-      if (branchTargets.length === 0) return results;
-
-      const objectRows = await client.query<{
-        primary_key: string;
-        properties: { status?: unknown; reconciliationEligibility?: unknown };
-      }>(
-        `SELECT primary_key, properties
-           FROM object_instances
-          WHERE ontology_id = $1::uuid
-            AND branch_id = $2::uuid
-            AND object_type_api_name = $3
-            AND primary_key = ANY($4::text[])
-          FOR UPDATE`,
-        [ontologyId, branchId, PAYMENT_TRANSACTION_TYPE, branchTargets.map((target) => target.transactionId)],
-      );
-      const objectById = new Map(objectRows.rows.map((row) => [row.primary_key, row.properties]));
-
-      // First occurrence of a transaction/batch pair may reconcile; later
-      // occurrences in the same request have the same exactly-once outcome as
-      // a previously persisted business key.
-      const seenTransactions = new Map<string, string>();
-      const eligible: PreparedTarget[] = [];
-      for (const target of branchTargets) {
-        const pair = `${target.transactionId}\u0000${target.batchId}`;
-        const properties = objectById.get(target.transactionId);
-        const priorBatch = seenTransactions.get(target.transactionId);
-        if (priorBatch === target.batchId) {
-          results.push(rejected(target.transactionId, "DUPLICATE_BUSINESS_KEY"));
-        } else if (priorBatch !== undefined) {
-          // The ordinary action pipeline is sequential. A second request for
-          // the same target in this batch observes the first transition to
-          // RECONCILED and therefore fails its FAILED-state criterion.
-          results.push(rejected(target.transactionId, "INELIGIBLE"));
-        } else if (properties?.status !== "FAILED" || properties.reconciliationEligibility !== "ELIGIBLE") {
-          results.push(rejected(target.transactionId, "INELIGIBLE"));
-        } else {
-          seenTransactions.set(target.transactionId, target.batchId);
-          eligible.push(target);
+        // A request originates from one authenticated caller.  Do not silently
+        // collapse an unusual mixed-branch programmatic batch: reject only the
+        // divergent targets rather than writing them into the main branch.
+        const branchId = targets[0]!.context.branchId ?? deriveMainBranchId(ontologyId);
+        const branchTargets = targets.filter((target) =>
+          (target.context.branchId ?? deriveMainBranchId(ontologyId)) === branchId,
+        );
+        for (const target of targets) {
+          if (!branchTargets.includes(target)) results.push(rejected(target.transactionId, "INVALID_TARGET"));
         }
-      }
-      if (eligible.length === 0) return results;
+        if (branchTargets.length === 0) return results;
 
-      // The unique index is the race-safe authority.  ON CONFLICT returns the
-      // accepted keys, so concurrent batches cannot duplicate a settlement.
-      const reserved = await client.query<{ transaction_id: string; batch_id: string }>(
-        `INSERT INTO rwanda_bulk_reconciliation_business_key
-           (ontology_id, transaction_id, batch_id, request_id)
-         SELECT $1, transaction_id, batch_id, $4
-           FROM unnest($2::text[], $3::text[]) AS input(transaction_id, batch_id)
-         ON CONFLICT DO NOTHING
-         RETURNING transaction_id, batch_id`,
-        [ontologyId, eligible.map((target) => target.transactionId), eligible.map((target) => target.batchId), requestId],
-      );
-      const reservedPairs = new Set(reserved.rows.map((row) => `${row.transaction_id}\u0000${row.batch_id}`));
-      const accepted = eligible.filter((target) => reservedPairs.has(`${target.transactionId}\u0000${target.batchId}`));
-      for (const target of eligible) {
-        if (!reservedPairs.has(`${target.transactionId}\u0000${target.batchId}`)) {
-          results.push(rejected(target.transactionId, "DUPLICATE_BUSINESS_KEY"));
+        const objectRows = await client.query<{
+          primary_key: string;
+          properties: { status?: unknown; reconciliationEligibility?: unknown };
+        }>(
+          `SELECT primary_key, properties
+             FROM object_instances
+            WHERE ontology_id = $1::uuid
+              AND branch_id = $2::uuid
+              AND object_type_api_name = $3
+              AND primary_key = ANY($4::text[])
+            FOR UPDATE`,
+          [ontologyId, branchId, PAYMENT_TRANSACTION_TYPE, branchTargets.map((target) => target.transactionId)],
+        );
+        const objectById = new Map(objectRows.rows.map((row) => [row.primary_key, row.properties]));
+
+        // First occurrence of a transaction/batch pair may reconcile; later
+        // occurrences in the same request have the same exactly-once outcome as
+        // a previously persisted business key.
+        const seenTransactions = new Map<string, string>();
+        const eligible: PreparedTarget[] = [];
+        for (const target of branchTargets) {
+          const pair = `${target.transactionId}\u0000${target.batchId}`;
+          const properties = objectById.get(target.transactionId);
+          const priorBatch = seenTransactions.get(target.transactionId);
+          if (priorBatch === target.batchId) {
+            results.push(rejected(target.transactionId, "DUPLICATE_BUSINESS_KEY"));
+          } else if (priorBatch !== undefined) {
+            // The ordinary action pipeline is sequential. A second request for
+            // the same target in this batch observes the first transition to
+            // RECONCILED and therefore fails its FAILED-state criterion.
+            results.push(rejected(target.transactionId, "INELIGIBLE"));
+          } else if (properties?.status !== "FAILED" || properties.reconciliationEligibility !== "ELIGIBLE") {
+            results.push(rejected(target.transactionId, "INELIGIBLE"));
+          } else {
+            seenTransactions.set(target.transactionId, target.batchId);
+            eligible.push(target);
+          }
         }
-      }
-      if (accepted.length === 0) return results;
+        if (eligible.length === 0) return results;
 
-      const executionIds = accepted.map(() => crypto.randomUUID());
-      const editIds = accepted.map(() => crypto.randomUUID());
-      const actor = accepted[0]!.context.executedBy || "system";
-      const correlationId = accepted[0]!.context.correlationId ?? null;
-      const parameters = accepted.map((target) => JSON.stringify({ transactionId: target.transactionId, batchId: target.batchId }));
+        // The unique index is the race-safe authority.  ON CONFLICT returns the
+        // accepted keys, so concurrent batches cannot duplicate a settlement.
+        const reserved = await client.query<{ transaction_id: string; batch_id: string }>(
+          `INSERT INTO rwanda_bulk_reconciliation_business_key
+             (ontology_id, transaction_id, batch_id, request_id)
+           SELECT $1, transaction_id, batch_id, $4
+             FROM unnest($2::text[], $3::text[]) AS input(transaction_id, batch_id)
+           ON CONFLICT DO NOTHING
+           RETURNING transaction_id, batch_id`,
+          [ontologyId, eligible.map((target) => target.transactionId), eligible.map((target) => target.batchId), requestId],
+        );
+        const reservedPairs = new Set(reserved.rows.map((row) => `${row.transaction_id}\u0000${row.batch_id}`));
+        const accepted = eligible.filter((target) => reservedPairs.has(`${target.transactionId}\u0000${target.batchId}`));
+        for (const target of eligible) {
+          if (!reservedPairs.has(`${target.transactionId}\u0000${target.batchId}`)) {
+            results.push(rejected(target.transactionId, "DUPLICATE_BUSINESS_KEY"));
+          }
+        }
+        if (accepted.length === 0) return results;
 
-      await client.query(
-        `INSERT INTO ontology_edit
-           (edit_id, object_type_api_name, primary_key, operation, property_values,
-            link_edits, action_type_api_name, execution_id, action_parameters,
-            executed_by, edit_strategy, ontology_id, branch_id)
-         SELECT edit_id::uuid, $1, transaction_id, 'update', '{"status":"RECONCILED"}'::jsonb,
-                '[]'::jsonb, $2, execution_id::uuid, parameters::jsonb, $3,
-                'user_edit_wins', $4::uuid, $5::uuid
-           FROM unnest($6::uuid[], $7::text[], $8::uuid[], $9::jsonb[])
-             AS input(edit_id, transaction_id, execution_id, parameters)`,
-        [PAYMENT_TRANSACTION_TYPE, RWANDA_RSWITCH_BULK_ACTION, actor, ontologyId, branchId, editIds, accepted.map((target) => target.transactionId), executionIds, parameters],
-      );
+        const executionIds = accepted.map(() => crypto.randomUUID());
+        const editIds = accepted.map(() => crypto.randomUUID());
+        const actor = accepted[0]!.context.executedBy || "system";
+        const correlationId = accepted[0]!.context.correlationId ?? null;
+        const parameters = accepted.map((target) => JSON.stringify({ transactionId: target.transactionId, batchId: target.batchId }));
 
-      // Maintain the authoritative object projection in the same chunk
-      // transaction. Search indexing is deliberately asynchronous, exactly as
-      // it is for a deferred generic action batch.
-      await client.query(
-        `UPDATE object_instances
-            SET properties = properties || '{"status":"RECONCILED"}'::jsonb,
-                version = version + 1,
-                last_modified_at = now()
-          WHERE ontology_id = $1::uuid
-            AND branch_id = $2::uuid
-            AND object_type_api_name = $3
-            AND primary_key = ANY($4::text[])`,
-        [ontologyId, branchId, PAYMENT_TRANSACTION_TYPE, accepted.map((target) => target.transactionId)],
-      );
+        await client.query(
+          `INSERT INTO ontology_edit
+             (edit_id, object_type_api_name, primary_key, operation, property_values,
+              link_edits, action_type_api_name, execution_id, action_parameters,
+              executed_by, edit_strategy, ontology_id, branch_id)
+           SELECT edit_id::uuid, $1, transaction_id, 'update', '{"status":"RECONCILED"}'::jsonb,
+                  '[]'::jsonb, $2, execution_id::uuid, parameters::jsonb, $3,
+                  'user_edit_wins', $4::uuid, $5::uuid
+             FROM unnest($6::uuid[], $7::text[], $8::uuid[], $9::jsonb[])
+               AS input(edit_id, transaction_id, execution_id, parameters)`,
+          [PAYMENT_TRANSACTION_TYPE, RWANDA_RSWITCH_BULK_ACTION, actor, ontologyId, branchId, editIds, accepted.map((target) => target.transactionId), executionIds, parameters],
+        );
 
-      for (let index = 0; index < accepted.length; index += 1) {
-        const target = accepted[index]!;
-        const audit = await appendAuditRow(client, {
-          action_type_api_name: RWANDA_RSWITCH_BULK_ACTION,
-          action_type_display_name: "Bulk Reconcile Selected (QA)",
-          execution_id: executionIds[index]!,
-          parameters: { transactionId: target.transactionId, batchId: target.batchId },
-          affected_objects: [{ objectType: PAYMENT_TRANSACTION_TYPE, primaryKey: target.transactionId, operation: "update" }],
-          affected_object_count: 1,
-          result: "success",
-          failure_type: null,
-          error_message: null,
-          duration_ms: 0,
-          executed_by: target.context.executedBy || "system",
-          source_ip: target.context.sourceIp ?? null,
-          branch_id: branchId,
-          metadata: { requestId, bulkChunkOffset: offset },
-          correlation_id: target.context.correlationId ?? null,
-        });
-        results.push({ transactionId: target.transactionId, outcome: "RECONCILED", reasonCode: "OK", auditId: audit.auditId });
-      }
-      return results;
-    });
-    perRecordResults.push(...chunkResults);
+        // Maintain the authoritative object projection in the same chunk
+        // transaction. Search indexing is deliberately asynchronous, exactly as
+        // it is for a deferred generic action batch.
+        await client.query(
+          `UPDATE object_instances
+              SET properties = properties || '{"status":"RECONCILED"}'::jsonb,
+                  version = version + 1,
+                  last_modified_at = now()
+            WHERE ontology_id = $1::uuid
+              AND branch_id = $2::uuid
+              AND object_type_api_name = $3
+              AND primary_key = ANY($4::text[])`,
+          [ontologyId, branchId, PAYMENT_TRANSACTION_TYPE, accepted.map((target) => target.transactionId)],
+        );
+
+        for (let index = 0; index < accepted.length; index += 1) {
+          const target = accepted[index]!;
+          const audit = await appendAuditRow(client, {
+            action_type_api_name: RWANDA_RSWITCH_BULK_ACTION,
+            action_type_display_name: "Bulk Reconcile Selected (QA)",
+            execution_id: executionIds[index]!,
+            parameters: { transactionId: target.transactionId, batchId: target.batchId },
+            affected_objects: [{ objectType: PAYMENT_TRANSACTION_TYPE, primaryKey: target.transactionId, operation: "update" }],
+            affected_object_count: 1,
+            result: "success",
+            failure_type: null,
+            error_message: null,
+            duration_ms: 0,
+            executed_by: target.context.executedBy || "system",
+            source_ip: target.context.sourceIp ?? null,
+            branch_id: branchId,
+            metadata: { requestId, bulkChunkOffset: offset },
+            correlation_id: target.context.correlationId ?? null,
+            // action_audit_log.semantics_version is NOT NULL; mirror the
+            // executor's Stage-1b defaults for this declarative transition.
+            semantics_version: 1,
+            execution_mode: "declarative",
+          });
+          results.push({ transactionId: target.transactionId, outcome: "RECONCILED", reasonCode: "OK", auditId: audit.auditId });
+        }
+        return results;
+      });
+      perRecordResults.push(...chunkResults);
+    }
+  } catch (error) {
+    // §6.3 wholesale infrastructure failure: each committed chunk is fully
+    // applied, and the aborted chunk is fully unapplied. Persist the actual
+    // state of every requested record before rethrowing, so a same-requestId
+    // replay reports the truth instead of the empty placeholder above.
+    const reported: PerRecordReconciliationResult[] = [...perRecordResults];
+    for (let index = reported.length; index < requests.length; index += 1) {
+      const parameters = requests[index]?.parameters ?? {};
+      const transactionId = typeof parameters.transactionId === "string" ? parameters.transactionId : "";
+      reported.push(rejected(transactionId, "NOT_ATTEMPTED"));
+    }
+    const committed = reported.filter((row) => row.outcome === "RECONCILED").length;
+    const partial: BulkReconciliationResult = {
+      requestId,
+      outcome: committed === 0 ? "FAILED" : "PARTIAL_FAILURE",
+      perRecordResults: reported,
+    };
+    await query(
+      `UPDATE rwanda_bulk_reconciliation_run SET result = $2::jsonb WHERE request_id = $1`,
+      [requestId, JSON.stringify(partial)],
+    );
+    throw error;
   }
 
   // Preserve request ordering even though validation/rejection results are

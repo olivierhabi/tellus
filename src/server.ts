@@ -712,6 +712,20 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
   console.log(
     "[test-hooks] Mounted /api/v1/_test/rate-limiter/reset (TELLUS_TEST_HOOKS=1)",
   );
+
+  // Rwanda QA campaign: namespace-scoped fixture reset (see
+  // src/qa/rwanda/resetNamespace.ts for why user_edit_wins makes this
+  // necessary between campaigns).
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { RWANDA_QA_RESET_ROUTE, resetRwandaQaNamespace } = require(
+    "./qa/rwanda/resetNamespace",
+  ) as typeof import("./qa/rwanda/resetNamespace");
+  app.post(RWANDA_QA_RESET_ROUTE, (req: Request, res: Response) => {
+    void resetRwandaQaNamespace(req, res);
+  });
+  console.log(
+    `[test-hooks] Mounted ${RWANDA_QA_RESET_ROUTE} (TELLUS_TEST_HOOKS=1)`,
+  );
 }
 
 // "One Enterprise, One Ontology" — collapse ANY ontology identifier in the

@@ -73,6 +73,20 @@ describe("Rwanda RSwitch production bulk route", () => {
       requests: [request("tx-1"), request("tx-2")],
       contextFor: () => ({ executedBy: "recon-specialist", roles: ["recon-specialist"] }),
     })).rejects.toThrow("audit storage unavailable");
+
+    // §6.3: the durable run row reports every record's actual state after a
+    // wholesale failure — the uncommitted chunk is NOT_ATTEMPTED, so a
+    // same-requestId replay cannot return the empty placeholder as truth.
+    const update = query.mock.calls.find(([sql]: [string]) =>
+      String(sql).includes("UPDATE rwanda_bulk_reconciliation_run SET result"),
+    );
+    expect(update).toBeDefined();
+    const persisted = JSON.parse((update as [string, unknown[]])[1][1] as string);
+    expect(persisted.outcome).toBe("FAILED");
+    expect(persisted.perRecordResults).toEqual([
+      { transactionId: "tx-1", outcome: "REJECTED", reasonCode: "NOT_ATTEMPTED", auditId: null },
+      { transactionId: "tx-2", outcome: "REJECTED", reasonCode: "NOT_ATTEMPTED", auditId: null },
+    ]);
   });
 
   it("returns exact partial outcomes for ineligible, unauthorized, and accepted targets", async () => {
