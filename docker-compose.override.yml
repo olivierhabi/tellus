@@ -1,0 +1,44 @@
+# =============================================================================
+# docker-compose.override.yml — server deployment env overrides.
+#
+# Auto-merged by docker compose (no -f needed) on top of docker-compose.yml.
+# =============================================================================
+services:
+  app:
+    environment:
+      # ---- Development mode so superadmin auto-create + test hooks work ----
+      NODE_ENV: development
+      ENVIRONMENT: development
+      # ---- Superadmin bootstrap (creates realm + user in Keycloak on boot) ----
+      TELLUS_SUPERADMIN_EMAIL: "${TELLUS_SUPERADMIN_EMAIL}"
+      TELLUS_SUPERADMIN_PASSWORD: "${TELLUS_SUPERADMIN_PASSWORD}"
+      # ---- Rate limiter: single-replica in-memory opt-in ----
+      ALLOW_INMEMORY_RATELIMIT: "1"
+      # ---- Session lifetime (echoed to FE on login) ----
+      TELLUS_SESSION_MAX_AGE: "${TELLUS_SESSION_MAX_AGE:-8h}"
+      TELLUS_SESSION_IDLE_TIMEOUT: "${TELLUS_SESSION_IDLE_TIMEOUT:-30m}"
+      # ---- BFF SSO (Auth Code + PKCE) ----
+      KEYCLOAK_BFF_CLIENT_ID: "${KEYCLOAK_BFF_CLIENT_ID:-tellus-bff}"
+      KEYCLOAK_BFF_CLIENT_SECRET: "${KEYCLOAK_BFF_CLIENT_SECRET}"
+      TELLUS_FE_BASE_URL: "${TELLUS_FE_BASE_URL:-http://localhost:3001}"
+      # ---- Crypto / workload ----
+      TELLUS_LOCAL_KEK_B64: "${TELLUS_LOCAL_KEK_B64}"
+      TELLUS_WORKLOAD_JWT_SECRET: "${TELLUS_WORKLOAD_JWT_SECRET}"
+      TELLUS_INTERNAL_URL: "http://app:3000"
+      # ---- Quiver editor ----
+      TELLUS_QUIVER_PHASE: "${TELLUS_QUIVER_PHASE:-5}"
+      QUIVER_AUDIT_BEST_EFFORT: "${QUIVER_AUDIT_BEST_EFFORT:-1}"
+      # ---- Dev / test hooks (allowed in development mode) ----
+      TELLUS_TEST_HOOKS: "${TELLUS_TEST_HOOKS:-0}"
+      CODE_REPOS_TEST_AUTH: "${CODE_REPOS_TEST_AUTH:-0}"
+      WEBHOOK_ALLOW_PRIVATE_NETWORK_FOR_DEV: "${WEBHOOK_ALLOW_PRIVATE_NETWORK_FOR_DEV:-0}"
+      CONNECTIVITY_EGRESS_ALLOW_RESERVED: "${CONNECTIVITY_EGRESS_ALLOW_RESERVED}"
+      # ---- Rate limit / timeouts ----
+      RATE_LIMIT_MAX: "${RATE_LIMIT_MAX:-1000}"
+      REQUEST_TIMEOUT_MS: "${REQUEST_TIMEOUT_MS:-30000}"
+      AI_ENGINE_TIMEOUT_MS: "${AI_ENGINE_TIMEOUT_MS:-300000}"
+      TELOS_AIE_AGENT_URL: "${TELOS_AIE_AGENT_URL:-http://127.0.0.1:5000}"
+      TELOS_AIE_AGENT_TOKEN: "${TELOS_AIE_AGENT_TOKEN}"
+      # ---- Lakekeeper pipeline bootstrap (uses MinIO creds, not S3_*) ----
+      MINIO_ACCESS_KEY: "${S3_ACCESS_KEY_ID}"
+      MINIO_SECRET_KEY: "${S3_SECRET_ACCESS_KEY}"

@@ -49,7 +49,7 @@ RUN groupadd --system appgroup && useradd --system --gid appgroup appuser
 COPY package.json pnpm-lock.yaml ./
 RUN --mount=type=cache,id=tellus-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
     pnpm config set fetch-retries 5 \
-    && pnpm install --frozen-lockfile --prod --ignore-scripts
+    && pnpm install --frozen-lockfile --prod --ignore-scripts && pnpm rebuild duckdb
 
 COPY --from=builder /app/dist/ dist/
 
