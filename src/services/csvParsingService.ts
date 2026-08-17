@@ -2,7 +2,8 @@ import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { getObjectStream } from './storageService';
 import { sanitizeCsvHeader } from '../utils/csvHeader';
-import { Readable } from 'stream';
+import { createHash } from 'node:crypto';
+import { Readable, Transform } from 'stream';
 
 const MAX_SAMPLE_ROWS = 10000;
 const PREVIEW_ROWS = 10;
@@ -32,6 +33,29 @@ export interface ParseResult {
   columns: ColumnStats[];
   rowCount: number;
   previewRows: Record<string, string>[];
+  /** Byte count read from the persisted object, not the HTTP upload body. */
+  fileSizeBytes: number;
+  /** SHA-256 of the exact persisted object that produced this schema. */
+  contentHash: string;
+}
+
+/**
+ * Raised when the object in storage is not a complete, rectangular CSV/TSV.
+ *
+ * This is deliberately distinct from an infrastructure read failure: callers
+ * can safely present this as a rejected upload and retain the original object
+ * for support/audit instead of repeatedly retrying an invalid file.
+ */
+export class DatasetCsvValidationError extends Error {
+  readonly code = 'DATASET_CSV_VALIDATION_FAILED';
+  readonly cause: unknown;
+
+  constructor(filePath: string, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Dataset file '${filePath}' is not a valid rectangular CSV/TSV: ${detail}`);
+    this.name = 'DatasetCsvValidationError';
+    this.cause = cause;
+  }
 }
 
 class WelfordAccumulator {
@@ -164,6 +188,8 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
     let rowCount = 0;
     let doneAnalyzing = false;
     let settled = false;
+    let fileSizeBytes = 0;
+    const contentHash = createHash('sha256');
 
     const ext = filePath.toLowerCase();
     const delimiter = ext.endsWith('.tsv') ? '\t' : ',';
@@ -195,7 +221,12 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
       },
       skip_empty_lines: true,
       trim: true,
-      relax_column_count: true,
+      // Never relax row width during ingestion. A permissive parser turns a
+      // truncated final record (or a dropped delimiter) into a seemingly
+      // valid dataset whose schema and data disagree at execution time.
+      // Header normalisation above handles cosmetic header defects; it does
+      // not make malformed data records valid.
+      relax_column_count: false,
       // UTF-8 BOM handling: strip the byte-order-mark so the first
       // column header doesn't end up as "\uFEFForder_id". Every layer
       // downstream — the client JSON body, the inputSanitizer (which
@@ -217,7 +248,13 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
           stats.name = name;
           return stats;
         });
-        resolve({ columns, rowCount, previewRows });
+        resolve({
+          columns,
+          rowCount,
+          previewRows,
+          fileSizeBytes,
+          contentHash: `sha256:${contentHash.digest('hex')}`,
+        });
       }
     };
 
@@ -246,7 +283,7 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
       readStream.destroy();
       if (!settled) {
         settled = true;
-        reject(err);
+        reject(new DatasetCsvValidationError(filePath, err));
       }
     });
 
@@ -258,7 +295,32 @@ function parseStream(readStream: Readable, filePath: string): Promise<ParseResul
       settle();
     });
 
-    readStream.pipe(parser);
+    // Account for the exact bytes actually parsed. This proves that schema,
+    // preview and row count were derived from the persisted S3 object rather
+    // than from an in-memory request body that could differ from storage.
+    const accountingStream = new Transform({
+      transform(chunk: Buffer | string, _encoding, callback) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        fileSizeBytes += bytes.length;
+        contentHash.update(bytes);
+        callback(null, chunk);
+      },
+    });
+
+    readStream.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+    accountingStream.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+
+    readStream.pipe(accountingStream).pipe(parser);
   });
 }
 
