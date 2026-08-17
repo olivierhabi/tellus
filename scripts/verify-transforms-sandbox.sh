@@ -61,7 +61,7 @@ setup_commit() {
     | jq -r '.branches[] | select(.name == "master") | .headSha // empty' | head -1)
   curl -s -X POST "$BASE/code-repositories/$RID/branches/master/commits" "${AUTH[@]}" \
     -H "Idempotency-Key: $(ukey)" ${TIP:+-H "If-Match: \"$TIP\""} -H 'Content-Type: application/json' \
-    -d "{\"message\":\"m\",\"fileChanges\":[{\"path\":\"transforms/$2\",\"op\":\"add\",\"contentBase64\":\"$(printf '%s' "$3" | base64)\"}]}" \
+    -d "{\"message\":\"m\",\"fileChanges\":[{\"path\":\"transforms/$2\",\"op\":\"add\",\"contentBase64\":\"$(printf '%s' \"$3\" | base64 | tr -d '\n')\"}]}" \
     | jq -e '.commitSha // empty' >/dev/null || { red "commit failed for $1"; return 1; }
   echo "$RID"
 }

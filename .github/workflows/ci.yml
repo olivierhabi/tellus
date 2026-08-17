@@ -768,6 +768,13 @@ jobs:
   # litellm-credential-rotation.md instead of a perpetual CI failure.
   secret-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # gitleaks-action lists PR commits via the REST API on pull_request
+      # events — without this the default token gets 403 Resource not
+      # accessible by integration (x-accepted-github-permissions:
+      # pull_requests=read).
+      pull-requests: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v5

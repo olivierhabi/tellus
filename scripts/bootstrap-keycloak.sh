@@ -507,9 +507,12 @@ fi
 #     fail-closed archetype survived the default-marking graft.
 token_roles() {
   # token_roles TOKEN — decodes the JWT payload and prints realm_access.roles.
+  # Use userland `base64 -d` (BSD + GNU identical): `openssl base64 -d` is
+  # NOT portable — LibreSSL exits 0 with empty output on single-line input,
+  # which made this check decodу zero roles and fail closed in CI.
   printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+' \
     | { p=$(cat); pad=$(( (4 - ${#p} % 4) % 4 )); printf '%s%*s' "$p" "$pad" '' | tr ' ' '='; } \
-    | openssl base64 -d 2>/dev/null | jq -c '.realm_access.roles // []'
+    | base64 -d 2>/dev/null | jq -c '.realm_access.roles // []'
 }
 
 marking_role_count=$(token_roles "$USER_TOKEN" | jq '[.[] | select(startswith("marking:"))] | length')

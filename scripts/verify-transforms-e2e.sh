@@ -164,8 +164,10 @@ def filter_completed(output, orders):
     output.write_dataframe(completed)
 "
 
-# Base64 encode the transform code
-TRANSFORM_B64=$(echo "$TRANSFORM_CODE" | base64)
+# Base64 encode the transform code. GNU base64 wraps at 76 columns; strip
+# newlines or the wrapped payload breaks the JSON body (Linux CI regression —
+# macOS base64 never wraps, so this passes locally without the tr).
+TRANSFORM_B64=$(printf '%s' "$TRANSFORM_CODE" | base64 | tr -d '\n')
 
 COMMIT_IDEM=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
