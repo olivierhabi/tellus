@@ -235,6 +235,12 @@ async function applyInstanceSettings(
   // container rely on the OOM killer for isolation.
   const memoryLimit = options.memoryLimit ?? process.env.DUCKDB_MEMORY_LIMIT ?? "1GB";
   const tempDir = options.tempDirectory ?? process.env.DUCKDB_TEMP_DIR ?? "/tmp/duckdb_spill";
+  // DuckDB resolves extension/cache state through `home_directory`. In the
+  // production image we run as an unprivileged user, so make this an
+  // application-owned path instead of depending on a host/user home path.
+  // This must precede INSTALL/LOAD httpfs below.
+  const homeDirectory = process.env.DUCKDB_HOME_DIRECTORY ?? "/app/data/duckdb";
+  await runAll(conn, `SET home_directory='${homeDirectory.replace(/'/g, "''")}'`);
   await runAll(conn, `SET memory_limit='${memoryLimit}'`);
   await runAll(conn, `PRAGMA temp_directory='${tempDir}'`);
   // Default thread count — tuned so a 4-vCPU pod doesn't oversubscribe.

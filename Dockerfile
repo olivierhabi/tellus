@@ -44,7 +44,12 @@ RUN apt-get update \
 RUN corepack enable && corepack prepare pnpm@latest-10 --activate
 
 # Run as non-root user for security (Debian useradd/groupadd, not Alpine's).
-RUN groupadd --system appgroup && useradd --system --gid appgroup appuser
+# `--create-home` is required: DuckDB resolves its extension/cache directory
+# through the current user's home and rejects a passwd entry whose home path
+# does not exist. Keep DuckDB's state in the application data directory too,
+# rather than relying on an ambient host home directory.
+RUN groupadd --system appgroup \
+    && useradd --system --create-home --gid appgroup appuser
 
 COPY package.json pnpm-lock.yaml ./
 RUN --mount=type=cache,id=tellus-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
@@ -53,8 +58,10 @@ RUN --mount=type=cache,id=tellus-pnpm-store,target=/root/.local/share/pnpm/store
 
 COPY --from=builder /app/dist/ dist/
 
-# Create data directory for datasource files
-RUN mkdir -p /app/data && chown appuser:appgroup /app/data
+# Create data directories for datasource files and DuckDB's extension/cache
+# home. `appdata` is the persistent application volume in Compose.
+RUN mkdir -p /app/data/duckdb /tmp/duckdb_spill \
+    && chown -R appuser:appgroup /app/data /tmp/duckdb_spill
 
 USER appuser
 
@@ -62,5 +69,7 @@ EXPOSE 3000
 
 ENV NODE_ENV=production
 ENV DATA_DIR=/app/data
+ENV HOME=/home/appuser
+ENV DUCKDB_HOME_DIRECTORY=/app/data/duckdb
 
 CMD ["node", "dist/server.js"]
