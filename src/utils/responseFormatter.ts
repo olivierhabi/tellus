@@ -299,6 +299,10 @@ export function formatProperty(dbRow: DbRow): Record<string, unknown> {
     isRequired: dbRow.is_required,
     isArray: dbRow.is_array,
     ordinal: dbRow.ordinal,
+    // Property visibility in user applications (Foundry Ontology Manager
+    // Display tab — normal / prominent / hidden). Column is NOT NULL with a
+    // 'normal' default; the fallback guards rows read mid-migration.
+    visibility: (dbRow.visibility as string) ?? "normal",
     conditionalFormatting: dbRow.conditional_formatting ?? null,
     inlineEditActionId: (dbRow.inline_edit_action_id as string | null) ?? null,
     // Column-level visibility markings (migration 045 / Rwanda QA §3.3). An
@@ -401,6 +405,7 @@ export const ERROR_CODES: Record<string, number> = {
   REQUIRED_FIELD_MISSING: 400,
   OPENSEARCH_CONNECTION_ERROR: 503,
   NO_BACKING_DATASOURCE: 400,
+  REINDEX_TOO_LARGE: 413,
   INDEXING_IN_PROGRESS: 409,
   DATA_VALIDATION_ERROR: 400,
   ACTION_TYPE_NOT_FOUND: 404,

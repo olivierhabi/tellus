@@ -60,6 +60,7 @@ import {
   KNOWN_SETTINGS,
   type KnownSettingKey,
 } from '../services/systemSettingsService';
+import { getAdminRolesService } from '../services/adminRolesService';
 import { getKeycloakRealm } from '../auth/keycloakConfig'; // F-P4-26
 import { SESSION_MAX_AGE_SECONDS, SESSION_IDLE_TIMEOUT_SECONDS } from '../config/sessionConfig';
 
@@ -572,9 +573,18 @@ router.post('/refresh', csrfSameOrigin, async (req: Request, res: Response) => {
       },
     });
   } catch (err) {
-    // Clear stale cookies so the FE can't keep retrying on the same
-    // dead refresh token.
-    clearSessionCookies(res);
+    // Only a CONFIRMED dead session (Keycloak rejected the grant → 401
+    // REFRESH_TOKEN_*) wipes the cookies, so the FE can't keep retrying
+    // on the same dead refresh token. Transient upstream failures
+    // (Keycloak slow/down, fetch timeout, JWKS hiccup — 5xx) MUST leave
+    // them intact: the httpOnly refresh cookie is still valid, the FE
+    // retries, and the session survives the blip. Clearing on a blip
+    // collapsed the 24h TELLUS_SESSION_MAX_AGE window to one access-token
+    // lifespan — the user was bounced to /login roughly every ~10 min
+    // whenever Keycloak hiccuped near a refresh boundary.
+    if (err instanceof AppError && err.statusCode === 401) {
+      clearSessionCookies(res);
+    }
     sendError(err, req, res);
   }
 });
@@ -651,6 +661,9 @@ const EnrollOptionsSchema = z.object({
   // The caller can ask for 'preferred' in case of an older authenticator
   // but the default is the strict setting.
   residentKey: z.enum(['required', 'preferred', 'discouraged']).default('required'),
+  // Prefer the built-in device authenticator (Touch ID / Windows Hello)
+  // over Edge's cross-device QR-code flow for first-time enrollment.
+  authenticatorAttachment: z.enum(['platform', 'cross-platform']).default('platform'),
 });
 
 router.post('/enroll/passkey/options', loginLimiter, async (req: Request, res: Response) => {
@@ -682,10 +695,7 @@ router.post('/enroll/passkey/options', loginLimiter, async (req: Request, res: R
       userLabel: parsed.data.userLabel,
       residentKey: parsed.data.residentKey,
       userVerification: 'required',
-      // Leave authenticatorAttachment undefined so the browser offers
-      // every available authenticator: Touch ID on a MacBook, Windows
-      // Hello on a PC, a plugged-in YubiKey, or a phone as a roaming
-      // authenticator via hybrid transport. The user gets to choose.
+      authenticatorAttachment: parsed.data.authenticatorAttachment,
     });
     res.json({ success: true, data: options });
   } catch (err) {
@@ -1542,6 +1552,9 @@ const WebauthnRegisterOptionsSchema = z.object({
   // passkey) that supports usernameless + synced login. Callers
   // can still downgrade to 'preferred' for older authenticators.
   residentKey: z.enum(['required', 'preferred', 'discouraged']).default('required'),
+  // Prefer the built-in device authenticator by default. Callers that
+  // intentionally enroll a security key can still request cross-platform.
+  authenticatorAttachment: z.enum(['platform', 'cross-platform']).default('platform'),
 });
 
 router.post('/me/webauthn/register-options', requireTellusAuth({ allowPat: false }), async (req: Request, res: Response) => {
@@ -1555,6 +1568,7 @@ router.post('/me/webauthn/register-options', requireTellusAuth({ allowPat: false
       displayName: claims.preferred_username || claims.email || claims.sub,
       userLabel: parsed.data.userLabel,
       residentKey: parsed.data.residentKey,
+      authenticatorAttachment: parsed.data.authenticatorAttachment,
     });
     res.json({ success: true, data: options });
   } catch (err) {
@@ -2395,6 +2409,244 @@ router.get('/health', async (_req: Request, res: Response) => {
     });
   }
 });
+
+// ===========================================================================
+// Roles directory — GET /roles.
+//
+// Any-authenticated-user listing of realm role identities (id + name +
+// description ONLY). Exists for authoring UIs that must offer a role picker
+// — the Ontology Manager's submission-criteria editor gates actions on
+// `{ role: "<name>" }` conditions evaluated against the submitter's JWT
+// realm_access.roles, and the superadmin-only /admin/roles console below is
+// unreadable by the ontology authors who write those conditions. Membership,
+// composite edges and counts stay behind requireSuperAdmin; this route only
+// exposes names already visible in every issued JWT.
+// ===========================================================================
+
+router.get(
+  '/roles',
+  requireTellusAuth(),
+  async (_req: Request, res: Response) => {
+    try {
+      const roles = await getAdminRolesService().listRoleDirectory();
+      res.json({ success: true, data: { roles, total: roles.length } });
+    } catch (err) {
+      sendError(err, _req, res);
+    }
+  },
+);
+
+// ===========================================================================
+// Superadmin roles console — /admin/roles + composites + members.
+// Business invariants (built-in protection, cycle detection, last-superadmin
+// guard) live in services/adminRolesService.ts; these routes are
+// validation + envelope + audit only. Wire format matches the FE contract
+// in tellus-fe/lib/rolesApi.ts verbatim.
+// ===========================================================================
+
+const ROLE_NAME_RE = /^[a-zA-Z][a-zA-Z0-9-_:.]{1,254}$/;
+
+const ListRolesQuerySchema = z.object({
+  search: z.string().max(255).optional(),
+  first: z.coerce.number().int().min(0).max(10_000).optional(),
+  max: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+const CreateRoleSchema = z.object({
+  name: z.string().min(2).max(255).regex(ROLE_NAME_RE, 'Invalid role name'),
+  description: z.string().max(4000).optional(),
+  compositeRoleIds: z.array(z.string().min(1)).max(50).optional(),
+});
+
+const UpdateRoleSchema = z.object({
+  description: z.string().max(4000).optional(),
+  compositeRoleIds: z.array(z.string().min(1)).max(50).optional(),
+});
+
+const AddRoleMemberSchema = z.object({
+  userId: z.string().min(1).max(255),
+});
+
+router.get(
+  '/admin/roles',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = ListRolesQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const { roles, total } = await getAdminRolesService().listRoles({
+        search: parsed.data.search,
+        first: parsed.data.first,
+        max: parsed.data.max,
+      });
+      res.json({ success: true, data: { roles, total } });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.post(
+  '/admin/roles',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = CreateRoleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+      const role = await getAdminRolesService().createRole(parsed.data);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.create',
+        result: 'SUCCESS',
+        req,
+        details: { roleName: role.name, compositeCount: role.compositeRoleIds.length },
+      });
+      res.status(201).json({ success: true, data: role });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.get(
+  '/admin/roles/:id',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const role = await getAdminRolesService().getRole(req.params.id);
+      res.json({ success: true, data: role });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.put(
+  '/admin/roles/:id',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = UpdateRoleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+      const role = await getAdminRolesService().updateRole(req.params.id, parsed.data);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.update',
+        result: 'SUCCESS',
+        req,
+        details: {
+          roleName: role.name,
+          descriptionTouched: parsed.data.description !== undefined,
+          compositeCount: role.compositeRoleIds.length,
+        },
+      });
+      res.json({ success: true, data: role });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.delete(
+  '/admin/roles/:id',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const actor = requireClaimsFor(req);
+      await getAdminRolesService().deleteRole(req.params.id);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.delete',
+        result: 'SUCCESS',
+        req,
+        details: { roleId: req.params.id },
+      });
+      res.status(204).end();
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.get(
+  '/admin/roles/:id/members',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { users, total } = await getAdminRolesService().listMembers(req.params.id);
+      res.json({ success: true, data: { users, total } });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.post(
+  '/admin/roles/:id/members',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = AddRoleMemberSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+      await getAdminRolesService().addMember(req.params.id, parsed.data.userId);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.member.add',
+        result: 'SUCCESS',
+        req,
+        details: { roleId: req.params.id, memberUserId: parsed.data.userId },
+      });
+      res.status(204).end();
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.delete(
+  '/admin/roles/:id/members/:userId',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const actor = requireClaimsFor(req);
+      await getAdminRolesService().removeMember(req.params.id, req.params.userId);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.member.remove',
+        result: 'SUCCESS',
+        req,
+        details: { roleId: req.params.id, memberUserId: req.params.userId },
+      });
+      res.status(204).end();
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
 
 // ===========================================================================
 // Example: a protected /me/audit/export endpoint that demonstrates

@@ -23,6 +23,13 @@ import propertyService from "../services/propertyService";
 import { getByApiName as getLinkType, resolvePropertyApiName, resolveObjectTypeApiName } from "../models/linkType";
 import type { LinkTypeRow } from "../models/linkType";
 import { query } from "../db";
+import type { PoolClient } from "pg";
+import {
+  allocateGeneratedSequence,
+  previewGeneratedSequence,
+  type GeneratedSequenceSource,
+} from "./generatedSequence";
+import { incCounter } from "../services/funnel/metrics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,9 +37,13 @@ import { query } from "../db";
 
 /** Source descriptor for resolving property values and object references. */
 interface ValueSource {
-  source: "parameter" | "static" | "currentTimestamp" | "currentUser" | "writebackResponse";
+  source: "parameter" | "static" | "currentTimestamp" | "generatedSequence" | "currentUser" | "writebackResponse";
   param?: string;
   value?: unknown;
+  sequenceKey?: string;
+  prefix?: string;
+  padLength?: number;
+  startAt?: number;
   // Phase 4 — writebackResponse value source fields.
   outputId?: string;
   path?: string;
@@ -198,6 +209,10 @@ export interface ExecutionContext {
    * lifts the `writebackResponse` ValueSource resolution next.
    */
   writebackOutputs?: Record<string, unknown>;
+  /** Use the caller's transaction for generated identifiers when available. */
+  transactionClient?: PoolClient;
+  /** Validation/preview must never consume a durable sequence value. */
+  previewGeneratedSequences?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -388,14 +403,33 @@ async function compileCreateObject(
   edits: PreliminaryEdit[],
   errors: string[]
 ): Promise<void> {
+  const propertyBaseTypes = await getPropertyBaseTypes(
+    executionContext.ontologyId,
+    rule.objectType,
+    errors,
+  );
+  if (!propertyBaseTypes) return;
+
   // 1. Resolve each property value
   const propertyValues: Record<string, unknown> = {};
 
   for (const [propName, source] of Object.entries(rule.properties)) {
-    const value = resolveValue(source, resolvedParameters, executionContext);
+    const value =
+      source.source === "generatedSequence"
+        ? executionContext.previewGeneratedSequences
+          ? previewGeneratedSequence(source as GeneratedSequenceSource)
+          : await allocateGeneratedSequence(
+              executionContext.ontologyId,
+              source as GeneratedSequenceSource,
+              executionContext.transactionClient,
+            )
+        : resolveValue(source, resolvedParameters, executionContext);
     // If the parameter is undefined (optional and not provided), skip
     if (value === undefined) continue;
-    propertyValues[propName] = value;
+    propertyValues[propName] =
+      source.source === "currentTimestamp" && propertyBaseTypes.get(propName) === "date"
+        ? String(value).slice(0, 10)
+        : value;
   }
 
   // 2. Determine the primary key property name
@@ -412,10 +446,45 @@ async function compileCreateObject(
     return;
   }
 
-  const primaryKey = String(propertyValues[pkPropName]);
+  let primaryKey = String(propertyValues[pkPropName]);
 
   // 4. Check for duplicate primary key — the object must NOT already exist
-  const existing = await objectFetcher(rule.objectType, primaryKey);
+  // A generated identifier preview is deliberately non-reserving. Its
+  // example value may already exist, which says nothing about whether the
+  // next real allocation is available; do not turn that into a false
+  // validation failure.
+  let existing = executionContext.previewGeneratedSequences
+    ? null
+    : await objectFetcher(rule.objectType, primaryKey);
+  const primaryKeySource = rule.properties[pkPropName];
+  if (existing && primaryKeySource?.source === "generatedSequence") {
+    const maxCollisionSkips = Math.max(
+      1,
+      Number.parseInt(process.env.ACTION_GENERATED_SEQUENCE_MAX_COLLISION_SKIPS ?? "1000", 10) || 1000,
+    );
+    let skipped = 0;
+    while (existing && skipped < maxCollisionSkips) {
+      primaryKey = await allocateGeneratedSequence(
+        executionContext.ontologyId,
+        primaryKeySource as GeneratedSequenceSource,
+        executionContext.transactionClient,
+      );
+      propertyValues[pkPropName] = primaryKey;
+      skipped += 1;
+      existing = await objectFetcher(rule.objectType, primaryKey);
+    }
+    if (skipped > 0) {
+      incCounter("tellus_action_generated_sequence_collisions_total", {
+        object_type: rule.objectType,
+      }, skipped);
+    }
+    if (existing) {
+      errors.push(
+        `Generated identifier sequence for type '${rule.objectType}' could not find an available value after ${maxCollisionSkips} collision(s)`,
+      );
+      return;
+    }
+  }
   if (existing) {
     errors.push(
       `createObject rule targets object '${primaryKey}' of type '${rule.objectType}' which already exists`
@@ -486,23 +555,13 @@ async function compileModifyObject(
     );
     return;
   }
-  const primaryKey = String(pkValue);
-
-  // 2. Verify object exists (check preliminaryEdits first for preceding create)
-  const pendingCreate = edits.find(
-    (e) =>
-      e.objectType === rule.objectType &&
-      e.primaryKey === primaryKey &&
-      e.operation === "create"
-  );
-  if (!pendingCreate) {
-    const existing = await objectFetcher(rule.objectType, primaryKey);
-    if (!existing) {
-      errors.push(
-        `modifyObject rule targets object '${primaryKey}' of type '${rule.objectType}' which does not exist`
-      );
-      return;
-    }
+  // A Foundry bulk action supplies an object-reference list.  Expand the
+  // declarative rule once per selected object; never stringify the list into
+  // a comma-separated primary key.
+  const primaryKeys = Array.isArray(pkValue) ? pkValue : [pkValue];
+  if (primaryKeys.some((value) => typeof value !== "string" || !value.trim())) {
+    errors.push(`modifyObject rule at index ${ruleIndex} resolved an invalid object reference list`);
+    return;
   }
 
   // 3. Resolve each property value
@@ -522,7 +581,7 @@ async function compileModifyObject(
     executionContext.ontologyId, rule.objectType, errors
   );
   if (!pkPropName) return; // error already added
-  if (propertyValues[pkPropName] !== undefined && propertyValues[pkPropName] !== primaryKey) {
+  if (propertyValues[pkPropName] !== undefined && primaryKeys.some((primaryKey) => propertyValues[pkPropName] !== primaryKey)) {
     errors.push(
       `Cannot modify the primary key property '${pkPropName}' of an existing object. ` +
       `Primary keys are immutable. To change an object's primary key, delete it and create a new object.`
@@ -533,15 +592,31 @@ async function compileModifyObject(
   // drop it so a parameters→all-properties mapping doesn't write the key.
   delete propertyValues[pkPropName];
 
-  // 4. Generate edit
-  edits.push({
-    objectType: rule.objectType,
-    primaryKey,
-    operation: "update",
-    propertyValues,
-    linkEdits: [],
-    ruleIndex,
-  });
+  // 4. Verify and generate one update for every selected object. Preserve the
+  // selection order so previews and validation errors map back to the table.
+  for (const primaryKey of primaryKeys) {
+    // Check preliminary edits first for a preceding create in this action.
+    const pendingCreate = edits.find(
+      (e) => e.objectType === rule.objectType && e.primaryKey === primaryKey && e.operation === "create"
+    );
+    if (!pendingCreate) {
+      const existing = await objectFetcher(rule.objectType, primaryKey);
+      if (!existing) {
+        errors.push(
+          `modifyObject rule targets object '${primaryKey}' of type '${rule.objectType}' which does not exist`
+        );
+        continue;
+      }
+    }
+    edits.push({
+      objectType: rule.objectType,
+      primaryKey,
+      operation: "update",
+      propertyValues,
+      linkEdits: [],
+      ruleIndex,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,6 +1418,29 @@ async function getPrimaryKeyPropertyName(
   } catch (err: any) {
     errors.push(
       `Failed to look up object type '${objectTypeApiName}': ${err.message}`
+    );
+    return null;
+  }
+}
+
+/** Resolve types once per create rule so date-valued system time is stored as
+ * an ISO calendar date rather than a timestamp. */
+async function getPropertyBaseTypes(
+  ontologyId: string,
+  objectTypeApiName: string,
+  errors: string[],
+): Promise<Map<string, string> | null> {
+  try {
+    const result = await objectTypeService.getByApiName(ontologyId, objectTypeApiName);
+    return new Map(
+      result.properties.map((property: any) => [
+        property.api_name as string,
+        String(property.base_type ?? "").toLowerCase(),
+      ]),
+    );
+  } catch (err: any) {
+    errors.push(
+      `Failed to look up object type '${objectTypeApiName}': ${err.message}`,
     );
     return null;
   }

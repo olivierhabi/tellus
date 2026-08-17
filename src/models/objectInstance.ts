@@ -39,6 +39,47 @@ export interface UpsertInstanceInput {
   source_transaction_id?: string | null;
 }
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Coerce a provenance id to something the `uuid` columns can accept.
+ *
+ * `source_datasource_id` and `source_transaction_id` are BOTH `uuid` in
+ * Postgres, but they are pure provenance breadcrumbs — nothing joins on them
+ * and no read path requires them. Callers, however, reach this function with
+ * values that are not uuids:
+ *
+ *   * reindexService fabricates a synthetic transaction labelled
+ *     "foundry-bridge" or "legacy" for datasources that have no
+ *     `dataset_transaction` row, and
+ *   * the funnel merge stage round-trips these ids through Parquet, where a
+ *     missing value materializes as the empty string rather than null.
+ *
+ * Either one makes Postgres abort the entire multi-thousand-row batch with
+ * `invalid input syntax for type uuid` — which is exactly how Force Reindex
+ * returned a 500 for every wizard-created object type (2026-08-16). Losing a
+ * breadcrumb is strictly better than losing the batch, so a non-uuid is
+ * downgraded to NULL and reported once per process rather than thrown.
+ *
+ * The upstream callers are fixed to pass null themselves; this is the
+ * belt-and-braces guard so a future caller cannot reintroduce a 500.
+ */
+const warnedNonUuid = new Set<string>();
+function asUuidOrNull(value: string | null | undefined, field: string): string | null {
+  if (value == null || value === "") return null;
+  if (UUID_RE.test(value)) return value;
+  if (!warnedNonUuid.has(value)) {
+    warnedNonUuid.add(value);
+    console.warn(
+      `[objectInstance] ${field}=${JSON.stringify(value)} is not a uuid — ` +
+        `storing NULL. Provenance for these rows is lost, but the batch is ` +
+        `preserved. Fix the caller to pass null for synthetic transactions.`,
+    );
+  }
+  return null;
+}
+
 /**
  * Upsert a single object instance. `version` is bumped on every write.
  * Intended for unit tests and ad-hoc writes; bulk merge should use
@@ -76,8 +117,8 @@ export async function upsertInstance(
       input.primary_key,
       JSON.stringify(input.properties),
       input.markings ?? [],
-      input.source_datasource_id ?? null,
-      input.source_transaction_id ?? null,
+      asUuidOrNull(input.source_datasource_id, "source_datasource_id"),
+      asUuidOrNull(input.source_transaction_id, "source_transaction_id"),
       branchId,
     ]
   );
@@ -157,8 +198,8 @@ export async function bulkUpsertInstances(
           chunk.map((r) => r.primary_key),
           chunk.map((r) => JSON.stringify(r.properties)),
           chunk.map((r) => JSON.stringify(r.markings ?? [])),
-          chunk.map((r) => r.source_datasource_id ?? null),
-          chunk.map((r) => r.source_transaction_id ?? null),
+          chunk.map((r) => asUuidOrNull(r.source_datasource_id, "source_datasource_id")),
+          chunk.map((r) => asUuidOrNull(r.source_transaction_id, "source_transaction_id")),
           chunk.map((r) => deriveMainBranchId(r.ontology_id)),
         ]
       );

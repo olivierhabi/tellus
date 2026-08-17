@@ -2,7 +2,6 @@
   "environment": "qa-local",
   "functions": {
     "calculateCreditRiskV2": 5,
-    "validateCreditLimitV2": 4,
     "detectAffordabilityExceptionV2": 4,
     "validateRraTaxClearanceV2": 4,
     "verifyNationalIdMatchV2": 4,

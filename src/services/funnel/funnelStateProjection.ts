@@ -36,6 +36,10 @@ import {
 } from "../../metrics/funnelProjection";
 import { eventBus } from "../../websocket/eventBus";
 import {
+  closeOpenStageRuns,
+  closeOpenStageRunsByWorkflowId,
+} from "./stageRunClosure";
+import {
   recordMissingObjectType,
   recordProjectionSkipped,
   recordStageEnvironmentInconsistency,
@@ -94,10 +98,31 @@ interface RunIdentity {
 // current pipeline shape — a redeployed pipeline definition must not
 // rewrite the criteria for in-flight history.
 
+/**
+ * Resolve the run this projection is about, by runId or by runKey.
+ *
+ * Takes a NAMED-FIELD object on purpose. Until 2026-08-16 this took two bare
+ * strings, `(objectTypeApiName, ontologyId, options)`, and BOTH call sites
+ * passed them in the opposite order — one of them via a no-op
+ * `ontologyIdPlaceholder()` helper whose doc comment asserted the wrong
+ * order and made the bug look intentional. Consequence: on the runKey path the
+ * fallback workflow id was built as `ObjectTypeFunnelWorkflow-<ontologyId>`,
+ * which matches no row in `funnel_run`, so resolution silently returned null —
+ * and a null run means `verifyTerminalConsistency` is SKIPPED. The one guard
+ * that stops a run reaching terminal 'indexed' with a missing or failed stage
+ * was inert for every runKey-only terminal. Two same-typed positional
+ * parameters cannot be misordered when they are named fields.
+ */
 async function resolveRunIdentity(
-  objectTypeApiName: string,
-  ontologyId: string,
-  options: ProjectFunnelTerminalOptions,
+  {
+    objectTypeApiName,
+    ontologyId,
+    options,
+  }: {
+    objectTypeApiName: string;
+    ontologyId: string;
+    options: ProjectFunnelTerminalOptions;
+  },
 ): Promise<RunIdentity | null> {
   if (options.runId) {
     const r = await query(
@@ -268,7 +293,7 @@ export async function projectFunnelTerminalToState(
       });
       funnelProjectionTotal.inc({ status, outcome: "ot_missing", path });
       observeDuration("ot_missing");
-      const run = await resolveRunIdentity(ontologyIdPlaceholder(ontologyId), objectTypeApiName, options);
+      const run = await resolveRunIdentity({ ontologyId, objectTypeApiName, options });
       if (run && options.allowObjectTypeDeletedMarking) {
         await query(
           `UPDATE funnel_run
@@ -280,6 +305,14 @@ export async function projectFunnelTerminalToState(
             `object_type_deleted: ${objectTypeApiName} not found in ontology ${ontologyId} (deleted mid-run or wrong database)`,
             run.runId,
           ]
+        );
+        // funnel_stage_run has no 'cancelled' status, so open stages are
+        // closed as 'failed' carrying the cancellation reason. Without this the
+        // stage rows outlive the terminal run and the UI spins forever on
+        // whichever stage was in flight when the type was deleted.
+        await closeOpenStageRuns(
+          run.runId,
+          `run cancelled: object_type_deleted (${objectTypeApiName} not found in ontology ${ontologyId})`,
         );
         console.warn(
           JSON.stringify({
@@ -309,7 +342,7 @@ export async function projectFunnelTerminalToState(
     // ---------------------------------------------------------------
     // Resolve run identity + guard terminal consistency
     // ---------------------------------------------------------------
-    const run = await resolveRunIdentity(ontologyId, objectTypeApiName, options);
+    const run = await resolveRunIdentity({ ontologyId, objectTypeApiName, options });
     if ((status === "indexed" || status === "failed") && run) {
       if (status === "indexed") {
         await verifyTerminalConsistency(run, objectTypeApiName, options.environmentId);
@@ -461,6 +494,16 @@ export async function projectFunnelTerminalToState(
                 AND status IN ('dispatch_pending','workflow_started','running')`,
             [options.errorMessage ?? null, temporalWorkflowId]
           );
+          // Close the stage rows of whichever run just went terminal. Keyed by
+          // workflow id (the run id is not known on this path) and scoped to
+          // already-terminal runs, so a live run can never be touched. Both a
+          // heartbeat timeout and a StartToClose timeout land here — those are
+          // the stranded rows the boot sweeps could never reach, because the
+          // sweeps only select runs still at 'running'.
+          await closeOpenStageRunsByWorkflowId(
+            temporalWorkflowId,
+            `run failed: ${options.errorMessage ?? "no error message recorded"}`,
+          );
         } catch (runErr) {
           console.warn(
             JSON.stringify({
@@ -589,9 +632,4 @@ export async function findStaleIndexingStates(
     [`${Math.ceil(thresholdMs / 1000)} seconds`],
   );
   return res.rows;
-}
-
-/** Placeholder guard: resolveRunIdentity's first arg is ontologyId. */
-function ontologyIdPlaceholder(ontologyId: string): string {
-  return ontologyId;
 }

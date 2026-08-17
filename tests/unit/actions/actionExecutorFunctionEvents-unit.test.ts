@@ -80,6 +80,11 @@ vi.mock("../../../src/actions/actionCbac", () => ({
 vi.mock("../../../src/services/funnel/metrics", () => ({ incCounter: vi.fn() }));
 vi.mock("../../../src/services/branchContext", () => ({
   resolveBranchIdOrMain: vi.fn(async () => "00000000-0000-0000-0000-000000000000"),
+  // Same id as the resolved branch, so `isNonMainBranch` reports false and
+  // these tests keep exercising the on-main side-effect path they were
+  // written against (migration 173's branch switches are covered separately
+  // in actionSecuritySettings-unit.test.ts).
+  resolveMainBranchId: vi.fn(async () => "00000000-0000-0000-0000-000000000000"),
 }));
 vi.mock("../../../src/services/opensearch/client", () => ({ client: null }));
 vi.mock("../../../src/services/opensearch/indexMappingGenerator", () => ({

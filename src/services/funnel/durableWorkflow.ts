@@ -33,6 +33,8 @@
 
 import { PoolClient } from "pg";
 import { query, getClient } from "../../db";
+import { getEnvironmentIdentity } from "../../config/environmentIdentity";
+import { closeOpenStageRuns } from "./stageRunClosure";
 
 export type FunnelStage = "changelog" | "merge" | "indexing" | "hydration";
 
@@ -174,6 +176,25 @@ export async function runWorkflow(
         WHERE run_id = $1`,
       [runId]
     );
+    // A completed run with an open stage row should be impossible —
+    // runActivityImpl closes each stage on both its happy and sad paths. Close
+    // defensively anyway: if it ever happens, the alternative is a stage that
+    // spins forever in the UI under a green header, which is strictly worse
+    // than a recorded inconsistency. See stageRunClosure.ts.
+    const strandedOnSuccess = await closeOpenStageRuns(
+      runId,
+      "run completed with this stage still open (stage bookkeeping inconsistency)"
+    );
+    if (strandedOnSuccess > 0) {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          type: "funnel_stage_run_open_on_completed_run",
+          runId,
+          closed: strandedOnSuccess,
+        })
+      );
+    }
     return { runId, status: "completed" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -183,6 +204,13 @@ export async function runWorkflow(
         WHERE run_id = $2`,
       [message, runId]
     );
+    // The confirmed leak: this branch used to update funnel_run alone. The boot
+    // sweeps only close stage rows for runs THEY fail (selected by
+    // `funnel_run.status = 'running'`), so a run failed here was never again
+    // reachable and its 'running' stage rows became permanent — the perpetual
+    // merge spinner. Process death is still a leak by construction; that is what
+    // the sweeps are for.
+    await closeOpenStageRuns(runId, `run failed: ${message}`);
     return { runId, status: "failed", errorMessage: message };
   }
 }
@@ -542,12 +570,19 @@ async function sweepViaTemporalVisibility(): Promise<SweepOrphanedRunsResult | n
   const client = getTemporalClient();
   if (!client) return null;
 
-  // Load every running funnel_run row we know about.
+  // Load the running funnel_run rows THIS deployment owns. The visibility
+  // listing below is scoped to one Temporal namespace + task queue, so a run
+  // belonging to another environment would be absent from `aliveWorkflowIds`
+  // for a reason that has nothing to do with it being orphaned — and would be
+  // condemned on that basis. See environmentScopeClause.
+  const { environmentId } = getEnvironmentIdentity();
   const rows = await query(
     `SELECT run_id, object_type_api_name, started_at
        FROM funnel_run
       WHERE status = 'running'
-        AND workflow_type LIKE 'ObjectTypeFunnelWorkflow%'`
+        AND workflow_type LIKE 'ObjectTypeFunnelWorkflow%'
+        ${environmentScopeClause(1)}`,
+    [environmentId]
   );
   if (rows.rowCount === 0) {
     return { sweptRunIds: [], sweptStageRuns: 0, requeuedSignals: 0 };
@@ -639,11 +674,34 @@ async function sweepViaTemporalVisibility(): Promise<SweepOrphanedRunsResult | n
   };
 }
 
+/**
+ * Restrict a sweep to runs this deployment is actually responsible for.
+ *
+ * `funnel_run` is shared by every process pointed at the database — in dev
+ * that is routinely a dozen `tsx server.ts` instances, and in production it is
+ * every environment that shares a Postgres (staging/QA on one cluster is the
+ * normal arrangement). The sweep declares runs dead, so an unscoped sweep is a
+ * cross-environment write: a booting QA worker marks a live production run
+ * 'failed', which flips the operator's badge to Failed and re-queues its
+ * signals, producing a duplicate pipeline pass against production data.
+ *
+ * The age heuristic made this near-certain because it cannot see liveness at
+ * all — anything older than the window is condemned regardless of owner.
+ *
+ * `environment_id` is nullable (rows predate FUNN-ISO-3), so NULL-owner rows
+ * are also claimed: nobody else will ever sweep them, and leaving them
+ * 'running' forever is the stuck-badge state this sweep exists to clear.
+ */
+function environmentScopeClause(paramIndex: number): string {
+  return `AND (environment_id IS NULL OR environment_id = $${paramIndex})`;
+}
+
 async function sweepViaAgeHeuristic(
   staleAfterMs: number
 ): Promise<SweepOrphanedRunsResult> {
   try {
     const seconds = Math.ceil(staleAfterMs / 1000);
+    const { environmentId } = getEnvironmentIdentity();
     const sweptRuns = await query(
       `UPDATE funnel_run
           SET status        = 'failed',
@@ -652,8 +710,9 @@ async function sweepViaAgeHeuristic(
               completed_at  = COALESCE(completed_at, now())
         WHERE status = 'running'
           AND started_at < now() - make_interval(secs => $1)
+          ${environmentScopeClause(2)}
         RETURNING run_id`,
-      [seconds]
+      [seconds, environmentId]
     );
     const runIds = sweptRuns.rows.map((r: { run_id: string }) => r.run_id);
     if (runIds.length === 0) {

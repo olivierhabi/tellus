@@ -292,11 +292,21 @@ export async function applyEdits(
       // the type never mismatches. Strategy 2 already returned an
       // int thanks to COUNT(*)::int, but belt-and-braces.
       try {
+        const hasObjectScope = Boolean(executionContext.ontologyId && executionContext.branchId);
         const vRes = await pgClient.query(
-          `SELECT version FROM object_instances
-            WHERE object_type_api_name = $1 AND primary_key = $2
-            FOR UPDATE`,
-          [objectType, primaryKey]
+          hasObjectScope
+            ? `SELECT version FROM object_instances
+                WHERE ontology_id = $1::uuid
+                  AND branch_id = $2::uuid
+                  AND object_type_api_name = $3
+                  AND primary_key = $4
+                FOR UPDATE`
+            : `SELECT version FROM object_instances
+                WHERE object_type_api_name = $1 AND primary_key = $2
+                FOR UPDATE`,
+          hasObjectScope
+            ? [executionContext.ontologyId, executionContext.branchId, objectType, primaryKey]
+            : [objectType, primaryKey],
         );
         if ((vRes.rowCount ?? 0) > 0) {
           const raw = vRes.rows[0].version ?? 0;
@@ -310,10 +320,19 @@ export async function applyEdits(
       // Strategy 2: count ontology_edit rows (always available)
       if (currentVersion === undefined) {
         try {
+          const hasObjectScope = Boolean(executionContext.ontologyId && executionContext.branchId);
           const countRes = await pgClient.query(
-            `SELECT COUNT(*)::int AS version FROM ontology_edit
-              WHERE object_type_api_name = $1 AND primary_key = $2`,
-            [objectType, primaryKey]
+            hasObjectScope
+              ? `SELECT COUNT(*)::int AS version FROM ontology_edit
+                  WHERE ontology_id = $1::uuid
+                    AND branch_id = $2::uuid
+                    AND object_type_api_name = $3
+                    AND primary_key = $4`
+              : `SELECT COUNT(*)::int AS version FROM ontology_edit
+                  WHERE object_type_api_name = $1 AND primary_key = $2`,
+            hasObjectScope
+              ? [executionContext.ontologyId, executionContext.branchId, objectType, primaryKey]
+              : [objectType, primaryKey],
           );
           currentVersion = Number(countRes.rows[0]?.version ?? 0);
         } catch {

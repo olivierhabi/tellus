@@ -269,6 +269,32 @@ export async function installAndLoad(
   await runAll(conn, `LOAD ${extension}`);
 }
 
+/**
+ * Pick the S3 endpoint DuckDB should talk to.
+ *
+ * Two endpoints exist for the same object store: `ICEBERG_S3_ENDPOINT` is the
+ * docker-internal name (`http://minio:9000`) used by containers on the compose
+ * network, and `S3_ENDPOINT` is the host-reachable one (`http://localhost:9000`).
+ * DuckDB runs in-process inside the Node server, so when that server runs on the
+ * host — `npm run dev` — the docker-internal name does not resolve and every
+ * httpfs read fails with "Could not establish connection", which surfaced as a
+ * 500 from /transforms/execute.
+ *
+ * The toggle and its default mirror icebergSidecar.ts: on outside production,
+ * inheriting whatever the pod sets in production (where both names resolve to
+ * the same in-cluster service anyway).
+ */
+export function resolveS3Endpoint(
+  envWithDefault: (key: string, fallback: string) => string,
+): string {
+  const preferHostReachable =
+    (process.env.PB_B4_LOCAL_DNS_OVERRIDE ??
+      (process.env.NODE_ENV !== "production" ? "1" : "0")) === "1";
+  const iceberg = envWithDefault("ICEBERG_S3_ENDPOINT", "");
+  const host = envWithDefault("S3_ENDPOINT", "");
+  return preferHostReachable ? host || iceberg : iceberg || host;
+}
+
 // F-P4-24: `minioadmin` fallbacks removed. DuckDB S3 credentials now
 // fail loudly via requireSecret; a misconfigured pod cannot silently
 // connect to prod S3 with the well-known MinIO root credential.
@@ -276,10 +302,7 @@ export async function installAndLoad(
 // so a secret containing `'` does not produce malformed SQL.
 async function applyS3Credentials(conn: DuckDBConnection): Promise<void> {
   const { envWithDefault, requireSecret } = await import("../../utils/requireEnv");
-  const endpoint = (
-    envWithDefault("ICEBERG_S3_ENDPOINT", "") ||
-    envWithDefault("S3_ENDPOINT", "")
-  ).replace(/^https?:\/\//, "");
+  const endpoint = resolveS3Endpoint(envWithDefault).replace(/^https?:\/\//, "");
   const region = envWithDefault("S3_REGION", "us-east-1");
   const akid = requireSecret("S3_ACCESS_KEY_ID", "DuckDB S3 access key required.");
   const sak = requireSecret("S3_SECRET_ACCESS_KEY", "DuckDB S3 secret key required.");

@@ -683,6 +683,77 @@ router.put(
   },
 );
 
+// Long-lived scoped tokens (Sharing & tokens — gap-analysis §5, S1) ----------
+const TokenCreateSchema = z.object({
+  name: z.string().min(1).max(255),
+  scopes: z.array(z.string().min(1).max(255)).max(1000).optional().default([]),
+  expiresAt: z.string().datetime().nullable().optional(),
+});
+
+router.get(
+  '/applications/:applicationId/tokens',
+  requireTellusAuth({ allowPat: true }),
+  requireApplicationAccess('read'),
+  async (req: Request, res: Response) => {
+    try {
+      const data = await getDeveloperConsoleService(knex()).listLongLivedTokens(
+        req.params.applicationId,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.post(
+  '/applications/:applicationId/tokens',
+  requireTellusAuth({ allowPat: false }),
+  requireApplicationAccess('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const actor = principal(req);
+      const parsed = TokenCreateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const data = await getDeveloperConsoleService(knex()).createLongLivedToken(
+        req.params.applicationId,
+        actor,
+        {
+          name: parsed.data.name,
+          scopes: parsed.data.scopes,
+          expiresAt: parsed.data.expiresAt,
+        },
+        expectedVersion(req),
+      );
+      res.status(201).json({ success: true, data });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.delete(
+  '/applications/:applicationId/tokens/:tokenId',
+  requireTellusAuth({ allowPat: false }),
+  requireApplicationAccess('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const actor = principal(req);
+      await getDeveloperConsoleService(knex()).revokeLongLivedToken(
+        req.params.applicationId,
+        actor,
+        req.params.tokenId,
+        expectedVersion(req),
+      );
+      res.status(204).end();
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
 // ----- Platform SDK ---------------------------------------------------------
 
 router.get(

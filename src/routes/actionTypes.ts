@@ -69,6 +69,11 @@ import {
   type ParameterMigration,
 } from "../actions/actionMigrationAnalysis";
 import { hashActionDefinition } from "../actions/actionDefinitionHash";
+import { validateSystemValueSourceForProperty } from "../actions/valueSourceCompatibility";
+import {
+  normalizeActionSecuritySettings,
+  resolveActionSecuritySettings,
+} from "../actions/actionSecuritySettings";
 import { defaultSchemaLookup } from "../actions/objectReferenceResolver";
 import { recordMigration } from "../models/actionMigrationLog";
 import {
@@ -273,6 +278,7 @@ const VALID_SOURCES = new Set([
   "parameter",
   "static",
   "currentTimestamp",
+  "generatedSequence",
   "currentUser",
   "writebackResponse",
   "objectProperty",
@@ -326,6 +332,7 @@ interface FunctionActionConfig {
   branch: string;
   semver: string;
   autoUpgrade?: boolean;
+  inputs?: Record<string, unknown>;
 }
 
 async function validateFunctionConfig(
@@ -402,6 +409,7 @@ async function validateFunctionConfig(
   const signatureParameters = Array.isArray(row.signature?.parameters)
     ? row.signature.parameters
     : [];
+  const callableParameterNames = new Set<string>();
   for (const signatureParameter of signatureParameters) {
     if (!signatureParameter || typeof signatureParameter.name !== "string") continue;
     if (
@@ -411,6 +419,7 @@ async function validateFunctionConfig(
     ) {
       continue;
     }
+    callableParameterNames.add(signatureParameter.name);
     const actionParameter = declared.get(signatureParameter.name);
     if (!actionParameter) {
       errors.push(`Function parameter '${signatureParameter.name}' is missing from action parameters.`);
@@ -418,6 +427,34 @@ async function validateFunctionConfig(
     }
     if (signatureParameter.optional !== true && !actionParameter.required) {
       errors.push(`Function parameter '${signatureParameter.name}' must be required.`);
+    }
+  }
+  // Version upgrades can remove or rename function inputs. Reject stale
+  // mappings instead of silently persisting metadata that the runtime can no
+  // longer honor (and which leaves the editor showing a valid-looking action).
+  if (config.inputs != null) {
+    if (typeof config.inputs !== "object" || Array.isArray(config.inputs)) {
+      errors.push("functionConfig.inputs must be an object.");
+    } else {
+      for (const [functionInput, rawSource] of Object.entries(config.inputs)) {
+        if (!callableParameterNames.has(functionInput)) {
+          errors.push(
+            `Function input mapping '${functionInput}' is not present in the published ${config.semver} signature.`,
+          );
+        }
+        if (rawSource == null || typeof rawSource !== "object" || Array.isArray(rawSource)) {
+          errors.push(`functionConfig.inputs.${functionInput} must be a value source.`);
+          continue;
+        }
+        const source = rawSource as { source?: unknown; param?: unknown };
+        if (source.source === "parameter") {
+          if (typeof source.param !== "string" || !declared.has(source.param)) {
+            errors.push(
+              `functionConfig.inputs.${functionInput} references missing action parameter '${String(source.param ?? "")}'.`,
+            );
+          }
+        }
+      }
     }
   }
   return errors;
@@ -450,6 +487,10 @@ export function formatActionType(row: Record<string, any>): Record<string, unkno
     sideEffects: row.side_effects ?? null,
     writebackConfig: row.writeback_config ?? null,
     functionConfig: row.function_config ?? null,
+    // Migration 173 — always fully resolved, never the raw NULL blob, so the
+    // Security page renders the real effective values (and every default it
+    // shows is the same one the executor will enforce).
+    securitySettings: resolveActionSecuritySettings(row.security_settings),
     maxAffectedObjects: row.max_affected_objects,
     isEnabled: row.is_enabled,
     status: row.is_enabled ? "ACTIVE" : "EXPERIMENTAL",
@@ -526,6 +567,7 @@ async function resolveObjectType(
 ): Promise<{
   objectTypeId: string;
   properties: Set<string>;
+  propertyBaseTypes: Map<string, string>;
   primaryKeyProperty?: string;
   requiredProperties: Set<string>;
 }> {
@@ -543,7 +585,7 @@ async function resolveObjectType(
 
   // Fetch all property api_names for this object type
   const propResult = await query(
-    "SELECT property_id, api_name, is_required FROM property WHERE object_type_id = $1",
+    "SELECT property_id, api_name, base_type, is_required FROM property WHERE object_type_id = $1",
     [objectTypeId]
   );
   const properties = new Set<string>(
@@ -553,6 +595,12 @@ async function resolveObjectType(
   return {
     objectTypeId,
     properties,
+    propertyBaseTypes: new Map<string, string>(
+      propResult.rows.map((row: Record<string, unknown>) => [
+        row.api_name as string,
+        String(row.base_type ?? "").toLowerCase(),
+      ]),
+    ),
     primaryKeyProperty: propResult.rows.find(
       (row: Record<string, unknown>) => row.property_id === otResult.rows[0].primary_key_property_id,
     )?.api_name as string | undefined,
@@ -636,6 +684,39 @@ function validateValueSource(
     }
   }
   return [];
+}
+
+function validateGeneratedSequenceSource(
+  value: unknown,
+  path: string,
+  ruleType: string,
+  propertyApiName: string,
+  primaryKeyProperty: string | undefined,
+  propertyBaseType: string | undefined,
+): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const source = value as Record<string, unknown>;
+  if (source.source !== "generatedSequence") return [];
+  const errors: string[] = [];
+  if (ruleType !== "createObject" || propertyApiName !== primaryKeyProperty) {
+    errors.push(`${path} may only generate the primary key of a Create object rule.`);
+  }
+  if (propertyBaseType !== "string") {
+    errors.push(`${path} requires a string primary-key property.`);
+  }
+  if (typeof source.sequenceKey !== "string" || !/^[A-Za-z0-9:-]{1,100}$/.test(source.sequenceKey)) {
+    errors.push(`${path}.sequenceKey must contain only letters, numbers, colons, or hyphens (max 100).`);
+  }
+  if (typeof source.prefix !== "string" || !/^[A-Za-z0-9-]{0,100}$/.test(source.prefix)) {
+    errors.push(`${path}.prefix must contain only letters, numbers, or hyphens (max 100).`);
+  }
+  if (!Number.isInteger(source.padLength) || (source.padLength as number) < 1 || (source.padLength as number) > 18) {
+    errors.push(`${path}.padLength must be an integer from 1 to 18.`);
+  }
+  if (source.startAt !== undefined && (!Number.isSafeInteger(source.startAt) || (source.startAt as number) < 1)) {
+    errors.push(`${path}.startAt must be a positive integer when provided.`);
+  }
+  return errors;
 }
 
 // ---------------------------------------------------------------------------
@@ -869,6 +950,7 @@ async function validateRules(
       }
 
       let objTypeProps: Set<string> | null = null;
+      let propertyBaseTypes = new Map<string, string>();
       let primaryKeyProperty: string | undefined;
       let requiredProperties = new Set<string>();
       try {
@@ -878,6 +960,7 @@ async function validateRules(
           `Rule ${idx}`
         );
         objTypeProps = resolved.properties;
+        propertyBaseTypes = resolved.propertyBaseTypes;
         primaryKeyProperty = resolved.primaryKeyProperty;
         requiredProperties = resolved.requiredProperties;
       } catch (err: any) {
@@ -927,6 +1010,23 @@ async function validateRules(
 
           // Validate the mapping source
           errors.push(...validateValueSource(mapping, `${idx}.properties.${propName}`, paramNames));
+          errors.push(
+            ...validateSystemValueSourceForProperty(
+              mapping,
+              `${idx}.properties.${propName}`,
+              propertyBaseTypes.get(propName),
+            ),
+          );
+          errors.push(
+            ...validateGeneratedSequenceSource(
+              mapping,
+              `${idx}.properties.${propName}`,
+              ruleType,
+              propName,
+              primaryKeyProperty,
+              propertyBaseTypes.get(propName),
+            ),
+          );
         }
       } else if (ruleType === "createObject" || ruleType === "modifyOrCreateObject") {
         errors.push(`${idx}.properties is required for '${ruleType}' rules.`);
@@ -2717,6 +2817,31 @@ const updateActionTypeHandler = async (
       const resultingEnabled =
         body.isEnabled !== undefined ? body.isEnabled : existing.is_enabled;
 
+      // --- Function-backed actions (Action Semantics v2) -------------------
+      //
+      // Mirror the POST create contract on partial updates: a Function-backed
+      // action carries NO declarative rules — its `functionConfig` is the
+      // action's logic — and every declared Function input must exist as an
+      // action parameter. `executionMode` may flip between "declarative" and
+      // "function"; persistence of either column is partial-update style.
+      if (
+        body.executionMode !== undefined &&
+        body.executionMode !== "declarative" &&
+        body.executionMode !== "function"
+      ) {
+        sendError(
+          res,
+          "VALIDATION_FAILED",
+          "executionMode must be 'declarative' or 'function'."
+        );
+        return;
+      }
+      const effectiveExecutionMode =
+        body.executionMode !== undefined
+          ? body.executionMode
+          : existing.execution_mode;
+      const isFunctionAction = effectiveExecutionMode === "function";
+
       // Validate parameters if provided
       if (body.parameters !== undefined) {
         if (!Array.isArray(body.parameters)) {
@@ -2740,8 +2865,13 @@ const updateActionTypeHandler = async (
       ) {
         const rulesToValidate = effectiveRules;
         if (!Array.isArray(rulesToValidate) || rulesToValidate.length === 0) {
-          // Webhook-backed actions need no edit rules (see POST create).
-          if (resultingEnabled && !hasWebhookBinding(effectiveWriteback, effectiveSideEffects)) {
+          // Webhook-backed AND Function-backed actions need no edit rules
+          // (see POST create): the binding/config IS the action's logic.
+          if (
+            resultingEnabled &&
+            !isFunctionAction &&
+            !hasWebhookBinding(effectiveWriteback, effectiveSideEffects)
+          ) {
             sendError(
               res,
               "VALIDATION_FAILED",
@@ -2750,6 +2880,14 @@ const updateActionTypeHandler = async (
             return;
           }
         } else {
+          if (isFunctionAction) {
+            sendError(
+              res,
+              "FUNCTION_CONFIG_INVALID",
+              "Function-backed Action Types cannot also declare declarative rules."
+            );
+            return;
+          }
           const paramNames = new Set<string>(
             (effectiveParams as Array<Record<string, unknown>>).map(
               (p) => p.apiName as string
@@ -2869,9 +3007,42 @@ const updateActionTypeHandler = async (
             : [],
         );
       }
+      // Function-backed action: validate the effective functionConfig
+      // against the effective action parameters (auto-created inputs)
+      // before persisting either — mirrors the POST create gate.
+      if (
+        isFunctionAction &&
+        (body.functionConfig !== undefined ||
+          body.executionMode !== undefined ||
+          body.parameters !== undefined)
+      ) {
+        const effectiveFunctionConfig =
+          body.functionConfig !== undefined
+            ? body.functionConfig
+            : existing.function_config;
+        const functionErrors = await validateFunctionConfig(
+          effectiveFunctionConfig,
+          effectiveParams as Array<Record<string, unknown>>,
+        );
+        if (functionErrors.length > 0) {
+          sendError(res, "FUNCTION_CONFIG_INVALID", functionErrors.join(" "), {
+            validationErrors: functionErrors,
+          });
+          return;
+        }
+      }
       if (body.submissionCriteria !== undefined) updates.submission_criteria = body.submissionCriteria;
       if (body.sideEffects !== undefined) updates.side_effects = body.sideEffects;
       if (body.writebackConfig !== undefined) updates.writeback_config = body.writebackConfig;
+      if (body.functionConfig !== undefined) updates.function_config = body.functionConfig;
+      if (body.executionMode !== undefined) updates.execution_mode = body.executionMode;
+      // Migration 173 — normalized (unknown keys dropped, all-defaults → NULL)
+      // before it reaches a security-relevant column.
+      if (body.securitySettings !== undefined) {
+        updates.security_settings = normalizeActionSecuritySettings(
+          body.securitySettings,
+        );
+      }
       if (body.maxAffectedObjects !== undefined) updates.max_affected_objects = body.maxAffectedObjects;
       if (body.isEnabled !== undefined) updates.is_enabled = body.isEnabled;
 

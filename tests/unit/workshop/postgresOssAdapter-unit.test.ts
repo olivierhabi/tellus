@@ -62,7 +62,12 @@ describe("PostgresOssAdapter — load", () => {
     expect(recorded[0]?.sql).toMatch(/object_type_api_name = \$2/);
     expect(recorded[0]?.params?.[0]).toBe("49aaa226-40f3-4516-bd0e-8c3010bd3edd");
     expect(recorded[0]?.params?.[1]).toBe("OlivierOrderJune");
-    expect(r.objects).toEqual([{ id: "ORD-1", itemName: "Printer", quantity: 26 }]);
+    expect(r.objects).toEqual([{
+      __primaryKey: "ORD-1",
+      id: "ORD-1",
+      itemName: "Printer",
+      quantity: 26,
+    }]);
     expect(r.totalEstimate).toBe(1);
   });
 
@@ -78,7 +83,11 @@ describe("PostgresOssAdapter — load", () => {
       },
       ctx,
     );
-    expect(r.objects[0]).toEqual({ id: "PK-9", itemName: "Desk" });
+    expect(r.objects[0]).toEqual({
+      __primaryKey: "PK-9",
+      id: "PK-9",
+      itemName: "Desk",
+    });
   });
 
   it("generic path parameterizes JSONB field access (no injection surface)", async () => {

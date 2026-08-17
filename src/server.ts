@@ -113,6 +113,7 @@ import { ensureIndexTemplate } from "./services/opensearch/templateRegistry";
 // versioned independently of the existing /api/v1 ontology APIs.
 import connectivityRouter, {
   initConnectivity,
+  shutdownConnectivity,
 } from "./routes/connectivity.routes";
 
 // Modern Palantir-stack additions: DuckDB SQL, Polars charts, Kafka producer,
@@ -242,6 +243,34 @@ try {
 // Express application
 // ---------------------------------------------------------------------------
 const app = express();
+
+// Trust the reverse-proxy hop(s) in front of this process when resolving
+// req.ip. Every supported topology has exactly one trusted hop already:
+//   - prod:           Traefik edge routes /api directly to this backend
+//   - dev/bare docker: the Next.js /api catch-all proxy (tellus-fe)
+// Without this, express-rate-limit v8 throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+// on every request, the global + login-brute-force limiters key on the
+// PROXY address (all users share one bucket → spurious 429s), and audit
+// logs (auditEventService.extractIp) record the proxy IP instead of the
+// client's. Fail fast on a malformed override rather than booting with
+// silently broken rate limiting.
+//
+// NEVER set this to Express `true` — that trusts client-supplied
+// X-Forwarded-For blindly, letting attackers spoof IPs to bypass rate
+// limiting and poison audit records. Use TRUST_PROXY_HOPS=0 to disable
+// trust entirely (e.g. a deployment with no proxy in front).
+const trustProxy: boolean | number = (() => {
+  const raw = process.env.TRUST_PROXY_HOPS;
+  if (raw === undefined || raw.trim() === "") return 1;
+  const hops = Number(raw);
+  if (!Number.isInteger(hops) || hops < 0) {
+    throw new Error(
+      `TRUST_PROXY_HOPS must be a non-negative integer (hops to trust), got: "${raw}"`
+    );
+  }
+  return hops === 0 ? false : hops;
+})();
+app.set("trust proxy", trustProxy);
 
 // Security headers (helmet defaults are sensible for APIs)
 app.use(helmet());
@@ -686,6 +715,34 @@ app.get("/health", async (_req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/metrics — Prometheus scrape of the prom-client default registry.
+ *
+ * This path was already auth-exempt (middleware/globalAuth.ts), rate-limit
+ * exempt (RATE_LIMIT_SKIP above), and RED-middleware skip-listed, but no
+ * handler was ever mounted, so every scrape got a 404 and all prom-client
+ * series — connectivity request duration/errors, workshop, and the new
+ * connectivity probe/pool/egress metrics — were unreachable except through the
+ * Workshop-scoped alias at /api/v1/workshop/metrics.
+ *
+ * prom-client stays a soft dependency (503, not 500, if it is absent), matching
+ * routes/workshopModules.ts.
+ */
+app.get("/api/metrics", async (_req: Request, res: Response) => {
+  try {
+    const prom = (await import("prom-client")) as unknown as {
+      register: { metrics(): Promise<string>; contentType: string };
+    };
+    res.setHeader("Content-Type", prom.register.contentType);
+    res.send(await prom.register.metrics());
+  } catch {
+    res
+      .status(503)
+      .type("text/plain")
+      .send("# prom-client unavailable in this build\n");
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Test-only hooks — mounted iff TELLUS_TEST_HOOKS === "1". Used by integration
 // suites that need to reset in-process state (e.g., rate-limiter windows)
@@ -725,6 +782,20 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
   });
   console.log(
     `[test-hooks] Mounted ${RWANDA_QA_RESET_ROUTE} (TELLUS_TEST_HOOKS=1)`,
+  );
+
+  // Rwanda QA campaign: deterministic one-shot Pindo policy evaluation (plan
+  // §3.9 functional slice — kill-switch / corrupt-telemetry refusals without
+  // waiting real hold-down windows). See src/qa/rwanda/pindoAutomationProbe.ts.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { RWANDA_PINDO_EVALUATE_ROUTE, evaluateRwandaPindoOnce } = require(
+    "./qa/rwanda/pindoAutomationProbe",
+  ) as typeof import("./qa/rwanda/pindoAutomationProbe");
+  app.post(RWANDA_PINDO_EVALUATE_ROUTE, (req: Request, res: Response) => {
+    void evaluateRwandaPindoOnce(req, res);
+  });
+  console.log(
+    `[test-hooks] Mounted ${RWANDA_PINDO_EVALUATE_ROUTE} (TELLUS_TEST_HOOKS=1)`,
   );
 }
 
@@ -1639,27 +1710,6 @@ async function start(): Promise<void> {
       );
     }
 
-    // B3: Sweep funnel_run rows orphaned by a prior worker restart.
-    // A SIGKILL / OOM / container restart mid-activity leaves rows at
-    // status='running' that the UI polls and shows stuck on "sync"
-    // forever. Close them out before a new worker comes up so every
-    // save-to-ontology click after restart starts from a clean slate.
-    try {
-      const { sweepOrphanedFunnelRuns } = await import(
-        "./services/funnel/durableWorkflow"
-      );
-      const swept = await sweepOrphanedFunnelRuns();
-      if (swept.sweptRunIds.length > 0) {
-        console.log(
-          `Swept ${swept.sweptRunIds.length} orphaned funnel_run row(s) + ${swept.sweptStageRuns} stage(s) from prior worker restart`
-        );
-      }
-    } catch (err) {
-      console.warn(
-        `WARNING: orphaned funnel_run sweep failed: ${(err as Error).message}`
-      );
-    }
-
     // Phase 3: resume opensearch_reindex_run rows orphaned by a prior
     // worker restart. Unlike funnel_run (which is swept to 'failed'),
     // these are RESUMED — the executor's resume-skip continues from the
@@ -1686,9 +1736,15 @@ async function start(): Promise<void> {
     // becomes a fallback used only when `isTemporalConnected()` is
     // false at signal time.
     void (async () => {
+      // The worker start is wrapped on its own so a failure here is logged but
+      // does NOT skip the orphan sweep below — the sweep matters most exactly
+      // when the worker is dead or disabled, because that is when rows are
+      // left stranded at status='running'.
       try {
-        if (process.env.TEMPORAL_WORKER_DISABLED === "true") return;
-        const ok = await startTemporalWorker();
+        const ok =
+          process.env.TEMPORAL_WORKER_DISABLED === "true"
+            ? false
+            : await startTemporalWorker();
         if (ok) {
           const { getWorkerDiagnostics } = await import(
             "./services/funnel/temporal/worker"
@@ -1724,6 +1780,45 @@ async function start(): Promise<void> {
       } catch (err) {
         console.warn(
           `WARNING: Temporal worker failed to start: ${(err as Error).message}`
+        );
+      }
+
+      // B3: Sweep funnel_run rows orphaned by a prior worker restart.
+      // A SIGKILL / OOM / container restart mid-activity leaves rows at
+      // status='running' that the UI polls and shows stuck on "sync"
+      // forever. Close them out so every save-to-ontology click after a
+      // restart starts from a clean slate.
+      //
+      // ORDER MATTERS, and it used to be wrong: this ran ~40 lines earlier,
+      // BEFORE startTemporalWorker(). sweepOrphanedFunnelRuns prefers
+      // Temporal visibility (a run is orphaned only if no live workflow
+      // matches it) and falls back to a 4h05m age heuristic when the client
+      // is absent. Running it pre-connect meant getTemporalClient() returned
+      // null every single time, so the visibility path was unreachable dead
+      // code and EVERY boot swept by age alone — which cannot distinguish a
+      // dead run from a legitimately long one, so a >4h indexing pass on a
+      // large object type got declared failed and its signals re-queued
+      // while the activity was still running, producing a concurrent
+      // duplicate pass over the same data.
+      //
+      // Awaited after the worker attempt resolves, on EVERY path — success,
+      // unreachable, thrown, or TEMPORAL_WORKER_DISABLED. On success
+      // visibility is live and precise; otherwise we degrade to the age
+      // heuristic, which is what the old pre-connect placement silently always
+      // did.
+      try {
+        const { sweepOrphanedFunnelRuns } = await import(
+          "./services/funnel/durableWorkflow"
+        );
+        const swept = await sweepOrphanedFunnelRuns();
+        if (swept.sweptRunIds.length > 0) {
+          console.log(
+            `Swept ${swept.sweptRunIds.length} orphaned funnel_run row(s) + ${swept.sweptStageRuns} stage(s) from prior worker restart`
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `WARNING: orphaned funnel_run sweep failed: ${(err as Error).message}`
         );
       }
     })();
@@ -2068,6 +2163,18 @@ async function shutdown(signal: string): Promise<void> {
     console.error(JSON.stringify({ type: "foundry_db_disconnect_error", error: err instanceof Error ? err.message : String(err) }));
   }
 
+  // Stop connectivity background workers (outbox poller, credential rotation,
+  // health prober, table-import scheduler, webhook reaper) and drain the
+  // per-source PG pools. Must run BEFORE pool.end(): the prober and rotation
+  // worker write to the main pool, so leaving them ticking past this point
+  // produces "Cannot use a pool after calling end" noise on every shutdown.
+  try {
+    await shutdownConnectivity();
+    console.log(JSON.stringify({ type: "connectivity_shutdown" }));
+  } catch (err) {
+    console.error(JSON.stringify({ type: "connectivity_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+  }
+
   // Give any still-running boot tasks (Lakekeeper / ClickHouse / seed
   // scripts) a short window to finish so they don't hit pool.end() mid
   // query. 2s is more than enough on a healthy host and bounded
@@ -2091,6 +2198,15 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+// nodemon restarts its child with SIGUSR2; the Temporal worker Runtime also
+// consumes SIGUSR2/SIGQUIT as graceful-shutdown signals (SDK default
+// shutdownSignals: SIGINT/SIGTERM/SIGQUIT/SIGUSR2). Without handlers here the
+// Runtime swallows the signal, the process survives as a zombie (API up, no
+// worker), and the Runtime stays in SHUTTING_DOWN state forever — every
+// subsequent Worker.create() is drained within milliseconds (infinite
+// restart loop). Exit cleanly so the supervisor reruns the process.
+process.on("SIGUSR2", () => shutdown("SIGUSR2"));
+process.on("SIGQUIT", () => shutdown("SIGQUIT"));
 
 start();
 

@@ -21,6 +21,7 @@ import {
   setHandler,
   condition,
   sleep,
+  continueAsNew,
 } from "@temporalio/workflow";
 import type * as Activities from "./activities";
 
@@ -151,6 +152,27 @@ export interface ObjectTypeFunnelInput {
   seedCompletedRuns?: number;
   seedLastProcessedSignalId?: string;
   /**
+   * FNL-H1b — signals that were still queued when the parent called
+   * `continueAsNew`, handed to the child so they are processed rather than
+   * dropped.
+   *
+   * The parent's inner drain loop exits only when `pending` is empty, so it
+   * looked safe. It is not: `continueAsNew` is awaited, and Temporal delivers
+   * signals at workflow-task boundaries — a signal that lands in the task
+   * which issues the continue-as-new command is appended to `pending` on a
+   * workflow that is already terminating. The array is workflow-local state,
+   * so it dies with the parent execution and nothing ever retries it: the
+   * dispatcher already CAS'd its `funnel_run` row to `workflow_started`, so
+   * the reconciler sees a dispatch that was accepted and the reindex simply
+   * never happens. The UI badge stays on whatever the previous run left.
+   *
+   * Carrying the queue across the boundary makes the hand-off lossless. The
+   * child re-drains them under their original `signalId`, so `runKey` (and
+   * therefore the `funnel_run` row identity) is unchanged — a signal carried
+   * over is indistinguishable from one delivered directly to the child.
+   */
+  seedPendingSignals?: SignalPayload[];
+  /**
    * Override for `CONTINUE_AS_NEW_DEFAULT_THRESHOLD`. Resolved on the
    * host side (worker.ts reads `FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD`
    * and forwards it here). The Temporal workflow sandbox has no `process`
@@ -232,7 +254,10 @@ function rootCauseMessage(err: unknown): string {
 export async function ObjectTypeFunnelWorkflow(
   input: ObjectTypeFunnelInput
 ): Promise<void> {
-  const pending: SignalPayload[] = [];
+  // Seeded first: signals carried over from a parent that hit the
+  // continue-as-new threshold while they were still queued. They are older
+  // than anything a handler can append below, so they belong at the head.
+  const pending: SignalPayload[] = [...(input.seedPendingSignals ?? [])];
   setHandler(sourceTxnSignal, (p) => { pending.push(p); });
   setHandler(editBatchSignal, (p) => { pending.push(p); });
   setHandler(schemaChangeSignal, (p) => { pending.push(p); });
@@ -308,16 +333,46 @@ export async function ObjectTypeFunnelWorkflow(
         // panel can see them in the same round-trip. Runs BEFORE the
         // Quickwit indexing stage because that path goes through Kafka
         // and has its own publish-wait — we don't want the FE pretending
-        // the OT is empty for that interval. Best-effort: if the sync
-        // fails we still continue with Quickwit indexing so the funnel's
-        // primary store stays consistent; the terminal projection's
-        // outer catch will surface any error in `funnel_state`.
-        await syncOpenSearchActivity({
-          ontologyId: input.ontologyId,
-          objectTypeApiName: input.objectTypeApiName,
-          objectTypeRid: input.objectTypeRid,
-          environmentId: input.environmentId,
-        });
+        // the OT is empty for that interval.
+        //
+        // GENUINELY best-effort, and it used to only claim to be: this call
+        // was bare, so any OpenSearch hiccup — a dev-box OS restart, a
+        // circuit breaker under a warm re-index, a transient 503 — escaped
+        // to the outer catch and failed the ENTIRE funnel run after the
+        // expensive changelog+merge stages had already succeeded and been
+        // durably committed. The user then saw 'failed' on an Object Type
+        // whose primary store (Postgres + Quickwit) was perfectly fine, and
+        // the only recovery was re-running the whole pipeline.
+        //
+        // OpenSearch is a secondary read replica for the FE search panel,
+        // not the funnel's source of truth, and `syncOpenSearch` is
+        // idempotent (a later run or an explicit Force Reindex re-syncs it).
+        // So swallow the failure, carry the message forward, and record it
+        // on the indexing stage's output so it is visible in the run detail
+        // rather than silently lost.
+        //
+        // ONE exception is rethrown: a FUNN-ISO identity-fence failure means
+        // the Object Type was deleted mid-run (or an activity landed against
+        // the wrong environment). That is not a degraded search index, it is
+        // a run that must not continue, so it goes to the outer catch which
+        // has the dedicated `object_type_deleted` terminal handling.
+        let openSearchSyncWarning: string | undefined;
+        try {
+          await syncOpenSearchActivity({
+            ontologyId: input.ontologyId,
+            objectTypeApiName: input.objectTypeApiName,
+            objectTypeRid: input.objectTypeRid,
+            environmentId: input.environmentId,
+          });
+        } catch (err) {
+          if (
+            isTypedCause(err, "FunnelObjectTypeMissing") ||
+            isTypedCause(err, "FunnelExecutionEnvironmentMismatch")
+          ) {
+            throw err;
+          }
+          openSearchSyncWarning = rootCauseMessage(err);
+        }
 
         await projectStageToPostgres({
           ...input,
@@ -330,6 +385,12 @@ export async function ObjectTypeFunnelWorkflow(
             deletes: merge.deletes,
             mergedRowCount: merge.mergedRowCount,
             mergedSnapshotId: merge.mergedSnapshotId,
+            ...(openSearchSyncWarning
+              ? {
+                  openSearchSyncDegraded: true,
+                  openSearchSyncError: openSearchSyncWarning,
+                }
+              : {}),
           },
         });
         const indexing = await runIndexingActivityProxy({
@@ -444,14 +505,45 @@ export async function ObjectTypeFunnelWorkflow(
     // the child workflow's input; the rest lives in Postgres (`funnel_run`
     // is the durable ledger).
     if (completedRuns >= threshold) {
+      // FNL-H1b — snapshot the queue and hand it to the child. Two reasons a
+      // signal can be sitting here even though the drain loop above exits only
+      // when `pending` is empty:
+      //
+      //   1. Temporal applies every signal in the current event batch BEFORE
+      //      running workflow code, so a signal delivered in the same workflow
+      //      task that issues the continue-as-new command is already in
+      //      `pending` by the time we get here.
+      //   2. A signal the server accepted concurrently with the command can be
+      //      ordered into history ahead of it, and on replay it lands in
+      //      `pending` at exactly this point.
+      //
+      // In both cases the parent execution is finished and `pending` is
+      // workflow-local memory, so anything left in it evaporates. It is not
+      // recoverable downstream either: the dispatcher CAS'd the `funnel_run`
+      // row to `workflow_started` when it acked, so the reconciler treats the
+      // dispatch as delivered and never re-signals. Result: a save that
+      // silently never indexes.
+      //
+      // There must be NO `await` between this snapshot and the continueAsNew
+      // call — an await yields a new workflow task, which is precisely the
+      // window that drops signals.
+      const carriedOver = pending.splice(0, pending.length);
       // `continueAsNew` throws a ContinueAsNew error that the Temporal
-      // runtime catches to start the child workflow.
-      const { continueAsNew } = await import("@temporalio/workflow");
+      // runtime catches to start the child workflow. Imported statically —
+      // a dynamic `import()` inside a workflow is a non-deterministic
+      // side-effect the sandbox merely tolerates today.
       await continueAsNew<typeof ObjectTypeFunnelWorkflow>({
         ontologyId: input.ontologyId,
         objectTypeApiName: input.objectTypeApiName,
+        // FUNN-ISO-2/3 — the identity fence. Dropping these across the
+        // boundary makes every child workflow un-fenced, so a worker attached
+        // to the wrong database could run a pass that the parent would have
+        // rejected.
+        objectTypeRid: input.objectTypeRid,
+        environmentId: input.environmentId,
         seedCompletedRuns: 0,
         seedLastProcessedSignalId: lastProcessedSignalId,
+        seedPendingSignals: carriedOver,
         // Preserve the host-resolved threshold across the continue-as-new
         // boundary so the child workflow doesn't fall back to the default
         // when the operator has configured a non-default value.

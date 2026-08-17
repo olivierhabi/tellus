@@ -83,6 +83,43 @@ export interface WriteOverlayOutputs {
   upsertedInstance: boolean;
 }
 
+/**
+ * Publishes an overlay for an object row which has already been committed to
+ * Postgres by a set-based writer.  This keeps specialised high-volume action
+ * paths immediately consistent with Object Search without forcing them to
+ * perform a second, per-object `object_instances` UPSERT.
+ *
+ * The caller owns durability: this function intentionally only touches the
+ * short-lived read projection.  A Redis failure must therefore be handled by
+ * the caller as a degraded-read concern, never by rolling back committed data.
+ */
+export async function publishCommittedObjectOverlay(input: {
+  branchId?: string | null;
+  objectType: string;
+  primaryKey: string;
+  doc: Record<string, unknown>;
+  deleted: boolean;
+  version: number;
+  editId: string;
+  actorUserId?: string | null;
+  ttlSeconds?: number;
+  store?: OverlayStore;
+}): Promise<void> {
+  const record: OverlayRecord = {
+    branchId: resolveBranchSlot(input.branchId),
+    objectType: input.objectType,
+    primaryKey: input.primaryKey,
+    doc: input.doc,
+    deleted: input.deleted,
+    version: input.version,
+    createdAt: Date.now(),
+    editId: input.editId,
+    actorUserId: input.actorUserId ?? null,
+  };
+  await writeOverlay(record, input.store ?? (await getOverlayStore()), computeTtlSeconds(input.ttlSeconds));
+  recordOverlayWrite(input.editId, record.createdAt);
+}
+
 const DEFAULT_COMMIT_TIMEOUT = 60;
 
 function computeTtlSeconds(explicit?: number): number {
@@ -268,7 +305,7 @@ export async function writeOverlayForEdit(
     // so the INSERT resolves and branch isolation semantics are preserved
     // (T-04 layers an explicit-branch keyspace on top — the PG row is
     // still per-ontology-`_main`-by-default for now).
-    const branchUuid = deriveMainBranchId(input.ontologyId);
+    const branchUuid = input.branchId ?? deriveMainBranchId(input.ontologyId);
     // Phase 2 (object identity): persist a stable object rid on first
     // write. Caller-supplied rid wins; otherwise mint one. On conflict
     // the EXISTING rid is kept — rids never change for the lifetime of
@@ -331,7 +368,15 @@ export async function writeOverlayForEdit(
   // Step 3 — Redis overlay. Routed through `writeOverlay` for CAS,
   // dual-write, and metrics. Errors propagate up to the caller for
   // observability; the caller decides whether to retry from the sweeper.
-  const slot = resolveBranchSlot(input.branchId);
+  // Object Query's untagged read contract addresses the main branch through
+  // the `_main` slot. The executor resolves that branch to its UUID before
+  // writeback, so normalise it back here; otherwise a successful generic
+  // action is invisible to the default Workshop/Object Type query until the
+  // asynchronous index catches up. Explicit non-main branches retain their
+  // UUID key and remain isolated.
+  const slot = resolveBranchSlot(
+    input.branchId === deriveMainBranchId(input.ontologyId) ? null : input.branchId,
+  );
   const record: OverlayRecord = {
     branchId: slot,
     objectType: input.objectType,

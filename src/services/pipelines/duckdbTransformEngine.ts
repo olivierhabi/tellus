@@ -60,7 +60,24 @@ export type TransformStep =
   | RenameStep
   | NormalizeStep
   | JoinStep
-  | UnionStep;
+  | UnionStep
+  | SelectStep
+  | SortStep
+  | DropDuplicatesStep
+  | UppercaseColumnNamesStep
+  | RowSizeStep
+  | ApplyExpressionStep
+  | ApplyMultipleExpressionsStep
+  | ApplyToMultipleColumnsStep
+  | ComputeIfExpressionAbsentStep
+  | TextBlockStep
+  | AggregateStep
+  | RollupStep
+  | AggregateOnConditionStep
+  | TopRowsStep
+  | PivotStep
+  | UnpivotStep
+  | KeepDuplicatesStep;
 
 export interface CastStep {
   function: "Cast";
@@ -110,17 +127,178 @@ export interface JoinStep {
   // right input — that's follow-5.
   rightPath: string;
   rightAlias?: string;
-  joinType: "inner" | "left" | "right" | "full" | "cross";
-  on?: Array<{ left: string; right: string }>;
+  joinType: "inner" | "left" | "right" | "full" | "cross" | "semi" | "anti";
+  /**
+   * Join conditions, combined with AND (Palantir's `and(...)` expression).
+   * `operator` omitted = `equals`, which keeps every historical equality-only
+   * step compiling to the same SQL. The inequality operators are the theta
+   * joins the `complex*JoinV1` family expresses as `Expression<Boolean>`.
+   */
+  on?: Array<{
+    left: string;
+    right: string;
+    operator?:
+      | "equals"
+      | "notEquals"
+      | "lessThan"
+      | "lessThanOrEqual"
+      | "greaterThan"
+      | "greaterThanOrEqual";
+  }>;
   /** Required when joinType='cross'. Guard against compile-time OOMs. */
   allowCrossJoin?: boolean;
   estimatedCardinality?: number;
 }
 export interface UnionStep {
   function: "Union";
-  otherPath: string;
+  /**
+   * Second input (legacy two-input shape). Kept because every existing step
+   * carries it; `otherPaths` is the N-input form matching Palantir's
+   * `List<Table>`. Both may be present — the singular leads.
+   */
+  otherPath?: string;
+  /** Additional inputs beyond the first, in order. */
+  otherPaths?: string[];
   /** By name (default) or by position. */
   byName?: boolean;
+  /**
+   * Palantir schema-policy variants (PB-B2.follow-2). Omitted = legacy
+   * byName/byPosition behaviour.
+   *   first  — output = left's columns only (firstUnionByNameV1)
+   *   narrow — output = intersection of both inputs (narrowUnionByNameV1)
+   *   wide   — output = superset with null fill (wideUnionByNameV1)
+   */
+  mode?: "first" | "narrow" | "wide";
+}
+
+// --- Tier A single-input transforms (PB-B2.follow) -------------------------
+
+export interface SelectStep {
+  function: "Select";
+  columns: string[];
+}
+export interface SortStep {
+  function: "Sort";
+  sorts: Array<{ column: string; direction: "asc" | "desc"; nulls?: "first" | "last" }>;
+}
+export interface DropDuplicatesStep {
+  function: "DropDuplicates";
+  /** When omitted/empty, dedupe on all columns. */
+  columns?: string[];
+}
+export interface UppercaseColumnNamesStep {
+  function: "UppercaseColumnNames";
+}
+export interface RowSizeStep {
+  function: "RowSize";
+  outputColumn?: string;
+}
+export interface OperandShape {
+  kind: "column" | "literal";
+  value: string;
+  literalType?: "string" | "integer" | "numeric" | "boolean";
+}
+export type BinaryOp = "+" | "-" | "*" | "/" | "||" | "==" | "!=" | ">" | "<" | ">=" | "<=";
+export interface ExpressionItemShape {
+  left: OperandShape;
+  operator: BinaryOp;
+  right: OperandShape;
+  outputColumn: string;
+  outputType?: "string" | "integer" | "numeric" | "boolean" | "date" | "timestamp";
+}
+export interface ApplyExpressionStep {
+  function: "ApplyExpression";
+  expression: ExpressionItemShape;
+}
+export interface ApplyMultipleExpressionsStep {
+  function: "ApplyMultipleExpressions";
+  expressions: ExpressionItemShape[];
+}
+export interface ApplyToMultipleColumnsStep {
+  function: "ApplyToMultipleColumns";
+  columns: string[];
+  operator: BinaryOp;
+  right: OperandShape;
+  outputSuffix?: string;
+  outputColumns?: string[];
+  outputType?: "string" | "integer" | "numeric" | "boolean" | "date" | "timestamp";
+}
+export interface ComputeIfExpressionAbsentStep {
+  function: "ComputeIfExpressionAbsent";
+  outputColumn: string;
+  expression: Omit<ExpressionItemShape, "outputColumn">;
+}
+export interface TextBlockStep {
+  function: "TextBlock";
+  text?: string;
+  title?: string;
+}
+
+// --- Tier B aggregate-family steps (PB-B2.follow-2) ------------------------
+
+export type AggregateFn =
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "count"
+  | "count_distinct"
+  | "stddev"
+  | "variance";
+
+export interface AggregationItemShape {
+  /** Optional ONLY for `count` (COUNT(*) over the whole group). */
+  column?: string;
+  function: AggregateFn;
+  outputColumn: string;
+}
+
+export interface AggregateStep {
+  function: "Aggregate";
+  groupBy?: string[];
+  aggregations: AggregationItemShape[];
+}
+
+export interface RollupStep {
+  function: "Rollup";
+  rollupColumns?: string[];
+  aggregations: AggregationItemShape[];
+}
+
+export interface AggregateOnConditionStep {
+  function: "AggregateOnCondition";
+  predicate: { kind: "all" | "columnHasType"; columnType?: string };
+  aggregations: Array<{ function: "sum" | "avg" | "min" | "max" | "count"; suffix: string }>;
+  groupBy?: string[];
+}
+
+export interface TopRowsStep {
+  function: "TopRows";
+  partitionBy?: string[];
+  sorts?: Array<{ column: string; direction: "asc" | "desc"; nulls?: "first" | "last" }>;
+  topN?: number;
+}
+
+export interface PivotStep {
+  function: "Pivot";
+  groupBy?: string[];
+  pivotColumn: string;
+  pivotValues: Array<{ value: string; alias: string }>;
+  aggregations: AggregationItemShape[];
+  aliasPosition?: "prefix" | "suffix";
+}
+
+export interface UnpivotStep {
+  function: "Unpivot";
+  columns: string[];
+  nameColumn: string;
+  valueColumn: string;
+}
+
+export interface KeepDuplicatesStep {
+  function: "KeepDuplicates";
+  /** Omit/empty = exact duplicate rows (key = every column). */
+  columns?: string[];
 }
 
 export interface CompileOptions {
@@ -192,14 +370,69 @@ export function compileTransformChain(
       }
       case "Union":
         ctes.push(`${next} AS (${compileUnion(step, current)})`);
-        externalReads.push(step.otherPath);
+        externalReads.push(...unionOtherPaths(step));
         break;
+      case "Select":
+        ctes.push(`${next} AS (${compileSelect(step, current)})`);
+        break;
+      case "Sort":
+        ctes.push(`${next} AS (${compileSort(step, current)})`);
+        break;
+      case "DropDuplicates":
+        ctes.push(`${next} AS (${compileDropDuplicates(step, current)})`);
+        break;
+      case "ApplyExpression":
+      case "ApplyMultipleExpressions": {
+        const all = step.function === "ApplyExpression" ? [step.expression] : step.expressions;
+        ctes.push(`${next} AS (${compileExpressions(all, current)})`);
+        break;
+      }
+      case "ApplyToMultipleColumns":
+        ctes.push(`${next} AS (${compileApplyToMultipleColumns(step, current)})`);
+        break;
+      case "ComputeIfExpressionAbsent":
+        ctes.push(`${next} AS (${compileComputeIfAbsent(step, current)})`);
+        break;
+      case "TextBlock":
+        // Pure annotation — identity pass-through.
+        ctes.push(`${next} AS (SELECT * FROM ${current})`);
+        break;
+      // --- Tier B aggregate-family (PB-B2.follow-2) ---
+      case "Aggregate":
+        ctes.push(`${next} AS (${compileAggregate(step, current)})`);
+        break;
+      case "Rollup":
+        ctes.push(`${next} AS (${compileRollup(step, current)})`);
+        break;
+      case "AggregateOnCondition":
+        ctes.push(
+          `${next} AS (${compileAggregateOnCondition(step, current, options.sourceColumns)})`,
+        );
+        break;
+      case "TopRows":
+        ctes.push(`${next} AS (${compileTopRows(step, current)})`);
+        break;
+      case "Pivot":
+        ctes.push(`${next} AS (${compilePivot(step, current)})`);
+        break;
+      case "Unpivot":
+        ctes.push(`${next} AS (${compileUnpivot(step, current)})`);
+        break;
+      case "KeepDuplicates":
+        ctes.push(`${next} AS (${compileKeepDuplicates(step, current)})`);
+        break;
+      case "UppercaseColumnNames":
+      case "RowSize":
       case "Normalize":
         // Not reachable — rejectUnsupported() threw above.
         throw new AppError(
-          "Normalize is not supported on compute_type='duckdb' — set compute_type='legacy_nodejs' on the pipeline",
+          `${step.function} is not supported on compute_type='duckdb' — set compute_type='legacy_nodejs' on the pipeline`,
           400,
-          "NORMALIZE_REQUIRES_LEGACY_ENGINE",
+          step.function === "Normalize"
+            ? "NORMALIZE_REQUIRES_LEGACY_ENGINE"
+            : step.function === "UppercaseColumnNames"
+            ? "UPPERCASE_REQUIRES_LEGACY_ENGINE"
+            : "ROWSIZE_REQUIRES_LEGACY_ENGINE",
         );
       default:
         throw new AppError(
@@ -229,6 +462,22 @@ function rejectUnsupported(transforms: TransformStep[]): void {
           "(tracked by PB-B2.follow-2 — Rust UDF).",
         400,
         "NORMALIZE_REQUIRES_LEGACY_ENGINE",
+      );
+    }
+    if (step.function === "UppercaseColumnNames") {
+      throw new AppError(
+        "UppercaseColumnNames is not supported on compute_type='duckdb' (column-name fold needs the legacy TS engine). " +
+          "Set compute_type='legacy_nodejs' on the pipeline.",
+        400,
+        "UPPERCASE_REQUIRES_LEGACY_ENGINE",
+      );
+    }
+    if (step.function === "RowSize") {
+      throw new AppError(
+        "RowSize is not supported on compute_type='duckdb' (no portable whole-row byte-size SQL). " +
+          "Set compute_type='legacy_nodejs' on the pipeline.",
+        400,
+        "ROWSIZE_REQUIRES_LEGACY_ENGINE",
       );
     }
     if (step.function === "Join" && step.joinType === "cross") {
@@ -264,18 +513,96 @@ function rejectUnsupported(transforms: TransformStep[]): void {
 // Per-step SQL emitters.
 // ---------------------------------------------------------------------------
 
+// Regex that splits a slash/dash/dot-separated date into its three fields.
+// Applied after separators are normalised to '/', so only '/' appears here.
+const DATE_PARTS_RE = "'^([0-9]{1,2})/([0-9]{1,2})/([0-9]{2}|[0-9]{4})$'";
+
+/**
+ * SQL that decides whether a column of separator-dates is month-first or
+ * day-first, by counting values that can only be read one way. Emits 1 for
+ * month-first, 0 for day-first (which is also the no-evidence default).
+ *
+ * This is the SQL twin of inferDateFormat() in utils/typeConverter.ts, and the
+ * two must stay in agreement: the same chain can run through either engine
+ * depending on pipelines.compute_type, and a preview that disagrees with the
+ * materialised output is worse than either answer alone.
+ */
+function dateOrderProbe(col: string, from: string): string {
+  const norm = `regexp_replace(trim(CAST(${col} AS VARCHAR)), '[-.]', '/', 'g')`;
+  return `(SELECT CASE WHEN
+      SUM(CASE WHEN __p2 > 12 AND __p1 <= 12 THEN 1 ELSE 0 END) >
+      SUM(CASE WHEN __p1 > 12 AND __p2 <= 12 THEN 1 ELSE 0 END)
+    THEN 1 ELSE 0 END
+    FROM (SELECT TRY_CAST(regexp_extract(__n, ${DATE_PARTS_RE}, 1) AS INTEGER) AS __p1,
+                 TRY_CAST(regexp_extract(__n, ${DATE_PARTS_RE}, 2) AS INTEGER) AS __p2
+          FROM (SELECT ${norm} AS __n FROM ${from})))`;
+}
+
+/**
+ * Parse a date/timestamp column by dispatching on the value's *shape* before
+ * falling back to TRY_CAST.
+ *
+ * Shape dispatch has to come first: TRY_CAST('30/7/23' AS DATE) does not fail,
+ * it silently returns year 0030. Only after the separator shapes are handled is
+ * TRY_CAST safe to use for ISO and other native forms.
+ *
+ * `order` picks the two-field interpretation for values that are ambiguous
+ * ('7/6/23'); values that can only be read one way parse correctly either way.
+ */
+function parseDateShaped(
+  col: string,
+  order: "dmy" | "mdy",
+  sqlType: string,
+): string {
+  const s = `nullif(trim(CAST(${col} AS VARCHAR)), '')`;
+  const n = `regexp_replace(${s}, '[-.]', '/', 'g')`;
+  const f2 = order === "mdy" ? "'%m/%d/%y'" : "'%d/%m/%y'";
+  const f4 = order === "mdy" ? "'%m/%d/%Y'" : "'%d/%m/%Y'";
+  return `CASE
+    WHEN ${s} IS NULL THEN NULL
+    WHEN regexp_matches(${n}, '^[0-9]{4}/[0-9]{1,2}/[0-9]{1,2}$')
+      THEN CAST(TRY_STRPTIME(${n}, '%Y/%m/%d') AS ${sqlType})
+    WHEN regexp_matches(${n}, '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$')
+      THEN CAST(TRY_STRPTIME(${n}, ${f4}) AS ${sqlType})
+    WHEN regexp_matches(${n}, '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}$')
+      THEN CAST(TRY_STRPTIME(${n}, ${f2}) AS ${sqlType})
+    ELSE COALESCE(
+      TRY_CAST(${s} AS ${sqlType}),
+      CAST(TRY_STRPTIME(${s}, ['%d-%b-%Y','%d %b %Y','%b %d %Y','%b %d, %Y']) AS ${sqlType}))
+  END`;
+}
+
+/**
+ * The cast expression for one column. Date and timestamp targets get the
+ * shape-dispatched parser with per-column day/month inference; every other
+ * target is a plain lenient TRY_CAST.
+ */
+function castExpr(
+  col: string,
+  targetType: CastStep["targetType"],
+  from: string,
+): string {
+  const sqlType = mapTargetType(targetType);
+  if (targetType !== "date" && targetType !== "timestamp") {
+    return `TRY_CAST(${col} AS ${sqlType})`;
+  }
+  return `CASE WHEN ${dateOrderProbe(col, from)} = 1
+    THEN ${parseDateShaped(col, "mdy", sqlType)}
+    ELSE ${parseDateShaped(col, "dmy", sqlType)} END`;
+}
+
 function compileCast(step: CastStep, from: string): string {
   const sourceCol = quoteIdent(step.expression);
   const outputCol = quoteIdent(step.outputColumn ?? step.expression);
-  const sqlType = mapTargetType(step.targetType);
+  const expr = castExpr(sourceCol, step.targetType, from);
   // Replace-in-place: use EXCLUDE to drop the source column and add a
   // recomputed one of the same name. When outputColumn differs, we keep
   // the source column and append the cast as a new column (mirrors the
   // legacy TS engine's ({ ...row, [outputCol]: castValue }) behaviour).
   if (step.outputColumn && step.outputColumn !== step.expression) {
-    return `SELECT *, TRY_CAST(${sourceCol} AS ${sqlType}) AS ${outputCol} FROM ${from}`;
+    return `SELECT *, ${expr} AS ${outputCol} FROM ${from}`;
   }
-  return `SELECT * EXCLUDE (${sourceCol}), TRY_CAST(${sourceCol} AS ${sqlType}) AS ${outputCol} FROM ${from}`;
+  return `SELECT * EXCLUDE (${sourceCol}), ${expr} AS ${outputCol} FROM ${from}`;
 }
 
 function mapTargetType(t: CastStep["targetType"]): string {
@@ -388,7 +715,8 @@ function compileJoin(step: JoinStep, from: string): string {
   const on = (step.on ?? [])
     .map(
       (p) =>
-        `l.${quoteIdent(p.left)} = ${quoteIdent(alias)}.${quoteIdent(p.right)}`,
+        `l.${quoteIdent(p.left)} ${joinOperatorSql(p.operator)} ` +
+        `${quoteIdent(alias)}.${quoteIdent(p.right)}`,
     )
     .join(" AND ");
   if (!on) {
@@ -398,12 +726,53 @@ function compileJoin(step: JoinStep, from: string): string {
       "VALIDATION_ERROR",
     );
   }
+  // Semi / anti joins return LEFT columns only (Palantir
+  // complexSemiJoinV1 / complexAntiJoinV1). DuckDB's SEMI/ANTI syntax
+  // does exactly this: `SELECT l.* FROM l SEMI JOIN r ON …`.
+  if (step.joinType === "semi" || step.joinType === "anti") {
+    const kw = step.joinType === "semi" ? "SEMI" : "ANTI";
+    return `SELECT l.* FROM ${from} AS l ${kw} JOIN ${right} AS ${quoteIdent(alias)} ON ${on}`;
+  }
   // Column collisions are resolved by DuckDB's natural disambiguation
   // (duplicate names get a numeric suffix). The legacy TS engine's
   // left/right prefix rule is captured exactly by PB-B2.follow-5 — for
   // now `SELECT *` matches the byte-shape on non-colliding joins, which
   // is the dominant case in production chains.
   return `SELECT * FROM ${from} AS l ${joinKind} JOIN ${right} AS ${quoteIdent(alias)} ON ${on}`;
+}
+
+/**
+ * SQL comparison for one join condition. Emitted from a closed switch rather
+ * than interpolated from the payload, so an unexpected operator string cannot
+ * reach the SQL text.
+ *
+ * SQL's `=` and `<>` already treat NULL as unknown (never matching), which is
+ * the null ≠ null rule the legacy engine implements explicitly.
+ */
+export function joinOperatorSql(
+  op: NonNullable<JoinStep["on"]>[number]["operator"],
+): string {
+  switch (op) {
+    case undefined:
+    case "equals":
+      return "=";
+    case "notEquals":
+      return "<>";
+    case "lessThan":
+      return "<";
+    case "lessThanOrEqual":
+      return "<=";
+    case "greaterThan":
+      return ">";
+    case "greaterThanOrEqual":
+      return ">=";
+    default:
+      throw new AppError(
+        `Unsupported join condition operator "${String(op)}".`,
+        400,
+        "VALIDATION_ERROR",
+      );
+  }
 }
 
 function joinSql(kind: JoinStep["joinType"]): string {
@@ -418,15 +787,449 @@ function joinSql(kind: JoinStep["joinType"]): string {
       return "FULL OUTER";
     case "cross":
       return "CROSS";
+    case "semi":
+      return "SEMI";
+    case "anti":
+      return "ANTI";
   }
 }
 
+/**
+ * Every input after the first, de-duplicated and in order. De-duplication
+ * matters because a repeated path would silently double those rows.
+ */
+export function unionOtherPaths(step: UnionStep): string[] {
+  const ordered = [
+    ...(step.otherPath ? [step.otherPath] : []),
+    ...(step.otherPaths ?? []),
+  ];
+  return [...new Set(ordered)];
+}
+
 function compileUnion(step: UnionStep, from: string): string {
+  const otherPaths = unionOtherPaths(step);
+  if (otherPaths.length === 0) {
+    throw new AppError(
+      "Union requires at least one additional input (otherPaths, or the legacy otherPath).",
+      400,
+      "VALIDATION_ERROR",
+    );
+  }
+
+  // Palantir schema-policy variants (PB-B2.follow-2).
+  //  - `wide` is exactly DuckDB's UNION ALL BY NAME (superset, null-fill).
+  //  - `first` / `narrow` need the static column algebra of BOTH inputs at
+  //    compile time; this compiler doesn't track columns through chained
+  //    steps, so — mirroring the Normalize/RowSize precedent — they are
+  //    executed by the legacy TS engine and rejected here.
+  // N inputs chain as one flat UNION ALL — associative, so a three-way union
+  // is a single node rather than two chained ones (Palantir `List<Table>`).
+  const tails = otherPaths.map((p) => `SELECT * FROM ${readSource(p)}`);
+
+  if (step.mode === "wide") {
+    return [`SELECT * FROM ${from}`, ...tails].join(" UNION ALL BY NAME ");
+  }
+  if (step.mode === "first" || step.mode === "narrow") {
+    throw new AppError(
+      `Union mode '${step.mode}' requires static column knowledge of both inputs. ` +
+        "Set compute_type='legacy_nodejs' on the pipeline (mirrors the Normalize/RowSize precedent).",
+      400,
+      "UNION_MODE_REQUIRES_LEGACY_ENGINE",
+    );
+  }
+
   const byName = step.byName ?? true;
-  const right = readSource(step.otherPath);
-  return byName
-    ? `SELECT * FROM ${from} UNION ALL BY NAME SELECT * FROM ${right}`
-    : `SELECT * FROM ${from} UNION ALL SELECT * FROM ${right}`;
+  return [`SELECT * FROM ${from}`, ...tails].join(
+    byName ? " UNION ALL BY NAME " : " UNION ALL ",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tier A simple-single-input emitters.
+// ---------------------------------------------------------------------------
+
+function compileSelect(step: SelectStep, from: string): string {
+  const cols = (step.columns ?? []).map(quoteIdent);
+  if (cols.length === 0) {
+    throw new AppError(
+      "Select requires at least one column.",
+      400,
+      "VALIDATION_ERROR",
+    );
+  }
+  return `SELECT ${cols.join(", ")} FROM ${from}`;
+}
+
+function compileSort(step: SortStep, from: string): string {
+  const keys = (step.sorts ?? []).map((s) => {
+    const col = quoteIdent(s.column);
+    const dir = s.direction === "desc" ? "DESC" : "ASC";
+    // DuckDB defaults NULLS FIRST for ASC, NULLS LAST for DESC. We mirror
+    // the legacy TS engine's convention: NULLS LAST for ASC, NULLS FIRST
+    // for DESC unless explicitly overridden.
+    const nulls =
+      s.nulls === "first"
+        ? "NULLS FIRST"
+        : s.nulls === "last"
+        ? "NULLS LAST"
+        : s.direction === "desc"
+        ? "NULLS FIRST"
+        : "NULLS LAST";
+    return `${col} ${dir} ${nulls}`;
+  });
+  if (keys.length === 0) return `SELECT * FROM ${from}`;
+  return `SELECT * FROM ${from} ORDER BY ${keys.join(", ")}`;
+}
+
+function compileDropDuplicates(step: DropDuplicatesStep, from: string): string {
+  const cols = (step.columns ?? []).map(quoteIdent);
+  if (cols.length === 0) {
+    // DISTINCT on the whole row.
+    return `SELECT DISTINCT * FROM ${from}`;
+  }
+  // DuckDB 0.8+ supports DISTINCT ON (cols) — first occurrence wins.
+  return `SELECT DISTINCT ON (${cols.join(", ")}) * FROM ${from}`;
+}
+
+/**
+ * Render an operand to a SQL expression. `kind='literal'` parses the value
+ * according to `literalType` (default string) and emits a quoted literal;
+ * `kind='column'` emits a quoted identifier.
+ */
+function renderOperand(op: OperandShape): string {
+  if (op.kind === "column") return quoteIdent(op.value);
+  // literal
+  const t = op.literalType ?? "string";
+  const v = op.value ?? "";
+  switch (t) {
+    case "integer":
+    case "numeric": {
+      const n = Number(v);
+      return Number.isFinite(n) ? String(n) : "NULL";
+    }
+    case "boolean":
+      return v === "true" ? "TRUE" : "FALSE";
+    case "string":
+    default: {
+      const esc = v.replace(/'/g, "''");
+      return `'${esc}'`;
+    }
+  }
+}
+
+/** Map our binary operators to the SQL operator (= for ==, <> for !=). */
+function sqlOp(op: BinaryOp): string {
+  switch (op) {
+    case "==":
+      return "=";
+    case "!=":
+      return "<>";
+    default:
+      return op;
+  }
+}
+
+function renderExpression(e: ExpressionItemShape): string {
+  return `(${renderOperand(e.left)} ${sqlOp(e.operator)} ${renderOperand(e.right)})`;
+}
+
+function castForResult(
+  expr: string,
+  outputType: ExpressionItemShape["outputType"],
+): string {
+  if (outputType === undefined) return expr;
+  const sqlType = mapTargetType(outputType);
+  if (outputType !== "date" && outputType !== "timestamp") {
+    return `TRY_CAST(${expr} AS ${sqlType})`;
+  }
+  // An expression result has no column to sniff for day/month order, so use
+  // the same "dmy" default that convertValue applies in the TS engine's
+  // castExpressionResult. Shape dispatch still matters: TRY_CAST alone reads
+  // '30/7/23' as year 0030 instead of failing.
+  return parseDateShaped(expr, "dmy", sqlType);
+}
+
+function compileExpressions(
+  exprs: ExpressionItemShape[],
+  from: string,
+): string {
+  // Build the projection: keep all existing columns, then add each
+  // expression's output column via the * EXCLUDE/REPLACE pattern. We use
+  // a single SELECT with the existing columns plus the computed ones;
+  // when an output column matches an existing column, REPLACE is used.
+  if (exprs.length === 0) return `SELECT * FROM ${from}`;
+  const computedParts = exprs.map((e) =>
+    `${castForResult(renderExpression(e), e.outputType)} AS ${quoteIdent(e.outputColumn)}`,
+  );
+  // Use a simple SELECT *, <computed> FROM. When the output column already
+  // exists, DuckDB will error on the duplicate alias; we mirror the legacy
+  // TS engine by treating computed columns as new (overwrite) — use the
+  // `* REPLACE (...)` clause to overwrite existing columns of the same
+  // name. To keep this simple, we always emit `SELECT *, computed` and
+  // trust the user to pick non-conflicting output column names. Edge case
+  // collisions will surface a DuckDB error at runtime.
+  return `SELECT *, ${computedParts.join(", ")} FROM ${from}`;
+}
+
+function compileApplyToMultipleColumns(
+  step: ApplyToMultipleColumnsStep,
+  from: string,
+): string {
+  const cols = step.columns ?? [];
+  if (cols.length === 0) return `SELECT * FROM ${from}`;
+  const suffix = step.outputSuffix ?? "_calc";
+  const outNames =
+    step.outputColumns ?? cols.map((c) => `${c}${suffix}`);
+  const parts = cols.map((c, i) => {
+    const expr: ExpressionItemShape = {
+      left: { kind: "column", value: c },
+      operator: step.operator,
+      right: step.right,
+      outputColumn: outNames[i],
+      outputType: step.outputType,
+    };
+    return `${castForResult(renderExpression(expr), step.outputType)} AS ${quoteIdent(outNames[i])}`;
+  });
+  return `SELECT *, ${parts.join(", ")} FROM ${from}`;
+}
+
+function compileComputeIfAbsent(
+  step: ComputeIfExpressionAbsentStep,
+  from: string,
+): string {
+  // When the output column is absent/null/empty, replace it with the
+  // expression. CSV null-ish values map to: IS NULL OR '' OR 'null'/'NULL'.
+  const outCol = quoteIdent(step.outputColumn);
+  const expr = renderExpression(step.expression as ExpressionItemShape);
+  const coalesced = `COALESCE(${outCol}, ${castForResult(expr, (step.expression as { outputType?: string }).outputType as ExpressionItemShape["outputType"])})`;
+  // Use REPLACE so the column keeps its position when it already exists.
+  return `SELECT * REPLACE (${coalesced} AS ${outCol}) FROM ${from}`;
+}
+
+// ---------------------------------------------------------------------------
+// Tier B aggregate-family emitters (PB-B2.follow-2).
+// Palantir refs: aggregateV1, rollUpV1, aggregateOnConditionV1, topRowV2,
+// pivotV1, unpivotV1, keepDuplicatesV1.
+// ---------------------------------------------------------------------------
+
+/** Map an aggregation spec to its DuckDB aggregate expression. */
+function aggregateSql(a: AggregationItemShape): string {
+  const col = a.column ? quoteIdent(a.column) : null;
+  switch (a.function) {
+    case "count":
+      // count(col) = non-null count; bare count = COUNT(*).
+      return col ? `COUNT(${col})` : "COUNT(*)";
+    case "count_distinct":
+      return `COUNT(DISTINCT ${col})`;
+    case "sum":
+      return `SUM(${col})`;
+    case "avg":
+      return `AVG(${col})`;
+    case "min":
+      return `MIN(${col})`;
+    case "max":
+      return `MAX(${col})`;
+    case "stddev":
+      return `STDDEV_SAMP(${col})`;
+    case "variance":
+      return `VAR_SAMP(${col})`;
+  }
+}
+
+function compileAggregate(step: AggregateStep, from: string): string {
+  const groups = (step.groupBy ?? []).map(quoteIdent);
+  const aggs = step.aggregations.map(
+    (a) => `${aggregateSql(a)} AS ${quoteIdent(a.outputColumn)}`,
+  );
+  const select = [...groups, ...aggs].join(", ");
+  return groups.length > 0
+    ? `SELECT ${select} FROM ${from} GROUP BY ${groups.join(", ")}`
+    : `SELECT ${select} FROM ${from}`;
+}
+
+function compileRollup(step: RollupStep, from: string): string {
+  // DuckDB: GROUP BY ROLLUP(a, b) → (a,b), (a), () super-aggregates with
+  // NULL placeholders — mirrors Palantir rollUpV1's super-aggregate rows.
+  const cols = (step.rollupColumns ?? []).map(quoteIdent);
+  const aggs = step.aggregations.map(
+    (a) => `${aggregateSql(a)} AS ${quoteIdent(a.outputColumn)}`,
+  );
+  if (cols.length === 0) {
+    // Palantir rollUpV1 example 5: empty rollup = single global row.
+    return `SELECT ${aggs.join(", ")} FROM ${from}`;
+  }
+  return `SELECT ${[...cols, ...aggs].join(", ")} FROM ${from} GROUP BY ROLLUP(${cols.join(", ")})`;
+}
+
+function compileAggregateOnCondition(
+  step: AggregateOnConditionStep,
+  from: string,
+  sourceColumns?: string[],
+): string {
+  // The column predicate ('all' | columnHasType) is resolved against the
+  // source schema; per matching column each expression becomes
+  //   <fn>(col) AS <col><suffix>   (Palantir columnNameConcat alias).
+  const pred = step.predicate;
+  let targets: string[];
+  if (pred.kind === "all") {
+    targets = sourceColumns ?? [];
+  } else {
+    // Column-type predicates need schema types — the chain compiler only
+    // carries column NAMES, so type predicates are a legacy-engine path.
+    throw new AppError(
+      "AggregateOnCondition with a column-type predicate requires schema type " +
+        "knowledge at compile time. Set compute_type='legacy_nodejs' on the pipeline.",
+      400,
+      "AOC_REQUIRES_LEGACY_ENGINE",
+    );
+  }
+  if (targets.length === 0) {
+    throw new AppError(
+      "AggregateOnCondition: no columns matched the predicate (source column list missing?).",
+      400,
+      "VALIDATION_ERROR",
+    );
+  }
+  const groups = (step.groupBy ?? []).map(quoteIdent);
+  const aggs: string[] = [];
+  for (const col of targets) {
+    for (const expr of step.aggregations) {
+      const item: AggregationItemShape = {
+        column: col,
+        function: expr.function,
+        outputColumn: `${col}${expr.suffix}`,
+      };
+      aggs.push(`${aggregateSql(item)} AS ${quoteIdent(item.outputColumn)}`);
+    }
+  }
+  const select = [...groups, ...aggs].join(", ");
+  return groups.length > 0
+    ? `SELECT ${select} FROM ${from} GROUP BY ${groups.join(", ")}`
+    : `SELECT ${select} FROM ${from}`;
+}
+
+function compileTopRows(step: TopRowsStep, from: string): string {
+  // topRowV2: ROW_NUMBER() over (PARTITION BY p ORDER BY sorts) <= topN.
+  const partitions = (step.partitionBy ?? []).map(quoteIdent);
+  const order = (step.sorts ?? []).map((s) => {
+    const dir = s.direction === "desc" ? "DESC" : "ASC";
+    const nulls =
+      s.nulls === "first"
+        ? "NULLS FIRST"
+        : s.nulls === "last"
+        ? "NULLS LAST"
+        : s.direction === "desc"
+        ? "NULLS FIRST"
+        : "NULLS LAST";
+    return `${quoteIdent(s.column)} ${dir} ${nulls}`;
+  });
+  const n = Math.max(1, Math.floor(step.topN ?? 1));
+  const overParts: string[] = [];
+  if (partitions.length > 0) overParts.push(`PARTITION BY ${partitions.join(", ")}`);
+  if (order.length > 0) overParts.push(`ORDER BY ${order.join(", ")}`);
+  return (
+    `SELECT * EXCLUDE (__top_rows_rn) FROM (` +
+    `SELECT *, ROW_NUMBER() OVER (${overParts.join(" ")}) AS __top_rows_rn FROM ${from}` +
+    `) WHERE __top_rows_rn <= ${n}`
+  );
+}
+
+function compilePivot(step: PivotStep, from: string): string {
+  // pivotV1: per (pivot-value × aggregation) a filtered-aggregate column:
+  //   AVG(CASE WHEN pcol = 'JFK' THEN miles END) AS new_york_miles
+  const groups = (step.groupBy ?? []).map(quoteIdent);
+  const position = step.aliasPosition ?? "prefix";
+  const cols: string[] = [];
+  for (const pv of step.pivotValues) {
+    for (const agg of step.aggregations) {
+      if (!agg.column) {
+        throw new AppError(
+          "Pivot aggregations require a column (count(*) pivot is not supported).",
+          400,
+          "VALIDATION_ERROR",
+        );
+      }
+      const name =
+        position === "prefix"
+          ? `${pv.alias}_${agg.outputColumn}`
+          : `${agg.outputColumn}_${pv.alias}`;
+      const v = pv.value.replace(/'/g, "''");
+      const filtered = {
+        ...agg,
+        column: `CASE WHEN CAST(${quoteIdent(step.pivotColumn)} AS VARCHAR) = '${v}' THEN ${quoteIdent(agg.column)} END`,
+      };
+      // The CASE expression must not be re-quoted — emit raw.
+      const expr = aggregateSqlRaw(filtered);
+      cols.push(`${expr} AS ${quoteIdent(name)}`);
+    }
+  }
+  return groups.length > 0
+    ? `SELECT ${[...groups, ...cols].join(", ")} FROM ${from} GROUP BY ${groups.join(", ")}`
+    : `SELECT ${cols.join(", ")} FROM ${from}`;
+}
+
+/** Like aggregateSql but trusts `column` to be a raw SQL expression (no quoting). */
+function aggregateSqlRaw(a: AggregationItemShape): string {
+  const col = a.column ?? "";
+  switch (a.function) {
+    case "count":
+      return a.column ? `COUNT(${col})` : "COUNT(*)";
+    case "count_distinct":
+      return `COUNT(DISTINCT ${col})`;
+    case "sum":
+      return `SUM(${col})`;
+    case "avg":
+      return `AVG(${col})`;
+    case "min":
+      return `MIN(${col})`;
+    case "max":
+      return `MAX(${col})`;
+    case "stddev":
+      return `STDDEV_SAMP(${col})`;
+    case "variance":
+      return `VAR_SAMP(${col})`;
+  }
+}
+
+function compileUnpivot(step: UnpivotStep, from: string): string {
+  // unpivotV1: wide → long. Each unpivoted column becomes a row branch
+  // labelled with the original column name; all other columns are kept
+  // (Palantir keeps NULLs — unpivotV1 example 1). UNION ALL BY NAME
+  // preserves nulls across branches.
+  const name = quoteIdent(step.nameColumn);
+  const value = quoteIdent(step.valueColumn);
+  const allUnpivoted = step.columns.map(quoteIdent).join(", ");
+  const branches = step.columns.map((c) => {
+    const escaped = c.replace(/'/g, "''");
+    return (
+      `SELECT '${escaped}' AS ${name}, ${quoteIdent(c)} AS ${value}, ` +
+      `* EXCLUDE (${allUnpivoted}) FROM ${from}`
+    );
+  });
+  return branches.join("\nUNION ALL BY NAME\n");
+}
+
+function compileKeepDuplicates(step: KeepDuplicatesStep, from: string): string {
+  // keepDuplicatesV1: rows whose key occurs more than once. Empty subset =
+  // whole-row key (exact duplicates) — partition over ALL columns via a
+  // positional projection is not stable in SQL, so the empty-subset case
+  // uses COUNT(*) OVER (PARTITION BY <every column>). The chain compiler
+  // doesn't know upstream column names; use the legacy TS engine there.
+  const cols = (step.columns ?? []).map(quoteIdent);
+  if (cols.length === 0) {
+    throw new AppError(
+      "KeepDuplicates with an empty column subset (exact-duplicate mode) requires " +
+        "compile-time knowledge of all column names. Set compute_type='legacy_nodejs' " +
+        "or pass an explicit column subset.",
+      400,
+      "VALIDATION_ERROR",
+    );
+  }
+  return (
+    `SELECT * EXCLUDE (__keep_dups_n) FROM (` +
+    `SELECT *, COUNT(*) OVER (PARTITION BY ${cols.join(", ")}) AS __keep_dups_n FROM ${from}` +
+    `) WHERE __keep_dups_n > 1`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -599,5 +1402,19 @@ export const __internals = {
   compileRename,
   compileJoin,
   compileUnion,
+  compileSelect,
+  compileSort,
+  compileDropDuplicates,
+  compileExpressions,
+  compileApplyToMultipleColumns,
+  compileComputeIfAbsent,
+  compileAggregate,
+  compileRollup,
+  compileAggregateOnCondition,
+  compileTopRows,
+  compilePivot,
+  compileUnpivot,
+  compileKeepDuplicates,
+  aggregateSql,
   rejectUnsupported,
 };

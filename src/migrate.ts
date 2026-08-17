@@ -1554,6 +1554,16 @@ async function migrate(): Promise<void> {
       `ALTER TABLE property ADD COLUMN IF NOT EXISTS conditional_formatting JSONB`
     );
 
+    // Property.visibility — Foundry "Display → Visibility" (normal /
+    // prominent / hidden) authored in the Ontology Manager property
+    // inspector; 'normal' is the documented default for new + legacy rows.
+    await client.query(
+      `ALTER TABLE property ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal'`
+    );
+    await client.query(
+      `UPDATE property SET visibility = 'normal' WHERE visibility IS NULL`
+    );
+
     console.log("Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)");
 
     // ------------------------------------------------------------------

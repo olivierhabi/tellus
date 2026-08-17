@@ -33,9 +33,20 @@ import {
 } from "../../../lib/errors/connectivity.errors";
 import { extractUser, requireScope } from "./connections.handler";
 import { recordStatus, stateForTellusError } from "../health/recordStatus";
+import { observeProbe } from "../metrics";
 import { limiter } from "../../../middleware/rateLimiter";
 
-const TIMEOUT_MS = 2_000;
+// Probe budget for the liveness query. This must exceed the pool's
+// connectionTimeoutMillis (config.ts: cfg.connectTimeoutMs ?? 10_000), or the
+// handler gives up while the driver is still legitimately dialing and reports a
+// misleading "timeout after 2000ms" for what is really a slow — but reachable —
+// server. Budget = connect allowance + query allowance.
+const QUERY_BUDGET_MS = Number(process.env.CONNECTIVITY_PROBE_QUERY_BUDGET_MS ?? 5_000);
+
+/** Total probe deadline for a config whose connect timeout is `connectMs`. */
+function probeBudgetMs(connectMs: number | undefined): number {
+  return (connectMs ?? 10_000) + QUERY_BUDGET_MS;
+}
 
 // Connection-probe abuse guard. Both probe endpoints (`/test`, `/test-config`)
 // open real outbound sockets, so they are the natural lever for SSRF sweeps and
@@ -97,13 +108,39 @@ export async function testConnection(
   const started = process.hrtime.bigint();
   try {
     const pool = await getPool(rid);
-    const result = await withTimeout(
-      pool.query<{ version: string }>("SELECT version() AS version"),
-      TIMEOUT_MS,
-    );
+    // Check out a single client rather than using pool.query so a timeout can
+    // destroy THAT connection (release(true)) instead of abandoning a query
+    // that keeps running while its client stays checked out. The pool is shared
+    // and cached per source, so it must never be torn down by one probe.
+    const client = await pool.connect();
+    let released = false;
+    let result;
+    try {
+      result = await withTimeout(
+        client.query<{ version: string }>("SELECT version() AS version"),
+        // The pool was built by assemblePgPoolOptions, so its own
+        // connectionTimeoutMillis is this connection's real connect allowance —
+        // read it back rather than re-deriving the default.
+        probeBudgetMs(
+          (pool as unknown as { options?: { connectionTimeoutMillis?: number } })
+            .options?.connectionTimeoutMillis,
+        ),
+        () => {
+          released = true;
+          client.release(true);
+        },
+      );
+    } finally {
+      // Track the release explicitly rather than inferring it from `result`:
+      // every non-timeout rejection (auth failure being the common one) leaves
+      // `result` undefined with the client still checked out, so inferring
+      // leaked one connection per failed probe.
+      if (!released) client.release();
+    }
     const latencyMs = Number(
       (process.hrtime.bigint() - started) / 1_000_000n,
     );
+    observeProbe("postgresql", "HEALTHY", latencyMs);
     await recordStatus(rid, "HEALTHY", {
       serverVersion: result.rows[0].version,
       latencyMs,
@@ -121,7 +158,9 @@ export async function testConnection(
         "[connectivity.test] failed",
         sanitizeForLog({ rid, errorName: err.definition.errorName }),
       );
-      await recordStatus(rid, stateForTellusError(err.definition.errorName), {
+      const state = stateForTellusError(err.definition.errorName);
+      observeProbe("postgresql", state, elapsedMsSince(started));
+      await recordStatus(rid, state, {
         errorName: err.definition.errorName,
       });
       err.send(res);
@@ -132,12 +171,8 @@ export async function testConnection(
       // Eagerly evict the pool — credential may have rotated server-side.
       await evict(rid).catch(() => undefined);
     }
-    const probeState =
-      mapped.kind === "auth"
-        ? "AUTH_FAILED"
-        : /tls|ssl|certificate|self-signed/i.test(mapped.reason)
-          ? "TLS_FAILED"
-          : "UNREACHABLE";
+    const probeState = probeStateForMapped(mapped);
+    observeProbe("postgresql", probeState, elapsedMsSince(started));
     await recordStatus(rid, probeState, { reason: mapped.reason });
     // eslint-disable-next-line no-console
     console.warn(
@@ -238,13 +273,16 @@ export async function testConfig(
     // One connection is enough for a probe; cap the pool to avoid leaks.
     pool = new Pool({ ...pinnedOpts, max: 1 });
 
+    // This pool is single-use and torn down in `finally`, so ending it is the
+    // cancellation mechanism — no need to isolate an individual client.
+    const probePool = pool;
     const result = await withTimeout(
-      pool.query<{ version: string }>("SELECT version() AS version"),
-      TIMEOUT_MS,
+      probePool.query<{ version: string }>("SELECT version() AS version"),
+      probeBudgetMs(cfg.connectTimeoutMs),
+      () => void probePool.end().catch(() => undefined),
     );
-    const latencyMs = Number(
-      (process.hrtime.bigint() - started) / 1_000_000n,
-    );
+    const latencyMs = elapsedMsSince(started);
+    observeProbe("postgresql", "HEALTHY", latencyMs);
     res.status(200).json({
       ok: true,
       serverVersion: result.rows[0].version,
@@ -252,6 +290,17 @@ export async function testConfig(
     });
   } catch (err) {
     if (err instanceof TellusError) {
+      // Only real probe outcomes belong in the latency histogram. A rejected
+      // scope or a malformed body never opened a socket, and folding them in as
+      // UNREACHABLE would make the wizard's own validation noise look like
+      // target-database failures.
+      if (isProbeOutcome(err.definition.errorName)) {
+        observeProbe(
+          "postgresql",
+          stateForTellusError(err.definition.errorName),
+          elapsedMsSince(started),
+        );
+      }
       err.send(res);
       return;
     }
@@ -261,6 +310,7 @@ export async function testConfig(
       "[connectivity.testConfig] failed",
       sanitizeForLog({ kind: mapped.kind, reason: mapped.reason }),
     );
+    observeProbe("postgresql", probeStateForMapped(mapped), elapsedMsSince(started));
     if (mapped.kind === "auth") {
       new TellusError(JdbcAuthFailed, {}).send(res);
       return;
@@ -275,17 +325,52 @@ export async function testConfig(
   }
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+/** Milliseconds elapsed since an hrtime mark. */
+function elapsedMsSince(started: bigint): number {
+  return Number((process.hrtime.bigint() - started) / 1_000_000n);
+}
+
+/**
+ * True when a TellusError describes the outcome of an actual connection attempt
+ * (or a refusal to make one) rather than a caller-side rejection. Scope denials
+ * and body-validation failures are excluded so they never appear as probe
+ * latency samples.
+ */
+function isProbeOutcome(errorName: string): boolean {
+  return !/InvalidConfiguration|ScopeRequired|RateLimit/.test(errorName);
+}
+
+/** Probe state for a driver error already classified by mapPgError. */
+function probeStateForMapped(mapped: {
+  kind: string;
+  reason: string;
+}): "AUTH_FAILED" | "TLS_FAILED" | "UNREACHABLE" {
+  if (mapped.kind === "auth") return "AUTH_FAILED";
+  if (/tls|ssl|certificate|self-signed/i.test(mapped.reason)) return "TLS_FAILED";
+  return "UNREACHABLE";
+}
+
+/**
+ * Reject after `ms`, running `onTimeout` first. Without that hook a timed-out
+ * probe abandons the promise while the query keeps running on the server and the
+ * connection stays checked out — under repeated timeouts that exhausts the pool.
+ * Callers pass a destroyer so the socket is torn down, which is what actually
+ * cancels the backend query.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, onTimeout?: () => void): Promise<T> {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(
-      () =>
-        reject(
-          new TellusError(JdbcConnectFailed, {
-            reason: `timeout after ${ms}ms`,
-          }),
-        ),
-      ms,
-    );
+    const t = setTimeout(() => {
+      try {
+        onTimeout?.();
+      } catch {
+        /* best effort — we're already failing this probe */
+      }
+      reject(
+        new TellusError(JdbcConnectFailed, {
+          reason: `timeout after ${ms}ms`,
+        }),
+      );
+    }, ms);
     p.then(
       (v) => {
         clearTimeout(t);
@@ -304,8 +389,22 @@ interface MappedPgError {
   reason: string;
 }
 
-function mapPgError(err: unknown): MappedPgError {
-  const e = err as { code?: string; message?: string; errno?: string } | undefined;
+// Node syscall errors carry the string identifier ("ECONNREFUSED") in `code`;
+// `errno` is the NUMERIC constant (-61). Matching on `errno === "ECONNREFUSED"`
+// never fires, which routed every network failure to the generic 500 handler.
+const CONNECT_ERROR_CODES = new Set([
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "EPIPE",
+]);
+
+/** Exported for unit tests (see tests/connectivity/unit/pg-error-mapping-unit.test.ts). */
+export function mapPgError(err: unknown): MappedPgError {
+  const e = err as { code?: string; message?: string } | undefined;
   if (
     e?.code === "28P01" /* invalid_password */ ||
     e?.code === "28000" /* invalid_authorization_specification */
@@ -313,10 +412,7 @@ function mapPgError(err: unknown): MappedPgError {
     return { kind: "auth", reason: "credentials rejected" };
   }
   if (
-    e?.errno === "ENOTFOUND" ||
-    e?.errno === "ECONNREFUSED" ||
-    e?.errno === "EHOSTUNREACH" ||
-    e?.errno === "ETIMEDOUT" ||
+    (e?.code && CONNECT_ERROR_CODES.has(e.code)) ||
     /tls|ssl|self-signed|certificate/i.test(e?.message ?? "")
   ) {
     return { kind: "connect", reason: classifyConnectFailure(e) };
@@ -325,13 +421,13 @@ function mapPgError(err: unknown): MappedPgError {
 }
 
 function classifyConnectFailure(
-  e: { code?: string; message?: string; errno?: string } | undefined,
+  e: { code?: string; message?: string } | undefined,
 ): string {
   const m = e?.message ?? "";
   if (/self-signed/i.test(m)) return "tls self-signed";
   if (/certificate/i.test(m)) return "tls certificate invalid";
-  if (e?.errno === "ETIMEDOUT") return "connect timeout";
-  if (e?.errno === "ECONNREFUSED") return "connection refused";
-  if (e?.errno === "ENOTFOUND") return "host not resolvable";
+  if (e?.code === "ETIMEDOUT") return "connect timeout";
+  if (e?.code === "ECONNREFUSED") return "connection refused";
+  if (e?.code === "ENOTFOUND") return "host not resolvable";
   return "network unreachable";
 }

@@ -9,15 +9,6 @@ export const rwandaFunctionsV2 = {
     const band = score >= 90 ? "HIGH" : score >= 70 ? "MEDIUM" : "LOW";
     return { score, band, explanation: score >= 90 ? "High synthetic risk" : score >= 70 ? "Manual review threshold" : "Within policy" };
   },
-  validateCreditLimitV2(input: JsonRecord) {
-    const requestedLimit = number(input.requestedLimit);
-    const policyCeiling = number(input.policyCeiling ?? 1_000_000);
-    const failures: string[] = [];
-    if (!Number.isFinite(requestedLimit)) failures.push("requestedLimit is not numeric");
-    else if (requestedLimit <= 0) failures.push("requestedLimit must be positive");
-    if (Number.isFinite(requestedLimit) && requestedLimit > policyCeiling) failures.push(`requestedLimit exceeds policy ceiling ${policyCeiling}`);
-    return { allowed: failures.length === 0, failures };
-  },
   detectAffordabilityExceptionV2(input: JsonRecord) {
     const monthlyIncome = number(input.monthlyIncome ?? input.balance);
     const monthlyCommitment = number(input.monthlyCommitment ?? input.requestedLimit);

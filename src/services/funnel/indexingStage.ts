@@ -101,6 +101,137 @@ export async function buildFullIndexBatch(input: {
   return { rows: [...baseRows, ...repairRows], editIds };
 }
 
+/**
+ * STREAMING equivalent of {@link buildFullIndexBatch} — yields fixed-size
+ * batches instead of building one array holding every merged row.
+ *
+ * `buildFullIndexBatch` needs the base rows only to answer one question ("is
+ * this pending edit's PK already covered?") and then concatenates
+ * `[...baseRows, ...repairRows]`. Both of those forced the caller to hold the
+ * entire merged result in heap, which is why the Quickwit indexing activity
+ * used the materialising `loadMergedRowsFromSnapshot` and therefore hard-failed
+ * on any Object Type above the 2M-row read gate. Here the coverage question is
+ * answered incrementally against the *pending* PK set — bounded by the number
+ * of outstanding edits, not by the row count — so memory is flat regardless of
+ * whether the snapshot holds 700 rows or 4.65M.
+ *
+ * Yields base-row batches first, in stream order, then a final batch with the
+ * repair/tombstone rows for pending PKs the stream never covered. Row
+ * `version` continues monotonically across batches, matching the array
+ * variant's `i + 1` numbering so replay/rebuild converge on the same state.
+ *
+ * `editIds` rides on the FIRST yielded batch and is empty on the rest, because
+ * `runIndexingActivity` unions them into a Set for its own `editsMarkedApplied`
+ * bookkeeping and repeating the list per batch would be pure noise. The array
+ * variant collected every pending edit id unconditionally — coverage never
+ * affected acknowledgement — and that is preserved here. Acknowledgement itself
+ * still belongs to the caller, only after the serving index confirms
+ * publication: the invariant at the top of this file.
+ *
+ * At least one batch is always yielded when `pending` is non-empty, since every
+ * pending PK is either covered by a streamed base row (base batch) or is not
+ * (repair batch), so the edit ids can never be stranded.
+ */
+export async function* streamFullIndexBatches(input: {
+  ontologyId: string;
+  objectTypeApiName: string;
+  baseRows: AsyncIterable<{
+    primary_key: string;
+    properties: Record<string, unknown>;
+    operation: "upsert" | "delete";
+    source_transaction_id?: string | null;
+  }>;
+  pending: PendingIndexEdit[];
+  /** Rows per yielded batch. Bounds peak heap; 5k keeps the Kafka publish
+   *  loop busy without holding a meaningful slice of a 4.65M-row snapshot. */
+  batchSize?: number;
+}): AsyncGenerator<{ rows: MergedRow[]; editIds: string[] }> {
+  const { ontologyId, objectTypeApiName, baseRows, pending } = input;
+  const batchSize = input.batchSize && input.batchSize > 0 ? input.batchSize : 5000;
+
+  // Rides on the first yielded batch only (see doc comment).
+  let pendingEditIds: string[] = pending.map((e) => e.edit_id);
+  const takeEditIds = (): string[] => {
+    const out = pendingEditIds;
+    pendingEditIds = [];
+    return out;
+  };
+
+  // Pending edits grouped by PK. Anything still here once the stream ends was
+  // merged by an EARLIER run whose index attempt failed, and needs the
+  // object_instances repair read.
+  const uncoveredByPk = new Map<string, PendingIndexEdit[]>();
+  for (const e of pending) {
+    const list = uncoveredByPk.get(e.primary_key) ?? [];
+    list.push(e);
+    uncoveredByPk.set(e.primary_key, list);
+  }
+
+  let version = 0;
+  let buffer: MergedRow[] = [];
+  for await (const r of baseRows) {
+    version += 1;
+    buffer.push({
+      primary_key: r.primary_key,
+      properties: r.properties,
+      operation: r.operation === "delete" ? "DELETE" : "UPDATE",
+      version,
+      source_transaction_id: r.source_transaction_id ?? undefined,
+    });
+    // This run already carries the PK, so no repair read is needed for it.
+    uncoveredByPk.delete(r.primary_key);
+    if (buffer.length >= batchSize) {
+      yield { rows: buffer, editIds: takeEditIds() };
+      buffer = [];
+    }
+  }
+  if (buffer.length > 0) {
+    yield { rows: buffer, editIds: takeEditIds() };
+    buffer = [];
+  }
+
+  const uncoveredPks = [...uncoveredByPk.keys()];
+  if (uncoveredPks.length === 0) return;
+
+  const instances = await loadInstanceStates(ontologyId, objectTypeApiName, uncoveredPks);
+  const repairRows: MergedRow[] = [];
+  for (const pk of uncoveredPks) {
+    const edits = uncoveredByPk.get(pk)!;
+    // Latest executed edit for this PK wins; ties broken by edit_id for
+    // determinism (same-transaction bulk edits share executed_at).
+    edits.sort((a, b) => {
+      const ta = a.executed_at ? new Date(a.executed_at).getTime() : 0;
+      const tb = b.executed_at ? new Date(b.executed_at).getTime() : 0;
+      if (ta !== tb) return ta - tb;
+      return a.edit_id.localeCompare(b.edit_id);
+    });
+    const latest = edits[edits.length - 1];
+    const instance = instances.get(pk);
+    version += 1;
+    if (latest.operation !== "delete" && instance) {
+      repairRows.push({
+        primary_key: pk,
+        properties: instance,
+        operation: "UPDATE",
+        version,
+      });
+    } else {
+      // Latest intent is delete, or the instance is already gone — either way
+      // the serving index must converge to "absent": tombstone.
+      repairRows.push({
+        primary_key: pk,
+        properties: {},
+        operation: "DELETE",
+        version,
+      });
+    }
+    if (repairRows.length >= batchSize) {
+      yield { rows: repairRows.splice(0, repairRows.length), editIds: takeEditIds() };
+    }
+  }
+  if (repairRows.length > 0) yield { rows: repairRows, editIds: takeEditIds() };
+}
+
 async function loadInstanceStates(
   ontologyId: string,
   objectTypeApiName: string,

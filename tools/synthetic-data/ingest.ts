@@ -100,9 +100,9 @@ async function uploadBytes(base: string, bytes: Uint8Array, filename: string, na
   return id;
 }
 
-async function ingestCsv(base: string, ontology: string, uploaded: Uploaded[], type: string, csv: string, filename: string) {
+async function ingestCsv(base: string, ontology: string, uploaded: Uploaded[], type: string, csv: string, filename: string, columnTypes?: Readonly<Record<string, string>>) {
   const header = columns(csv);
-  await ensureObjectType(base, ontology, type, header);
+  await ensureObjectType(base, ontology, type, header, columnTypes);
   const datasetId = await uploadBytes(base, Buffer.from(csv), filename, `qa-rw-${path.basename(filename, ".csv")}`);
   await api(base, `/api/v1/ontology/${ontology}/objectTypes/${type}/datasource`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -112,7 +112,12 @@ async function ingestCsv(base: string, ontology: string, uploaded: Uploaded[], t
   await api(base, `/api/v1/ontology/${ontology}/objectTypes/${type}/reindex?force=true`, { method: "POST" }, ADMIN);
 }
 
-async function ensureObjectType(base: string, ontology: string, type: string, headers: string[]) {
+async function ensureObjectType(base: string, ontology: string, type: string, headers: string[], columnTypes?: Readonly<Record<string, string>>) {
+  // Numeric columns come from the generator's manifest (`columnTypes`); every
+  // other property stays `string`. Retyping existing properties is impossible
+  // without the migration manager, so the apply here is create-only — QA
+  // databases are rebuildable by design (plan §10.5).
+  const baseTypeFor = (apiName: string) => columnTypes?.[apiName] ?? "string";
   const result = await fetch(`${base}/api/v1/ontology/${ontology}/objectTypes/${type}`, {
     headers: { "X-Tellus-Test-Auth": EDITOR },
   });
@@ -132,7 +137,7 @@ async function ensureObjectType(base: string, ontology: string, type: string, he
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          properties: missing.map((apiName) => ({ apiName, displayName: apiName, baseType: "string" })),
+          properties: missing.map((apiName) => ({ apiName, displayName: apiName, baseType: baseTypeFor(apiName) })),
         }),
       });
     }
@@ -148,14 +153,17 @@ async function ensureObjectType(base: string, ontology: string, type: string, he
       status: "experimental",
       primaryKeyProperty: headers[0],
       titleProperty: headers[0],
-      properties: headers.map((apiName) => ({ apiName, displayName: apiName, baseType: "string" })),
+      properties: headers.map((apiName) => ({ apiName, displayName: apiName, baseType: baseTypeFor(apiName) })),
     }),
   });
   return true;
 }
 
 export async function ingestFunctionalFixtures(options = args()): Promise<Uploaded[]> {
-  const manifest = JSON.parse(await readFile(path.join(options.out, "manifest.json"), "utf8")) as { tier?: string };
+  const manifest = JSON.parse(await readFile(path.join(options.out, "manifest.json"), "utf8")) as {
+    tier?: string;
+    columnTypes?: Record<string, Record<string, string>>;
+  };
   if (manifest.tier !== "functional") throw new Error("Only functional-tier data may be ingested by this QA helper");
   const ontology = await ontologyId(options.base);
   const files = await csvs(options.out, options.scenarios);
@@ -164,7 +172,8 @@ export async function ingestFunctionalFixtures(options = args()): Promise<Upload
     for (const file of files) {
       const type = apiName(file);
       const csv = await readFile(file, "utf8");
-      await ingestCsv(options.base, ontology, uploaded, type, csv, path.basename(file));
+      const relative = path.relative(options.out, file).split(path.sep).join("/");
+      await ingestCsv(options.base, ontology, uploaded, type, csv, path.basename(file), manifest.columnTypes?.[relative]);
     }
     // Raw ISO-8583 is intentionally transformed before it reaches the
     // supported upload/datasource/reindex pipeline.  No datasource schema or

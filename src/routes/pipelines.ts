@@ -98,6 +98,44 @@ router.post('/:pipelineId/nodes/:nodeId/union/apply', authenticate, editor, pipe
 router.post('/:pipelineId/nodes/:nodeId/transforms/normalize/preview', authenticate, viewer, pipelineController.normalizePreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/normalize/apply', authenticate, editor, pipelineController.normalizeApply);
 
+// Tier A single-input transforms (PB-B2.follow).
+router.post('/:pipelineId/nodes/:nodeId/transforms/select/preview', authenticate, viewer, pipelineController.selectPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/select/apply', authenticate, editor, pipelineController.selectApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/sort/preview', authenticate, viewer, pipelineController.sortPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/sort/apply', authenticate, editor, pipelineController.sortApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/drop-duplicates/preview', authenticate, viewer, pipelineController.dropDuplicatesPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/drop-duplicates/apply', authenticate, editor, pipelineController.dropDuplicatesApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/uppercase-column-names/preview', authenticate, viewer, pipelineController.uppercaseColumnNamesPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/uppercase-column-names/apply', authenticate, editor, pipelineController.uppercaseColumnNamesApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/row-size/preview', authenticate, viewer, pipelineController.rowSizePreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/row-size/apply', authenticate, editor, pipelineController.rowSizeApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/apply-expression/preview', authenticate, viewer, pipelineController.applyExpressionPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/apply-expression/apply', authenticate, editor, pipelineController.applyExpressionApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/apply-multiple-expressions/preview', authenticate, viewer, pipelineController.applyMultipleExpressionsPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/apply-multiple-expressions/apply', authenticate, editor, pipelineController.applyMultipleExpressionsApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/apply-to-multiple-columns/preview', authenticate, viewer, pipelineController.applyToMultipleColumnsPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/apply-to-multiple-columns/apply', authenticate, editor, pipelineController.applyToMultipleColumnsApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/compute-if-absent/preview', authenticate, viewer, pipelineController.computeIfExpressionAbsentPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/compute-if-absent/apply', authenticate, editor, pipelineController.computeIfExpressionAbsentApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/text-block/preview', authenticate, viewer, pipelineController.textBlockPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/text-block/apply', authenticate, editor, pipelineController.textBlockApply);
+
+// Tier B aggregate-family transforms (PB-B2.follow-2).
+router.post('/:pipelineId/nodes/:nodeId/transforms/aggregate/preview', authenticate, viewer, pipelineController.aggregatePreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/aggregate/apply', authenticate, editor, pipelineController.aggregateApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/rollup/preview', authenticate, viewer, pipelineController.rollupPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/rollup/apply', authenticate, editor, pipelineController.rollupApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/aggregate-on-condition/preview', authenticate, viewer, pipelineController.aggregateOnConditionPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/aggregate-on-condition/apply', authenticate, editor, pipelineController.aggregateOnConditionApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/top-rows/preview', authenticate, viewer, pipelineController.topRowsPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/top-rows/apply', authenticate, editor, pipelineController.topRowsApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/pivot/preview', authenticate, viewer, pipelineController.pivotPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/pivot/apply', authenticate, editor, pipelineController.pivotApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/unpivot/preview', authenticate, viewer, pipelineController.unpivotPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/unpivot/apply', authenticate, editor, pipelineController.unpivotApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/keep-duplicates/preview', authenticate, viewer, pipelineController.keepDuplicatesPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/keep-duplicates/apply', authenticate, editor, pipelineController.keepDuplicatesApply);
+
 // Execute full transform chain — executes against upstream data so it's
 // effectively a read-side preview, viewer-level.
 router.post('/:pipelineId/nodes/:nodeId/transforms/execute', authenticate, viewer, pipelineController.executeChain);

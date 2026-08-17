@@ -85,6 +85,15 @@ export interface KeycloakGroup {
   path: string;
 }
 
+/** Subset of Keycloak's RoleRepresentation the superadmin console consumes. */
+export interface KeycloakRealmRole {
+  id: string;
+  name: string;
+  description?: string;
+  composite?: boolean;
+  clientRole?: boolean;
+}
+
 export type RequiredAction = 'webauthn-register' | 'webauthn-register-passwordless' | 'CONFIGURE_TOTP' | 'UPDATE_PASSWORD' | 'VERIFY_EMAIL';
 
 interface CachedToken {
@@ -722,6 +731,194 @@ export class KeycloakAdminService {
 
   async removeRealmRoleFromUser(userId: string, roleName: string): Promise<void> {
     const role = await this.ensureRealmRole(roleName);
+    await this.call('DELETE', `/users/${userId}/role-mappings/realm`, {
+      body: [{ id: role.id, name: role.name }],
+      parseJson: false,
+    });
+  }
+
+  // --- Realm role CRUD + composites (superadmin /admin/roles console) ------
+
+  /**
+   * List realm roles. Keycloak paginates /roles server-side (first/max) and
+   * supports `search` (prefix on the name) — we page internally in the
+   * caller-facing adminRolesService, this method just talks to Keycloak.
+   */
+  async listRoles(opts: { search?: string; first?: number; max?: number } = {}): Promise<KeycloakRealmRole[]> {
+    return this.call<KeycloakRealmRole[]>('GET', '/roles', {
+      query: {
+        search: opts.search,
+        first: opts.first?.toString(),
+        max: (opts.max ?? 200).toString(),
+      },
+    });
+  }
+
+  /**
+   * Look up a realm role by its Keycloak id. Null when absent — unlike
+   * the /roles/{name} endpoint, /roles-by-id is id-addressed, which is what
+   * the /admin/roles/:id routes key on.
+   */
+  async getRoleById(id: string): Promise<KeycloakRealmRole | null> {
+    try {
+      return await this.call<KeycloakRealmRole>(
+        'GET',
+        `/roles-by-id/${encodeURIComponent(id)}`,
+      );
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'NOT_FOUND') return null;
+      throw err;
+    }
+  }
+
+  async getRoleByName(name: string): Promise<KeycloakRealmRole | null> {
+    try {
+      return await this.call<KeycloakRealmRole>(
+        'GET',
+        `/roles/${encodeURIComponent(name)}`,
+      );
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'NOT_FOUND') return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Create a realm role. Unlike ensureRealmRole this is NOT idempotent: a
+   * 409 from Keycloak propagates (the route turns it into ROLE_NAME_TAKEN)
+   * because the superadmin console's create flow must distinguish "created"
+   * from "already existed".
+   */
+  async createRole(name: string, description: string): Promise<void> {
+    await this.call('POST', '/roles', {
+      body: { name, description },
+      parseJson: false,
+    });
+  }
+
+  /**
+   * Update a role's description. Keycloak's PUT /roles/{name} is a full
+   * representation replace: we fetch the current representation by id and
+   * PUT it back with the new description. Name/id/composite are NOT mutated
+   * here — composite edges are managed through the composites endpoints.
+   */
+  async updateRoleDescription(id: string, description: string): Promise<void> {
+    const rep = await this.getRoleById(id);
+    if (!rep) throw new AppError('Role not found', 404, 'NOT_FOUND');
+    await this.call('PUT', `/roles/${encodeURIComponent(rep.name)}`, {
+      body: { ...rep, description },
+      parseJson: false,
+    });
+  }
+
+  /** Delete a realm role by name (Keycloak's canonical delete endpoint). */
+  async deleteRole(name: string): Promise<void> {
+    await this.call('DELETE', `/roles/${encodeURIComponent(name)}`, {
+      parseJson: false,
+    });
+  }
+
+  /** The roles this role composites (the "permissions" it grants). */
+  async getRoleComposites(name: string): Promise<KeycloakRealmRole[]> {
+    return this.call<KeycloakRealmRole[]>(
+      'GET',
+      `/roles/${encodeURIComponent(name)}/composites`,
+    );
+  }
+
+  async addRoleComposites(name: string, roles: Array<{ id: string; name: string }>): Promise<void> {
+    await this.call('POST', `/roles/${encodeURIComponent(name)}/composites`, {
+      body: roles.map((r) => ({ id: r.id, name: r.name })),
+      parseJson: false,
+    });
+  }
+
+  async removeRoleComposites(name: string, roles: Array<{ id: string; name: string }>): Promise<void> {
+    await this.call('DELETE', `/roles/${encodeURIComponent(name)}/composites`, {
+      body: roles.map((r) => ({ id: r.id, name: r.name })),
+      parseJson: false,
+    });
+  }
+
+  /**
+   * Users currently granted this realm role, mapped to the same shape the
+   * /admin/users list returns (AdminUser). `max` is honoured server-side by
+   * Keycloak; realm-role membership lists don't carry a total, so the caller
+   * computes counts from the returned rows.
+   */
+  async listRoleUsers(opts: { name: string; first?: number; max?: number }): Promise<
+    Array<{
+      id: string;
+      username: string;
+      email: string | null;
+      firstName: string | null;
+      lastName: string | null;
+      enabled: boolean;
+      emailVerified: boolean;
+      createdTimestamp: number | null;
+      roles: string[];
+    }>
+  > {
+    const rows = await this.call<
+      Array<{
+        id: string;
+        username: string;
+        email?: string;
+        firstName?: string;
+        lastName?: string;
+        enabled?: boolean;
+        emailVerified?: boolean;
+        createdTimestamp?: number;
+      }>
+    >('GET', `/roles/${encodeURIComponent(opts.name)}/users`, {
+      query: {
+        first: opts.first?.toString(),
+        max: (opts.max ?? 200).toString(),
+        briefRepresentation: 'true',
+      },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      username: r.username,
+      email: r.email ?? null,
+      firstName: r.firstName ?? null,
+      lastName: r.lastName ?? null,
+      enabled: r.enabled ?? true,
+      emailVerified: r.emailVerified ?? false,
+      createdTimestamp: r.createdTimestamp ?? null,
+      roles: [],
+    }));
+  }
+
+  /**
+   * Cheap member-count probe: fetches at most `max` member rows and returns
+   * how many came back. Used by the roles LIST endpoint where we only need a
+   * count cell — the FE displays an exact number for small bands and the cap
+   * value when the band is truncated (documented in adminRolesService).
+   */
+  async countRoleUsers(name: string, max = 101): Promise<number> {
+    const rows = await this.call<unknown[]>(
+      'GET',
+      `/roles/${encodeURIComponent(name)}/users`,
+      { query: { first: '0', max: max.toString(), briefRepresentation: 'true' } },
+    );
+    return rows.length;
+  }
+
+  /** Idempotent grant by role id — adds the mapping only when not held. */
+  async assignRoleToUserById(userId: string, role: { id: string; name: string }): Promise<void> {
+    const current = await this.call<Array<{ id: string }>>(
+      'GET',
+      `/users/${userId}/role-mappings/realm`,
+    );
+    if (current.some((r) => r.id === role.id)) return; // idempotent
+    await this.call('POST', `/users/${userId}/role-mappings/realm`, {
+      body: [{ id: role.id, name: role.name }],
+      parseJson: false,
+    });
+  }
+
+  async removeRoleFromUserById(userId: string, role: { id: string; name: string }): Promise<void> {
     await this.call('DELETE', `/users/${userId}/role-mappings/realm`, {
       body: [{ id: role.id, name: role.name }],
       parseJson: false,

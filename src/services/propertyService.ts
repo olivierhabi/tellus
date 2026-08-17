@@ -50,6 +50,10 @@ interface UpdateInput {
   inlineEditActionId?: string | null;
   /** Column-level visibility markings; null/[] clears. See CreateInput. */
   markingRequired?: string[] | null;
+  /** Foundry property visibility in user applications (Ontology Manager
+   *  "Display → Visibility" cards). Only the three documented values are
+   *  accepted; new properties default to 'normal' (column default). */
+  visibility?: "normal" | "prominent" | "hidden";
   // Not updatable — checked and rejected:
   apiName?: string;
   baseType?: string;
@@ -271,11 +275,21 @@ async function update(
         : null
     );
   }
+  if (data.visibility !== undefined) {
+    if (!["normal", "prominent", "hidden"].includes(data.visibility)) {
+      throw appError(
+        "VALIDATION_FAILED",
+        `Invalid visibility '${data.visibility}'. Must be one of: normal, prominent, hidden.`
+      );
+    }
+    setClauses.push(`visibility = $${paramIndex++}`);
+    values.push(data.visibility);
+  }
 
   if (setClauses.length === 0) {
     throw appError(
       "INVALID_PARAMETER",
-      "At least one updatable field (displayName, description, isRequired, ordinal, conditionalFormatting, inlineEditActionId, markingRequired) must be provided."
+      "At least one updatable field (displayName, description, isRequired, ordinal, conditionalFormatting, inlineEditActionId, markingRequired, visibility) must be provided."
     );
   }
 

@@ -286,11 +286,21 @@ export class TellusAuthService {
     });
     // F-P4-08: same 5s bound as loginWithPassword; callers expect
     // token-rotation to be cheap.
+    //
+    // A timeout/abort/connection failure is TRANSIENT: a slow or down
+    // Keycloak says NOTHING about the presented refresh token's validity.
+    // Map it to a typed 5xx so the route layer leaves the session cookies
+    // alone and the FE treats the attempt as retryable. Letting the raw
+    // AbortError escape (as a 500) — or worse, clearing cookies on it —
+    // collapsed a 24h session to one access-token lifespan whenever
+    // Keycloak hiccuped at a refresh boundary.
     const res = await fetch(`${this.issuer}/protocol/openid-connect/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
       signal: AbortSignal.timeout(5_000),
+    }).catch(() => {
+      throw new AppError('Keycloak unreachable during refresh', 503, 'KEYCLOAK_UNREACHABLE');
     });
     if (!res.ok) {
       if (res.status === 400 || res.status === 401) {
@@ -303,7 +313,16 @@ export class TellusAuthService {
       refresh_token?: string;
       expires_in: number;
     };
-    const claims = await this.verifyAccessToken(data.access_token);
+    // A freshly-minted token failing local verification is an upstream or
+    // local-config problem (JWKS fetch hiccup, clock skew) — never proof
+    // that the USER's session died. 5xx keeps the refresh cookie intact so
+    // the next attempt can succeed; a 401 here would wipe a live session.
+    let claims: TellusClaims;
+    try {
+      claims = await this.verifyAccessToken(data.access_token);
+    } catch {
+      throw new AppError('Keycloak token verification failed during refresh', 503, 'KEYCLOAK_UNREACHABLE');
+    }
     return {
       accessToken: data.access_token,
       refreshToken: data.refresh_token,

@@ -61,6 +61,182 @@ describe("compileRules modifyOrCreateObject", () => {
     })]);
   });
 
+  it("serializes Current timestamp as a calendar date for date properties", async () => {
+    getByApiName.mockResolvedValue({
+      objectType: { primary_key_property_id: "property-id" },
+      properties: [
+        { property_id: "property-id", api_name: "orderId", base_type: "string" },
+        { property_id: "submittedAt", api_name: "submittedAt", base_type: "date" },
+      ],
+    });
+
+    const result = await compileRules(
+      [{
+        type: "createObject",
+        objectType: "Order",
+        properties: {
+          orderId: { source: "parameter", param: "orderId" },
+          submittedAt: { source: "currentTimestamp" },
+        },
+      }],
+      { orderId: "ORD-1" },
+      vi.fn().mockResolvedValue(null),
+      { ontologyId: "ontology-id", executedBy: "user-1" },
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.edits[0]?.propertyValues?.submittedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("atomically formats a generated primary-key identifier", async () => {
+    getByApiName.mockResolvedValue({
+      objectType: { primary_key_property_id: "property-id" },
+      properties: [
+        { property_id: "property-id", api_name: "applicationId", base_type: "string" },
+      ],
+    });
+    query.mockResolvedValue({ rows: [{ value: "5" }] });
+
+    const result = await compileRules(
+      [{
+        type: "createObject",
+        objectType: "Application",
+        properties: {
+          applicationId: {
+            source: "generatedSequence",
+            sequenceKey: "qa-rw-bk-loan-application",
+            prefix: "QA-RW-BK-L-",
+            padLength: 7,
+            startAt: 5,
+          },
+        },
+      }],
+      {},
+      vi.fn().mockResolvedValue(null),
+      { ontologyId: "ontology-id", executedBy: "user-1" },
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.edits[0]?.primaryKey).toBe("QA-RW-BK-L-0000005");
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO action_generated_sequence"),
+      ["ontology-id", "qa-rw-bk-loan-application", 6],
+    );
+  });
+
+  it("previews a generated identifier without reserving a sequence value", async () => {
+    getByApiName.mockResolvedValue({
+      objectType: { primary_key_property_id: "property-id" },
+      properties: [
+        { property_id: "property-id", api_name: "applicationId", base_type: "string" },
+      ],
+    });
+
+    const result = await compileRules(
+      [{
+        type: "createObject",
+        objectType: "Application",
+        properties: {
+          applicationId: {
+            source: "generatedSequence",
+            sequenceKey: "application",
+            prefix: "APP-",
+            padLength: 5,
+            startAt: 7,
+          },
+        },
+      }],
+      {},
+      vi.fn().mockResolvedValue({ applicationId: "APP-00007" }),
+      {
+        ontologyId: "ontology-id",
+        executedBy: "user-1",
+        previewGeneratedSequences: true,
+      },
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.edits[0]?.primaryKey).toBe("APP-00007");
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("uses the caller-owned transaction when allocating an identifier", async () => {
+    getByApiName.mockResolvedValue({
+      objectType: { primary_key_property_id: "property-id" },
+      properties: [
+        { property_id: "property-id", api_name: "applicationId", base_type: "string" },
+      ],
+    });
+    const transactionClient = {
+      query: vi.fn().mockResolvedValue({ rows: [{ value: "8" }] }),
+    };
+
+    const result = await compileRules(
+      [{
+        type: "createObject",
+        objectType: "Application",
+        properties: {
+          applicationId: {
+            source: "generatedSequence",
+            sequenceKey: "application",
+            prefix: "APP-",
+            padLength: 5,
+          },
+        },
+      }],
+      {},
+      vi.fn().mockResolvedValue(null),
+      {
+        ontologyId: "ontology-id",
+        executedBy: "user-1",
+        transactionClient: transactionClient as any,
+      },
+    );
+
+    expect(result.edits[0]?.primaryKey).toBe("APP-00008");
+    expect(transactionClient.query).toHaveBeenCalledOnce();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("skips identifiers that predate the sequence counter", async () => {
+    getByApiName.mockResolvedValue({
+      objectType: { primary_key_property_id: "property-id" },
+      properties: [
+        { property_id: "property-id", api_name: "applicationId", base_type: "string" },
+      ],
+    });
+    query
+      .mockResolvedValueOnce({ rows: [{ value: "5" }] })
+      .mockResolvedValueOnce({ rows: [{ value: "6" }] });
+    const fetchObject = vi.fn()
+      .mockResolvedValueOnce({ applicationId: "APP-00005" })
+      .mockResolvedValueOnce(null);
+
+    const result = await compileRules(
+      [{
+        type: "createObject",
+        objectType: "Application",
+        properties: {
+          applicationId: {
+            source: "generatedSequence",
+            sequenceKey: "application",
+            prefix: "APP-",
+            padLength: 5,
+            startAt: 5,
+          },
+        },
+      }],
+      {},
+      fetchObject,
+      { ontologyId: "ontology-id", executedBy: "user-1" },
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.edits[0]?.primaryKey).toBe("APP-00006");
+    expect(result.edits[0]?.propertyValues?.applicationId).toBe("APP-00006");
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
   it("updates an existing object without attempting to mutate its primary key", async () => {
     const result = await compileRules(
       [{

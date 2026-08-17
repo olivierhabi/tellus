@@ -3,7 +3,7 @@
 # files-projects v2 turn protocol.
 #
 # Required services (per the turn directive):
-#   cassandra, postgres, keycloak, kafka, schema-registry, minio,
+#   cassandra, postgres, keycloak, kafka, minio,
 #   otel-collector
 #
 # This repo's docker-compose.yml does not expose all of those (cassandra +
@@ -11,7 +11,7 @@
 # This script is a thin idempotent wrapper that:
 #   1. Brings up the base compose project (docker-compose.yml) if not running.
 #   2. Brings up the verify compose project (which includes cassandra,
-#      schema-registry, otel-collector) if not running.
+#      otel-collector) if not running.
 #   3. Prints a single docker compose ps --format json snapshot to stdout
 #      (used as the integration-log header).
 #
@@ -19,13 +19,13 @@
 
 set -euo pipefail
 
-REQUIRED=(cassandra postgres keycloak kafka schema-registry minio otel-collector)
+REQUIRED=(cassandra postgres keycloak kafka minio otel-collector)
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
 echo "[dc-up] bringing up base compose stack" >&2
-docker compose -f docker-compose.yml up -d --remove-orphans postgres opensearch zookeeper kafka schema-registry keycloak minio minio-init >&2 || true
+docker compose -f docker-compose.yml up -d --remove-orphans postgres opensearch zookeeper kafka keycloak minio minio-init >&2 || true
 
 if [[ -f docker-compose.verify.yml ]]; then
   echo "[dc-up] bringing up verify compose stack (cassandra, otel-collector)" >&2

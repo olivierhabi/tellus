@@ -22,6 +22,8 @@
 // and the bar simply won't advance past the network phase — never a 5xx.
 // ---------------------------------------------------------------------------
 
+import { connectRedisBounded, describeRedisError } from '../lib/redisConnect';
+
 type RedisLike = {
   get(k: string): Promise<string | null>;
   set(k: string, v: string, o?: { EX?: number }): Promise<unknown>;
@@ -53,27 +55,23 @@ let redisInstance: RedisLike | null | undefined;
 // stall. Concurrent callers share the single in-flight connect.
 let redisConnecting: Promise<RedisLike | null> | null = null;
 
+// Bounded connect lives in lib/redisConnect.ts. This module previously used a
+// retry-forever reconnectStrategy, so `connect()` never settled while Redis was
+// down — and because the pending promise is cached in `redisConnecting` below,
+// every httpUploadProgress event blocked on it. See lib/redisConnect.ts.
 async function connectRedis(): Promise<RedisLike | null> {
   try {
-    // `any` matches the lazy-getRedis pattern in bffSessionService/linkPagination
-    // (the redis module's createClient generics don't fit a minimal RedisLike).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mod: any = await import('redis');
-    const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
-    const client = mod.createClient({
-      url,
-      socket: {
-        connectTimeout: 5_000,
-        reconnectStrategy: (retries: number) => Math.min(retries * 500, 30_000),
-      },
+    const client = await connectRedisBounded<RedisLike>({
+      logPrefix: '[upload-progress]',
     });
-    (client as unknown as { on: (e: string, cb: () => void) => void }).on('error', () => {
-      /* silenced — callers treat a null redis as "progress unavailable" */
-    });
-    await (client as unknown as { connect: () => Promise<void> }).connect();
     redisInstance = client;
     return client;
-  } catch {
+  } catch (err) {
+    // Fail open and stay failed — the upload proceeds, only the progress bar
+    // is unavailable. Caching `null` avoids re-paying the deadline per event.
+    console.warn(
+      `[upload-progress] progress unavailable (${describeRedisError(err)}) — upload continues`,
+    );
     redisInstance = null;
     return null;
   }

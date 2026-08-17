@@ -32,6 +32,7 @@ export const CANONICAL_VALUE_SOURCE_KINDS = new Set([
   "parameter",
   "static",
   "currentTimestamp",
+  "generatedSequence",
   "currentUser",
   "writebackResponse",
 ]);

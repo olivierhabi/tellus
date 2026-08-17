@@ -993,6 +993,13 @@ export class DeveloperConsoleService {
     const row = await this.findRow(applicationId);
     if (!row) throw new AppError('Application not found', 404, 'NOT_FOUND');
 
+    // P0 semantic parity (gap-analysis §4.2): when resource/operation
+    // restrictions are switched from `restricted` → `unrestricted`, Palantir
+    // DELETE the existing project/operation configuration and warns loudly,
+    // because unrestricted mode trusts the client with everything previously
+    // gated. We clear the corresponding rows server-side here so the FE
+    // only needs to confirm intent.
+    const clearedConfig: { resourceRestrictions?: number; projectGrants?: number; operationScopes?: number } = {};
     await this.knex.transaction(async (trx) => {
       if (body.redirectUris) {
         await trx('tpa_redirect_uris').where({ application_id: row.id }).del();
@@ -1000,6 +1007,33 @@ export class DeveloperConsoleService {
           await trx('tpa_redirect_uris').insert(
             body.redirectUris.map((uri) => ({ application_id: row.id, uri })),
           );
+        }
+      }
+      const goingUnrestricted = (level: RestrictionLevel | undefined, prior: string | undefined) =>
+        level === 'unrestricted' && prior === 'restricted';
+      if (goingUnrestricted(body.resourceRestrictions, row.resource_restrictions)) {
+        // Resource restriction removed → drop Ontology SDK resource selections.
+        const deleted = await trx('tpa_ontology_resources').where({ application_id: row.id }).del();
+        if (deleted > 0) clearedConfig.resourceRestrictions = deleted;
+      }
+      if (goingUnrestricted(body.operationRestrictions, row.operation_restrictions)) {
+        const projectGrantsSchema = await trx.raw(
+          `SELECT to_regclass('public.tpa_project_grants') IS NOT NULL AS exists`,
+        );
+        const opScopesSchema = await trx.raw(
+          `SELECT to_regclass('public.tpa_operation_scopes') IS NOT NULL AS exists`,
+        );
+        if (opScopesSchema?.rows?.[0]?.exists) {
+          const droppedScopes = await trx('tpa_operation_scopes')
+            .where({ application_id: row.id })
+            .del();
+          if (droppedScopes > 0) clearedConfig.operationScopes = droppedScopes;
+        }
+        if (projectGrantsSchema?.rows?.[0]?.exists) {
+          const droppedProjects = await trx('tpa_project_grants')
+            .where({ application_id: row.id })
+            .del();
+          if (droppedProjects > 0) clearedConfig.projectGrants = droppedProjects;
         }
       }
       const updates: Record<string, unknown> = {
@@ -1028,6 +1062,7 @@ export class DeveloperConsoleService {
           resourceRestrictions: body.resourceRestrictions,
           operationRestrictions: body.operationRestrictions,
           markingRestrictions: body.markingRestrictions,
+          clearedConfig,
         },
       });
     });
@@ -2739,6 +2774,161 @@ import type { ${objectExports[0]}Object } from "${opts.packageName}";
       });
     });
     return this.listServiceShares(applicationId);
+  }
+
+  // ----- Long-lived scoped tokens (Sharing & tokens; gap-analysis §5) -----------
+
+  private async tokensTableReady(): Promise<boolean> {
+    const row = await this.knex.raw(
+      `SELECT to_regclass('public.tpa_long_lived_tokens') IS NOT NULL AS exists`,
+    );
+    return Boolean(row?.rows?.[0]?.exists);
+  }
+
+  async listLongLivedTokens(applicationId: string) {
+    await this.requireTable();
+    const row = await this.findRow(applicationId);
+    if (!row) throw new AppError('Application not found', 404, 'NOT_FOUND');
+    if (!(await this.tokensTableReady())) return [];
+    const tokens = await this.knex('tpa_long_lived_tokens')
+      .where({ application_id: row.id })
+      .whereNull('revoked_at')
+      .orderBy('created_at', 'desc');
+    return tokens.map(
+      (t: {
+        id: string;
+        name: string;
+        token_prefix: string;
+        scopes: unknown;
+        expires_at: Date | string | null;
+        last_used_at: Date | string | null;
+        created_by: string;
+        created_at: Date | string;
+      }) => ({
+        id: t.id,
+        name: t.name,
+        tokenPrefix: t.token_prefix,
+        scopes: Array.isArray(t.scopes) ? t.scopes : [],
+        expiresAt: t.expires_at ? iso(t.expires_at) : null,
+        lastUsedAt: t.last_used_at ? iso(t.last_used_at) : null,
+        createdBy: t.created_by,
+        createdAt: iso(t.created_at),
+      }),
+    );
+  }
+
+  async createLongLivedToken(
+    applicationId: string,
+    actor: DeveloperConsoleActor,
+    input: { name: string; scopes?: string[]; expiresAt?: string | null },
+    expectedVersion?: number,
+  ): Promise<{ id: string; name: string; token: string; scopes: string[]; expiresAt: string | null; createdAt: string }> {
+    await this.requireTable();
+    const row = await this.findRow(applicationId);
+    if (!row) throw new AppError('Application not found', 404, 'NOT_FOUND');
+    if (!(await this.tokensTableReady())) {
+      throw new AppError('Token schema not migrated', 503, 'SCHEMA_NOT_READY');
+    }
+    const name = (input.name ?? '').trim();
+    if (!name) throw new AppError('Token name is required', 400, 'VALIDATION_ERROR');
+    if (name.length > 255) throw new AppError('Token name is too long', 400, 'VALIDATION_ERROR');
+    const scopes = Array.isArray(input.scopes) ? input.scopes.slice(0, 1000) : [];
+    const parsedExpiry = input.expiresAt ? new Date(input.expiresAt) : null;
+    if (parsedExpiry && (Number.isNaN(parsedExpiry.getTime()) || parsedExpiry.getTime() < Date.now())) {
+      throw new AppError('Expiry must be a future ISO timestamp', 400, 'VALIDATION_ERROR');
+    }
+    // Format: "plt_<32hex>_<8uuidHex>". Revealing only the hash + a random tail
+    // keeps the plaintext unguessable while staying copy-pasteable for clients.
+    const secret = crypto.randomBytes(32).toString('hex');
+    const token = `plt_${secret}_${crypto.randomBytes(4).toString('hex')}`;
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const tokenPrefix = token.slice(0, 12);
+
+    await this.knex.transaction(async (trx) => {
+      await trx('tpa_long_lived_tokens').insert({
+        application_id: row.id,
+        name,
+        token_hash: tokenHash,
+        token_prefix: tokenPrefix,
+        scopes: JSON.stringify(scopes),
+        expires_at: parsedExpiry ? parsedExpiry.toISOString() : null,
+        created_by: actor.userName,
+      });
+      let update = trx('third_party_applications').where({ id: row.id });
+      if (expectedVersion !== undefined) update = update.andWhere({ row_version: expectedVersion });
+      const updated = await update.update({
+        row_version: trx.raw('row_version + 1'),
+        last_modified_at: new Date(),
+        last_edited_by: actor.userName,
+      });
+      if (updated !== 1) {
+        throw new AppError('Application was modified by another request', 412, 'PRECONDITION_FAILED');
+      }
+      await trx('tpa_audit_events').insert({
+        tenant_id: row.tenant_id,
+        application_id: row.id,
+        actor_id: actor.userId,
+        actor_name: actor.userName,
+        action: 'tokens.create',
+        result: 'SUCCESS',
+        request_id: actor.requestId,
+        details: { name, scopes, expiresAt: parsedExpiry ? parsedExpiry.toISOString() : null },
+      });
+    });
+    return {
+      id: crypto.randomUUID(),
+      name,
+      token,
+      scopes,
+      expiresAt: parsedExpiry ? parsedExpiry.toISOString() : null,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  async revokeLongLivedToken(
+    applicationId: string,
+    actor: DeveloperConsoleActor,
+    tokenId: string,
+    expectedVersion?: number,
+  ): Promise<void> {
+    await this.requireTable();
+    const row = await this.findRow(applicationId);
+    if (!row) throw new AppError('Application not found', 404, 'NOT_FOUND');
+    if (!(await this.tokensTableReady())) {
+      throw new AppError('Token schema not migrated', 503, 'SCHEMA_NOT_READY');
+    }
+    await this.knex.transaction(async (trx) => {
+      const result = await trx('tpa_long_lived_tokens')
+        .where({ id: tokenId, application_id: row.id })
+        .whereNull('revoked_at')
+        .update({
+          revoked_at: new Date(),
+          revoked_by: actor.userName,
+        });
+      if (result === 0) {
+        throw new AppError('Token not found or already revoked', 404, 'NOT_FOUND');
+      }
+      let update = trx('third_party_applications').where({ id: row.id });
+      if (expectedVersion !== undefined) update = update.andWhere({ row_version: expectedVersion });
+      const updated = await update.update({
+        row_version: trx.raw('row_version + 1'),
+        last_modified_at: new Date(),
+        last_edited_by: actor.userName,
+      });
+      if (updated !== 1) {
+        throw new AppError('Application was modified by another request', 412, 'PRECONDITION_FAILED');
+      }
+      await trx('tpa_audit_events').insert({
+        tenant_id: row.tenant_id,
+        application_id: row.id,
+        actor_id: actor.userId,
+        actor_name: actor.userName,
+        action: 'tokens.revoke',
+        result: 'SUCCESS',
+        request_id: actor.requestId,
+        details: { tokenId },
+      });
+    });
   }
 
   async listProjectCatalog(opts?: { pageSize?: number; q?: string }): Promise<ProjectCatalogItem[]> {

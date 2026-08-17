@@ -104,6 +104,11 @@ export const STANDARD_ERROR_CODES: Record<string, { status: number; name: string
   COLUMN_MAPPING_INVALID:     { status: 400, name: "ValidationError" },
   REQUIRED_FIELD_MISSING:     { status: 400, name: "RequiredPropertyMissingError" },
   NO_BACKING_DATASOURCE:      { status: 400, name: "ValidationError" },
+  // 413: the request is well-formed and authorized, but the object type is
+  // too large for the in-heap datasource reindex path (see
+  // REINDEX_MAX_MERGED_OBJECTS in reindexService). Not a 500 — the caller can
+  // act on it by using the Object Storage V2 funnel instead.
+  REINDEX_TOO_LARGE:          { status: 413, name: "PayloadTooLargeError" },
   INDEXING_IN_PROGRESS:       { status: 409, name: "ConflictError" },
   DATA_VALIDATION_ERROR:      { status: 400, name: "ValidationError" },
   EDIT_NOT_FOUND:             { status: 404, name: "NotFoundError" },

@@ -25,7 +25,7 @@ import {
 import { createTable, funnelNamespace, getTable, ManifestEntry } from "../icebergCatalog";
 import {
   mergeChangesFromSnapshots,
-  loadMergedRowsFromSnapshot,
+  streamMergedRowsFromSnapshot,
 } from "../mergeStage";
 import {
   getPendingMergeEdits,
@@ -35,13 +35,13 @@ import {
 import { runIndexingActivity } from "../../quickwit/indexingActivity";
 import { ensureIndex } from "../../quickwit/indexManager";
 import {
-  buildFullIndexBatch,
+  streamFullIndexBatches,
   recordIndexingDeferred,
   updatePendingIndexGauges,
 } from "../indexingStage";
-import { MergedRow } from "../../quickwit/docBuilder";
 import { runHydrationActivity } from "../../quickwit/hydrationActivity";
 import { sleepForStageDelay, writeStageReceipt } from "../stageDelay";
+import { closeOpenStageRuns } from "../stageRunClosure";
 import {
   projectFunnelTerminalToState,
   type FunnelStateStatus,
@@ -66,6 +66,12 @@ import {
   streamQuery,
   releaseConnection,
 } from "../../duckdb/pool";
+import {
+  runWithStageProgress,
+  reportStageProgress,
+  shouldHeartbeat,
+  type StageProgressState,
+} from "./stageProgress";
 import { randomUUID } from "node:crypto";
 import * as readline from "node:readline";
 import fs from "fs";
@@ -77,10 +83,13 @@ import { pipeline } from "stream/promises";
 // its body in `withStageInstrumentation(stage, obj, async () => ...)`.
 // The helper:
 //   * records wall-clock duration into funnel_stage_duration_seconds
-//   * starts a 5s heartbeat so Temporal knows the worker is alive (a
-//     merge/indexing activity that quietly blocks without heartbeating
-//     would otherwise stay in "running" until startToCloseTimeout hits —
-//     precisely the "stuck on sync" symptom we saw in prod)
+//   * runs a PROGRESS-COUPLED heartbeat loop: it beats while the stage keeps
+//     calling reportStageProgress(), and goes SILENT once the stage stops,
+//     so Temporal's heartbeatTimeout can actually fail a stalled attempt.
+//     The old loop beat on a bare timer, which proved only that the process
+//     was alive — that is why the 2026-08-16 Redis deadlock sat "running"
+//     for three days with a 56-second-old heartbeat and a 120s timeout.
+//     See temporal/stageProgress.ts for the full incident write-up.
 //   * counts errors per stage so on-call sees which stage is flaky
 async function withStageInstrumentation<T>(
   stage: "changelog" | "merge" | "indexing" | "hydration",
@@ -88,9 +97,15 @@ async function withStageInstrumentation<T>(
   fn: () => Promise<T>
 ): Promise<T> {
   const started = Date.now();
-  const heartbeat = startHeartbeatLoop();
+  let progress: StageProgressState | undefined;
+  const heartbeat = startHeartbeatLoop(
+    () => progress,
+    `${stage}/${objectTypeApiName}`,
+  );
   try {
-    const out = await fn();
+    const out = await runWithStageProgress(fn, (state) => {
+      progress = state;
+    });
     observeHistogram("funnel_stage_duration_seconds", (Date.now() - started) / 1000, {
       stage,
       object_type: objectTypeApiName,
@@ -113,25 +128,55 @@ async function withStageInstrumentation<T>(
   }
 }
 
-function startHeartbeatLoop(): { stop: () => void } {
+/**
+ * Progress-coupled heartbeat loop. `getProgress` returns the running stage's
+ * progress state (undefined until runWithStageProgress installs it).
+ *
+ * The loop stops beating — deliberately — once an instrumented stage has been
+ * silent for longer than the stall window, so Temporal's heartbeatTimeout
+ * expires and the attempt is retried on a healthy worker. It logs once when it
+ * makes that decision, so the operator sees WHY the attempt timed out rather
+ * than an unexplained heartbeat timeout.
+ */
+function startHeartbeatLoop(
+  getProgress: () => StageProgressState | undefined,
+  label: string,
+): { stop: () => void } {
   let cancelled = false;
   let timer: NodeJS.Timeout | null = null;
+  let loggedStall = false;
   const tick = () => {
     if (cancelled) return;
-    try {
-      // The @temporalio/activity Context is only available when the
-      // activity runs inside a Temporal worker. When these functions
-      // are invoked directly (from the PG dispatcher or a unit test),
-      // `Context.current()` throws — treat that as a no-op heartbeat.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { Context } = require("@temporalio/activity") as typeof import("@temporalio/activity");
-      Context.current().heartbeat();
-    } catch {
-      /* not inside a Temporal activity — no heartbeat needed */
+    const progress = getProgress();
+    const alive = !progress || shouldHeartbeat(progress, Date.now());
+    if (alive) {
+      loggedStall = false;
+      try {
+        // The @temporalio/activity Context is only available when the
+        // activity runs inside a Temporal worker. When these functions
+        // are invoked directly (from the PG dispatcher or a unit test),
+        // `Context.current()` throws — treat that as a no-op heartbeat.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { Context } = require("@temporalio/activity") as typeof import("@temporalio/activity");
+        Context.current().heartbeat();
+      } catch {
+        /* not inside a Temporal activity — no heartbeat needed */
+      }
+    } else if (!loggedStall) {
+      loggedStall = true;
+      const stalledFor = Math.round((Date.now() - progress!.lastProgressAt) / 1000);
+      console.warn(
+        `[funnel] ${label} reported no progress for ${stalledFor}s (last step: ` +
+          `${progress!.lastMarker || "unknown"}) — withholding heartbeats so ` +
+          `Temporal's heartbeatTimeout fails this attempt`,
+      );
+      incCounter("funnel_stage_stall_detected_total", { stage: label });
     }
     timer = setTimeout(tick, 5000);
+    timer.unref?.();
   };
   timer = setTimeout(tick, 5000);
+  timer.unref?.();
   return {
     stop() {
       cancelled = true;
@@ -478,26 +523,37 @@ async function runIndexingActivityProxyImpl(
     // merged snapshot by id (NOT from a Temporal activity return value).
     // Skipped entirely when this run merged nothing — the repair pass
     // covers everything from object_instances in that case.
-    const mergedRowsSource =
-      input.mergedRowCount > 0
-        ? await loadMergedRowsFromSnapshot(input.mergedSnapshotId)
-        : [];
-    const baseRows: MergedRow[] = mergedRowsSource.map((r, i) => ({
-      primary_key: r.primary_key,
-      properties: r.properties,
-      operation: r.operation === "delete" ? "DELETE" : "UPDATE",
-      version: i + 1,
-      source_transaction_id: r.source_transaction_id ?? undefined,
-    }));
-    const batch = await buildFullIndexBatch({
-      ontologyId: input.ontologyId,
-      objectTypeApiName: input.objectTypeApiName,
-      baseRows,
-      pending,
-    });
-    const reader = (async function* () {
-      yield { rows: batch.rows, editIds: batch.editIds };
-    });
+    //
+    // STREAMED, not materialised. The previous version called the array-
+    // returning `loadMergedRowsFromSnapshot`, which goes through
+    // `readParquetRows` — and that function THROWS above
+    // TELLUS_PARQUET_READ_MAX_ROWS (2M) because building a multi-million-row
+    // JS array is a genuine heap wall. The gate was right; this caller was
+    // wrong. The consequence was inverted from what anyone would want: the
+    // BIGGEST Object Types were exactly the ones that could never reach the
+    // Quickwit serving index (OO7 sits at 4.65M rows, so every indexing
+    // attempt for it died with "exceeds TELLUS_PARQUET_READ_MAX_ROWS" and the
+    // catch below deferred it forever).
+    //
+    // `streamFullIndexBatches` yields fixed-size batches instead, and
+    // `runIndexingActivity`'s reader contract already accepts many batches
+    // (`for await (const batch of input.reader())`), so peak heap is now the
+    // batch size rather than the snapshot size.
+    //
+    // editIds are collected up-front, unconditionally, exactly as the array
+    // variant did — coverage never affected acknowledgement — and are still
+    // stamped only after runIndexingActivity confirms split publication.
+    const emptySource = (async function* () {})() as AsyncIterable<never>;
+    const reader = () =>
+      streamFullIndexBatches({
+        ontologyId: input.ontologyId,
+        objectTypeApiName: input.objectTypeApiName,
+        baseRows:
+          input.mergedRowCount > 0
+            ? streamMergedRowsFromSnapshot(input.mergedSnapshotId)
+            : emptySource,
+        pending,
+      });
     const out = await runIndexingActivity({
       ontologyId: input.ontologyId,
       objectTypeApiName: input.objectTypeApiName,
@@ -506,10 +562,10 @@ async function runIndexingActivityProxyImpl(
       publishTimeoutMs: 15_000,
       publishPollMs: 1_000,
     });
-    await markEditsAppliedToIndex(batch.editIds);
+    await markEditsAppliedToIndex(editIds);
     updatePendingIndexGauges(input.objectTypeApiName, []);
     return {
-      editsIndexed: batch.editIds.length,
+      editsIndexed: editIds.length,
       publishedSplitIds: out.publishedSplitIds,
       quickwit: true,
     };
@@ -673,6 +729,28 @@ export async function projectStageToPostgres(input: {
             input.stageOutput ? JSON.stringify(input.stageOutput) : null,
           ]
         );
+      }
+      // The run is now 'completed', so ANY other stage row still at
+      // pending/running is a leak, not a state — and the FE renders such a row
+      // as a perpetual spinner regardless of the run's status. The update
+      // above closes only `completedPrevious`; an earlier stage whose own
+      // projection was lost (this whole function is best-effort and swallows
+      // its errors) would otherwise stay open forever, unreachable by the boot
+      // sweeps, which only select runs still at 'running'. See stageRunClosure.
+      if (updated.rows[0]?.run_id) {
+        const stranded = await closeOpenStageRuns(
+          updated.rows[0].run_id,
+          "run completed with this stage still open (stage projection was lost)"
+        );
+        if (stranded > 0) {
+          console.warn(JSON.stringify({
+            level: "warn",
+            type: "funnel_stage_run_open_on_completed_run",
+            runId: updated.rows[0].run_id,
+            objectTypeApiName,
+            closed: stranded,
+          }));
+        }
       }
       return;
     }
@@ -1107,7 +1185,13 @@ async function* dedupFoundryRows(
         `(${sqlStr(key)},'INSERT',${propsJson},${sqlStr(txnId)},${sqlStr(ts)},${seq})`,
       );
       seq++;
-      if (batch.length >= BATCH) await flush();
+      if (batch.length >= BATCH) {
+        await flush();
+        // Liveness evidence for the heartbeat loop (temporal/stageProgress.ts).
+        // A stalled S3 read or a wedged DuckDB insert now stops the heartbeats
+        // instead of being masked by a free-running timer.
+        reportStageProgress(`changelog dedup insert seq=${seq}`);
+      }
     }
     await flush(); // final partial batch
     if (seq === 0) return; // empty source — Parquet cannot represent zero rows
@@ -1120,6 +1204,7 @@ async function* dedupFoundryRows(
       `SELECT DISTINCT ON (primary_key) primary_key, operation, properties, ` +
       `source_transaction_id, source_commit_timestamp FROM ${tempTable} ` +
       `ORDER BY primary_key, __seq DESC`;
+    let emitted = 0;
     for await (const r of streamQuery<{
       primary_key: string;
       operation: string;
@@ -1138,6 +1223,8 @@ async function* dedupFoundryRows(
           /* keep {} — shouldn't happen (we JSON.stringify'd on insert) */
         }
       }
+      emitted++;
+      if (emitted % 5000 === 0) reportStageProgress(`changelog dedup read=${emitted}`);
       yield {
         primary_key: r.primary_key,
         operation: r.operation as SourceChangeRow["operation"],

@@ -198,6 +198,29 @@ router.get(
 );
 
 router.get(
+  "/discovery/users/:userId",
+  handler(async (req, res) => {
+    actor(req);
+    const user = await getKeycloakAdminService().getUserById(req.params.userId);
+    if (!user?.enabled) {
+      res.status(404).json({ error: "USER_NOT_FOUND", message: "User not found" });
+      return;
+    }
+    res.status(200).json({
+      data: {
+        kind: "user" as const,
+        id: user.id,
+        displayName:
+          [user.firstName, user.lastName].filter(Boolean).join(" ") ||
+          user.email ||
+          user.username,
+        email: user.email,
+      },
+    });
+  }),
+);
+
+router.get(
   "/discovery/groups",
   handler(async (req, res) => {
     actor(req);

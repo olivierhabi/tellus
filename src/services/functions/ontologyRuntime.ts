@@ -23,7 +23,12 @@
 // happens before the sandbox runs.
 // ---------------------------------------------------------------------------
 
+import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { getOverlayStore } from "../overlay/getOverlayStore";
+import { writeOverlay } from "../overlay/writebackOverlay";
+import type { OverlayRecord } from "../overlay/overlayStore";
+import { sendSignal } from "../funnel/durableWorkflow";
 
 /** A materialised object: its declared properties plus `$`-prefixed metadata. */
 export interface OntologyObject {
@@ -555,6 +560,13 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
   }
   const client: PoolClient = await pool.connect();
   let created = 0, updated = 0, deleted = 0, linked = 0, unlinked = 0;
+  const editBatchId = randomUUID();
+  // Function-backed Actions historically bypassed editApplicator's B7
+  // writeback overlay. PostgreSQL advanced immediately, but object search
+  // continued returning the older indexed document. Collect the committed
+  // post-edit projections here and publish them only after COMMIT, preventing
+  // both stale reads and phantom overlay records on rollback.
+  const committedOverlays: OverlayRecord[] = [];
   try {
     await client.query("BEGIN");
     const linkTablePresent = await client.query<{ exists: boolean }>(
@@ -576,26 +588,52 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
 
     for (const e of args.edits) {
       if (e.op === "create") {
-        await client.query(
+        const r = await client.query<{ properties: Record<string, unknown>; version: number; rid: string | null }>(
           `INSERT INTO object_instances
              (ontology_id, branch_id, object_type_api_name, primary_key, properties, last_modified_at, version)
            VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, now(), 1)
            ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
            DO UPDATE SET properties = EXCLUDED.properties, last_modified_at = now(),
-                         version = object_instances.version + 1`,
+                         version = object_instances.version + 1
+           RETURNING properties, version, rid`,
           [args.ontologyId, branchId, e.objectType, e.primaryKey, JSON.stringify(e.properties)],
         );
+        const row = r.rows[0];
+        if (row) committedOverlays.push({
+          branchId: "_main",
+          objectType: e.objectType,
+          primaryKey: e.primaryKey,
+          doc: { ...row.properties, ...(row.rid ? { __rid: row.rid } : {}) },
+          deleted: false,
+          version: Number(row.version),
+          createdAt: Date.now(),
+          editId: randomUUID(),
+          actorUserId: args.actorUserId ?? null,
+        });
         created += 1;
       } else if (e.op === "update") {
-        const r = await client.query(
+        const r = await client.query<{ properties: Record<string, unknown>; version: number; rid: string | null }>(
           `UPDATE object_instances
               SET properties = properties || $5::jsonb, last_modified_at = now(),
                   version = version + 1
             WHERE ontology_id = $1::uuid AND branch_id = $2::uuid
-              AND object_type_api_name = $3 AND primary_key = $4`,
+              AND object_type_api_name = $3 AND primary_key = $4
+          RETURNING properties, version, rid`,
           [args.ontologyId, branchId, e.objectType, e.primaryKey, JSON.stringify(e.patch)],
         );
         updated += r.rowCount ?? 0;
+        const row = r.rows[0];
+        if (row) committedOverlays.push({
+          branchId: "_main",
+          objectType: e.objectType,
+          primaryKey: e.primaryKey,
+          doc: { ...row.properties, ...(row.rid ? { __rid: row.rid } : {}) },
+          deleted: false,
+          version: Number(row.version),
+          createdAt: Date.now(),
+          editId: randomUUID(),
+          actorUserId: args.actorUserId ?? null,
+        });
         if (canAudit) {
           for (const [prop, val] of Object.entries(e.patch)) {
             await client.query(
@@ -608,13 +646,27 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
           }
         }
       } else if (e.op === "delete") {
-        const r = await client.query(
+        const r = await client.query<{ version: number }>(
           `DELETE FROM object_instances
             WHERE ontology_id = $1::uuid AND branch_id = $2::uuid
-              AND object_type_api_name = $3 AND primary_key = $4`,
+              AND object_type_api_name = $3 AND primary_key = $4
+          RETURNING version`,
           [args.ontologyId, branchId, e.objectType, e.primaryKey],
         );
         deleted += r.rowCount ?? 0;
+        const row = r.rows[0];
+        if (row) committedOverlays.push({
+          branchId: "_main",
+          objectType: e.objectType,
+          primaryKey: e.primaryKey,
+          doc: {},
+          deleted: true,
+          // A delete is the next state transition after the removed row.
+          version: Number(row.version) + 1,
+          createdAt: Date.now(),
+          editId: randomUUID(),
+          actorUserId: args.actorUserId ?? null,
+        });
       } else {
         // link / unlink → an append-only edit in link_edit (operation add|remove).
         if (canLink) {
@@ -630,8 +682,46 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
         if (e.op === "link") linked += 1; else unlinked += 1;
       }
     }
+    // Wake the durable Funnel in the SAME transaction as the object edits.
+    // This is the long-term projection path; the overlay below only provides
+    // immediate read-your-writes while indexing is in flight. A rollback
+    // removes both mutations and signals, so no phantom reindex can escape.
+    const affectedTypes = new Set(
+      args.edits.flatMap((edit) =>
+        "objectType" in edit && typeof edit.objectType === "string"
+          ? [edit.objectType]
+          : [],
+      ),
+    );
+    for (const objectTypeApiName of affectedTypes) {
+      await sendSignal({
+        ontologyId: args.ontologyId,
+        objectTypeApiName,
+        signalType: "editBatchPending",
+        fingerprint: `function-edit:${editBatchId}:${objectTypeApiName}`,
+        payload: { source: "function-action", editBatchId },
+        client,
+      });
+    }
     if (args.preCommitHook) await args.preCommitHook(client);
     await client.query("COMMIT");
+    if (committedOverlays.length > 0) {
+      try {
+        const store = await getOverlayStore();
+        const commitTimeout = Number(process.env.QUICKWIT_COMMIT_TIMEOUT_SECS ?? 60);
+        const ttlSeconds = Math.max(60, (Number.isFinite(commitTimeout) ? commitTimeout : 60) * 3);
+        await Promise.all(
+          committedOverlays.map((record) => writeOverlay(record, store, ttlSeconds)),
+        );
+      } catch (error) {
+        // PostgreSQL is authoritative and the durable indexing pipeline still
+        // consumes object_edits. Overlay failure must not turn a committed
+        // Action into a reported failure, but it must be observable.
+        console.warn(
+          `[function-edits] post-commit overlay publish failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     return { created, updated, deleted, linked, unlinked };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

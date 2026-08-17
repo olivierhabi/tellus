@@ -78,6 +78,29 @@ function requestCorrelationId(req: Request): string | undefined {
     : undefined;
 }
 
+/**
+ * Organizations the caller belongs to, for `{ organization }` /
+ * `{ anyOrganization }` submission-criteria conditions.
+ *
+ * Sourced from the `securityContext` middleware, which derives it from
+ * `user.organizations` or the token's `orgs` claim. Missing `req.security`
+ * (router mounted standalone in a unit test) yields `[]` — an org condition
+ * then fails closed rather than passing on an unknown principal.
+ *
+ * Note: `executionContext` is deliberately NOT threaded here. Scenario /
+ * what-if submits are still rejected as unsupported (see the `scenarioRid`
+ * guard in routes/v2/actionsV2.ts), so every submission that reaches an
+ * executor is a live one and the evaluator's `"live"` default is correct.
+ * Wire it through when scenario submits ship.
+ */
+function requestOrganizations(req: Request): string[] {
+  const orgs = (req as { security?: { organizations?: unknown } }).security
+    ?.organizations;
+  return Array.isArray(orgs)
+    ? orgs.filter((o): o is string => typeof o === "string")
+    : [];
+}
+
 // ---------------------------------------------------------------------------
 // POST /:actionTypeApiName/apply — Execute an action
 // ---------------------------------------------------------------------------
@@ -106,6 +129,60 @@ router.post(
           undefined,
           { parameterName: "actionTypeApiName" }
         );
+      }
+
+      // Foundry-compatible bulk Action invocation: Workshop binds the Object
+      // Table's typed Selected objects output to an `object_set` parameter and
+      // submits ONE action call. The specialised executor retains set-based
+      // persistence internally while the public action contract remains a
+      // native object-list action rather than a client-expanded applyBatch.
+      if (actionTypeApiName === RWANDA_RSWITCH_BULK_ACTION) {
+        const selected = parameters.transactions;
+        const batchId = parameters.batchId;
+        const requestId = req.headers["idempotency-key"];
+        if (!Array.isArray(selected) || selected.length === 0 || selected.some((value) => typeof value !== "string" || !value.trim())) {
+          throw new OntologyError(
+            "transactions must be a selected object list",
+            "INVALID_PARAMETER",
+            400,
+            { parameterName: "transactions" },
+          );
+        }
+        if (typeof batchId !== "string" || batchId.trim().length === 0) {
+          throw new OntologyError("batchId is required", "INVALID_PARAMETER", 400, { parameterName: "batchId" });
+        }
+        if (typeof requestId !== "string" || !requestId.trim()) {
+          throw new OntologyError("Idempotency-Key requestId is required", "INVALID_PARAMETER", 400);
+        }
+        const sec = (req as any).security as
+          | { userId: string; markings: string[]; cbac: string[]; systemPrincipal: boolean; markingBypass: boolean }
+          | undefined;
+        await withIdempotencyLock(`rwanda-bulk:${requestId}`, async () => {
+          const result = await executeRwandaRswitchBulkReconciliation({
+            ontologyId,
+            requestId,
+            requests: selected.map((transactionId) => ({ parameters: { transactionId, batchId } })),
+            contextFor: () => ({
+              executedBy: (req as any).user?.id || "system",
+              correlationId: requestCorrelationId(req),
+              tenant: resolveRequestTenant(req),
+              sourceIp: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null,
+              branchId: req.body?.branchId || null,
+              roles: (req as any).user?.roles || [],
+              groups: (req as any).user?.groups || [],
+              organizations: requestOrganizations(req),
+              ...(sec ? {
+                subjectKind: (sec.systemPrincipal ? "service" : "user") as "user" | "service",
+                subjectIdentifier: sec.userId || (req as any).user?.id || "anonymous",
+                subjectMarkings: sec.markings ?? [],
+                subjectCbac: sec.cbac ?? [],
+                markBypass: sec.markingBypass === true,
+              } : {}),
+            }),
+          });
+          res.status(200).json(result);
+        });
+        return;
       }
 
       // ---------------------------------------------------------------
@@ -175,6 +252,8 @@ router.post(
         expectedVersion,
         roles: (req as any).user?.roles || [],
         groups: (req as any).user?.groups || [],
+        // Org membership for `{ organization }` submission criteria.
+        organizations: requestOrganizations(req),
         ...(sec
           ? {
               subjectKind: (sec.systemPrincipal ? "service" : "user") as
@@ -381,6 +460,8 @@ router.post(
                 branchId: item.branchId || body.branchId || null,
                 roles: (req as any).user?.roles || [],
                 groups: (req as any).user?.groups || [],
+                // Org membership for `{ organization }` submission criteria.
+                organizations: requestOrganizations(req),
                 ...(sec ? {
                   subjectKind: (sec.systemPrincipal ? "service" : "user") as "user" | "service",
                   subjectIdentifier: sec.userId || (req as any).user?.id || "anonymous",
@@ -504,6 +585,8 @@ router.post(
           branchId: item.branchId || body.branchId || null,
           roles: (req as any).user?.roles || [],
           groups: (req as any).user?.groups || [],
+          // Org membership for `{ organization }` submission criteria.
+          organizations: requestOrganizations(req),
           ...(ackBudgetMs !== undefined ? { ackBudgetMs } : {}),
           ...(secBatch
             ? {
@@ -732,6 +815,8 @@ router.post(
         executedBy: (req as any).user?.id || "system",
         roles: (req as any).user?.roles || [],
         groups: (req as any).user?.groups || [],
+        // Org membership for `{ organization }` submission criteria.
+        organizations: requestOrganizations(req),
       };
 
       const result = await validateAction(
@@ -807,6 +892,8 @@ validateRouter.post(
         executedBy: (req as any).user?.id || "system",
         roles: (req as any).user?.roles || [],
         groups: (req as any).user?.groups || [],
+        // Org membership for `{ organization }` submission criteria.
+        organizations: requestOrganizations(req),
       };
 
       const result = await validateAction(
@@ -870,6 +957,8 @@ function rwandaBulkExecutionContext(req: Request, body: any, index: number) {
     branchId: item.branchId || body.branchId || null,
     roles: (req as any).user?.roles || [],
     groups: (req as any).user?.groups || [],
+    // Org membership for `{ organization }` submission criteria.
+    organizations: requestOrganizations(req),
     ...(sec ? {
       subjectKind: (sec.systemPrincipal ? "service" : "user") as "user" | "service",
       subjectIdentifier: sec.userId || (req as any).user?.id || "anonymous",
@@ -1048,6 +1137,8 @@ batchRouter.post(
           branchId: item.branchId || body.branchId || null,
           roles: (req as any).user?.roles || [],
           groups: (req as any).user?.groups || [],
+          // Org membership for `{ organization }` submission criteria.
+          organizations: requestOrganizations(req),
           ...(ackBudgetMs !== undefined ? { ackBudgetMs } : {}),
           ...(secBatch
             ? {

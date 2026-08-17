@@ -390,6 +390,519 @@ export const NormalizeApplySchema = z.object({
 export type NormalizeApplyInput = z.infer<typeof NormalizeApplySchema>;
 
 // ---------------------------------------------------------------------------
+// Select Columns transform — keep only the listed columns (inverse of Drop)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/selectV1
+// ---------------------------------------------------------------------------
+
+export const SelectPreviewSchema = z.object({
+  /** Column names to keep; all others are removed. Order is preserved. */
+  columns: z.array(z.string().trim().min(1)).min(1, 'At least one column is required'),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type SelectPreviewInput = z.infer<typeof SelectPreviewSchema>;
+
+export const SelectApplySchema = z.object({
+  columns: z.array(z.string().trim().min(1)).min(1, 'At least one column is required'),
+});
+
+export type SelectApplyInput = z.infer<typeof SelectApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Sort transform — ORDER BY columns with per-column direction
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/sortV2
+// ---------------------------------------------------------------------------
+
+export const SORT_DIRECTIONS = ['asc', 'desc'] as const;
+export const SORT_NULLS = ['first', 'last'] as const;
+
+const SortKeySchema = z.object({
+  column: z.string().trim().min(1, 'Sort column is required'),
+  direction: z.enum(SORT_DIRECTIONS).default('asc'),
+  nulls: z.enum(SORT_NULLS).optional(),
+});
+
+export const SortPreviewSchema = z.object({
+  sorts: z.array(SortKeySchema).min(1, 'At least one sort key is required'),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type SortPreviewInput = z.infer<typeof SortPreviewSchema>;
+
+export const SortApplySchema = z.object({
+  sorts: z.array(SortKeySchema).min(1, 'At least one sort key is required'),
+});
+
+export type SortApplyInput = z.infer<typeof SortApplySchema>;
+
+// ---------------------------------------------------------------------------
+// DropDuplicates transform — remove rows that are duplicates on key columns
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/dropDuplicatesV1
+// ---------------------------------------------------------------------------
+
+export const DropDuplicatesPreviewSchema = z.object({
+  /** Columns defining the deduplicate key. Omit (= null, default) to dedupe on ALL columns. */
+  columns: z.array(z.string().trim().min(1)).optional(),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type DropDuplicatesPreviewInput = z.infer<typeof DropDuplicatesPreviewSchema>;
+
+export const DropDuplicatesApplySchema = z.object({
+  columns: z.array(z.string().trim().min(1)).optional(),
+});
+
+export type DropDuplicatesApplyInput = z.infer<typeof DropDuplicatesApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Uppercase Column Names transform — rename every column to UPPER_CASE
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/uppercaseColumnNamesV1
+// ---------------------------------------------------------------------------
+
+export const UppercaseColumnNamesPreviewSchema = z.object({
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type UppercaseColumnNamesPreviewInput = z.infer<typeof UppercaseColumnNamesPreviewSchema>;
+
+export const UppercaseColumnNamesApplySchema = z.object({});
+
+export type UppercaseColumnNamesApplyInput = z.infer<typeof UppercaseColumnNamesApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Row Size transform — add a column with the row's estimated byte size
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/rowSizeV1
+// ---------------------------------------------------------------------------
+
+export const RowSizePreviewSchema = z.object({
+  /** Name of the new column. Default: 'row_size'. */
+  outputColumn: z.string().trim().min(1).max(255).optional(),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type RowSizePreviewInput = z.infer<typeof RowSizePreviewSchema>;
+
+export const RowSizeApplySchema = z.object({
+  outputColumn: z.string().trim().min(1).max(255).optional(),
+});
+
+export type RowSizeApplyInput = z.infer<typeof RowSizeApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Shared binary-expression model used by Apply Expression,
+// Apply Multiple Expressions, Apply to Multiple Columns, and
+// Compute if Expression Absent.
+// ---------------------------------------------------------------------------
+
+export const BINARY_OPERATORS = [
+  '+',
+  '-',
+  '*',
+  '/',
+  '||',
+  '==',
+  '!=',
+  '>',
+  '<',
+  '>=',
+  '<=',
+] as const;
+
+export type BinaryOperator = (typeof BINARY_OPERATORS)[number];
+
+const OperandSchema = z.object({
+  /** 'column' = reference an existing column; 'literal' = a constant. */
+  kind: z.enum(['column', 'literal']),
+  /**
+   * When kind=column, the column name.
+   * When kind=literal, the value is the literal stored as a string; it is
+   * parsed according to `literalType` (default: string).
+   */
+  value: z.string(),
+  /** For literals only — how to parse `value`. Ignored for columns. */
+  literalType: z.enum(['string', 'integer', 'numeric', 'boolean']).optional(),
+});
+
+export type Operand = z.infer<typeof OperandSchema>;
+
+export const ExpressionItemSchema = z.object({
+  left: OperandSchema,
+  operator: z.enum(BINARY_OPERATORS),
+  right: OperandSchema,
+  /** Target column for the result. */
+  outputColumn: z.string().trim().min(1, 'outputColumn is required').max(255),
+  /** Logical type of the result; defaults inferred from operands at evaluation. */
+  outputType: z.enum(CAST_TARGET_TYPES).optional(),
+});
+
+export type ExpressionItem = z.infer<typeof ExpressionItemSchema>;
+
+// ---------------------------------------------------------------------------
+// Apply expression transform — single binary expression producing a column
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/applyExpressionV1
+// ---------------------------------------------------------------------------
+
+export const ApplyExpressionPreviewSchema = z.object({
+  expression: ExpressionItemSchema,
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type ApplyExpressionPreviewInput = z.infer<typeof ApplyExpressionPreviewSchema>;
+
+export const ApplyExpressionApplySchema = z.object({
+  expression: ExpressionItemSchema,
+});
+
+export type ApplyExpressionApplyInput = z.infer<typeof ApplyExpressionApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Apply multiple expressions transform
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/projectV1
+// ---------------------------------------------------------------------------
+
+export const ApplyMultipleExpressionsPreviewSchema = z.object({
+  expressions: z.array(ExpressionItemSchema).min(1, 'At least one expression is required'),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type ApplyMultipleExpressionsPreviewInput = z.infer<typeof ApplyMultipleExpressionsPreviewSchema>;
+
+export const ApplyMultipleExpressionsApplySchema = z.object({
+  expressions: z.array(ExpressionItemSchema).min(1, 'At least one expression is required'),
+});
+
+export type ApplyMultipleExpressionsApplyInput = z.infer<typeof ApplyMultipleExpressionsApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Apply to multiple columns — apply the same operator+right operand to N
+// columns (substituted in the left role), producing N new columns.
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/projectOnConditionV1
+// ---------------------------------------------------------------------------
+
+export const ApplyToMultipleColumnsPreviewSchema = z.object({
+  /** Columns to substitute into the left operand role. */
+  columns: z.array(z.string().trim().min(1)).min(1, 'At least one column is required'),
+  operator: z.enum(BINARY_OPERATORS),
+  /** Right operand (literal or column); shared across all columns. */
+  right: OperandSchema,
+  /** Suffix appended to each input column name for the output column name. Default: '_calc'. */
+  outputSuffix: z.string().trim().min(1).max(64).optional(),
+  /** Optional explicit output column names (must match `columns` length if provided). */
+  outputColumns: z.array(z.string().trim().min(1)).optional(),
+  outputType: z.enum(CAST_TARGET_TYPES).optional(),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type ApplyToMultipleColumnsPreviewInput = z.infer<typeof ApplyToMultipleColumnsPreviewSchema>;
+
+export const ApplyToMultipleColumnsApplySchema = z.object({
+  columns: z.array(z.string().trim().min(1)).min(1, 'At least one column is required'),
+  operator: z.enum(BINARY_OPERATORS),
+  right: OperandSchema,
+  outputSuffix: z.string().trim().min(1).max(64).optional(),
+  outputColumns: z.array(z.string().trim().min(1)).optional(),
+  outputType: z.enum(CAST_TARGET_TYPES).optional(),
+});
+
+export type ApplyToMultipleColumnsApplyInput = z.infer<typeof ApplyToMultipleColumnsApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Compute if Expression Absent — fill a column with the result of an
+// expression only when the target column is null/empty/missing.
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/computeExpressionIfAbsentV1
+// ---------------------------------------------------------------------------
+
+export const ComputeIfExpressionAbsentPreviewSchema = z.object({
+  /** The output column to populate; created if missing. */
+  outputColumn: z.string().trim().min(1).max(255),
+  /** The expression to evaluate when `outputColumn` is null/empty/absent. */
+  expression: ExpressionItemSchema.omit({ outputColumn: true }),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type ComputeIfExpressionAbsentPreviewInput = z.infer<typeof ComputeIfExpressionAbsentPreviewSchema>;
+
+export const ComputeIfExpressionAbsentApplySchema = z.object({
+  outputColumn: z.string().trim().min(1).max(255),
+  expression: ExpressionItemSchema.omit({ outputColumn: true }),
+});
+
+export type ComputeIfExpressionAbsentApplyInput = z.infer<typeof ComputeIfExpressionAbsentApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Text block transform — documentation annotation; passes data through
+// untouched. Useful for in-canvas documentation of pipeline logic.
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/textBlockV1
+// ---------------------------------------------------------------------------
+
+export const TextBlockPreviewSchema = z.object({
+  /** Free-form documentation text. Plain or limited markdown; up to 4000 chars. */
+  text: z.string().trim().min(1, 'Text is required').max(4000),
+  /** Optional short title shown above the text block. */
+  title: z.string().trim().max(255).optional(),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type TextBlockPreviewInput = z.infer<typeof TextBlockPreviewSchema>;
+
+export const TextBlockApplySchema = z.object({
+  text: z.string().trim().min(1).max(4000),
+  title: z.string().trim().max(255).optional(),
+});
+
+export type TextBlockApplyInput = z.infer<typeof TextBlockApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Tier B aggregate-family transforms (PB-B2.follow-2).
+//
+// Shared aggregation model used by Aggregate, Rollup, Pivot and (in its
+// dynamic-alias form) Aggregate on condition.
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/aggregateV1
+// ---------------------------------------------------------------------------
+
+export const AGGREGATE_FUNCTIONS = [
+  'sum',
+  'avg',
+  'min',
+  'max',
+  'count',
+  'count_distinct',
+  'stddev',
+  'variance',
+] as const;
+
+export type AggregateFunction = (typeof AGGREGATE_FUNCTIONS)[number];
+
+/**
+ * One aggregation in an Aggregate / Rollup / Pivot spec.
+ * `column` is optional ONLY for `count` — bare count aggregates the whole
+ * group (SQL COUNT(*)); count with a column counts non-null values,
+ * mirroring Palantir's `rowCount(expression)` helper.
+ */
+export const AggregationItemSchema = z.object({
+  column: z.string().trim().min(1).optional(),
+  function: z.enum(AGGREGATE_FUNCTIONS),
+  /** Name of the output column produced by this aggregation. */
+  outputColumn: z.string().trim().min(1, 'Output column is required'),
+}).refine(
+  (a) => a.function === 'count' || !!a.column,
+  { message: 'column is required for aggregations other than count' },
+);
+
+export type AggregationItem = z.infer<typeof AggregationItemSchema>;
+
+// ---------------------------------------------------------------------------
+// Aggregate transform — GROUP BY + aggregations (aggregateV1)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/aggregateV1
+// ---------------------------------------------------------------------------
+
+export const AggregatePreviewSchema = z.object({
+  /** Columns to group by. Empty = single global aggregation row. */
+  groupBy: z.array(z.string().trim().min(1)).default([]),
+  aggregations: z.array(AggregationItemSchema).min(1, 'At least one aggregation is required'),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type AggregatePreviewInput = z.infer<typeof AggregatePreviewSchema>;
+
+export const AggregateApplySchema = z.object({
+  groupBy: z.array(z.string().trim().min(1)).default([]),
+  aggregations: z.array(AggregationItemSchema).min(1),
+});
+
+export type AggregateApplyInput = z.infer<typeof AggregateApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Rollup transform — GROUP BY ROLLUP(...) super-aggregates (rollUpV1)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/rollUpV1
+// ---------------------------------------------------------------------------
+
+export const RollupPreviewSchema = z.object({
+  /** Columns to rollup. Empty = single global aggregation row (Palantir example 5). */
+  rollupColumns: z.array(z.string().trim().min(1)).default([]),
+  aggregations: z.array(AggregationItemSchema).min(1, 'At least one aggregation is required'),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type RollupPreviewInput = z.infer<typeof RollupPreviewSchema>;
+
+export const RollupApplySchema = z.object({
+  rollupColumns: z.array(z.string().trim().min(1)).default([]),
+  aggregations: z.array(AggregationItemSchema).min(1),
+});
+
+export type RollupApplyInput = z.infer<typeof RollupApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Aggregate on condition — apply each expression once per column matching a
+// ColumnPredicate, naming outputs with a dynamic suffix (columnNameConcat).
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/aggregateOnConditionV1
+// ---------------------------------------------------------------------------
+
+export const ColumnPredicateSchema = z.object({
+  /** `all` = every column; `columnHasType` = columns with the given type. */
+  kind: z.enum(['all', 'columnHasType']),
+  columnType: z
+    .enum(['string', 'integer', 'numeric', 'boolean', 'date', 'timestamp'])
+    .optional(),
+}).refine(
+  (p) => p.kind === 'all' || !!p.columnType,
+  { message: 'columnType is required when kind=columnHasType' },
+);
+
+export type ColumnPredicate = z.infer<typeof ColumnPredicateSchema>;
+
+/**
+ * One dynamic aggregation: applied once per predicate-matched column, the
+ * output column named `<column><suffix>` (Palantir columnNameConcat).
+ * `count` counts non-null values (Palantir rowCount).
+ */
+export const DynamicAggregationSchema = z.object({
+  function: z.enum(['sum', 'avg', 'min', 'max', 'count']),
+  suffix: z.string().trim().min(1, 'Suffix is required'),
+});
+
+export type DynamicAggregation = z.infer<typeof DynamicAggregationSchema>;
+
+export const AggregateOnConditionPreviewSchema = z.object({
+  predicate: ColumnPredicateSchema,
+  aggregations: z.array(DynamicAggregationSchema).min(1, 'At least one aggregation is required'),
+  groupBy: z.array(z.string().trim().min(1)).default([]),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type AggregateOnConditionPreviewInput = z.infer<typeof AggregateOnConditionPreviewSchema>;
+
+export const AggregateOnConditionApplySchema = z.object({
+  predicate: ColumnPredicateSchema,
+  aggregations: z.array(DynamicAggregationSchema).min(1),
+  groupBy: z.array(z.string().trim().min(1)).default([]),
+});
+
+export type AggregateOnConditionApplyInput = z.infer<typeof AggregateOnConditionApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Top rows transform — top N rows per sorted partition (topRowV2)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/topRowV2
+// ---------------------------------------------------------------------------
+
+export const TopRowsPreviewSchema = z.object({
+  /** Columns defining each partition. Empty = one partition (the whole dataset). */
+  partitionBy: z.array(z.string().trim().min(1)).default([]),
+  /** Sort specification within each partition. */
+  sorts: z.array(SortKeySchema).default([]),
+  /** Number of rows to select per partition (Palantir "Number of rows"). Defaults to 1. */
+  topN: z.number().int().min(1).max(10000).default(1),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type TopRowsPreviewInput = z.infer<typeof TopRowsPreviewSchema>;
+
+export const TopRowsApplySchema = z.object({
+  partitionBy: z.array(z.string().trim().min(1)).default([]),
+  sorts: z.array(SortKeySchema).default([]),
+  topN: z.number().int().min(1).max(10000).default(1),
+});
+
+export type TopRowsApplyInput = z.infer<typeof TopRowsApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Pivot transform — values of `pivotColumn` become columns (pivotV1)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/pivotV1
+// ---------------------------------------------------------------------------
+
+/** One (value, alias) pivot pair — alias feeds the output column name. */
+export const PivotValueSchema = z.object({
+  value: z.string().trim().min(1, 'Pivot value is required'),
+  alias: z.string().trim().min(1, 'Pivot alias is required'),
+});
+
+export type PivotValue = z.infer<typeof PivotValueSchema>;
+
+export const PivotPreviewSchema = z.object({
+  groupBy: z.array(z.string().trim().min(1)).default([]),
+  pivotColumn: z.string().trim().min(1, 'Pivot column is required'),
+  pivotValues: z.array(PivotValueSchema).min(1, 'At least one pivot value is required'),
+  aggregations: z.array(AggregationItemSchema).min(1, 'At least one aggregation is required'),
+  /** `prefix` (default): '<alias><sep><aggName>'; `suffix`: '<aggName><sep><alias>'. */
+  aliasPosition: z.enum(['prefix', 'suffix']).default('prefix'),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type PivotPreviewInput = z.infer<typeof PivotPreviewSchema>;
+
+export const PivotApplySchema = z.object({
+  groupBy: z.array(z.string().trim().min(1)).default([]),
+  pivotColumn: z.string().trim().min(1),
+  pivotValues: z.array(PivotValueSchema).min(1),
+  aggregations: z.array(AggregationItemSchema).min(1),
+  aliasPosition: z.enum(['prefix', 'suffix']).default('prefix'),
+});
+
+export type PivotApplyInput = z.infer<typeof PivotApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Unpivot transform — wide → long; columns become (name, value) rows
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/unpivotV1
+// ---------------------------------------------------------------------------
+
+export const UnpivotPreviewSchema = z.object({
+  /** Columns to unpivot. All other columns are kept as-is. */
+  columns: z.array(z.string().trim().min(1)).min(1, 'At least one column to unpivot is required'),
+  /** Output column holding the original column names. */
+  nameColumn: z.string().trim().min(1, 'Name column is required'),
+  /** Output column holding the values. */
+  valueColumn: z.string().trim().min(1, 'Value column is required'),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type UnpivotPreviewInput = z.infer<typeof UnpivotPreviewSchema>;
+
+export const UnpivotApplySchema = z.object({
+  columns: z.array(z.string().trim().min(1)).min(1),
+  nameColumn: z.string().trim().min(1),
+  valueColumn: z.string().trim().min(1),
+});
+
+export type UnpivotApplyInput = z.infer<typeof UnpivotApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Keeps duplicates transform — inverse of Drop duplicates (keepDuplicatesV1)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/keepDuplicatesV1
+// ---------------------------------------------------------------------------
+
+export const KeepDuplicatesPreviewSchema = z.object({
+  /** Columns defining the duplicate key. Omit/null = exact duplicate rows. */
+  columns: z.array(z.string().trim().min(1)).optional(),
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type KeepDuplicatesPreviewInput = z.infer<typeof KeepDuplicatesPreviewSchema>;
+
+export const KeepDuplicatesApplySchema = z.object({
+  columns: z.array(z.string().trim().min(1)).optional(),
+});
+
+export type KeepDuplicatesApplyInput = z.infer<typeof KeepDuplicatesApplySchema>;
+
+// ---------------------------------------------------------------------------
 // Transform Preview Snapshot — saved when user clicks "Apply All"
 // ---------------------------------------------------------------------------
 
@@ -419,14 +932,49 @@ export const JOIN_TYPES = [
   'inner',
   'full_outer',
   'cross',
+  // Palantir complexSemiJoinV1 / complexAntiJoinV1 — left-only output:
+  // semi keeps left rows WITH a match; anti keeps left rows WITHOUT one.
+  'semi',
+  'anti',
 ] as const;
 
 export type JoinType = (typeof JOIN_TYPES)[number];
 
-/** A single join condition (left column = right column). */
+/**
+ * Comparison operators for a join condition.
+ *
+ * Palantir's `joinV2` is equality-only, but the `complex*JoinV1` family accepts
+ * an arbitrary `Expression<Boolean>` built from comparisons combined with
+ * `and(...)`. A list of conditions here is that `and(...)`: every condition must
+ * hold. `equals` is the default so existing equality-only payloads are
+ * unchanged, and the inequality operators cover the documented `lessThan` /
+ * `greaterThan` theta joins.
+ */
+export const JOIN_OPERATORS = [
+  'equals',
+  'notEquals',
+  'lessThan',
+  'lessThanOrEqual',
+  'greaterThan',
+  'greaterThanOrEqual',
+] as const;
+
+export type JoinOperator = (typeof JOIN_OPERATORS)[number];
+
+/** Operators that can be satisfied by hash lookup rather than a full scan. */
+export function isEqualityJoinOperator(op: JoinOperator | undefined): boolean {
+  return op === undefined || op === 'equals';
+}
+
+/** A single join condition: `leftColumn <operator> rightColumn`. */
 const JoinConditionSchema = z.object({
   leftColumn: z.string().trim().min(1, 'Left column is required'),
   rightColumn: z.string().trim().min(1, 'Right column is required'),
+  /**
+   * Comparison to apply. Omitted = `equals`, which keeps the historical
+   * equality-only wire shape valid.
+   */
+  operator: z.enum(JOIN_OPERATORS).optional(),
 });
 
 /**
@@ -451,6 +999,14 @@ export const JoinPreviewSchema = z.object({
   leftSelectedColumns: z.array(z.string()).optional(),
   /** Optional: only include these right columns in the output. If omitted, all right columns are included. */
   rightSelectedColumns: z.array(z.string()).optional(),
+  /**
+   * Merge same-named equality join keys into ONE output column instead of
+   * emitting a prefixed duplicate (Palantir `complexOuterJoinV1` Example 4:
+   * "the join columns are coalesced" when no right-side prefix is applied).
+   * Only equality conditions are coalesced — an inequality has no single
+   * shared value to collapse to. Omitted = false (historical behaviour).
+   */
+  coalesceJoinKeys: z.boolean().optional(),
 });
 
 export type JoinPreviewInput = z.infer<typeof JoinPreviewSchema>;
@@ -463,6 +1019,7 @@ export const JoinApplySchema = z.object({
   joinType: z.enum(JOIN_TYPES),
   conditions: z.array(JoinConditionSchema).default([]),
   rightPrefix: z.string().optional().default('right_'),
+  coalesceJoinKeys: z.boolean().optional(),
 });
 
 export type JoinApplyInput = z.infer<typeof JoinApplySchema>;
@@ -490,17 +1047,51 @@ export type JoinApplyInput = z.infer<typeof JoinApplySchema>;
  *     stable output schema to downstream consumers (deploy graph
  *     fingerprinting, Iceberg writers, ontology object types).
  */
+/**
+ * Both input fields are individually optional so either wire shape validates,
+ * so the "at least one input" rule has to be a schema-level refinement.
+ */
+const UNION_INPUT_REQUIRED = {
+  message: 'A union needs at least one additional input — send rightNodeIds (or the legacy rightNodeId).',
+  path: ['rightNodeIds'],
+};
+
+function hasAtLeastOneUnionInput(v: { rightNodeId?: string; rightNodeIds?: string[] }): boolean {
+  return Boolean(v.rightNodeId) || (v.rightNodeIds?.length ?? 0) > 0;
+}
+
 export const UnionPreviewSchema = z.object({
-  /** UUID of the second input node. */
-  rightNodeId: z.string().uuid('Invalid right node UUID'),
+  /**
+   * UUID of the second input node. Retained for back-compat; prefer
+   * `rightNodeIds` for the N-input form. When both are present,
+   * `rightNodeId` is treated as the first entry of the list.
+   */
+  rightNodeId: z.string().uuid('Invalid right node UUID').optional(),
+  /**
+   * UUIDs of every additional input, in order. Palantir's `union*ByNameV1`
+   * transforms all take `List<Table>`, so a three-way union is one node, not
+   * two chained ones. Column ordering follows the FIRST input (the node the
+   * request is addressed to), then each additional input in list order.
+   */
+  rightNodeIds: z.array(z.string().uuid('Invalid right node UUID')).optional(),
   /** Max rows to return. */
   limit: z.number().int().min(1).max(5000).default(500),
   priorTransforms: z.array(PriorTransformSchema).optional(),
   /**
    * Schema-reconciliation policy. Omitted = `name-merge` (legacy default).
+   *
+   * Palantir variants (PB-B2.follow-2):
+   *   - `first`  (firstUnionByNameV1): output columns = FIRST input's
+   *     columns only; extra right-side columns are dropped, missing
+   *     right values become null.
+   *   - `narrow` (narrowUnionByNameV1): output columns = the INTERSECTION
+   *     of both inputs' column names.
+   *   - `wide`   (wideUnionByNameV1): output columns = the SUPERSET of
+   *     both inputs' column names; missing values become null.
+   *     (`name-merge` is the historical equivalent plus mismatch hints.)
    */
-  mode: z.enum(['name-merge', 'strict']).optional(),
-});
+  mode: z.enum(['name-merge', 'strict', 'first', 'narrow', 'wide']).optional(),
+}).refine(hasAtLeastOneUnionInput, UNION_INPUT_REQUIRED);
 
 export type UnionPreviewInput = z.infer<typeof UnionPreviewSchema>;
 
@@ -508,10 +1099,31 @@ export type UnionPreviewInput = z.infer<typeof UnionPreviewSchema>;
  * Request body for POST .../nodes/:nodeId/union/apply
  */
 export const UnionApplySchema = z.object({
-  rightNodeId: z.string().uuid('Invalid right node UUID'),
-});
+  rightNodeId: z.string().uuid('Invalid right node UUID').optional(),
+  rightNodeIds: z.array(z.string().uuid('Invalid right node UUID')).optional(),
+  /** Persisted so deploy/replay paths reproduce the same schema policy. */
+  mode: z.enum(['name-merge', 'strict', 'first', 'narrow', 'wide']).optional(),
+}).refine(hasAtLeastOneUnionInput, UNION_INPUT_REQUIRED);
 
 export type UnionApplyInput = z.infer<typeof UnionApplySchema>;
+
+/**
+ * Normalize the two accepted wire shapes into one ordered, de-duplicated list.
+ * `rightNodeId` (singular, legacy) leads; `rightNodeIds` follows in order.
+ * De-duplication matters because a repeated input would double its rows
+ * silently — a union of a table with itself is a request a user can make on
+ * purpose, but not by sending the same id twice in one payload.
+ */
+export function resolveUnionInputIds(input: {
+  rightNodeId?: string;
+  rightNodeIds?: string[];
+}): string[] {
+  const ordered = [
+    ...(input.rightNodeId ? [input.rightNodeId] : []),
+    ...(input.rightNodeIds ?? []),
+  ];
+  return [...new Set(ordered)];
+}
 
 // ---------------------------------------------------------------------------
 // Batch position update

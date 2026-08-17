@@ -40,6 +40,7 @@
  * - `parameter`         — value comes from a validated action input parameter.
  * - `static`            — literal value baked into the rule definition.
  * - `currentTimestamp`  — server-side `now()` at the moment of execution.
+ * - `generatedSequence` — atomically reserved, formatted business identifier.
  * - `currentUser`       — the executing actor's principal id.
  * - `writebackResponse` — a typed output from a preceding writeback webhook
  *                         (Phase 4). The outputId is validated against the
@@ -50,6 +51,7 @@ export type ValueSourceTag =
   | "parameter"
   | "static"
   | "currentTimestamp"
+  | "generatedSequence"
   | "currentUser"
   | "writebackResponse"
   | "objectProperty";
@@ -74,6 +76,14 @@ export interface StaticValueSource {
 
 export interface CurrentTimestampValueSource {
   readonly source: "currentTimestamp";
+}
+
+export interface GeneratedSequenceValueSource {
+  readonly source: "generatedSequence";
+  readonly sequenceKey: string;
+  readonly prefix: string;
+  readonly padLength: number;
+  readonly startAt?: number;
 }
 
 export interface CurrentUserValueSource {
@@ -103,6 +113,7 @@ export type ValueSource =
   | ParameterValueSource
   | StaticValueSource
   | CurrentTimestampValueSource
+  | GeneratedSequenceValueSource
   | CurrentUserValueSource
   | WritebackResponseValueSource
   | ObjectPropertyValueSource;

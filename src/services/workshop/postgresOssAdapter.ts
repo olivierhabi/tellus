@@ -358,7 +358,7 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
 
     try {
       const r = await getWorkshopDb().query(
-        `SELECT primary_key, properties
+        `SELECT primary_key, properties, version, rid
            FROM object_instances
           WHERE ontology_id = $1::uuid
             AND object_type_api_name = $2
@@ -369,8 +369,18 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
       );
       const objects = r.rows.slice(0, limit).map((row) => {
         const props = (row.properties ?? {}) as Record<string, unknown>;
-        // Guarantee an `id` surface for consumers that key off it.
-        return "id" in props ? props : { id: row.primary_key, ...props };
+        const version = Number(row.version);
+        // Preserve the system identity/version envelope Workshop needs for
+        // active-object bindings and optimistic concurrency. Returning only
+        // user properties makes a selected table row look current while the
+        // Action form has no authoritative token to protect its write.
+        return {
+          ...(row.rid ? { __rid: row.rid } : {}),
+          __primaryKey: row.primary_key,
+          ...(Number.isFinite(version) ? { __version: version } : {}),
+          ...("id" in props ? {} : { id: row.primary_key }),
+          ...props,
+        };
       });
       // Recompute the count query with its OWN param array (the load query's
       // params include trailing orderBy bindings the count doesn't reference,

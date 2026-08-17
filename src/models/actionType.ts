@@ -125,6 +125,15 @@ export interface ActionTypeRow {
   writeback_config: unknown | null;
   /** Immutable published Function binding for function execution mode. */
   function_config?: unknown | null;
+  /**
+   * Migration 173 — Ontology Manager Security page operational settings
+   * (branch side-effect switches, Automate consumer gate, notification
+   * failure policy / redaction). NULL = every default; always read through
+   * `resolveActionSecuritySettings` so consumers agree on what NULL means.
+   * Deliberately outside the definition hash and version-bump trigger:
+   * operational policy, not action semantics.
+   */
+  security_settings?: unknown | null;
   max_affected_objects: number;
   is_enabled: boolean;
   created_at: string;
@@ -179,6 +188,10 @@ export interface UpdateActionTypeInput {
   /** Phase 4 — pre-edit writeback config (NULL = no writeback). One-writeback-per-action enforced by CHECK constraint from migration 130. */
   writeback_config?: unknown | null;
   function_config?: unknown | null;
+  /** Action Semantics v2 — declarative rules vs Function-backed execution. */
+  execution_mode?: "declarative" | "function";
+  /** Migration 173 — see ActionTypeRow.security_settings. */
+  security_settings?: unknown | null;
   max_affected_objects?: number;
   is_enabled?: boolean;
 }
@@ -199,6 +212,8 @@ const UPDATABLE_FIELDS: ReadonlySet<string> = new Set([
   "side_effects",
   "writeback_config",
   "function_config",
+  "execution_mode",
+  "security_settings",
   "max_affected_objects",
   "is_enabled",
 ]);
@@ -438,7 +453,8 @@ async function updateActionType(
       key === "submission_criteria" ||
       key === "side_effects" ||
       key === "writeback_config" ||
-      key === "function_config"
+      key === "function_config" ||
+      key === "security_settings"
     ) {
       values.push(value != null ? JSON.stringify(value) : null);
     } else {

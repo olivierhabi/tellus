@@ -28,11 +28,11 @@ import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import type { CompiledEdit } from "./ruleCompiler";
 import { evaluateSubmissionCriteria, resolveObjectPropertyOperands, type SubmissionSubject } from "./submissionCriteria";
-import { evaluateFunctionValidationCriteria } from "./functionValidationCriteria";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
 import { getActionSemanticsExecutionAvailability } from "./actionSemanticsFlags";
+import { getKeycloakAdminService } from "../services/keycloakAdminService";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -141,7 +141,13 @@ export async function validateAction(
   ontologyId: string,
   actionTypeApiName: string,
   parameters: Record<string, unknown>,
-  context?: { executedBy?: string; roles?: string[]; groups?: string[] }
+  context?: {
+    executedBy?: string;
+    roles?: string[];
+    groups?: string[];
+    organizations?: string[];
+    executionContext?: string;
+  }
 ): Promise<ValidationResult> {
   // -----------------------------------------------------------------
   // STAGE 1: Load the action type definition
@@ -192,7 +198,14 @@ export async function validateAction(
     actionType.parameters as ParameterDefinition[],
     parameters,
     objectExists,
-    fetchObject
+    fetchObject,
+    {
+      currentUserId: context?.executedBy,
+      userExists: async (userId) => {
+        const user = await getKeycloakAdminService().getUserById(userId);
+        return user?.enabled === true;
+      },
+    },
   );
 
   if (!validation.valid) {
@@ -211,6 +224,11 @@ export async function validateAction(
     // role-gated action that /apply would accept.
     roles: context?.roles ?? [],
     groups: context?.groups ?? [],
+    // Same subject fields the executor's Stage 3 uses, for the same reason:
+    // /validate must accept exactly what /apply would, or an org-gated or
+    // scenario-gated action fails pre-flight and succeeds on submit.
+    organizations: context?.organizations ?? [],
+    executionContext: context?.executionContext ?? undefined,
   };
 
   // D27 — pre-resolve object-property operands against the live referenced-
@@ -227,15 +245,6 @@ export async function validateAction(
     subject,
     objectPropertyValues,
   );
-  const functionFailures = await evaluateFunctionValidationCriteria(
-    ontologyId,
-    actionType.submission_criteria,
-    resolvedParameters as Record<string, unknown>,
-  );
-  if (functionFailures.length > 0) {
-    submission.ok = false;
-    submission.failures.push(...functionFailures);
-  }
 
   if (!submission.ok) {
     return {
@@ -254,6 +263,7 @@ export async function validateAction(
     {
       executedBy: context?.executedBy || "system",
       ontologyId,
+      previewGeneratedSequences: true,
     }
   );
 

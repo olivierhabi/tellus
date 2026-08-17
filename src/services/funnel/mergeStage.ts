@@ -51,6 +51,7 @@ import {
   parseJsonColumn,
   parseJsonArrayColumn,
   readParquetRows,
+  streamParquetRows,
   resolveParquetRef,
   writeParquetRef,
   type ParquetRef,
@@ -68,6 +69,7 @@ import {
   readMergeProgress,
   clearMergeProgress,
 } from "./mergeProgress";
+import { reportStageProgress } from "./temporal/stageProgress";
 
 // Delta PG tail: diff the freshly-built merged parquet against the PREVIOUS
 // merged snapshot's parquet (same producer — DuckDB — so plain string
@@ -1321,6 +1323,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       const client = await getClient();
       const upsertBuf: UpsertInstanceInput[] = [];
       const deleteBuf: string[] = [];
+      let pgTailCommitted = false;
       try {
         await client.query("BEGIN");
         // Batched queryAll over the LOCAL merged parquet (pk-sorted — the COPY
@@ -1383,12 +1386,24 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
               }
             }
             // Advisory progress (transaction NOT committed yet — advisory only).
+            // Deliberately NOT awaited: this runs inside the open BEGIN/COMMIT
+            // while holding a pooled PG client, so awaiting a Redis round-trip
+            // here would hold the transaction (and the pool slot) open for the
+            // duration of every checkpoint — 930 checkpoints for OO7's 4.65M
+            // rows, and up to the full connect deadline each when Redis is
+            // down. recordMergeProgress swallows its own failures, so a
+            // floating rejection is impossible.
             if (input.runKey && rowsProcessed % 5000 === 0) {
-              await recordMergeProgress(input.runKey, {
+              void recordMergeProgress(input.runKey, {
                 committed: false,
                 lastPk,
                 rowsProcessed,
               });
+              // Liveness evidence for the Temporal heartbeat loop. Unlike the
+              // Redis checkpoint above, this is a local field write that cannot
+              // block — and it is what lets heartbeatTimeout fail this activity
+              // if the PG tail ever wedges again.
+              reportStageProgress(`merge pg-tail rows=${rowsProcessed}`);
             }
           }
           keysetAfter = lastPk ?? ""; // advance the cursor to the last row of this batch
@@ -1410,20 +1425,25 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
           `[merge-sql] ${input.objectTypeApiName} pg-tail rows=${rowsProcessed} ` +
             `upserts=${upserts} deletes=${deletes} durMs=${Date.now() - tTail}`,
         );
-        if (input.runKey) {
-          await recordMergeProgress(input.runKey, {
-            committed: true,
-            lastPk,
-            rowsProcessed,
-            upserts,
-            deletes,
-          });
-        }
+        pgTailCommitted = true;
       } catch (err) {
         await client.query("ROLLBACK");
         throw err;
       } finally {
         client.release();
+      }
+      // committed=true is recorded only AFTER the pool client is released, so
+      // the Redis write can never extend the lifetime of a PG connection.
+      // Ordering is still safe: the checkpoint is a resume hint, and a crash
+      // between COMMIT and this write only costs a redundant (idempotent) redo.
+      if (input.runKey && pgTailCommitted) {
+        await recordMergeProgress(input.runKey, {
+          committed: true,
+          lastPk,
+          rowsProcessed,
+          upserts,
+          deletes,
+        });
       }
       } // end tailRowCount > 0
     } else if (skipPgTail) {
@@ -1693,6 +1713,59 @@ export async function loadMergedRowsFromSnapshot(
   // LEGACY: pre-fix snapshots inlined the merged rows.
   const inline = (summary.inline_rows ?? []) as MergeResult["mergedRows"];
   return Array.isArray(inline) ? inline : [];
+}
+
+/**
+ * STREAMING sibling of {@link loadMergedRowsFromSnapshot} — yields the merged
+ * rows one at a time instead of returning a full array.
+ *
+ * Why this exists: `loadMergedRowsFromSnapshot` goes through
+ * `readParquetRows`, which refuses (throws) above
+ * `TELLUS_PARQUET_READ_MAX_ROWS` (default 2M) because materialising a
+ * multi-million-row array is a real O(N) heap wall. That gate is correct, but
+ * the Quickwit indexing activity was calling the materialising variant
+ * unconditionally, so every Object Type past 2M rows — OO7 sits at 4.65M —
+ * had its indexing stage hard-fail with "exceeds
+ * TELLUS_PARQUET_READ_MAX_ROWS", i.e. the largest types were exactly the ones
+ * that could never reach the serving index. The guard was doing its job; the
+ * caller had no streaming path to fall back to. This is it.
+ *
+ * Same row shape and same legacy `inline_rows` fallback as the array variant,
+ * so callers can switch without changing their mapping.
+ */
+export async function* streamMergedRowsFromSnapshot(
+  snapshotId: string
+): AsyncGenerator<MergeResult["mergedRows"][number]> {
+  const res = await query(
+    `SELECT summary_json FROM funnel_snapshot WHERE snapshot_id = $1`,
+    [snapshotId]
+  );
+  const row = res.rows[0] as
+    | { summary_json: Record<string, unknown> }
+    | undefined;
+  if (!row) return;
+  const summary = row.summary_json ?? {};
+  const ref = resolveParquetRef(summary.parquet_ref);
+  if (ref) {
+    yield* streamParquetRows<MergeResult["mergedRows"][number]>(ref, (r) => ({
+      primary_key: String(r.primary_key ?? ""),
+      properties: parseJsonColumn(r.properties),
+      markings: parseJsonArrayColumn(r.markings),
+      operation: r.operation === "delete" ? "delete" : "upsert",
+      source_datasource_id:
+        r.source_datasource_id != null && r.source_datasource_id !== ""
+          ? String(r.source_datasource_id)
+          : null,
+      source_transaction_id:
+        r.source_transaction_id != null && r.source_transaction_id !== ""
+          ? String(r.source_transaction_id)
+          : null,
+    }));
+    return;
+  }
+  // LEGACY: pre-fix snapshots inlined the merged rows.
+  const inline = (summary.inline_rows ?? []) as MergeResult["mergedRows"];
+  if (Array.isArray(inline)) yield* inline;
 }
 
 async function loadExistingInstances(

@@ -24,6 +24,7 @@
 
 import { AppError } from "../../utils/foundryAppError";
 import type { TransformStep } from "./duckdbTransformEngine";
+import { joinOperatorSql, unionOtherPaths } from "./duckdbTransformEngine";
 
 export interface DatasetNode {
   id: string;
@@ -247,10 +248,22 @@ function renderStreamingSelect(input: {
         ctes.push(`${next} AS (${compileFilterFlink(step, current)})`);
         break;
       case "Union": {
-        // PB-B5 v1 supports UNION ALL against another source table by
-        // path — we resolve it to the nearest registered source.
+        // PB-B5 v1 supports UNION ALL against other source tables by
+        // path — we resolve each to the nearest registered source. N inputs
+        // flatten into one UNION ALL chain (Palantir `List<Table>`).
+        const others = unionOtherPaths(step);
+        if (others.length === 0) {
+          throw new AppError(
+            "Union requires at least one additional input (otherPaths, or the legacy otherPath).",
+            400,
+            "VALIDATION_ERROR",
+          );
+        }
+        const tails = others.map(
+          (p) => `SELECT * FROM ${quoteIdent(resolveUnionSource(p, input.sources))}`,
+        );
         ctes.push(
-          `${next} AS (SELECT * FROM ${current} UNION ALL SELECT * FROM ${quoteIdent(resolveUnionSource(step.otherPath, input.sources))})`,
+          `${next} AS (${[`SELECT * FROM ${current}`, ...tails].join(" UNION ALL ")})`,
         );
         break;
       }
@@ -259,7 +272,7 @@ function renderStreamingSelect(input: {
         const on = (step.on ?? [])
           .map(
             (p) =>
-              `l.${quoteIdent(p.left)} = r.${quoteIdent(p.right)}`,
+              `l.${quoteIdent(p.left)} ${joinOperatorSql(p.operator)} r.${quoteIdent(p.right)}`,
           )
           .join(" AND ");
         const kind = step.joinType.toUpperCase();

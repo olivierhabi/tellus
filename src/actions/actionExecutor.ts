@@ -37,7 +37,6 @@ import * as https from "https";
 import * as http from "http";
 import { applyEdits } from "./editApplicator";
 import { evaluateSubmissionCriteria, resolveObjectPropertyOperands } from "./submissionCriteria";
-import { evaluateFunctionValidationCriteria } from "./functionValidationCriteria";
 import { fireActionWebhooks } from "./actionWebhooks";
 import { sendNotifications } from "./sideEffectNotifier";
 import {
@@ -60,7 +59,15 @@ import {
 } from "./actionCbac";
 import { incCounter } from "../services/funnel/metrics";
 import { eventBus } from "../websocket/eventBus";
-import { resolveBranchIdOrMain } from "../services/branchContext";
+import {
+  resolveBranchIdOrMain,
+  resolveMainBranchId,
+} from "../services/branchContext";
+import {
+  resolveActionSecuritySettings,
+  isNonMainBranch,
+  filterSideEffectsForBranch,
+} from "./actionSecuritySettings";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
 import { OntologyError } from "../utils/queryErrors";
@@ -72,6 +79,7 @@ import {
   isV2ExecutionEnabled,
 } from "./actionSemanticsFlags";
 import type { ActionError } from "./actionErrors";
+import { getKeycloakAdminService } from "../services/keycloakAdminService";
 import { defaultSchemaLookup } from "./objectReferenceResolver";
 import { buildPlannedStepsFromRules } from "./actionV2PlanBuilder";
 import { buildActionPlan, objectKey, type ObjectIdentity } from "./actionPlanner";
@@ -110,6 +118,18 @@ export interface ExecutionContext {
   /** Subject roles/groups for §5 submission-criteria evaluation (Stage 3). */
   roles?: string[];
   groups?: string[];
+  /**
+   * Subject multipass organizations for §5 submission-criteria evaluation —
+   * backs `{ organization }` / `{ anyOrganization }` conditions authored as
+   * "Current User · Organizations · Includes any of · <org>" in the Ontology
+   * Manager. Threaded from `req.security.organizations`.
+   */
+  organizations?: string[];
+  /**
+   * Execution context of this submission ("scenario" for a what-if/scenario
+   * submit, otherwise "live"). Backs `{ executionContext }` conditions.
+   */
+  executionContext?: string;
   /** Phase 6.1 — CBAC subject + markings/cbac from `req.security`.
    * Threaded through from the route's `securityContext` middleware so
    * the Stage 1c CBAC gate (action-type-level allow/deny +
@@ -551,7 +571,14 @@ export async function executeAction(
       parameterDefinitions,
       parameters,
       objectExists,
-      fetchObject
+      fetchObject,
+      {
+        currentUserId: context.executedBy,
+        userExists: async (userId) => {
+          const user = await getKeycloakAdminService().getUserById(userId);
+          return user?.enabled === true;
+        },
+      },
     );
 
     if (!validation.valid) {
@@ -593,10 +620,22 @@ export async function executeAction(
         ? resolvedParameters[parameterName]
         : undefined;
       if (typeof targetObjectType === "string" && primaryKey != null) {
+        // Scope the diagnostic preflight to the exact ontology branch that
+        // will be mutated. Object type API names and primary keys are not
+        // globally unique; the former unscoped lookup could read a version
+        // from another ontology/branch and falsely reject a freshly refreshed
+        // Workshop row as "modified by another user".
+        const expectedVersionBranchId = await resolveBranchIdOrMain(
+          ontologyId,
+          context.branchId,
+        );
         const versionResult = await pgQuery(
           `SELECT version FROM object_instances
-            WHERE object_type_api_name = $1 AND primary_key = $2`,
-          [targetObjectType, String(primaryKey)],
+            WHERE ontology_id = $1::uuid
+              AND branch_id = $2::uuid
+              AND object_type_api_name = $3
+              AND primary_key = $4`,
+          [ontologyId, expectedVersionBranchId, targetObjectType, String(primaryKey)],
         );
         if ((versionResult.rowCount ?? 0) > 0) {
           const actualVersion = Number(versionResult.rows[0].version);
@@ -631,11 +670,6 @@ export async function executeAction(
     // markings) is enforced separately; this gates on the inputs/preconditions.
     // -----------------------------------------------------------------
     {
-      const functionFailures = await evaluateFunctionValidationCriteria(
-        ontologyId,
-        actionType.submission_criteria,
-        resolvedParameters as Record<string, unknown>,
-      );
       // D27 — pre-resolve object-property operands (conditions of the form
       // `{ parameter, objectProperty }`) against the live referenced-object
       // state before evaluating criteria, so the pure evaluator can compare
@@ -653,13 +687,14 @@ export async function executeAction(
           username: context.executedBy ?? undefined,
           roles: context.roles ?? [],
           groups: context.groups ?? [],
+          // Multipass organizations + execution context back the OM editor's
+          // "Current User · Organizations" and "Execution context · is ·
+          // Scenario" conditions. Absent ⇒ no orgs / a normal "live" submit.
+          organizations: context.organizations ?? [],
+          executionContext: context.executionContext ?? undefined,
         },
         objectPropertyValues,
       );
-      if (functionFailures.length > 0) {
-        submission.ok = false;
-        submission.failures.push(...functionFailures);
-      }
       if (!submission.ok) {
         result.failureType = "unclassified";
         result.errorMessage = `Submission criteria not met: ${submission.failures.join("; ")}`;
@@ -885,6 +920,7 @@ export async function executeAction(
         executedBy: context.executedBy || "system",
         ontologyId,
         branchId: context.branchId ?? undefined,
+        transactionClient: context.transactionClient,
         ...(writebackOutputs ? { writebackOutputs } : {}),
       }
     );
@@ -1104,6 +1140,36 @@ export async function executeAction(
       operation: e.operation,
     }));
 
+    // F-P3-12: resolve branch at the single executor boundary. The
+    // writer (`applyEdits`) requires `branchId: string` — a missing
+    // branch is a compile-time error. `resolveBranchIdOrMain` falls
+    // back to the ontology's `main` branch UUID when the caller did
+    // not thread one (classic untagged writes); any other downstream
+    // code is forbidden from performing this fallback again.
+    //
+    // Resolved BEFORE `preCommitHook` is constructed (rather than after,
+    // where it used to live) because the hook now needs it: the
+    // "Testing on branches" switches decide which side effects are even
+    // enqueued into the durable outbox, and that decision happens inside
+    // the hook's transaction.
+    const resolvedBranchId = await resolveBranchIdOrMain(
+      ontologyId,
+      context.branchId,
+    );
+
+    // Migration 173 — "Testing on branches". Off by default: an action
+    // rehearsed on a branch must not call a real external endpoint or
+    // email real users. `isNonMainBranch` fails safe toward "this is
+    // main" so a deployment with no ontology_branch row keeps its
+    // pre-migration behaviour instead of silently losing side effects.
+    const securitySettings = resolveActionSecuritySettings(
+      (actionType as { security_settings?: unknown } | null)?.security_settings,
+    );
+    const onNonMainBranch = isNonMainBranch(
+      resolvedBranchId,
+      await resolveMainBranchId(ontologyId),
+    );
+
     const preCommitHook = async (pg: any) => {
       // Recompute duration at commit time for a tighter audit number.
       result.durationMs = Date.now() - startTime;
@@ -1138,13 +1204,26 @@ export async function executeAction(
           result: result.result,
           affectedObjects: result.affectedObjects,
           firedAt: new Date().toISOString(),
+          // Migration 173 — snapshot, not a worker-side re-read, so the
+          // job dispatches under the policy in force when it ran.
+          notificationPolicy: {
+            failurePolicy: securitySettings.actionFailurePolicy,
+            disableRedaction: securitySettings.disableNotificationRedaction,
+          },
         };
-        const sideEffects = context.suppressNotifications
+        const requestSuppressed = context.suppressNotifications
           ? {
               ...(at.side_effects as Record<string, unknown>),
               notifications: [],
             }
           : at.side_effects;
+        // Branch switches applied LAST so they can only ever remove side
+        // effects, never reinstate one the caller suppressed.
+        const sideEffects = filterSideEffectsForBranch(
+          requestSuppressed,
+          securitySettings,
+          onNonMainBranch,
+        );
         const jobs = extractSideEffectJobs(sideEffects, execCtx);
         if (jobs.length > 0) {
           await enqueueSideEffectJobsInTransaction(pg, {
@@ -1161,17 +1240,6 @@ export async function executeAction(
         }
       }
     };
-
-    // F-P3-12: resolve branch at the single executor boundary. The
-    // writer (`applyEdits`) requires `branchId: string` — a missing
-    // branch is a compile-time error. `resolveBranchIdOrMain` falls
-    // back to the ontology's `main` branch UUID when the caller did
-    // not thread one (classic untagged writes); any other downstream
-    // code is forbidden from performing this fallback again.
-    const resolvedBranchId = await resolveBranchIdOrMain(
-      ontologyId,
-      context.branchId,
-    );
 
     const applyContext = {
       executionId,
@@ -1324,9 +1392,17 @@ export async function executeAction(
     // that delivery was attempted, but failures are swallowed inside.
     // -----------------------------------------------------------------
     if (application.success && actionType.side_effects != null && process.env.ACTION_SIDE_EFFECT_WORKER_ENABLED === "0") {
+      // Migration 173 — same branch gate as the durable outbox above,
+      // through the same shared filter so the switch cannot mean two
+      // different things depending on ACTION_SIDE_EFFECT_WORKER_ENABLED.
+      const branchFilteredSideEffects = filterSideEffectsForBranch(
+        actionType.side_effects,
+        securitySettings,
+        onNonMainBranch,
+      );
       try {
         // Fire webhooks
-        await fireActionWebhooks(actionType.side_effects, {
+        await fireActionWebhooks(branchFilteredSideEffects, {
           executionId,
           actionTypeApiName,
           ontologyId,
@@ -1339,7 +1415,7 @@ export async function executeAction(
         
         // Send notifications (email, push, etc.)
         if (!context.suppressNotifications) {
-          await sendNotifications(actionType.side_effects, {
+          await sendNotifications(branchFilteredSideEffects, {
             executionId,
             actionTypeApiName,
             ontologyId,

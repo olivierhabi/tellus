@@ -290,7 +290,7 @@
           "additionalProperties": false,
           "properties": {
             "color": { "type": "string" },
-            "borderStyle": { "type": "string", "enum": ["none", "thin", "shadow"] }
+            "borderStyle": { "type": "string", "enum": ["none", "thin", "shadow", "innerShadow"] }
           }
         },
         "scrolling": {

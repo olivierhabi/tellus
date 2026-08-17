@@ -21,84 +21,15 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
+  # NOTE (2026-08-13, container-diet pass): the autoheal and mem-monitor
+  # containers were REMOVED from the default stack. Neither is referenced by
+  # any application code — autoheal restarts unhealthy containers (Compose's
+  # `restart: unless-stopped` already handles crash loops; health sweeps
+  # caused restart storms during long JVM startups), and mem-monitor only
+  # logged warnings every 60s (alert-only by design). Cutting both removes
+  # two docker-socket mounts from the dev workstation's attack surface.
+  # Restore from git history if an ops environment needs them.
   # -------------------------------------------------------------------------
-  # autoheal — the missing recovery half of our healthchecks.
-  #
-  # Docker Compose's `restart:` policy only reacts to a process EXITING; it
-  # does NOT restart a container that goes `unhealthy` while its process is
-  # still alive (e.g. a deadlocked server still holding the port). autoheal
-  # watches the Docker socket and restarts any container whose healthcheck
-  # has gone unhealthy. With AUTOHEAL_CONTAINER_LABEL=all it covers every
-  # container that defines a healthcheck — no per-service label needed.
-  #
-  # This is what turns our healthchecks from "a red light on a dashboard"
-  # into actual self-healing.
-  # -------------------------------------------------------------------------
-  autoheal:
-    image: willfarrell/autoheal:1.2.0
-    restart: unless-stopped
-    environment:
-      AUTOHEAL_CONTAINER_LABEL: all
-      AUTOHEAL_INTERVAL: 10           # seconds between health sweeps
-      AUTOHEAL_START_PERIOD: 30       # grace before the first action
-      AUTOHEAL_DEFAULT_STOP_TIMEOUT: 30
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    logging: *default-logging
-    deploy:
-      resources:
-        limits:
-          memory: 64M
-          cpus: "0.25"
-    memswap_limit: 64M
-
-  # -------------------------------------------------------------------------
-  # mem-monitor — memory pressure early-warning system.
-  #
-  # Polls `docker stats` every 60 s and writes structured log lines when any
-  # container crosses the WARNING (80 %) or CRITICAL (90 %) threshold.
-  # CRITICAL is alert-only. `docker stats` includes reclaimable filesystem
-  # cache, so restarting stateful databases at an arbitrary percentage can
-  # interrupt WAL recovery, Kafka writes, or ClickHouse merges even though the
-  # kernel could reclaim that cache. Hard cgroup limits below remain the actual
-  # safety boundary and restart policies handle a real OOM exit.
-  #
-  # Log lines are emitted to stdout (visible via `docker compose logs
-  # mem-monitor`). In a deployed environment, ship these logs to your
-  # log aggregator (CloudWatch Logs, Loki, etc.) for alerting.
-  # -------------------------------------------------------------------------
-  mem-monitor:
-    image: docker:27-cli
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        WARN_PCT=80
-        CRIT_PCT=90
-        echo "[mem-monitor] started — warn=$${WARN_PCT}% crit=$${CRIT_PCT}% (alert-only)"
-        while true; do
-          docker stats --no-stream --format '{{.Name}} {{.MemPerc}} {{.MemUsage}}' 2>/dev/null \
-          | while read -r name raw_pct usage; do
-              pct=$$(printf '%.0f' "$${raw_pct%%%*}" 2>/dev/null) || continue
-              [ -z "$$pct" ] && continue
-              if [ "$$pct" -ge "$$CRIT_PCT" ]; then
-                echo "[CRITICAL $$(date -Iseconds)] $$name at $${raw_pct} ($$usage)"
-              elif [ "$$pct" -ge "$$WARN_PCT" ]; then
-                echo "[WARN    $$(date -Iseconds)] $$name at $${raw_pct} ($$usage)"
-              fi
-            done
-          sleep 60
-        done
-    logging: *default-logging
-    deploy:
-      resources:
-        limits:
-          memory: 64M
-          cpus: "0.10"
-    memswap_limit: 64M
-
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -131,56 +62,14 @@ services:
       retries: 12
       start_period: 90s
 
+  # NOTE (2026-08-13, container-diet pass): the pg-backup cron container was
+  # REMOVED from the default stack — zero application code references it; it
+  # existed purely as an ops cron (daily pg_dump into ./backups/app).
+  # One-off local backups remain available via scripts/pg-backup.sh, and a
+  # production backup story (WAL archiving / PITR + off-host copies) was never
+  # this container anyway (see docs/runbook). Restore from git history if a
+  # deployed dev box wants daily dumps again.
   # -------------------------------------------------------------------------
-  # pg-backup — scheduled logical backups of the APP Postgres.
-  #
-  # The app's Postgres holds the only irreplaceable data (ontology, edits,
-  # connectivity, credentials). Temporal's history is ephemeral and
-  # Lakekeeper's catalog is rebuildable, so we back up THIS one on a schedule
-  # with retention. Dumps land in ./backups/app on the host (gitignored) and
-  # can be restored with `pg_restore`/`psql`. BACKUP_ON_START makes the first
-  # dump happen immediately so the backup path is proven, not assumed.
-  #
-  # NOTE: this is logical backup only. Production also needs WAL archiving /
-  # PITR and an OFF-HOST copy — a local dump on the same disk dies with the
-  # disk. See docs/runbook for the gap.
-  # -------------------------------------------------------------------------
-  pg-backup:
-    image: prodrigestivill/postgres-backup-local:16
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_DB: tellus_db
-      POSTGRES_USER: tellus
-      POSTGRES_PASSWORD: ${PGPASSWORD:-changeme}
-      SCHEDULE: "@daily"
-      BACKUP_ON_START: "TRUE"
-      BACKUP_KEEP_DAYS: "7"
-      BACKUP_KEEP_WEEKS: "4"
-      BACKUP_KEEP_MONTHS: "6"
-      HEALTHCHECK_PORT: "8080"
-    volumes:
-      - ./backups/app:/backups
-    logging: *default-logging
-    deploy:
-      resources:
-        limits:
-          memory: ${TELLUS_PG_BACKUP_MEMORY_LIMIT:-256M}
-          cpus: "0.5"
-    memswap_limit: ${TELLUS_PG_BACKUP_MEMORY_LIMIT:-256M}
-    # The image's built-in healthcheck uses a 5-minute interval, which keeps the
-    # container "starting" for ~5 min and needlessly stalls orchestration
-    # readiness. Override with a fast probe against the same status endpoint
-    # (HEALTHCHECK_PORT=8080) so a successful backup is reflected promptly.
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   opensearch:
     image: opensearchproject/opensearch:2.17.0
@@ -295,31 +184,13 @@ services:
       timeout: 10s
       retries: 10
 
-  schema-registry:
-    image: confluentinc/cp-schema-registry:7.6.1
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-    environment:
-      SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
-      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-      # Schema Registry is a thin proxy in local development.
-      SCHEMA_REGISTRY_HEAP_OPTS: "${TELLUS_SCHEMA_REGISTRY_HEAP_OPTS:--Xmx192m -Xms96m}"
-    ports:
-      - "127.0.0.1:8081:8081"
-    deploy:
-      resources:
-        limits:
-          memory: ${TELLUS_SCHEMA_REGISTRY_MEMORY_LIMIT:-384M}
-          cpus: "1.0"
-    memswap_limit: ${TELLUS_SCHEMA_REGISTRY_MEMORY_LIMIT:-384M}
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  # NOTE (2026-08-13, container-diet pass): schema-registry was REMOVED —
+  # verified there are ZERO references to SCHEMA_REGISTRY_URL anywhere in
+  # src/ (the backend's kafkajs producer publishes plain JSON; Avro schema
+  # validation is only needed by Debezium/Quickwit, which run in their own
+  # compose files). Restore from git history when wiring a schema-validated
+  # topic.
+  # -------------------------------------------------------------------------
 
   keycloak:
     image: quay.io/keycloak/keycloak:25.0
@@ -751,7 +622,8 @@ services:
       PGPASSWORD: ${PGPASSWORD:-changeme}
       OPENSEARCH_URL: http://opensearch:9200
       KAFKA_BROKERS: kafka:29092
-      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # SCHEMA_REGISTRY_URL intentionally unset — nothing in src/ reads it
+      # (container-diet pass, 2026-08-13; see note above the keycloak svc).
       KEYCLOAK_URL: http://keycloak:8086
       KEYCLOAK_REALM: tellus
       KEYCLOAK_CLIENT_ID: tellus-frontend

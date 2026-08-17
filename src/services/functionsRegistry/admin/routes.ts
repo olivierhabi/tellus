@@ -24,6 +24,47 @@ import {
   authorizePublish,
   executionPolicy,
 } from "../../functions/executionPolicy.js";
+import { resolveFunctionSources } from "../artifactStore.js";
+import type { FunctionVersionRow } from "../store.js";
+
+/**
+ * Hydrate `manifest.sources` for read responses.
+ *
+ * Track 2 item #8 moved published source text out of `manifest_json` into the
+ * content-addressed artifact blob, but API consumers (Ontology Manager action
+ * type editor, Workshop pickers) were built against the pre-Track-2 contract
+ * in which every version response carries the immutable inline source
+ * snapshot. Per the artifactStore design comment ("Source reads go through
+ * resolveFunctionSource(s)"), the read routes are the hydration point — the
+ * manifest stored in the row stays compact while responses restore the
+ * documented contract.
+ *
+ * Best-effort: a missing/corrupt blob degrades to the row's manifest as-is
+ * (callers fail closed on absent sources), never a 500.
+ */
+async function hydrateManifestSources(
+  row: FunctionVersionRow,
+): Promise<FunctionVersionRow> {
+  if (!row.manifest || typeof row.manifest !== "object") return row;
+  if (Array.isArray(row.manifest.sources)) return row;
+  if (
+    row.manifest.sources &&
+    typeof row.manifest.sources === "object" &&
+    Object.keys(row.manifest.sources as Record<string, unknown>).length > 0
+  ) {
+    return row;
+  }
+  try {
+    const sources = await resolveFunctionSources({
+      artifact_blob_id: row.artifactBlobId,
+      manifest_json: row.manifest as { sources?: Record<string, unknown> },
+    });
+    if (!sources || Object.keys(sources).length === 0) return row;
+    return { ...row, manifest: { ...row.manifest, sources } };
+  } catch {
+    return row;
+  }
+}
 
 /**
  * The canonical signature shape exposed to clients (Automate editors,
@@ -624,7 +665,7 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
     const branch = typeof req.query.branch === "string" ? req.query.branch : undefined;
     const includeYanked = req.query.includeYanked === "true";
     const rows = await listVersions(deps.pool, repositoryRid, { branch, includeYanked });
-    res.status(200).json({ versions: rows });
+    res.status(200).json({ versions: await Promise.all(rows.map(hydrateManifestSources)) });
   });
 
   router.get("/functions/:repositoryRid/versions/:semver", async (req: Request, res: Response) => {
@@ -639,7 +680,7 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
       sendError(res, functionsError("Functions:VersionNotFound", { repositoryRid, semver }));
       return;
     }
-    res.status(200).json(row);
+    res.status(200).json(await hydrateManifestSources(row));
   });
 
   router.get("/functions/:repositoryRid/resolve", async (req: Request, res: Response) => {
@@ -672,7 +713,7 @@ export function createFunctionsRouter(deps: FunctionsRouterDeps): Router {
       sendError(res, functionsError("Functions:VersionTargetUnsatisfied", { versionTarget, branch, defaultBranch }));
       return;
     }
-    res.status(200).json(winner);
+    res.status(200).json(await hydrateManifestSources(winner));
   });
 
   router.post("/functions/:repositoryRid/versions/:semver/yank", async (req: Request, res: Response) => {

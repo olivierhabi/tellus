@@ -21,20 +21,53 @@
 //       { "parameter": "reason", "operator": "exists" },
 //       { "role": "approver" },           // subject must hold this role
 //       { "anyRole": ["approver","admin"] },
-//       { "group": "finance" }            // subject must be in this group
+//       { "group": "finance" },           // subject must be in this group
+//       { "organization": "bihire" },     // subject's multipass org
+//       { "executionContext": "scenario" },
+//       // Nested logical group (arbitrary depth):
+//       { "operator": "any", "conditions": [ ...nodes... ] },
+//       { "operator": "none", "conditions": [ ...nodes... ] }
 //     ]
 //   }
 // A bare string condition ("statusIsDraft") is treated as an always-pass label.
+//
+// NESTED GROUPS. A condition node is either a LEAF (the predicate shapes above)
+// or a GROUP — `{ operator: "all"|"any"|"none", conditions: [...] }` — which
+// combines child nodes recursively. `none` passes iff NO child passes. Groups
+// nest to arbitrary depth; an empty group passes (vacuous, matching the
+// top-level empty-criteria allow-all rule). This is what the Ontology Manager
+// "Security & Submission Criteria" editor authors via its "logical operator"
+// rows, so the evaluator MUST understand them: an unrecognised condition object
+// falls through to always-pass (forward compatibility), which would silently
+// disable every criterion nested inside a group the evaluator can't read.
 // ---------------------------------------------------------------------------
 
 export type SubmissionOperator =
   | "eq" | "ne" | "lt" | "lte" | "gt" | "gte"
-  | "in" | "nin" | "exists" | "absent" | "truthy" | "falsy";
+  | "in" | "nin" | "exists" | "absent" | "truthy" | "falsy"
+  // Regex match against the stringified operand ("matches" in the OM editor).
+  | "matches"
+  // Multi-value (array operand) predicates surfaced by the OM editor as
+  // "includes" / "includes any" / "each is" / "each is not". `in`/`nin` remain
+  // the scalar-in-list form ("is included in").
+  | "contains" | "containsAny" | "eachIs" | "eachIsNot";
+
+/** Logical combinator for a nested condition group. */
+export type SubmissionGroupOperator = "all" | "any" | "none";
 
 export interface SubmissionSubject {
   username?: string | null;
   roles?: string[];
   groups?: string[];
+  /** Multipass organizations the subject belongs to (securityContext.organizations). */
+  organizations?: string[];
+  /**
+   * The execution context the action is being submitted under. Foundry
+   * distinguishes a normal ("live") submission from one made inside a
+   * scenario / what-if sandbox; `{ executionContext: "scenario" }` conditions
+   * gate on it. Absent ⇒ treated as "live".
+   */
+  executionContext?: string | null;
 }
 
 export interface SubmissionEvaluation {
@@ -93,6 +126,33 @@ function compare(actual: unknown, op: SubmissionOperator, expected: unknown): bo
       if (Number.isNaN(a) || Number.isNaN(b)) return false;
       return op === "lt" ? a < b : op === "lte" ? a <= b : op === "gt" ? a > b : a >= b;
     }
+    // Regex match ("matches" in the OM editor). An invalid pattern fails
+    // closed rather than throwing out of the evaluator.
+    case "matches": {
+      if (actual == null || expected == null) return false;
+      try {
+        return new RegExp(String(expected)).test(String(actual));
+      } catch {
+        return false;
+      }
+    }
+    // Multi-value predicates: the LHS is the array operand.
+    case "contains":
+      return asArray(actual).some((a) => a === expected || String(a) === String(expected));
+    case "containsAny": {
+      const lhs = asArray(actual);
+      return asArray(expected).some((e) =>
+        lhs.some((a) => a === e || String(a) === String(e)),
+      );
+    }
+    case "eachIs": {
+      const lhs = asArray(actual);
+      // Vacuous truth on an empty operand matches `Array.every` semantics and
+      // the "no values to violate the rule" reading.
+      return lhs.every((a) => a === expected || String(a) === String(expected));
+    }
+    case "eachIsNot":
+      return asArray(actual).every((a) => !(a === expected || String(a) === String(expected)));
     default:
       return false;
   }
@@ -100,7 +160,7 @@ function compare(actual: unknown, op: SubmissionOperator, expected: unknown): bo
 
 interface Condition {
   parameter?: string;
-  operator?: SubmissionOperator;
+  operator?: SubmissionOperator | SubmissionGroupOperator;
   value?: unknown;
   role?: string;
   anyRole?: string[];
@@ -108,6 +168,22 @@ interface Condition {
   anyGroup?: string[];
   username?: string;
   anyUsername?: string[];
+  /** Subject's multipass organization must include this org. */
+  organization?: string;
+  /** Subject must belong to at least one of these organizations. */
+  anyOrganization?: string[];
+  /**
+   * Gate on the submission's execution context (e.g. "scenario" vs "live").
+   * Compared case-insensitively against `subject.executionContext`; an absent
+   * subject context is treated as "live".
+   */
+  executionContext?: string;
+  /**
+   * Nested logical group — present iff this node is a GROUP rather than a
+   * leaf predicate. `operator` then carries the combinator ("all"|"any"|
+   * "none") and `conditions` the child nodes, evaluated recursively.
+   */
+  conditions?: Condition[];
   description?: string;
   /**
    * D27 — when set alongside `parameter`, the operand is a PROPERTY of the
@@ -146,6 +222,107 @@ interface Condition {
    * object_reference param.
    */
   objectType?: string;
+}
+
+const GROUP_OPERATORS = new Set<string>(["all", "any", "none"]);
+
+/**
+ * A node is a GROUP iff it carries a `conditions` array. `operator` then names
+ * the combinator; anything unrecognised degrades to "all" (the safest reading:
+ * every child must hold).
+ */
+function isGroupNode(cond: Condition): boolean {
+  return Array.isArray(cond.conditions);
+}
+
+function groupOperatorOf(cond: Condition): SubmissionGroupOperator {
+  const op = typeof cond.operator === "string" ? cond.operator : "all";
+  return (GROUP_OPERATORS.has(op) ? op : "all") as SubmissionGroupOperator;
+}
+
+/**
+ * Evaluate a nested condition GROUP. Recurses through `evalNode`, so groups
+ * nest to arbitrary depth.
+ *
+ * - `all`  — every child must pass (empty ⇒ pass, vacuous).
+ * - `any`  — at least one child must pass (empty ⇒ pass, matching the
+ *            top-level "no conditions ⇒ allow all" rule rather than
+ *            fail-closing an unfinished group).
+ * - `none` — no child may pass (empty ⇒ pass).
+ *
+ * The group's own `description` is the author-configured failure message
+ * (root-level groups carry the failure message shown across consuming apps);
+ * when absent the child reasons are joined so the caller still learns why.
+ */
+function evalGroup(
+  cond: Condition,
+  parameters: Record<string, unknown>,
+  subject: SubmissionSubject,
+  objectPropertyValues: Record<string, unknown> | undefined,
+  depth: number,
+): { ok: boolean; reason: string } {
+  const custom = typeof cond.description === "string" && cond.description.trim()
+    ? cond.description
+    : null;
+  const op = groupOperatorOf(cond);
+  const children = (cond.conditions ?? []).filter(
+    (c) => c != null && (typeof c === "object" || typeof c === "string"),
+  );
+  if (children.length === 0) return { ok: true, reason: "" };
+
+  const results = children.map((child) =>
+    evalNode(child, parameters, subject, objectPropertyValues, depth + 1),
+  );
+  const ok =
+    op === "any"
+      ? results.some((r) => r.ok)
+      : op === "none"
+        ? !results.some((r) => r.ok)
+        : results.every((r) => r.ok);
+  if (ok) return { ok: true, reason: "" };
+
+  const childReasons = results
+    .filter((r) => !r.ok)
+    .map((r) => r.reason)
+    .filter(Boolean);
+  const synthesized =
+    op === "none"
+      ? `none of ${children.length} nested conditions may be satisfied`
+      : op === "any"
+        ? `none of ${children.length} nested 'any' conditions were satisfied${
+            childReasons.length ? `: ${childReasons.join("; ")}` : ""
+          }`
+        : childReasons.join("; ") || `nested 'all' group not satisfied`;
+  return { ok: false, reason: custom ?? synthesized };
+}
+
+/**
+ * Evaluate one condition node — dispatching a GROUP to `evalGroup` (recursive)
+ * and a leaf to `evalCondition`. `depth` bounds pathological nesting from a
+ * malformed/hostile blob so the evaluator can never blow the stack; a node
+ * deeper than the cap fails closed rather than being silently skipped.
+ */
+const MAX_GROUP_DEPTH = 32;
+
+function evalNode(
+  cond: Condition | string,
+  parameters: Record<string, unknown>,
+  subject: SubmissionSubject,
+  objectPropertyValues?: Record<string, unknown>,
+  depth = 0,
+): { ok: boolean; reason: string } {
+  // A bare string is an always-pass label (documented, backward compatible).
+  if (typeof cond === "string") return { ok: true, reason: "" };
+  if (cond == null || typeof cond !== "object") return { ok: true, reason: "" };
+  if (depth > MAX_GROUP_DEPTH) {
+    return {
+      ok: false,
+      reason: `submission criteria nested deeper than ${MAX_GROUP_DEPTH} levels`,
+    };
+  }
+  return isGroupNode(cond)
+    ? evalGroup(cond, parameters, subject, objectPropertyValues, depth)
+    : evalCondition(cond, parameters, subject, objectPropertyValues);
 }
 
 function evalCondition(
@@ -235,6 +412,27 @@ function evalCondition(
     const ok = cond.anyGroup.some((g) => groups.includes(g));
     return { ok, reason: ok ? "" : (custom ?? `subject not in any of groups ${JSON.stringify(cond.anyGroup)}`) };
   }
+  // Multipass organization predicates ("Current User · Organizations ·
+  // Includes any of · <org>" in the OM editor).
+  const organizations = subject.organizations ?? [];
+  if (cond.organization) {
+    const ok = organizations.includes(cond.organization);
+    return { ok, reason: ok ? "" : (custom ?? `subject not in required organization '${cond.organization}'`) };
+  }
+  if (cond.anyOrganization && cond.anyOrganization.length) {
+    const ok = cond.anyOrganization.some((o) => organizations.includes(o));
+    return { ok, reason: ok ? "" : (custom ?? `subject not in any of organizations ${JSON.stringify(cond.anyOrganization)}`) };
+  }
+  // Execution-context predicate ("Execution context · is · Scenario").
+  // An absent subject context means a normal submission ⇒ "live".
+  if (cond.executionContext) {
+    const actualCtx = (subject.executionContext ?? "live").toLowerCase();
+    const ok = actualCtx === cond.executionContext.toLowerCase();
+    return {
+      ok,
+      reason: ok ? "" : (custom ?? `execution context is not '${cond.executionContext}' (was '${actualCtx}')`),
+    };
+  }
   // Unknown/label condition → pass (forward-compatible).
   return { ok: true, reason: "" };
 }
@@ -267,10 +465,11 @@ export function evaluateSubmissionCriteria(
 
   if (conditions.length === 0) return { ok: true, failures: [] };
 
+  // evalNode dispatches leaf-vs-group, so a root-level `{operator:"any",
+  // conditions:[...]}` node recurses instead of falling through the
+  // unknown-condition always-pass branch.
   const results = conditions.map((cond) =>
-    typeof cond === "string"
-      ? { ok: true, reason: "" }
-      : evalCondition(cond, parameters, subject, objectPropertyValues),
+    evalNode(cond, parameters, subject, objectPropertyValues, 0),
   );
   const failures = results.filter((r) => !r.ok).map((r) => r.reason);
 
@@ -288,8 +487,34 @@ export function evaluateSubmissionCriteria(
   };
 }
 
-/** Flatten a criteria blob (array or `{conditions:[]}`) into its conditions. */
+/**
+ * Flatten a criteria blob (array or `{conditions:[]}`) into its LEAF
+ * conditions, descending through nested logical groups.
+ *
+ * Callers use this to find the conditions needing IO pre-resolution (D27
+ * object-property operands) and to introspect a criteria blob. Since a group
+ * node is itself `{operator, conditions:[...]}`, a non-recursive flatten would
+ * return the group instead of the leaves inside it — and every object-property
+ * condition nested in a group would go unresolved, then fail closed at
+ * evaluation time. Groups are therefore expanded and only leaves returned.
+ */
 export function extractConditions(criteria: unknown): Condition[] {
+  const top = topLevelConditions(criteria);
+  const out: Condition[] = [];
+  const walk = (nodes: Condition[], depth: number) => {
+    if (depth > MAX_GROUP_DEPTH) return;
+    for (const node of nodes) {
+      if (node == null || typeof node !== "object") continue;
+      if (Array.isArray(node.conditions)) walk(node.conditions, depth + 1);
+      else out.push(node);
+    }
+  };
+  walk(top, 0);
+  return out;
+}
+
+/** The criteria blob's own condition array, without descending into groups. */
+function topLevelConditions(criteria: unknown): Condition[] {
   if (criteria == null) return [];
   if (Array.isArray(criteria)) return criteria as Condition[];
   if (typeof criteria === "object") {

@@ -203,6 +203,18 @@ interface TransactionFile {
   file_path: string;
   transaction_type: string;
   committed_at: string;
+  /**
+   * True for the SYNTHETIC transaction that legacy file-backed and
+   * foundry-bridged datasources fabricate below — those have no row in
+   * `dataset_transaction`, so their `transaction_id` is a human-readable label
+   * ("legacy" / "foundry-bridge"), NOT a uuid. It must never reach
+   * `object_instances.source_transaction_id`, which is a `uuid` column: doing so
+   * aborts the whole reindex with `invalid input syntax for type uuid:
+   * "foundry-bridge"` (a 2026-08-16 production 500 on Force Reindex for every
+   * wizard-created object type). The label stays usable for logs and the
+   * reindex_history metadata blob.
+   */
+  synthetic?: boolean;
 }
 
 interface ReindexStats {
@@ -393,7 +405,15 @@ export async function reindexObjectType(
   };
 
   let objectTypeId: string;
+  /** Label of the last transaction merged — for logs and reindex_history only. */
   let lastTransactionId: string | null = null;
+  /**
+   * The same value, but ONLY when it is a real `dataset_transaction` uuid. This
+   * is the one that may be written to `object_instances.source_transaction_id`
+   * (a `uuid` column). Synthetic labels stay null here — see
+   * TransactionFile.synthetic.
+   */
+  let lastTransactionUuid: string | null = null;
   let replacementIndexName: string | null = null;
   let replacementCutoverComplete = false;
   let rollbackIndexName: string | null = null;
@@ -518,6 +538,8 @@ export async function reindexObjectType(
           file_path: datasource.file_path,
           transaction_type: "SNAPSHOT",
           committed_at: new Date().toISOString(),
+          // Not a uuid — see TransactionFile.synthetic.
+          synthetic: true,
         },
       ];
       // Format detection: prefer the explicit `file_format` column
@@ -560,6 +582,39 @@ export async function reindexObjectType(
     await setPipelineStage(objectTypeApiName, "merge_changes");
 
     const objectMap = new Map<string, Record<string, unknown>>();
+
+    // BOUNDED, and honest about why. The transaction FILES are streamed
+    // (parseCsvReadable), so we no longer materialise a 5.6 M-row array before
+    // the merge starts — but this Map is still O(distinct PKs) live objects,
+    // each holding a full property doc. At a few million objects that is
+    // multiple GB of heap, and the failure mode is the worst kind: V8
+    // aborts the WHOLE Node process on OOM, so one oversized Force Reindex
+    // takes down every unrelated request in flight, and the run's own
+    // funnel_run row is left stranded at status='running' with no error
+    // recorded (there is no catch block that survives an OOM abort).
+    //
+    // This guard does NOT make the legacy reindex path scale — it converts an
+    // unattributable process kill into a clean, attributable, per-object-type
+    // error that names the object type, the count, and the knob. Genuinely
+    // fixing it means spilling the merge to disk (DuckDB, as the OSv2 funnel's
+    // mergeChangesSQL already does) instead of collapsing it in heap; that is
+    // the Object Storage V2 funnel path, which is why large types should go
+    // through the funnel rather than Force Reindex.
+    const REINDEX_MAX_MERGED_OBJECTS = parsePositiveIntEnv(
+      process.env.REINDEX_MAX_MERGED_OBJECTS,
+      2_000_000,
+    );
+    const assertMergeBudget = () => {
+      if (objectMap.size <= REINDEX_MAX_MERGED_OBJECTS) return;
+      throw appError(
+        "REINDEX_TOO_LARGE",
+        `Object type '${objectTypeApiName}' merged past ${REINDEX_MAX_MERGED_OBJECTS} distinct primary keys, ` +
+          `the in-memory limit for the datasource reindex path. Aborting before the process runs out of heap. ` +
+          `Index this object type through the Object Storage V2 funnel (which merges on disk via DuckDB), ` +
+          `or raise REINDEX_MAX_MERGED_OBJECTS if this process has headroom for it.`,
+        { failedAtStep: "merge_changes" },
+      );
+    };
 
     for (const txn of transactions) {
       // Rows now arrive as an async iterable (streamed from S3/disk via
@@ -671,11 +726,20 @@ export async function reindexObjectType(
           }
         } else {
           objectMap.set(pkStr, doc);
+          // Only a NEW key can grow the map, so check on that edge only —
+          // an overwrite of an existing key is memory-neutral.
+          if (objectMap.size % 50_000 === 0) assertMergeBudget();
         }
       }
 
       lastTransactionId = txn.transaction_id;
+      lastTransactionUuid = txn.synthetic ? null : txn.transaction_id;
     }
+
+    // The sampled check above fires every 50 000 new keys, so a run that ends
+    // just past the budget slips through it. Check once more on the exact
+    // final size before committing to the indexing stage.
+    assertMergeBudget();
 
     // Capture datasource count BEFORE applying edits
     const objectsFromDatasource = objectMap.size;
@@ -959,7 +1023,9 @@ export async function reindexObjectType(
         properties: doc,
         markings: secured._security?.markings ?? [],
         source_datasource_id: null,
-        source_transaction_id: lastTransactionId ?? null,
+        // NOT lastTransactionId — that may be a synthetic label
+        // ("foundry-bridge" / "legacy") and this column is a `uuid`.
+        source_transaction_id: lastTransactionUuid,
       });
       batchDocs++;
       processedDocs++;

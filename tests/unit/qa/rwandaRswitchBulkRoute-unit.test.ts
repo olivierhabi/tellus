@@ -1,13 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { query, withTransaction, appendAuditRow } = vi.hoisted(() => ({
+const { query, withTransaction, appendAuditRow, publishCommittedObjectOverlay, openSearchBulk } = vi.hoisted(() => ({
   query: vi.fn(),
   withTransaction: vi.fn(),
   appendAuditRow: vi.fn(),
+  publishCommittedObjectOverlay: vi.fn(),
+  openSearchBulk: vi.fn(),
 }));
 
 vi.mock("../../../src/db", () => ({ query, withTransaction }));
 vi.mock("../../../src/models/actionAuditLog", () => ({ appendAuditRow }));
+vi.mock("../../../src/services/overlay/writebackOverlay", () => ({ publishCommittedObjectOverlay }));
+vi.mock("../../../src/services/opensearch/client", () => ({
+  client: { bulk: openSearchBulk },
+}));
 
 import {
   executeRwandaRswitchBulkReconciliation,
@@ -41,6 +47,16 @@ describe("Rwanda RSwitch production bulk route", () => {
             const batchIds = values?.[2] as string[];
             return { rowCount: transactionIds.length, rows: transactionIds.map((transaction_id, index) => ({ transaction_id, batch_id: batchIds[index] })) };
           }
+          if (sql.includes("UPDATE object_instances")) {
+            return {
+              rowCount: (values?.[3] as string[] | undefined)?.length ?? 0,
+              rows: ((values?.[3] as string[] | undefined) ?? []).map((primary_key) => ({
+                primary_key,
+                properties: { status: "RECONCILED", reconciliationEligibility: "ELIGIBLE" },
+                version: 2,
+              })),
+            };
+          }
           return { rowCount: 1, rows: [] };
         }),
       };
@@ -48,6 +64,8 @@ describe("Rwanda RSwitch production bulk route", () => {
     });
     let audit = 0;
     appendAuditRow.mockImplementation(async () => ({ auditId: `audit-${++audit}` }));
+    publishCommittedObjectOverlay.mockResolvedValue(undefined);
+    openSearchBulk.mockResolvedValue({ body: { errors: false } });
   });
 
   it("uses one transaction and set-based writes per 100 records while retaining one durable audit per accepted target", async () => {
@@ -63,6 +81,15 @@ describe("Rwanda RSwitch production bulk route", () => {
     expect(result.perRecordResults).toHaveLength(201);
     expect(withTransaction).toHaveBeenCalledTimes(3);
     expect(appendAuditRow).toHaveBeenCalledTimes(201);
+    expect(publishCommittedObjectOverlay).toHaveBeenCalledTimes(201);
+    expect(openSearchBulk).toHaveBeenCalledTimes(3);
+    expect(publishCommittedObjectOverlay).toHaveBeenCalledWith(expect.objectContaining({
+      branchId: null,
+      objectType: "QaRwRswitchPaymentTransactions",
+      primaryKey: "tx-0",
+      doc: { status: "RECONCILED", reconciliationEligibility: "ELIGIBLE" },
+      version: 2,
+    }));
   });
 
   it("rolls back the entire chunk when durable audit append fails", async () => {
@@ -104,6 +131,16 @@ describe("Rwanda RSwitch production bulk route", () => {
           }
           if (sql.includes("rwanda_bulk_reconciliation_business_key")) {
             return { rowCount: 1, rows: [{ transaction_id: "accepted", batch_id: "settlement-1" }] };
+          }
+          if (sql.includes("UPDATE object_instances")) {
+            return {
+              rowCount: 1,
+              rows: [{
+                primary_key: "accepted",
+                properties: { status: "RECONCILED", reconciliationEligibility: "ELIGIBLE" },
+                version: 2,
+              }],
+            };
           }
           return { rowCount: 1, rows: [] };
         }),

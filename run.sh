@@ -12,17 +12,28 @@
 #
 # Usage:
 #   ./run.sh                 # build + start everything, wait for healthy
+#   ./run.sh --core          # DEV DAILY-DRIVER: start ONLY the core infra the
+#                            # host backend (`pnpm dev`) needs — postgres,
+#                            # opensearch, keycloak, minio (+minio-init).
+#                            # Skips kafka/zk, clickhouse, redis, temporal,
+#                            # lakekeeper and the containerised `app`: the app
+#                            # tolerates all of them being down (in-memory /
+#                            # PG fallbacks; verify with `docker compose ... ps`).
 #   ./run.sh --no-build      # start without rebuilding the app image
 #   ./run.sh --pull          # pull newer base images before building
 #   ./run.sh --recreate      # force-recreate containers
 #   ./run.sh --no-wait       # start in background, don't block on health
 #   ./run.sh --no-bootstrap  # skip the post-up bootstrap (migrations, realm,
 #                            # superadmin, passkey gate) — just up + health
-#   ./run.sh --logs          # tail app logs after it becomes healthy
+#   ./run.sh --logs          # tail app logs after it becomes healthy (full mode)
 #   ./run.sh -h | --help
 #
+# Service-subset override: set RUN_SERVICES to a space-separated service list
+# (e.g. RUN_SERVICES="postgres keycloak opensearch minio redis clickhouse")
+# to bring up exactly that set instead of the full stack or the --core set.
+#
 # Overridable via env: COMPOSE_FILE, PROJECT_NAME, ENV_FILE, HEALTH_TIMEOUT,
-# RUN_BOOTSTRAP (default 1; set 0 to skip the bootstrap phase).
+# RUN_BOOTSTRAP (default 1; set 0 to skip the bootstrap phase), RUN_SERVICES.
 # =============================================================================
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -41,6 +52,16 @@ HEALTH_POLL="${HEALTH_POLL:-5}"           # poll interval, seconds
 # --- flags -------------------------------------------------------------------
 DO_BUILD=1; DO_PULL=0; RECREATE=0; WAIT=1; FOLLOW_LOGS=0
 DO_BOOTSTRAP="${RUN_BOOTSTRAP:-1}"
+MODE="${RUN_MODE:-full}"
+
+# Daily-driver dev core (2026-08-13 container-diet pass): the only infra the
+# host backend (`pnpm dev`/nodemon) hard-requires. Everything else the app
+# degrades around (redis→in-memory, clickhouse→PG, temporal→PG dispatcher,
+# lakekeeper→PG shim, kafka→events dropped harmlessly, and schema-registry /
+# autoheal / mem-monitor / pg-backup were removed from the default stack
+# having no code usage at all).
+# shellcheck disable=SC2206
+CORE_SERVICES=(postgres opensearch keycloak minio minio-init)
 
 # --- pretty logging (auto-disabled when not a TTY or NO_COLOR set) ------------
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -75,6 +96,7 @@ usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
 # --- parse args --------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --core)      MODE=core ;;
     --no-build)  DO_BUILD=0 ;;
     --pull)      DO_PULL=1 ;;
     --recreate)  RECREATE=1 ;;
@@ -157,7 +179,7 @@ wait_for_service_healthy() {
   local deadline=$(( $(date +%s) + timeout ))
   log "waiting up to ${timeout}s for $svc to become healthy…"
   while :; do
-    local id; id="$("${COMPOSE[@]}" ps -q "$svc" 2>/dev/null || true)"
+    local id; id="$("${COMPOSE[@]}" ps -q -a "$svc" 2>/dev/null | head -1 || true)"
     if [[ -n "$id" ]]; then
       local state health
       state="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null || echo unknown)"
@@ -165,6 +187,11 @@ wait_for_service_healthy() {
       if [[ "$state" == "running" && ( "$health" == "healthy" || "$health" == "none" ) ]]; then
         ok "$svc is ready"
         return 0
+      elif [[ "$state" == "exited" && "$health" == "none" ]]; then
+        # One-shot containers (*-init, *-migrate, *-bootstrap) exit by design.
+        local rc; rc="$(docker inspect -f '{{.State.ExitCode}}' "$id" 2>/dev/null || echo 1)"
+        if [[ "$rc" == "0" ]]; then ok "$svc is ready (one-shot, exited 0)"; return 0
+        else die "$svc exited with rc=$rc"; fi
       fi
     fi
     if [[ $(date +%s) -ge $deadline ]]; then
@@ -246,7 +273,11 @@ bootstrap_keycloak_realm() {
   local kc_realm kc_port kc_url
   kc_realm="$(env_val KEYCLOAK_REALM)"; kc_realm="${kc_realm:-tellus}"
   # Derive the keycloak host port from THIS project's compose config.
-  kc_port="$("${COMPOSE[@]}" port keycloak 8086 2>/dev/null | sed 's/.*://')" || kc_port=""
+  # `|| true` group INSIDE the substitution: a missing/stopped keycloak
+  # service is an EXPECTED state (e.g. hosted by the per-suffix verify
+  # project) and must not trip the ERR trap in the subshell with a scary
+  # "[err] failed at line".
+  kc_port="$({ "${COMPOSE[@]}" port keycloak 8086 2>/dev/null || true; } | sed 's/.*://')" || kc_port=""
   kc_port="${kc_port:-8086}"
   kc_url="http://127.0.0.1:${kc_port}"
   if curl -sf "${kc_url}/realms/${kc_realm}" -o /dev/null 2>&1; then
@@ -292,7 +323,11 @@ bootstrap_ensure_superadmin() {
   kc_realm="$(env_val KEYCLOAK_REALM)"; kc_realm="${kc_realm:-tellus}"
   # Derive the keycloak host port from THIS project's compose config so the
   # bootstrap works for any project (Elie: 8086, Sam: 8087, etc.).
-  kc_port="$("${COMPOSE[@]}" port keycloak 8086 2>/dev/null | sed 's/.*://')" || kc_port=""
+  # `|| true` group INSIDE the substitution: a missing/stopped keycloak
+  # service is an EXPECTED state (e.g. hosted by the per-suffix verify
+  # project) and must not trip the ERR trap in the subshell with a scary
+  # "[err] failed at line".
+  kc_port="$({ "${COMPOSE[@]}" port keycloak 8086 2>/dev/null || true; } | sed 's/.*://')" || kc_port=""
   kc_port="${kc_port:-8086}"
   kc_url="http://127.0.0.1:${kc_port}"
   local tok
@@ -448,6 +483,45 @@ bootstrap_duckdb_binding() {
   fi
 }
 
+# Core-mode bootstrap: no containerised `app`, no temporal, no duckdb — the
+# backend runs on the host (`pnpm dev`). We do the infra-only parts: PG
+# password sync, keycloak realm + superadmin + passkey gate. Migrations:
+# if the ledger is missing AND the app image exists, run them via the image
+# (same as full mode); otherwise point the user at the host pnpm scripts
+# (the host dev backend is what needs the schema anyway).
+# Called with the STARTED service list ($@) so it can skip keycloak when a
+# foreign container already serves :8086.
+post_up_bootstrap_core() {
+  log "post-up bootstrap (core: keycloak realm + superadmin + login gate)"
+  wait_for_service_healthy postgres 120
+  local want=""
+  for s in "$@"; do [[ "$s" == "keycloak" ]] && want=1; done
+  if [[ -n "$want" ]]; then
+    wait_for_service_healthy keycloak 180
+  else
+    log "keycloak owned by a foreign project — skipping its health gate (realm bootstrap still targets the published host port)"
+  fi
+  bootstrap_sync_pg_password
+
+  local pguser pgdb marker
+  pguser="$(env_val PGUSER)"; pguser="${pguser:-tellus}"
+  pgdb="$(env_val PGDATABASE)"; pgdb="${pgdb:-tellus_db}"
+  marker="$("${COMPOSE[@]}" exec -T postgres psql -U "$pguser" -d "$pgdb" \
+            -tAc "SELECT to_regclass('schema_migrations_applied')" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$marker" == "schema_migrations_applied" ]]; then
+    ok "schema ledger present — skipping migrations"
+  elif docker image inspect tellus-app >/dev/null 2>&1; then
+    bootstrap_run_migrations
+  else
+    warn "fresh database and no app image (core mode doesn't build it) — run on the host: pnpm migrate && pnpm migrate:foundry && pnpm migrate:auth"
+  fi
+
+  bootstrap_keycloak_realm
+  bootstrap_ensure_superadmin
+  bootstrap_disable_passkey_gate
+  ok "core post-up bootstrap complete"
+}
+
 # Orchestrate the full post-up bootstrap. Called from main() only when
 # DO_BOOTSTRAP=1 and WAIT=1 (the app must reach healthy before the late steps).
 post_up_bootstrap() {
@@ -482,6 +556,27 @@ post_up_bootstrap() {
   fi
   bootstrap_disable_passkey_gate
   ok "post-up bootstrap complete"
+}
+
+# --- core-mode summary -------------------------------------------------------
+summary_core() {
+  echo
+  ok "Tellus dev-core infra is up ($(as_line "${services[@]}"))."
+  cat <<'EOF'
+   • PostgreSQL         localhost:5432
+   • OpenSearch         http://localhost:9200
+   • Keycloak           http://localhost:8086
+   • MinIO (S3 API/UI)  http://localhost:9000 / http://localhost:9001
+
+  NOT started (backend degrades gracefully): kafka/zk, redis, clickhouse,
+  temporal, lakekeeper, the containerised app — run the backend on the host
+  with `pnpm dev` and the FE in tellus-fe with `pnpm dev`.
+EOF
+  echo
+  log "status:";  "${COMPOSE[@]}" ps
+  echo
+  log "full stack:  ./run.sh   (adds kafka, clickhouse, redis, temporal, lakekeeper, app)"
+  log "stop stack:  ./stop.sh"
 }
 
 # --- endpoint summary --------------------------------------------------------
@@ -532,24 +627,102 @@ main() {
   [[ "$DO_BUILD"  -eq 1 ]] && up+=(--build)
   [[ "$RECREATE"  -eq 1 ]] && up+=(--force-recreate)
 
-  log "starting stack: $(as_line "${COMPOSE[@]}") $(as_line "${up[@]}")"
-  "${COMPOSE[@]}" "${up[@]}"
-
-  if [[ "$WAIT" -eq 1 ]]; then
-    if [[ "$DO_BOOTSTRAP" -eq 1 ]]; then
-      post_up_bootstrap
-    else
-      wait_for_health
-    fi
-  else
-    warn "--no-wait set: not gating on health (bootstrap skipped)"
+  # Resolve the service subset: explicit RUN_SERVICES env wins, then --core,
+  # then the full stack (no service list).
+  local services=()
+  if [[ -n "${RUN_SERVICES:-}" ]]; then
+    # shellcheck disable=SC2206
+    services=(${RUN_SERVICES})
+  elif [[ "$MODE" == "core" ]]; then
+    services=("${CORE_SERVICES[@]}")
   fi
 
-  summary
+  # Foreign-keycloak guard (2026-08-13): port 8086 may already be held by a
+  # container from ANOTHER compose project — historically the standalone
+  # docker-compose-files/keycloak.docker-compose.yml (`tellus-keycloak`,
+  # uncapped, KC_DB=dev-file). Also possible: the capped per-suffix sibling
+  # (tellus-verify-keycloak) while the user wants THIS project's Keycloak
+  # (kc-proxy). `compose up` on our keycloak in that case aborts with a
+  # bind conflict and the ERR trap leaves the rest half-started. Drop our
+  # keycloak from the start set; the app still reaches Keycloak on the
+  # published host port regardless of which project serves it.
+  local kc_held_foreign=""
+  if [[ ${#services[@]} -gt 0 ]]; then
+    local holder holder_project
+    holder="$(docker ps -q --filter publish=8086 2>/dev/null | head -1 || true)"
+    if [[ -n "$holder" ]]; then
+      holder_project="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$holder" 2>/dev/null || true)"
+      local holder_name; holder_name="$(docker inspect -f '{{.Name}}' "$holder" 2>/dev/null | sed 's#^/##')"
+      if [[ "$holder_project" != "$PROJECT_NAME" ]]; then
+        kc_held_foreign="$holder_name (${holder_project:-unknown})"
+        warn "port 8086 is held by foreign container '$holder_name' (compose project '${holder_project:-unknown}') — skipping THIS project's keycloak service; the app still reaches Keycloak on localhost:8086"
+        local kept=() svc_name
+        for svc_name in "${services[@]}"; do
+          [[ "$svc_name" == "keycloak" ]] || kept+=("$svc_name")
+        done
+        services=("${kept[@]}")
+      fi
+    fi
+  fi
+
+  if [[ ${#services[@]} -gt 0 ]]; then
+    # Diet enforcement (verified empirically): `up <subset>` does NOT stop
+    # services outside the subset — `--remove-orphans` only prunes services
+    # that were REMOVED FROM THE FILE. Stop the complement explicitly, or
+    # kafka/clickhouse/temporal keep burning RAM/CPU despite core mode.
+    local stop_list=() defined svc line in_set
+    defined="$("${COMPOSE[@]}" config --services 2>/dev/null)"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      in_set=""
+      for svc in "${services[@]}"; do [[ "$svc" == "$line" ]] && in_set=1; done
+      [[ -z "$in_set" ]] && stop_list+=("$line")
+    done <<< "$defined"
+    if [[ ${#stop_list[@]} -gt 0 ]]; then
+      log "stopping out-of-subset services: $(as_line "${stop_list[@]}")"
+      "${COMPOSE[@]}" stop "${stop_list[@]}" >/dev/null 2>&1 || true
+    fi
+
+    log "starting ${#services[@]} services (mode=$MODE): $(as_line "${services[@]}")"
+    "${COMPOSE[@]}" "${up[@]}" "${services[@]}"
+    if [[ "$WAIT" -eq 1 ]]; then
+      # Gate on the named services only — the rest of the stack is
+      # intentionally down/paused, so the full wait_for_health can never
+      # pass. Note: `--remove-orphans` + a service list also DOWNs any
+      # running service not in the list (by design — it prunes the stack
+      # to exactly this subset).
+      for svc in "${services[@]}"; do
+        wait_for_service_healthy "$svc" 180
+      done
+      [[ "$DO_BOOTSTRAP" -eq 1 ]] && post_up_bootstrap_core "${services[@]}"
+    else
+      warn "--no-wait set: not gating on health (bootstrap skipped)"
+    fi
+    summary_core
+  else
+    log "starting stack: $(as_line "${COMPOSE[@]}") $(as_line "${up[@]}")"
+    "${COMPOSE[@]}" "${up[@]}"
+
+    if [[ "$WAIT" -eq 1 ]]; then
+      if [[ "$DO_BOOTSTRAP" -eq 1 ]]; then
+        post_up_bootstrap
+      else
+        wait_for_health
+      fi
+    else
+      warn "--no-wait set: not gating on health (bootstrap skipped)"
+    fi
+
+    summary
+  fi
 
   if [[ "$FOLLOW_LOGS" -eq 1 ]]; then
-    log "tailing app logs (Ctrl-C to detach; stack keeps running)…"
-    exec "${COMPOSE[@]}" logs -f app
+    if [[ ${#services[@]} -gt 0 ]]; then
+      warn "--logs in core/subset mode: no containerised app — follow your host \`pnpm dev\` instead"
+    else
+      log "tailing app logs (Ctrl-C to detach; stack keeps running)…"
+      exec "${COMPOSE[@]}" logs -f app
+    fi
   fi
 }
 

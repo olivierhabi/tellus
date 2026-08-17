@@ -145,3 +145,32 @@ export function findNearNameMatches(
 
   return suggestions;
 }
+
+// ---------------------------------------------------------------------------
+// Union side-naming — "left"/"right" only make sense for two inputs.
+// ---------------------------------------------------------------------------
+
+/**
+ * How to name the two divergence sets in a union message.
+ *
+ * The union node became N-input to match Palantir's `union*ByNameV1`
+ * (`List<Table>`), but the messages still read "Left-only"/"Right-only". With
+ * three inputs there is no single "right" side, so a user reading
+ * "Right-only: orderId" cannot tell which of inputs 2..N actually has it.
+ *
+ * `firstOnly` describes columns the first input has that some later input
+ * lacks; `laterOnly` describes columns absent from the first input.
+ */
+export function unionSideLabels(inputCount: number): {
+  firstOnly: string;
+  laterOnly: string;
+  allInputs: string;
+} {
+  return inputCount === 2
+    ? { firstOnly: 'only in left', laterOnly: 'only in right', allInputs: 'both inputs' }
+    : {
+        firstOnly: 'missing from at least one later input',
+        laterOnly: 'absent from the first input',
+        allInputs: `all ${inputCount} inputs`,
+      };
+}

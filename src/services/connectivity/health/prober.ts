@@ -19,6 +19,8 @@ import { getPool } from "../connectors/postgresql/pool";
 import { TellusError } from "../../../lib/errors/envelope";
 import { listProbeTargets } from "../store/connections.repo";
 import { recordStatus, stateForTellusError } from "./recordStatus";
+import { observeProbe } from "../metrics";
+import { withWorkerLease } from "../workerLease";
 
 let timer: NodeJS.Timeout | null = null;
 
@@ -37,7 +39,7 @@ export function startHealthProber(): void {
   if (process.env.TELLUS_DISABLE_HEALTH_PROBER === "1") return;
   if (timer) return;
   timer = setInterval(() => {
-    void probeAll().catch((err) => {
+    void probeTick().catch((err) => {
       // eslint-disable-next-line no-console
       console.error("[connectivity.health.prober] tick failed", err);
     });
@@ -45,7 +47,16 @@ export function startHealthProber(): void {
   // setInterval keeps the loop alive otherwise; the prober is background-only.
   timer.unref?.();
   // First sweep on boot so a freshly-restarted process refreshes status.
-  void probeAll().catch(() => undefined);
+  void probeTick().catch(() => undefined);
+}
+
+/**
+ * One leader-gated sweep. Without the lease every replica probes every
+ * connection each tick, multiplying outbound load and status writes by the
+ * replica count. Returns null when another replica holds the lease.
+ */
+export function probeTick(): Promise<{ healthy: number; unhealthy: number } | null> {
+  return withWorkerLease("health-prober", probeAll);
 }
 
 export function stopHealthProber(): void {
@@ -98,9 +109,13 @@ export async function probeAll(): Promise<{ healthy: number; unhealthy: number }
   let unhealthy = 0;
   for (const { rid, tenant, connectorType } of targets) {
     if (connectorType !== "postgresql") continue;
+    const started = process.hrtime.bigint();
+    const elapsedMs = (): number =>
+      Number(process.hrtime.bigint() - started) / 1_000_000;
     try {
       const pg = await getPool(rid);
       await withTimeout(pg.query("SELECT 1"), PROBE_TIMEOUT_MS);
+      observeProbe(connectorType, "HEALTHY", elapsedMs());
       await recordStatus(rid, "HEALTHY", { probedBy: "system:health-prober" });
       healthy += 1;
     } catch (err) {
@@ -108,6 +123,7 @@ export async function probeAll(): Promise<{ healthy: number; unhealthy: number }
         err instanceof TellusError
           ? stateForTellusError(err.definition.errorName)
           : stateForProbeError(err);
+      observeProbe(connectorType, state, elapsedMs());
       await recordStatus(rid, state, {
         probedBy: "system:health-prober",
         reason:

@@ -38,7 +38,20 @@
 // unreachable, record/read silently no-op and the merge proceeds WITHOUT resume
 // (a retry redoes the PG tail — correct, just slower). Redis can never block or
 // fail the merge.
+//
+// 2026-08-16 — that promise used to be FALSE. This module's own
+// `reconnectStrategy` returned a number, which in node-redis v4 means "retry
+// forever", so `client.connect()` never settled while Redis was down and the
+// pending promise was cached for the process lifetime. `readMergeProgress()` at
+// the top of the merge PG tail therefore hung the merge activity indefinitely —
+// ObjectStorage V2 indexing stuck on "Merge changes" for three days. The
+// bounded-connect contract now lives in lib/redisConnect.ts; see that file for
+// why a `connectTimeout` alone cannot bound this. The fail-open promise above is
+// now actually enforced: getRedis() cannot block for longer than the connect
+// deadline (default 3s), and once it has failed it stays failed for the process.
 // ---------------------------------------------------------------------------
+
+import { connectRedisBounded, describeRedisError } from "../../lib/redisConnect";
 
 type RedisLike = {
   get(k: string): Promise<string | null>;
@@ -66,26 +79,17 @@ let redisConnecting: Promise<RedisLike | null> | null = null;
 
 async function connectRedis(): Promise<RedisLike | null> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mod: any = await import("redis");
-    const url = process.env.REDIS_URL ?? "redis://localhost:6379";
-    const client = mod.createClient({
-      url,
-      socket: {
-        connectTimeout: 5_000,
-        reconnectStrategy: (retries: number) => Math.min(retries * 500, 30_000),
-      },
+    const client = await connectRedisBounded<RedisLike>({
+      logPrefix: "[merge-progress]",
     });
-    (client as unknown as { on: (e: string, cb: () => void) => void }).on(
-      "error",
-      () => {
-        /* silenced — callers treat a null redis as "checkpoint unavailable" */
-      },
-    );
-    await (client as unknown as { connect: () => Promise<void> }).connect();
     redisInstance = client;
     return client;
-  } catch {
+  } catch (err) {
+    // Fail open and STAY failed: caching `null` means the merge never pays the
+    // connect deadline again for the life of the process. A restart re-tries.
+    console.warn(
+      `[merge-progress] checkpoint unavailable (${describeRedisError(err)}) — merge continues without resume`,
+    );
     redisInstance = null;
     return null;
   }

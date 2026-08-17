@@ -31,6 +31,7 @@ import {
 const FIXTURE_DIR = path.resolve(__dirname, "../../fixtures/pb-b2");
 const ORDERS = path.join(FIXTURE_DIR, "orders.csv");
 const CUSTOMERS = path.join(FIXTURE_DIR, "customers.csv");
+const DATES = path.join(FIXTURE_DIR, "dates.csv");
 
 const hasDuck = isDuckDBAvailable();
 
@@ -120,6 +121,74 @@ describe("duckdbTransformEngine end-to-end", () => {
     const out = await executeTransformChain(chain, { inputPath: ORDERS });
     expect(out.rowCount).toBe(1);
     expect(out.rows[0].order_id).toBe(1004);
+  });
+
+  // The reported "500 of 500 values could not be cast to Date" came from a
+  // bare TRY_CAST, which nulls every 2-digit-year value. These four cases run
+  // the shape-dispatched emitter against the real binding, because the failure
+  // modes it guards against are semantic, not syntactic: TRY_CAST('30/7/23')
+  // does not error, it returns year 0030.
+  const dateOf = (v: unknown) =>
+    v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+
+  it("casts a month-first 2-digit-year column to the right dates", async () => {
+    if (!hasDuck) return;
+    const out = await executeTransformChain(
+      [{ function: "Cast", expression: "mdy_date", targetType: "date" }],
+      { inputPath: DATES },
+    );
+    expect(out.rows.map((r) => dateOf(r.mdy_date))).toEqual([
+      "2023-07-30",
+      "2023-01-15",
+      "1999-12-31",
+      "2024-02-29",
+    ]);
+  });
+
+  it("casts a day-first 2-digit-year column to the same dates", async () => {
+    if (!hasDuck) return;
+    const out = await executeTransformChain(
+      [{ function: "Cast", expression: "dmy_date", targetType: "date" }],
+      { inputPath: DATES },
+    );
+    // Same calendar days as mdy_date, written day-first. The per-column order
+    // probe has to reach the opposite verdict on this column than on that one.
+    expect(out.rows.map((r) => dateOf(r.dmy_date))).toEqual([
+      "2023-07-30",
+      "2023-01-15",
+      "1999-12-31",
+      "2024-02-29",
+    ]);
+  });
+
+  it("leaves ISO dates alone and nulls values that are not dates", async () => {
+    if (!hasDuck) return;
+    const out = await executeTransformChain(
+      [
+        { function: "Cast", expression: "iso_date", targetType: "date" },
+        { function: "Cast", expression: "bad_date", targetType: "date" },
+      ],
+      { inputPath: DATES },
+    );
+    expect(out.rows.map((r) => dateOf(r.iso_date))).toEqual([
+      "2023-07-30",
+      "2023-01-15",
+      "1999-12-31",
+      "2024-02-29",
+    ]);
+    // Garbage, empty, an impossible month and Feb 30 all become NULL rather
+    // than a wrong date — lenient cast semantics, not silent corruption.
+    expect(out.rows.every((r) => r.bad_date === null)).toBe(true);
+  });
+
+  it("casts to timestamp through the same path", async () => {
+    if (!hasDuck) return;
+    const out = await executeTransformChain(
+      [{ function: "Cast", expression: "mdy_date", targetType: "timestamp" }],
+      { inputPath: DATES },
+    );
+    expect(dateOf(out.rows[0].mdy_date)).toBe("2023-07-30");
+    expect(out.rows.every((r) => r.mdy_date !== null)).toBe(true);
   });
 
   it("(g) shares one DuckDB Database across parallel acquires", async () => {

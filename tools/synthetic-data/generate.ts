@@ -130,7 +130,6 @@ const iso = (offsetMinutes: number) => new Date(Date.parse(now) - offsetMinutes 
 
 export const FUNCTION_FIXTURE_INPUTS: Record<RwandaFunctionName, Record<string, unknown>> = {
   calculateCreditRiskV2: { score: 92 },
-  validateCreditLimitV2: { requestedLimit: 500_000, policyCeiling: 1_000_000 },
   detectAffordabilityExceptionV2: { monthlyIncome: 100_000, monthlyCommitment: 50_000, maxRatio: 0.4 },
   validateRraTaxClearanceV2: { clearanceId: "QA-RW-IR-T-0000001", status: "VALID", expiresAt: "2026-09-01T00:00:00Z", syncedAt: "2026-08-10T06:00:00Z", freshnessSlaMinutes: 360, now },
   verifyNationalIdMatchV2: { nationalId: "9990000000000012", recordNationalId: "9990000000000012" },
@@ -298,6 +297,31 @@ async function dirtyFixtures(root: string) {
   ]);
 }
 
+/**
+ * Numeric column declarations per generated CSV (relative path from the run
+ * directory). The ingester used to type EVERY property `string`, which made
+ * the seeded Chart: XY widgets (numeric `avg`) 400 in the published views —
+ * QA-#… chart defect. The manifest carries this map so `ingest.ts` can create
+ * the properties with the right baseType; all values must be plain numbers in
+ * the corresponding CSV or the reindex cast fails loudly (a dirty-then-clean
+ * fixture is far better than a silently mis-typed schema).
+ */
+const NUMERIC_COLUMNS: Readonly<Record<string, Readonly<Record<string, "integer" | "double">>>> = {
+  "a-bk/customer_accounts.csv": { balance: "double" },
+  "a-bk/loan_applications.csv": { requestedLimit: "double", versionToken: "integer" },
+  "a-bk/risk_assessments.csv": { score: "integer" },
+  "a-bk/collateral.csv": { value: "double" },
+  "a-bk/credit_decisions.csv": { approvedLimit: "double" },
+  "a-bk/scenario_expected_outputs.csv": { expectedScore: "integer" },
+  "b-irembo/land_parcels.csv": { size: "double" },
+  "b-irembo/land_transfer_cases.csv": { versionToken: "integer" },
+  "c-rswitch/payment_transactions.csv": { amount: "double", versionToken: "integer" },
+  "c-rswitch/settlement_batches.csv": { value: "double" },
+  "d-pindo/carrier_routes.csv": { capacity: "integer", p95Latency: "double", errorRate: "double", versionToken: "integer" },
+  "d-pindo/latency_samples.csv": { latencyMs: "integer" },
+  "d-pindo/failover_policies.csv": { threshold: "integer", breachHoldDown: "integer", recoveryHoldDown: "integer", maxFailoversPerWindow: "integer" },
+};
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   // Start from an empty run directory so the manifest proves exactly what was
@@ -322,6 +346,7 @@ async function main() {
     tier: args.tier,
     generatedAt: "deterministic:2026-08-10T08:00:00.000Z",
     namespacePrefix: RUN_PREFIX,
+    columnTypes: NUMERIC_COLUMNS,
     files: outputs.sort((a, b) => a.file.localeCompare(b.file)),
   };
   await writeFile(join(args.out, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");

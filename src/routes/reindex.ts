@@ -42,6 +42,11 @@ const KNOWN_CODES = new Set([
   "NO_BACKING_DATASOURCE",
   "REINDEX_IN_PROGRESS",
   "REINDEX_FAILED",
+  // Object type exceeds the in-heap merge budget of the datasource reindex
+  // path; surfaced as 413 with the funnel as the documented alternative.
+  // Without this entry the route would rewrite it into a generic 500 and the
+  // remediation text in the message would never reach the operator.
+  "REINDEX_TOO_LARGE",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -103,6 +108,81 @@ async function getDatasource(
     [objectTypeId]
   );
   return result.rows.length > 0 ? result.rows[0] : null;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: acquire the per-object-type reindex mutex
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a `funnel_state.status='indexing'` row may go untouched before
+ * `force=true` is allowed to steal it. A live run bumps `updated_at` on every
+ * stage transition, so this is a liveness check, not a duration cap: a slow but
+ * progressing reindex keeps its lock indefinitely.
+ */
+function forceStealStaleMs(): number {
+  const raw = Number(process.env.REINDEX_FORCE_STEAL_STALE_MS ?? 900_000);
+  return Number.isFinite(raw) && raw > 0 ? raw : 900_000;
+}
+
+/**
+ * Take the reindex lock for `objectTypeId`, returning false if another run
+ * holds it. The claim is a single atomic statement, so concurrent callers
+ * cannot both win: `INSERT ... ON CONFLICT DO UPDATE ... WHERE <predicate>`
+ * evaluates the predicate against the locked existing row, and the loser gets
+ * zero rows back rather than an error.
+ *
+ * With `allowStealStale` (force mode) the predicate also matches an 'indexing'
+ * row that has not been touched for forceStealStaleMs — a lock leaked by a
+ * crashed run. See the call site for why force must neither skip this lock nor
+ * be blocked by a dead one.
+ */
+async function claimIndexingLock(
+  objectTypeId: string,
+  allowStealStale: boolean,
+): Promise<boolean> {
+  const result = await query(
+    `INSERT INTO funnel_state (object_type_id, status, error_message, updated_at)
+     VALUES ($1, 'indexing', NULL, now())
+     ON CONFLICT (object_type_id) DO UPDATE
+       SET status = 'indexing', error_message = NULL, updated_at = now()
+       WHERE funnel_state.status <> 'indexing'
+          OR ($2::boolean AND funnel_state.updated_at < now() - $3::interval)
+     RETURNING object_type_id`,
+    [objectTypeId, allowStealStale, `${Math.ceil(forceStealStaleMs() / 1000)} seconds`],
+  );
+  return result.rows.length > 0;
+}
+
+/**
+ * Release a lock taken by claimIndexingLock when the run never actually
+ * started. Scoped to `status='indexing'` so it can never clobber a terminal
+ * status written by a run that did start.
+ *
+ * Without this, the async-pipeline branch below returned its 500 while leaving
+ * funnel_state pinned at 'indexing' — the UI showed a perpetual "Indexing…"
+ * badge for a run that did not exist, and (before force learned to steal stale
+ * locks) nothing short of manual SQL could clear it.
+ */
+async function releaseIndexingLock(
+  objectTypeId: string,
+  errorMessage: string,
+): Promise<void> {
+  try {
+    await query(
+      `UPDATE funnel_state
+          SET status = 'failed', error_message = $1, updated_at = now()
+        WHERE object_type_id = $2 AND status = 'indexing'`,
+      [errorMessage, objectTypeId],
+    );
+  } catch (err) {
+    // Best-effort: the caller is already returning an error to the client, and
+    // the stale-steal path above is the backstop if this write fails.
+    console.warn(
+      `[reindex] failed to release indexing lock for ${objectTypeId}: ` +
+        `${err instanceof Error ? err.message : err}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,56 +261,35 @@ router.post(
       }
 
       // ---------------------------------------------------------------
-      // Step 5: Atomic lock — prevent concurrent reindex (unless force)
+      // Step 5: Atomic lock — prevent concurrent reindex
       // ---------------------------------------------------------------
-      if (!force) {
-        const lockResult = await query(
-          `UPDATE funnel_state SET status = 'indexing', error_message = NULL, updated_at = now()
-           WHERE object_type_id = $1 AND status != 'indexing'
-           RETURNING *`,
-          [objectType.object_type_id]
-        );
-
-        if (lockResult.rows.length === 0) {
-          // Either no row exists or status is already 'indexing'
-          const existsResult = await query(
-            "SELECT status FROM funnel_state WHERE object_type_id = $1",
-            [objectType.object_type_id]
-          );
-
-          if (existsResult.rows.length === 0) {
-            // No row — create one with 'indexing' status
-            const insertResult = await query(
-              `INSERT INTO funnel_state (object_type_id, status)
-               VALUES ($1, 'indexing')
-               ON CONFLICT (object_type_id) DO NOTHING
-               RETURNING *`,
-              [objectType.object_type_id]
-            );
-            if (insertResult.rows.length === 0) {
-              // Lost the race — another reindex just started
-              return sendError(
-                res,
-                "REINDEX_IN_PROGRESS",
-                `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`
-              );
-            }
-          } else if (existsResult.rows[0].status === "indexing") {
-            return sendError(
-              res,
-              "REINDEX_IN_PROGRESS",
-              `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`
-            );
-          }
-        }
-      } else {
-        // Force mode: ensure funnel_state exists and set to 'indexing'
-        await query(
-          `INSERT INTO funnel_state (object_type_id, status, error_message)
-           VALUES ($1, 'indexing', NULL)
-           ON CONFLICT (object_type_id)
-           DO UPDATE SET status = 'indexing', error_message = NULL, updated_at = now()`,
-          [objectType.object_type_id]
+      // `force` bypasses the SMART-SKIP (step 4), not the mutex. It used to
+      // bypass both: the force branch did an unconditional
+      // `DO UPDATE SET status='indexing'`, so two overlapping Force Reindexes
+      // each built a replacement index and each cut the alias over — the
+      // second cutover pointing the alias at an index the first one was still
+      // filling, then deleting the other's rollback index. Nothing detected it;
+      // the loser's documents simply vanished.
+      //
+      // But force cannot be subject to the naive lock either, or a LEAKED
+      // 'indexing' row (crash mid-run, or the 202 path below failing after it
+      // took the lock) makes the object type permanently un-reindexable, with
+      // Force Reindex — the operator's escape hatch — the one thing that can't
+      // clear it. That dead end is almost certainly why force skipped the lock.
+      //
+      // So both modes take the same CAS, and force additionally may STEAL a
+      // lock whose heartbeat has gone stale. A live run refreshes
+      // funnel_state.updated_at on every stage transition, so "not touched for
+      // FORCE_STEAL_STALE_MS" means the holder is gone, not slow.
+      if (!(await claimIndexingLock(objectType.object_type_id, force))) {
+        return sendError(
+          res,
+          "REINDEX_IN_PROGRESS",
+          force
+            ? `A reindex for object type '${apiName}' is already in progress and ` +
+                `is still making progress. Force cannot interrupt a live run; ` +
+                `wait for it to finish or fail.`
+            : `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`,
         );
       }
 
@@ -263,6 +322,12 @@ router.post(
             },
           });
         } catch (err: any) {
+          // The lock was taken in step 5 but no run exists to release it —
+          // hand it back, or funnel_state stays pinned at 'indexing' forever.
+          await releaseIndexingLock(
+            objectType.object_type_id,
+            `Failed to start async reindex: ${err.message}`,
+          );
           return sendError(
             res,
             "REINDEX_FAILED",
@@ -646,6 +711,7 @@ async function checkReindexNeeded(
 // REINDEX_IN_PROGRESS → 409
 // REINDEX_FAILED      → 500
 // NO_BACKING_DATASOURCE → 400
+// REINDEX_TOO_LARGE   → 413
 //
 
 export default router;

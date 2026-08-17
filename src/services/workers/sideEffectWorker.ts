@@ -332,23 +332,80 @@ export const productionNotificationDispatch: SideEffectDispatchFn = async (job) 
   const resolver = makeProductionRecipientResolver(
     (email: string) => getKeycloakAdminService().findUserByEmail(email),
   );
+  // Migration 173 — the Security page's "Notification settings" card,
+  // snapshotted into the job payload at enqueue time (see
+  // SideEffectExecutionContext.notificationPolicy). Absent on jobs
+  // enqueued before the field existed → documented defaults.
+  const notificationPolicy = (ctx.notificationPolicy ?? {}) as {
+    failurePolicy?: unknown;
+    disableRedaction?: unknown;
+  };
+  const disableRedaction = notificationPolicy.disableRedaction === true;
+  const failurePolicy =
+    notificationPolicy.failurePolicy === "any" ? "any" : "all";
   let filterResult;
-  try {
-    filterResult = await recipientVisibilityFilter(
-      ontologyId,
-      affectedObjects,
-      recipientPreFilter,
-      resolver,
-    );
-  } catch (err: any) {
-    // Defensive — never crash the worker on a filter bug.
-    filterResult = {
-      ok: false,
-      droppedReason: "lookup_error",
-      resolvedUserId: null,
-    };
+  if (disableRedaction) {
+    // "Disable notification redaction" — the action's owner has declared
+    // that everyone who is notified may see the notification unredacted,
+    // so the marking-based visibility drop is skipped. The recipient
+    // still has to RESOLVE to a real user (an unresolvable principal is
+    // not a redaction question — there is nobody to dispatch to), so the
+    // resolver runs even here.
+    let resolvedUserId: string | null = null;
+    try {
+      resolvedUserId = await resolver(
+        recipientPreFilter.principal,
+        recipientPreFilter.principalKind,
+      );
+    } catch {
+      resolvedUserId = null;
+    }
+    filterResult = resolvedUserId
+      ? { ok: true as const, resolvedUserId }
+      : {
+          ok: false as const,
+          droppedReason: "user_not_resolved",
+          resolvedUserId: null,
+        };
+  } else {
+    try {
+      filterResult = await recipientVisibilityFilter(
+        ontologyId,
+        affectedObjects,
+        recipientPreFilter,
+        resolver,
+      );
+    } catch (err: any) {
+      // Defensive — never crash the worker on a filter bug.
+      filterResult = {
+        ok: false,
+        droppedReason: "lookup_error",
+        resolvedUserId: null,
+      };
+    }
   }
   if (!filterResult.ok) {
+    // Migration 173 — "Require all users to have permissions" (the
+    // default). A recipient who cannot see an edited object is an
+    // operator-visible problem, not a silent drop, so the job is failed
+    // and lands in the retry/dead queue where it is auditable.
+    //
+    // HONEST LIMITATION: Foundry enforces this policy PRE-commit — the
+    // action itself fails and nobody is notified. Here the edits are
+    // already durable by the time the outbox worker runs, so "all" can
+    // only surface the violation, not prevent the write. Full parity
+    // needs the recipient visibility check hoisted into the executor's
+    // validation stage; tracked, not shipped.
+    if (
+      failurePolicy === "all" &&
+      filterResult.droppedReason === "insufficient_visibility"
+    ) {
+      const err = new Error(
+        `Notification recipient lacks visibility on an affected object and this action requires all recipients to have permissions (missing markings: ${(filterResult.missingMarkings ?? []).join(", ") || "unknown"}).`,
+      ) as Error & { code?: string };
+      err.code = "NOTIFICATION_RECIPIENT_PERMISSION_REQUIRED";
+      throw err;
+    }
     // Drop → mark the job succeeded with a structured receipt
     // (no provider call). The worker's success-path code records
     // this in external_receipt + the structured log + bumps the

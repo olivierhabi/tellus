@@ -80,6 +80,11 @@ export type AuditAction =
   | 'admin.user.enable'
   | 'admin.user.disable'
   | 'admin.setting.update'
+  | 'admin.role.create'
+  | 'admin.role.update'
+  | 'admin.role.delete'
+  | 'admin.role.member.add'
+  | 'admin.role.member.remove'
   // PB-B7
   | 'pipeline.acl.grant'
   | 'pipeline.acl.revoke'

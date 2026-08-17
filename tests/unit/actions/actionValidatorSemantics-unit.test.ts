@@ -36,6 +36,9 @@ vi.mock("../../../src/actions/ruleCompiler", () => ({
 vi.mock("../../../src/actions/submissionCriteria", () => ({
   evaluateSubmissionCriteria: vi.fn(() => ({ ok: true, failures: [] })),
   resolveObjectPropertyOperands: vi.fn(async () => ({})),
+  // `functionValidationCriteria` flattens criteria through this shared
+  // helper; these tests exercise no function gates, so it yields no leaves.
+  extractConditions: vi.fn(() => []),
 }));
 vi.mock("../../../src/services/opensearch/indexMappingGenerator", () => ({
   getIndexName: vi.fn((name: string) => name),

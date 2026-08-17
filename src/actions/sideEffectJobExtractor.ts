@@ -148,6 +148,22 @@ export interface SideEffectExecutionContext {
   result: string;
   affectedObjects: Array<{ objectType: string; primaryKey: string; operation: string }>;
   firedAt: string;
+  /**
+   * Migration 173 — the Security page's "Notification settings" card,
+   * snapshotted into the outbox payload at enqueue time rather than
+   * re-read by the worker. Snapshotting is deliberate: the job must be
+   * dispatched under the policy that was in force when the action ran,
+   * not whatever an editor flipped to while the job sat in the queue.
+   *
+   * Absent on jobs enqueued before this field existed; the worker
+   * resolves absence to the documented defaults.
+   */
+  notificationPolicy?: {
+    /** "all" | "any" — see ActionSecuritySettings.actionFailurePolicy. */
+    failurePolicy: string;
+    /** Bypass the recipient visibility filter entirely. */
+    disableRedaction: boolean;
+  };
 }
 
 function resolveValueSource(

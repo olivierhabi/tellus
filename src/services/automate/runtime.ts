@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { pool } from "../../db";
 import { executeAction } from "../../actions/actionExecutor";
+import { resolveActionSecuritySettings } from "../../actions/actionSecuritySettings";
 import {
   checkIdempotencyKey,
   storeIdempotencyKey,
@@ -532,8 +533,10 @@ async function executeActionEffect(
     definition_version: number;
     definition_hash: string | null;
     is_enabled: boolean;
+    security_settings: unknown | null;
   }>(
-    `SELECT action_type_id, definition_version, definition_hash, is_enabled
+    `SELECT action_type_id, definition_version, definition_hash, is_enabled,
+            security_settings
        FROM action_type
       WHERE ontology_id = $1 AND api_name = $2`,
     [row.ontology_id, actionApiName],
@@ -559,6 +562,21 @@ async function executeActionEffect(
         "The Action Type schema changed after this automation version was activated.",
       ),
       { code: "ACTION_SCHEMA_CHANGED", status: 409 },
+    );
+  }
+  // Migration 173 — the Security page's "Frontend consumers" gate. Default
+  // is `true`, so this only ever rejects an action whose owner explicitly
+  // turned Automate off. Status 403 (not 5xx) keeps it non-retryable: the
+  // switch is a decision, not a transient failure, so retrying cannot help.
+  if (
+    !resolveActionSecuritySettings(action.security_settings)
+      .allowAutomateSubmission
+  ) {
+    throw Object.assign(
+      new Error(
+        "This Action Type does not allow submissions from Foundry Automate.",
+      ),
+      { code: "ACTION_CONSUMER_NOT_ALLOWED", status: 403 },
     );
   }
   const user = await getKeycloakAdminService().getUserById(row.owner_user_id);

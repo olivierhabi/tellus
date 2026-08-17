@@ -30,6 +30,7 @@ import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { appError } from "../utils/appError";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
+import { resolveBranchIdOrMain } from "../services/branchContext";
 import { incCounter } from "../services/funnel/metrics";
 import { routeMetric } from "../utils/routeInstrumentation";
 import {
@@ -253,6 +254,78 @@ async function mergeWithOverlay<R extends { data: unknown[] }>(
 }
 
 /**
+ * Reconcile a page of indexed hits with the authoritative B1 projection.
+ *
+ * The writeback overlay makes newly committed actions visible immediately,
+ * but it is intentionally short-lived. During a deployment/restart, or for
+ * edits committed before overlay rollout, OpenSearch can still hold an older
+ * document version. Returning that older version causes Workshop to submit a
+ * stale OCC token even though the object has not changed since the user read
+ * it. A single batched lookup closes that gap without an N+1 query pattern.
+ */
+async function hydrateStaleIndexedRows<R extends { data: unknown[] }>(
+  objectType: string,
+  result: R,
+  requestedBranchId: string | null,
+): Promise<R> {
+  const hits = result.data.filter(
+    (value): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  const primaryKeys = hits
+    .map((hit) => hit.__pk ?? hit.__primaryKey)
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+  if (primaryKeys.length === 0) return result;
+
+  try {
+    const type = await query(
+      "SELECT ontology_id FROM object_type WHERE api_name = $1 LIMIT 1",
+      [objectType],
+    );
+    const ontologyId = type.rows[0]?.ontology_id;
+    if (typeof ontologyId !== "string") return result;
+    const branchId = await resolveBranchIdOrMain(ontologyId, requestedBranchId);
+    const instances = await query(
+      `SELECT primary_key, properties, version
+         FROM object_instances
+        WHERE ontology_id = $1::uuid
+          AND branch_id = $2::uuid
+          AND object_type_api_name = $3
+          AND primary_key = ANY($4::text[])`,
+      [ontologyId, branchId, objectType, [...new Set(primaryKeys)]],
+    );
+    const authoritative = new Map((instances.rows as Array<{
+      primary_key: string;
+      properties: Record<string, unknown>;
+      version: number | string;
+    }>).map((row) => [row.primary_key, row]));
+    const data = result.data.map((value) => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+      const hit = value as Record<string, unknown>;
+      const primaryKey = typeof hit.__pk === "string"
+        ? hit.__pk
+        : typeof hit.__primaryKey === "string" ? hit.__primaryKey : null;
+      const instance = primaryKey ? authoritative.get(primaryKey) : undefined;
+      const indexedVersion = typeof hit.__version === "number" ? hit.__version : Number(hit.__version);
+      const instanceVersion = instance ? Number(instance.version) : Number.NaN;
+      if (!instance || !Number.isFinite(instanceVersion) || instanceVersion <= indexedVersion) return value;
+      return {
+        ...hit,
+        ...instance.properties,
+        __pk: instance.primary_key,
+        __objectType: hit.__objectType ?? objectType,
+        __version: instanceVersion,
+        __overlay_source: "object_instances",
+      };
+    });
+    return { ...result, data } as R;
+  } catch {
+    // Object Search remains available if a transitional deployment has not
+    // created B1 tables yet; the index continues as the safe fallback.
+    return result;
+  }
+}
+
+/**
  * B7 SCAN discovery: build a minimal filter predicate from the search
  * `where` clause so `collectFilterMatchingOverlays` can include
  * overlay-only hits (rows edited within the last overlay TTL that the
@@ -434,7 +507,8 @@ router.post(
       // B7: merge the writeback overlay so recent edits are visible
       // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
       // the index document for matching PKs; misses pass through.
-      const result = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where, branchId);
+      const overlayMerged = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where, branchId);
+      const result = await hydrateStaleIndexedRows(objectType, overlayMerged, branchId);
       stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       // B9: shadow-diff during soak. Fire-and-forget — hurts neither

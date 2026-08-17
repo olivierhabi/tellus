@@ -220,6 +220,12 @@ const COUNTER_HELP: Record<string, string> = {
     "Count of dispatch retries triggered by infra failure, partitioned by kind and error_code.",
   tellus_side_effect_dead_total:
     "Count of jobs dead-lettered after exhausting the retry policy, partitioned by kind and error_code.",
+  tellus_action_generated_sequence_allocations_total:
+    "Count of generated identifier allocations by outcome.",
+  tellus_action_generated_sequence_exhausted_total:
+    "Count of generated identifier allocations rejected outside the supported numeric range.",
+  tellus_action_generated_sequence_collisions_total:
+    "Count of pre-existing generated identifiers skipped while reconciling a sequence counter.",
   // P5.6.1 — notification recipient data filter counters.
   tellus_side_effect_notification_dropped_total:
     "Count of notification jobs the Phase 6.1 recipient data filter refused to dispatch, partitioned by reason (insufficient_visibility / user_not_resolved / lookup_error).",
@@ -255,4 +261,6 @@ const HISTOGRAM_HELP: Record<string, string> = {
   // P5 — per-dispatch latency.
   tellus_side_effect_dispatch_duration_seconds:
     "Per-dispatch latency in seconds for the side-effect worker, partitioned by kind and outcome (ok/retry/dead).",
+  tellus_action_generated_sequence_allocation_duration_seconds:
+    "PostgreSQL generated identifier allocation latency in seconds.",
 };

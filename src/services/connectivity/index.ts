@@ -47,6 +47,7 @@ import {
   stopTableImportScheduler,
 } from "./imports/scheduler";
 import { drainAll as drainPgPools } from "./connectors/postgresql/pool";
+import { assertConnectivityPosture } from "./bootPosture";
 import { extractUser, requireScope } from "./handlers/connections.handler";
 import { TellusError } from "../../lib/errors/envelope";
 import { ConnectionNotFound } from "../../lib/errors/connectivity.errors";
@@ -333,6 +334,11 @@ export function createConnectivityRouter(): Router {
  * Safe to call multiple times.
  */
 export function initConnectivity(): void {
+  // Fail closed BEFORE any worker starts or any socket can be opened: a dev
+  // CONNECTIVITY_EGRESS_ALLOW_RESERVED that reached production has disabled the
+  // SSRF boundary, and every probe would still look healthy. Throws.
+  assertConnectivityPosture();
+
   if (process.env.TELLUS_DISABLE_CONNECTIVITY_POLLER !== "1") {
     outbox.startPoller();
   }

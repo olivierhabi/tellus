@@ -305,6 +305,22 @@ export async function startTemporalWorker(): Promise<boolean> {
         strict: identity.mode === "strict",
       });
       routingProvisioned = route.provisioned;
+      // A connected Worker that is not the queue's active target is not a
+      // healthy worker: dispatching through its Client only strands signals
+      // at workflow_started. The routing helper returns provisioned=false
+      // both for an idempotent match and for a best-effort failure, so verify
+      // the effective rule before exposing temporalClient/isConnected.
+      const rules = await (conn.client as any).workflowService.getWorkerVersioningRules({
+        namespace: identity.temporalNamespace,
+        taskQueue: identity.temporalTaskQueue,
+      });
+      const activeBuild = rules.assignmentRules?.[0]?.rule?.targetBuildId;
+      if (activeBuild !== versioning.buildId) {
+        throw new Error(
+          `task queue '${identity.temporalTaskQueue}' routes to build ` +
+          `'${activeBuild ?? "<none>"}', not active worker '${versioning.buildId}'`,
+        );
+      }
     }
     const runningWorker = workerInstance;
     void runningWorker.run().then(

@@ -44,6 +44,11 @@ export interface ParameterDefinition {
   /** Required for interface_reference and interface_reference_array. */
   interfaceId?: string;
   defaultValue?: unknown;
+  /** Contextual default resolved from the authenticated action subject. */
+  defaultValueTypeClass?: "currentUserId";
+  /** Form interaction metadata used to make contextual values tamper-proof. */
+  visible?: boolean;
+  editable?: boolean;
   constraints?: ParameterConstraints;
   /** Field schema for struct parameters. When present, struct values are
    * coerced field-by-field and unknown keys are rejected. */
@@ -70,6 +75,8 @@ export interface ParameterDefinition {
 
 /** Constraint rules for a parameter. */
 export interface ParameterConstraints {
+  /** Canonical principal constraint. Values are Keycloak/Multipass user IDs. */
+  valueType?: "user" | "group";
   regex?: string;
   min?: number;
   max?: number;
@@ -95,6 +102,13 @@ export type ObjectFetcher = (
   objectType: string,
   primaryKey: string
 ) => Promise<Record<string, unknown> | null>;
+
+export interface ParameterValidationContext {
+  /** Canonical authenticated principal ID, never accepted from request data. */
+  currentUserId?: string;
+  /** Authoritative identity-directory lookup used for user constraints. */
+  userExists?: (userId: string) => Promise<boolean>;
+}
 
 /** Result of parameter validation. */
 export interface ValidationResult {
@@ -216,10 +230,12 @@ export async function validateParameters(
   parameterDefinitions: ParameterDefinition[],
   providedParameters: Record<string, unknown>,
   objectExistsChecker: ObjectExistsChecker,
-  objectFetcher?: ObjectFetcher
+  objectFetcher?: ObjectFetcher,
+  context: ParameterValidationContext = {},
 ): Promise<ValidationResult> {
   const errors: string[] = [];
   const resolved: Record<string, unknown> = {};
+  const effectiveParameters = { ...providedParameters };
 
   // Build lookup map of parameter definitions
   const defMap = new Map<string, ParameterDefinition>();
@@ -245,17 +261,47 @@ export async function validateParameters(
     return { valid: false, errors, resolvedParameters: null };
   }
 
+  // Resolve contextual defaults before requiredness. For hidden/disabled
+  // fields, reject caller substitution and bind the value to the authenticated
+  // principal. Visible + editable fields retain normal prefill semantics and
+  // may be changed to another valid directory user.
+  for (const def of parameterDefinitions) {
+    if (def.defaultValueTypeClass !== "currentUserId") continue;
+    const currentUserId = context.currentUserId?.trim();
+    if (!currentUserId) {
+      errors.push(
+        `Parameter '${def.apiName}' requires an authenticated current user`,
+      );
+      continue;
+    }
+    const supplied = effectiveParameters[def.apiName];
+    const locked = def.visible === false || def.editable === false;
+    if (locked && supplied != null && String(supplied) !== currentUserId) {
+      errors.push(
+        `Parameter '${def.apiName}' is bound to the authenticated current user`,
+      );
+      continue;
+    }
+    if (supplied === undefined || supplied === null || locked) {
+      effectiveParameters[def.apiName] = currentUserId;
+    }
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors, resolvedParameters: null };
+  }
+
   // -----------------------------------------------------------------------
   // Step 2: Check required parameters (C21: skip params in a hidden
   // form-content section — predicate-hidden or statically hidden).
   // -----------------------------------------------------------------------
   const hiddenSectionParams = computeHiddenSectionParams(
     parameterDefinitions,
-    providedParameters,
+    effectiveParameters,
   );
   for (const def of parameterDefinitions) {
     if (def.required === true && !hiddenSectionParams.has(def.apiName)) {
-      const value = providedParameters[def.apiName];
+      const value = effectiveParameters[def.apiName];
       // fix(F34): a required string parameter supplied as "" or whitespace-only
       // is missing (the Workshop form already enforces this client-side; the
       // API path must not persist whitespace PKs).
@@ -282,7 +328,7 @@ export async function validateParameters(
   // Step 3: Apply default values
   // -----------------------------------------------------------------------
   for (const def of parameterDefinitions) {
-    const provided = providedParameters[def.apiName];
+    const provided = effectiveParameters[def.apiName];
     if (provided !== undefined && provided !== null) {
       resolved[def.apiName] = provided;
     } else if (def.required !== true && (provided === undefined || provided === null)) {
@@ -382,6 +428,38 @@ export async function validateParameters(
     if (value === undefined || value === null) continue;
 
     validateConstraints(def, value, errors);
+  }
+
+  // User constraints are an identity boundary, not a presentation hint.
+  // Validate against the authoritative directory and fail closed when no
+  // checker is available. Cache lookups within one submission for batch-like
+  // schemas that repeat the same principal.
+  const userExistence = new Map<string, boolean>();
+  for (const def of parameterDefinitions) {
+    if (def.constraints?.valueType !== "user") continue;
+    const value = resolved[def.apiName];
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value !== "string") {
+      errors.push(`Parameter '${def.apiName}' must be a user ID`);
+      continue;
+    }
+    if (!context.userExists) {
+      errors.push(`Parameter '${def.apiName}' user identity could not be validated`);
+      continue;
+    }
+    let exists = userExistence.get(value);
+    if (exists === undefined) {
+      try {
+        exists = await context.userExists(value);
+      } catch {
+        errors.push(`Parameter '${def.apiName}' user identity could not be validated`);
+        continue;
+      }
+      userExistence.set(value, exists);
+    }
+    if (!exists) {
+      errors.push(`Parameter '${def.apiName}' references an unknown or disabled user`);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -552,7 +630,7 @@ async function validateAndCoerceType(
       return coerceInterfaceReferenceArray(apiName, value, def, objectExistsChecker, errors);
 
     case "object_set":
-      return coerceObjectSet(apiName, value, errors);
+      return coerceObjectSet(apiName, value, def, objectExistsChecker, errors);
 
     case "string_array":
       return coerceTypedArray(apiName, value, "string", errors);
@@ -960,21 +1038,43 @@ async function coerceObjectReference(
 }
 
 // --- Object Set ---
-function coerceObjectSet(
+async function coerceObjectSet(
   apiName: string,
   value: unknown,
+  def: ParameterDefinition,
+  objectExistsChecker: ObjectExistsChecker,
   errors: string[]
-): string[] | undefined {
+): Promise<string[] | undefined> {
   if (!Array.isArray(value)) {
     errors.push(
       `Parameter '${apiName}' must be an array of strings (object set), received: ${typeof value}`
     );
     return undefined;
   }
+  // Foundry's documented object-reference-list limit. Enforce it at the
+  // boundary so a Workshop selection cannot turn into an unbounded action.
+  if (value.length > 1_000) {
+    errors.push(
+      `Parameter '${apiName}' exceeds the maximum of 1000 object references`,
+    );
+    return undefined;
+  }
+  if (!def.objectType) {
+    errors.push(
+      `Parameter '${apiName}' is type 'object_set' but has no objectType configured.`,
+    );
+    return undefined;
+  }
   for (let i = 0; i < value.length; i++) {
-    if (typeof value[i] !== "string") {
+    if (typeof value[i] !== "string" || !(value[i] as string).trim()) {
       errors.push(
-        `Parameter '${apiName}' array element at index ${i} must be a string, received: ${typeof value[i]}`
+        `Parameter '${apiName}' array element at index ${i} must be a non-empty string, received: ${typeof value[i]}`
+      );
+      return undefined;
+    }
+    if (!await objectExistsChecker(def.objectType, value[i] as string)) {
+      errors.push(
+        `Parameter '${apiName}' references object '${value[i]}' of type '${def.objectType}' which does not exist in the Ontology`,
       );
       return undefined;
     }

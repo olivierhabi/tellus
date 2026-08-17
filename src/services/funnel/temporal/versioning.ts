@@ -152,11 +152,16 @@ export async function ensureQueueAssignmentRule(
       }
       let token = rules.conflictToken;
       const previous = current;
+      // Keep a single active rollout rule. Inserting a new unconditional
+      // 100% rule on every restart grows the queue's rule list without
+      // bound; once Temporal rejects another insert, the new worker can be
+      // RUNNING locally while receiving zero tasks. Replacing slot zero is
+      // the intended atomic promotion operation.
       const inserted = (await client.workflowService.updateWorkerVersioningRules({
         namespace,
         taskQueue,
         conflictToken: token,
-        insertAssignmentRule: { ruleIndex: 0, rule: { targetBuildId: buildId, percentageRamp: { rampPercentage: 100 } } },
+        replaceAssignmentRule: { ruleIndex: 0, rule: { targetBuildId: buildId, percentageRamp: { rampPercentage: 100 } } },
       })) as QueuedRules;
       token = inserted.conflictToken ?? token;
       if (previous) {

@@ -45,8 +45,44 @@ import {
 } from "../services/funnel/replacementScheduler";
 import { bootstrapLakekeeper } from "../services/funnel/lakekeeperBootstrap";
 import { getLakekeeperClient } from "../services/funnel/lakekeeperClient";
+import { dataPlaneGuard, requireOntologyWrite } from "../middleware/requireRole";
 
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// Authorization (OWASP API5 — function-level authorization).
+//
+// Every route below was previously reachable by ANY authenticated principal,
+// including a session whose `roles` claim is empty. That is a real privilege
+// escalation, not a theoretical one: an ontology *viewer* could
+// `POST /replacement/:objectType/approve-cutover` to flip a Quickwit index
+// alias for a production Object Type, `POST /replacement/:objectType/rollback`
+// to revert it, `POST /replacement/sweep` to DROP retained indexes past their
+// grace window, `POST /clickhouse/link` to issue ClickHouse DDL, or
+// `POST /lakekeeper/bootstrap` to create warehouses and namespaces. None of
+// those are recoverable by re-running the funnel.
+//
+// Mounted as a router-level guard rather than per-route annotations so it
+// cannot be forgotten on the next endpoint added to this file — new mutations
+// are admin-gated by default. GET/HEAD/OPTIONS pass through: funnel reads are
+// governed by the marking/security context in the handlers, and
+// `GET /metrics` is deliberately unauthenticated for Prometheus scraping
+// (see middleware/globalAuth.ts).
+//
+// One deliberate downgrade: `POST /signals` is the reindex trigger the
+// Ontology Manager datasources page fires (hooks/useFunnelRun.ts →
+// `signalNow()`), so requiring admin there would break the normal
+// editor workflow of saving a datasource and watching it index. It is
+// idempotent, append-only into the signal inbox, and scoped to one Object
+// Type, so ontology-write is the correct authority — the same level already
+// required to change the Object Type's datasource in the first place.
+router.use((req, res, next) => {
+  if (req.method === "POST" && req.path === "/signals") {
+    requireOntologyWrite(req, res, next);
+    return;
+  }
+  dataPlaneGuard({ post: "admin" })(req, res, next);
+});
 
 // ---------------------------------------------------------------------------
 // POST /api/v1/funnel/signals — enqueue a workflow signal
