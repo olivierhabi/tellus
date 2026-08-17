@@ -58,8 +58,12 @@ describe("resolveTransformPython (self-config without env vars)", () => {
     else expect(py).toBe("python3");
   });
   it("honors an explicit TELLUS_PYTHON_BIN (env wins over self-config)", () => {
-    process.env.TELLUS_PYTHON_BIN = "/usr/local/bin/python3";
-    expect(resolveTransformPython()).toBe("/usr/local/bin/python3");
+    // Use process.execPath — guaranteed to exist on every host. (A hardcoded
+    // /usr/local/bin/python3 does not exist in the CI container, and
+    // resolveTransformPython skips nonexistent candidates by design — see the
+    // "broken TELLUS_PYTHON_BIN falls through" test below.)
+    process.env.TELLUS_PYTHON_BIN = process.execPath;
+    expect(resolveTransformPython()).toBe(process.execPath);
   });
   it("falls back to python3 when no candidate exists", () => {
     process.env.TELLUS_PYTHON_BIN = "/nonexistent/venv/bin/python";

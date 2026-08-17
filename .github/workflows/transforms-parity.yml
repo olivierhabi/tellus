@@ -1,19 +1,15 @@
 # Gap 5 (CI/PR gating): runs the transforms-python END-TO-END parity suite on
-# every PR + push. The unit logic is already gated by ci.yml's `unit` job
-# (pnpm run test:unit covers tests/unit/code-repos/code-repository/transforms/);
-# THIS job gates the behavioral parity that unit tests cannot cover — the bash
-# verify scripts (retry, crash-sweeper, lineage-unified, sandbox, cluster) +
-# the cypress transforms specs, which exercise a live backend + Postgres +
-# PySpark. A failure here blocks the merge (the job is a required check via
-# branch protection — see repo settings).
+# every PR + push, BACKEND-ONLY. The unit logic is also gated by ci.yml's
+# `unit` job; THIS workflow's e2e job gates the behavioral parity that unit
+# tests cannot cover: a live backend + Postgres + PySpark running a real
+# build end-to-end via this repo's own scripts
+# (scripts/verify-transforms-e2e.sh + scripts/test-template-parity.sh).
 #
-# Honest scope: the sandbox (Gap 3) + cluster (Gap 1) sub-jobs require Docker
-# (present on GitHub-hosted runners) + the tellus/transform-runtime image
-# (built in-step). The crash-sweeper + retry tests restart the in-runner backend
-# (kill+restart), which works on a self-hosted runner but may need
-# `services` adjustments on GitHub-hosted runners; they are tagged
-# transforms-parity-restart + allowed to be skipped via env on runners that
-# forbid process restarts.
+# The former browser/cross-repo leg (bash verify scripts + cypress specs from
+# the sibling tellus-fe repo) was REMOVED: tellus-fe no longer contains that
+# e2e harness, and checking out a second private repo requires a PAT we do
+# not maintain. Sandbox (container-mode) + cypress browser parity are
+# exercised by the local verify stack / unit lanes instead.
 name: transforms-parity
 on:
   pull_request:
@@ -47,7 +43,7 @@ jobs:
       - run: pnpm vitest run --config vitest.unit.config.ts tests/unit/code-repos/code-repository/transforms/ tests/unit/code-repos/templates/
 
   parity-e2e:
-    name: transforms parity (bash + cypress, live backend)
+    name: transforms parity (bash, live backend) — backend only
     runs-on: ubuntu-latest
     timeout-minutes: 35
     services:
@@ -68,12 +64,6 @@ jobs:
       NODE_ENV: development
     steps:
       - uses: actions/checkout@v5
-      # The bash verify scripts + cypress specs live in the sibling tellus-fe repo.
-      - uses: actions/checkout@v5
-        with:
-          repository: ${{ github.repository_owner }}/tellus-fe
-          path: tellus-fe
-          ref: ${{ github.base_ref || github.ref_name }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with: { node-version: 24.12.0, cache: pnpm }
@@ -86,8 +76,6 @@ jobs:
         run: |
           python -m venv /tmp/pyspark-venv
           /tmp/pyspark-venv/bin/pip install --quiet pyspark pandas pyarrow
-      - name: Build transform-runtime image (sandbox + cluster)
-        run: docker build -t tellus/transform-runtime:py38 -f tellus-fe/scripts/transform-runtime.Dockerfile tellus-fe/scripts
       - name: Run migrations
         run: pnpm run migrate:all
       - name: Start backend (local mode)
@@ -101,21 +89,22 @@ jobs:
         # and asserts the Foundry-faithful file set + content invariants + datasetRid
         # substitution (✅/➕/➖ report). See scripts/test-template-parity.sh + DECISIONS.md.
         run: TELLUS_BASE=http://localhost:3000 bash scripts/test-template-parity.sh
-      - name: bash parity — retry + lineage-unified (local mode)
-        run: |
-          bash tellus-fe/scripts/verify-transforms-retry.sh
-          bash tellus-fe/scripts/verify-transforms-lineage-unified.sh
+      - name: bash parity — backend e2e (repo → dataset → @transform → build → lineage)
+        # Full loop on this repo alone: create a transforms repo, seed an input
+        # dataset, commit a real @transform, run the build against the live
+        # PySpark venv, and assert job_spec rows + materialized output +
+        # lineage edges. See scripts/verify-transforms-e2e.sh.
+        run: bash scripts/verify-transforms-e2e.sh 3000
+      - name: Build transform-runtime image (Gap 3 sandbox)
+        run: docker build -t tellus/transform-runtime:py38 -f scripts/transform-runtime.Dockerfile scripts
       - name: bash parity — sandboxed execution (container mode)
+        # Gap 3 proof on this repo alone: a normal transform SUCCEEDS in the
+        # container; a host-filesystem read FAILS with FileNotFoundError; a
+        # network socket FAILS under --network=none. See
+        # scripts/verify-transforms-sandbox.sh. Exits non-zero on any miss.
         run: |
           pkill -f "tsx src/server.ts" || true
-          env TELLUS_PYTHON_BIN=/tmp/pyspark-venv/bin/python JAVA_HOME=$JAVA_HOME \
+          env JAVA_HOME=$JAVA_HOME \
             TELLUS_TRANSFORM_EXECUTION_MODE=container nohup npx tsx src/server.ts > /tmp/tellus-c.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://localhost:3000/health && break; sleep 1; done
-          bash tellus-fe/scripts/verify-transforms-sandbox.sh
-      - name: cypress transforms specs
-        working-directory: tellus-fe
-        run: |
-          npx cypress run --headless --browser electron \
-            --config baseUrl=http://localhost:3000 \
-            --env apiUrl=http://localhost:3000/api \
-            --spec cypress/e2e/transforms-*.cy.ts
+          bash scripts/verify-transforms-sandbox.sh
