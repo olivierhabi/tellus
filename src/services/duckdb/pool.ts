@@ -24,6 +24,8 @@
 // native module is missing (Alpine ARM64 without prebuilds, CI minimal
 // sandbox, etc.) the caller is expected to feature-detect via
 // `isDuckDBAvailable()` and fall back to the legacy Node.js engine.
+import { mkdir } from "node:fs/promises";
+
 type DuckDBDatabaseCtor = new (p: string) => DuckDBDatabase;
 interface DuckDBDatabase {
   connect(): DuckDBConnection;
@@ -239,7 +241,11 @@ async function applyInstanceSettings(
   // production image we run as an unprivileged user, so make this an
   // application-owned path instead of depending on a host/user home path.
   // This must precede INSTALL/LOAD httpfs below.
-  const homeDirectory = process.env.DUCKDB_HOME_DIRECTORY ?? "/app/data/duckdb";
+  // Existing Docker volumes mask directories created at image build time, so
+  // provision both paths at runtime as the effective service user too.
+  const homeDirectory = process.env.DUCKDB_HOME_DIRECTORY ?? "/tmp/tellus-duckdb";
+  await mkdir(homeDirectory, { recursive: true });
+  await mkdir(tempDir, { recursive: true });
   await runAll(conn, `SET home_directory='${homeDirectory.replace(/'/g, "''")}'`);
   await runAll(conn, `SET memory_limit='${memoryLimit}'`);
   await runAll(conn, `PRAGMA temp_directory='${tempDir}'`);
