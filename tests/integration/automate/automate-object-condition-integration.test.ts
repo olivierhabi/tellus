@@ -33,6 +33,7 @@ import {
 } from "../../../src/services/automate/runtime";
 import { runAutomateConditionEvaluatorOnce } from "../../../src/services/automate/conditionRuntime";
 import { conditionFingerprint } from "../../../src/services/automate/objectCondition";
+import { getKeycloakAdminService } from "../../../src/services/keycloakAdminService";
 import type { AutomationDraft } from "../../../src/services/automate/contracts";
 import { deriveMainBranchId } from "../../../src/services/branchContext";
 import { syncObjectInstancesToOpenSearch } from "../../../src/services/opensearch/syncFromInstances";
@@ -41,8 +42,10 @@ import { deleteIndex } from "../../../src/services/opensearch/indexLifecycleMana
 const tenantId = "automate-object-condition";
 // The evaluator refreshes the owner's security snapshot through the real
 // Keycloak admin service; cypress-admin is a provisioned realm user with
-// the tellus-superadmin role (runtime marking bypass).
-const actorUserId = "53cf9bcf-4c20-4aed-83f4-3c7e405453b4";
+// the tellus-superadmin role (runtime marking bypass). Realm bootstraps
+// hand out FRESH UUIDs, so the id is resolved at setup — the previously
+// hard-coded dev-realm UUID failed CI with `Keycloak resource not found`.
+let actorUserId = "";
 const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 const OBJECT_TYPE = `AutomateFilter${suffix}`;
 const MATCH_TIN = `match-${suffix}`;
@@ -226,6 +229,18 @@ function objectAddedDefinition(filterValue: string | null): (base: AutomationDra
 }
 
 beforeAll(async () => {
+  const admins = await getKeycloakAdminService().listUsers({
+    search: "cypress-admin@tellus.local",
+    max: 5,
+  });
+  const admin = admins.find((u) => u.email === "cypress-admin@tellus.local" || u.username === "cypress-admin@tellus.local");
+  if (!admin) {
+    throw new Error(
+      "cypress-admin@tellus.local not provisioned in the lane Keycloak realm",
+    );
+  }
+  actorUserId = admin.id;
+
   const ontology = await pool.query<{ ontology_id: string }>(
     "SELECT ontology_id FROM ontology ORDER BY created_at LIMIT 1",
   );

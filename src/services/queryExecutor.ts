@@ -156,9 +156,11 @@ export async function executeGetObject(
   branchId: string | null,
 ): Promise<Record<string, unknown> | null> {
   const indexName = getIndexName(objectTypeApiName);
+  if (process.env.GET_DEBUG) console.log("[XGET-DEBUG] objectType=", objectTypeApiName, "index=", indexName, "id=", primaryKey, "filter=", securityFilter!==null&&securityFilter!==undefined, "branch=", branchId);
 
   try {
     const { body } = await client.get({ index: indexName, id: primaryKey });
+    if (process.env.GET_DEBUG) console.log("[XGET-DEBUG] OS get found=", (body as any)?.found);
 
     // Post-fetch security check (§Task 28 + F-03 remediation): client.get()
     // bypasses query-level filters, so we re-issue the fetch as a filtered
@@ -186,6 +188,7 @@ export async function executeGetObject(
         const { body: checkResp } = await client.search({ index: indexName, body: checkBody });
         const total = (checkResp as any).hits?.total;
         const count = typeof total === "object" ? total.value : total;
+        if (process.env.GET_DEBUG) console.log("[XGET-DEBUG] post-fetch check count=", count);
         if (count === 0) return null;
       } catch {
         // Security verification failed — deny access to prevent leaks.
@@ -197,6 +200,7 @@ export async function executeGetObject(
 
     return formatSingleObject(body, objectTypeApiName);
   } catch (err: any) {
+    if (process.env.GET_DEBUG) console.log("[XGET-DEBUG] OS get THREW status=", err?.statusCode, err?.meta?.statusCode, "msg=", String(err?.message).slice(0,120));
     if (err?.statusCode === 404 || err?.meta?.statusCode === 404) {
       return null;
     }

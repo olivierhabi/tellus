@@ -3,6 +3,20 @@
 Isolated verify stack dedicated to the `tellus-automate-verify` realm, so the Automate platform can be verified end-to-end without disturbing the shared dev stack (ports 3000/3001).
 Every element of the full e2e evaluation chain runs inside it: dedicated PostgreSQL DB, shared OpenSearch, Keycloak realm, isolated MinIO bucket, isolated API (:3100) and FE (:3101).
 
+## Lane self-test determinism (FUNN-ISO prefix)
+
+Inline module self-tests (`runSelfTests()` invoked by `npx tsx <file>` via
+`tests/helpers/selfTestBridge.ts`) that assert the DEFAULT index-name shape
+(`ontology-<apiName>` / "Index 'ontology-…' does not exist") must pin
+`process.env.OS_INDEX_PREFIX = "ontology-"` inside the wrapper and restore
+it after (see `src/services/indexing/{autoCreateHook,verifier,indexingOrchestrator}.ts`
+and `src/services/opensearch/objectCounter.ts`): `objectIndexPrefix()` reads
+env on every call, and vitest injects `ttest-ontology-` from `tests/laneEnv.ts`
+into every worker — the naming mechanics those tests check are
+prefix-independent. Equivalently environmental unit assumptions (e.g.
+`CONNECTIVITY_EGRESS_ALLOW_RESERVED` pinned by `tests/globalSetup.ts`) must
+be cleared in `beforeEach`, not only `afterEach`.
+
 ## Function invocation contract (canonical, migration 156)
 
 One canonical published contract drives publication, registry, Automate configuration, backend validation, runtime invocation, and version compatibility (`src/services/functions/canonicalSignature.ts`):

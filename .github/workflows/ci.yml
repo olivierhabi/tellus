@@ -145,6 +145,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    # TEMP-DIAG (run 32098065017): saturday-integration + markings-cbac
+    # GET-single 404s with docs visible to search. Emits [XGET-DEBUG] /
+    # [GET-DEBUG] lines from queryExecutor + objects.ts into stdout.
+    # Remove once the root cause is found.
+    env:
+      GET_DEBUG: "1"
+
+
     services:
       clickhouse:
         # osv2-serving + funnel CH suites (ch-migration, cdc-topology,
@@ -249,6 +257,46 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Start Temporal (funnel lane workers)
+        # tests/funnel/integration/multi-replica + automate suites spawn REAL
+        # Temporal workers against localhost:7233 in the lane namespace
+        # (tellus-funnel-tellus-tests-main, registered by testStackBootstrap).
+        # Mirrors docker-compose.temporal{,-postgres}; the dynamicconfig file
+        # (worker-versioning APIs) is a repo path, so docker-run is used
+        # instead of a service container.
+        run: |
+          docker run -d --name temporal-postgres \
+            -e POSTGRES_DB=temporal \
+            -e POSTGRES_USER=temporal \
+            -e POSTGRES_PASSWORD=temporal_pw \
+            postgres:16-alpine
+
+          for i in $(seq 1 30); do
+            if docker exec temporal-postgres pg_isready -U temporal -d temporal >/dev/null 2>&1; then
+              echo "temporal-postgres ready"; break
+            fi
+            [ "$i" -eq 30 ] && { echo "temporal-postgres failed to start"; docker logs temporal-postgres; exit 1; }
+            sleep 1
+          done
+
+          docker run -d --name temporal \
+            --network host -p 7233:7233 \
+            -e DB=postgres12 \
+            -e DB_PORT=5432 \
+            -e POSTGRES_USER=temporal \
+            -e POSTGRES_PWD=temporal_pw \
+            -e POSTGRES_SEEDS=temporal-postgres \
+            -v "$PWD/deploy/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro" \
+            temporalio/auto-setup:1.25.2
+
+          for i in $(seq 1 90); do
+            if docker exec temporal temporal operator cluster health --address temporal:7233 2>/dev/null | grep -q SERVING; then
+              echo "temporal ready"; break
+            fi
+            [ "$i" -eq 90 ] && { echo "temporal failed to start"; docker logs temporal; exit 1; }
+            sleep 2
+          done
+
       - name: Start MinIO and create lane bucket
         # Functions-publish artifact-storage + service suites (and the
         # code-repos publish path) stream real blobs to S3 — the lane bucket
@@ -346,6 +394,10 @@ jobs:
       OS_INDEX_PREFIX: ttest-e2e-ontology-
       S3_BUCKET: tellus-tests-e2e-bucket
       TELLUS_TEST_API_BASE_URL: http://localhost:3000
+      # TEMP-DIAG (run 32098065017): saturday GET-single 404 with docs visible
+      # to search. Emits [XGET-DEBUG]/[GET-DEBUG] lines from queryExecutor +
+      # objects.ts into the e2e-server-log artifact. Remove once fixed.
+      GET_DEBUG: "1"
 
     services:
       postgres:
@@ -679,6 +731,9 @@ jobs:
       TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-all
       TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-all
       KEYCLOAK_REALM: tellus-tests-all
+      # TEMP-DIAG (run 32098065017): markings-cbac GET-single 404s here too —
+      # same XGET/GET debug tracing as the E2E job. Remove once fixed.
+      GET_DEBUG: "1"
       # NOTE: OS_INDEX_PREFIX is deliberately NOT job-env. This job runs
       # tests/runAll.ts, whose day suites + inline self-test modules (and
       # the vitest unit lane) assert the unprefixed default index names

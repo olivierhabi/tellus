@@ -28,6 +28,7 @@ import {
 import { runAutomateConditionEvaluatorOnce } from "../../../src/services/automate/conditionRuntime";
 import type { AutomationDraft } from "../../../src/services/automate/contracts";
 import { deriveMainBranchId } from "../../../src/services/branchContext";
+import { getKeycloakAdminService } from "../../../src/services/keycloakAdminService";
 import { syncObjectInstancesToOpenSearch } from "../../../src/services/opensearch/syncFromInstances";
 import { deleteIndex } from "../../../src/services/opensearch/indexLifecycleManager";
 
@@ -35,8 +36,11 @@ const tenantId = "automate-run-on-all-load";
 // The evaluator refreshes the owner's security snapshot through the real
 // Keycloak admin service, so the owner must be a provisioned realm user
 // (cypress-admin is bootstrapped by scripts/bootstrap-keycloak.sh and holds
-// the tellus-superadmin realm role for runtime marking bypass).
-const actorUserId = "53cf9bcf-4c20-4aed-83f4-3c7e405453b4";
+// the tellus-superadmin realm role for runtime marking bypass). Realm
+// bootstraps hand out FRESH UUIDs, so the id is resolved at setup — it
+// was once hard-coded to the dev realm's cypress-admin UUID and every
+// fresh CI realm failed with `Keycloak resource not found`.
+let actorUserId = "";
 const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 const OBJECT_TYPE = `AutomateLoad${suffix}`;
 const OBJECT_COUNT = 2_500;
@@ -94,6 +98,18 @@ async function drainEffectsUntilSettled(
 }
 
 beforeAll(async () => {
+  const admins = await getKeycloakAdminService().listUsers({
+    search: "cypress-admin@tellus.local",
+    max: 5,
+  });
+  const admin = admins.find((u) => u.email === "cypress-admin@tellus.local" || u.username === "cypress-admin@tellus.local");
+  if (!admin) {
+    throw new Error(
+      "cypress-admin@tellus.local not provisioned in the lane Keycloak realm",
+    );
+  }
+  actorUserId = admin.id;
+
   const ontology = await pool.query<{ ontology_id: string }>(
     "SELECT ontology_id FROM ontology ORDER BY created_at LIMIT 1",
   );

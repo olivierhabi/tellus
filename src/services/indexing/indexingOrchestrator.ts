@@ -712,6 +712,22 @@ export default { indexObjectType };
 // ---------------------------------------------------------------------------
 
 export async function runSelfTests(): Promise<void> {
+  // These self-tests assert the DEFAULT index-name shape (e.g.
+  // "ontology-employee") byte-for-byte. Under a FUNN-ISO prefixed lane
+  // (vitest pins OS_INDEX_PREFIX=ttest-ontology-) the assertion broke —
+  // the naming mechanics they check are prefix-independent. Pin the
+  // default prefix for the duration of the test; restore after.
+  const savedPrefix = process.env.OS_INDEX_PREFIX;
+  process.env.OS_INDEX_PREFIX = "ontology-";
+  try {
+    await runSelfTestsImpl();
+  } finally {
+    if (savedPrefix === undefined) delete process.env.OS_INDEX_PREFIX;
+    else process.env.OS_INDEX_PREFIX = savedPrefix;
+  }
+}
+
+async function runSelfTestsImpl(): Promise<void> {
   let passed = 0;
   let failed = 0;
 

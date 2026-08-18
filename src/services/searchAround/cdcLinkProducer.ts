@@ -298,24 +298,36 @@ export async function publishRowsToTopic(topic: string, rows: LinkCdcRow[]): Pro
   if (rows.length === 0) return 0;
   const p = await getProducer();
   if (!p) return 0;
-  try {
-    await p.send({
-      topic,
-      messages: rows.map((row) => ({
-        key: `${row.source_pk}::${row.target_pk}`,
-        value: serialisePayload(row),
-        headers: {
-          schema_version: row.schema_version ?? "2.0.0",
-          operation: row.operation ?? "ADD",
-          event_id: row.event_id ?? "",
-        },
-      })),
-    });
-    return rows.length;
-  } catch (err) {
-    console.warn(`[kafka/cdc-links] publish to ${topic} failed: ${(err as Error).message}`);
-    return 0;
+  const messages = rows.map((row) => ({
+    key: `${row.source_pk}::${row.target_pk}`,
+    value: serialisePayload(row),
+    headers: {
+      schema_version: row.schema_version ?? "2.0.0",
+      operation: row.operation ?? "ADD",
+      event_id: row.event_id ?? "",
+    },
+  }));
+  // A topic created moments before the first publish can still race the
+  // broker's metadata propagation ("This server does not host this
+  // topic-partition" / UNKNOWN_TOPIC_OR_PARTITION on a cold leader). Retry
+  // those topic-bootstrap classes once after a short settle — never the
+  // generic failure classes (those fall through to the outbox retry).
+  const RETRYABLE = /not host this topic-partition|UNKNOWN_TOPIC|NOT_LEADER|LEADER_NOT_AVAILABLE/i;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await p.send({ topic, messages });
+      return rows.length;
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (attempt < 2 && RETRYABLE.test(msg)) {
+        await new Promise((r) => setTimeout(r, 400));
+        continue;
+      }
+      console.warn(`[kafka/cdc-links] publish to ${topic} failed: ${msg}`);
+      return 0;
+    }
   }
+  return 0;
 }
 
 function toClickHouseDateTime(d: Date): string {
