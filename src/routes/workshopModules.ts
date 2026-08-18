@@ -24,6 +24,7 @@ import {
   listModules,
   updateModule,
 } from "../services/workshop/moduleService";
+import { listModuleActivity } from "../services/workshop/activityService";
 import {
   createModuleRequestSchema,
   moduleDefinitionSchema,
@@ -148,6 +149,46 @@ router.get(
         modules: result.modules,
         nextPageToken: result.nextPageToken,
       });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---- GET /api/v1/workshop/modules:activity ---------------------------------
+//
+// The composite home-table read: the caller's recently-viewed ∪ favorited
+// modules, joined to live (non-trashed) modules and enriched with folder
+// paths + principal display names. Replaces a client-side N+1 (recents +
+// N getModule + N breadcrumb + user directory) with one call, and filters
+// stale recents rows server-side.
+
+const activityQuerySchema = z
+  .object({
+    limit: z
+      .preprocess(
+        (v) => (typeof v === "string" ? parseInt(v, 10) : v),
+        z.number().int().min(1).max(100),
+      )
+      .optional(),
+    branch: z.string().optional(),
+  })
+  .strict();
+
+router.get(
+  "/modules:activity",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const parsed = activityQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        throw invalidModuleSchema("modules:activity query did not validate", {
+          issues: parsed.error.issues,
+        });
+      }
+      const result = await listModuleActivity(currentUser(req), {
+        limit: parsed.data.limit,
+      });
+      res.status(200).json(result);
     } catch (err) {
       next(err);
     }

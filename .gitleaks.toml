@@ -2,11 +2,31 @@
 useDefault = true
 
 [[allowlists]]
-description = "Temporal histories use UUID identifiers as payload references; UUIDs are identifiers, not credentials"
+description = "UUIDs are identifiers, not credentials (Temporal payload refs, test idempotency keys). Quotes-tolerant: gitleaks 8.24.x extracts the secret with surrounding quotes, 8.30.x without."
 regexTarget = "secret"
 regexes = [
-  '''^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$''',
+  '''^\"?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\"?$''',
 ]
+
+[[allowlists]]
+description = "Dev-stack MinIO credentials (localhost:9000 docker-compose dev instance only — never production). Exact value, scoped to the two probe/verify scripts that legitimately connect to the local dev bucket."
+regexTarget = "secret"
+paths = [
+  '''(^|/)scripts/_dup_probe\.mjs$''',
+  '''(^|/)scripts/verify-partitioned-merge\.ts$''',
+]
+regexes = [
+  '''^\"?kYJtYYunruhlPtOow9PD5FyRa36BXPM\"?$''',
+]
+
+[[allowlists]]
+description = "litellm historical api_key (commit dd0ea16) — credential rotated + documented in docs/security/litellm-credential-rotation.md; current file carries no key (os.environ). Commit-scoped so a NEW key in this file still fails CI."
+paths = ['''^litellm_config\.yaml$''']
+commits = ['dd0ea1656dbe647f9a5778576c778d2b9a7e20cf']
+
+[[allowlists]]
+description = "Historical committed session-log dump (env excerpts); file removed from the working tree in ae6d39b — findings are historical blobs inside the PR scan range only."
+paths = ['''^019fa89f-66cd-7831-8982-dca47293bda6\.md$''']
 
 [[allowlists]]
 description = "Secret-scanner unit test contains deliberately planted, non-live credential-shaped fixtures"

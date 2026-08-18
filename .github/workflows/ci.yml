@@ -255,6 +255,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    # FUNN-ISO-1 lane identity: src/seed.ts → resetEnterpriseOntologyForSeed
+    # runs the destructive-test guard, which DENIES dev-shaped identity
+    # (tellus_db / realm tellus / ontology- prefix / tellus-uploads) and
+    # requires the full 10-field proof + a sealed db. This job therefore runs
+    # as its own provably-test lane: environment tellus-tests-e2e, db sealed
+    # below, temporal ns/queue + realm + index prefix + bucket all test-shaped.
+    env:
+      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
+      TELLUS_ENVIRONMENT_ID: tellus-tests-e2e
+      PGDATABASE: tellus_tests_e2e
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      PGPORT: "5432"
+      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-e2e
+      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-e2e
+      KEYCLOAK_REALM: tellus-tests-e2e
+      OS_INDEX_PREFIX: ttest-e2e-ontology-
+      S3_BUCKET: tellus-tests-e2e-bucket
+      TELLUS_TEST_API_BASE_URL: http://localhost:3000
+
     services:
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
@@ -264,7 +285,7 @@ jobs:
         # official image, needs no auth, and is not Docker-Hub-rate-limited.
         image: public.ecr.aws/docker/library/postgres:16
         env:
-          POSTGRES_DB: tellus_db
+          POSTGRES_DB: tellus_tests_e2e
           POSTGRES_USER: tellus
           POSTGRES_PASSWORD: tellus123
         ports:
@@ -333,7 +354,7 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
+          KC_REALM=tellus-tests-e2e bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -355,10 +376,20 @@ jobs:
           wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-uploads
+          mc mb --ignore-existing ci/tellus-tests-e2e-bucket
 
       - name: Create test data directory
         run: mkdir -p /tmp/ontology-testdata
+
+      - name: Seal the e2e-lane database (FUNN-ISO-1)
+        # First-writer-wins: the destructive-test guard requires the connected
+        # DB to carry the deployment_environment seal for TELLUS_ENVIRONMENT_ID
+        # before seed.ts may reset the enterprise ontology. Migrations must
+        # exist first (run-all.sh re-runs them idempotently afterwards).
+        run: |
+          pnpm run migrate:all
+          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
+            VALUES (TRUE, 'tellus-tests-e2e', 'ci-e2e-lane') ON CONFLICT (singleton) DO NOTHING"
 
       - name: Run E2E tests
         run: pnpm run test:e2e
@@ -770,11 +801,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # gitleaks-action lists PR commits via the REST API on pull_request
-      # events — without this the default token gets 403 Resource not
-      # accessible by integration (x-accepted-github-permissions:
-      # pull_requests=read).
-      pull-requests: read
+      # gitleaks-action on pull_request events (1) lists PR commits via the
+      # REST API and (2) posts findings as a PR review/comment — both need
+      # write on pull-requests, else 403 Resource not accessible by
+      # integration (x-accepted-github-permissions: pull_requests=read for
+      # the list; the comment endpoint needs write).
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -785,3 +817,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          # Pin 8.30.1: .gitleaks.toml uses the [[allowlists]] array form,
+          # which 8.24.x (the action's default) silently ignores — the local
+          # scan was validated byte-identically with this version.
+          GITLEAKS_VERSION: 8.30.1
