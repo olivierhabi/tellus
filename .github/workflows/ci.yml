@@ -406,6 +406,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # FUNN-ISO-1 lane identity: src/seed.ts resets the enterprise ontology,
+    # which the destructive-test guard only allows for a provably-test lane
+    # (sealed DB, test-shaped ns/queue/realm/prefix/bucket) — never for
+    # dev-shaped identity (tellus_db / realm tellus / tellus-uploads).
+    env:
+      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
+      TELLUS_ENVIRONMENT_ID: tellus-tests-perf
+      PGDATABASE: tellus_tests_perf
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      PGPORT: "5432"
+      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-perf
+      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-perf
+      KEYCLOAK_REALM: tellus-tests-perf
+      OS_INDEX_PREFIX: ttest-perf-ontology-
+      S3_BUCKET: tellus-tests-perf-bucket
+      TELLUS_TEST_API_BASE_URL: http://localhost:3000
+
     services:
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
@@ -415,13 +434,13 @@ jobs:
         # official image, needs no auth, and is not Docker-Hub-rate-limited.
         image: public.ecr.aws/docker/library/postgres:16
         env:
-          POSTGRES_DB: tellus_db
+          POSTGRES_DB: tellus_tests_perf
           POSTGRES_USER: tellus
           POSTGRES_PASSWORD: tellus123
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-cmd="pg_isready -U tellus -d tellus_tests_perf"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
@@ -484,7 +503,7 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
+          KC_REALM=tellus-tests-perf bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -506,13 +525,20 @@ jobs:
           wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-uploads
+          mc mb --ignore-existing ci/tellus-tests-perf-bucket
 
       - name: Run database migrations
         run: |
           pnpm run migrate
           pnpm run migrate:foundry
           pnpm run migrate:auth
+
+      - name: Seal the perf lane database (FUNN-ISO-1)
+        # First-writer-wins seal proving this DB belongs to the test lane;
+        # required before src/seed.ts may reset the enterprise ontology.
+        run: |
+          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
+            VALUES (TRUE, 'tellus-tests-perf', 'ci-perf-lane') ON CONFLICT (singleton) DO NOTHING"
 
       - name: Seed database
         run: |

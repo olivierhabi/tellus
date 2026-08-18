@@ -41,6 +41,7 @@ const ROUTE_FILES = [
   "src/routes/explorations.ts",
   "src/routes/favorites.ts",
   "src/routes/exports.ts",
+  "src/routes/pipelinesActivity.ts",
 ];
 
 // Handlers that legitimately do NOT call buildSecurityFilter +
@@ -81,6 +82,10 @@ const EXEMPT_LIST: ReadonlyArray<string> = [
   // sql.invalidate is admin-only via authorize('ontology-admin') and
   // does not read tenant data.
   'src/routes/sql.ts::POST:/sql/invalidate',
+  // pipelines.activity reads environment-scoped funnel pipeline
+  // operational rows (stage timings, run statuses) — not ontology
+  // objects. There is no marking or branch dimension to filter by.
+  'src/routes/pipelinesActivity.ts::GET:/pipelines:activity',
 ] as const;
 
 const EXEMPT_REASONS: Record<string, string> = {
@@ -114,6 +119,8 @@ const EXEMPT_REASONS: Record<string, string> = {
     'User-scoped download; IDOR-safe via requested_by = currentUser.',
   'src/routes/sql.ts::POST:/sql/invalidate':
     'Admin-only via authorize(\'ontology-admin\'). No tenant data read.',
+  'src/routes/pipelinesActivity.ts::GET:/pipelines:activity':
+    'Environment-scoped funnel operational rows; no markings/branch dimension.',
 };
 
 // ---------------------------------------------------------------------------
