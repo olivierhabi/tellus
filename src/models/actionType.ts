@@ -257,19 +257,20 @@ async function createActionType(
   // create endpoint is persisted as version 1 (default + deprecation
   // telemetry emitted by the route). An explicit version 2 carries the
   // v2 defaults server-side when executionMode/deletePolicy are omitted.
-  const semanticsVersion: number | null =
-    actionTypeDef.semanticsVersion !== undefined
-      ? actionTypeDef.semanticsVersion
-      : null; // null persisted for legacy-v1-omit; read-time fallback to 1
-  let executionMode: string | null =
-    actionTypeDef.executionMode ?? null;
-  let deletePolicy: string | null =
-    actionTypeDef.deletePolicy ?? null;
+  // NOTE: migration 124 makes semantics_version / execution_mode / delete_policy
+  // NOT NULL. Persisting NULL for legacy-v1-omit is no longer legal — an
+  // omitted semanticsVersion resolves to the v1 defaults (identical shape to
+  // the read-time fallback in resolveRowSemantics()).
+  const semanticsVersion: number =
+    actionTypeDef.semanticsVersion ?? V1_DEFAULT_SEMANTICS.semanticsVersion;
+  let executionMode: string;
+  let deletePolicy: string;
   if (actionTypeDef.semanticsVersion === 2) {
     const v2 = V2_DEFAULT_SEMANTICS;
     executionMode = actionTypeDef.executionMode ?? v2.executionMode;
     deletePolicy = actionTypeDef.deletePolicy ?? v2.deletePolicy;
-  } else if (actionTypeDef.semanticsVersion === 1) {
+  } else {
+    // v1 (explicit or legacy-v1-omit after the default above).
     const v1 = V1_DEFAULT_SEMANTICS;
     executionMode = actionTypeDef.executionMode ?? v1.executionMode;
     deletePolicy = actionTypeDef.deletePolicy ?? v1.deletePolicy;

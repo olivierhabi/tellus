@@ -223,18 +223,14 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
-
-      - name: Run database migrations
-        run: |
-          pnpm run migrate
-          pnpm run migrate:foundry
-          pnpm run migrate:auth
-
-      - name: Seed database
-        run: |
-          pnpm run seed
-          npx tsx src/seeds/actionTypes.seed.ts
+      # NOTE: no job-level Keycloak realm bootstrap, migrations, or seeds.
+      # The pinned vitest lane (tests/laneEnv.ts + tests/globalSetup.ts +
+      # tests/testStackBootstrap.ts) is fully self-sufficient: it creates and
+      # seals its own DB (tellus_tests / tellus-tests-main), runs the 4-pass
+      # migration, seeds via src/seed.ts + actionTypes.seed.ts with the full
+      # destructive-test-guard proof, and bootstraps the tellus-tests realm.
+      # The previous steps targeted the dev-shaped default (tellus_db) and
+      # are now refused by the FUNN-ISO-1 destructive-test guard by design.
 
       - name: Run integration tests
         run: pnpm run test:integration
@@ -565,6 +561,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # FUNN-ISO-1 lane identity: tests/runAll.ts manages its own backend on
+    # :3000 and expects a seeded ontology, so this job runs its explicit
+    # migrate+seed steps as a provably-test lane (sealed DB, test-shaped
+    # ns/queue/realm/prefix/bucket) — the destructive-test guard refuses
+    # dev-shaped identity by design. Vitest suites spawned inside runAll
+    # still boot their own pinned tellus_tests lane independently.
+    env:
+      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
+      TELLUS_ENVIRONMENT_ID: tellus-tests-all
+      PGDATABASE: tellus_tests_all
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      PGPORT: "5432"
+      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-all
+      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-all
+      KEYCLOAK_REALM: tellus-tests-all
+      OS_INDEX_PREFIX: ttest-all-ontology-
+      S3_BUCKET: tellus-tests-all-bucket
+      TELLUS_TEST_API_BASE_URL: http://localhost:3000
+
     services:
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
@@ -574,13 +591,13 @@ jobs:
         # official image, needs no auth, and is not Docker-Hub-rate-limited.
         image: public.ecr.aws/docker/library/postgres:16
         env:
-          POSTGRES_DB: tellus_db
+          POSTGRES_DB: tellus_tests_all
           POSTGRES_USER: tellus
           POSTGRES_PASSWORD: tellus123
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-cmd="pg_isready -U tellus -d tellus_tests_all"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
@@ -643,7 +660,7 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
+          KC_REALM=tellus-tests-all bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -665,7 +682,7 @@ jobs:
           wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-uploads
+          mc mb --ignore-existing ci/tellus-tests-all-bucket
 
       - name: Create test data directory
         run: mkdir -p /tmp/ontology-testdata
@@ -675,6 +692,13 @@ jobs:
           pnpm run migrate
           pnpm run migrate:foundry
           pnpm run migrate:auth
+
+      - name: Seal the test-all lane database (FUNN-ISO-1)
+        # First-writer-wins seal proving this DB belongs to the test lane;
+        # required before src/seed.ts may reset the enterprise ontology.
+        run: |
+          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
+            VALUES (TRUE, 'tellus-tests-all', 'ci-test-all-lane') ON CONFLICT (singleton) DO NOTHING"
 
       - name: Seed database
         run: |

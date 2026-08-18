@@ -38,7 +38,7 @@
 set -o pipefail
 
 KC="${KC_URL:-http://localhost:8086}"
-REALM="${KC_REALM:-tellus}"
+REALM="${KC_REALM:-${KEYCLOAK_REALM:-tellus}}"
 CLIENT="${KC_CLIENT:-tellus-frontend}"
 USER="${TELLUS_USER:-cypress@tellus.local}"
 PASS="${TELLUS_PASS:-Password123!}"
@@ -131,19 +131,19 @@ order_id,customer_id,item_name,quantity
 2,cust-b,Gizmo,3
 3,cust-a,Sprocket,25
 CSV
+  # POST /api/v1/datasets/upload — canonical ingest path; scans the CSV
+  # synchronously and returns the dataset + schema in one response. (The old
+  # project-file-upload no longer materialises a dataset row or columns.)
   local upload
-  upload=$(curl -sf -X POST -H "$auth" -F "files=@$tmp_csv" \
-    "$API/v1/projects/$PROJECT_ID/upload") || die "upload failed"
-  DATASET_ID=$(echo "$upload" | jq -r '.data[0].dataset.id // .data[0].id // .data[0].datasetId')
-  [ -n "$DATASET_ID" ] && [ "$DATASET_ID" != "null" ] || die "no dataset id"
-
-  for _ in $(seq 1 30); do
-    local cols
-    cols=$(curl -sf -H "$auth" "$API/v1/datasets/$DATASET_ID" \
-      | jq '(.data.columns // .columns // .data.schema_info.columns // []) | length')
-    [ "${cols:-0}" -ge 4 ] && break
-    sleep 2
-  done
+  upload=$(curl -sf -X POST -H "$auth" \
+    -F "file=@$tmp_csv" \
+    -F "name=stage-delay-$stamp" \
+    "$API/v1/datasets/upload") || die "upload failed"
+  DATASET_ID=$(echo "$upload" | jq -r '.dataset.datasetId // empty')
+  [ -n "$DATASET_ID" ] && [ "$DATASET_ID" != "null" ] || die "no dataset id: $upload"
+  local cols
+  cols=$(echo "$upload" | jq '(.dataset.schemaDefinition.columns // []) | length')
+  [ "${cols:-0}" -ge 4 ] || die "no schema columns: $upload"
 
   OBJECT_TYPE_API_NAME="${prefix}${stamp}"
   local batch
@@ -167,7 +167,7 @@ CSV
 
   curl -sf -X POST -H "$auth" -H "Content-Type: application/json" \
     -d "$(jq -n --arg id "$DATASET_ID" \
-      '{foundryDatasetId:$id,
+      '{datasetId:$id,
         columnMapping:{orderId:"order_id",customerId:"customer_id",itemName:"item_name",quantity:"quantity"},
         primaryKeyColumn:"order_id"}')" \
     "$API/v1/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME/datasource" \

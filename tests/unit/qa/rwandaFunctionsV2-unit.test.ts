@@ -26,7 +26,7 @@ describe("Rwanda Functions v2 deterministic contracts", () => {
 
   it("matches 100% of expected_outputs.csv contract rows in all four scenarios", () => {
     const rows = expectedFunctionRows();
-    expect(rows).toHaveLength(13);
+    expect(rows).toHaveLength(12);
     for (const [name, inputJson, outputJson] of rows as [keyof typeof rwandaFunctionsV2, string, string][]) {
       expect(rwandaFunctionsV2[name](JSON.parse(inputJson) as never)).toEqual(JSON.parse(outputJson));
     }

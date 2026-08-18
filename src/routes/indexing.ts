@@ -380,7 +380,10 @@ router.delete(
       // -----------------------------------------------------------------
       // Determine response message based on whether index existed
       // -----------------------------------------------------------------
-      const indexExisted = !result.message?.includes("does not exist");
+      // Message-shape agnostic: indexLifecycleManager may phrase the
+      // nothing-to-delete result as "does not exist" (base) or "do not
+      // exist" (with replacement generations).
+      const indexExisted = !result.message?.includes("not exist");
 
       const message = indexExisted
         ? `Index '${indexName}' has been deleted. All indexed objects have been removed. Re-index to restore.`

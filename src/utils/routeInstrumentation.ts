@@ -75,6 +75,7 @@ export type RouteName =
   | "favorites.toggle"
   | "favorites.recent.list"
   | "favorites.recent.record"
+  | "pipelines.activity"
   | "sql.execute"
   | "sql.invalidate";
 

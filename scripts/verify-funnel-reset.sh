@@ -23,7 +23,7 @@
 set -o pipefail
 
 KC="${KC_URL:-http://localhost:8086}"
-REALM="${KC_REALM:-tellus}"
+REALM="${KC_REALM:-${KEYCLOAK_REALM:-tellus}}"
 CLIENT="${KC_CLIENT:-tellus-frontend}"
 USER="${TELLUS_USER:-cypress@tellus.local}"
 PASS="${TELLUS_PASS:-Password123!}"
@@ -117,18 +117,18 @@ order_id,customer_id,item_name,quantity
 2,b,Gizmo,3
 3,a,Sprocket,25
 CSV
-UPLOAD=$(curl -sf -X POST -H "$AUTH" -F "files=@$TMP_CSV" \
-  "$API/v1/projects/$PROJECT_ID/upload")
-DATASET_ID=$(echo "$UPLOAD" | jq -r '.data[0].dataset.id // .data[0].id // .data[0].datasetId')
-[ -n "$DATASET_ID" ] && [ "$DATASET_ID" != "null" ] || die "dataset missing"
+# POST /api/v1/datasets/upload — canonical ingest path; scans the CSV
+# synchronously and returns the dataset + schema in one response. (The old
+# project-file-upload no longer materialises a dataset row.)
+UPLOAD=$(curl -sf -X POST -H "$AUTH" \
+  -F "file=@$TMP_CSV" \
+  -F "name=reset-probe-$STAMP" \
+  "$API/v1/datasets/upload")
+DATASET_ID=$(echo "$UPLOAD" | jq -r '.dataset.datasetId // empty')
+[ -n "$DATASET_ID" ] && [ "$DATASET_ID" != "null" ] || die "dataset missing: $UPLOAD"
+cols=$(echo "$UPLOAD" | jq '(.dataset.schemaDefinition.columns // []) | length')
+[ "${cols:-0}" -ge 4 ] || die "dataset missing schema columns: $UPLOAD"
 note "dataset=$DATASET_ID"
-
-for _ in $(seq 1 30); do
-  cols=$(curl -sf -H "$AUTH" "$API/v1/datasets/$DATASET_ID" \
-    | jq '(.data.columns // .columns // .data.schema_info.columns // []) | length')
-  [ "${cols:-0}" -ge 4 ] && break
-  sleep 2
-done
 
 OBJECT_TYPE_API_NAME="ResetProbe$STAMP"
 BATCH=$(curl -sf -X POST -H "$AUTH" -H "Content-Type: application/json" \
@@ -147,7 +147,7 @@ OBJECT_TYPE_ID=$(echo "$BATCH" | jq -r '.objectType.objectTypeId // .data.object
 OBJECT_TYPE_API_NAME=$(echo "$BATCH" | jq -r '.objectType.apiName // .data.objectType.apiName // .data.apiName // .apiName // "'"$OBJECT_TYPE_API_NAME"'"')
 curl -sf -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$(jq -n --arg id "$DATASET_ID" \
-    '{foundryDatasetId:$id,
+    '{datasetId:$id,
       columnMapping:{orderId:"order_id",customerId:"customer_id",itemName:"item_name",quantity:"quantity"},
       primaryKeyColumn:"order_id"}')" \
   "$API/v1/ontology/$ONTOLOGY/objectTypes/$OBJECT_TYPE_API_NAME/datasource" \

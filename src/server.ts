@@ -1157,6 +1157,12 @@ app.use("/api/v1/scaffold", createScaffoldRouter({ pool }));
 import pipelinesMetricsRouter from "./routes/pipelinesMetrics";
 app.use("/api/v1/pipelines", pipelinesMetricsRouter);
 
+// Pipeline Builder app home — composite recents ∪ favorites read for
+// /pipeline (mirrors /api/v1/workshop/modules:activity). User-scoped, so it
+// is mounted at /api/v1 rather than under /api/v1/projects/:projectId.
+import pipelinesActivityRouter from "./routes/pipelinesActivity";
+app.use("/api/v1", pipelinesActivityRouter);
+
 // Workshop B01 — module CRUD with ETag/If-Match optimistic concurrency.
 // Spec: tasks/workshop/workshop-tasks.md §B01. Mounted under the spec's
 // `/api/v1/workshop` prefix (separate from `/api/v1` so the surface stays

@@ -114,7 +114,8 @@ do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes" '{
 }'
 assert_status "$HTTP_STATUS" "201" "Create custom action type"
 assert_contains "$HTTP_BODY" "\"${CUSTOM_ACTION}\"" "apiName in response"
-assert_contains "$HTTP_BODY" '"actionTypeId"' "actionTypeId present"
+# The canonical create response is rid-shaped (action type identifier).
+assert_contains "$HTTP_BODY" '"rid"' "actionTypeId present"
 assert_contains "$HTTP_BODY" '"parameters"' "parameters present"
 assert_contains "$HTTP_BODY" '"rules"' "rules present"
 assert_contains "$HTTP_BODY" '"isEnabled"' "isEnabled present"
@@ -188,10 +189,13 @@ do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes" '{
 assert_status "$HTTP_STATUS" "400" "Empty rules rejected"
 
 # --- Duplicate apiName ---
+# Use a FULLY VALID payload: rule validation runs before the apiName
+# uniqueness INSERT, so an invalid payload would surface as 400, not the
+# 409 conflict we want to assert.
 do_request POST "/api/v1/ontology/${ONTOLOGY_ID}/actionTypes" '{
   "apiName":"registerTaxpayer",
   "displayName":"Duplicate",
-  "rules":[{"type":"createObject","objectType":"Taxpayer","properties":{}}]
+  "rules":[{"type":"createObject","objectType":"Taxpayer","properties":{"tin":{"source":"static","value":"TIN-dup-1"},"fullName":{"source":"static","value":"Dup Name"}}}]
 }'
 assert_status "$HTTP_STATUS" "409" "Duplicate apiName returns 409"
 
