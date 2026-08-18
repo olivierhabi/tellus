@@ -82,22 +82,45 @@ const DEV_FALLBACK_PRINCIPAL =
 
 /** Build a synthetic `test`-source principal from a
  * `<userId>[/<role1>,<role2>...]` header string + call next(). Shared by the
- * X-Tellus-Test-Principal override + the localhost dev fallback. */
+ * X-Tellus-Test-Principal override + the localhost dev fallback.
+ *
+ * Additional roles come from the documented `X-Tellus-Test-Role` /
+ * `X-Tellus-Test-Roles: r1,r2` headers (api/docs/CODE_REPOSITORY_API.md).
+ * Roles embedded in the principal header are passed through verbatim
+ * (existing callers pin exact case, e.g. `tellus-superadmin`), but the two
+ * role headers carry the Compass repo-role vocabulary, so the well-known
+ * names are canonicalized case-insensitively (viewer/editor/owner/reader
+ * → VIEWER/EDITOR/OWNER/READER) before the Compass policy sees them. */
 function applyHeaderPrincipal(
   req: Request,
   res: Response,
   next: NextFunction,
   header: string,
 ): void {
+  const CANONICAL_REPO_ROLES: Record<string, string> = {
+    viewer: "VIEWER",
+    editor: "EDITOR",
+    owner: "OWNER",
+    reader: "READER",
+  };
+  const canonicalize = (r: string) =>
+    CANONICAL_REPO_ROLES[r.trim().toLowerCase()] ?? r.trim();
+  const extraRoleHeaders = [req.header("X-Tellus-Test-Role"), req.header("X-Tellus-Test-Roles")]
+    .filter((h): h is string => typeof h === "string" && h.length > 0);
   const [userId, rolesCsv] = header.split("/");
   if (!userId) {
     sendUnauthenticated(res, req, "X-Tellus-Test-Principal missing userId");
     return;
   }
-  const roles = (rolesCsv ?? "")
+  const embeddedRoles = (rolesCsv ?? "")
     .split(",")
     .map((r) => r.trim())
     .filter((r) => r.length > 0);
+  const headerRoles = extraRoleHeaders
+    .flatMap((h) => h.split(","))
+    .map(canonicalize)
+    .filter((r) => r.length > 0);
+  const roles = [...embeddedRoles, ...headerRoles];
   req.codeReposPrincipal = {
     userId,
     source: "test",

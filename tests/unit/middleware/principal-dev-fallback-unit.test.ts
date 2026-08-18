@@ -100,6 +100,39 @@ describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () =
     expect(p!.roles).toEqual(["VIEWER"]);
   });
 
+  it("honors the documented X-Tellus-Test-Role(s) headers (canonicalized Compass roles)", () => {
+    const auth = requireCodeReposAuth();
+    const req = mockReq({
+      header: {
+        "X-Tellus-Test-Principal": "transforms-e2e",
+        "X-Tellus-Test-Roles": "editor",
+      },
+      remoteAddress: "127.0.0.1",
+    });
+    auth(req, mockRes(), () => {});
+
+    const p = principalOf(req);
+    expect(p!.userId).toBe("transforms-e2e");
+    // lowercase 'editor' from the documented header canonicalizes to the
+    // Compass repo-role name the WRITE gate recognizes.
+    expect(p!.roles).toEqual(["EDITOR"]);
+  });
+
+  it("merges X-Tellus-Test-Roles with embedded roles; embedded roles stay verbatim", () => {
+    const auth = requireCodeReposAuth();
+    const req = mockReq({
+      header: {
+        "X-Tellus-Test-Principal": "alice/tellus-superadmin",
+        "X-Tellus-Test-Role": "Owner",
+      },
+      remoteAddress: "127.0.0.1",
+    });
+    auth(req, mockRes(), () => {});
+
+    const p = principalOf(req);
+    expect(p!.roles).toEqual(["tellus-superadmin", "OWNER"]);
+  });
+
   it("401s (Stemma:Unauthenticated) for a no-header, NON-localhost request (the gate)", () => {
     const auth = requireCodeReposAuth();
     const req = mockReq({ remoteAddress: "203.0.113.10" }); // non-loopback
