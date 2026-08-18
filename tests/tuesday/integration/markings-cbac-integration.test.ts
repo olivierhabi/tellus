@@ -99,6 +99,12 @@ const PK_SECRET = `CBAC-SEC-${randomUUID().slice(0, 8)}`;
 const PK_TOP_SECRET = `CBAC-TS-${randomUUID().slice(0, 8)}`;
 const PK_UNCLASSIFIED = `CBAC-UNCL-${randomUUID().slice(0, 8)}`;
 
+// The lane prefixes every OS index (FUNN-ISO) — never hardcode the dev
+// default. `tests/laneEnv.ts` pins OS_INDEX_PREFIX for vitest lanes; strip
+// just the suffix to build the REST path.
+const TAXPAYER_INDEX = `${process.env.OS_INDEX_PREFIX ?? "ontology-"}taxpayer`;
+const OS_BASE = process.env.OPENSEARCH_URL ?? "http://localhost:9200";
+
 // Palantir semantics: a doc with no `_security` is invisible to every
 // marking-constrained user. We create it via a raw OS PUT to bypass the
 // `ensureDocumentSecurity` helper that would otherwise stamp PUBLIC.
@@ -121,7 +127,7 @@ async function stampRawDoc(
     doc._security = { markings, cbac: [] };
   }
   const res = await fetch(
-    `http://localhost:9200/ontology-taxpayer/_doc/${pk}?refresh=true`,
+    `${OS_BASE}/${TAXPAYER_INDEX}/_doc/${pk}?refresh=true`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -137,7 +143,7 @@ async function stampRawDoc(
 
 async function deleteRawDoc(pk: string): Promise<void> {
   await fetch(
-    `http://localhost:9200/ontology-taxpayer/_doc/${pk}?refresh=true`,
+    `${OS_BASE}/${TAXPAYER_INDEX}/_doc/${pk}?refresh=true`,
     { method: "DELETE" },
   ).catch(() => {});
 }
@@ -206,10 +212,12 @@ describe("CBAC + Markings enforcement (F-02 / F-03)", () => {
     );
     expect(res.status).toBe(200);
     // The single-object GET returns a flat record (not wrapped in `data`)
-    // whose primary key is exposed as `__primaryKey`. The marking stays on
+    // whose primary key is exposed as `__pk`. The marking stays on
     // the payload because alice has the PUBLIC marking.
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.__primaryKey).toBe(PK_PUBLIC);
+    // Served doc shape: the PG/overlay-backed read stamps `__pk`; the
+    // OS-serving projection stamps `__primaryKey`. Both carry the PK.
+    expect(body.__pk ?? body.__primaryKey ?? body.tin).toBe(PK_PUBLIC);
   });
 
   it("alice can read the SECRET document", async () => {
@@ -293,7 +301,7 @@ describe("CBAC + Markings enforcement (F-02 / F-03)", () => {
 
   it("F-03: the unclassified document DOES exist in OpenSearch (proving the filter is what hides it)", async () => {
     const res = await fetch(
-      `http://localhost:9200/ontology-taxpayer/_doc/${PK_UNCLASSIFIED}`,
+      `${OS_BASE}/${TAXPAYER_INDEX}/_doc/${PK_UNCLASSIFIED}`,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { _source?: Record<string, unknown> };
@@ -319,10 +327,10 @@ describe("CBAC + Markings enforcement (F-02 / F-03)", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      data?: Array<{ __primaryKey?: string; tin?: string }>;
+      data?: Array<{ __pk?: string; tin?: string }>;
     };
     const rows = body.data ?? [];
-    const pks = rows.map((d) => d.__primaryKey ?? d.tin);
+    const pks = rows.map((d) => d.__pk ?? d.tin);
     expect(pks).not.toContain(PK_SECRET);
   });
 
@@ -340,10 +348,10 @@ describe("CBAC + Markings enforcement (F-02 / F-03)", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      data?: Array<{ __primaryKey?: string; tin?: string }>;
+      data?: Array<{ __pk?: string; tin?: string }>;
     };
     const rows = body.data ?? [];
-    const pks = rows.map((d) => d.__primaryKey ?? d.tin);
+    const pks = rows.map((d) => d.__pk ?? d.tin);
     expect(pks).toContain(PK_SECRET);
   });
 });

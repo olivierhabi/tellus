@@ -59,6 +59,11 @@ beforeAll(async () => {
         submission_criteria JSONB,
         is_enabled     BOOLEAN NOT NULL DEFAULT true,
         max_affected_objects INT NOT NULL DEFAULT 1000,
+        -- Migration 124 made these NOT NULL; the wizard INSERT always writes
+        -- the resolved v1 triple, so the scratch table must carry them.
+        semantics_version SMALLINT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        delete_policy TEXT NOT NULL,
         created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
         UNIQUE (ontology_id, api_name)

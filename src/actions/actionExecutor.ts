@@ -641,7 +641,9 @@ export async function executeAction(
           const actualVersion = Number(versionResult.rows[0].version);
           if (actualVersion !== context.expectedVersion) {
             result.failureType = "concurrency_conflict";
-            result.errorMessage = "Object was modified by another user";
+            result.errorMessage =
+              `Object '${String(primaryKey)}' of type '${targetObjectType}' has been modified since you last read it. ` +
+              `Expected version ${context.expectedVersion}, found ${actualVersion}. Reload and retry.`;
             pendingError = new OntologyError(
               result.errorMessage,
               "CONCURRENCY_CONFLICT",
@@ -649,6 +651,10 @@ export async function executeAction(
               {
                 executionId,
                 expectedVersion: context.expectedVersion,
+                // The client contract (editApplicator's authoritative 409)
+                // is `currentVersion` — keep `actualVersion` as an additive
+                // alias for existing consumers of this preflight shape.
+                currentVersion: actualVersion,
                 actualVersion,
                 objectType: targetObjectType,
                 primaryKey: String(primaryKey),

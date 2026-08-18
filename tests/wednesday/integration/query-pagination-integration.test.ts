@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { api } from "../../helpers/api";
+import { api, BASE_URL } from "../../helpers/api";
 
 const BASE = "/api/v1/objects";
 let ONTOLOGY_ID: string;
@@ -14,7 +14,7 @@ let READY = false;
 describe("Query Pagination (Task 27)", () => {
   beforeAll(async () => {
     try {
-      const res = await fetch("http://localhost:3000/health");
+      const res = await fetch(`${BASE_URL}/health`);
       if (res.status !== 200) throw new Error("not healthy");
     } catch {
       throw new Error("F-P2-01: integration server unreachable — beforeAll fails loudly rather than ghost-passing");

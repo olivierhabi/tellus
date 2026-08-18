@@ -487,6 +487,15 @@ export async function setup(): Promise<void> {
       // and interface-link rule discriminators can be authored on the test
       // server. Gated off by default in production pending the v2 runbook.
       ACTION_SEMANTICS_V2_CREATION_ENABLED: "1",
+      // V2 EXECUTION for the lane: interface-link/matrix fixtures and the
+      // writeback lifecycle suites CREATE v2 action types and immediately
+      // APPLY them, so execution + projection-ready must also be on. This
+      // is safe here precisely because the lane DB is a fresh scratch world:
+      // the link_instances projection is empty and the ledger is empty, so
+      // the "bootstrap + reconcile, THEN enable" operator precondition is
+      // trivially satisfied. Production keeps both flags default-off.
+      ACTION_SEMANTICS_V2_ENABLED: "1",
+      ACTION_SEMANTICS_V2_PROJECTION_READY: "1",
       // Gap G/H — allow the action side-effect webhook delivery path
       // (connectivity egress) to reach the controlled service on loopback.
       // Mirrors the existing actionWebhooks unit-test opt-in. Test-only.

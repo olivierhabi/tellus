@@ -486,7 +486,7 @@ describe("Friday Integration: Complete Action System", () => {
       if (res.status === 201) {
         expect(res.body.apiName).toBe(CUSTOM_ACTION);
         expect(res.body.displayName).toBe("Friday Custom Action");
-        expect(res.body.actionTypeId).toBeDefined();
+        expect(res.body.rid).toBeDefined();
         expect(res.body.parameters).toHaveLength(4);
         expect(res.body.rules).toHaveLength(1);
         expect(res.body.isEnabled).toBe(true);
@@ -513,14 +513,32 @@ describe("Friday Integration: Complete Action System", () => {
       );
       expect(r2.status).toBe(400);
 
-      // Duplicate apiName
+      // Duplicate apiName. The payload must be otherwise FULLY VALID:
+      // creation-time rule validation (required-property mapping) runs
+      // before the uniqueness check, so an invalid body now fails 400
+      // and never proves the 409 contract.
       const r3 = await request(
         "POST",
         `/api/v1/ontology/${ontologyId}/actionTypes`,
         {
           apiName: "registerTaxpayer",
           displayName: "Duplicate",
-          rules: [{ type: "createObject", objectType: "Taxpayer", properties: {} }],
+          parameters: [
+            { apiName: "tin", displayName: "TIN", type: "string", required: true },
+            { apiName: "fullName", displayName: "Full Name", type: "string", required: true },
+            { apiName: "taxpayerType", displayName: "Type", type: "string", required: true },
+          ],
+          rules: [
+            {
+              type: "createObject",
+              objectType: "Taxpayer",
+              properties: {
+                tin: { source: "parameter", param: "tin" },
+                fullName: { source: "parameter", param: "fullName" },
+                taxpayerType: { source: "parameter", param: "taxpayerType" },
+              },
+            },
+          ],
         }
       );
       expect(r3.status).toBe(409);
@@ -642,7 +660,7 @@ describe("Friday Integration: Complete Action System", () => {
 
       // Verify each entry has required fields
       const first = res.body.data[0];
-      expect(first.actionTypeId).toBeDefined();
+      expect(first.rid).toBeDefined();
       expect(first.apiName).toBeDefined();
       expect(first.displayName).toBeDefined();
       expect(first.rules).toBeDefined();
@@ -686,7 +704,9 @@ describe("Friday Integration: Complete Action System", () => {
       // Verify object exists in OpenSearch
       const taxpayer = await fetchObject("Taxpayer", TEST_TIN);
       expect(taxpayer).not.toBeNull();
-      expect(taxpayer.__primaryKey).toBe(TEST_TIN);
+      // Served doc shape: PG/overlay-backed reads stamp `__pk`; the
+      // OS-serving projection stamps `__primaryKey`. Both carry the PK.
+      expect(taxpayer.__pk ?? taxpayer.__primaryKey).toBe(TEST_TIN);
       expect(taxpayer.fullName).toBe("Friday Test Taxpayer");
       expect(taxpayer.taxpayerType).toBe("Individual");
       expect(taxpayer.province).toBe("Kigali");

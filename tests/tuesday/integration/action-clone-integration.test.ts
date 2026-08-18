@@ -185,7 +185,7 @@ describe("Action Type Cloning (Task 23)", () => {
     expect(res.status).toBe(201);
     expect(res.body.apiName).toBe(newName);
     expect(res.body.displayName).toBe("Cloned Action T1");
-    expect(res.body.actionTypeId).toBeTruthy();
+    expect(res.body.rid).toBeTruthy();
 
     // Clean up
     await deleteActionType(newName);
@@ -213,7 +213,7 @@ describe("Action Type Cloning (Task 23)", () => {
   // Test 3: Cloned action has different ID but same parameters/rules
   // -------------------------------------------------------------------------
 
-  it("has different actionTypeId but identical parameters and rules", async () => {
+  it("has different rid but identical parameters and rules", async () => {
     if (skip()) return;
 
     const newName = `cloneT3${RUN_ID}`;
@@ -228,15 +228,26 @@ describe("Action Type Cloning (Task 23)", () => {
     expect(origRes.status).toBe(200);
 
     // IDs must be different
-    expect(cloneRes.body.actionTypeId).not.toBe(origRes.body.actionTypeId);
+    expect(cloneRes.body.rid).not.toBe(origRes.body.rid);
 
-    // Parameters and rules must be identical
-    expect(JSON.stringify(cloneRes.body.parameters)).toBe(
-      JSON.stringify(origRes.body.parameters)
+    // Parameters and rules must be identical SEMANTICALLY: the clone
+    // re-mints parameter/rule rids (a clone owns fresh identities —
+    // sharing rids across two definitions would alias their pin/drift
+    // machinery). Compare with identity fields stripped.
+    const strip = (v: any): any => {
+      if (Array.isArray(v)) return v.map(strip);
+      if (v && typeof v === "object") {
+        const { rid, ruleId, ...rest } = v as Record<string, unknown>;
+        const out: Record<string, unknown> = {};
+        for (const [k, val] of Object.entries(rest)) out[k] = strip(val);
+        return out;
+      }
+      return v;
+    };
+    expect(strip(cloneRes.body.parameters)).toEqual(
+      strip(origRes.body.parameters)
     );
-    expect(JSON.stringify(cloneRes.body.rules)).toBe(
-      JSON.stringify(origRes.body.rules)
-    );
+    expect(strip(cloneRes.body.rules)).toEqual(strip(origRes.body.rules));
 
     // maxAffectedObjects should be copied
     expect(cloneRes.body.maxAffectedObjects).toBe(

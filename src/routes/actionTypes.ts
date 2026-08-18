@@ -2857,6 +2857,12 @@ const updateActionTypeHandler = async (
         }
       }
 
+      // Rule-validation errors: hard errors block; a required-property
+      // mapping gap on UPDATE is downgraded to a migration warning (see
+      // below). Both arrays accumulate across this request's single pass.
+      const ruleErrors: string[] = [];
+      const downgradedRuleWarnings: string[] = [];
+
       // Validate rules if provided, or re-validate existing rules against new params
       if (
         body.rules !== undefined ||
@@ -2893,12 +2899,29 @@ const updateActionTypeHandler = async (
               (p) => p.apiName as string
             )
           );
-          const ruleErrors = await validateRules(
+          const allRuleErrors = await validateRules(
             rulesToValidate,
             ontologyId,
             paramNames,
             effectiveParams as Array<Record<string, unknown>>,
           );
+          // UPDATE semantics (Task 26): a breaking schema migration must
+          // persist with warnings rather than hard-fail. The canonical
+          // breaking-change class is a create/modifyOrCreate rule that no
+          // longer maps a required property (the object type may have
+          // gained a requirement, or the parameter backing the mapping was
+          // removed). Creation stays strict — this leniency is only for
+          // evolution of an existing definition, surfaced to the caller as
+          // migrationWarnings. Every other validation error remains fatal.
+          const REQUIRED_PROPERTY_MAPPING =
+            /^rules\[\d+\]\.properties must map required property /;
+          for (const e of allRuleErrors) {
+            if (REQUIRED_PROPERTY_MAPPING.test(e)) {
+              downgradedRuleWarnings.push(e);
+            } else {
+              ruleErrors.push(e);
+            }
+          }
           if (ruleErrors.length > 0) {
             sendError(res, "VALIDATION_FAILED", ruleErrors.join(" "), {
               validationErrors: ruleErrors,
@@ -3109,8 +3132,9 @@ const updateActionTypeHandler = async (
 
       // Build response — include migration warnings if any exist
       const responseData: Record<string, unknown> = formatActionType(updatedRow);
-      if (!migration.safe) {
+      if (downgradedRuleWarnings.length > 0 || !migration.safe) {
         responseData.migrationWarnings = [
+          ...downgradedRuleWarnings,
           ...migration.warnings,
           ...migration.breakingChanges,
         ];

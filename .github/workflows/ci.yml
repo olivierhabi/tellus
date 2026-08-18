@@ -146,6 +146,56 @@ jobs:
     timeout-minutes: 25
 
     services:
+      clickhouse:
+        # osv2-serving + funnel CH suites (ch-migration, cdc-topology,
+        # edge-version-semantics, benchmarks) publish to the lane ClickHouse.
+        # Only the HTTP port is published — the native TCP port (9000) stays
+        # internal so it can't collide with MinIO on the runner.
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_USER: tellus
+          CLICKHOUSE_PASSWORD: tellus_ch_pw
+          CLICKHOUSE_DB: default
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd="wget -qO- http://127.0.0.1:8123/ping | grep -q Ok || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+      zookeeper:
+        image: confluentinc/cp-zookeeper:7.6.1
+        env:
+          ZOOKEEPER_CLIENT_PORT: 2181
+          ZOOKEEPER_TICK_TIME: 2000
+        ports:
+          - 2181:2181
+
+      kafka:
+        # CDC link producer/consumer suites (funnel cdc-topology, link-index
+        # ack) publish to localhost:9092 with auto topic creation — mirrors
+        # docker-compose.yml's dev broker.
+        image: confluentinc/cp-kafka:7.6.1
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd="kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=12
+
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
         # instead of Docker Hub. registry-1.docker.io has been intermittently
@@ -198,6 +248,31 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start MinIO and create lane bucket
+        # Functions-publish artifact-storage + service suites (and the
+        # code-repos publish path) stream real blobs to S3 — the lane bucket
+        # is tests/laneEnv.ts:S3_BUCKET ("tellus-tests-bucket").
+        run: |
+          docker run -d --name minio \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            -p 9000:9000 \
+            minio/minio:RELEASE.2024-10-02T17-50-41Z server /data
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+              echo "MinIO ready"
+              break
+            fi
+            [ "$i" -eq 30 ] && { echo "MinIO failed to start"; docker logs minio; exit 1; }
+            sleep 1
+          done
+
+          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set ci http://localhost:9000 minioadmin minioadmin
+          mc mb --ignore-existing ci/tellus-tests-bucket
 
       - name: Start Keycloak and bootstrap realm
         run: |
@@ -604,7 +679,14 @@ jobs:
       TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-all
       TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-all
       KEYCLOAK_REALM: tellus-tests-all
-      OS_INDEX_PREFIX: ttest-all-ontology-
+      # NOTE: OS_INDEX_PREFIX is deliberately NOT job-env. This job runs
+      # tests/runAll.ts, whose day suites + inline self-test modules (and
+      # the vitest unit lane) assert the unprefixed default index names
+      # (`ontology-taxpayer` etc.) — a job-level prefix leaks through
+      # CHILD_ENV and breaks them (CI run 32091038758: 'ttest-all-ontology-'
+      # mismatches). The destructive-test guard only needs the test-shaped
+      # prefix for the one-off `pnpm run seed` below (resetEnterprise
+      # OntologyForSeed), so it is scoped to that step.
       S3_BUCKET: tellus-tests-all-bucket
       TELLUS_TEST_API_BASE_URL: http://localhost:3000
 
@@ -727,6 +809,12 @@ jobs:
             VALUES (TRUE, 'tellus-tests-all', 'ci-test-all-lane') ON CONFLICT (singleton) DO NOTHING"
 
       - name: Seed database
+        env:
+          # The destructive-test guard demands a test-shaped OS prefix when
+          # src/seed.ts resets the enterprise ontology (FUNN-ISO-1 10-field
+          # proof). This is the ONLY step that needs it — see the job-env
+          # note above.
+          OS_INDEX_PREFIX: ttest-all-ontology-
         run: |
           pnpm run seed
           npx tsx src/seeds/actionTypes.seed.ts

@@ -1232,14 +1232,6 @@ router.get(
         // BEFORE their funnel hydration committed (or through the legacy
         // standalone index trigger, which never hydrates object_instances)
         // fall back to the serving index so pre-cutover reads keep working.
-        // PG-hydrated doc wins when present; objects that were indexed
-        // BEFORE their funnel hydration committed (or through the legacy
-        // standalone index trigger, which never hydrates object_instances)
-        // fall back to the serving index so pre-cutover reads keep working.
-        // PG-hydrated doc wins when present; objects that were indexed
-        // BEFORE their funnel hydration committed (or through the legacy
-        // standalone index trigger, which never hydrates object_instances)
-        // fall back to the serving index so pre-cutover reads keep working.
         async (ot, pk) =>
           (await import("../services/serving/pgObjectAsDoc")).pgObjectAsDoc(ontologyId, ot, pk)
           ?? await executeGetObject(ot, pk, buildSecurityFilter(req.security), branchId),

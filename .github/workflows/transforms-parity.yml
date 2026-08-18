@@ -104,7 +104,26 @@ jobs:
         # scripts/verify-transforms-sandbox.sh. Exits non-zero on any miss.
         run: |
           pkill -f "tsx src/server.ts" || true
+          # Wait for the OLD (local-mode) server to actually release :3000 —
+          # otherwise the container-mode server below dies with EADDRINUSE
+          # and the script silently exercises STALE local-mode execution:
+          # the negative isolation probes then "succeed" (nothing sandboxed)
+          # exactly as in run 32091038735.
+          for i in $(seq 1 30); do
+            if ! curl -s -m 1 http://localhost:3000/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          if curl -s -m 1 http://localhost:3000/health >/dev/null 2>&1; then
+            echo "old server on :3000 did not exit after 30s"; exit 1
+          fi
           env JAVA_HOME=$JAVA_HOME \
             TELLUS_TRANSFORM_EXECUTION_MODE=container nohup npx tsx src/server.ts > /tmp/tellus-c.log 2>&1 &
-          for i in $(seq 1 60); do curl -sf http://localhost:3000/health && break; sleep 1; done
+          READY=""
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/health >/dev/null 2>&1; then READY=1; break; fi
+            sleep 1
+          done
+          if [ -z "$READY" ]; then
+            echo "container-mode server failed to start:"; cat /tmp/tellus-c.log; exit 1
+          fi
           bash scripts/verify-transforms-sandbox.sh

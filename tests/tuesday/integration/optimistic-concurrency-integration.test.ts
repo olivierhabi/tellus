@@ -477,7 +477,12 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
   // Test 6: $expectedVersion on multi-object action returns 400
   // -------------------------------------------------------------------------
 
-  it("rejects $expectedVersion on multi-object actions", async () => {
+  // Contract CHANGE (Task 22 follow-up): multi-object (chained) actions are
+  // NOT rejected. `$expectedVersion` guards the PRIMARY (first modify)
+  // target; the secondary edits ride the same transaction and roll back
+  // with it if that target is stale. See the Stage-4b comment in
+  // actionExecutor.ts for the rationale.
+  it("multi-object actions: $expectedVersion guards the primary modify target", async () => {
     if (skip()) return;
 
     const tin1 = `OCC-MULTI1-${RUN_ID}`;
@@ -494,16 +499,24 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
     });
     await new Promise((r) => setTimeout(r, 500));
 
-    // Try multi-modify with $expectedVersion
+    // Primary target (tin1) is at version 1 → applies.
     const res = await executeAction(
       MULTI_MODIFY_ACTION,
       { tin1, tin2, fullName: "Multi Updated" },
       1
     );
-    expect(res.status).toBe(400);
-    expect(res.body.message).toContain(
-      "Optimistic concurrency control is only supported for single-object actions"
+    expect(res.status).toBe(200);
+
+    // A stale replay with the OLD version now conflicts — the same
+    // single-token guard applies to the primary target.
+    await new Promise((r) => setTimeout(r, 500));
+    const stale = await executeAction(
+      MULTI_MODIFY_ACTION,
+      { tin1, tin2, fullName: "Multi Updated Again" },
+      1
     );
+    expect(stale.status).toBe(409);
+    expect(stale.body.errorCode).toBe("CONCURRENCY_CONFLICT");
   });
 
   // -------------------------------------------------------------------------
