@@ -42,6 +42,8 @@ import {
 import { scanFile } from "../services/fileScannerService";
 import { checkAndTriggerAutoIndex, AutoIndexResult } from "../services/autoIndexService";
 import { dataPlaneGuard } from "../middleware/requireRole";
+import { resolveDataset } from "../services/datasets/dataset-resolver";
+import { resolveDatasetColumns } from "../services/datasets/datasetColumns";
 
 const router = Router();
 
@@ -547,9 +549,40 @@ router.get(
         [datasetId]
       );
       if (dsResult.rows.length === 0) {
-        // Not in the ontology dataset table — fall through to the
-        // foundry dataset router which checks `foundry_datasets`.
-        return next();
+        // Not in the ontology `dataset` table — this is a Foundry dataset
+        // (`foundry_datasets`, identified by its bare UUID). The picker and
+        // pipeline-builder hand the wizard this UUID, so resolve it back to
+        // its full RID and surface identity + column schema here, mirroring
+        // the Foundry-parity `GET /:datasetRid` identity endpoint. Without
+        // this fallback the wizard's `GET /v1/datasets/:id` 404s and Step 3
+        // shows "The selected datasource has no columns".
+        const foundryRid = `ri.foundry.main.dataset.${datasetId}`;
+        const resolved = await resolveDataset(foundryRid);
+        if (!resolved || (!resolved.registry && !resolved.producer)) {
+          // Truly unknown to both the ontology and foundry surfaces.
+          return next();
+        }
+        const columns = await resolveDatasetColumns(resolved, 50);
+        return sendSuccess(res, {
+          rid: foundryRid,
+          datasetId,
+          id: datasetId,
+          name: resolved.name,
+          displayName: resolved.name,
+          parentFolderRid: resolved.parentFolderRid,
+          columns,
+          schema_info: { columns },
+          // Legacy ontology-shape wrapper so consumers that read the
+          // `dataset.schemaDefinition` form also resolve columns by name/type.
+          dataset: {
+            datasetId,
+            name: resolved.name,
+            schemaDefinition: {
+              columns: columns.map((c) => c.name),
+              inferredTypes: columns.map((c) => c.type),
+            },
+          },
+        });
       }
 
       const ds = dsResult.rows[0];

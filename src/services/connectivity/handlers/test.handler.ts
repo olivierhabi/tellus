@@ -71,7 +71,7 @@ export function testRateLimit(
   // source) produced 429 EgressRateLimited friction for no real security gain.
   // The bucket is retained for the unauthenticated fallback as defense in depth
   // (globalAuth normally makes that path unreachable). Set
-  // CONNECTIVITY_TEST_RATE_LIMIT_ALL=1 to throttle authenticated callers too.
+  // CONNECTIVITY_TEST_RATE_LIMIT_ALL=0 to exempt authenticated callers.
   let principalId: string | null = null;
   try {
     principalId = extractUser(req).id;
@@ -79,7 +79,7 @@ export function testRateLimit(
     principalId = null;
   }
 
-  if (principalId && process.env.CONNECTIVITY_TEST_RATE_LIMIT_ALL !== "1") {
+  if (principalId && process.env.CONNECTIVITY_TEST_RATE_LIMIT_ALL === "0") {
     next();
     return;
   }
@@ -312,7 +312,11 @@ export async function testConfig(
     );
     observeProbe("postgresql", probeStateForMapped(mapped), elapsedMsSince(started));
     if (mapped.kind === "auth") {
-      new TellusError(JdbcAuthFailed, {}).send(res);
+      // Uniform response envelope: never disclose to the caller whether the
+      // failure was refused-connection, auth, timeout, or protocol mismatch —
+      // that distinction is an internal service fingerprint. The internal
+      // classification above stays for metrics/logging only.
+      new TellusError(JdbcConnectFailed, {}).send(res);
       return;
     }
     if (mapped.kind === "connect") {

@@ -339,6 +339,13 @@ else
   echo ""
   echo -e "${BOLD}Server stderr (last 50 lines):${NC}"
   tail -50 /tmp/tellus-e2e-server-err.log 2>/dev/null || true
+  echo ""
+  echo -e "${BOLD}GET-single debug trace ([GET-DEBUG]/[XGET-DEBUG], last 40):${NC}"
+  # TEMP-DIAG: GET_DEBUG=1 traces are emitted to STDERR by the server, so
+  # they land in tellus-e2e-server-err.log — dump them here so a failing
+  # GET-single is diagnosable from the CI console alone (the uploaded
+  # artifacts expire after 7 days).
+  grep -h "GET-DEBUG" /tmp/tellus-e2e-server-err.log /tmp/tellus-e2e-server.log 2>/dev/null | tail -40 || true
 fi
 echo -e "${BOLD}========================================${NC}"
 

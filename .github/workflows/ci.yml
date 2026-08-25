@@ -265,7 +265,14 @@ jobs:
         # (worker-versioning APIs) is a repo path, so docker-run is used
         # instead of a service container.
         run: |
-          docker run -d --name temporal-postgres \
+          # A user-defined bridge network is REQUIRED: container DNS aliases
+          # (temporal-postgres, temporal) only resolve inside a user-defined
+          # network. The previous `--network host` run made both names
+          # unresolvable (auto-setup logged "nc: bad address
+          # 'temporal-postgres'" forever → step timeout → job failure).
+          docker network create tellus-ci-net
+
+          docker run -d --name temporal-postgres --network tellus-ci-net \
             -e POSTGRES_DB=temporal \
             -e POSTGRES_USER=temporal \
             -e POSTGRES_PASSWORD=temporal_pw \
@@ -279,8 +286,7 @@ jobs:
             sleep 1
           done
 
-          docker run -d --name temporal \
-            --network host -p 7233:7233 \
+          docker run -d --name temporal --network tellus-ci-net -p 7233:7233 \
             -e DB=postgres12 \
             -e DB_PORT=5432 \
             -e POSTGRES_USER=temporal \
@@ -290,7 +296,7 @@ jobs:
             temporalio/auto-setup:1.25.2
 
           for i in $(seq 1 90); do
-            if docker exec temporal temporal operator cluster health --address temporal:7233 2>/dev/null | grep -q SERVING; then
+            if docker exec temporal temporal operator cluster health --address localhost:7233 2>/dev/null | grep -q SERVING; then
               echo "temporal ready"; break
             fi
             [ "$i" -eq 90 ] && { echo "temporal failed to start"; docker logs temporal; exit 1; }

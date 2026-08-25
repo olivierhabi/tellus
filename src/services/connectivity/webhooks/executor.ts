@@ -414,7 +414,8 @@ function assertConnectionAllows(
 ): void {
   const allowed = connection.egressPolicy.allowlist.some((entry) => {
     if (entry.port !== port) return false;
-    return entry.kind === "host" && entry.host.toLowerCase() === hostname.toLowerCase();
+    const normalize = (host: string) => host.toLowerCase().replace(/^\[|\]$/g, "");
+    return entry.kind === "host" && normalize(entry.host) === normalize(hostname);
   });
   if (!allowed) {
     throw new WebhookExecutionError(
@@ -1141,7 +1142,7 @@ export async function executeWebhook(
     allowedHosts:
       options.connection.egressPolicy.allowlist
         .filter((entry): entry is Extract<typeof entry, { kind: "host" }> => entry.kind === "host")
-        .map((entry) => entry.host.toLowerCase()),
+        .map((entry) => entry.host.toLowerCase().replace(/^\[|\]$/g, "")),
     headerAllowlist: [],
     maxRequestBytes: policy.maxRequestBytes,
     maxResponseBytes: policy.maxResponseBytes,

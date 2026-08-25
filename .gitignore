@@ -54,3 +54,6 @@ generated/osdk/
 # tokens) — CI artifacts / dev machines only; see docs/evidence-policy.md.
 # Redacted records and manifests elsewhere under .migration-evidence/ ARE committed.
 .migration-evidence/raw/
+
+
+.strix_runs/
