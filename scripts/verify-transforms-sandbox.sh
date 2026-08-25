@@ -112,6 +112,16 @@ dump_failure_events() {
                            WHERE repository_rid = '$1'
                            ORDER BY enqueued_at DESC LIMIT 1)
       ORDER BY id" 2>&1 | tail -c 6000
+  echo "--- stemma blobs (repo $1) ---"
+  psql -tA -c \
+    "SELECT branch || ' ' || path || ' bytes=' || octet_length(content)
+       FROM coderepo_stemma_blob
+      WHERE repository_rid = '$1' ORDER BY branch, path" 2>&1 | tail -c 2000
+  echo "--- builds (repo $1) ---"
+  psql -tA -c \
+    "SELECT rid || ' status=' || status || ' commit=' || coalesce(commit_sha,'-') || ' count=' || transform_count
+       FROM transform_build
+      WHERE repository_rid = '$1' ORDER BY enqueued_at DESC LIMIT 2" 2>&1 | tail -c 1000
   echo ""
 }
 
