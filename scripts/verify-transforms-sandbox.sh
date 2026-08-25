@@ -71,9 +71,8 @@ dump_tree() {
   # $1 repository rid — list the repo tree so a missing probe transform is
   # visible directly in CI logs (discovery silently drops files it cannot
   # parse; this shows whether the file even exists at master HEAD).
-  echo "--- repo tree ($1) ---"
-  curl -s "$BASE/code-repositories/$1/branches/master/tree" "${AUTH[@]}" | head -c 1500
-  echo ""
+  echo "--- repo tree transforms/ ($1) ---"
+  curl -s "$BASE/code-repositories/$1/branches/master/tree?path=transforms&depth=3" "${AUTH[@]}" | jq -c '[.entries[]? | .path]' 2>/dev/null || true
 }
 
 build_poll() {
