@@ -50,3 +50,15 @@ ignore:
   - vulnerability: CVE-2026-53571
     package:
       name: vite
+
+  # --- extract-zip — dev/test-only (cypress), no fixed version exists ---
+  # CVE-2026-56876 (High) reaches the tree ONLY via cypress 13.x (a
+  # devDependency used for browser E2E). There is NO patched release of
+  # extract-zip 2.x, so it cannot be cleared by an override. The production
+  # image is built with `pnpm install --prod` (Dockerfile), so neither
+  # cypress nor extract-zip is present in the deployed artifact. Not
+  # exploitable in production. Revisit when cypress ships a fixed
+  # extract-zip.
+  - vulnerability: CVE-2026-56876
+    package:
+      name: extract-zip
