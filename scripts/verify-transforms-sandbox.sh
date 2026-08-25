@@ -60,6 +60,7 @@ setup_commit() {
   sleep 2
   TIP=$(curl -s "$BASE/code-repositories/$RID/branches" "${AUTH[@]}" \
     | jq -r '.branches[] | select(.name == "master") | .headSha // empty' | head -1)
+  echo "[setup_commit] repo=$1 src-len=$(printf '%s' "$3" | wc -c | tr -d ' ') src-sha=$(printf '%s' "$3" | shasum -a 256 | cut -c1-24)"
   curl -s -X POST "$BASE/code-repositories/$RID/branches/master/commits" "${AUTH[@]}" \
     -H "Idempotency-Key: $(ukey)" ${TIP:+-H "If-Match: \"$TIP\""} -H 'Content-Type: application/json' \
     -d "{\"message\":\"m\",\"fileChanges\":[{\"path\":\"transforms/$2\",\"op\":\"add\",\"contentBase64\":\"$(printf '%s' \"$3\" | base64 | tr -d '\n')\"}]}" \
@@ -117,11 +118,15 @@ dump_failure_events() {
     "SELECT branch || ' ' || path || ' bytes=' || octet_length(content)
        FROM coderepo_stemma_blob
       WHERE repository_rid = '$1' ORDER BY branch, path" 2>&1 | tail -c 2000
-  echo "--- t.py stored content (repo $1) ---"
+  echo "--- t.py stored (repo $1) ---"
   psql -tA -c \
-    "SELECT encode(content, 'escape')
+    "SELECT 'db-sha=' || sha || ' bytes=' || octet_length(content)
        FROM coderepo_stemma_blob
-      WHERE repository_rid = '$1' AND path = 'transforms/t.py'" 2>&1 | head -c 1200
+      WHERE repository_rid = '$1' AND path = 'transforms/t.py'" 2>&1 | head -c 300
+  psql -tA -c \
+    "SELECT 'first40=[' || substring(encode(content, 'escape') from 1 for 40) || ']'
+       FROM coderepo_stemma_blob
+      WHERE repository_rid = '$1' AND path = 'transforms/t.py'" 2>&1 | head -c 200
   echo ""
   echo "--- builds (repo $1) ---"
   psql -tA -c \
