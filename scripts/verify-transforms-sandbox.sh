@@ -60,7 +60,7 @@ setup_commit() {
   sleep 2
   TIP=$(curl -s "$BASE/code-repositories/$RID/branches" "${AUTH[@]}" \
     | jq -r '.branches[] | select(.name == "master") | .headSha // empty' | head -1)
-  echo "[setup_commit] repo=$1 src-len=$(printf '%s' "$3" | wc -c | tr -d ' ') src-sha=$(printf '%s' "$3" | shasum -a 256 | cut -c1-24)"
+  echo "[setup_commit] repo=$1 src-len=$(printf '%s' "$3" | wc -c | tr -d ' ') src-sha=$(printf '%s' "$3" | shasum -a 256 | cut -c1-24)" >&2
   curl -s -X POST "$BASE/code-repositories/$RID/branches/master/commits" "${AUTH[@]}" \
     -H "Idempotency-Key: $(ukey)" ${TIP:+-H "If-Match: \"$TIP\""} -H 'Content-Type: application/json' \
     -d "{\"message\":\"m\",\"fileChanges\":[{\"path\":\"transforms/$2\",\"op\":\"add\",\"contentBase64\":\"$(printf '%s' \"$3\" | base64 | tr -d '\n')\"}]}" \
