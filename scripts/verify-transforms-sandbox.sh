@@ -91,14 +91,13 @@ build_poll() {
 }
 
 dump_failure_events() {
-  # $1 repository rid  $2 build rid — print the failing transform's stderr.
-  # $2 is empty when the build never started; skip in that case (the POST
-  # response was already printed by build_poll).
+  # $1 repository rid  $2 build rid — print the raw build detail (events carry
+  # the per-transform stderr + terminal failures array). Bounded so CI logs
+  # stay readable.
   [ -z "$2" ] && return 0
-  curl -s "$BASE/code-repositories/$1/builds/$2" "${AUTH[@]}" | jq -r '
-    .events[]? | select(.kind == "log" and .data.phase == "failed") |
-    "[event] \(.data.transform): \(.data.error // "")\n" +
-    (.data.stderr // "" | split("\n") | last(15) | join("\n"))' || true
+  echo "--- raw build detail ($2) ---"
+  curl -s "$BASE/code-repositories/$1/builds/$2" "${AUTH[@]}" | head -c 4000
+  echo ""
 }
 
 # --- (positive) container build ---------------------------------------------

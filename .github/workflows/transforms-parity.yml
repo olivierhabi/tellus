@@ -134,4 +134,13 @@ jobs:
           if [ -z "$READY" ]; then
             echo "container-mode server failed to start:"; cat /tmp/tellus-c.log; exit 1
           fi
+          # Image sanity: the runtime image must be able to import pyspark and
+          # run a plain shell command under `docker run` — isolates "image is
+          # broken on this platform" from "orchestration/driver failed".
+          docker run --rm tellus/transform-runtime:py38 bash -c 'echo shell-ok; python3 --version'
+          docker run --rm --network=none --user spark --read-only \
+            --tmpfs /tmp:size=128m,mode=1777,exec --tmpfs /home/spark:size=64m,mode=1777 \
+            -e HOME=/home/spark \
+            -v "$PWD:/work:ro" \
+            tellus/transform-runtime:py38 bash -c 'python3 -c "import pyspark, pandas, pyarrow; print(\"imports-ok\", pyspark.__version__)"'
           bash scripts/verify-transforms-sandbox.sh
