@@ -69,7 +69,7 @@ export interface SyncedPreview {
 }
 
 /** The table-import config fields the reader needs to locate the table. */
-interface ImportConfigForRead {
+export interface ImportConfigForRead {
   schema: string;
   table: string;
   targetTable?: string;

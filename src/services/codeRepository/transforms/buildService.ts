@@ -382,11 +382,38 @@ async function prepareBuild(
     }
   }
 
+  // Gap 3 (sandboxed execution): if the operator opted into container mode,
+  // the transform-runtime image MUST be present — a missing image is a LOUD
+  // failure (503), never a silent fallback to host execution. An operator who
+  // set TELLUS_TRANSFORM_EXECUTION_MODE=container expects isolation.
+  //
+  // This check MUST come before the host PySpark preflight below: in container
+  // mode the driver + JVM run entirely inside the sandbox (the host merely
+  // reads the mounted output CSV), so requiring a HOST pyspark venv would
+  // wrongly 503 every build on a backend that has no host-side runtime —
+  // exactly what the CI container-mode parity leg exercises.
+  const containerMode = executionMode() === "container";
+  if (containerMode) {
+    const img = containerImageAvailable();
+    if (!img.ok) {
+      return {
+        ok: false,
+        error: transformError("Transform:RuntimeNotConfigured", {
+          message: `container execution mode is on (TELLUS_TRANSFORM_EXECUTION_MODE=container) but the runtime image '${img.image}' is not present. Build it first: docker build -t ${img.image} -f scripts/transform-runtime.Dockerfile scripts. Detail: ${img.error ?? "image inspect failed"}`,
+          python: "",
+          javaHome: "",
+        }),
+      };
+    }
+  }
+
   // Preflight the PySpark runtime (pyspark + pandas + pyarrow importable +
   // java runs). This MUST happen before enqueueing the build so a
   // misconfigured backend fails the build LOUDLY with a 503
   // Transform:RuntimeNotConfigured carrying the exact reason + the fix
   // command — not the cryptic "No module named 'pyspark'" from the child.
+  // LOCAL MODE ONLY — container builds execute inside the sandbox image and
+  // must not depend on a host-side venv (see the container-mode block above).
   //
   // Track 1 (lightweight): every @transform still goes through the PySpark
   // shim today — the @lightweight decorator (transforms-python v3.0.0) uses
@@ -396,31 +423,15 @@ async function prepareBuild(
   // iteration may swap in a no-JVM sidecar keyed on this tag (runtimeForBatch
   // + preflightLightweightRuntime in runtimeConfig.ts) without breaking
   // existing repos.
-  const rt = preflightTransformRuntime();
-  if (!rt.ok) {
-    return {
-      ok: false,
-      error: transformError("Transform:RuntimeNotConfigured", {
-        message: rt.error ?? "PySpark runtime not configured",
-        python: rt.python,
-        javaHome: rt.javaHome ?? "",
-      }),
-    };
-  }
-
-  // Gap 3 (sandboxed execution): if the operator opted into container mode,
-  // the transform-runtime image MUST be present — a missing image is a LOUD
-  // failure (503), never a silent fallback to host execution. An operator who
-  // set TELLUS_TRANSFORM_EXECUTION_MODE=container expects isolation.
-  if (executionMode() === "container") {
-    const img = containerImageAvailable();
-    if (!img.ok) {
+  if (!containerMode) {
+    const rt = preflightTransformRuntime();
+    if (!rt.ok) {
       return {
         ok: false,
         error: transformError("Transform:RuntimeNotConfigured", {
-          message: `container execution mode is on (TELLUS_TRANSFORM_EXECUTION_MODE=container) but the runtime image '${img.image}' is not present. Build it first: docker build -t ${img.image} -f tellus-fe/scripts/transform-runtime.Dockerfile tellus-fe/scripts. Detail: ${img.error ?? "image inspect failed"}`,
-          python: "",
-          javaHome: "",
+          message: rt.error ?? "PySpark runtime not configured",
+          python: rt.python,
+          javaHome: rt.javaHome ?? "",
         }),
       };
     }
