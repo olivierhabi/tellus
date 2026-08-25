@@ -117,6 +117,12 @@ dump_failure_events() {
     "SELECT branch || ' ' || path || ' bytes=' || octet_length(content)
        FROM coderepo_stemma_blob
       WHERE repository_rid = '$1' ORDER BY branch, path" 2>&1 | tail -c 2000
+  echo "--- t.py stored content (repo $1) ---"
+  psql -tA -c \
+    "SELECT encode(content, 'escape')
+       FROM coderepo_stemma_blob
+      WHERE repository_rid = '$1' AND path = 'transforms/t.py'" 2>&1 | head -c 1200
+  echo ""
   echo "--- builds (repo $1) ---"
   psql -tA -c \
     "SELECT rid || ' status=' || status || ' commit=' || coalesce(commit_sha,'-') || ' count=' || transform_count
