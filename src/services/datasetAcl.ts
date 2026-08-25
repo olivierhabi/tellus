@@ -57,11 +57,18 @@ export class DatasetAclService {
     userId: string,
     groupIds: string[] = [],
   ): Promise<DatasetRole | null> {
-    // 1. Direct user grants.
-    const userGrants = await this.knex("dataset_acl")
-      .where({ dataset_id: datasetId, principal_id: userId, principal_type: "user" })
-      .pluck("role");
-    let best: DatasetRole | null = pickHighest(userGrants as DatasetRole[]);
+    // 1. Direct user grants. principal_id is a UUID column — a non-UUID userId
+    // (a dev/email principal, or a malformed JWT sub) can't match, so skip the
+    // query rather than letting Postgres throw "invalid input syntax for type
+    // uuid" (a check error that surfaces as a fail-closed deny instead of a clean
+    // null = "no grant"). Group grants (step 2) are UUID-filtered already.
+    let best: DatasetRole | null = null;
+    if (UUID_RE.test(userId)) {
+      const userGrants = await this.knex("dataset_acl")
+        .where({ dataset_id: datasetId, principal_id: userId, principal_type: "user" })
+        .pluck("role");
+      best = pickHighest(userGrants as DatasetRole[]);
+    }
 
     // 2. Group grants — UUIDs plug straight in; named groups go through
     // keycloak_group_map (same as PipelineAclService).
@@ -92,19 +99,23 @@ export class DatasetAclService {
     }
 
     // 3. Fallback: project_members on the dataset's owning project, reached
-    // through folder_id → folders.project_id.
-    const owning = await this.knex("foundry_datasets as d")
-      .join("folders as f", "f.id", "d.folder_id")
-      .where("d.id", datasetId)
-      .first("f.project_id as project_id");
-    if (owning?.project_id) {
-      const pm = await this.knex("project_members")
-        .where({ project_id: owning.project_id, user_id: userId })
-        .first("role");
-      if (pm?.role) {
-        const candidate = normaliseRole(pm.role);
-        if (candidate && (best === null || ROLE_RANK[candidate] > ROLE_RANK[best])) {
-          best = candidate;
+    // through folder_id → folders.project_id. project_members.user_id is also a
+    // UUID column — same non-UUID guard as step 1 (skip the whole block; a
+    // non-UUID userId can't be a project member, so resolving the project is moot).
+    if (UUID_RE.test(userId)) {
+      const owning = await this.knex("foundry_datasets as d")
+        .join("folders as f", "f.id", "d.folder_id")
+        .where("d.id", datasetId)
+        .first("f.project_id as project_id");
+      if (owning?.project_id) {
+        const pm = await this.knex("project_members")
+          .where({ project_id: owning.project_id, user_id: userId })
+          .first("role");
+        if (pm?.role) {
+          const candidate = normaliseRole(pm.role);
+          if (candidate && (best === null || ROLE_RANK[candidate] > ROLE_RANK[best])) {
+            best = candidate;
+          }
         }
       }
     }

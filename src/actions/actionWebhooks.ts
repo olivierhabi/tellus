@@ -73,9 +73,31 @@ export function parseWebhookSpecs(sideEffects: unknown): ActionWebhookSpec[] {
   return specs;
 }
 
+/**
+ * Phase 5 — single-webhook delivery. Exported separately so the durable
+ * outbox worker can dispatch a per-job webhook spec through the exact
+ * same transport path the legacy fire-and-forget `fireActionWebhooks`
+ * uses (same SSRF guard + same timeout + same fetch). Identical semantics
+ * preserve backward compatibility for existing tests + reduce the Phase 5
+ * implementation scope to a refactor, not a rewrite.
+ *
+ * @deprecated F9 — System C (legacy inline-URL writeback). New action
+ *   side-effects MUST bind a connectivity webhook RID and dispatch through
+ *   System A (`executeWebhook`). This function emits a runtime deprecation
+ *   warning on every call. See docs/data-connection/webhook-systems.md.
+ */
+export async function deliverOneWebhook(
+  spec: ActionWebhookSpec,
+  payload: ActionWebhookPayload,
+  opts?: { idempotencyKey?: string },
+): Promise<{ url: string; ok: boolean; status?: number; error?: string; receiptId?: string }> {
+  return deliverOne(spec, payload, opts?.idempotencyKey);
+}
+
 async function deliverOne(
   spec: ActionWebhookSpec,
   payload: ActionWebhookPayload,
+  idempotencyKey?: string,
 ): Promise<WebhookDeliveryResult> {
   let url: URL;
   try {
@@ -104,6 +126,11 @@ async function deliverOne(
         "user-agent": "tellus-action-webhook/1",
         "x-tellus-action": payload.actionTypeApiName,
         "x-tellus-execution-id": payload.executionId,
+        // Stable idempotency key so a dedup-aware receiver collapses
+        // at-least-once retries into exactly-once effect (the same key is
+        // re-sent on every retry of the same job/execution). Receivers
+        // that ignore the header are unaffected — additive only.
+        ...(idempotencyKey ? { "x-idempotency-key": idempotencyKey } : {}),
         ...(spec.headers ?? {}),
       },
       body: JSON.stringify(payload),
@@ -130,7 +157,9 @@ export async function fireActionWebhooks(
   if (specs.length === 0) return [];
   const results: WebhookDeliveryResult[] = [];
   for (const spec of specs) {
-    const r = await deliverOne(spec, payload);
+    // Fire-and-forget path: the execution id is the natural stable key —
+    // all webhooks of one execution share it (receivers dedup per URL).
+    const r = await deliverOne(spec, payload, payload.executionId);
     results.push(r);
     try {
       incCounter(r.ok ? "tellus_action_webhook_delivered_total" : "tellus_action_webhook_failed_total");

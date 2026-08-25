@@ -103,6 +103,38 @@ export function requireTellusAuth(opts: { allowPat?: boolean } = {}) {
         .json(envelope('UNAUTHORIZED', 401, 'Authentication required', req));
     }
 
+    // Dev-only test-auth bypass — when NODE_ENV !== 'production' AND
+    // TELLUS_TEST_HOOKS=1, a token starting with "test-auth:" is accepted
+    // without Keycloak JWKS verification. The userId is extracted and a
+    // synthetic principal is built. Mirrors the bypass in globalAuth.ts.
+    if (
+      extracted.token.startsWith('test-auth:') &&
+      process.env.NODE_ENV !== 'production' &&
+      process.env.TELLUS_TEST_HOOKS === '1'
+    ) {
+      const raw = extracted.token.slice('test-auth:'.length).trim();
+      const colonIdx = raw.indexOf(':');
+      const userId = colonIdx === -1 ? raw : raw.slice(0, colonIdx);
+      const rolePart = colonIdx === -1 ? undefined : raw.slice(colonIdx + 1);
+      const roles = rolePart
+        ? rolePart.split(',').map((r) => r.trim()).filter(Boolean)
+        : ['ontology-editor', 'default-roles-tellus'];
+      req.tellusPrincipal = {
+        userId,
+        keycloakSub: userId,
+        source: extracted.source === 'cookie' ? 'cookie' : 'bearer-jwt',
+        roles,
+        scopes: [],
+      };
+      (req as Request & { user?: unknown }).user = {
+        id: userId,
+        email: `test-${userId.slice(0, 8)}@tellus.local`,
+        displayName: 'Test User',
+        roles,
+      };
+      return next();
+    }
+
     try {
       if (extracted.token.startsWith(PAT_PREFIX)) {
         if (!allowPat) {

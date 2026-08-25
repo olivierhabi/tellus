@@ -40,7 +40,9 @@ const ENV_WHITELIST = new Set([
 ]);
 
 const MAX_OLD_SPACE_MB = Number(
-  process.env.TELLUS_WORKER_MAX_OLD_SPACE_MB ?? 2048,
+  // A local worker previously defaulted to a 2 GiB V8 heap. Builds can opt
+  // into more, but an unconfigured single-user backend must remain laptop-safe.
+  process.env.TELLUS_WORKER_MAX_OLD_SPACE_MB ?? 512,
 );
 
 export interface SandboxHandle {

@@ -1,0 +1,41 @@
+{
+  "queue": "funniso-versioning-probe-1785541778814",
+  "phases": {
+    "baseline": {
+      "error": "Workflow execution timed out",
+      "timedOut": true,
+      "receiptsA": 0,
+      "receiptsB": 0
+    },
+    "assignment": {
+      "assignedToA": true,
+      "executedByB": false,
+      "rules": {
+        "assignmentRules": [
+          {
+            "targetBuildID": "probe-a",
+            "rampPercentage": 100,
+            "createTime": "2026-07-31T23:50:12.431Z"
+          }
+        ],
+        "redirectRules": null
+      }
+    },
+    "upgrade": {
+      "executedByB": true
+    },
+    "foreign": {
+      "foreignClaimedWork": false,
+      "routedWorkerClaimedWork": true
+    },
+    "rollback": {
+      "executedByA": true
+    },
+    "replay": {
+      "probe-wf1-assigned": "replayed",
+      "probe-wf2-upgrade": "replayed",
+      "probe-wf3-foreign": "replayed",
+      "probe-wf4-rollback": "replayed"
+    }
+  }
+}

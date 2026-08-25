@@ -1,14 +1,32 @@
 // ---------------------------------------------------------------------------
-// Temporal worker bootstrap — Task B3
+// Temporal worker bootstrap — Task B3 + FUNN-ISO
 //
-// Registers the ObjectTypeFunnelWorkflow + activities against the
-// `tellus-funnel` namespace on the Temporal cluster. Called from
+// Registers the ObjectTypeFunnelWorkflow + activities against a Temporal
+// namespace + task queue OWNED BY THIS DEPLOYMENT. Called from
 // `src/server.ts` at boot.
 //
-// If Temporal is unreachable (env var not set, or cluster down) the
-// worker simply does not start and the PG-backed funnelDispatcher stays
-// as the fallback — the two pipelines are interchangeable at the
-// activity boundary, so there is no duplicate-work hazard.
+// FUNN-ISO isolation guarantees (defense in depth):
+//   1. Identity: namespace/task queue/environment come from
+//      config/environmentIdentity.ts — REQUIRED in strict (production-like)
+//      mode; deterministic env-id-derived defaults in local dev. Two stacks
+//      can never silently share a queue again.
+//   2. Database seal: before the worker starts we seal/verify
+//      `deployment_environment` in the connected database. A mismatch
+//      between TELLUS_ENVIRONMENT_ID and the seal REFUSES worker startup
+//      (throws FunnelExecutionEnvironmentMismatch — the caller logs a
+//      prominent fatal; /health/ready's temporal probe also flips red).
+//   3. Namespace: verified to exist before the worker polls. Local/verify
+//      stacks provision idempotently; strict mode requires it to exist
+//      (provision via deployment infra) unless
+//      TELLUS_TEMPORAL_PROVISION_NAMESPACE=1 is set deliberately.
+//   4. Poller attribution: the Worker identity string is
+//      `<envId>:<buildId>:<pid>@<host>` so task-queue poller audits can
+//      reject foreign environments (see scripts/verify-temporal-pollers.*).
+//
+// If Temporal is unreachable the worker simply does not start and the
+// PG-backed funnelDispatcher stays as the fallback — the two pipelines are
+// interchangeable at the activity boundary, so there is no duplicate-work
+// hazard.
 // ---------------------------------------------------------------------------
 
 import { NativeConnection, Worker } from "@temporalio/worker";
@@ -17,14 +35,96 @@ import * as activities from "./activities";
 import * as pipelineActivities from "../../pipelines/temporal/activities";
 import * as tableImportActivities from "../../connectivity/imports/temporal/activities";
 import type { SignalPayload } from "./workflows";
+import {
+  getEnvironmentIdentity,
+  identityLogFields,
+  type EnvironmentIdentity,
+} from "../../../config/environmentIdentity";
+import { sealDatabaseEnvironment } from "../environmentGuard";
+import {
+  resolveWorkerVersioningConfig,
+  versionedWorkerOptions,
+} from "./versioning";
 
 let workerInstance: Worker | null = null;
 let temporalClient: Client | null = null;
+let workerIdentitySnapshot: EnvironmentIdentity | null = null;
+let workerDatabaseEnvironmentId: string | null = null;
+let workerVersioningSnapshot: import("./versioning").WorkerVersioningConfig | null = null;
+let workerRestartTimer: ReturnType<typeof setTimeout> | null = null;
+let workerStopping = false;
+
+const WORKER_RESTART_DELAY_MS = 2_000;
+
+function clearWorkerRuntime(expectedWorker?: Worker): void {
+  // A delayed completion from an older worker must never clear a newer one.
+  if (expectedWorker && workerInstance !== expectedWorker) return;
+  workerInstance = null;
+  temporalClient = null;
+  workerIdentitySnapshot = null;
+  workerDatabaseEnvironmentId = null;
+  workerVersioningSnapshot = null;
+}
+
+function scheduleWorkerRestart(reason: string): void {
+  if (
+    workerStopping ||
+    process.env.TEMPORAL_WORKER_DISABLED === "true" ||
+    workerRestartTimer
+  ) {
+    return;
+  }
+  console.warn(
+    `[temporal] worker unavailable (${reason}); retrying in ${WORKER_RESTART_DELAY_MS}ms`,
+  );
+  workerRestartTimer = setTimeout(() => {
+    workerRestartTimer = null;
+    void startTemporalWorker().then((started) => {
+      if (!started) scheduleWorkerRestart("restart attempt failed");
+    }).catch((err) => {
+      scheduleWorkerRestart((err as Error).message);
+    });
+  }, WORKER_RESTART_DELAY_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow identity
+// ---------------------------------------------------------------------------
 
 /**
- * Is Temporal actually reachable? Return null (not throw) so server
- * startup never hard-fails on a down cluster.
+ * Canonical Temporal workflow id for an Object Type's long-running parent
+ * workflow, keyed on STABLE resource identifiers — NOT the mutable API name:
+ *   `ObjectTypeFunnelWorkflow/<ontologyRid>/<objectTypeRid>`
+ * A rename of the Object Type no longer orphans the workflow, and two
+ * databases can never address the same workflow through a shared api name
+ * (api names are scope-local; RIDs are globally unique).
  */
+export function funnelWorkflowId(ontologyRid: string, objectTypeRid: string): string {
+  return `ObjectTypeFunnelWorkflow/${ontologyRid}/${objectTypeRid}`;
+}
+
+/**
+ * LEGACY (pre-FUNN-ISO) api-name-keyed workflow id. Retained ONLY for the
+ * migration window: the isolation-migration script terminates these, and
+ * `sweepViaTemporalVisibility` still recognizes orphaned runs created by
+ * them. New dispatches MUST use {@link funnelWorkflowId}.
+ */
+export function legacyFunnelWorkflowId(objectTypeApiName: string): string {
+  return `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
+}
+
+/** Custom search attributes registered by the provisioning scripts. */
+export const FUNNEL_SEARCH_ATTRIBUTES = {
+  environmentId: "TellusEnvironmentId",
+  ontologyRid: "TellusOntologyRid",
+  objectTypeRid: "TellusObjectTypeRid",
+  buildId: "TellusWorkerBuildId",
+} as const;
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
 async function tryConnect(
   address: string
 ): Promise<{ native: NativeConnection; client: Connection } | null> {
@@ -40,154 +140,439 @@ async function tryConnect(
   }
 }
 
-export async function startTemporalWorker(): Promise<boolean> {
-  const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
-  const namespace = process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
-  const taskQueue = process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
-
-  const conn = await tryConnect(address);
-  if (!conn) return false;
-
+/**
+ * Verify (and in local/verify mode, idempotently provision) the namespace.
+ * Strict mode REQUIRES the namespace to already exist — provisioning in
+ * production-like environments belongs to deployment infrastructure;
+ * `TELLUS_TEMPORAL_PROVISION_NAMESPACE=1` is the deliberate opt-out.
+ */
+async function ensureNamespace(
+  connection: Connection,
+  identity: EnvironmentIdentity
+): Promise<void> {
+  const ns = identity.temporalNamespace;
+  let exists = false;
   try {
+    await connection.workflowService.describeNamespace({ namespace: ns });
+    exists = true;
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    if (!/not.?found|NOT_FOUND/i.test(msg)) {
+      throw new Error(`describeNamespace(${ns}) failed: ${msg}`);
+    }
+  }
+  if (exists) return;
+
+  const allowAutoProvision =
+    identity.mode !== "strict" ||
+    process.env.TELLUS_TEMPORAL_PROVISION_NAMESPACE === "1";
+  if (!allowAutoProvision) {
+    throw new Error(
+      `Temporal namespace '${ns}' does not exist and strict mode forbids ` +
+        `worker-side provisioning. Create it via deployment infrastructure, ` +
+        `e.g.: temporal operator namespace create --address ${identity.temporalAddress} ` +
+        `--retention 72h ${ns} — or set TELLUS_TEMPORAL_PROVISION_NAMESPACE=1.`,
+    );
+  }
+  const retentionDays = Number(process.env.TEMPORAL_NAMESPACE_RETENTION_DAYS ?? 3);
+  await connection.workflowService.registerNamespace({
+    namespace: ns,
+    workflowExecutionRetentionPeriod: {
+      seconds: retentionDays * 86400 as never,
+    },
+  });
+  console.log(
+    JSON.stringify({
+      level: "info",
+      type: "temporal_namespace_provisioned",
+      namespace: ns,
+      retentionDays,
+      ...identityLogFields(identity),
+    })
+  );
+
+  // Best-effort: register the funnel lineage search attributes for this
+  // namespace so dispatch can attach typed attributes (not just memo).
+  // operatorService.addSearchAttributes is idempotent about *values* —
+  // re-adding an existing attribute errors with AlreadyExists which we
+  // tolerate. Clusters without operator permissions still dispatch fine
+  // via the memo-only fallback in signalTemporalWorkflow.
+  try {
+    // temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD = 2.
+    // Hard-coded to avoid a direct @temporalio/api dependency (the client
+    // package bundles the same proto).
+    const INDEXED_VALUE_TYPE_KEYWORD = 2;
+    const searchAttributes: Record<string, number> = {};
+    for (const name of Object.values(FUNNEL_SEARCH_ATTRIBUTES)) {
+      searchAttributes[name] = INDEXED_VALUE_TYPE_KEYWORD;
+    }
+    await connection.operatorService.addSearchAttributes({
+      namespace: ns,
+      searchAttributes,
+    } as never);
+    console.log(
+      JSON.stringify({
+        level: "info",
+        type: "temporal_search_attributes_registered",
+        namespace: ns,
+        attributes: Object.keys(searchAttributes),
+      }),
+    );
+  } catch (err) {
+    // Already-registered or insufficient privileges — memo fallback covers us.
+    console.warn(
+      `[temporal] search-attribute registration best-effort failed for ${ns}: ${(err as Error).message}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// startTemporalWorker
+// ---------------------------------------------------------------------------
+
+export async function startTemporalWorker(): Promise<boolean> {
+  if (workerInstance && temporalClient) return true;
+  workerStopping = false;
+  // Throws DeploymentConfigurationError in strict mode when identity
+  // fields are absent — startup MUST fail loudly, not fall back to a
+  // shared default (that default was the split-brain).
+  const identity = getEnvironmentIdentity();
+
+  const conn = await tryConnect(identity.temporalAddress);
+  if (!conn) {
+    scheduleWorkerRestart("Temporal connection unavailable");
+    return false;
+  }
+
+  // Namespace gate — refuses to poll a namespace that doesn't exist.
+  await ensureNamespace(conn.client, identity);
+
+  // Database seal gate — refuses to attach this deployment's queue to a
+  // database sealed by a DIFFERENT environment.
+  let dbEnvironmentId: string;
+  try {
+    dbEnvironmentId = await sealDatabaseEnvironment(identity);
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        type: "temporal_worker_refused_environment_mismatch",
+        error: (err as Error).message,
+        ...identityLogFields(identity),
+      })
+    );
+    throw err;
+  }
+
+  let routingProvisioned = false;
+  try {
+    const versioning = resolveWorkerVersioningConfig(identity);
     workerInstance = await Worker.create({
       connection: conn.native,
-      namespace,
-      taskQueue,
+      namespace: identity.temporalNamespace,
+      taskQueue: identity.temporalTaskQueue,
+      identity: identity.workerIdentity,
+      // Temporal-supported Worker Versioning (SDK @deprecated legacy API,
+      // functional on server 1.25): poll as this build; routing assigned by
+      // the queue's build-id rules (scripts/provision-task-queue-versioning).
+      ...versionedWorkerOptions(versioning),
       // PB-B4 follow-3.1 — register both the Funnel's own workflows
       // and the Pipeline-Builder workflows under the same worker so
       // pb-b4 iceberg maintenance runs on the existing task queue.
-      // Worker.create only accepts one workflowsPath per worker, so
-      // we expose a re-exporting bridge module that barrels both sets
-      // into a single package; activities merge cleanly via spread.
       workflowsPath: require.resolve("./workflowsBundle"),
       activities: { ...activities, ...pipelineActivities, ...tableImportActivities },
-      // Keep the worker small for single-process dev; raise these in prod.
       maxConcurrentActivityTaskExecutions: 20,
       maxConcurrentWorkflowTaskExecutions: 10,
     });
-    temporalClient = new Client({ connection: conn.client, namespace });
-    // Fire-and-forget the run loop.
-    void workerInstance.run().catch(async (err) => {
-      console.error(`[temporal] worker run failed: ${(err as Error).message}`);
-      // PB-B9 — temporal_workflow_failures_total counter.
-      try {
-        const { recordTemporalFailure } = await import(
-          "../../pipelines/metrics"
-        );
-        recordTemporalFailure(
-          "worker",
-          (err as Error).name ?? "unknown",
-        );
-      } catch {
-        /* ignore */
-      }
+    temporalClient = new Client({
+      connection: conn.client,
+      namespace: identity.temporalNamespace,
+      identity: identity.workerIdentity,
     });
+    workerIdentitySnapshot = identity;
+    workerDatabaseEnvironmentId = dbEnvironmentId;
+    workerVersioningSnapshot = versioning;
+    // Queue routing self-provisioning: with build-ID versioning enabled, an
+    // unrouted queue strands every dispatched workflow ("baseline" probe
+    // evidence). APIs must boot with routing in place. Strict mode: infra
+    // owns the rule (failure = boot error, surfacing platform misconfig).
+    if (versioning.enabled) {
+      const { ensureQueueAssignmentRule } = await import("./versioning");
+      const route = await ensureQueueAssignmentRule(conn.client as never, {
+        namespace: identity.temporalNamespace,
+        taskQueue: identity.temporalTaskQueue,
+        buildId: versioning.buildId,
+        strict: identity.mode === "strict",
+      });
+      routingProvisioned = route.provisioned;
+      // A connected Worker that is not the queue's active target is not a
+      // healthy worker: dispatching through its Client only strands signals
+      // at workflow_started. The routing helper returns provisioned=false
+      // both for an idempotent match and for a best-effort failure, so verify
+      // the effective rule before exposing temporalClient/isConnected.
+      const rules = await (conn.client as any).workflowService.getWorkerVersioningRules({
+        namespace: identity.temporalNamespace,
+        taskQueue: identity.temporalTaskQueue,
+      });
+      const activeBuild = rules.assignmentRules?.[0]?.rule?.targetBuildId;
+      if (activeBuild !== versioning.buildId) {
+        throw new Error(
+          `task queue '${identity.temporalTaskQueue}' routes to build ` +
+          `'${activeBuild ?? "<none>"}', not active worker '${versioning.buildId}'`,
+        );
+      }
+    }
+    const runningWorker = workerInstance;
+    void runningWorker.run().then(
+      () => {
+        clearWorkerRuntime(runningWorker);
+        scheduleWorkerRestart("run loop stopped");
+      },
+      async (err) => {
+        console.error(`[temporal] worker run failed: ${(err as Error).message}`);
+        clearWorkerRuntime(runningWorker);
+        try {
+          const { recordTemporalFailure } = await import(
+            "../../pipelines/metrics"
+          );
+          recordTemporalFailure(
+            "worker",
+            (err as Error).name ?? "unknown",
+          );
+        } catch {
+          /* ignore */
+        }
+        scheduleWorkerRestart((err as Error).message);
+      },
+    );
     console.log(
-      `[temporal] worker started on ${address} ns=${namespace} queue=${taskQueue}`
+      JSON.stringify({
+        level: "info",
+        type: "temporal_worker_started",
+        dbEnvironmentId,
+        versioningEnabled: versioning.enabled,
+        buildId: versioning.buildId,
+        deploymentName: versioning.deploymentName,
+        routingProvisioned,
+        ...identityLogFields(identity),
+      })
     );
     return true;
   } catch (err) {
     console.warn(`[temporal] worker bootstrap failed: ${(err as Error).message}`);
+    clearWorkerRuntime();
+    scheduleWorkerRestart((err as Error).message);
     return false;
   }
 }
 
 export async function stopTemporalWorker(): Promise<void> {
+  workerStopping = true;
+  if (workerRestartTimer) {
+    clearTimeout(workerRestartTimer);
+    workerRestartTimer = null;
+  }
   if (workerInstance) {
     try {
       workerInstance.shutdown();
     } catch {
       /* ignore */
     }
-    workerInstance = null;
   }
-  temporalClient = null;
+  clearWorkerRuntime();
 }
 
-/**
- * Start (or update) the ObjectTypeFunnelWorkflow for an Object Type and
- * signal it. Idempotent: starting an already-running workflow returns
- * the existing handle. Returns false if Temporal is not connected.
- */
-export async function signalTemporalWorkflow(
-  ontologyId: string,
-  objectTypeApiName: string,
+// ---------------------------------------------------------------------------
+// Workflow dispatch (durable hand-off — FUNN-ISO-6)
+// ---------------------------------------------------------------------------
+
+/** Lineage memo attached to every funnel workflow start. */
+export interface FunnelWorkflowMemo {
+  environmentId: string;
+  ontologyRid: string;
+  objectTypeRid: string;
+  objectTypeApiName: string;
+  funnelRunId?: string;
+  dbEnvironmentId?: string;
+  workerBuildId: string;
+  datasourceId?: string;
+  actor?: string;
+  reason?: string;
+  sourceTransactionId?: string;
+}
+
+export interface SignalDispatchInput {
+  ontologyId: string;
+  objectTypeApiName: string;
+  objectTypeRid: string;
   signalType:
     | "sourceTransactionCommitted"
     | "editBatchPending"
     | "schemaChanged"
-    | "pipelineDeployCompleted",
-  payload: SignalPayload = {}
+    | "pipelineDeployCompleted";
+  payload?: SignalPayload;
+  /** Extra memo fields (datasourceId/actor/reason/sourceTransactionId). */
+  memo?: Partial<FunnelWorkflowMemo>;
+}
+
+/**
+ * Start (or signal) the RID-keyed long-running ObjectTypeFunnelWorkflow.
+ * Idempotent: the workflow id is deterministic per (ontologyRid, rid), and
+ * `USE_EXISTING` turns a concurrent duplicate dispatch into a plain signal.
+ *
+ * Lineage: the full context is placed in the workflow memo (always works)
+ * plus typed search attributes when provisioned — on clusters without the
+ * custom attributes registered, we retry memo-only rather than failing the
+ * dispatch ( degrade lineage, never delivery).
+ */
+export async function signalTemporalWorkflow(
+  input: SignalDispatchInput
 ): Promise<boolean> {
   if (!temporalClient) return false;
-  try {
-    const taskQueue = process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
-    const workflowId = `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
+  const identity = workerIdentitySnapshot ?? getEnvironmentIdentity();
+  const workflowId = funnelWorkflowId(input.ontologyId, input.objectTypeRid);
 
-    // Determine conflict policy — prod-safe default `USE_EXISTING` keeps
-    // the spec's "one long-running parent workflow per OT" invariant.
-    // Opt-in `FUNNEL_TERMINATE_ON_SAVE=true` makes every save forcibly
-    // replace an in-flight workflow (the verify-funnel-reset semantic).
-    // Before terminating we give the workflow up to
-    // FUNNEL_CANCEL_TIMEOUT_MS (default 30s) to exit gracefully via a
-    // cancel — so an activity that's merely retrying a transient PG/S3
-    // error gets to finish its attempt and idempotently commit.
-    const terminateOnSave = process.env.FUNNEL_TERMINATE_ON_SAVE === "true";
-    if (terminateOnSave) {
-      await cancelWithTimeoutIfStuck(workflowId);
-      incrementCounter("funnel_workflow_terminate_on_save_total", {
-        object_type: objectTypeApiName,
+  // FUNN-ISO-3: first-dispatch gate — never let a signal start the OT's
+  // parent workflow BEFORE the queue's assignment rule exists, or the
+  // workflow is stamped unversioned and can never be claimed by versioned
+  // pollers. Wait (bounded); the outbox CAS retries otherwise.
+  {
+    const { waitForQueueRule } = await import("./versioning");
+    await waitForQueueRule(
+      temporalClient.connection as never,
+      identity.temporalNamespace,
+      identity.temporalTaskQueue,
+    );
+  }
+
+  // Conflict policy — prod-safe default `USE_EXISTING` keeps the "one
+  // long-running parent workflow per OT" invariant. Opt-in
+  // `FUNNEL_TERMINATE_ON_SAVE=true` makes every save forcibly replace an
+  // in-flight workflow (the verify-funnel-reset semantic). Before
+  // terminating we give the workflow up to FUNNEL_CANCEL_TIMEOUT_MS
+  // (default 30s) to exit gracefully via cancel.
+  const terminateOnSave = process.env.FUNNEL_TERMINATE_ON_SAVE === "true";
+  if (terminateOnSave) {
+    await cancelWithTimeoutIfStuck(workflowId);
+    incrementCounter("funnel_workflow_terminate_on_save_total", {
+      object_type: input.objectTypeApiName,
+    });
+  }
+
+  const memo: FunnelWorkflowMemo = {
+    environmentId: identity.environmentId,
+    ontologyRid: input.ontologyId,
+    objectTypeRid: input.objectTypeRid,
+    objectTypeApiName: input.objectTypeApiName,
+    funnelRunId: input.payload?.funnelRunId,
+    dbEnvironmentId: workerDatabaseEnvironmentId ?? undefined,
+    workerBuildId: identity.workerBuildId,
+    ...input.memo,
+  };
+
+  const continueAsNewThresholdRaw =
+    process.env.FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD;
+  const continueAsNewThresholdParsed = continueAsNewThresholdRaw
+    ? Number(continueAsNewThresholdRaw)
+    : NaN;
+  const continueAsNewThreshold =
+    Number.isFinite(continueAsNewThresholdParsed) &&
+    continueAsNewThresholdParsed > 0
+      ? Math.floor(continueAsNewThresholdParsed)
+      : undefined;
+
+  const workflowArgs = [
+    {
+      ontologyId: input.ontologyId,
+      objectTypeApiName: input.objectTypeApiName,
+      objectTypeRid: input.objectTypeRid,
+      environmentId: identity.environmentId,
+      continueAsNewThreshold,
+    },
+  ];
+
+  const searchAttributes = {
+    [FUNNEL_SEARCH_ATTRIBUTES.environmentId]: [identity.environmentId],
+    [FUNNEL_SEARCH_ATTRIBUTES.ontologyRid]: [input.ontologyId],
+    [FUNNEL_SEARCH_ATTRIBUTES.objectTypeRid]: [input.objectTypeRid],
+    [FUNNEL_SEARCH_ATTRIBUTES.buildId]: [identity.workerBuildId],
+  };
+
+  try {
+    try {
+      await temporalClient.workflow.signalWithStart("ObjectTypeFunnelWorkflow", {
+        workflowId,
+        taskQueue: identity.temporalTaskQueue,
+        args: workflowArgs,
+        signal: input.signalType,
+        signalArgs: [input.payload ?? {}],
+        memo: { ...memo },
+        searchAttributes,
+        // eslint-plugin note: keep this pattern single-line —
+        // scripts/test-production-readiness.sh greps for it literally.
+        workflowIdConflictPolicy: terminateOnSave ? "TERMINATE_EXISTING" : "USE_EXISTING",
+      });
+    } catch (err) {
+      // Clusters without the custom search attributes registered reject the
+      // start — retry memo-only so dispatch itself is never blocked by a
+      // metadata-registration gap. The "search attribute" complaint is in
+      // the gRPC CAUSE chain, not the envelope message, so walk it.
+      let isSearchAttrErr = false;
+      let cur = err as { message?: string; cause?: unknown } | undefined;
+      let depth = 0;
+      while (cur && depth < 8) {
+        if (/search.?attribute/i.test(cur.message ?? "")) {
+          isSearchAttrErr = true;
+          break;
+        }
+        cur = cur.cause as typeof cur;
+        depth++;
+      }
+      if (!isSearchAttrErr) throw err;
+      await temporalClient.workflow.signalWithStart("ObjectTypeFunnelWorkflow", {
+        workflowId,
+        taskQueue: identity.temporalTaskQueue,
+        args: workflowArgs,
+        signal: input.signalType,
+        signalArgs: [input.payload ?? {}],
+        memo: { ...memo },
+        workflowIdConflictPolicy: terminateOnSave ? "TERMINATE_EXISTING" : "USE_EXISTING",
       });
     }
-
-    // Resolve the continue-as-new threshold HERE on the host. Temporal
-    // workflow code runs inside a V8 isolate sandbox with no `process`
-    // global, so `process.env.*` MUST NOT be read inside workflows.ts —
-    // doing so throws `ReferenceError: process is not defined` the moment
-    // the workflow starts. See ObjectTypeFunnelInput.continueAsNewThreshold.
-    const continueAsNewThresholdRaw =
-      process.env.FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD;
-    const continueAsNewThresholdParsed = continueAsNewThresholdRaw
-      ? Number(continueAsNewThresholdRaw)
-      : NaN;
-    const continueAsNewThreshold =
-      Number.isFinite(continueAsNewThresholdParsed) &&
-      continueAsNewThresholdParsed > 0
-        ? Math.floor(continueAsNewThresholdParsed)
-        : undefined;
-
-    await temporalClient.workflow.signalWithStart("ObjectTypeFunnelWorkflow", {
-      workflowId,
-      taskQueue,
-      args: [{ ontologyId, objectTypeApiName, continueAsNewThreshold }],
-      signal: signalType,
-      signalArgs: [payload],
-      workflowIdConflictPolicy: terminateOnSave ? "TERMINATE_EXISTING" : "USE_EXISTING",
-    });
     incrementCounter("funnel_signal_with_start_total", {
-      object_type: objectTypeApiName,
-      signal_type: signalType,
+      environment: identity.environmentId,
+      object_type: input.objectTypeApiName,
+      signal_type: input.signalType,
     });
     return true;
   } catch (err) {
     incrementCounter("funnel_signal_with_start_errors_total", {
-      object_type: objectTypeApiName,
+      environment: identity.environmentId,
+      object_type: input.objectTypeApiName,
     });
+    // Unwrap the Temporal cause chain — "Failed to signalWithStart Workflow"
+    // is the envelope; the REAL cause (notfound/validation/…) sits in .cause.
+    let causeMsg = "";
+    let cur = err as { cause?: unknown } | undefined;
+    let depth = 0;
+    while (cur?.cause && depth < 8) {
+      const c = cur.cause as { message?: string; details?: string };
+      if (c?.message) causeMsg += ` | cause: ${c.details ?? c.message}`;
+      cur = cur.cause as typeof cur;
+      depth++;
+    }
     console.warn(
-      `[temporal] signalWithStart failed for ${objectTypeApiName}: ${(err as Error).message}`
+      `[temporal] signalWithStart failed for ${input.objectTypeApiName}: ${(err as Error).message}${causeMsg}`
     );
     return false;
   }
 }
 
 /**
- * Graceful-replace pattern: if a workflow for this ID is currently
- * running and has been for longer than `FUNNEL_CANCEL_STALE_THRESHOLD_MS`
- * (default 2 min), send a cancel, wait up to `FUNNEL_CANCEL_TIMEOUT_MS`
- * (default 30s) for it to exit, then let the caller's signalWithStart
- * with TERMINATE_EXISTING finish the job. Side effects from the
- * in-flight activity are allowed to complete idempotently — the
- * activity code is written so that partial writes + retries converge.
+ * Graceful-replace pattern: if the workflow is running and older than
+ * FUNNEL_CANCEL_STALE_THRESHOLD_MS (default 2 min), send cancel, wait up to
+ * FUNNEL_CANCEL_TIMEOUT_MS (default 30s) for a clean exit, then let the
+ * caller's signalWithStart(TERMINATE_EXISTING) finish the job.
  */
 async function cancelWithTimeoutIfStuck(workflowId: string): Promise<void> {
   if (!temporalClient) return;
@@ -198,9 +583,9 @@ async function cancelWithTimeoutIfStuck(workflowId: string): Promise<void> {
     const desc = await handle.describe();
     if (desc.status.name !== "RUNNING") return;
     const ageMs = Date.now() - desc.startTime.getTime();
-    if (ageMs < staleMs) return; // still fresh; let signalWithStart reuse or terminate
+    if (ageMs < staleMs) return;
     incrementCounter("funnel_workflow_cancel_attempted_total", {
-      object_type: workflowId.replace(/^ObjectTypeFunnelWorkflow-/, ""),
+      object_type: workflowId.replace(/^ObjectTypeFunnelWorkflow[-/]/, ""),
     });
     await handle.cancel();
     const giveUpAt = Date.now() + timeoutMs;
@@ -213,11 +598,8 @@ async function cancelWithTimeoutIfStuck(workflowId: string): Promise<void> {
       }
     }
     incrementCounter("funnel_workflow_cancel_timeout_total", {});
-    // Fall through — caller's signalWithStart(TERMINATE_EXISTING) will
-    // forcibly close the workflow.
   } catch (err) {
     const msg = (err as Error).message;
-    // Not-found = workflow doesn't exist yet; nothing to cancel.
     if (!/not found/i.test(msg) && !/NotFound/i.test(msg)) {
       console.warn(
         `[temporal] cancelWithTimeoutIfStuck(${workflowId}): ${msg}`
@@ -226,9 +608,7 @@ async function cancelWithTimeoutIfStuck(workflowId: string): Promise<void> {
   }
 }
 
-/** Internal metrics handle — delegates to the ../metrics module when
- *  available. We require it lazily so the worker module stays usable
- *  in unit tests where the metrics module might not be wired. */
+/** Internal metrics handle. */
 function incrementCounter(name: string, labels: Record<string, string>): void {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -240,36 +620,39 @@ function incrementCounter(name: string, labels: Record<string, string>): void {
 }
 
 /**
- * Terminate the durable ObjectTypeFunnelWorkflow for an Object Type. Called
- * when the Object Type is DELETED — the long-running workflow would otherwise
- * outlive the type and keep retrying activities (e.g. syncOpenSearchActivity)
- * against a now-missing type, failing on every attempt.
- *
- * Best-effort: returns false (never throws) when Temporal is disconnected or
- * the workflow doesn't exist. Termination is immediate (not a graceful cancel)
- * because there's nothing left to converge to — the type is gone.
+ * Terminate the durable parent workflow for an Object Type (called when the
+ * type is DELETED). Terminates BOTH the RID-keyed id and — during the
+ * migration window — the legacy api-name-keyed id.
  */
 export async function terminateTemporalWorkflow(
   objectTypeApiName: string,
-  reason: string = "object type deleted"
+  reason: string = "object type deleted",
+  identity?: { ontologyId?: string; objectTypeRid?: string }
 ): Promise<boolean> {
   if (!temporalClient) return false;
-  const workflowId = `ObjectTypeFunnelWorkflow-${objectTypeApiName}`;
-  try {
-    await temporalClient.workflow.getHandle(workflowId).terminate(reason);
-    incrementCounter("funnel_workflow_terminated_total", {
-      object_type: objectTypeApiName,
-    });
-    return true;
-  } catch (err) {
-    const msg = (err as Error).message;
-    // Not-found = nothing to terminate (no workflow for this type). Quiet.
-    if (/not found/i.test(msg) || /NotFound/i.test(msg)) return false;
-    console.warn(
-      `[temporal] terminate failed for ${objectTypeApiName}: ${msg}`
-    );
-    return false;
+  const ids = [legacyFunnelWorkflowId(objectTypeApiName)];
+  if (identity?.ontologyId && identity?.objectTypeRid) {
+    ids.unshift(funnelWorkflowId(identity.ontologyId, identity.objectTypeRid));
   }
+  let anyTerminated = false;
+  for (const workflowId of ids) {
+    try {
+      await temporalClient.workflow.getHandle(workflowId).terminate(reason);
+      anyTerminated = true;
+      incrementCounter("funnel_workflow_terminated_total", {
+        object_type: objectTypeApiName,
+        workflow_id_kind: workflowId.includes("/") ? "rid" : "legacy",
+      });
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (!/not found/i.test(msg) && !/NotFound/i.test(msg)) {
+        console.warn(
+          `[temporal] terminate failed for ${workflowId}: ${msg}`
+        );
+      }
+    }
+  }
+  return anyTerminated;
 }
 
 /** Internal accessor used by the sweeper. Null when Temporal isn't connected. */
@@ -279,4 +662,19 @@ export function getTemporalClient(): Client | null {
 
 export function isTemporalConnected(): boolean {
   return temporalClient != null && workerInstance != null;
+}
+
+/** Diagnostics snapshot used by /health/ready + ops tooling. */
+export function getWorkerDiagnostics(): {
+  connected: boolean;
+  identity: EnvironmentIdentity | null;
+  dbEnvironmentId: string | null;
+  versioning: import("./versioning").WorkerVersioningConfig | null;
+} {
+  return {
+    connected: isTemporalConnected(),
+    identity: workerIdentitySnapshot,
+    dbEnvironmentId: workerDatabaseEnvironmentId,
+    versioning: workerVersioningSnapshot,
+  };
 }

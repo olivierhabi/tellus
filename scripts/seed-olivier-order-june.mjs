@@ -136,6 +136,10 @@ async function seedRows() {
       const pk = `ORD-${String(i + 1).padStart(3, "0")}`;
       const props = {
         id: pk,
+        // Older dev ontologies created this demo type with `orderId` as the
+        // canonical property. Keep both aliases populated so the idempotent
+        // scale seed remains compatible with either schema revision.
+        orderId: pk,
         itemName: ITEMS[i % ITEMS.length],
         orderDueDate: new Date(Date.UTC(2023, 5, 1 + (i % 28), 12, 0, 0)).toISOString(),
         customerId: `cust-${String((i % 5) + 1).padStart(3, "0")}`,

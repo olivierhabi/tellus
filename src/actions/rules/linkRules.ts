@@ -416,6 +416,27 @@ async function handleFkLink(
     };
   }
 
+  // fix(A5): reject FK writes that target the FK-bearing object's primary
+  // key property. A misconfigured link type can declare source_property_id/
+  // target_property_id as the object's PK — an addLink rule would then write
+  // the FK value into the PK column, silently RENAMING the object. Mirror the
+  // modifyObject PK-immutability guard here at compile time.
+  const fkObjDef = await (await import("../../services/objectTypeService")).default.getByApiName(
+    linkType.ontology_id as string,
+    fkObjectType,
+  );
+  const fkPkPropertyId = fkObjDef.objectType.primary_key_property_id as string | null;
+  if (fkPkPropertyId && fkPropertyId === fkPkPropertyId) {
+    return {
+      linkEdit: null,
+      edit: null,
+      errors: [
+        `${ruleLabel} rule: link type '${linkType.api_name}' foreign-key property '${fkPropertyApiName}' is the primary key of object type '${fkObjectType}; a link may not write the primary key. Reconfigure the link type to use a non-PK FK property.`,
+      ],
+      warnings: [],
+    };
+  }
+
   // For add: set FK to the referenced PK
   // For remove: set FK to null (clear the relationship)
   const fkValue = operation === "add" ? referencedPk : null;

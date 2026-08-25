@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { getToken } from "../../helpers/tokens";
 
-const BASE = process.env.TEST_BASE_URL || "http://localhost:3000";
+const BASE = process.env.TEST_BASE_URL || (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 // Probe without the default interceptor by passing an explicit empty
 // Authorization header. Setting the header to "" makes

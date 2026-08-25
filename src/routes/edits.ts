@@ -201,6 +201,8 @@ router.get(
       const indexedParam = req.query.indexed as string | undefined;
       const operationParam = req.query.operation as string | undefined;
       const primaryKeyParam = req.query.primaryKey as string | undefined;
+      const primaryKeysParam = req.query.primaryKeys as string | undefined;
+      const orderParam = req.query.order as string | undefined;
 
       let pageSize = parseInt(req.query.pageSize as string, 10);
       if (isNaN(pageSize) || pageSize < 1) pageSize = DEFAULT_PAGE_SIZE;
@@ -232,6 +234,16 @@ router.get(
           "INVALID_PARAMETER",
           "indexed must be 'true' or 'false'."
         );
+      }
+      if (orderParam !== undefined && orderParam !== "newest" && orderParam !== "oldest") {
+        return sendError(res, "INVALID_PARAMETER", "order must be 'newest' or 'oldest'.");
+      }
+      const primaryKeys = primaryKeysParam
+        ?.split(",")
+        .map((value) => value.trim())
+        .filter(Boolean) ?? [];
+      if (primaryKeys.length > 500) {
+        return sendError(res, "INVALID_PARAMETER", "primaryKeys supports at most 500 values.");
       }
 
       if (
@@ -297,6 +309,11 @@ router.get(
         values.push(primaryKeyParam);
         paramIndex++;
       }
+      if (primaryKeys.length > 0) {
+        conditions.push(`primary_key = ANY($${paramIndex}::text[])`);
+        values.push(primaryKeys);
+        paramIndex++;
+      }
 
       const whereClause = conditions.join(" AND ");
 
@@ -315,7 +332,7 @@ router.get(
                 branch_id
          FROM ontology_edit
          WHERE ${whereClause}
-         ORDER BY executed_at DESC
+         ORDER BY executed_at ${orderParam === "oldest" ? "ASC" : "DESC"}
          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
         [...values, pageSize, offset]
       );

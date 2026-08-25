@@ -26,6 +26,12 @@ interface CreateInput {
   ordinal?: number;
   /** Ordered conditional-formatting rules (FE ConditionalFormattingRule[]). */
   conditionalFormatting?: unknown;
+  /**
+   * Column-level visibility markings (Rwanda QA plan §3.3 / migration 045).
+   * A caller must hold every listed marking to read, filter, sort, aggregate,
+   * or export this property.
+   */
+  markingRequired?: string[] | null;
 }
 
 interface UpdateInput {
@@ -35,6 +41,19 @@ interface UpdateInput {
   ordinal?: number;
   /** Replace the property's conditional-formatting rules (null clears them). */
   conditionalFormatting?: unknown;
+  /**
+   * Inline-edit action-type binding (Foundry Pillar 1). Set to an action-type
+   * apiName to make this property inline-editable; null/empty clears the
+   * binding. Defense in depth: the route layer validates eligibility before
+   * persisting — this service stores whatever the route passes.
+   */
+  inlineEditActionId?: string | null;
+  /** Column-level visibility markings; null/[] clears. See CreateInput. */
+  markingRequired?: string[] | null;
+  /** Foundry property visibility in user applications (Ontology Manager
+   *  "Display → Visibility" cards). Only the three documented values are
+   *  accepted; new properties default to 'normal' (column default). */
+  visibility?: "normal" | "prominent" | "hidden";
   // Not updatable — checked and rejected:
   apiName?: string;
   baseType?: string;
@@ -57,6 +76,7 @@ async function create(objectTypeId: string, data: CreateInput) {
     isRequired = false,
     ordinal = 0,
     conditionalFormatting = null,
+    markingRequired = null,
   } = data;
 
   // 1. Validate apiName
@@ -128,8 +148,9 @@ async function create(objectTypeId: string, data: CreateInput) {
     const result = await query(
       `INSERT INTO property
          (object_type_id, api_name, display_name, base_type, description,
-          struct_schema, is_required, is_array, ordinal, conditional_formatting)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          struct_schema, is_required, is_array, ordinal, conditional_formatting,
+          marking_required)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
       [
         objectTypeId,
@@ -142,6 +163,7 @@ async function create(objectTypeId: string, data: CreateInput) {
         isArray,
         ordinal,
         conditionalFormatting ? JSON.stringify(conditionalFormatting) : null,
+        Array.isArray(markingRequired) && markingRequired.length > 0 ? markingRequired : null,
       ]
     );
     return result.rows[0];
@@ -237,11 +259,37 @@ async function update(
         : null
     );
   }
+  if (data.inlineEditActionId !== undefined) {
+    setClauses.push(`inline_edit_action_id = $${paramIndex++}`);
+      values.push(
+        data.inlineEditActionId && String(data.inlineEditActionId).length > 0
+          ? String(data.inlineEditActionId)
+          : null
+      );
+  }
+  if (data.markingRequired !== undefined) {
+    setClauses.push(`marking_required = $${paramIndex++}`);
+    values.push(
+      Array.isArray(data.markingRequired) && data.markingRequired.length > 0
+        ? data.markingRequired
+        : null
+    );
+  }
+  if (data.visibility !== undefined) {
+    if (!["normal", "prominent", "hidden"].includes(data.visibility)) {
+      throw appError(
+        "VALIDATION_FAILED",
+        `Invalid visibility '${data.visibility}'. Must be one of: normal, prominent, hidden.`
+      );
+    }
+    setClauses.push(`visibility = $${paramIndex++}`);
+    values.push(data.visibility);
+  }
 
   if (setClauses.length === 0) {
     throw appError(
       "INVALID_PARAMETER",
-      "At least one updatable field (displayName, description, isRequired, ordinal, conditionalFormatting) must be provided."
+      "At least one updatable field (displayName, description, isRequired, ordinal, conditionalFormatting, inlineEditActionId, markingRequired, visibility) must be provided."
     );
   }
 
@@ -419,6 +467,7 @@ async function createWithClient(
     isRequired = false,
     ordinal = 0,
     conditionalFormatting = null,
+    markingRequired = null,
   } = data;
 
   // 1. Validate apiName
@@ -487,8 +536,9 @@ async function createWithClient(
     const result = await client.query(
       `INSERT INTO property
          (object_type_id, api_name, display_name, base_type, description,
-          struct_schema, is_required, is_array, ordinal, conditional_formatting)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          struct_schema, is_required, is_array, ordinal, conditional_formatting,
+          marking_required)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
       [
         objectTypeId,
@@ -501,6 +551,7 @@ async function createWithClient(
         isArray,
         ordinal,
         conditionalFormatting ? JSON.stringify(conditionalFormatting) : null,
+        Array.isArray(markingRequired) && markingRequired.length > 0 ? markingRequired : null,
       ]
     );
     return result.rows[0];

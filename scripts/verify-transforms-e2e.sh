@@ -36,13 +36,25 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Postgres access: local dev runs the compose container `tellus-postgres-1`;
+# CI (transforms-parity parity-e2e job) runs a GitHub service postgres — no
+# container to exec into, but psql is preinstalled on the runner and honors
+# the PGDATABASE/PGUSER/PGPASSWORD/PGHOST env the workflow exports.
+sql() {
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'tellus-postgres-1'; then
+        docker exec tellus-postgres-1 psql -U tellus -d tellus_db "$@"
+    else
+        psql "$@"
+    fi
+}
+
 cleanup() {
     log_info "Cleaning up test data..."
     # Remove test datasets if they exist
-    docker exec tellus-postgres-1 psql -U tellus -d tellus_db -c \
+    sql -c \
         "DELETE FROM dataset WHERE storage_path LIKE '%transforms-e2e%'" 2>/dev/null || true
     # Remove test repos
-    docker exec tellus-postgres-1 psql -U tellus -d tellus_db -c \
+    sql -c \
         "DELETE FROM code_repository WHERE display_name LIKE 'transforms-e2e%'" 2>/dev/null || true
 }
 
@@ -94,14 +106,14 @@ INPUT_RID="ri.foundry.main.dataset.transforms-e2e-input-$(date +%s)"
 log_info "Seeding INPUT dataset: $INPUT_RID"
 
 # Create dataset row
-docker exec tellus-postgres-1 psql -U tellus -d tellus_db -c \
+sql -c \
     "INSERT INTO dataset (dataset_id, rid, name, file_format, storage_path, created_at, updated_at, created_by)
      VALUES (gen_random_uuid(), '$INPUT_RID', 'transforms-e2e-input', 'csv',
              '$PWD/data/transforms-e2e-input.csv', now(), now(), 'e2e-test')
      RETURNING dataset_id" > /dev/null
 
 # Get dataset ID
-INPUT_ID=$(docker exec tellus-postgres-1 psql -U tellus -d tellus_db -tA -c \
+INPUT_ID=$(sql -tA -c \
     "SELECT dataset_id FROM dataset WHERE rid = '$INPUT_RID'")
 
 # Write seed data file to host ./data directory (where the executor reads from)
@@ -117,7 +129,7 @@ order_id,customer,amount,status
 EOF
 
 # Create transaction record with absolute path
-docker exec tellus-postgres-1 psql -U tellus -d tellus_db -c \
+sql -c \
     "INSERT INTO dataset_transaction (transaction_id, dataset_id, transaction_type, file_path, created_at, status)
      VALUES (gen_random_uuid(), '$INPUT_ID', 'SNAPSHOT', '$PWD/data/transforms-e2e-input.csv', now(), 'committed')"
 
@@ -152,8 +164,10 @@ def filter_completed(output, orders):
     output.write_dataframe(completed)
 "
 
-# Base64 encode the transform code
-TRANSFORM_B64=$(echo "$TRANSFORM_CODE" | base64)
+# Base64 encode the transform code. GNU base64 wraps at 76 columns; strip
+# newlines or the wrapped payload breaks the JSON body (Linux CI regression —
+# macOS base64 never wraps, so this passes locally without the tr).
+TRANSFORM_B64=$(printf '%s' "$TRANSFORM_CODE" | base64 | tr -d '\n')
 
 COMMIT_IDEM=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
@@ -252,7 +266,7 @@ fi
 # Step 7: Verify job_spec rows
 # -----------------------------------------------------------------------------
 log_info "Verifying job_spec rows..."
-JOB_SPEC_COUNT=$(docker exec tellus-postgres-1 psql -U tellus -d tellus_db -tA -c \
+JOB_SPEC_COUNT=$(sql -tA -c \
     "SELECT count(*) FROM job_spec WHERE repository_rid = '$REPO_RID'")
 
 if [ "$JOB_SPEC_COUNT" -lt 1 ]; then
@@ -268,7 +282,7 @@ log_info "Verifying output datasets..."
 OUTPUT_ID="$OUTPUT_DS"
 
 # Verify transaction exists
-OUTPUT_ROWS=$(docker exec tellus-postgres-1 psql -U tellus -d tellus_db -tA -c \
+OUTPUT_ROWS=$(sql -tA -c \
     "SELECT count(*) FROM dataset_transaction WHERE dataset_id = '$OUTPUT_ID'")
 
 if [ "$OUTPUT_ROWS" -lt 1 ]; then
@@ -281,7 +295,7 @@ fi
 # Step 9: Verify transform_lineage
 # -----------------------------------------------------------------------------
 log_info "Verifying transform lineage table..."
-LINEAGE_COUNT=$(docker exec tellus-postgres-1 psql -U tellus -d tellus_db -tA -c \
+LINEAGE_COUNT=$(sql -tA -c \
     "SELECT count(*) FROM transform_lineage WHERE repository_rid = '$REPO_RID'")
 
 log_info "Found $LINEAGE_COUNT lineage edge(s)"

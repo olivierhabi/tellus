@@ -13,6 +13,16 @@
 // when the group has no connected agent. The actual tunnel transport lives in
 // the coordinator (B6); the pool layer consults this seam so an agentProxy
 // connection can never silently fall back to a direct egress.
+//
+// F7 — IMPORTANT: the liveness gate above is the ONLY use of this seam today.
+// Webhook execution, health-probe, and worker-fetch egress all originate from
+// the backend Node process DIRECTLY (see webhooks/executor.ts and
+// health/prober.ts); they do NOT consult this seam and do NOT tunnel through
+// the agent. The connection's `settings.egressMode` records the operator's
+// acknowledgement of this ("direct" default vs the future "agent-tunnel"), and
+// every direct egress is recorded in `connectivity_egress_audit_log`. The
+// pool layer's `assertAgentAvailable` gate is a liveness check only — it does
+// not open a tunnel. The B6 tunnel transport is future work.
 // ---------------------------------------------------------------------------
 
 import { TellusError } from "../../../lib/errors/envelope";

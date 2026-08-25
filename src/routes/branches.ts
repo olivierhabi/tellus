@@ -356,4 +356,61 @@ router.delete(
   }
 );
 
+// ---------------------------------------------------------------------------
+// POST /:branchName/apply-fast — B3 (cross-functionality engagement) scenario
+// "apply" shim. Dev/test-only: gated by X-Tellus-Test-Hook:1 +
+// NODE_ENV!=="production" (same posture as the auth login-bypass — not
+// reachable in a production build). Auto-opens + approves a synthetic
+// proposal + merges the branch into its parent so a Scenario ("apply") lands
+// without the 3-step human proposal gate. Production keeps the human gate
+// (POST /:branchName/proposals + /:proposalId/approve + /merge); this fast
+// path is ONLY for the E2E engagement's scenario-apply step.
+// ---------------------------------------------------------------------------
+router.post(
+  "/:branchName/apply-fast",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (process.env.NODE_ENV === "production" || req.headers["x-tellus-test-hook"] !== "1") {
+        return sendError(res, "FORBIDDEN", "apply-fast is dev/test-only.");
+      }
+      const { ontologyId, branchName } = req.params;
+      const branch = await query(
+        "SELECT * FROM ontology_branch WHERE ontology_id = $1 AND name = $2",
+        [ontologyId, branchName],
+      );
+      if (branch.rowCount === 0) {
+        return sendError(res, "BRANCH_NOT_FOUND", `Branch ${branchName} not found.`);
+      }
+      const row = branch.rows[0];
+      if (row.status !== "OPEN") {
+        return sendError(res, "VALIDATION_FAILED", `Branch is ${row.status}; only OPEN branches can be applied.`);
+      }
+      // Open + auto-approve a synthetic proposal so the merge guard (>=1
+      // APPROVED proposal) is satisfied.
+      const createdBy = (req as any).user?.id || "system";
+      const prop = await query(
+        `INSERT INTO ontology_proposal (branch_id, title, description, created_by)
+         VALUES ($1, $2, $3, $4) RETURNING *`,
+        [row.branch_id, `apply-fast-${Date.now()}`, "Auto-approved by cross-functionality E2E shim.", createdBy],
+      );
+      const proposalId = prop.rows[0].proposal_id;
+      await query(
+        `UPDATE ontology_proposal SET status = 'APPROVED', approved_by = $1, approved_at = now()
+         WHERE proposal_id = $2 AND status = 'OPEN'`,
+        [createdBy, proposalId],
+      );
+      const mergeResult = await mergeThreeWay(ontologyId, row.branch_id, undefined);
+      if (!mergeResult.success) {
+        return res.status(409).json({
+          error: { code: "BRANCH_MERGE_CONFLICT", message: `Merge conflict: ${mergeResult.conflicts.length}.`, conflicts: mergeResult.conflicts },
+        });
+      }
+      sendSuccess(res, { branchId: row.branch_id, status: "MERGED", mergedEditCount: mergeResult.mergedEditCount });
+    } catch (err: any) {
+      if (KNOWN.has(err.code)) return sendError(res, err.code, err.message);
+      next(err);
+    }
+  }
+);
+
 export default router;

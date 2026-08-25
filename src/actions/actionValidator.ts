@@ -12,7 +12,7 @@
 //
 //   Stage 1: Load the action type definition
 //   Stage 2: Validate parameters
-//   Stage 3: Submission criteria (TODO — not yet implemented in week 1)
+//   Stage 3: Submission criteria (evaluateSubmissionCriteria)
 //   Stage 4: Compile rules into edits
 //
 // Stage 6 (edit application), Stage 7 (side effects), and Stage 8 (audit
@@ -21,14 +21,18 @@
 
 import { query } from "../db";
 import { getOntologyId } from "../services/ontology/canonicalOntology";
-import { getActionType } from "../models/actionType";
+import { getActionType, resolveSemanticsForRow } from "../models/actionType";
 import type { ActionTypeRow } from "../models/actionType";
 import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import type { CompiledEdit } from "./ruleCompiler";
+import { evaluateSubmissionCriteria, resolveObjectPropertyOperands, type SubmissionSubject } from "./submissionCriteria";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
+import { OntologyError } from "../utils/queryErrors";
+import { getActionSemanticsExecutionAvailability } from "./actionSemanticsFlags";
+import { getKeycloakAdminService } from "../services/keycloakAdminService";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,7 +141,13 @@ export async function validateAction(
   ontologyId: string,
   actionTypeApiName: string,
   parameters: Record<string, unknown>,
-  context?: { executedBy?: string }
+  context?: {
+    executedBy?: string;
+    roles?: string[];
+    groups?: string[];
+    organizations?: string[];
+    executionContext?: string;
+  }
 ): Promise<ValidationResult> {
   // -----------------------------------------------------------------
   // STAGE 1: Load the action type definition
@@ -151,11 +161,34 @@ export async function validateAction(
     return { valid: false, errors: ["Action type not found"] };
   }
 
-  if (!actionType.is_enabled) {
-    return {
-      valid: false,
-      errors: [`Action type '${actionTypeApiName}' is disabled`],
-    };
+  // Foundry parity: `is_enabled` is cosmetic and never gates validation.
+  // Webhook lifecycle safety remains at apply time (writeback executor
+  // refuses non-active webhooks; failurePolicy 'abort' halts before edits).
+
+  // -----------------------------------------------------------------
+  // STAGE 1b: Action semantics availability
+  //
+  // Validation and execution intentionally share the same rollout decision.
+  // Returning a successful preview for an action that apply must reject is a
+  // broken API contract and causes late, confusing submission failures.
+  // -----------------------------------------------------------------
+  const semantics = resolveSemanticsForRow({
+    semantics_version: actionType.semantics_version,
+    execution_mode: actionType.execution_mode,
+    delete_policy: actionType.delete_policy,
+  });
+  const semanticsAvailability =
+    getActionSemanticsExecutionAvailability(semantics.semanticsVersion);
+  if (!semanticsAvailability.available) {
+    throw new OntologyError(
+      semanticsAvailability.message ??
+        `Unsupported action semantics version '${semantics.semanticsVersion}'.`,
+      semanticsAvailability.code ?? "UNSUPPORTED_SEMANTICS_VERSION",
+      422,
+      semanticsAvailability.details ?? {
+        semanticsVersion: semantics.semanticsVersion,
+      },
+    );
   }
 
   // -----------------------------------------------------------------
@@ -164,7 +197,15 @@ export async function validateAction(
   const validation = await validateParameters(
     actionType.parameters as ParameterDefinition[],
     parameters,
-    objectExists
+    objectExists,
+    fetchObject,
+    {
+      currentUserId: context?.executedBy,
+      userExists: async (userId) => {
+        const user = await getKeycloakAdminService().getUserById(userId);
+        return user?.enabled === true;
+      },
+    },
   );
 
   if (!validation.valid) {
@@ -175,8 +216,42 @@ export async function validateAction(
 
   // -----------------------------------------------------------------
   // STAGE 3: Submission criteria
-  // TODO: Add submission criteria check here when implemented
   // -----------------------------------------------------------------
+  const subject: SubmissionSubject = {
+    username: context?.executedBy ?? undefined,
+    // Role/group predicates must use the caller's identity, same as
+    // actionExecutor.ts Stage 3 — otherwise /validate rejects every
+    // role-gated action that /apply would accept.
+    roles: context?.roles ?? [],
+    groups: context?.groups ?? [],
+    // Same subject fields the executor's Stage 3 uses, for the same reason:
+    // /validate must accept exactly what /apply would, or an org-gated or
+    // scenario-gated action fails pre-flight and succeeds on submit.
+    organizations: context?.organizations ?? [],
+    executionContext: context?.executionContext ?? undefined,
+  };
+
+  // D27 — pre-resolve object-property operands against the live referenced-
+  // object state before evaluating criteria (same path as the executor).
+  const objectPropertyValues = await resolveObjectPropertyOperands(
+    actionType.submission_criteria,
+    resolvedParameters as Record<string, unknown>,
+    actionType.parameters as ReadonlyArray<{ apiName: string; objectType?: string }>,
+    fetchObject,
+  );
+  const submission = evaluateSubmissionCriteria(
+    actionType.submission_criteria,
+    resolvedParameters as Record<string, unknown>,
+    subject,
+    objectPropertyValues,
+  );
+
+  if (!submission.ok) {
+    return {
+      valid: false,
+      errors: [`Submission criteria not met: ${submission.failures.join("; ")}`],
+    } as ValidationFailure;
+  }
 
   // -----------------------------------------------------------------
   // STAGE 4: Compile rules into edits
@@ -188,6 +263,7 @@ export async function validateAction(
     {
       executedBy: context?.executedBy || "system",
       ontologyId,
+      previewGeneratedSequences: true,
     }
   );
 

@@ -359,6 +359,57 @@ export async function loadMfaChallenge(
   });
 }
 
+/**
+ * Read-only load of an in-flight MFA challenge — verifies the row
+ * exists and has not expired WITHOUT incrementing the attempt counter.
+ *
+ * Used by /login/mfa/webauthn-options, which only needs the challenge's
+ * user binding to build WebAuthn ceremony options — it is NOT an
+ * authentication attempt and must NOT count against MFA_MAX_ATTEMPTS.
+ *
+ * Why this exists: an earlier version of the options endpoint called
+ * loadMfaChallenge(), which increments the counter. That burned one of
+ * the 5 brute-force slots every time the browser fetched options —
+ * including every passkey RETRY and every DISMISSED OS prompt (options
+ * fetched, ceremony cancelled, no assertion ever submitted). After 2-3
+ * such events on the same challenge the counter exceeded
+ * MFA_MAX_ATTEMPTS and the user was told to "Start over from the
+ * sign-in screen" even though they had never submitted a real
+ * assertion. The actual verify (/login/mfa) still calls
+ * loadMfaChallenge() — that is the only call site that should burn a
+ * slot, because it is the only call site that actually attempts a
+ * second factor.
+ *
+ * No transaction / FOR UPDATE here: there is no write, so there is no
+ * concurrency hazard with the incrementing loadMfaChallenge() path.
+ * Expired rows are still cleaned up so the caller sees the same
+ * "challenge gone" signal loadMfaChallenge() returns.
+ */
+export async function peekMfaChallenge(
+  knex: Knex,
+  id: string,
+): Promise<{
+  keycloakSub: string;
+  accessToken: string;
+  refreshToken: string | null;
+  methods: string[];
+  attempts: number;
+} | null> {
+  const row = await knex('auth_mfa_challenges').where({ id }).first();
+  if (!row) return null;
+  if (new Date(row.expires_at) < new Date()) {
+    await knex('auth_mfa_challenges').where({ id }).delete();
+    return null;
+  }
+  return {
+    keycloakSub: row.keycloak_sub,
+    accessToken: row.access_token,
+    refreshToken: row.refresh_token ?? null,
+    methods: row.methods ?? [],
+    attempts: Number(row.attempts ?? 0),
+  };
+}
+
 export async function consumeMfaChallenge(knex: Knex, id: string): Promise<void> {
   await knex('auth_mfa_challenges').where({ id }).delete();
 }

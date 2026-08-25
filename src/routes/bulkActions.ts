@@ -26,8 +26,16 @@ import crypto from "crypto";
 import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { executeAction } from "../actions/actionExecutor";
+import {
+  collectPendingAcks,
+  assertBatchAckOutcomeInvariant,
+  COMMITTED_INDEX_PENDING,
+  perItemAckBudgetMs,
+  type BatchAckCandidate,
+} from "../actions/linkIndexAckHttp";
 import { getDefaultOntologyId } from "../actions/actionValidator";
 import { OntologyError } from "../utils/queryErrors";
+import { resolveRequestTenant } from "../utils/requestTenant";
 import { sendError } from "../utils/responseFormatter";
 import { indexObjectType } from "../services/indexing/indexingOrchestrator";
 
@@ -143,6 +151,9 @@ router.post(
 
       // Track which object types were affected (for autoIndex)
       const affectedObjectTypes = new Set<string>();
+      const envAckTimeoutMs = Number(
+        process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000,
+      );
 
       for (let i = 0; i < requests.length; i++) {
         if (stopped) {
@@ -165,9 +176,35 @@ router.post(
         const item = requests[i];
         const parameters = item.parameters || {};
 
+        // Pre-defer the ack when the wire budget is nearly spent
+        // (same rule as applyBatch — if this router is ever mounted
+        // WITHOUT the budget middleware's route regex covering it, the
+        // stamped DATA-plane deadline is what holds, which is still the
+        // correct ceiling): a committed item is answered 202-per-item
+        // pending, never 504'd post-commit.
+        const ackBudgetMs = perItemAckBudgetMs({
+          localsDeadlineAt: (res.locals as Record<string, unknown>)
+            .requestBudgetDeadlineAt,
+          envAckTimeoutMs,
+        });
+
         // Build execution context
+        //
+        // Phase 6.1 — thread `req.security` so the per-iteration
+        // `executeAction` runs Stage 1c against the same CBAC policy
+        // as the single-action route.
+        const secBulk = (req as any).security as
+          | {
+              userId: string;
+              markings: string[];
+              cbac: string[];
+              systemPrincipal: boolean;
+              markingBypass: boolean;
+            }
+          | undefined;
         const context = {
           executedBy: (req as any).user?.id || "system",
+          tenant: resolveRequestTenant(req),
           sourceIp:
             (req.headers["x-forwarded-for"] as string)
               ?.split(",")[0]
@@ -175,6 +212,21 @@ router.post(
             req.socket.remoteAddress ||
             null,
           branchId: item.branchId || body.branchId || null,
+          roles: (req as any).user?.roles || [],
+          groups: (req as any).user?.groups || [],
+          ...(ackBudgetMs !== undefined ? { ackBudgetMs } : {}),
+          ...(secBulk
+            ? {
+                subjectKind: (secBulk.systemPrincipal
+                  ? "service"
+                  : "user") as "user" | "service" | "token" | "anonymous",
+                subjectIdentifier:
+                  secBulk.userId || (req as any).user?.id || "anonymous",
+                subjectMarkings: secBulk.markings ?? [],
+                subjectCbac: secBulk.cbac ?? [],
+                markBypass: secBulk.markingBypass === true,
+              }
+            : {}),
         };
 
         try {
@@ -209,6 +261,11 @@ router.post(
               executionId: result.executionId,
               affectedObjects: result.affectedObjects,
               scaleLimitReached: true,
+              // OSv2 read-after-write verdict (present only when
+              // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
+              ...(result.linkIndexAck
+                ? { linkIndexAck: result.linkIndexAck }
+                : {}),
               warning: `Total affected objects (${totalAffectedObjects}) exceeds the limit of ${MAX_AFFECTED_OBJECTS}. Remaining requests skipped.`,
             });
 
@@ -244,6 +301,11 @@ router.post(
                 : null,
             executionId: result.executionId,
             affectedObjects: result.affectedObjects,
+            // OSv2 read-after-write verdict (present only when
+            // LINK_INDEX_ACK_REQUIRED=true and link edits were staged).
+            ...(result.linkIndexAck
+              ? { linkIndexAck: result.linkIndexAck }
+              : {}),
           });
         } catch (err: any) {
           failedCount++;
@@ -329,8 +391,42 @@ router.post(
       // -----------------------------------------------------------------
       const totalDurationMs = Date.now() - bulkStartTime;
 
-      // HTTP status: 200 if any succeeded, 422 if all failed
-      const httpStatus = successCount > 0 ? 200 : 422;
+      // OSv2 read-after-write aggregation (single rule for all batch
+      // surfaces — actions/linkIndexAckHttp.ts): 202
+      // result:COMMITTED_INDEX_PENDING iff at least one item committed
+      // AND its edge-index ack is unconfirmed; each pending item carries
+      // its own pollable statusUrl. A post-commit deferral is NEVER an
+      // error status nor a per-item failure — so 202 outranks 200 but
+      // never outranks the all-pre-commit-failed 422 (nothing committed).
+      const pendingAcks = collectPendingAcks(
+        results as Array<Record<string, unknown>> & BatchAckCandidate[],
+      );
+      if (pendingAcks.length > 0) {
+        const urlByIndex = new Map(
+          pendingAcks.map((p) => [p.index, p.statusUrl]),
+        );
+        for (const r of results) {
+          const u = urlByIndex.get(r.index as number);
+          if (u) r.statusUrl = u;
+        }
+      }
+      const bulkOutcome = {
+        status:
+          successCount > 0 && pendingAcks.length > 0
+            ? 202
+            : successCount > 0
+              ? 200
+              : 422,
+        pendingCount: pendingAcks.length,
+        ...(successCount > 0 && pendingAcks.length > 0
+          ? { result: COMMITTED_INDEX_PENDING }
+          : {}),
+      };
+      assertBatchAckOutcomeInvariant(bulkOutcome);
+
+      // HTTP status: 202 if any committed item is index-pending, else 200
+      // if any succeeded, 422 if all failed
+      const httpStatus = bulkOutcome.status;
 
       return res.status(httpStatus).json({
         bulkId,
@@ -342,6 +438,7 @@ router.post(
         results,
         autoIndexResults,
         totalDurationMs,
+        ...(bulkOutcome.result ? { result: bulkOutcome.result } : {}),
       });
     } catch (err: any) {
       // Top-level errors (invalid body structure) → 400

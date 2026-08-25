@@ -29,6 +29,7 @@ import jwt, { type JwtHeader, type SigningKeyCallback } from "jsonwebtoken";
 import jwksClient, { type JwksClient } from "jwks-rsa";
 import { getKeycloakRealm } from "../auth/keycloakConfig";
 import { SESSION_MAX_AGE_SECONDS } from "../config/sessionConfig";
+import { connectRedisBounded, describeRedisError } from "../lib/redisConnect";
 
 // ---------------------------------------------------------------------------
 // Config (env-driven; all default to the local docker-compose values)
@@ -76,21 +77,16 @@ let redisInstance: RedisLike | null | undefined;
 async function getRedis(): Promise<RedisLike | null> {
   if (redisInstance !== undefined) return redisInstance;
   try {
-    const mod: any = await import("redis");
-    const url = process.env.REDIS_URL ?? "redis://localhost:6379";
-    const client = mod.createClient({
-      url,
-      socket: {
-        connectTimeout: 5_000,
-        reconnectStrategy: (retries: number) => Math.min(retries * 500, 30_000),
-      },
+    // Bounded connect — a retry-forever strategy here meant every BFF session
+    // read hung while Redis was down instead of surfacing "session
+    // unavailable". See lib/redisConnect.ts.
+    redisInstance = await connectRedisBounded<RedisLike>({
+      logPrefix: "[bff-session]",
     });
-    client.on("error", () => {
-      /* silenced — callers treat a null redis as "session unavailable" */
-    });
-    await client.connect();
-    redisInstance = client as RedisLike;
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[bff-session] redis unavailable (${describeRedisError(err)}) — session store offline`,
+    );
     redisInstance = null;
   }
   return redisInstance;

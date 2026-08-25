@@ -128,6 +128,14 @@ async function startServer(): Promise<void> {
       OVERLAY_SWEEPER_DISABLED: "true",
       REPLACEMENT_SCHEDULER_DISABLED: "true",
       TEMPORAL_WORKER_DISABLED: "true",
+      // Mirror tests/globalSetup.ts: the lane is a scratch world (empty
+      // projection = empty ledger), so v2 action semantics creation +
+      // execution are enabled for the suites that author/apply v2
+      // definitions (interface/link fixture families). Production keeps
+      // all four flags default-off.
+      ACTION_SEMANTICS_V2_CREATION_ENABLED: "1",
+      ACTION_SEMANTICS_V2_ENABLED: "1",
+      ACTION_SEMANTICS_V2_PROJECTION_READY: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,

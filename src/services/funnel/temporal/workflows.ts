@@ -21,6 +21,7 @@ import {
   setHandler,
   condition,
   sleep,
+  continueAsNew,
 } from "@temporalio/workflow";
 import type * as Activities from "./activities";
 
@@ -40,23 +41,32 @@ const BACKOFF = {
   backoffCoefficient: 2,
 } as const;
 
+// heartbeatTimeout: every stage activity runs startHeartbeatLoop (5s ticks),
+// so 120s of silence means the worker is GONE (crash/SIGKILL/deploy). Without
+// this, Temporal cannot detect worker death and a stage stalls for the FULL
+// startToCloseTimeout before retrying (observed: a merge sat "Started" for
+// 90+ minutes after the worker was SIGTERMed mid-activity).
 const { runChangelogActivity } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "1 hour",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 5 },
 });
 
 const { runMergeActivity } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "2 hours",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 5 },
 });
 
 const { runIndexingActivityProxy } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "4 hours",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 3 },
 });
 
 const { runHydrationActivityProxy } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "30 minutes",
+  heartbeatTimeout: "120s",
   retry: { ...BACKOFF, maximumAttempts: 10 },
 });
 
@@ -83,7 +93,18 @@ const { projectFunnelTerminalActivity } = proxyActivities<typeof Activities>({
 // the "500 objects pending index" empty-state fires. 10 min is generous
 // for a 1M-row index; bulkIndex pages internally.
 const { syncOpenSearchActivity } = proxyActivities<typeof Activities>({
-  startToCloseTimeout: "10 minutes",
+  // 60 min + heartbeatTimeout: a 5.6M-row OT (OlivierOrder2) bulk-indexes
+  // ~4.66M docs into a fresh OpenSearch index. On the dev single-box cluster
+  // that is ~8 s / 5000-doc page (~2 hr total) — far beyond the prior 10-min
+  // startToCloseTimeout, which exhausted the 5-attempt retry budget mid-sync
+  // (the resume cursor is durable, but each attempt only covered ~75 pages).
+  // 60 min lets one attempt cover ~450 pages; 5 attempts × 60 min = 5 hr
+  // budget for a ~2 hr sync. heartbeatTimeout=120 s makes a worker death
+  // (OOM/SIGTERM) auto-retry from the heartbeat cursor instead of orphaning
+  // the activity (no heartbeatTimeout → stuck until startToClose). The sync
+  // heartbeats after every page (pages run <60 s), so 120 s is false-retry-safe.
+  startToCloseTimeout: "60 minutes",
+  heartbeatTimeout: "120 seconds",
   retry: { ...BACKOFF, maximumAttempts: 5 },
 });
 
@@ -92,6 +113,10 @@ const { syncOpenSearchActivity } = proxyActivities<typeof Activities>({
 // `client.workflow.getHandle(workflowId).signal(sourceTxnSignal, {...})`.
 export interface SignalPayload {
   signalId?: string;
+  /** FUNN-ISO-6: pre-created funnel_run (status=dispatch_pending) this
+   *  signal drives — binds outbox row ↔ Temporal execution for terminal
+   *  CAS + audit. */
+  funnelRunId?: string;
   transactionId?: string;
   editBatchSize?: number;
   schemaChangeEventId?: string;
@@ -105,6 +130,20 @@ export interface ObjectTypeFunnelInput {
   ontologyId: string;
   objectTypeApiName: string;
   /**
+   * FUNN-ISO-2 — stable object-type RID. The dispatching environment
+   * resolved (ontologyId, apiName, rid) at dispatch time; the activity
+   * fence verifies the triple against the database it actually reads, so a
+   * worker pointed at the wrong DB can never "successfully" run a pass
+   * whose expected resources do not exist there.
+   */
+  objectTypeRid?: string;
+  /**
+   * FUNN-ISO-3 — deployment environment identity stamped into the workflow
+   * at dispatch. Every activity fence-compares it against (a) its own
+   * worker identity and (b) the database seal. Immutable per workflow run.
+   */
+  environmentId?: string;
+  /**
    * FNL-H1 — state carried across a `continueAsNew` boundary. Fresh
    * workflow invocations omit this; continue-as-new child workflows
    * receive the parent's running state so SLI counters and the
@@ -112,6 +151,27 @@ export interface ObjectTypeFunnelInput {
    */
   seedCompletedRuns?: number;
   seedLastProcessedSignalId?: string;
+  /**
+   * FNL-H1b — signals that were still queued when the parent called
+   * `continueAsNew`, handed to the child so they are processed rather than
+   * dropped.
+   *
+   * The parent's inner drain loop exits only when `pending` is empty, so it
+   * looked safe. It is not: `continueAsNew` is awaited, and Temporal delivers
+   * signals at workflow-task boundaries — a signal that lands in the task
+   * which issues the continue-as-new command is appended to `pending` on a
+   * workflow that is already terminating. The array is workflow-local state,
+   * so it dies with the parent execution and nothing ever retries it: the
+   * dispatcher already CAS'd its `funnel_run` row to `workflow_started`, so
+   * the reconciler sees a dispatch that was accepted and the reindex simply
+   * never happens. The UI badge stays on whatever the previous run left.
+   *
+   * Carrying the queue across the boundary makes the hand-off lossless. The
+   * child re-drains them under their original `signalId`, so `runKey` (and
+   * therefore the `funnel_run` row identity) is unchanged — a signal carried
+   * over is indistinguishable from one delivered directly to the child.
+   */
+  seedPendingSignals?: SignalPayload[];
   /**
    * Override for `CONTINUE_AS_NEW_DEFAULT_THRESHOLD`. Resolved on the
    * host side (worker.ts reads `FUNNEL_WORKFLOW_CONTINUE_AS_NEW_THRESHOLD`
@@ -139,6 +199,53 @@ function resolveContinueAsNewThreshold(input: ObjectTypeFunnelInput): number {
 }
 
 /**
+ * Walk the Temporal failure `.cause` chain to the root ApplicationFailure so
+ * `funnel_state.error_message` carries the REAL error (e.g. "Cannot create a
+ * string longer than 0x1fffffe8 characters") instead of the generic wrapper
+ * "Activity task failed" that Temporal wraps activity failures in. Without
+ * this unwrap, the OO7 root cause was masked by the ActivityFailure's own
+ * `.message` and the UI badge showed a useless "Activity task failed".
+ *
+ * Pure property access — deterministic, safe inside the workflow sandbox.
+ * Falls back to the top-level `.message` if no cause chain is present.
+ */
+/**
+ * Walk the Temporal failure `.cause` chain looking for a specific typed
+ * error name (e.g. "FunnelObjectTypeMissing",
+ * "FunnelExecutionEnvironmentMismatch"). Temporal wraps activity throws in
+ * ActivityFailure/ApplicationFailure — custom error .name is preserved on
+ * ApplicationFailure.type (and .message otherwise).
+ *
+ * Pure property access — deterministic, safe inside the workflow sandbox.
+ */
+function isTypedCause(err: unknown, typeName: string): boolean {
+  let cur = err as { name?: string; type?: string; message?: string; cause?: unknown } | undefined;
+  let depth = 0;
+  while (cur && depth < 16) {
+    if (cur.name === typeName || cur.type === typeName) return true;
+    if (typeof cur.message === "string" && cur.message.includes(typeName)) return true;
+    cur = cur.cause as typeof cur;
+    depth++;
+  }
+  return false;
+}
+
+function rootCauseMessage(err: unknown): string {
+  let cur = err as { message?: string; cause?: unknown } | undefined;
+  let msg = cur instanceof Error ? cur.message : "Funnel pipeline failed";
+  let depth = 0;
+  while (cur?.cause && depth < 16) {
+    const c = cur.cause as { message?: string; cause?: unknown } | undefined;
+    if (c && typeof c.message === "string" && c.message.length > 0) {
+      msg = c.message;
+    }
+    cur = c;
+    depth++;
+  }
+  return msg;
+}
+
+/**
  * Parent workflow per Object Type. FNL-H1 — once the workflow has
  * completed `CONTINUE_AS_NEW_DEFAULT_THRESHOLD` signals it calls
  * `continueAsNew(...)` with the rolling counters so Temporal's history
@@ -147,7 +254,10 @@ function resolveContinueAsNewThreshold(input: ObjectTypeFunnelInput): number {
 export async function ObjectTypeFunnelWorkflow(
   input: ObjectTypeFunnelInput
 ): Promise<void> {
-  const pending: SignalPayload[] = [];
+  // Seeded first: signals carried over from a parent that hit the
+  // continue-as-new threshold while they were still queued. They are older
+  // than anything a handler can append below, so they belong at the head.
+  const pending: SignalPayload[] = [...(input.seedPendingSignals ?? [])];
   setHandler(sourceTxnSignal, (p) => { pending.push(p); });
   setHandler(editBatchSignal, (p) => { pending.push(p); });
   setHandler(schemaChangeSignal, (p) => { pending.push(p); });
@@ -185,6 +295,9 @@ export async function ObjectTypeFunnelWorkflow(
       // returning immediately gives us a workflow-history-safe sentinel
       // — `Date.now()` is NOT deterministic inside a workflow.
       const runKey = sig?.signalId ?? `nosig-${pendingDrainedCount++}`;
+      /** FUNN-ISO-6: the pre-created funnel_run (dispatch_pending) this
+       *  signal drives — threaded into terminal projections for CAS. */
+      const funnelRunId = sig?.funnelRunId;
 
       // Per-signal terminal projection — wraps the four-stage pipeline so
       // `funnel_state.status` always flips from 'indexing' to either
@@ -204,33 +317,86 @@ export async function ObjectTypeFunnelWorkflow(
           currentStage: "merge",
           completedPrevious: "changelog",
           runKey,
+          stageOutput: {
+            rowsEmitted: changelog.rowsEmitted,
+            snapshotId: changelog.snapshotId,
+          },
         });
-        const merge = await runMergeActivity({ ...input, changelogRows: changelog.rows });
+        const merge = await runMergeActivity({
+          ...input,
+          changelogSnapshotId: changelog.snapshotId,
+          changelogOwnedProperties: changelog.ownedProperties,
+          runKey,
+        });
 
         // Sync the freshly-merged rows into OpenSearch so the FE search
         // panel can see them in the same round-trip. Runs BEFORE the
         // Quickwit indexing stage because that path goes through Kafka
         // and has its own publish-wait — we don't want the FE pretending
-        // the OT is empty for that interval. Best-effort: if the sync
-        // fails we still continue with Quickwit indexing so the funnel's
-        // primary store stays consistent; the terminal projection's
-        // outer catch will surface any error in `funnel_state`.
-        await syncOpenSearchActivity({
-          ontologyId: input.ontologyId,
-          objectTypeApiName: input.objectTypeApiName,
-        });
+        // the OT is empty for that interval.
+        //
+        // GENUINELY best-effort, and it used to only claim to be: this call
+        // was bare, so any OpenSearch hiccup — a dev-box OS restart, a
+        // circuit breaker under a warm re-index, a transient 503 — escaped
+        // to the outer catch and failed the ENTIRE funnel run after the
+        // expensive changelog+merge stages had already succeeded and been
+        // durably committed. The user then saw 'failed' on an Object Type
+        // whose primary store (Postgres + Quickwit) was perfectly fine, and
+        // the only recovery was re-running the whole pipeline.
+        //
+        // OpenSearch is a secondary read replica for the FE search panel,
+        // not the funnel's source of truth, and `syncOpenSearch` is
+        // idempotent (a later run or an explicit Force Reindex re-syncs it).
+        // So swallow the failure, carry the message forward, and record it
+        // on the indexing stage's output so it is visible in the run detail
+        // rather than silently lost.
+        //
+        // ONE exception is rethrown: a FUNN-ISO identity-fence failure means
+        // the Object Type was deleted mid-run (or an activity landed against
+        // the wrong environment). That is not a degraded search index, it is
+        // a run that must not continue, so it goes to the outer catch which
+        // has the dedicated `object_type_deleted` terminal handling.
+        let openSearchSyncWarning: string | undefined;
+        try {
+          await syncOpenSearchActivity({
+            ontologyId: input.ontologyId,
+            objectTypeApiName: input.objectTypeApiName,
+            objectTypeRid: input.objectTypeRid,
+            environmentId: input.environmentId,
+          });
+        } catch (err) {
+          if (
+            isTypedCause(err, "FunnelObjectTypeMissing") ||
+            isTypedCause(err, "FunnelExecutionEnvironmentMismatch")
+          ) {
+            throw err;
+          }
+          openSearchSyncWarning = rootCauseMessage(err);
+        }
 
         await projectStageToPostgres({
           ...input,
           currentStage: "indexing",
-          objectsIndexed: merge.upserts,
+          objectsIndexed: merge.objectsIndexed,
           completedPrevious: "merge",
           runKey,
+          stageOutput: {
+            upserts: merge.upserts,
+            deletes: merge.deletes,
+            mergedRowCount: merge.mergedRowCount,
+            mergedSnapshotId: merge.mergedSnapshotId,
+            ...(openSearchSyncWarning
+              ? {
+                  openSearchSyncDegraded: true,
+                  openSearchSyncError: openSearchSyncWarning,
+                }
+              : {}),
+          },
         });
         const indexing = await runIndexingActivityProxy({
           ...input,
-          mergedRows: merge.mergedRows,
-          editIds: merge.editIds,
+          mergedSnapshotId: merge.mergedSnapshotId,
+          mergedRowCount: merge.mergedRowCount,
         });
 
         await projectStageToPostgres({
@@ -238,8 +404,13 @@ export async function ObjectTypeFunnelWorkflow(
           currentStage: "hydration",
           completedPrevious: "indexing",
           runKey,
+          stageOutput: {
+            editsIndexed: indexing.editsIndexed,
+            publishedSplitCount: indexing.publishedSplitIds.length,
+            quickwit: indexing.quickwit,
+          },
         });
-        await runHydrationActivityProxy({
+        const hydration = await runHydrationActivityProxy({
           ...input,
           publishedSplitIds: indexing.publishedSplitIds,
         });
@@ -247,38 +418,77 @@ export async function ObjectTypeFunnelWorkflow(
         await projectStageToPostgres({
           ...input,
           currentStage: null,
+          objectsIndexed: merge.objectsIndexed,
           completedPrevious: "hydration",
           runKey,
+          stageOutput: { prefetched: hydration.prefetched },
         });
 
         // Terminal projection: flip the UI badge from 'indexing' → 'indexed'
-        // and stamp `funnel_state.objects_indexed` with the merge stage's
-        // upsert count (which is the count of distinct primary keys
-        // surfaced from the backing datasource on this run). The shared
+        // and stamp `funnel_state.objects_indexed` with the materialized
+        // object cardinality (not this run's mutation delta). The shared
         // helper additionally broadcasts a `funnel_state.changed` WebSocket
         // event so the OT overview page updates in sub-second latency.
         await projectFunnelTerminalActivity({
           ontologyId: input.ontologyId,
           objectTypeApiName: input.objectTypeApiName,
+          objectTypeRid: input.objectTypeRid,
+          environmentId: input.environmentId,
           status: "indexed",
-          objectsIndexed: merge.upserts,
+          objectsIndexed: merge.objectsIndexed,
+          funnelRunId,
+          runKey,
         });
       } catch (err) {
+        // FUNN-ISO-4 — an expected-identity projection that cannot resolve
+        // the object type means the type was deleted mid-run (or, in the
+        // bad old world, the activity landed in the wrong DB). Mark the run
+        // with the explicit terminal state `object_type_deleted` and
+        // continue draining signals — do NOT rethrow (the pipeline itself
+        // was fine) and never report "indexed".
+        if (isTypedCause(err, "FunnelObjectTypeMissing")) {
+          try {
+            await projectFunnelTerminalActivity({
+              ontologyId: input.ontologyId,
+              objectTypeApiName: input.objectTypeApiName,
+              objectTypeRid: input.objectTypeRid,
+              environmentId: input.environmentId,
+              status: "cancelled",
+              errorMessage: `object_type_deleted: ${rootCauseMessage(err)}`,
+              funnelRunId,
+              runKey,
+              allowObjectTypeDeletedMarking: true,
+            });
+          } catch {
+            /* projection best-effort; there is no OT left to write to */
+          }
+          continue;
+        }
         // ANY exception in the four-stage pipeline lands us here. We must
         // still flip the badge so the user sees 'Failed' instead of an
         // eternal 'Indexing' spinner — then re-throw so Temporal applies
         // its activity-level retry policy and writes the workflow failure
         // to history.
-        const message =
-          err instanceof Error ? err.message : "Funnel pipeline failed";
+        // Unwrap the Temporal ActivityFailure `.cause` chain to the REAL
+        // root message — otherwise the badge shows the generic "Activity task
+        // failed" wrapper instead of e.g. "Cannot create a string longer than
+        // 0x1fffffe8 characters" (the OO7 symptom). Also pass `runKey` so the
+        // projection marks funnel_run failed (not just funnel_state) — closing
+        // the divergence that left funnel_run stuck at "changelog".
+        const message = rootCauseMessage(err);
         // Best-effort — if projection itself throws (e.g. PG down), the
         // outer rethrow still surfaces the original pipeline error.
         try {
           await projectFunnelTerminalActivity({
             ontologyId: input.ontologyId,
             objectTypeApiName: input.objectTypeApiName,
+            objectTypeRid: input.objectTypeRid,
+            environmentId: input.environmentId,
             status: "failed",
             errorMessage: message,
+            funnelRunId,
+            runKey,
+            allowObjectTypeDeletedMarking: true,
           });
         } catch {
           /* projection is best-effort; original error wins below */
@@ -295,14 +505,45 @@ export async function ObjectTypeFunnelWorkflow(
     // the child workflow's input; the rest lives in Postgres (`funnel_run`
     // is the durable ledger).
     if (completedRuns >= threshold) {
+      // FNL-H1b — snapshot the queue and hand it to the child. Two reasons a
+      // signal can be sitting here even though the drain loop above exits only
+      // when `pending` is empty:
+      //
+      //   1. Temporal applies every signal in the current event batch BEFORE
+      //      running workflow code, so a signal delivered in the same workflow
+      //      task that issues the continue-as-new command is already in
+      //      `pending` by the time we get here.
+      //   2. A signal the server accepted concurrently with the command can be
+      //      ordered into history ahead of it, and on replay it lands in
+      //      `pending` at exactly this point.
+      //
+      // In both cases the parent execution is finished and `pending` is
+      // workflow-local memory, so anything left in it evaporates. It is not
+      // recoverable downstream either: the dispatcher CAS'd the `funnel_run`
+      // row to `workflow_started` when it acked, so the reconciler treats the
+      // dispatch as delivered and never re-signals. Result: a save that
+      // silently never indexes.
+      //
+      // There must be NO `await` between this snapshot and the continueAsNew
+      // call — an await yields a new workflow task, which is precisely the
+      // window that drops signals.
+      const carriedOver = pending.splice(0, pending.length);
       // `continueAsNew` throws a ContinueAsNew error that the Temporal
-      // runtime catches to start the child workflow.
-      const { continueAsNew } = await import("@temporalio/workflow");
+      // runtime catches to start the child workflow. Imported statically —
+      // a dynamic `import()` inside a workflow is a non-deterministic
+      // side-effect the sandbox merely tolerates today.
       await continueAsNew<typeof ObjectTypeFunnelWorkflow>({
         ontologyId: input.ontologyId,
         objectTypeApiName: input.objectTypeApiName,
+        // FUNN-ISO-2/3 — the identity fence. Dropping these across the
+        // boundary makes every child workflow un-fenced, so a worker attached
+        // to the wrong database could run a pass that the parent would have
+        // rejected.
+        objectTypeRid: input.objectTypeRid,
+        environmentId: input.environmentId,
         seedCompletedRuns: 0,
         seedLastProcessedSignalId: lastProcessedSignalId,
+        seedPendingSignals: carriedOver,
         // Preserve the host-resolved threshold across the continue-as-new
         // boundary so the child workflow doesn't fall back to the default
         // when the operator has configured a non-default value.

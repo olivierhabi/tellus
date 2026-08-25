@@ -341,8 +341,10 @@ export const ontologySchemas = {
   ActionTypeRule: {
     type: 'object' as const,
     properties: {
-      type: { type: 'string' as const, enum: ['createObject', 'modifyObject', 'deleteObject', 'addLink', 'removeLink'] },
+      type: { type: 'string' as const, enum: ['createObject', 'modifyObject', 'modifyOrCreateObject', 'deleteObject', 'addLink', 'removeLink'] },
       objectType: STR,
+      objectReference: OBJ,
+      properties: { type: 'object' as const, additionalProperties: OBJ },
     },
     required: ['type'],
   },
@@ -354,6 +356,9 @@ export const ontologySchemas = {
       apiName: STR,
       displayName: STR,
       description: { type: 'string' as const, nullable: true },
+      icon: { type: 'string' as const, nullable: true },
+      iconColor: { type: 'string' as const, nullable: true },
+      saveLocationRid: { type: 'string' as const, nullable: true },
       parameters: { type: 'array' as const, items: { $ref: '#/components/schemas/ActionTypeParameter' } },
       rules: { type: 'array' as const, items: { $ref: '#/components/schemas/ActionTypeRule' } },
       maxAffectedObjects: INT,

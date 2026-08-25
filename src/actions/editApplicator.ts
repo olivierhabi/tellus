@@ -21,8 +21,9 @@
 import type { PoolClient } from "pg";
 import { getClient, query } from "../db";
 import { OntologyError } from "../utils/queryErrors";
-import { publishLinkCdc } from "../services/searchAround/cdcLinkProducer";
-import { incCounter } from "../services/funnel/metrics";
+import { stageLinkCdcEvent } from "../services/searchAround/linkCdcOutbox";
+import { incCounter, observeHistogram } from "../services/funnel/metrics";
+import { persistStickyVisibleVerdict } from "./linkIndexAckHttp";
 
 function genEventId(): string {
   try {
@@ -35,8 +36,21 @@ import { client as opensearchClient } from "../services/opensearch/client";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { markEditsAsIndexed } from "../models/ontologyEdit";
 import { writeOverlayForEdit, writeOverlayForLinkEdit } from "../services/overlay/writebackOverlay";
+import { deriveMainBranchId } from "../services/branchContext";
 import { isB1Ready } from "../services/funnel/b1Readiness";
 import { ensureDocumentSecurity } from "../services/security/documentSecurity";
+import { mintObjectRid } from "../services/objectIdentity";
+import {
+  getByApiName as getLinkType,
+  resolveObjectTypeApiName,
+} from "../models/linkType";
+import {
+  upsertActive,
+  removeActive,
+} from "./relationshipStateRepository";
+import { isV2ExecutionEnabled } from "./actionSemanticsFlags";
+import { acquireActionLocks, type LockIdentity } from "./actionLockManager";
+import type { ActionError } from "./actionErrors";
 import type { CompiledEdit, LinkEdit } from "./ruleCompiler";
 
 // ---------------------------------------------------------------------------
@@ -93,6 +107,30 @@ export interface ApplyExecutionContext {
   actionRid?: string;
   eventId?: string;
   /**
+   * Tenant cb scope for link edge-index confirmation (Stage 3 watermark).
+   * Optional; null normalises to "" in the serving-index scope, matching
+   * the ClickHouse String DEFAULT '' the ingest MV produces.
+   */
+  tenantId?: string;
+  /**
+   * Optional per-execution ceiling (ms) for the Step 6b read-after-write
+   * barrier. Routes thread the REMAINING request budget here so a batch
+   * item pre-defers its ack (202 COMMITTED_INDEX_PENDING) instead of
+   * overrunning the request-budget middleware (which would 504 a
+   * committed mutation — the exact double-apply hazard the contract
+   * forbids). When absent, LINK_INDEX_ACK_TIMEOUT_MS applies.
+   */
+  ackBudgetMs?: number;
+  /** Caller-owned transaction for an atomic batch chunk. */
+  transactionClient?: PoolClient;
+  /**
+   * Batch routes can defer individual OpenSearch writes until after their
+   * database chunk commits. This prevents N in-band projections from holding
+   * a shared transaction open; the durable edit-store/reindex path remains
+   * the source of truth.
+   */
+  deferSearchProjection?: boolean;
+  /**
    * F-P3-11 — durable-before-ack audit. Called AFTER all edits have been
    * inserted into ontology_edit/link_edit/object_instances (inside the
    * same PG transaction) but BEFORE the COMMIT. The hook MUST write the
@@ -104,6 +142,37 @@ export interface ApplyExecutionContext {
    * path; no other branch of the code may skip or defer it.
    */
   preCommitHook?: (client: PoolClient) => Promise<void>;
+  /**
+   * Action Semantics version of the executing action type (Phase 6).
+   * v1: link_instances projection is NOT dual-written (legacy behaviour
+   * unchanged — the projection is bootstrapped separately, never
+   * incrementally maintained for v1 streams). v2: each M2M link edit
+   * also upserts/removes the matching link_instances row inside the same
+   * transaction, gated on the version-2 execution feature flag so the
+   * projection stays consistent with v2 restrict-delete checks. v1
+   * behaviour is preserved exactly when semanticsVersion !== 2 or the
+   * flag is off.
+   */
+  semanticsVersion?: number;
+  /**
+   * Phase 6 — version-2 transaction invariant. When `semanticsVersion===2`
+   * and the v2 execution flag is on, `applyEdits` calls this hook AFTER
+   * `BEGIN` + OCC check + advisory/row lock acquisition, but BEFORE any
+   * ontology_edit/link_edit insert. The hook reloads canonical active
+   * relationship state from `link_instances` (now locked) and re-runs the
+   * final-state validator against the reloaded plan. Returns the list of
+   * structured errors; non-empty ⇒ the whole action transaction is rolled
+   * back (no partial edits) and the first error is thrown to the caller.
+   * The v1 path never sets this hook, so v1 behaviour is unchanged.
+   */
+  v2RevalidateAfterLock?: (client: PoolClient) => Promise<ActionError[]>;
+  /**
+   * Phase 6 — version-2 lock identities produced by the action planner.
+   * Advisory + row locks are acquired for these inside the transaction
+   * (deterministic order), before the reload/revalidate step. Only used
+   * when `semanticsVersion===2` and the v2 execution flag is on.
+   */
+  plannedLockIdentities?: LockIdentity[];
 }
 
 /** A single successfully applied edit. */
@@ -146,6 +215,14 @@ export interface ApplyResult {
   failedEdits: FailedEdit[];
   /** OpenSearch indexing outcome — separate from PG durability. */
   indexingStatus: "success" | "partial" | "failed";
+  /**
+   * Link edge-index acknowledgement (OSv2 Stage 3). Present only when the
+   * action staged link CDC events AND LINK_INDEX_ACK_REQUIRED === "true";
+   * `confirmed: false` means the serving index had not confirmed the
+   * required edge version within the budget — NEVER fabricated. Absent
+   * means the barrier is not enabled in this environment.
+   */
+  linkIndexAck?: import("../services/serving/edgeIndexWatermark").EdgeAckConfirmation;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,12 +254,19 @@ export async function applyEdits(
   // -----------------------------------------------------------------
 
   const appliedEdits: AppliedEdit[] = [];
+  // Wall-clock of the PG COMMIT — basis for SLO #1 (commit-to-queryable
+  // latency, measured only on the in-band-confirmed 200 path). Stamped
+  // right after `COMMIT` below; stays 0 on a pre-commit failure path.
+  let tCommit = 0;
   // Map from "objectType::primaryKey" to the edit_id for indexed marking
   const editIdMap = new Map<string, string>();
+  // Stage-3 ack handles for staged link CDC events (post-commit barrier).
+  const linkIndexAckHandles: import("../services/serving/edgeIndexWatermark").EdgeIndexAckHandle[] = [];
 
-  const pgClient = await getClient();
+  const ownsTransaction = !executionContext.transactionClient;
+  const pgClient = executionContext.transactionClient ?? await getClient();
   try {
-    await pgClient.query("BEGIN");
+    if (ownsTransaction) await pgClient.query("BEGIN");
 
     // F-05: Atomic optimistic concurrency check — inside the PG
     // transaction so no concurrent writer can slip between the read
@@ -208,11 +292,21 @@ export async function applyEdits(
       // the type never mismatches. Strategy 2 already returned an
       // int thanks to COUNT(*)::int, but belt-and-braces.
       try {
+        const hasObjectScope = Boolean(executionContext.ontologyId && executionContext.branchId);
         const vRes = await pgClient.query(
-          `SELECT version FROM object_instances
-            WHERE object_type_api_name = $1 AND primary_key = $2
-            FOR UPDATE`,
-          [objectType, primaryKey]
+          hasObjectScope
+            ? `SELECT version FROM object_instances
+                WHERE ontology_id = $1::uuid
+                  AND branch_id = $2::uuid
+                  AND object_type_api_name = $3
+                  AND primary_key = $4
+                FOR UPDATE`
+            : `SELECT version FROM object_instances
+                WHERE object_type_api_name = $1 AND primary_key = $2
+                FOR UPDATE`,
+          hasObjectScope
+            ? [executionContext.ontologyId, executionContext.branchId, objectType, primaryKey]
+            : [objectType, primaryKey],
         );
         if ((vRes.rowCount ?? 0) > 0) {
           const raw = vRes.rows[0].version ?? 0;
@@ -226,10 +320,19 @@ export async function applyEdits(
       // Strategy 2: count ontology_edit rows (always available)
       if (currentVersion === undefined) {
         try {
+          const hasObjectScope = Boolean(executionContext.ontologyId && executionContext.branchId);
           const countRes = await pgClient.query(
-            `SELECT COUNT(*)::int AS version FROM ontology_edit
-              WHERE object_type_api_name = $1 AND primary_key = $2`,
-            [objectType, primaryKey]
+            hasObjectScope
+              ? `SELECT COUNT(*)::int AS version FROM ontology_edit
+                  WHERE ontology_id = $1::uuid
+                    AND branch_id = $2::uuid
+                    AND object_type_api_name = $3
+                    AND primary_key = $4`
+              : `SELECT COUNT(*)::int AS version FROM ontology_edit
+                  WHERE object_type_api_name = $1 AND primary_key = $2`,
+            hasObjectScope
+              ? [executionContext.ontologyId, executionContext.branchId, objectType, primaryKey]
+              : [objectType, primaryKey],
           );
           currentVersion = Number(countRes.rows[0]?.version ?? 0);
         } catch {
@@ -242,7 +345,7 @@ export async function applyEdits(
         currentVersion !== undefined &&
         currentVersion !== executionContext.expectedVersion
       ) {
-        await pgClient.query("ROLLBACK");
+        if (ownsTransaction) await pgClient.query("ROLLBACK");
         // Do NOT release pgClient here — the finally block at the end
         // of this try/catch handles release unconditionally. Releasing
         // here causes a double-release: throw → catch → ROLLBACK on
@@ -259,6 +362,35 @@ export async function applyEdits(
             currentVersion,
           }
         );
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 6 — version-2 transaction invariants (advisory + row locks,
+    // reload, revalidate final state). Gated on semanticsVersion===2 AND
+    // the v2 execution feature flag; the v1 path is unchanged. This runs
+    // AFTER BEGIN + OCC, BEFORE any edit insert, so a failed invariant
+    // leaves the transaction empty and is rolled back with no partial
+    // edits.
+    // -----------------------------------------------------------------
+    const runV2Invariants =
+      executionContext.semanticsVersion === 2 && isV2ExecutionEnabled();
+    if (runV2Invariants) {
+      if (executionContext.plannedLockIdentities && executionContext.plannedLockIdentities.length > 0) {
+        await acquireActionLocks(pgClient, executionContext.plannedLockIdentities);
+      }
+      if (executionContext.v2RevalidateAfterLock) {
+        const revalErrors = await executionContext.v2RevalidateAfterLock(pgClient);
+        if (revalErrors.length > 0) {
+          if (ownsTransaction) await pgClient.query("ROLLBACK");
+          const first = revalErrors[0];
+          throw new OntologyError(
+            first.message,
+            first.code,
+            undefined,
+            { errors: revalErrors.map((e) => ({ code: e.code, path: e.path })), executionId: executionContext.executionId },
+          );
+        }
       }
     }
 
@@ -355,6 +487,7 @@ export async function applyEdits(
       // producer can emit v2.0.0 Avro payloads with full provenance.
       if (edit.linkEdits && edit.linkEdits.length > 0) {
         for (const linkEdit of edit.linkEdits) {
+          const linkEventId = executionContext.eventId ?? genEventId();
           await pgClient.query(
             `INSERT INTO link_edit
                (link_type_api_name, source_primary_key, target_primary_key,
@@ -370,7 +503,7 @@ export async function applyEdits(
               linkEdit.targetPrimaryKey,
               linkEdit.operation,
               executionContext.executionId,
-              executionContext.eventId ?? genEventId(),
+              linkEventId,
               "2.0.0",
               executionContext.executedBy,
               executionContext.actionRid ?? executionContext.actionTypeApiName,
@@ -384,14 +517,99 @@ export async function applyEdits(
             ]
           );
 
-          // F-P3-12: Prometheus counter per link_edit write, partitioned
-          // by branch so ops can see per-branch write traffic and spot
-          // unexpected cross-branch bleed at ingest time.
+          // Transactional outbox (OSv2 parity): the CDC event for this
+          // link mutation commits atomically with the domain change in
+          // THIS transaction. The drainer (startLinkCdcDrainer) publishes
+          // with bounded backoff and dead-letters; a Kafka outage no
+          // longer silently loses link events, and the edit is never
+          // marked "indexed" merely because an outbox row exists.
+          const rawOp = (linkEdit.operation ?? "add") as string;
+          const staged = await stageLinkCdcEvent(pgClient, {
+            eventId: linkEventId,
+            sourceObjectType: edit.objectType,
+            linkTypeApiName: linkEdit.linkTypeApiName,
+            sourcePrimaryKey: edit.primaryKey,
+            targetPrimaryKey: linkEdit.targetPrimaryKey,
+            operation:
+              rawOp === "remove" ? "REMOVE" : rawOp === "retract" ? "RETRACT" : "ADD",
+            ontologyId,
+            branchId: executionContext.branchId,
+            tenantId: executionContext.tenantId ?? null,
+            actorPrincipalId: executionContext.executedBy,
+            actionRid: executionContext.actionRid ?? executionContext.actionTypeApiName ?? null,
+            correlationId: executionContext.correlationId ?? null,
+            causationId: executionContext.causationId ?? null,
+          });
+          // ACK handle for the post-commit edge-index confirmation
+          // barrier (Stage 3): (eventId, monotonic outbox offset, scope).
+          linkIndexAckHandles.push({
+            eventId: staged.eventId,
+            outboxSeq: staged.outboxSeq,
+            linkTypeApiName: linkEdit.linkTypeApiName,
+            sourceObjectType: edit.objectType,
+            ontologyId,
+          });
+
           incCounter("tellus_link_edit_writes_total", {
             branch_id: executionContext.branchId,
             link_type: linkEdit.linkTypeApiName,
             operation: linkEdit.operation,
           });
+
+          // Phase 6 — link_instances dual-write (v2 only, feature-flagged).
+          // The active-state projection must stay consistent with v2
+          // restrict-delete EXISTS checks. v1 behaviour is unchanged: no
+          // incremental projection. Wrapped in a savepoint so a projection
+          // failure (transitional/deferred dependency) never aborts the
+          // committed edit — v2 restrict-delete itself stays disabled until
+          // the projection bootstrap has been verified (see §6).
+          if (
+            executionContext.semanticsVersion === 2 &&
+            isV2ExecutionEnabled()
+          ) {
+            await pgClient.query("SAVEPOINT link_instances_dw");
+            try {
+              const lt = await getLinkType(
+                executionContext.ontologyId ?? "",
+                linkEdit.linkTypeApiName,
+              );
+              if (lt) {
+                const srcOt = edit.objectType;
+                const tgtOt = await resolveObjectTypeApiName(lt.target_object_type).catch(() => null);
+                if (tgtOt) {
+                  if (linkEdit.operation === "add") {
+                    await upsertActive(pgClient, {
+                      ontologyId: executionContext.ontologyId ?? "",
+                      branchId: executionContext.branchId,
+                      linkTypeApiName: linkEdit.linkTypeApiName,
+                      sourceObjectType: srcOt,
+                      sourcePrimaryKey: edit.primaryKey,
+                      targetObjectType: tgtOt,
+                      targetPrimaryKey: linkEdit.targetPrimaryKey,
+                      executionId: executionContext.executionId,
+                    });
+                  } else {
+                    await removeActive(pgClient, {
+                      ontologyId: executionContext.ontologyId ?? "",
+                      branchId: executionContext.branchId,
+                      linkTypeApiName: linkEdit.linkTypeApiName,
+                      sourcePrimaryKey: edit.primaryKey,
+                      targetPrimaryKey: linkEdit.targetPrimaryKey,
+                    });
+                  }
+                }
+              }
+              await pgClient.query("RELEASE SAVEPOINT link_instances_dw");
+            } catch (dwErr) {
+              await pgClient.query("ROLLBACK TO SAVEPOINT link_instances_dw");
+              const dwMsg = dwErr instanceof Error ? dwErr.message : String(dwErr);
+              console.warn(
+                `[editApplicator] link_instances dual-write skipped for ` +
+                  `${linkEdit.linkTypeApiName} ${edit.primaryKey}->` +
+                  `${linkEdit.targetPrimaryKey}: ${dwMsg}`,
+              );
+            }
+          }
         }
       }
     }
@@ -404,25 +622,25 @@ export async function applyEdits(
     }
 
     // Step 3: Commit the PG transaction
-    await pgClient.query("COMMIT");
+    if (ownsTransaction) {
+      await pgClient.query("COMMIT");
+      tCommit = Date.now();
+    }
   } catch (err) {
-    await pgClient.query("ROLLBACK").catch(() => {});
+    if (ownsTransaction) await pgClient.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
-    pgClient.release();
+    if (ownsTransaction) pgClient.release();
   }
 
-  // B10: publish link_edit rows to the CDC topic. Outside the PG txn so
-  // a down Kafka doesn't roll back the edit; if it fails the
-  // /api/v1/funnel/clickhouse/cdc-lag endpoint surfaces the drift.
+  // Link CDC events were staged into `link_cdc_outbox` INSIDE the edit
+  // transaction above (transactional outbox — nothing to publish here).
+  // Writeback overlay remains post-commit and fire-and-forget: it is a
+  // read-after-write cache, never the source of truth; it is retired by
+  // the sweeper only after confirmed index visibility.
   for (const edit of edits) {
     if (!edit.linkEdits || edit.linkEdits.length === 0) continue;
     for (const linkEdit of edit.linkEdits) {
-      // The source-type for a link_edit is the same object type the
-      // action modified; link direction is decoupled via source_pk /
-      // target_pk columns on the link table.
-      //
-      // LT-B3: emit full v2.0.0 provenance on the per-link CDC topic.
       const rawOp = (linkEdit.operation ?? "add") as string;
       const op: "ADD" | "REMOVE" | "RETRACT" =
         rawOp === "remove"
@@ -430,26 +648,8 @@ export async function applyEdits(
           : rawOp === "retract"
             ? "RETRACT"
             : "ADD";
-      void publishLinkCdc(edit.objectType, linkEdit.linkTypeApiName, {
-        source_pk: edit.primaryKey,
-        target_pk: linkEdit.targetPrimaryKey,
-        link_props: {},
-        markings: [],
-        schema_version: "2.0.0",
-        event_id: genEventId(),
-        event_ts_micros: Date.now() * 1000,
-        ontology_id: executionContext.ontologyId,
-        link_type_api_name: linkEdit.linkTypeApiName,
-        operation: op,
-        actor_principal_id: executionContext.executedBy,
-        action_rid: executionContext.actionRid ?? executionContext.actionTypeApiName ?? null,
-        correlation_id: executionContext.correlationId ?? null,
-        causation_id: executionContext.causationId ?? null,
-        direction: "forward",
-      });
-
       // FNL-H5 — writeback overlay for the link edit so the resolver
-      // sees the change immediately even if Quickwit/CH ingestion lags.
+      // sees the change immediately even if the edge index lags.
       void writeOverlayForLinkEdit({
         linkTypeApiName: linkEdit.linkTypeApiName,
         sourcePk: edit.primaryKey,
@@ -466,6 +666,14 @@ export async function applyEdits(
 
   const failedEdits: FailedEdit[] = [];
   const successfulEditIds: string[] = [];
+  // A clean browser campaign validates the durable action contract through
+  // PostgreSQL + the writeback overlay. It must not synchronously compete
+  // with a large fixture reindex for the eventual OpenSearch projection.
+  // Production retains in-band indexing by default; this explicit switch is
+  // only for isolated harnesses that have their own projection evidence.
+  const deferSearchProjection =
+    executionContext.deferSearchProjection === true ||
+    process.env.ACTION_SEARCH_PROJECTION_DEFERRED === "true";
 
   const bulkBody: Array<Record<string, unknown>> = [];
 
@@ -484,7 +692,17 @@ export async function applyEdits(
       // default PUBLIC classification via ensureDocumentSecurity.
       const rawDoc: Record<string, unknown> = {
         __pk: edit.primaryKey,
+        // Phase 2: stable object rid. Prefer a rid supplied by the
+        // caller (e.g. read from object_instances); otherwise mint a
+        // fresh one for this newly created object.
+        __rid:
+          (edit.propertyValues?.__rid as string | undefined) ??
+          mintObjectRid(),
         __objectType: edit.objectType,
+        // OSS v2 mandatory ontology isolation. The v2 read choke point
+        // rejects unstamped documents rather than sharing a legacy
+        // object-type-only index across ontologies.
+        __ontology: executionContext.ontologyId,
         __lastModified: now,
         __editedBy: executionContext.executedBy,
         __version: 1,
@@ -517,11 +735,13 @@ export async function applyEdits(
             "ctx._source.__lastModified = params.now; " +
             "ctx._source.__editedBy = params.editedBy; " +
             "ctx._source.__branch = params.branchId; " +
+            "ctx._source.__ontology = params.ontologyId; " +
             "for (entry in params.props.entrySet()) { ctx._source[entry.getKey()] = entry.getValue(); }",
           params: {
             now,
             editedBy: executionContext.executedBy,
             branchId: executionContext.branchId,
+            ontologyId: executionContext.ontologyId,
             props: edit.propertyValues ?? {},
           },
         },
@@ -532,7 +752,15 @@ export async function applyEdits(
   }
 
   // Execute bulk request if there are operations
-  if (bulkBody.length > 0) {
+  if (deferSearchProjection) {
+    for (const edit of edits) {
+      failedEdits.push({
+        objectType: edit.objectType,
+        primaryKey: edit.primaryKey,
+        error: "Search projection deferred by ACTION_SEARCH_PROJECTION_DEFERRED",
+      });
+    }
+  } else if (bulkBody.length > 0) {
     try {
       const { body } = await opensearchClient.bulk({ body: bulkBody });
 
@@ -643,6 +871,104 @@ export async function applyEdits(
   }
 
   // -----------------------------------------------------------------
+  // Step 6b: Link edge-index READ-AFTER-WRITE barrier (OSv2 Stage 3).
+  //
+  // The Action must not report completed link mutations as queryable
+  // until the serving edge index has confirmed them (published_at is
+  // broker acceptance ONLY). Timeout/outage defers — the edit stays
+  // durable in PG (outbox + link_edit) and the response marks the ack
+  // as not confirmed; we NEVER fabricate completion. Gated:
+  // LINK_INDEX_ACK_REQUIRED=true (default OFF until the Kafka→
+  // ClickHouse ingest topology is live — enabling it pre-cutover would
+  // correctly defer every link Action).
+  // -----------------------------------------------------------------
+  let linkIndexAck: ApplyResult["linkIndexAck"];
+  if (
+    linkIndexAckHandles.length > 0 &&
+    process.env.LINK_INDEX_ACK_REQUIRED === "true"
+  ) {
+    const { confirmEdgeIndexVisibility } = await import(
+      "../services/serving/edgeIndexWatermark"
+    );
+    // The barrier ceiling: the route may shrink it per request (batch
+    // handlers pre-defer items rather than let the request-budget
+    // middleware 504 a committed mutation — see server.ts budgetFor).
+    const timeoutMs =
+      executionContext.ackBudgetMs ??
+      Number(process.env.LINK_INDEX_ACK_TIMEOUT_MS ?? 5_000);
+    try {
+      // Handles carry their per-object-type ontology (resolved inside the
+      // loop); group by ontology so multi-ontology actions confirm each
+      // scope against its own edge index. The groups share ONE absolute
+      // deadline: without that, K ontologies could block K × timeoutMs.
+      const results: NonNullable<ApplyResult["linkIndexAck"]>[] = [];
+      const byOntology = new Map<string, typeof linkIndexAckHandles>();
+      for (const h of linkIndexAckHandles) {
+        const list = byOntology.get(h.ontologyId) ?? [];
+        list.push(h);
+        byOntology.set(h.ontologyId, list);
+      }
+      const sharedDeadline = Date.now() + timeoutMs;
+      for (const [ontologyId, handles] of byOntology) {
+        results.push(
+          await confirmEdgeIndexVisibility({
+            scope: {
+              tenantId: executionContext.tenantId ?? "",
+              ontologyId,
+              branchId: executionContext.branchId,
+            },
+            handles,
+            timeoutMs: Math.max(0, sharedDeadline - Date.now()),
+          }),
+        );
+      }
+      linkIndexAck = {
+        confirmed: results.every((r) => r.confirmed),
+        deferred: results.reduce((a, r) => a + r.deferred, 0),
+        waitedMs: Math.max(...results.map((r) => r.waitedMs)),
+        reason: results.find((r) => !r.confirmed)?.reason,
+      };
+    } catch (err) {
+      linkIndexAck = {
+        confirmed: false,
+        deferred: linkIndexAckHandles.length,
+        waitedMs: timeoutMs,
+        reason: "index_outage",
+      };
+      console.warn(
+        `[link-index-ack] edge-index confirmation failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // Step 6c: Write-barrier STICKY verdict (closes the shape-1 gap).
+  //
+  // When the IN-BAND ack barrier confirmed (the 200 path), persist the
+  // monotonic VISIBLE verdict NOW — at the moment of confirmation, BEFORE
+  // any later ReplacingMergeTree merge can collapse the serving row. A
+  // wire-confirmed 200 whose CH row later merge-collapses would otherwise
+  // read PENDING on its FIRST statusUrl poll (no sticky yet, event_id row
+  // gone); persisting here makes the verdict durable regardless of later
+  // merges. SHARED writer with the status probe (persistStickyVisibleVerdict
+  // in linkIndexAckHttp.ts — single source of truth, no forked INSERT).
+  //
+  // Best-effort: the helper swallows+logs+counts a PG failure and NEVER
+  // throws, so the 200 response is unaffected. Also SLO #1: the
+  // commit-to-queryable latency, sampled only on the confirmed path.
+  // -----------------------------------------------------------------
+  if (linkIndexAck?.confirmed) {
+    await persistStickyVisibleVerdict(executionContext.executionId);
+    if (tCommit > 0) {
+      observeHistogram(
+        "link_index_commit_to_queryable_seconds",
+        (Date.now() - tCommit) / 1000,
+        { resource_type: "link" },
+      );
+    }
+  }
+
+  // -----------------------------------------------------------------
   // Step 7: Build and return result
   // -----------------------------------------------------------------
 
@@ -664,6 +990,7 @@ export async function applyEdits(
     appliedEdits,
     failedEdits,
     indexingStatus,
+    linkIndexAck,
   };
 }
 
@@ -703,7 +1030,38 @@ async function writeOverlayForEditInTxn(
 ): Promise<void> {
   const { edit, editId, ontologyId, actorUserId, correlationId, causationId, actionRid } = input;
   const deleted = edit.operation === "delete";
-  const doc = deleted ? {} : edit.propertyValues ?? {};
+  // object_edits.new_value keeps the PARTIAL edit payload (the change log
+  // records what changed, not the whole object) — unchanged from prior
+  // behavior.
+  const editDoc = deleted ? {} : edit.propertyValues ?? {};
+  // The writeback contract requires the OVERLAY `doc` = the FULL post-edit
+  // object state (overlay reads + object_instances UPSERT both project this
+  // doc). A modifyObject edit carries only the CHANGED subset in
+  // `edit.propertyValues`; passing that partial doc verbatim would (a)
+  // clobber every un-touched property in object_instances on the ON
+  // CONFLICT update and (b) make the Redis overlay advertise a partial
+  // object ({province} only), which the read path surfaces as the event's
+  // `currentValues` — breaking live objects-modified detection (the prior
+  // membership still has the full values, so every update false-positives
+  // as a change to the un-touched monitored property). For an update, MERGE
+  // the partial edit into the existing object_instances row (locked in
+  // this txn) and pass the full merged doc to the overlay/UPSERT only.
+  let overlayDoc: Record<string, unknown>;
+  if (deleted) {
+    overlayDoc = {};
+  } else if (edit.operation === "update") {
+    const branchUuid = deriveMainBranchId(ontologyId);
+    const existing = await pgClient.query<{ properties: Record<string, unknown> | null }>(
+      `SELECT properties FROM object_instances
+        WHERE ontology_id = $1 AND branch_id = $2
+          AND object_type_api_name = $3 AND primary_key = $4
+        FOR UPDATE`,
+      [ontologyId, branchUuid, edit.objectType, edit.primaryKey],
+    );
+    overlayDoc = { ...(existing.rows[0]?.properties ?? {}), ...(edit.propertyValues ?? {}) };
+  } else {
+    overlayDoc = edit.propertyValues ?? {};
+  }
 
   // Guard the B1/B7 writeback behind a SAVEPOINT. A missing `object_edits`
   // or `object_instances` table (transitional deployments where migration
@@ -727,7 +1085,7 @@ async function writeOverlayForEditInTxn(
         edit.objectType,
         edit.primaryKey,
         "*",
-        JSON.stringify(doc),
+        JSON.stringify(editDoc),
         actorUserId,
         correlationId ?? null,
         causationId ?? null,
@@ -739,8 +1097,9 @@ async function writeOverlayForEditInTxn(
       ontologyId,
       objectType: edit.objectType,
       primaryKey: edit.primaryKey,
-      doc,
+      doc: overlayDoc,
       deleted,
+      operation: edit.operation,
       version: 1, // monotonic bump is owned by object_instances UPSERT itself
       editId,
       actorUserId,

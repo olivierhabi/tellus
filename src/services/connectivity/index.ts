@@ -34,6 +34,8 @@ import * as cdcHandler from "./cdc/handlers";
 import * as connectorTypesHandler from "./handlers/connector-types.handler";
 import * as foldersHandler from "./handlers/folders.handler";
 import * as egressPoliciesHandler from "./handlers/egress-policies.handler";
+import * as webhooksHandler from "./webhooks/handlers";
+import { startWebhookReaper, stopWebhookReaper } from "./webhooks/reaper.worker";
 import * as outbox from "./store/outbox";
 import {
   startRotationWorker,
@@ -45,6 +47,7 @@ import {
   stopTableImportScheduler,
 } from "./imports/scheduler";
 import { drainAll as drainPgPools } from "./connectors/postgresql/pool";
+import { assertConnectivityPosture } from "./bootPosture";
 import { extractUser, requireScope } from "./handlers/connections.handler";
 import { TellusError } from "../../lib/errors/envelope";
 import { ConnectionNotFound } from "../../lib/errors/connectivity.errors";
@@ -146,6 +149,41 @@ export function createConnectivityRouter(): Router {
   router.post(
     "/connections/:rid/credentials/issue",
     secretsHandler.issueCredential,
+  );
+
+  // Source-linked webhooks inherit domains, egress policy, and credentials
+  // from their REST API connection while retaining an immutable version
+  // history and an independently managed activation lifecycle.
+  router.get("/connections/:rid/webhooks", webhooksHandler.listWebhooks);
+  router.post(
+    "/connections/:rid/webhooks",
+    idempotencyKeyMiddleware(pool, "connectivity.createWebhook"),
+    webhooksHandler.createWebhook,
+  );
+  router.get("/webhooks/:webhookRid", webhooksHandler.getWebhook);
+  router.get("/webhooks/:webhookRid/versions", webhooksHandler.listWebhookVersions);
+  router.put("/webhooks/:webhookRid", webhooksHandler.updateWebhook);
+  router.post("/webhooks/:webhookRid/ready", webhooksHandler.markWebhookReady);
+  router.post("/webhooks/:webhookRid/activate", webhooksHandler.activateWebhook);
+  router.post("/webhooks/:webhookRid/disable", webhooksHandler.disableWebhook);
+  router.delete("/webhooks/:webhookRid", webhooksHandler.archiveWebhook);
+  router.post(
+    "/webhooks/:webhookRid/test",
+    idempotencyKeyMiddleware(pool, "connectivity.testWebhook"),
+    webhooksHandler.testWebhook,
+  );
+  router.post(
+    "/webhooks/:webhookRid/execute",
+    idempotencyKeyMiddleware(pool, "connectivity.executeWebhook"),
+    webhooksHandler.executeProductionWebhook,
+  );
+  router.get(
+    "/webhooks/:webhookRid/executions",
+    webhooksHandler.listExecutions,
+  );
+  router.get(
+    "/webhook-executions/:executionRid",
+    webhooksHandler.getExecution,
   );
 
   // Worker credential unwrap — the foundry-worker child posts here with a
@@ -292,15 +330,27 @@ export function createConnectivityRouter(): Router {
  *   - B2: credential rotation worker.
  *   - B3: connection health prober.
  *   - B5: table-import scheduler.
+ *   - F2: webhook execution reaper (orphan recovery).
  * Safe to call multiple times.
  */
 export function initConnectivity(): void {
+  // Fail closed BEFORE any worker starts or any socket can be opened: a dev
+  // CONNECTIVITY_EGRESS_ALLOW_RESERVED that reached production has disabled the
+  // SSRF boundary, and every probe would still look healthy. Throws.
+  assertConnectivityPosture();
+
   if (process.env.TELLUS_DISABLE_CONNECTIVITY_POLLER !== "1") {
     outbox.startPoller();
   }
-  startRotationWorker();
-  startHealthProber();
-  startTableImportScheduler();
+  // Focused, isolated QA browser campaigns exercise the request-serving
+  // routes but must not drain unrelated production work queues from the
+  // shared development database. The normal product default remains on.
+  if (process.env.CONNECTIVITY_WORKERS_DISABLED !== "true") {
+    startRotationWorker();
+    startHealthProber();
+    startTableImportScheduler();
+    startWebhookReaper();
+  }
 }
 
 /** Stop background workers and drain PG pools for graceful shutdown. */
@@ -309,6 +359,7 @@ export async function shutdownConnectivity(): Promise<void> {
   stopRotationWorker();
   stopHealthProber();
   stopTableImportScheduler();
+  stopWebhookReaper();
   await drainPgPools().catch(() => undefined);
 }
 
@@ -324,3 +375,8 @@ export type {
   VirtualTable,
   Driver,
 } from "./contracts";
+export type {
+  ConnectivityWebhook,
+  WebhookExecutionSummary,
+  WebhookVersionConfiguration as WebhookVersionConfigurationValue,
+} from "./webhooks/contracts";

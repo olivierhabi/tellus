@@ -162,12 +162,23 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { ontologyId, apiName } = req.params;
+      // Versioned invoke: an optional `version` (query OR body) selects a
+      // specific published version by version_number; absent → latest (the
+      // documented default). Lets the Vega Chart FunctionPicker invoke a chosen
+      // version, not just the latest.
+      const versionRaw = req.query.version ?? req.body?.version;
+      const versionNumber = versionRaw != null ? Number(versionRaw) : null;
       const fn = await query(
-        `SELECT f.function_id, f.runtime, v.version_id, v.source_code
-           FROM ontology_function f
-           JOIN ontology_function_version v ON v.function_id = f.function_id AND v.is_latest = true
-          WHERE f.ontology_id = $1 AND f.api_name = $2`,
-        [ontologyId, apiName]
+        versionNumber != null
+          ? `SELECT f.function_id, f.runtime, v.version_id, v.source_code
+               FROM ontology_function f
+               JOIN ontology_function_version v ON v.function_id = f.function_id
+              WHERE f.ontology_id = $1 AND f.api_name = $2 AND v.version_number = $3`
+          : `SELECT f.function_id, f.runtime, v.version_id, v.source_code
+               FROM ontology_function f
+               JOIN ontology_function_version v ON v.function_id = f.function_id AND v.is_latest = true
+              WHERE f.ontology_id = $1 AND f.api_name = $2`,
+        versionNumber != null ? [ontologyId, apiName, versionNumber] : [ontologyId, apiName],
       );
       if (fn.rowCount === 0) {
         return sendError(res, "NOT_FOUND", `Function ${apiName} not found.`);

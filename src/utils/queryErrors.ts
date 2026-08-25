@@ -32,6 +32,41 @@ export const STANDARD_ERROR_CODES: Record<string, { status: number; name: string
   SIDE_EFFECT_FAILURE:        { status: 502, name: "SideEffectFailureError" },
   FUNCTION_FAILURE:           { status: 500, name: "FunctionFailureError" },
   CONCURRENCY_CONFLICT:       { status: 409, name: "ConcurrencyConflictError" },
+  INVALID_OBJECT_REFERENCE:   { status: 400, name: "InvalidObjectReferenceError" },
+  INVALID_PRIMARY_KEY:        { status: 400, name: "InvalidPrimaryKeyError" },
+  OBJECT_TYPE_MISMATCH:       { status: 400, name: "ObjectTypeMismatchError" },
+  OBJECT_ALREADY_EXISTS:      { status: 400, name: "ObjectAlreadyExistsError" },
+  SAME_INVOCATION_REFERENCE_FORBIDDEN: {
+    status: 422,
+    name: "SameInvocationReferenceForbiddenError",
+  },
+  DELETE_BLOCKED_BY_RELATIONSHIPS: {
+    status: 422,
+    name: "DeleteBlockedByRelationshipsError",
+  },
+  DANGLING_RELATIONSHIP:      { status: 422, name: "DanglingRelationshipError" },
+  FINAL_STATE_INVALID:        { status: 422, name: "FinalStateInvalidError" },
+  INVALID_RULE_PARAMETER_TYPE: {
+    status: 400,
+    name: "InvalidRuleParameterTypeError",
+  },
+  UNSUPPORTED_SEMANTICS_VERSION: {
+    status: 422,
+    name: "UnsupportedActionSemanticsVersionError",
+  },
+  INCOMPATIBLE_ACTION_SEMANTICS: {
+    status: 422,
+    name: "IncompatibleActionSemanticsError",
+  },
+  INVALID_EXECUTION_MODE:     { status: 422, name: "InvalidExecutionModeError" },
+  INVALID_DELETE_POLICY:      { status: 422, name: "InvalidDeletePolicyError" },
+  // B1 (cross-functionality engagement) — submission criteria rejection is a
+  // client-input failure (422), NOT a server error. Without this entry the
+  // OntologyError defaults to 500, mis-classifying the criterion rejection
+  // (the executor correctly throws SUBMISSION_CRITERIA_NOT_MET; the route's
+  // error middleware maps the code → status via this registry).
+  SUBMISSION_CRITERIA_NOT_MET: { status: 422, name: "SubmissionCriteriaNotMetError" },
+  DEADLOCK_RETRY_EXHAUSTED:   { status: 500, name: "DeadlockRetryExhaustedError" },
 
   // General API errors
   NOT_FOUND:                  { status: 404, name: "NotFoundError" },
@@ -53,6 +88,13 @@ export const STANDARD_ERROR_CODES: Record<string, { status: number; name: string
   OBJECT_TYPE_ALREADY_EXISTS: { status: 409, name: "ConflictError" },
   PROPERTY_ALREADY_EXISTS:    { status: 409, name: "ConflictError" },
   ACTION_TYPE_ALREADY_EXISTS: { status: 409, name: "ConflictError" },
+  // Phase 2 — interface link constraints.
+  INTERFACE_LINK_CONSTRAINT_NOT_FOUND:    { status: 404, name: "NotFoundError" },
+  INTERFACE_LINK_CONSTRAINT_ALREADY_EXISTS: { status: 409, name: "ConflictError" },
+  // Phase 3 — governed webhook registry.
+  WEBHOOK_NOT_FOUND:           { status: 404, name: "NotFoundError" },
+  WEBHOOK_ALREADY_EXISTS:      { status: 409, name: "ConflictError" },
+  WEBHOOK_VERSION_DISABLED:    { status: 409, name: "ConflictError" },
   DATASOURCE_NOT_FOUND:       { status: 404, name: "NotFoundError" },
   DATASOURCE_ALREADY_REGISTERED: { status: 409, name: "ConflictError" },
   INVALID_API_NAME:           { status: 400, name: "ValidationError" },
@@ -62,6 +104,11 @@ export const STANDARD_ERROR_CODES: Record<string, { status: number; name: string
   COLUMN_MAPPING_INVALID:     { status: 400, name: "ValidationError" },
   REQUIRED_FIELD_MISSING:     { status: 400, name: "RequiredPropertyMissingError" },
   NO_BACKING_DATASOURCE:      { status: 400, name: "ValidationError" },
+  // 413: the request is well-formed and authorized, but the object type is
+  // too large for the in-heap datasource reindex path (see
+  // REINDEX_MAX_MERGED_OBJECTS in reindexService). Not a 500 — the caller can
+  // act on it by using the Object Storage V2 funnel instead.
+  REINDEX_TOO_LARGE:          { status: 413, name: "PayloadTooLargeError" },
   INDEXING_IN_PROGRESS:       { status: 409, name: "ConflictError" },
   DATA_VALIDATION_ERROR:      { status: 400, name: "ValidationError" },
   EDIT_NOT_FOUND:             { status: 404, name: "NotFoundError" },

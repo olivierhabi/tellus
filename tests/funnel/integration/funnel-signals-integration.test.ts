@@ -21,6 +21,12 @@ const OT_API_NAME = `SignalsProbe${STAMP}`;
 let OT_ID = "";
 
 beforeAll(async () => {
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "funnel-signals-fixture-cleanup",
+    skipApiProbe: true,
+  });
   // Singleton: the canonical ontology already exists, so we only insert our own
   // object_type fixture (FK satisfied by the canonical ontology_id).
   const res = await query(

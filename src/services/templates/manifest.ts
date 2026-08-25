@@ -558,6 +558,455 @@ stages:
   ],
 };
 
+// ---------------------------------------------------------------------------
+// TR_PYTHON_2_0_0 — Foundry-faithful Python Transforms scaffold (parity with
+// Palantir's live "Project structure" docs, fetched 2026-07-09).
+//
+// Replaces the 1.0.0 flat `transforms/` layout with Foundry's nested
+// `src/<package>/` package layout + `pipeline.py` auto-discovery +
+// `setup.py` `transforms.pipelines` entry point + `conda_recipe/meta.yaml`.
+// See DECISIONS.md (next to this file) for the four policy decisions
+// (extra-file survival, package name, unconfirmed-file handling, version bump).
+//
+// Deviations from Foundry's literal default (all user-directed or guardrail-
+// driven; documented in DECISIONS.md):
+//   - package name defaults to `palantir` (Foundry literal: `myproject`).
+//   - `examples.py` ships commented-out (Foundry-faithful) BUT with both
+//     dataset paths substituted from `{{datasetRid}}` (tellus extension per
+//     brief §4) — so a fresh repo does NOT build green until uncommented.
+//   - `{{REPOSITORY_ORG_NAME}}` in setup.py is spaced (`{{ REPOSITORY_ORG_NAME }}`)
+//     so tellus's no-whitespace substitute leaves Foundry's build token literal.
+//   - Unconfirmed-content files (build.gradle inner+outer, gradle.properties,
+//     versions.properties, templateConfig.json, conda-versions lock, .pylintrc)
+//     are OMITTED — tracked follow-ups. (setup.cfg IS shipped — see "Ship tellus
+//     tooling" in DECISIONS.md §3; only Foundry's body is UNVERIFIED.)
+// ---------------------------------------------------------------------------
+const TR_PYTHON_2_0_0: TemplateManifest = {
+  templateId: "transforms-python",
+  version: "2.0.0",
+  displayName: "Python Transforms",
+  language: "python",
+  category: "transforms",
+  description: "Datasets transformed by @transform-decorated Python (Foundry-faithful layout).",
+  parameters: [
+    {
+      name: "packageName",
+      regex: "^[a-z][a-z0-9_]{0,63}$",
+      default: "palantir",
+      description: "Python package name (Foundry literal default is 'myproject'; tellus default is 'palantir' per user direction).",
+    },
+    {
+      name: "datasetRid",
+      regex: "^ri\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-zA-Z0-9_-]{1,128}$",
+      default: "ri.foundry.main.dataset.placeholder",
+      description: "Dataset RID substituted into the commented examples.py starter paths.",
+      required: true,
+    },
+  ],
+  deprecated: false,
+  files: [
+    // --- Foundry visible tree (src/<package>/ + conda_recipe/) ------------
+    {
+      // Empty package marker (content unconfirmed — ship empty, don't guess).
+      path: "src/{{packageName}}/__init__.py",
+      mode: "100644",
+      isBinary: false,
+      content: "",
+    },
+    {
+      // Foundry live default (4 lines, no blank line between imports and
+      // my_pipeline — matches the live doc's "Copied 1-4" widget).
+      path: "src/{{packageName}}/pipeline.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import Pipeline
+from {{packageName}} import datasets
+my_pipeline = Pipeline()
+my_pipeline.discover_transforms(datasets)
+`,
+    },
+    {
+      // Empty package marker (content unconfirmed — ship empty, don't guess).
+      path: "src/{{packageName}}/datasets/__init__.py",
+      mode: "100644",
+      isBinary: false,
+      content: "",
+    },
+    {
+      // Foundry default ships COMMENTED OUT ("an uncommented version of the
+      // default"). Per brief §4, both dataset paths are substituted from
+      // {{datasetRid}} (tellus extension; commented-out so non-executing).
+      path: "src/{{packageName}}/datasets/examples.py",
+      mode: "100644",
+      isBinary: false,
+      content: `# from transforms.api import Input, Output, transform, LightweightInput, LightweightOutput
+#
+#
+# @transform.using(
+#     output_dataset=Output("{{datasetRid}}"),
+#     input_dataset=Input("{{datasetRid}}"),
+# )
+# def compute(input_dataset: LightweightInput, output_dataset: LightweightOutput) -> None:
+#     output_dataset.write_table(input_dataset.polars(lazy=True))
+`,
+    },
+    {
+      // Foundry live default (23 lines). `{{ REPOSITORY_ORG_NAME }}` is spaced
+      // so tellus leaves Foundry's build-time token literal (cosmetic; see
+      // DECISIONS.md §3). os.environ['PKG_NAME']/['PKG_VERSION'] are Foundry
+      // conda-build env vars, passed through untouched.
+      path: "src/setup.py",
+      mode: "100644",
+      isBinary: false,
+      content: `import os
+from setuptools import find_packages, setup
+
+setup(
+    name=os.environ['PKG_NAME'],
+    version=os.environ['PKG_VERSION'],
+
+    description='Python data transformation project',
+
+    # Modify the author for this project
+    author='{{ REPOSITORY_ORG_NAME }}',
+
+    packages=find_packages(exclude=['contrib', 'docs', 'test']),
+
+    # Instead, specify your dependencies in conda_recipe/meta.yml
+    install_requires=[],
+
+    entry_points={
+        'transforms.pipelines': [
+            'root = {{packageName}}.pipeline:my_pipeline'
+        ]
+    }
+)
+`,
+    },
+    {
+      // Foundry live default (30 lines). All {{ ... }} tokens are Foundry's
+      // (PACKAGE_NAME / PACKAGE_VERSION / PYTHON_TRANSFORMS_VERSION) — spaced,
+      // so tellus leaves them literal for Foundry to resolve. python 3.9.*
+      // pinned in build AND run.
+      path: "conda_recipe/meta.yaml",
+      mode: "100644",
+      isBinary: false,
+      content: `# If you need to modify the runtime requirements for your package,
+# update the 'requirements.run' section in this file
+
+package:
+  name: "{{ PACKAGE_NAME }}"
+  version: "{{ PACKAGE_VERSION }}"
+
+source:
+  path: ../src
+
+requirements:
+  # Tools required to build the package. These packages are run on the build system and include
+  # things such as revision control systems (Git, SVN) make tools (GNU make, Autotool, CMake) and
+  # compilers (real cross, pseudo-cross, or native when not cross-compiling), and any source pre-processors.
+  # https://docs.conda.io/projects/conda-build/en/latest/resources/define-metadata.html#build
+  build:
+    - python 3.9.*
+    - setuptools
+
+  # Packages required to run the package. These are the dependencies that are installed automatically
+  # whenever the package is installed.
+  # https://docs.conda.io/projects/conda-build/en/latest/resources/define-metadata.html#run
+  run:
+    - python 3.9.*
+    - transforms {{ PYTHON_TRANSFORMS_VERSION }}
+    - transforms-expectations
+    - transforms-verbs
+
+build:
+  script: python setup.py install --single-version-externally-managed --record=record.txt
+`,
+    },
+    // --- tellus platform files (KEPT per Decision 1; outside Foundry domain) ---
+    {
+      // Stemma/Jemma CI for transforms-python. One consistency fix vs 1.0.0:
+      // lint path transforms/ -> src/ (2.0.0 moves sources into src/<package>/).
+      path: "ci.yml",
+      mode: "100644",
+      isBinary: false,
+      content: `# Stemma/Jemma CI pipeline for transforms-python.
+stages:
+  - name: lint
+    command: python -m pyflakes src/
+  - name: discover
+    command: tellus transforms discover
+  - name: build
+    command: tellus transforms build
+  - name: test
+    command: python -m pytest -q
+`,
+    },
+    {
+      path: "repoSettings.json",
+      mode: "100644",
+      isBinary: false,
+      content: `{
+  "defaultBranch": "master",
+  "tagNameValidation": "semver",
+  "branchProtection": [
+    { "branch": "master", "requiredStatusChecks": ["jemma:build"] }
+  ]
+}
+`,
+    },
+    // --- build/tooling files (tellus-native; make a scaffolded repo complete) ---
+    // The transforms.api library + tellus-transforms CLI are NOT committed here —
+    // they are published as the `tellus-transforms` distribution (see
+    // packages/transforms-python/) and declared as a dep in conda_recipe/meta.yaml +
+    // resolved into requirements.lock. This mirrors Foundry, where `transforms` is a
+    // conda dep, not committed into the repo.
+    {
+      // setup.cfg — Foundry ships this file but its default body is NOT documented
+      // (UNVERIFIED — see DECISIONS.md §3). tellus ships its OWN OSS tool config
+      // (pytest/pycodestyle/pylint), mapping Foundry's pep8/pylint Gradle plugins to
+      // OSS tools; no Gradle, no com.palantir.* IDs.
+      path: "src/setup.cfg",
+      mode: "100644",
+      isBinary: false,
+      content: `# Source: https://www.palantir.com/docs/foundry/transforms-python/project-structure/
+# (setup.cfg exists in the default Foundry tree; its DEFAULT CONTENTS are NOT documented):
+#   # UNVERIFIED — no public doc source for Foundry's setup.cfg body, needs product decision
+# tellus tool config, grounded in OSS docs (pytest / pycodestyle / pylint).
+[tool:pytest]
+testpaths = tests
+python_files = test_*.py
+python_functions = test_*
+
+[pycodestyle]
+max-line-length = 120
+exclude = build,dist,.venv
+
+[pylint]
+disable =
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring
+max-line-length = 120
+`,
+    },
+    {
+      // requirements.lock — pip-tools lock resolving meta.yaml run-deps (replaces
+      // Foundry's Hawk resolution; Hawk algorithm UNVERIFIED — original tellus design).
+      path: "requirements.lock",
+      mode: "100644",
+      isBinary: false,
+      content: `# Source: pip-tools https://pip-tools.readthedocs.io/ (pip-compile output).
+# tellus resolves conda_recipe/meta.yaml requirements.run via pip-compile -> this lock,
+# replacing Foundry's Hawk resolution (Hawk algorithm UNVERIFIED).
+#   # original implementation, not a port
+#
+# Generated by: tellus-transforms lock   (do not edit by hand)
+#   pip-compile --output-file requirements.lock conda_recipe/meta.yaml
+
+tellus-transforms==0.1.0  # tellus transforms.api library + build CLI (provides 'transforms' import)
+polars==0.20.*            # lightweight compute engine (Input.polars())
+# pyspark, pandas, duckdb: pulled per @transform.spark.using / .pandas() / .duckdb() usage
+`,
+    },
+    {
+      // Makefile — convenience orchestration (replaces Foundry Gradle Checks;
+      // original tellus design, not Gradle, no com.palantir.* IDs). Recipe lines use
+      // real tabs (\t) so `make` parses them.
+      path: "Makefile",
+      mode: "100644",
+      isBinary: false,
+      content: `# Source: original tellus orchestration (replaces Foundry Gradle Checks).
+#   # original implementation, not a port
+.PHONY: discover check lint test build lock
+
+discover:
+\ttellus-transforms discover
+lint:
+\tpycodestyle src && pylint src
+test:
+\tpytest -q
+build:
+\tpython -m build
+lock:
+\ttellus-transforms lock
+check: lint test build
+`,
+    },
+  ],
+};
+
+// ---------------------------------------------------------------------------
+// TR_PYTHON_3_0_0 — transforms-python v3.0.0 (Track 1: Lightweight runtime).
+//
+// Foundry-Foundry parity: ships a `@lightweight` example alongside the
+// existing `@transform` example. `@lightweight` (transforms.api) runs
+// single-process (no SparkSession) — pandas-only — for small datasets where
+// the JVM startup of a SparkSession dominates. The transforms discovery
+// walker (`discovery.ts` TRANSFORM_KINDS) recognizes `lightweight` as a new
+// `TransformKind`; `runtimeForBatch` (discovery.ts) selects the build's
+// `runtime` tag from the discovered kinds (all-@lightweight = `lightweight`;
+// any Spark-backed = `spark`) which is persisted on `transform_build.runtime`
+// (migration 120). See docs/transforms-architecture.md §lightweight for the
+// full contract.
+//
+// Backwards compatibility: this is the SAME `templateId` ("transforms-python")
+// as v1.0.0 / v2.0.0 — pinning per-version still scaffolds the older layout,
+// and `listLatestTemplateManifests` returns this 3.0.0 row as the latest for
+// the picker. The existing v1.0.0 / v2.0.0 manifests are untouched (no-touch
+// boundary #8).
+//
+// Deviation from Foundry's literal default:
+//   - The `@lightweight` example uses a synthetic seed (no Input) so a
+//     freshly-created v3.0.0 repo builds GREEN out of the box (a brand-new
+//     repo cannot reference a real dataset RID before its first commit).
+//   - The `@transform` example parity-mirrors v1.0.0's `example.py` with the
+//     Spark-backed `DataFrame([...])` shim so existing users upgrading to
+//     3.0.0 keep the workflow — `@lightweight` is shipped ADDITIVE, not as
+//     a replacement.
+// ---------------------------------------------------------------------------
+const TR_PYTHON_3_0_0: TemplateManifest = {
+  templateId: "transforms-python",
+  version: "3.0.0",
+  displayName: "Python Transforms (Lightweight + Spark)",
+  language: "python",
+  category: "transforms",
+  description: "Datasets transformed by @transform-decorated Python. Adds @lightweight — a single-process pandas-only runtime for small datasets (no SparkSession).",
+  parameters: [
+    {
+      name: "datasetRid",
+      regex: "^ri\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-z][a-z0-9_-]{0,127}\\.[a-zA-Z0-9_-]{1,128}$",
+      default: "ri.foundry.main.dataset.placeholder",
+      description: "Output dataset RID for the example seed transform. Edit per repo.",
+      required: true,
+    },
+  ],
+  deprecated: false,
+  files: [
+    {
+      // @lightweight seed: pandas-only, no Input, builds green out of the box.
+      // Demonstrates the Track-1 lightweight contract: read Input.pandas(),
+      // write Output.write_dataframe(pandas_df). For a real transform, add
+      // inputs as Input("ri.foundry.main.dataset.<in>") and call input.pandas().
+      path: "transforms/lightweight_seed.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import lightweight, Output, DataFrame
+
+# An @lightweight source transform: pandas/DF-only — NO SparkSession is
+# started. Reserved for datasets where the JVM startup cost of a SparkSession
+# dominates the work. To consume an existing dataset, add inputs and call
+# input.pandas() (NOT input.dataframe() — that lazily creates a SparkSession,
+# violating the lightweight contract).
+#
+#     @lightweight(
+#         output=Output("{{datasetRid}}"),
+#         source=Input("ri.foundry.main.dataset.<your-input>"),
+#     )
+#     def my_lightweight(output, source):
+#         df = source.pandas()
+#         output.write_dataframe(df[df["amount"] > 0])
+
+
+@lightweight(output=Output("{{datasetRid}}"))
+def leaked_lightweight_seed(output):
+    output.write_dataframe(
+        DataFrame(
+            [
+                {"id": 1, "category": "a", "value": 10},
+                {"id": 2, "category": "b", "value": 20},
+                {"id": 3, "category": "a", "value": 30},
+            ]
+        )
+    )
+`,
+    },
+    {
+      // @transform example parity-mirrors v1.0.0's example.py — the
+      // PySpark-backed path is preserved (kind = 'spark'). The discovery
+      // walker reports BOTH decorators; runtimeForBatch selects 'lightweight'
+      // for this repo since this file's seed transform happens to use only
+      // `DataFrame([...])` (no Input) — the SparkSession is not started by
+      // the driver when the user code never touches .dataframe()/.spark_session.
+      // To opt into the spark runtime, swap Output to a real Input dataset
+      // and call input.dataframe() — the runtime tag flips to 'spark'.
+      path: "transforms/example.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import transform, Output, DataFrame
+
+
+@transform(output=Output("{{datasetRid}}-transform"))
+def example_seed(output):
+    output.write_dataframe(
+        DataFrame(
+            [
+                {"id": 1, "category": "a", "value": 10},
+                {"id": 2, "category": "b", "value": 20},
+                {"id": 3, "category": "a", "value": 30},
+            ]
+        )
+    )
+`,
+    },
+    {
+      // An @incremental @lightweight example (incremental write semantics work
+      // across both runtimes — the ctx.is_incremental flag is symmetric). Disabled
+      // by default (rename to .py / remove the leading underscore to enable).
+      path: "transforms/_lightweight_incremental_example.py",
+      mode: "100644",
+      isBinary: false,
+      content: `from transforms.api import lightweight, incremental, Output, Input
+
+
+# @incremental on an @lightweight transform: same ctx-first injection rule as
+# @incremental on @transform — the entry signature is (ctx, output, **inputs),
+# matching the @incremental+@transform combination. Set the write mode to
+# 'modify'/'append' for incremental APPEND semantics (vs 'replace' = SNAPSHOT).
+# The lightweight runtime is a no-JVM path; an incremental write under it is the
+# pandas-append equivalent of an append transaction.
+@incremental()
+@lightweight(
+    output=Output("{{datasetRid}}-events"),
+    source=Input("{{datasetRid}}"),
+)
+def append_events(ctx, output, source):
+    df = source.pandas()
+    output.write_dataframe(df, mode="modify")
+`,
+    },
+    {
+      path: "ci.yml",
+      mode: "100644",
+      isBinary: false,
+      content: `# Stemma/Jemma CI pipeline for transforms-python (v3.0.0 lightweight + spark).
+stages:
+  - name: lint
+    command: python -m pyflakes transforms/
+  - name: discover
+    command: tellus transforms discover
+  - name: build
+    command: tellus transforms build
+  - name: test
+    command: python -m pytest -q
+`,
+    },
+    {
+      path: "repoSettings.json",
+      mode: "100644",
+      isBinary: false,
+      content: `{
+  "defaultBranch": "main",
+  "tagNameValidation": "semver",
+  "branchProtection": [
+    { "branch": "main", "requiredStatusChecks": ["jemma:build"] }
+  ]
+}
+`,
+    },
+  ],
+};
+
 const TR_JAVA_1_0_0: TemplateManifest = {
   templateId: "transforms-java",
   version: "1.0.0",
@@ -667,6 +1116,8 @@ const CATALOG: ReadonlyMap<string, ReadonlyMap<string, TemplateManifest>> = (() 
     TS_FUNCTIONS_2_4_0,
     PY_FUNCTIONS_1_0_0,
     TR_PYTHON_1_0_0,
+    TR_PYTHON_2_0_0,
+    TR_PYTHON_3_0_0,
     TR_JAVA_1_0_0,
     TR_SQL_1_0_0,
   ];
@@ -697,4 +1148,39 @@ export function getTemplateManifest(
   const versions = CATALOG.get(templateId);
   if (versions === undefined) return null;
   return versions.get(version) ?? null;
+}
+
+/**
+ * Compare two semver-ish version strings (e.g. "1.0.0" vs "2.4.0"). Returns
+ * >0 if a > b, 0 if equal, <0 if a < b. Non-numeric segments coerce to 0.
+ */
+function compareSemver(a: string, b: string): number {
+  const pa = a.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const da = pa[i] ?? 0;
+    const db = pb[i] ?? 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+/**
+ * Latest (semver-max) manifest per templateId. Used by the GET /templates list
+ * route so the picker shows one row per template at its newest version —
+ * Foundry-faithful ("bootstrapped with the latest version") and required once a
+ * template ships more than one version (transforms-python 1.0.0 + 2.0.0).
+ * Pinned consumers still scaffold any version via getTemplateManifest + the
+ * scaffold endpoint (non-deprecated versions are not rejected).
+ */
+export function listLatestTemplateManifests(): ReadonlyArray<TemplateManifest> {
+  const latest = new Map<string, TemplateManifest>();
+  for (const m of listTemplateManifests()) {
+    const cur = latest.get(m.templateId);
+    if (cur === undefined || compareSemver(m.version, cur.version) > 0) {
+      latest.set(m.templateId, m);
+    }
+  }
+  return Array.from(latest.values());
 }

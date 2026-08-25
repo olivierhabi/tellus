@@ -45,6 +45,7 @@ import {
 } from "../services/datasets/dataset-resolver";
 import { readSyncedPreview } from "../services/datasets/synced-dataset-reader";
 import { readUploadedPreview } from "../services/datasets/uploaded-dataset-reader";
+import { resolveDatasetColumns } from "../services/datasets/datasetColumns";
 
 export const foundryDatasetsV1Router = Router();
 
@@ -230,10 +231,17 @@ foundryDatasetsV1Router.get(
         sendErr(res, ERR.datasetNotFound, { datasetRid });
         return;
       }
+      // Surface the column schema so the "Create a new object type" wizard
+      // (and any consumer of the Get Dataset identity) can mirror it. Prefers
+      // the persisted `dataset_columns` scan and falls back to live-preview
+      // inference when the scan is empty (failed / not run).
+      const columns = await resolveDatasetColumns(resolved, PREVIEW_DEFAULT_ROWS);
       res.status(200).json({
         rid: resolved.rid,
         name: resolved.name,
         parentFolderRid: resolved.parentFolderRid,
+        columns,
+        schema_info: { columns },
       });
     } catch {
       sendErr(res, ERR.internal);

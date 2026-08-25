@@ -83,8 +83,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -112,8 +110,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -150,6 +146,56 @@ jobs:
     timeout-minutes: 25
 
     services:
+      clickhouse:
+        # osv2-serving + funnel CH suites (ch-migration, cdc-topology,
+        # edge-version-semantics, benchmarks) publish to the lane ClickHouse.
+        # Only the HTTP port is published — the native TCP port (9000) stays
+        # internal so it can't collide with MinIO on the runner.
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_USER: tellus
+          CLICKHOUSE_PASSWORD: tellus_ch_pw
+          CLICKHOUSE_DB: default
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd="wget -qO- http://127.0.0.1:8123/ping | grep -q Ok || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+      zookeeper:
+        image: confluentinc/cp-zookeeper:7.6.1
+        env:
+          ZOOKEEPER_CLIENT_PORT: 2181
+          ZOOKEEPER_TICK_TIME: 2000
+        ports:
+          - 2181:2181
+
+      kafka:
+        # CDC link producer/consumer suites (funnel cdc-topology, link-index
+        # ack) publish to localhost:9092 with auto topic creation — mirrors
+        # docker-compose.yml's dev broker.
+        image: confluentinc/cp-kafka:7.6.1
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd="kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=12
+
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
         # instead of Docker Hub. registry-1.docker.io has been intermittently
@@ -193,8 +239,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -204,6 +248,86 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Start Temporal (funnel lane workers)
+        # tests/funnel/integration/multi-replica + automate suites spawn REAL
+        # Temporal workers against localhost:7233 in the lane namespace
+        # (tellus-funnel-tellus-tests-main, registered by testStackBootstrap).
+        # Mirrors docker-compose.temporal{,-postgres}; the dynamicconfig file
+        # (worker-versioning APIs) is a repo path, so docker-run is used
+        # instead of a service container.
+        run: |
+          # A user-defined bridge network is REQUIRED: container DNS aliases
+          # (temporal-postgres, temporal) only resolve inside a user-defined
+          # network. The previous `--network host` run made both names
+          # unresolvable (auto-setup logged "nc: bad address
+          # 'temporal-postgres'" forever → step timeout → job failure).
+          docker network create tellus-ci-net
+
+          docker run -d --name temporal-postgres --network tellus-ci-net \
+            -e POSTGRES_DB=temporal \
+            -e POSTGRES_USER=temporal \
+            -e POSTGRES_PASSWORD=temporal_pw \
+            postgres:16-alpine
+
+          for i in $(seq 1 30); do
+            if docker exec temporal-postgres pg_isready -U temporal -d temporal >/dev/null 2>&1; then
+              echo "temporal-postgres ready"; break
+            fi
+            [ "$i" -eq 30 ] && { echo "temporal-postgres failed to start"; docker logs temporal-postgres; exit 1; }
+            sleep 1
+          done
+
+          docker run -d --name temporal --network tellus-ci-net -p 7233:7233 \
+            -e DB=postgres12 \
+            -e DB_PORT=5432 \
+            -e POSTGRES_USER=temporal \
+            -e POSTGRES_PWD=temporal_pw \
+            -e POSTGRES_SEEDS=temporal-postgres \
+            -v "$PWD/deploy/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro" \
+            temporalio/auto-setup:1.25.2
+
+          # Readiness probe MUST use the container's bridge IP, not
+          # "localhost": auto-setup binds the frontend ONLY to the container's
+          # eth0 address (verified: ss shows LISTEN on <bridge-ip>:7233 with
+          # no 127.0.0.1/::1 binding), so an in-container probe against
+          # localhost always gets "connection refused" even when the cluster
+          # is fully SERVING.
+          TEMPORAL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' temporal)"
+          echo "temporal container ip: $TEMPORAL_IP"
+
+          for i in $(seq 1 90); do
+            if docker exec temporal temporal operator cluster health --address "$TEMPORAL_IP:7233" 2>/dev/null | grep -q SERVING; then
+              echo "temporal ready"; break
+            fi
+            [ "$i" -eq 90 ] && { echo "temporal failed to start"; docker logs temporal; exit 1; }
+            sleep 2
+          done
+
+      - name: Start MinIO and create lane bucket
+        # Functions-publish artifact-storage + service suites (and the
+        # code-repos publish path) stream real blobs to S3 — the lane bucket
+        # is tests/laneEnv.ts:S3_BUCKET ("tellus-tests-bucket").
+        run: |
+          docker run -d --name minio \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            -p 9000:9000 \
+            minio/minio:RELEASE.2024-10-02T17-50-41Z server /data
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+              echo "MinIO ready"
+              break
+            fi
+            [ "$i" -eq 30 ] && { echo "MinIO failed to start"; docker logs minio; exit 1; }
+            sleep 1
+          done
+
+          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set ci http://localhost:9000 minioadmin minioadmin
+          mc mb --ignore-existing ci/tellus-tests-bucket
 
       - name: Start Keycloak and bootstrap realm
         run: |
@@ -229,18 +353,14 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
-
-      - name: Run database migrations
-        run: |
-          pnpm run migrate
-          pnpm run migrate:foundry
-          pnpm run migrate:auth
-
-      - name: Seed database
-        run: |
-          pnpm run seed
-          npx tsx src/seeds/actionTypes.seed.ts
+      # NOTE: no job-level Keycloak realm bootstrap, migrations, or seeds.
+      # The pinned vitest lane (tests/laneEnv.ts + tests/globalSetup.ts +
+      # tests/testStackBootstrap.ts) is fully self-sufficient: it creates and
+      # seals its own DB (tellus_tests / tellus-tests-main), runs the 4-pass
+      # migration, seeds via src/seed.ts + actionTypes.seed.ts with the full
+      # destructive-test-guard proof, and bootstraps the tellus-tests realm.
+      # The previous steps targeted the dev-shaped default (tellus_db) and
+      # are now refused by the FUNN-ISO-1 destructive-test guard by design.
 
       - name: Run integration tests
         run: pnpm run test:integration
@@ -261,6 +381,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    # FUNN-ISO-1 lane identity: src/seed.ts → resetEnterpriseOntologyForSeed
+    # runs the destructive-test guard, which DENIES dev-shaped identity
+    # (tellus_db / realm tellus / ontology- prefix / tellus-uploads) and
+    # requires the full 10-field proof + a sealed db. This job therefore runs
+    # as its own provably-test lane: environment tellus-tests-e2e, db sealed
+    # below, temporal ns/queue + realm + index prefix + bucket all test-shaped.
+    env:
+      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
+      TELLUS_ENVIRONMENT_ID: tellus-tests-e2e
+      PGDATABASE: tellus_tests_e2e
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      PGPORT: "5432"
+      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-e2e
+      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-e2e
+      KEYCLOAK_REALM: tellus-tests-e2e
+      OS_INDEX_PREFIX: ttest-e2e-ontology-
+      S3_BUCKET: tellus-tests-e2e-bucket
+      TELLUS_TEST_API_BASE_URL: http://localhost:3000
+
     services:
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
@@ -270,7 +411,7 @@ jobs:
         # official image, needs no auth, and is not Docker-Hub-rate-limited.
         image: public.ecr.aws/docker/library/postgres:16
         env:
-          POSTGRES_DB: tellus_db
+          POSTGRES_DB: tellus_tests_e2e
           POSTGRES_USER: tellus
           POSTGRES_PASSWORD: tellus123
         ports:
@@ -305,8 +446,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -341,7 +480,7 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
+          KC_REALM=tellus-tests-e2e bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -363,10 +502,20 @@ jobs:
           wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-uploads
+          mc mb --ignore-existing ci/tellus-tests-e2e-bucket
 
       - name: Create test data directory
         run: mkdir -p /tmp/ontology-testdata
+
+      - name: Seal the e2e-lane database (FUNN-ISO-1)
+        # First-writer-wins: the destructive-test guard requires the connected
+        # DB to carry the deployment_environment seal for TELLUS_ENVIRONMENT_ID
+        # before seed.ts may reset the enterprise ontology. Migrations must
+        # exist first (run-all.sh re-runs them idempotently afterwards).
+        run: |
+          pnpm run migrate:all
+          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
+            VALUES (TRUE, 'tellus-tests-e2e', 'ci-e2e-lane') ON CONFLICT (singleton) DO NOTHING"
 
       - name: Run E2E tests
         run: pnpm run test:e2e
@@ -387,6 +536,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # FUNN-ISO-1 lane identity: src/seed.ts resets the enterprise ontology,
+    # which the destructive-test guard only allows for a provably-test lane
+    # (sealed DB, test-shaped ns/queue/realm/prefix/bucket) — never for
+    # dev-shaped identity (tellus_db / realm tellus / tellus-uploads).
+    env:
+      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
+      TELLUS_ENVIRONMENT_ID: tellus-tests-perf
+      PGDATABASE: tellus_tests_perf
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      PGPORT: "5432"
+      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-perf
+      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-perf
+      KEYCLOAK_REALM: tellus-tests-perf
+      OS_INDEX_PREFIX: ttest-perf-ontology-
+      S3_BUCKET: tellus-tests-perf-bucket
+      TELLUS_TEST_API_BASE_URL: http://localhost:3000
+
     services:
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
@@ -396,13 +564,13 @@ jobs:
         # official image, needs no auth, and is not Docker-Hub-rate-limited.
         image: public.ecr.aws/docker/library/postgres:16
         env:
-          POSTGRES_DB: tellus_db
+          POSTGRES_DB: tellus_tests_perf
           POSTGRES_USER: tellus
           POSTGRES_PASSWORD: tellus123
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-cmd="pg_isready -U tellus -d tellus_tests_perf"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
@@ -431,8 +599,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -467,7 +633,7 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
+          KC_REALM=tellus-tests-perf bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -489,13 +655,20 @@ jobs:
           wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-uploads
+          mc mb --ignore-existing ci/tellus-tests-perf-bucket
 
       - name: Run database migrations
         run: |
           pnpm run migrate
           pnpm run migrate:foundry
           pnpm run migrate:auth
+
+      - name: Seal the perf lane database (FUNN-ISO-1)
+        # First-writer-wins seal proving this DB belongs to the test lane;
+        # required before src/seed.ts may reset the enterprise ontology.
+        run: |
+          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
+            VALUES (TRUE, 'tellus-tests-perf', 'ci-perf-lane') ON CONFLICT (singleton) DO NOTHING"
 
       - name: Seed database
         run: |
@@ -544,6 +717,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # FUNN-ISO-1 lane identity: tests/runAll.ts manages its own backend on
+    # :3000 and expects a seeded ontology, so this job runs its explicit
+    # migrate+seed steps as a provably-test lane (sealed DB, test-shaped
+    # ns/queue/realm/prefix/bucket) — the destructive-test guard refuses
+    # dev-shaped identity by design. Vitest suites spawned inside runAll
+    # still boot their own pinned tellus_tests lane independently.
+    env:
+      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
+      TELLUS_ENVIRONMENT_ID: tellus-tests-all
+      PGDATABASE: tellus_tests_all
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      PGPORT: "5432"
+      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-all
+      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-all
+      KEYCLOAK_REALM: tellus-tests-all
+      # NOTE: OS_INDEX_PREFIX is deliberately NOT job-env. This job runs
+      # tests/runAll.ts, whose day suites + inline self-test modules (and
+      # the vitest unit lane) assert the unprefixed default index names
+      # (`ontology-taxpayer` etc.) — a job-level prefix leaks through
+      # CHILD_ENV and breaks them (CI run 32091038758: 'ttest-all-ontology-'
+      # mismatches). The destructive-test guard only needs the test-shaped
+      # prefix for the one-off `pnpm run seed` below (resetEnterprise
+      # OntologyForSeed), so it is scoped to that step.
+      S3_BUCKET: tellus-tests-all-bucket
+      TELLUS_TEST_API_BASE_URL: http://localhost:3000
+
     services:
       postgres:
         # Pull Postgres from the AWS ECR Public mirror of the official image
@@ -553,13 +754,13 @@ jobs:
         # official image, needs no auth, and is not Docker-Hub-rate-limited.
         image: public.ecr.aws/docker/library/postgres:16
         env:
-          POSTGRES_DB: tellus_db
+          POSTGRES_DB: tellus_tests_all
           POSTGRES_USER: tellus
           POSTGRES_PASSWORD: tellus123
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-cmd="pg_isready -U tellus -d tellus_tests_all"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
@@ -588,8 +789,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -624,7 +823,7 @@ jobs:
             sleep 2
           done
 
-          bash scripts/bootstrap-keycloak.sh
+          KC_REALM=tellus-tests-all bash scripts/bootstrap-keycloak.sh
 
       - name: Start MinIO and create bucket
         run: |
@@ -646,7 +845,7 @@ jobs:
           wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-uploads
+          mc mb --ignore-existing ci/tellus-tests-all-bucket
 
       - name: Create test data directory
         run: mkdir -p /tmp/ontology-testdata
@@ -657,7 +856,20 @@ jobs:
           pnpm run migrate:foundry
           pnpm run migrate:auth
 
+      - name: Seal the test-all lane database (FUNN-ISO-1)
+        # First-writer-wins seal proving this DB belongs to the test lane;
+        # required before src/seed.ts may reset the enterprise ontology.
+        run: |
+          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
+            VALUES (TRUE, 'tellus-tests-all', 'ci-test-all-lane') ON CONFLICT (singleton) DO NOTHING"
+
       - name: Seed database
+        env:
+          # The destructive-test guard demands a test-shaped OS prefix when
+          # src/seed.ts resets the enterprise ontology (FUNN-ISO-1 10-field
+          # proof). This is the ONLY step that needs it — see the job-env
+          # note above.
+          OS_INDEX_PREFIX: ttest-all-ontology-
         run: |
           pnpm run seed
           npx tsx src/seeds/actionTypes.seed.ts
@@ -704,3 +916,101 @@ jobs:
           name: test-all-console-log
           path: /tmp/test-all.log
           retention-days: 7
+
+  # ===========================================================================
+  # Job 6: AI edit-function contract (Phase 3 — REAL production models)
+  #
+  # Runs the real-LLM contract test: for every model in the production
+  # catalog, a real generation is published through the versioned
+  # release/registry path and must store function_kind = 'edit'.
+  #
+  # INERT BY DEFAULT. Requires a repo admin to configure:
+  #   - variable TELOS_AIE_AGENT_URL      — a reachable telos-AIE-agent
+  #     engine holding the production LLM credentials (credentials never
+  #     live in this repo or in CI).
+  #   - variable AI_CONTRACT_TEST_ENABLED = "1" — explicit opt-in gate.
+  #   - secret  TELOS_AIE_AGENT_TOKEN     — only if the engine enforces
+  #     the shared-secret header (optional).
+  # ===========================================================================
+  ai-contract:
+    name: AI Contract (real models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ vars.AI_CONTRACT_TEST_ENABLED == '1' }}
+
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      AI_CONTRACT_TEST: "1"
+      TELOS_AIE_AGENT_URL: ${{ vars.TELOS_AIE_AGENT_URL }}
+      TELOS_AIE_AGENT_TOKEN: ${{ secrets.TELOS_AIE_AGENT_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify engine catalog is reachable
+        run: |
+          if [ -z "$TELOS_AIE_AGENT_URL" ]; then
+            echo "TELOS_AIE_AGENT_URL is not configured — set the repo variable or disable AI_CONTRACT_TEST_ENABLED."
+            exit 1
+          fi
+          curl -sf --max-time 15 "$TELOS_AIE_AGENT_URL/api/models"
+
+      - name: Run AI contract test (real production models)
+        run: pnpm run test:ai-contract
+
+  # Secret scanning — fails the build when a NEW commit introduces a
+  # credential. Scans PR/push commits (gitleaks default), not the full
+  # historical tree; the known historical exposure (litellm_config.yaml,
+  # commit dd0ea16, rotated) is governed by docs/security/
+  # litellm-credential-rotation.md instead of a perpetual CI failure.
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # gitleaks-action on pull_request events (1) lists PR commits via the
+      # REST API and (2) posts findings as a PR review/comment — both need
+      # write on pull-requests, else 403 Resource not accessible by
+      # integration (x-accepted-github-permissions: pull_requests=read for
+      # the list; the comment endpoint needs write).
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          # Pin 8.30.1: .gitleaks.toml uses the [[allowlists]] array form,
+          # which 8.24.x (the action's default) silently ignores — the local
+          # scan was validated byte-identically with this version.
+          GITLEAKS_VERSION: 8.30.1

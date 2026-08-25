@@ -7,17 +7,28 @@ import "dotenv/config";
 import { query } from "../src/db";
 import { isB1Ready, __resetB1ReadinessForTesting } from "../src/services/funnel/b1Readiness";
 
-async function applyMig012(): Promise<void> {
+async function applyMigrationFile(name: string): Promise<void> {
   const fs = await import("fs");
   const sql = fs.readFileSync(
-    new URL("../src/migrations/012_funnel_object_edits.sql", import.meta.url),
+    new URL(`../src/migrations/${name}`, import.meta.url),
     "utf8"
   );
   await query(sql);
 }
 
+// 012 alone restores the PRE-branch object_instances shape (PK without
+// branch_id). Restoring only 012 while 041 is already recorded in the
+// migration ledger silently regresses the schema (041 is never re-applied
+// by the migrators) and breaks every branch-scoped funnel write. 041 is
+// idempotent, so applying it here is safe whether or not the table was
+// actually dropped.
+async function restoreObjectInstances(): Promise<void> {
+  await applyMigrationFile("012_funnel_object_edits.sql");
+  await applyMigrationFile("041_object_instances_branch_pk.sql");
+}
+
 (async () => {
-  await applyMig012();
+  await restoreObjectInstances();
 
   __resetB1ReadinessForTesting();
   const readyWhenPresent = await isB1Ready();
@@ -27,7 +38,7 @@ async function applyMig012(): Promise<void> {
   const readyWhenMissing = await isB1Ready();
 
   // Restore
-  await applyMig012();
+  await restoreObjectInstances();
   __resetB1ReadinessForTesting();
   const readyAfterRestore = await isB1Ready();
 

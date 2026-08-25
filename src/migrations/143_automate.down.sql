@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS automation_audit_event;
+DROP TABLE IF EXISTS automation_idempotency;
+DROP TABLE IF EXISTS automation_effect_attempt;
+DROP TABLE IF EXISTS automation_effect_execution;
+DROP TABLE IF EXISTS automation_trigger_event;
+DROP TABLE IF EXISTS automation_condition_state;
+DROP TABLE IF EXISTS automation_dependency;
+DROP TABLE IF EXISTS automation_version;
+DROP TABLE IF EXISTS automation;

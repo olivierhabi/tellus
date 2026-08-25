@@ -18,6 +18,7 @@
 // ---------------------------------------------------------------------------
 
 import { client } from "./client";
+import { objectIndexPrefix } from "../../config/environmentIdentity";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -180,7 +181,7 @@ export async function refreshNow(
 // ---------------------------------------------------------------------------
 
 /**
- * Refresh all `ontology-*` indices at once. Useful after a batch operation
+ * Refresh all `<prefix>*` indices at once ("ontology-*" by default). Useful after a batch operation
  * that touches multiple object types.
  *
  * @param options - Optional configuration (e.g. injected deps).
@@ -192,11 +193,12 @@ export async function refreshAll(
 ): Promise<RefreshAllResult> {
   const deps = resolveDeps(options?.deps);
 
-  await deps.refresh("ontology-*");
+  const pattern = `${objectIndexPrefix()}*`;
+  await deps.refresh(pattern);
 
   return {
     success: true,
-    pattern: "ontology-*",
+    pattern,
   };
 }
 
@@ -417,10 +419,10 @@ export async function runSelfTests(): Promise<void> {
     const result = await refreshAll({ deps });
 
     assert(result.success === true, "refreshAll: success is true");
-    assert(result.pattern === "ontology-*", "refreshAll: pattern is 'ontology-*'");
+    assert(result.pattern === `${objectIndexPrefix()}*`, "refreshAll: pattern is '<prefix>*'");
     assert(refreshCalls.length === 1, "refreshAll: 1 refresh call");
     assert(
-      refreshCalls[0].indexOrPattern === "ontology-*",
+      refreshCalls[0].indexOrPattern === `${objectIndexPrefix()}*`,
       "refreshAll: correct pattern passed"
     );
   }
@@ -491,7 +493,7 @@ export async function runSelfTests(): Promise<void> {
     assert(putSettingsCalls[2].indexName === "ontology-employee", "multi: call 3 employee");
     assert(putSettingsCalls[3].indexName === "ontology-company", "multi: call 4 company");
     assert(refreshCalls.length === 1, "multi: 1 refreshAll call");
-    assert(refreshCalls[0].indexOrPattern === "ontology-*", "multi: refreshAll pattern");
+    assert(refreshCalls[0].indexOrPattern === `${objectIndexPrefix()}*`, "multi: refreshAll pattern");
   }
 
   // =======================================================================

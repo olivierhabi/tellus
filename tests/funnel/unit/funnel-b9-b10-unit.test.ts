@@ -233,7 +233,7 @@ describe("B9 dual-index tee", () => {
       client: new QuickwitClient({
         baseUrl: "http://qw",
         fetchImpl: (async () =>
-          new Response(JSON.stringify({ splits: [] }), { status: 200 })) as never,
+          new Response(JSON.stringify({ splits: [{ split_id: "s-1", split_state: "Published", publish_timestamp: 1, tags: ["kafka-offset:0:2147483647"] }] }), { status: 200 })) as never,
       }),
     });
 
@@ -296,7 +296,7 @@ describe("B9 dual-index tee", () => {
       client: new QuickwitClient({
         baseUrl: "http://qw",
         fetchImpl: (async () =>
-          new Response(JSON.stringify({ splits: [] }), { status: 200 })) as never,
+          new Response(JSON.stringify({ splits: [{ split_id: "s-1", split_state: "Published", publish_timestamp: 1, tags: ["kafka-offset:0:2147483647"] }] }), { status: 200 })) as never,
       }),
     });
 
@@ -362,16 +362,27 @@ describe("B10 clickhouse traversal SQL", () => {
   const hop = (src: string, name: string, tgt: string) => ({
     linkType: { sourceObjectType: src, linkName: name, targetObjectType: tgt },
   });
+  const iso = { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" };
 
   it("single-hop builds a SELECT DISTINCT over one link table", () => {
     const sql = buildTraversalSql({
       anchorPks: ["O-1", "O-2"],
       hops: [hop("Order", "customer", "Customer")],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(["PII"]),
+      isolation: iso,
       cap: 1000,
     });
-    expect(sql).toContain("FROM link__order__customer__customer AS l1");
+    // Versioned latest-state: argMax projection per edge identity.
+    expect(sql).toMatch(/FROM link__order__customer__customer/);
+    expect(sql).toMatch(/argMax\(link_props, event_version\)/);
+    expect(sql).toContain(") AS l1");
     expect(sql).toContain("l1.source_pk IN ['O-1','O-2']");
+    expect(sql).toContain("l1.deleted = 0");
+    // Isolation embedded in the subquery (tenant/ontology/branch).
+    expect(sql).toContain("tenant_id = 't-a'");
+    expect(sql).toContain("ontology_id = 'ont-1'");
+    expect(sql).toContain("branch_id = 'main'");
     expect(sql).toContain("LIMIT 1000");
   });
 
@@ -383,21 +394,28 @@ describe("B10 clickhouse traversal SQL", () => {
         hop("Customer", "account", "Account"),
         hop("Account", "transaction", "Transaction"),
       ],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(["PII", "FINANCE"]),
+      isolation: iso,
       cap: 100,
     });
-    expect(sql).toContain("INNER JOIN link__customer__account__account AS l2 ON l1.target_pk = l2.source_pk");
-    expect(sql).toContain("INNER JOIN link__account__transaction__transaction AS l3 ON l2.target_pk = l3.source_pk");
-    // 3 marking clauses — one per hop
+    expect(sql).toMatch(/INNER JOIN[\s\S]*FROM link__customer__account__account[\s\S]*\) AS l2 ON l1\.target_pk = l2\.source_pk/);
+    expect(sql).toMatch(/INNER JOIN[\s\S]*FROM link__account__transaction__transaction[\s\S]*\) AS l3 ON l2\.target_pk = l3\.source_pk/);
+    // 3 marking clauses + 3 argMax marking projections — 6 marking occurrences
     const markingCount = (sql.match(/arrayAll/g) ?? []).length;
     expect(markingCount).toBe(3);
+    // Each hop enforces latest-state liveness.
+    const stateClauses = (sql.match(/deleted = 0/g) ?? []).length;
+    expect(stateClauses).toBe(3);
   });
 
   it("escapes single quotes in PK literals", () => {
     const sql = buildTraversalSql({
       anchorPks: ["O'1"],
       hops: [hop("Order", "customer", "Customer")],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(),
+      isolation: iso,
       cap: 10,
     });
     expect(sql).toContain("'O''1'");
@@ -450,8 +468,13 @@ describe("B10 traverse() routing", () => {
       hops: [
         { linkType: { sourceObjectType: "Order", linkName: "customer", targetObjectType: "Customer" } },
       ],
-      userMarkings: new Set(),
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
+      userMarkings: new Set(["PII"]),
       quickwitClient,
+      endpointSecurityLookup: async () => ({
+        markings: new Map([["C-1", []], ["C-2", []], ["C-3", []]]),
+        error: false,
+      }),
     });
     expect(result.trace).toHaveLength(1);
     expect(result.trace[0].viaBackend).toBe("quickwit");
@@ -477,9 +500,14 @@ describe("B10 traverse() routing", () => {
       hops: [
         { linkType: { sourceObjectType: "Order", linkName: "customer", targetObjectType: "Customer" } },
       ],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(["PII"]),
       maxQuickwitHopSize: 100, // force escalation
       clickhouseClient,
+      endpointSecurityLookup: async () => ({
+        markings: new Map([["T-1", []], ["T-2", []]]),
+        error: false,
+      }),
     });
     expect(result.trace).toHaveLength(1);
     expect(result.trace[0].viaBackend).toBe("clickhouse");
@@ -501,6 +529,7 @@ describe("B10 traverse() routing", () => {
       hops: [
         { linkType: { sourceObjectType: "Order", linkName: "customer", targetObjectType: "Customer" } },
       ],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(),
       maxRows: 500_000, // > DEFAULT_CAP, no admin override
       maxQuickwitHopSize: 100,
@@ -519,6 +548,7 @@ describe("B10 traverse() routing", () => {
       anchorObjectType: "Order",
       anchorPks: Array.from({ length: 101 }, (_, i) => `O-${i}`),
       hops: [{ linkType: { sourceObjectType: "Order", linkName: "customer", targetObjectType: "Customer" } }],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(),
       maxRows: 1_000_000,
       adminOverride: true,
@@ -531,6 +561,7 @@ describe("B10 traverse() routing", () => {
       anchorObjectType: "Order",
       anchorPks: Array.from({ length: 101 }, (_, i) => `O-${i}`),
       hops: [{ linkType: { sourceObjectType: "Order", linkName: "customer", targetObjectType: "Customer" } }],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(),
       maxRows: 10_000_000,
       adminOverride: true,
@@ -547,6 +578,7 @@ describe("B10 traverse() routing", () => {
       hops: [
         { linkType: { sourceObjectType: "Order", linkName: "customer", targetObjectType: "Customer" } },
       ],
+      isolation: { tenantId: "t-a", ontologyId: "ont-1", branchId: "main" },
       userMarkings: new Set(),
     });
     expect(result.targetPks).toEqual([]);

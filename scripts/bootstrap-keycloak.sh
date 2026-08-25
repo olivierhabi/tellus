@@ -13,7 +13,11 @@
 #   • Clients:    tellus-frontend (public, PKCE S256 enforced),
 #                 tellus-api (bearer-only),
 #                 tellus-confidential (confidential, refresh rotation)
-#   • Roles:      ontology-editor, ontology-viewer, ontology-admin
+#   • Roles:      ontology-editor, ontology-viewer, ontology-admin,
+#                 credit-analyst, marking:{PUBLIC,CONFIDENTIAL,SECRET,
+#                 TOP_SECRET,PII_ID,CREDIT_RISK,FINANCIAL_DETAIL,PCI_PAN_MASKED};
+#                 default-roles inherits marking:PUBLIC (every user sees
+#                 PUBLIC data); credit-analyst inherits the BK domain markings
 #   • Flows:      removes sms-authenticator and email-otp executions from
 #                 every authentication flow; WebAuthn + TOTP only
 #   • Required:   CONFIGURE_TOTP as mandatory required-action
@@ -102,8 +106,8 @@ REALM_UPDATE=$(cat <<JSON
   "minimumQuickLoginWaitSeconds": 60,
   "quickLoginCheckMilliSeconds": 1000,
   "waitIncrementSeconds": 60,
-  "ssoSessionMaxLifespan": 57600,
-  "ssoSessionIdleTimeout": 57600,
+  "ssoSessionMaxLifespan": 86400,
+  "ssoSessionIdleTimeout": 86400,
   "offlineSessionIdleTimeout": 2592000,
   "accessTokenLifespan": 3600,
   "accessTokenLifespanForImplicitFlow": 900,
@@ -150,8 +154,20 @@ ok "realm '$REALM' hardened to spec (brute-force, 16h session, WebAuthn, passwor
 # Markings follow a conservative 4-level lattice that mirrors Palantir's
 # public training materials: PUBLIC < CONFIDENTIAL < SECRET < TOP_SECRET.
 # Membership is additive — a user bearing all four can see anything.
+#
+# Domain markings (PII_ID / CREDIT_RISK / FINANCIAL_DETAIL / PCI_PAN_MASKED)
+# are orthogonal, content-type-based markings used by seeded operational data
+# (e.g. the Rwanda BK credit-workbench). They are NOT part of the lattice —
+# a user gets only the domain markings explicitly granted. These MUST exist
+# here: securityContext is fail-closed (a user whose markings do not
+# intersect a document's `_security.markings` sees nothing at all), and a
+# realm missing these roles can never grant them. See the incident where a
+# fresh realm had no `marking:*` roles at all and every human user saw
+# "No objects found" in Workshop.
 for role in ontology-editor ontology-viewer ontology-admin audit-viewer \
-            "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET" "marking:TOP_SECRET"; do
+            credit-analyst \
+            "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET" "marking:TOP_SECRET" \
+            "marking:PII_ID" "marking:CREDIT_RISK" "marking:FINANCIAL_DETAIL" "marking:PCI_PAN_MASKED"; do
   role_enc=$(printf '%s' "$role" | jq -sRr @uri)
   exists=$(ADMIN -o /dev/null -w '%{http_code}' "$KC/admin/realms/$REALM/roles/$role_enc")
   if [[ "$exists" != "200" ]]; then
@@ -162,6 +178,50 @@ for role in ontology-editor ontology-viewer ontology-admin audit-viewer \
     ok "role '$role' created"
   fi
 done
+
+# --- 2b. Composite (inherited) role mappings ----------------------------------
+#
+# add_composite_role PARENT CHILD — idempotently makes CHILD an inherited
+# (composite) role of PARENT, so every holder of PARENT effectively carries
+# CHILD. This is the durable version of fixes previously applied ad-hoc via
+# the Keycloak admin console.
+add_composite_role() {
+  local parent="$1" child="$2"
+  local p_enc c_enc
+  p_enc=$(printf '%s' "$parent" | jq -sRr @uri)
+  c_enc=$(printf '%s' "$child" | jq -sRr @uri)
+  local child_repr
+  child_repr=$(ADMIN "$KC/admin/realms/$REALM/roles/$c_enc" 2>/dev/null || true)
+  if ! printf '%s' "$child_repr" | jq -e '.name' >/dev/null 2>&1; then
+    warn "role '$child' not found — skipping composite add to '$parent'"
+    return 0
+  fi
+  local already
+  already=$(ADMIN "$KC/admin/realms/$REALM/roles/$p_enc/composites" \
+    | jq --arg n "$child" '[.[].name] | index($n)')
+  if [[ "$already" == "null" ]]; then
+    ADMIN -X POST "$KC/admin/realms/$REALM/roles/$p_enc/composites" \
+      -H "Content-Type: application/json" \
+      -d "[$child_repr]" -o /dev/null
+    ok "composite: '$parent' now inherits '$child'"
+  fi
+}
+
+# Posture: every authenticated user sees PUBLIC-stamped data. Keycloak
+# auto-assigns `default-roles-$REALM` to every newly created user, so grafting
+# `marking:PUBLIC` onto it means a brand-new user can never fall into the
+# fail-closed "zero markings → zero objects" trap. Escalated markings still
+# require an explicit grant. The fail-closed test archetype
+# (cypress-nogroups / "dave") has default-roles explicitly unmapped below so
+# the zero-clearance integration test stays valid.
+add_composite_role "default-roles-$REALM" "marking:PUBLIC"
+
+# A credit analyst (Rwanda credit workbench archetype, see
+# tellus-fe/e2e/fixtures/roles.ts) reads loan applications and their
+# full risk/financial columns.
+add_composite_role "credit-analyst" "marking:PII_ID"
+add_composite_role "credit-analyst" "marking:CREDIT_RISK"
+add_composite_role "credit-analyst" "marking:FINANCIAL_DETAIL"
 
 # --- 3. Clients ---------------------------------------------------------------
 
@@ -205,7 +265,7 @@ FRONTEND_BODY=$(cat <<JSON
   "webOrigins": ["http://localhost:3000", "http://localhost:3001", "+"],
   "attributes": {
     "pkce.code.challenge.method": "S256",
-    "access.token.lifespan": "300",
+    "access.token.lifespan": "3600",
     "client_credentials.use_refresh_token": "false",
     "post.logout.redirect.uris": "http://localhost:3000/*##http://localhost:3001/*",
     "oauth2.device.authorization.grant.enabled": "false"
@@ -241,7 +301,7 @@ CONF_BODY=$(cat <<JSON
   "redirectUris": ["http://localhost:3000/*", "http://localhost:3001/*"],
   "attributes": {
     "pkce.code.challenge.method": "S256",
-    "access.token.lifespan": "300"
+    "access.token.lifespan": "3600"
   }
 }
 JSON
@@ -397,6 +457,20 @@ create_user "$TEST_USER" \
   ontology-editor \
   "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET"
 create_user "$NOGROUPS_TEST_USER"
+# dave must stay genuinely zero-clearance: `default-roles-$REALM` now inherits
+# `marking:PUBLIC` (see §2b), so it is explicitly unmapped from him. Without
+# this, markings-cbac-integration.test.ts ("dave cannot read ANY document")
+# would break every time a new realm is bootstrapped.
+dave_uid=$(ADMIN "$KC/admin/realms/$REALM/users?username=$NOGROUPS_TEST_USER" | jq -r '.[0].id // empty')
+if [[ -n "$dave_uid" ]]; then
+  default_role_repr=$(ADMIN "$KC/admin/realms/$REALM/roles/$(printf '%s' "default-roles-$REALM" | jq -sRr @uri)")
+  if printf '%s' "$default_role_repr" | jq -e '.name' >/dev/null 2>&1; then
+    ADMIN -X DELETE "$KC/admin/realms/$REALM/users/$dave_uid/role-mappings/realm" \
+      -H "Content-Type: application/json" \
+      -d "[$default_role_repr]" -o /dev/null
+    ok "user '$NOGROUPS_TEST_USER' unmapped from default-roles-$REALM (zero-clearance archetype)"
+  fi
+fi
 create_user "$ADMIN_TEST_USER" \
   ontology-admin \
   "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET" "marking:TOP_SECRET"
@@ -423,6 +497,46 @@ if [[ "$jwks_status" == "200" ]]; then
   ok "JWKS endpoint reachable"
 else
   err "JWKS endpoint returned $jwks_status"
+fi
+
+# --- 7b. Marking-posture assertions --------------------------------------------
+# Guard against the "empty markings → empty workshop" failure mode recurring:
+#   • bob (cypress@tellus.local) MUST carry at least one marking:* role —
+#     proving default-roles → marking:PUBLIC composite resolution works.
+#   • dave (cypress-nogroups) MUST carry NO marking roles — proving the
+#     fail-closed archetype survived the default-marking graft.
+token_roles() {
+  # token_roles TOKEN — decodes the JWT payload and prints realm_access.roles.
+  # Use userland `base64 -d` (BSD + GNU identical): `openssl base64 -d` is
+  # NOT portable — LibreSSL exits 0 with empty output on single-line input,
+  # which made this check decodу zero roles and fail closed in CI.
+  printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+' \
+    | { p=$(cat); pad=$(( (4 - ${#p} % 4) % 4 )); printf '%s%*s' "$p" "$pad" '' | tr ' ' '='; } \
+    | base64 -d 2>/dev/null | jq -c '.realm_access.roles // []'
+}
+
+marking_role_count=$(token_roles "$USER_TOKEN" | jq '[.[] | select(startswith("marking:"))] | length')
+if [[ "${marking_role_count:-0}" -ge 1 ]]; then
+  ok "posture check: '$TEST_USER' has $marking_role_count marking role(s)"
+else
+  err "posture check FAILED: '$TEST_USER' token has NO marking roles — new users would see zero objects (fail-closed)"
+  exit 1
+fi
+
+DAVE_TOKEN=$(curl -sf -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=$NOGROUPS_TEST_USER&password=$TEST_PASS&grant_type=password&client_id=tellus-frontend&scope=openid" \
+  "$KC/realms/$REALM/protocol/openid-connect/token" | jq -r '.access_token // empty') || DAVE_TOKEN=""
+if [[ -n "$DAVE_TOKEN" ]]; then
+  dave_markings=$(token_roles "$DAVE_TOKEN" | jq '[.[] | select(startswith("marking:"))] | length')
+  if [[ "${dave_markings:-1}" -eq 0 ]]; then
+    ok "posture check: '$NOGROUPS_TEST_USER' has zero marking roles (fail-closed archetype intact)"
+  else
+    err "posture check FAILED: '$NOGROUPS_TEST_USER' unexpectedly has $dave_markings marking role(s) — the zero-clearance integration test will break"
+    exit 1
+  fi
+else
+  warn "posture check skipped for '$NOGROUPS_TEST_USER' (direct grant failed — pre-existing user with unknown password?)"
 fi
 
 cat <<EOF

@@ -1936,7 +1936,7 @@ const baseSpec = {
       post: {
         tags: ['Join'],
         summary: 'Preview a Join transform',
-        description: 'Joins two datasets (left from node source, right from rightNodeId). Supports left, right, inner, full_outer, and cross join types. Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/joinV2/',
+        description: 'Joins two datasets (left from node source, right from rightNodeId). Supports left, right, inner, full_outer, cross, semi, and anti join types. Conditions default to equality (Palantir joinV2) and may carry an inequality operator for theta joins (Palantir complex*JoinV1 Expression<Boolean>). Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/joinV2/',
         parameters: [
           { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
           { name: 'pipelineId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
@@ -1944,9 +1944,10 @@ const baseSpec = {
         ],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, required: ['rightNodeId', 'joinType'], properties: {
           rightNodeId: { type: 'string' as const, format: 'uuid', description: 'UUID of the right-side node.' },
-          joinType: { type: 'string' as const, enum: ['left', 'right', 'inner', 'full_outer', 'cross'] },
-          conditions: { type: 'array' as const, items: { type: 'object' as const, required: ['leftColumn', 'rightColumn'], properties: { leftColumn: { type: 'string' as const }, rightColumn: { type: 'string' as const } } }, description: 'Join conditions (column equality). Required for non-cross joins.' },
+          joinType: { type: 'string' as const, enum: ['left', 'right', 'inner', 'full_outer', 'cross', 'semi', 'anti'] },
+          conditions: { type: 'array' as const, items: { type: 'object' as const, required: ['leftColumn', 'rightColumn'], properties: { leftColumn: { type: 'string' as const }, rightColumn: { type: 'string' as const }, operator: { type: 'string' as const, enum: ['equals', 'notEquals', 'lessThan', 'lessThanOrEqual', 'greaterThan', 'greaterThanOrEqual'], default: 'equals', description: 'Comparison for this condition. All conditions are ANDed. Inequality operators produce a theta join.' } } }, description: 'Join conditions. Required for non-cross joins.' },
           rightPrefix: { type: 'string' as const, default: 'right_', description: 'Prefix for right-side columns when names collide with left-side columns.' },
+          coalesceJoinKeys: { type: 'boolean' as const, default: false, description: 'Merge same-named equality join keys into one output column instead of emitting a prefixed duplicate (Palantir complexOuterJoinV1 coalescing).' },
           limit: { type: 'integer' as const, default: 500 },
           priorTransforms: { type: 'array' as const, items: { type: 'object' as const } },
           leftSelectedColumns: { type: 'array' as const, items: { type: 'string' as const }, description: 'Only include these left columns in the output. If omitted, all left columns are included.' },
@@ -1976,8 +1977,10 @@ const baseSpec = {
         ],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, required: ['rightNodeId', 'joinType'], properties: {
           rightNodeId: { type: 'string' as const, format: 'uuid' },
-          joinType: { type: 'string' as const, enum: ['left', 'right', 'inner', 'full_outer', 'cross'] },
-          conditions: { type: 'array' as const, items: { type: 'object' as const, properties: { leftColumn: { type: 'string' as const }, rightColumn: { type: 'string' as const } } } },
+          joinType: { type: 'string' as const, enum: ['left', 'right', 'inner', 'full_outer', 'cross', 'semi', 'anti'] },
+          conditions: { type: 'array' as const, items: { type: 'object' as const, properties: { leftColumn: { type: 'string' as const }, rightColumn: { type: 'string' as const }, operator: { type: 'string' as const, enum: ['equals', 'notEquals', 'lessThan', 'lessThanOrEqual', 'greaterThan', 'greaterThanOrEqual'], default: 'equals' } } } },
+          rightPrefix: { type: 'string' as const, default: 'right_' },
+          coalesceJoinKeys: { type: 'boolean' as const, default: false },
         } } } } },
         responses: {
           '200': { description: 'Updated node', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { $ref: '#/components/schemas/PipelineNode' } } } } } },
@@ -1990,16 +1993,18 @@ const baseSpec = {
       post: {
         tags: ['Union'],
         summary: 'Preview a Union by name transform',
-        description: 'Unions two datasets by matching column names (Palantir unionByNameV1). Columns present in both inputs are merged. Columns unique to one side get null in rows from the other. Returns warnings for type mismatches and side-only columns.',
+        description: 'Unions two or more datasets by matching column names (Palantir union*ByNameV1, which take a List<Table>). The addressed node is the first input; rightNodeIds supplies the rest, in order. Columns present in every input are merged; columns unique to one input get null in rows from the others. Rows are concatenated in input order with no de-duplication. Returns warnings for type mismatches, input-only columns, and preview windows that cover only some inputs.',
         parameters: [
           { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
           { name: 'pipelineId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
           { name: 'nodeId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' }, description: 'The union node ID (left input resolved from sourceNodeId)' },
         ],
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, required: ['rightNodeId'], properties: {
-          rightNodeId: { type: 'string' as const, format: 'uuid', description: 'UUID of the second input node' },
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, description: 'Send rightNodeIds (or the legacy singular rightNodeId); at least one additional input is required.', properties: {
+          rightNodeIds: { type: 'array' as const, items: { type: 'string' as const, format: 'uuid' }, description: 'UUIDs of every input after the first, in order. Duplicates are ignored.' },
+          rightNodeId: { type: 'string' as const, format: 'uuid', description: 'Legacy two-input shape: UUID of the second input node. Folded in ahead of rightNodeIds.' },
+          mode: { type: 'string' as const, enum: ['name-merge', 'strict', 'first', 'narrow', 'wide'], default: 'name-merge', description: 'Schema policy: first = first input\'s columns only, narrow = intersection, wide/name-merge = superset with null fill, strict = error on mismatch.' },
           limit: { type: 'integer' as const, default: 500, description: 'Max rows to return (1-5000)' },
-          priorTransforms: { type: 'array' as const, items: { type: 'object' as const }, description: 'Optional prior transforms to replay on left input' },
+          priorTransforms: { type: 'array' as const, items: { type: 'object' as const }, description: 'Optional prior transforms to replay on the first input' },
         } } } } },
         responses: {
           '200': { description: 'Unioned preview data', content: { 'application/json': { schema: { type: 'object' as const, properties: {
@@ -2009,8 +2014,10 @@ const baseSpec = {
               rows: { type: 'array' as const, items: { type: 'object' as const } },
               rowCount: { type: 'integer' as const },
               totalUnioned: { type: 'integer' as const, description: 'Total rows before limit' },
-              leftRowCount: { type: 'integer' as const },
-              rightRowCount: { type: 'integer' as const },
+              leftRowCount: { type: 'integer' as const, description: 'Rows in the first input' },
+              rightRowCount: { type: 'integer' as const, description: 'Rows in every input after the first, combined' },
+              inputCount: { type: 'integer' as const, description: 'Number of inputs unioned, including the first' },
+              branchRowCounts: { type: 'array' as const, items: { type: 'integer' as const }, description: 'Per-input row counts, in input order' },
               warnings: { type: 'array' as const, items: { type: 'object' as const, properties: { code: { type: 'string' as const }, message: { type: 'string' as const } } } },
             } },
           } } } } },
@@ -2022,14 +2029,16 @@ const baseSpec = {
       post: {
         tags: ['Union'],
         summary: 'Apply (persist) a Union by name transform',
-        description: 'Saves the union configuration (rightNodeId) to the pipeline node.',
+        description: 'Saves the union configuration to the pipeline node. Persists rightNodeIds (the N-input list) and keeps rightNodeId populated with the first entry for older readers.',
         parameters: [
           { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
           { name: 'pipelineId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
           { name: 'nodeId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
         ],
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, required: ['rightNodeId'], properties: {
-          rightNodeId: { type: 'string' as const, format: 'uuid', description: 'UUID of the second input node' },
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, description: 'Send rightNodeIds (or the legacy singular rightNodeId); at least one additional input is required.', properties: {
+          rightNodeIds: { type: 'array' as const, items: { type: 'string' as const, format: 'uuid' }, description: 'UUIDs of every input after the first, in order.' },
+          rightNodeId: { type: 'string' as const, format: 'uuid', description: 'Legacy two-input shape.' },
+          mode: { type: 'string' as const, enum: ['name-merge', 'strict', 'first', 'narrow', 'wide'] },
         } } } } },
         responses: {
           '200': { description: 'Updated node', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { $ref: '#/components/schemas/PipelineNode' } } } } } },
@@ -2817,8 +2826,8 @@ export const openApiSpec = {
 // Live-route-derived spec assembly.
 //
 // The curated `openApiSpec` above is hand-maintained and drifts (it documented
-// ~45% of the surface and carried 3 phantom paths — see
-// docs/audit/api-docs-coverage.md). To make /api/docs ALWAYS complete and
+// only part of the surface and previously carried phantom paths. To make
+// /api/docs ALWAYS complete and
 // phantom-free, we derive the served `paths` from the real Express route table
 // at request time: every live route is keyed in, reusing the rich curated
 // operation when one matches its shape, otherwise an auto-generated stub.

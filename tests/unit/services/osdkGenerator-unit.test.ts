@@ -246,18 +246,31 @@ describe("osdk generator — index.ts barrel", () => {
   it("re-exports types and client with a README header", () => {
     const files = generateOsdk(fixture);
     const index = fileContent(files, "index.ts");
-    expect(index).toContain('export * from "./types";');
-    expect(index).toContain('export * from "./client";');
+    expect(index).toContain('export * from "./types.js";');
+    expect(index).toContain('export * from "./client.js";');
     expect(index).toContain("README");
     expect(index).toContain("Ontology id: 11111111-2222-3333-4444-555555555555");
     expect(index).toContain("Generated:   2026-06-10T12:00:00.000Z");
   });
 });
 
+describe("osdk generator — durable subscription recovery", () => {
+  it("refreshes once when a resume cursor has expired", () => {
+    const files = generateOsdk(fixture);
+    const client = fileContent(files, "clientV2.ts");
+    expect(client).toContain(
+      'protocolError?.error === "SubscriptionCursorExpired"',
+    );
+    expect(client).toContain(
+      'ws.send(JSON.stringify({ type: "subscribeRequests", ...request }))',
+    );
+  });
+});
+
 describe("osdk generator — generated sources transpile", () => {
   it("every generated file passes ts.transpileModule without syntax diagnostics", () => {
     const files = generateOsdk(fixture);
-    for (const f of files) {
+    for (const f of files.filter((file) => file.path.endsWith(".ts"))) {
       const result = ts.transpileModule(f.content, {
         compilerOptions: {
           module: ts.ModuleKind.CommonJS,

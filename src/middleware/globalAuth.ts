@@ -135,6 +135,17 @@ function isAllowlisted(req: Request): boolean {
   // Duplicate health router under /api/v1/health (healthRouter mount).
   if (p === "/api/v1/health" || p.startsWith("/api/v1/health/")) return true;
 
+  // Kubernetes-style system probes (src/routes/health.ts).
+  // Must stay unauthenticated so kubelet probes never need a JWT.
+  if (
+    p === "/api/v1/system/liveness" ||
+    p === "/api/v1/system/readiness" ||
+    p === "/api/v1/system/health" ||
+    p === "/api/v1/ready"
+  ) {
+    return true;
+  }
+
   // Prometheus scrape targets.
   if (p === "/api/metrics") return true;
   if (p === "/api/v1/pipelines/metrics") return true;
@@ -182,6 +193,14 @@ function isAllowlisted(req: Request): boolean {
   // enforces JWT/PAT validation — the global gate is just one of two
   // enforcement layers.
   if (p === "/api/v1/code-repositories" || p.startsWith("/api/v1/code-repositories/")) return true;
+
+  // Code Assistant (AI coding agent for TypeScript Functions v2) — same
+  // two-layer pattern as code-repositories above: `createCodeAssistantRouter`
+  // mounts `requireCodeAssistantAuth` internally (which honours the
+  // CODE_ASSISTANT_TEST_AUTH=1 X-Tellus-Test-Principal bypass used by
+  // Cypress), so this allowlist entry only sidesteps the global Tellus auth
+  // gate. In production the per-router JWT/PAT validation still runs.
+  if (p === "/api/v1/code-assistant" || p.startsWith("/api/v1/code-assistant/")) return true;
 
   // Functions Registry (B8) — same two-layer pattern as code-repositories.
   // `createFunctionsRouter` mounts `requireCodeReposAuth` internally (which
@@ -308,6 +327,79 @@ function normalizeClaims(
 }
 
 // ---------------------------------------------------------------------------
+// Dev-only test-auth bypass — synthetic principals for the seeded Keycloak
+// users. Used ONLY when NODE_ENV !== 'production' AND TELLUS_TEST_HOOKS=1.
+// The user id is the Keycloak `sub` (UUID). The role mapping mirrors the
+// realm-tellus.json seed so the bypass produces claims equivalent to what
+// Keycloak would issue for the same user.
+// ---------------------------------------------------------------------------
+
+interface TestUserSeed {
+  id: string;
+  email: string;
+  name: string;
+  roles: string[];
+}
+
+const TEST_USER_SEEDS: readonly TestUserSeed[] = [
+  {
+    id: "633a9660-e374-41c6-87e0-d213cf50623d",
+    email: "cypress@tellus.local",
+    name: "Cypress User",
+    roles: ["marking:CONFIDENTIAL", "offline_access", "uma_authorization", "marking:SECRET", "marking:PUBLIC", "ontology-editor", "default-roles-tellus"],
+  },
+  {
+    id: "bdaba072-16f3-41c2-91f8-b367065ec578",
+    email: "cypress-admin@tellus.local",
+    name: "Cypress Admin",
+    roles: ["marking:PUBLIC", "marking:CONFIDENTIAL", "marking:TOP_SECRET", "default-roles-tellus", "ontology-admin", "marking:SECRET"],
+  },
+  {
+    id: "ae3f4ab3-9432-4d34-b426-186f5fa25fb0",
+    email: "cypress-viewer@tellus.local",
+    name: "Cypress Viewer",
+    roles: ["marking:PUBLIC", "ontology-viewer", "default-roles-tellus"],
+  },
+  {
+    id: "bcd2551e-b985-4d6f-97ff-e0e087a87e20",
+    email: "cypress-nogroups@tellus.local",
+    name: "Cypress NoGroups",
+    roles: ["default-roles-tellus"],
+  },
+];
+
+const TEST_ISSUER = `${KC_URL}/realms/${KC_REALM}`;
+
+function buildTestPrincipal(
+  userId: string,
+  overrideRoles?: string[],
+): AuthenticatedPrincipal | null {
+  const seed = TEST_USER_SEEDS.find((u) => u.id === userId);
+  const roles = overrideRoles ?? seed?.roles ?? ["connectivity:read", "connectivity:write", "default-roles-tellus"];
+  const email = seed?.email ?? `test-${userId}@tellus.local`;
+  const name = seed?.name ?? `Test User ${userId.slice(0, 8)}`;
+  const now = Math.floor(Date.now() / 1000);
+  const claims: Record<string, unknown> = {
+    exp: now + 3600,
+    iat: now,
+    iss: TEST_ISSUER,
+    sub: userId,
+    email,
+    email_verified: true,
+    preferred_username: email,
+    name,
+    given_name: name.split(" ")[0],
+    family_name: name.split(" ").slice(1).join(" "),
+    realm_access: { roles },
+    resource_access: { account: { roles: ["manage-account", "manage-account-links", "view-profile"] } },
+    azp: "tellus-frontend",
+    typ: "Bearer",
+    acr: "1",
+  };
+  return normalizeClaims(claims);
+}
+
+// ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
 
@@ -317,22 +409,67 @@ export function globalAuth() {
     res: Response,
     next: NextFunction,
   ): void {
-    // 1. Allowlist short-circuit.
-    if (isAllowlisted(req)) {
-      return next();
-    }
-
-    // 2. PAT already resolved by `patSecurityGate` — accept.
-    //    `patSecurityGate` populates `req.tellusPrincipal` when the
-    //    Authorization header starts with `tellus_pat_`. If that ran,
-    //    the request is authenticated via PAT scope semantics; do not
-    //    re-authenticate as a JWT (PATs are opaque, not JWTs).
+    // Shared per-request mutable surface — declared early so the test-auth
+    // bypass (below) and the JWT path (further down) both populate it.
     const reqAny = req as Request & {
       tellusPrincipal?: { userId: string; source?: string };
       user?: unknown;
       auth?: unknown;
       keycloakUser?: unknown;
     };
+
+    // 1. Allowlist short-circuit.
+    if (isAllowlisted(req)) {
+      return next();
+    }
+
+    // 1b. Dev-only test-auth bypass — accepts a X-Tellus-Test-Auth header
+    //     when NODE_ENV !== 'production' AND TELLUS_TEST_HOOKS=1. Skips
+    //     jwt.verify entirely — zero Keycloak dependency for BE API calls.
+    //     Format: "X-Tellus-Test-Auth: <userId>" or "X-Tellus-Test-Auth: <userId>:<role1>,<role2>"
+    //     When roles are specified, they override the seed's roles.
+    //     When the userId matches a TEST_USER_SEEDS entry, the seed's
+    //     email/name are used; otherwise a synthetic principal is built
+    //     from the userId + specified (or default) roles.
+    if (
+      process.env.NODE_ENV !== "production" &&
+      process.env.TELLUS_TEST_HOOKS === "1" &&
+      req.headers["x-tellus-test-auth"]
+    ) {
+      console.log("[globalAuth] TEST-AUTH BYPASS HIT — NODE_ENV=%s TELLUS_TEST_HOOKS=%s header=%s",
+        process.env.NODE_ENV, process.env.TELLUS_TEST_HOOKS, String(req.headers["x-tellus-test-auth"]).slice(0, 40));
+      const raw = String(req.headers["x-tellus-test-auth"]).trim();
+      // Split on the FIRST colon only — role names themselves contain colons
+      // (e.g. "connectivity:read"), so a naive split(":") would break them.
+      const colonIdx = raw.indexOf(":");
+      const userId = colonIdx === -1 ? raw : raw.slice(0, colonIdx);
+      const rolePart = colonIdx === -1 ? undefined : raw.slice(colonIdx + 1);
+      const overrideRoles = rolePart
+        ? rolePart.split(",").map((r) => r.trim()).filter(Boolean)
+        : undefined;
+      const principal = buildTestPrincipal(userId, overrideRoles);
+      if (principal) {
+        reqAny.user = {
+          id: principal.id,
+          email: principal.email,
+          displayName: principal.displayName,
+          roles: principal.roles,
+          claims: principal.claims,
+        } as unknown as NonNullable<typeof reqAny.user>;
+        reqAny.auth = principal.claims;
+        reqAny.keycloakUser = principal.claims as unknown as import("./keycloakAuth").KeycloakClaims;
+        return next();
+      }
+      return authError(
+        req,
+        res,
+        "UNAUTHORIZED",
+        `Test-auth bypass: invalid user id "${userId}"`,
+        401,
+      );
+    }
+
+    // 2. PAT already resolved by `patSecurityGate` — accept.
     if (reqAny.tellusPrincipal && reqAny.tellusPrincipal.source === "pat") {
       return next();
     }
@@ -350,6 +487,46 @@ export function globalAuth() {
     if (!token) {
       const cookieToken = readTellusTokenCookie(req);
       if (cookieToken) token = cookieToken;
+    }
+    // 3b. Dev-only test-auth Bearer bypass — the FE's axios interceptor
+    //     injects "Authorization: Bearer <token>" on every outbound call.
+    //     When the test stub's accessToken starts with "test-auth:", we
+    //     extract the userId and use the test bypass (same as 1b above),
+    //     skipping jwt.verify entirely. This lets the FE's normal auth
+    //     flow (silentRefresh → Bearer injection → API call) work without
+    //     Keycloak.
+    if (
+      token &&
+      process.env.NODE_ENV !== "production" &&
+      process.env.TELLUS_TEST_HOOKS === "1" &&
+      token.startsWith("test-auth:")
+    ) {
+      const raw = token.slice("test-auth:".length).trim();
+      // Split on the FIRST colon only — role names contain colons.
+      const colonIdx = raw.indexOf(":");
+      const userId = colonIdx === -1 ? raw : raw.slice(0, colonIdx);
+      const rolePart = colonIdx === -1 ? undefined : raw.slice(colonIdx + 1);
+      const overrideRoles = rolePart
+        ? rolePart.split(",").map((r) => r.trim()).filter(Boolean)
+        : undefined;
+      const principal = buildTestPrincipal(userId, overrideRoles);
+      if (principal) {
+        reqAny.user = {
+          id: principal.id,
+          email: principal.email,
+          displayName: principal.displayName,
+          roles: principal.roles,
+          claims: principal.claims,
+        } as unknown as NonNullable<typeof reqAny.user>;
+        reqAny.auth = principal.claims;
+        reqAny.keycloakUser = principal.claims as unknown as import("./keycloakAuth").KeycloakClaims;
+        return next();
+      }
+      return authError(
+        req, res, "UNAUTHORIZED",
+        `Test-auth Bearer bypass: invalid user id "${userId}"`,
+        401,
+      );
     }
     if (!token) {
       return authError(

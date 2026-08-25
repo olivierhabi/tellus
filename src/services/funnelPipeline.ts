@@ -19,6 +19,7 @@
 
 import { query } from "../db";
 import { client as osClient } from "../services/opensearch/client";
+import { objectTypeIndexName } from "./opensearch/objectIndexNames";
 
 export type FunnelStage = "changelog" | "merge" | "computed" | "indexing";
 export const STAGE_ORDER: FunnelStage[] = ["changelog", "merge", "computed", "indexing"];
@@ -135,7 +136,7 @@ export async function runFunnelPipeline(
   const stages: StageResult[] = [];
 
   try {
-    const index = `ontology-${objectTypeApiName.toLowerCase()}`;
+    const index = objectTypeIndexName(objectTypeApiName);
 
     // 1. CHANGELOG stage — read the current object count as a stand-in
     //    for building a real CDC delta. Production pipelines would diff

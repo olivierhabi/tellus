@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { pool } from "../../db";
+import { readSyncedPreview, type ImportConfigForRead } from "./synced-dataset-reader";
 
 const RID_PREFIX = "ri.foundry.main.dataset.";
 
@@ -133,5 +134,107 @@ export async function registerSyncedDataset(
     return { ok: true };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sync-schema persistence — populate `dataset_columns` for Iceberg outputs.
+//
+// The upload pipeline has the CSV parse worker to scan its schema into
+// `dataset_columns`, but a table-import's output never got an equivalent:
+// `registerSyncedDataset` writes only the registry row, so every Iceberg
+// dataset historically had zero persisted columns. Surfaces that read the
+// live preview (Dataset Preview, the ontology wizard's picker) masked this,
+// but consumers of the PERSISTED scan — notably
+// `registerWithFoundryDataset` (backing-datasource registration) — failed
+// with "has no columns yet".
+//
+// `persistSyncedSchema` closes that gap: it reads a bounded preview of the
+// current Iceberg snapshot and wipes-and-rewrites the dataset's
+// `dataset_columns` rows (same transactional pattern as the CSV parse job),
+// then records `column_count`/`schema_info` on the registry row. Called
+// best-effort after a successful build and as the registration fallback.
+// ---------------------------------------------------------------------------
+
+/** Sample size for type inference + sample values (bounded, cheap). */
+const SCHEMA_SCAN_ROW_LIMIT = 200;
+
+/**
+ * Scan the current Iceberg snapshot and persist the column schema for a
+ * synced dataset. Returns the number of columns persisted (0 when the table
+ * has never been built or is unreadable). Throws only on DB failures —
+ * callers treat it as best-effort except the registration fallback.
+ */
+export async function persistSyncedSchema(
+  foundryDatasetId: string,
+  config: ImportConfigForRead,
+  tenant: string,
+): Promise<number> {
+  const preview = await readSyncedPreview(config, tenant, SCHEMA_SCAN_ROW_LIMIT);
+  if (preview.columns.length === 0) return 0;
+
+  // Derive per-column sample values from the previewed rows (first few
+  // non-null observations), mirroring what the CSV scan persists.
+  const samples = new Map<string, unknown[]>();
+  for (const col of preview.columns) samples.set(col.name, []);
+  for (const row of preview.rows) {
+    let remaining = false;
+    for (const [key, vals] of samples) {
+      if (vals.length >= 5) continue;
+      remaining = true;
+      const v = row[key];
+      if (v !== null && v !== undefined && v !== "") vals.push(v);
+    }
+    if (!remaining) break;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM dataset_columns WHERE dataset_id = $1`, [
+      foundryDatasetId,
+    ]);
+    for (let i = 0; i < preview.columns.length; i++) {
+      const col = preview.columns[i];
+      await client.query(
+        `INSERT INTO dataset_columns
+           (dataset_id, column_name, column_type, ordinal_position, nullable, sample_values)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+        [
+          foundryDatasetId,
+          col.name,
+          col.type,
+          i + 1,
+          true,
+          JSON.stringify(samples.get(col.name) ?? []),
+        ],
+      );
+    }
+    await client.query(
+      `UPDATE foundry_datasets SET
+         column_count = $2,
+         row_count = COALESCE(row_count, $3),
+         schema_info = $4::jsonb,
+         updated_at = now()
+       WHERE id = $1`,
+      [
+        foundryDatasetId,
+        preview.columns.length,
+        preview.snapshot ? Number(preview.snapshot.addedRecords) || null : null,
+        JSON.stringify({
+          columns: preview.columns.map((c) => ({ name: c.name, type: c.type })),
+          source: "sync-schema-scan",
+          snapshotId: preview.snapshot?.id ?? null,
+          scannedAt: new Date().toISOString(),
+        }),
+      ],
+    );
+    await client.query("COMMIT");
+    return preview.columns.length;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
 }

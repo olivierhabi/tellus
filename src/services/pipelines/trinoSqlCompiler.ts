@@ -27,6 +27,9 @@ import { AppError } from "../../utils/foundryAppError";
 import type {
   TransformStep,
   FilterCondition,
+  OperandShape,
+  BinaryOp,
+  ExpressionItemShape,
 } from "./duckdbTransformEngine";
 import type { EnginePlan, IcebergTarget } from "./computeEngine";
 
@@ -77,6 +80,7 @@ export function compileBatchJob(input: CompileBatchInput): CompiledBatchJob {
   }));
   let from = `${sourceRef(input.catalog, primary)} AS t0`;
   const predicates: string[] = [];
+  const ordering: string[] = [];
   let aliasIdx = 1;
   const unions: string[] = [];
 
@@ -126,6 +130,111 @@ export function compileBatchJob(input: CompileBatchInput): CompiledBatchJob {
         for (const col of columns) {
           col.name = normalizeName(col.name, step.removeSpecialCharacters);
         }
+        break;
+      }
+      // --- Tier A single-input transforms -------------------------------
+      case "Select": {
+        const keep = new Set(step.columns);
+        const ordered = step.columns;
+        const resolved: typeof columns = [];
+        for (const name of ordered) {
+          const found = columns.find((c) => c.name === name);
+          if (found) resolved.push(found);
+          else throw new AppError(
+            `Select column "${name}" not produced by upstream chain.`,
+            400,
+            "BATCH_TRANSFORM_INVALID",
+          );
+        }
+        columns = resolved;
+        break;
+      }
+      case "Sort": {
+        for (const k of step.sorts ?? []) {
+          const dir = k.direction === "desc" ? "DESC" : "ASC";
+          const nulls =
+            k.nulls === "first"
+              ? "NULLS FIRST"
+              : k.nulls === "last"
+              ? "NULLS LAST"
+              : k.direction === "desc"
+              ? "NULLS FIRST"
+              : "NULLS LAST";
+          ordering.push(`${quoteIdent(k.column)} ${dir} ${nulls}`);
+        }
+        break;
+      }
+      case "DropDuplicates": {
+        // Fold-model limitation: would require a window-function subquery.
+        // Caller falls back to the in-process materializeForDeploy path.
+        throw new AppError(
+          "DropDuplicates is not yet supported in the Trino batch compiler. " +
+            "It falls back to in-process execution.",
+          400,
+          "BATCH_TRANSFORM_NOT_SUPPORTED",
+        );
+      }
+      case "UppercaseColumnNames": {
+        for (const col of columns) {
+          col.name = col.name.toUpperCase();
+        }
+        break;
+      }
+      case "RowSize": {
+        throw new AppError(
+          "RowSize is not supported in the Trino batch compiler (no portable whole-row byte-size).",
+          400,
+          "BATCH_TRANSFORM_NOT_SUPPORTED",
+        );
+      }
+      case "ApplyExpression": {
+        pushExpressionToColumns(columns, step.expression);
+        break;
+      }
+      case "ApplyMultipleExpressions": {
+        for (const e of step.expressions ?? []) {
+          pushExpressionToColumns(columns, e);
+        }
+        break;
+      }
+      case "ApplyToMultipleColumns": {
+        const cols = step.columns ?? [];
+        const suffix = step.outputSuffix ?? "_calc";
+        const outs = step.outputColumns ?? cols.map((c) => `${c}${suffix}`);
+        for (let i = 0; i < cols.length; i++) {
+          pushExpressionToColumns(columns, {
+            left: { kind: "column", value: cols[i] },
+            operator: step.operator,
+            right: step.right,
+            outputColumn: outs[i],
+            outputType: step.outputType,
+          });
+        }
+        break;
+      }
+      case "ComputeIfExpressionAbsent": {
+        const e = step.expression as unknown as ExpressionItemShape;
+        const outIdx = columns.findIndex((c) => c.name === step.outputColumn);
+        const inner = renderExpressionTrino(e);
+        const innerCast = castForResultTrino(inner, e.outputType);
+        const expr = `COALESCE(${quoteIdent(step.outputColumn)}, ${innerCast})`;
+        if (outIdx >= 0) {
+          columns[outIdx] = {
+            expr,
+            name: step.outputColumn,
+            type: e.outputType ?? columns[outIdx].type,
+          };
+        } else {
+          columns.push({
+            expr,
+            name: step.outputColumn,
+            type: e.outputType ?? "string",
+          });
+        }
+        break;
+      }
+      case "TextBlock": {
+        // Annotation — no effect on output schema or rows.
         break;
       }
       case "Join": {
@@ -238,7 +347,8 @@ export function compileBatchJob(input: CompileBatchInput): CompiledBatchJob {
     .join(", ");
 
   const where = predicates.length ? ` WHERE ${predicates.join(" AND ")}` : "";
-  let select = `SELECT ${projection} FROM ${from}${where}`;
+  const orderBy = ordering.length ? ` ORDER BY ${ordering.join(", ")}` : "";
+  let select = `SELECT ${projection} FROM ${from}${where}${orderBy}`;
   for (const u of unions) select += ` UNION ALL ${u}`;
 
   const sinkSchema = `${catalog}.${quoteIdent(input.output.namespace)}`;
@@ -362,6 +472,102 @@ export function foldLinearArm(
           col.name = normalizeName(col.name, step.removeSpecialCharacters);
         }
         break;
+      }
+      case "UppercaseColumnNames": {
+        for (const col of columns) {
+          col.name = col.name.toUpperCase();
+        }
+        break;
+      }
+      case "Select": {
+        const ordered = step.columns;
+        const resolved: typeof columns = [];
+        for (const name of ordered) {
+          const found = columns.find((c) => c.name === name);
+          if (found) resolved.push(found);
+          else throw new AppError(
+            `Select column "${name}" not produced by upstream.`,
+            400,
+            "BATCH_TRANSFORM_INVALID",
+          );
+        }
+        columns = resolved;
+        break;
+      }
+      case "ApplyExpression": {
+        pushExpressionToColumns(columns, step.expression);
+        break;
+      }
+      case "ApplyMultipleExpressions": {
+        for (const e of step.expressions ?? []) {
+          pushExpressionToColumns(columns, e);
+        }
+        break;
+      }
+      case "ApplyToMultipleColumns": {
+        const cols = step.columns ?? [];
+        const suffix = step.outputSuffix ?? "_calc";
+        const outs = step.outputColumns ?? cols.map((c) => `${c}${suffix}`);
+        for (let i = 0; i < cols.length; i++) {
+          pushExpressionToColumns(columns, {
+            left: { kind: "column", value: cols[i] },
+            operator: step.operator,
+            right: step.right,
+            outputColumn: outs[i],
+            outputType: step.outputType,
+          });
+        }
+        break;
+      }
+      case "ComputeIfExpressionAbsent": {
+        const e = step.expression as unknown as ExpressionItemShape;
+        const outIdx = columns.findIndex((c) => c.name === step.outputColumn);
+        const inner = renderExpressionTrino(e);
+        const innerCast = castForResultTrino(inner, e.outputType);
+        const expr = `COALESCE(${quoteIdent(step.outputColumn)}, ${innerCast})`;
+        if (outIdx >= 0) {
+          columns[outIdx] = {
+            expr,
+            name: step.outputColumn,
+            type: e.outputType ?? columns[outIdx].type,
+          };
+        } else {
+          columns.push({
+            expr,
+            name: step.outputColumn,
+            type: e.outputType ?? "string",
+          });
+        }
+        break;
+      }
+      case "TextBlock": {
+        // Annotation — no effect.
+        break;
+      }
+      case "Sort": {
+        // Sorting applies to the whole outer query, not an arm. We can't
+        // fold ORDER BY into the arm projection; arm sorting inside a fused
+        // join/union is meaningless. Refuse so the deployment planner picks
+        // the top-level batch compiler instead.
+        throw new AppError(
+          "Sort is not supported inside a fused join/union arm. Move Sort outside the fusion.",
+          400,
+          "BATCH_ARM_NOT_LINEAR",
+        );
+      }
+      case "DropDuplicates": {
+        throw new AppError(
+          "DropDuplicates is not supported in a fused arm.",
+          400,
+          "BATCH_ARM_NOT_LINEAR",
+        );
+      }
+      case "RowSize": {
+        throw new AppError(
+          "RowSize is not supported inside a fused arm.",
+          400,
+          "BATCH_ARM_NOT_LINEAR",
+        );
       }
       default:
         // Join/Union inside an arm chain is not a linear op — the graph
@@ -506,18 +712,29 @@ function sourceRef(catalog: string, s: BatchSourceTable): string {
 function renderCondition(c: FilterCondition): string {
   const col = quoteIdent(c.column);
   const val = () => `'${escapeSql(c.value ?? "")}'`;
+  // Right-hand operand: literal by default; column reference when the
+  // condition compares column-to-column (valueIsColumn).
+  const rhs = c.valueIsColumn
+    ? `CAST(${quoteIdent(c.value ?? "")} AS VARCHAR)`
+    : val();
   const colStr = `CAST(${col} AS VARCHAR)`;
   switch (c.operator) {
     case "eq":
-      return `${colStr} = ${val()}`;
+      return `${colStr} = ${rhs}`;
     case "neq":
-      return `${colStr} <> ${val()}`;
+      return `${colStr} <> ${rhs}`;
     case "starts_with":
-      return `${colStr} LIKE '${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `starts_with(${colStr}, ${rhs})`
+        : `${colStr} LIKE '${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
     case "ends_with":
-      return `${colStr} LIKE '%${escapeLike(c.value ?? "")}' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `ends_with(${colStr}, ${rhs})`
+        : `${colStr} LIKE '%${escapeLike(c.value ?? "")}' ESCAPE '\\'`;
     case "contains":
-      return `${colStr} LIKE '%${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
+      return c.valueIsColumn
+        ? `strpos(${colStr}, ${rhs}) > 0`
+        : `${colStr} LIKE '%${escapeLike(c.value ?? "")}%' ESCAPE '\\'`;
     case "is_null":
       return c.treatEmptyAsNull
         ? `(${col} IS NULL OR ${colStr} = '')`
@@ -581,4 +798,65 @@ function escapeSql(v: string): string {
 
 function escapeLike(v: string): string {
   return escapeSql(v).replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+// ---------------------------------------------------------------------------
+// Tier A single-input helpers — operand / expression rendering for
+// ApplyExpression-family transforms in the batch compiler.
+// ---------------------------------------------------------------------------
+
+/**
+ * Mutate `columns` (the in-progress column accumulator) by pushing or
+ * replacing the column produced by `e` with the rendered binary-expression
+ * string. Mirrors `compileExpressions` in duckdbTransformEngine.ts.
+ */
+function pushExpressionToColumns(
+  columns: Array<{ expr: string; name: string; type: string }>,
+  e: ExpressionItemShape,
+): void {
+  const expr = renderExpressionTrino(e);
+  const outIdx = columns.findIndex((c) => c.name === e.outputColumn);
+  if (outIdx >= 0) {
+    columns[outIdx] = {
+      expr,
+      name: e.outputColumn,
+      type: e.outputType ?? columns[outIdx].type,
+    };
+  } else {
+    columns.push({ expr, name: e.outputColumn, type: e.outputType ?? "string" });
+  }
+}
+
+function renderOperandTrino(op: OperandShape): string {
+  if (op.kind === "column") return quoteIdent(op.value);
+  const t = op.literalType ?? "string";
+  const v = op.value ?? "";
+  switch (t) {
+    case "integer":
+    case "numeric": {
+      const n = Number(v);
+      return Number.isFinite(n) ? String(n) : "NULL";
+    }
+    case "boolean":
+      return v === "true" ? "TRUE" : "FALSE";
+    case "string":
+    default:
+      return `'${escapeSql(v)}'`;
+  }
+}
+
+function sqlOpTrino(op: BinaryOp): string {
+  return op === "==" ? "=" : op === "!=" ? "<>" : op;
+}
+
+function renderExpressionTrino(e: ExpressionItemShape): string {
+  return `(${renderOperandTrino(e.left)} ${sqlOpTrino(e.operator)} ${renderOperandTrino(e.right)})`;
+}
+
+function castForResultTrino(
+  expr: string,
+  outputType: ExpressionItemShape["outputType"],
+): string {
+  if (outputType === undefined) return expr;
+  return `TRY_CAST(${expr} AS ${mapTrinoType(outputType)})`;
 }

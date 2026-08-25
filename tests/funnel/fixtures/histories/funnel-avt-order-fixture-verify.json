@@ -1,0 +1,4367 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-08-01T02:41:07.607522345Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "taskId": "250611107",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "ObjectTypeFunnelWorkflow"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiJ9"
+            }
+          ]
+        },
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "93b635be-ce62-4b06-811c-053044e8a773",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "firstExecutionRunId": "93b635be-ce62-4b06-811c-053044e8a773",
+        "attempt": 1,
+        "firstWorkflowTaskBackoff": "0s",
+        "memo": {
+          "fields": {
+            "dbEnvironmentId": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiI="
+            },
+            "environmentId": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiI="
+            },
+            "funnelRunId": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "IjNmMzA2M2JkLTgwMDAtNDk2OC1hNTUxLWFjNDI2Y2UxNjg4YSI="
+            },
+            "objectTypeApiName": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "IkF2dE9yZGVyRml4dHVyZSI="
+            },
+            "objectTypeRid": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "ImU4NDU3NjczLTc0NjctNDg5NS1iYWQ1LTBiMDU1YTBmODMwYiI="
+            },
+            "ontologyRid": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSI="
+            },
+            "workerBuildId": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "ImYxZDI4MDc5ZjgwMiI="
+            }
+          }
+        },
+        "searchAttributes": {
+          "indexedFields": {
+            "TellusEnvironmentId": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZA=="
+              },
+              "data": "WyJ0ZWxsdXMtYXV0b21hdGUtdmVyaWZ5LW1haW4iXQ=="
+            },
+            "TellusObjectTypeRid": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZA=="
+              },
+              "data": "WyJlODQ1NzY3My03NDY3LTQ4OTUtYmFkNS0wYjA1NWEwZjgzMGIiXQ=="
+            },
+            "TellusOntologyRid": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZA=="
+              },
+              "data": "WyIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiXQ=="
+            },
+            "TellusWorkerBuildId": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZA=="
+              },
+              "data": "WyJmMWQyODA3OWY4MDIiXQ=="
+            }
+          }
+        },
+        "header": {},
+        "workflowId": "ObjectTypeFunnelWorkflow/00000000-0000-0000-0000-000000000001/e8457673-7467-4895-bad5-0b055a0f830b"
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-08-01T02:41:07.608011970Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED",
+      "taskId": "250611108",
+      "workflowExecutionSignaledEventAttributes": {
+        "signalName": "sourceTransactionCommitted",
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzaWduYWxJZCI6ImNlZmE5ODMyLWMyNTQtNGVlMy1hODg2LWJmNDE2Mjc0OGVjNCIsImZ1bm5lbFJ1bklkIjoiM2YzMDYzYmQtODAwMC00OTY4LWE1NTEtYWM0MjZjZTE2ODhhIn0="
+            }
+          ]
+        },
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "header": {}
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-08-01T02:41:07.608032095Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611109",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-08-01T02:41:07.646321845Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611113",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "3",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "b04585d6-ce29-4722-88d5-6c6d7c16a78a",
+        "historySizeBytes": "1723",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-08-01T02:41:07.742741511Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611118",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "3",
+        "startedEventId": "4",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {
+          "coreUsedFlags": [
+            1,
+            3,
+            2
+          ],
+          "langUsedFlags": [
+            2
+          ],
+          "sdkName": "temporal-typescript",
+          "sdkVersion": "1.16.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-08-01T02:41:07.743384345Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "taskId": "250611119",
+      "timerStartedEventAttributes": {
+        "timerId": "2",
+        "startToFireTimeout": "300s",
+        "workflowTaskCompletedEventId": "5"
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-08-01T02:41:07.743857220Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611120",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "1",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6ImNoYW5nZWxvZyIsInJ1bktleSI6ImNlZmE5ODMyLWMyNTQtNGVlMy1hODg2LWJmNDE2Mjc0OGVjNCJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "5",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-08-01T02:41:07.761884803Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611126",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "7",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "baa00967-254c-4200-be7e-35d8da03d85d",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-08-01T02:41:07.803178553Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611127",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "7",
+        "startedEventId": "8",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-08-01T02:41:07.803200636Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611128",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-08-01T02:41:07.809660261Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611132",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "10",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "2df67ff5-b45e-4398-917e-d4389501107f",
+        "historySizeBytes": "2971"
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-08-01T02:41:07.843102261Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611136",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "10",
+        "startedEventId": "11",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-08-01T02:41:07.843180678Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611137",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "2",
+        "activityType": {
+          "name": "runChangelogActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "3600s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "12",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-08-01T02:41:07.851568720Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611142",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "13",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "b03732a4-a9e7-4fc0-b8b2-cd3ecd27b35c",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-08-01T02:41:12.954879708Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611143",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzbmFwc2hvdElkIjoiNzdjYzEyMjYtOTdhNy00YzAxLTk5OGUtMDJiMDAyMDIxODMzIiwicm93c0VtaXR0ZWQiOjAsIm1hbmlmZXN0IjpbeyJmaWxlX3BhdGgiOiJzMzovL19mdW5uZWwvQXZ0T3JkZXJGaXh0dXJlL2NoYW5nZWxvZy9kZWZhdWx0L2RhdGEvMjAyNi0wOC0wMVQwMjo0MToxMi44ODRaLnBhcnF1ZXQiLCJmaWxlX3NpemVfYnl0ZXMiOjAsInJvd19jb3VudCI6MCwib3BlcmF0aW9uIjoiYWRkZWQifV0sIm93bmVkUHJvcGVydGllcyI6W119"
+            }
+          ]
+        },
+        "scheduledEventId": "13",
+        "startedEventId": "14",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-08-01T02:41:12.954946Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611144",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-08-01T02:41:12.961295750Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611148",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "16",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "cc98e61c-8256-4828-9c01-4c179c51eb0b",
+        "historySizeBytes": "4312"
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2026-08-01T02:41:13.005118333Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611152",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "16",
+        "startedEventId": "17",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2026-08-01T02:41:13.006485166Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611153",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "3",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6Im1lcmdlIiwiY29tcGxldGVkUHJldmlvdXMiOiJjaGFuZ2Vsb2ciLCJydW5LZXkiOiJjZWZhOTgzMi1jMjU0LTRlZTMtYTg4Ni1iZjQxNjI3NDhlYzQiLCJzdGFnZU91dHB1dCI6eyJyb3dzRW1pdHRlZCI6MCwic25hcHNob3RJZCI6Ijc3Y2MxMjI2LTk3YTctNGMwMS05OThlLTAyYjAwMjAyMTgzMyJ9fQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "18",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "20",
+      "eventTime": "2026-08-01T02:41:13.014801458Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611158",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "19",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "96e57f3b-50a7-4c14-9c6a-e60624dfe8b0",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "21",
+      "eventTime": "2026-08-01T02:41:13.037864916Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611159",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "19",
+        "startedEventId": "20",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "22",
+      "eventTime": "2026-08-01T02:41:13.037871583Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611160",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "23",
+      "eventTime": "2026-08-01T02:41:13.043935083Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611164",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "22",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "200c7a63-aec6-4927-ace1-b59178b2745a",
+        "historySizeBytes": "5571"
+      }
+    },
+    {
+      "eventId": "24",
+      "eventTime": "2026-08-01T02:41:13.057300125Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611168",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "22",
+        "startedEventId": "23",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "25",
+      "eventTime": "2026-08-01T02:41:13.057365416Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611169",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "4",
+        "activityType": {
+          "name": "runMergeActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImNoYW5nZWxvZ1NuYXBzaG90SWQiOiI3N2NjMTIyNi05N2E3LTRjMDEtOTk4ZS0wMmIwMDIwMjE4MzMiLCJjaGFuZ2Vsb2dPd25lZFByb3BlcnRpZXMiOltdLCJydW5LZXkiOiJjZWZhOTgzMi1jMjU0LTRlZTMtYTg4Ni1iZjQxNjI3NDhlYzQifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "7200s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "24",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "26",
+      "eventTime": "2026-08-01T02:41:13.062672208Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611174",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "25",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "8fc8eb28-cf13-41ee-9d59-3d2f94d9cdba",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "27",
+      "eventTime": "2026-08-01T02:41:18.093836210Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611175",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJtZXJnZWRTbmFwc2hvdElkIjoiMjQxNDQ1YjAtNTk4Ny00MTI3LWJiMGUtMDIyNmMwNDE5YWQ2IiwidXBzZXJ0cyI6MCwiZGVsZXRlcyI6MCwiZWRpdElkcyI6W10sIm1lcmdlZFJvd0NvdW50IjowfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "25",
+        "startedEventId": "26",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "28",
+      "eventTime": "2026-08-01T02:41:18.093870919Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611176",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "29",
+      "eventTime": "2026-08-01T02:41:18.100281919Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611180",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "28",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "b3e5c06d-220d-4920-8c00-4977ec21bc98",
+        "historySizeBytes": "6897"
+      }
+    },
+    {
+      "eventId": "30",
+      "eventTime": "2026-08-01T02:41:18.113045377Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611184",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "28",
+        "startedEventId": "29",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "31",
+      "eventTime": "2026-08-01T02:41:18.113152169Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611185",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "5",
+        "activityType": {
+          "name": "syncOpenSearchActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "3600s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "30",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "32",
+      "eventTime": "2026-08-01T02:41:18.118891085Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611190",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "31",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "01a2fe92-a6c2-4653-8d0c-74230e645154",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "33",
+      "eventTime": "2026-08-01T02:41:19.111642752Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611191",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpbmRleE5hbWUiOiJ2ZXJpZnktbWFpbi1vbnRvbG9neS1hdnRvcmRlcmZpeHR1cmUiLCJpbmRleENyZWF0ZWQiOnRydWUsInJvd3NSZWFkIjo3NDYsInJvd3NJbmRleGVkIjo3NDYsInJvd3NGYWlsZWQiOjAsInJvd3NPcnBoYW5EZWxldGVkIjowLCJkdXJhdGlvbk1zIjo5NzF9"
+            }
+          ]
+        },
+        "scheduledEventId": "31",
+        "startedEventId": "32",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "34",
+      "eventTime": "2026-08-01T02:41:19.111649377Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611192",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "35",
+      "eventTime": "2026-08-01T02:41:19.119238502Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611196",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "34",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "bc282391-66e1-45d9-bf1a-aeaa137ab5c9",
+        "historySizeBytes": "8135"
+      }
+    },
+    {
+      "eventId": "36",
+      "eventTime": "2026-08-01T02:41:19.127685002Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611200",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "34",
+        "startedEventId": "35",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "37",
+      "eventTime": "2026-08-01T02:41:19.127750086Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611201",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "6",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6ImluZGV4aW5nIiwib2JqZWN0c0luZGV4ZWQiOjAsImNvbXBsZXRlZFByZXZpb3VzIjoibWVyZ2UiLCJydW5LZXkiOiJjZWZhOTgzMi1jMjU0LTRlZTMtYTg4Ni1iZjQxNjI3NDhlYzQiLCJzdGFnZU91dHB1dCI6eyJ1cHNlcnRzIjowLCJkZWxldGVzIjowLCJtZXJnZWRSb3dDb3VudCI6MCwibWVyZ2VkU25hcHNob3RJZCI6IjI0MTQ0NWIwLTU5ODctNDEyNy1iYjBlLTAyMjZjMDQxOWFkNiJ9fQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "36",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "38",
+      "eventTime": "2026-08-01T02:41:19.132481711Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611206",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "37",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "3f07c438-0c5a-4466-8230-b2858a86571d",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "39",
+      "eventTime": "2026-08-01T02:41:19.150479378Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611207",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "37",
+        "startedEventId": "38",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "40",
+      "eventTime": "2026-08-01T02:41:19.150485711Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611208",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "41",
+      "eventTime": "2026-08-01T02:41:19.156496628Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611212",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "40",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "ad59ed4b-b678-4f3c-ad65-15fbe6e9d039",
+        "historySizeBytes": "9444"
+      }
+    },
+    {
+      "eventId": "42",
+      "eventTime": "2026-08-01T02:41:19.166395961Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611216",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "40",
+        "startedEventId": "41",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "43",
+      "eventTime": "2026-08-01T02:41:19.166444544Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611217",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "7",
+        "activityType": {
+          "name": "runIndexingActivityProxy"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsIm1lcmdlZFNuYXBzaG90SWQiOiIyNDE0NDViMC01OTg3LTQxMjctYmIwZS0wMjI2YzA0MTlhZDYiLCJtZXJnZWRSb3dDb3VudCI6MH0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "14400s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "42",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "44",
+      "eventTime": "2026-08-01T02:41:19.170881669Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611222",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "43",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "df5bf82a-c263-4589-a2ac-6c580f640401",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "45",
+      "eventTime": "2026-08-01T02:41:24.192082005Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611223",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJlZGl0c0luZGV4ZWQiOjAsInB1Ymxpc2hlZFNwbGl0SWRzIjpbXSwicXVpY2t3aXQiOmZhbHNlfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "43",
+        "startedEventId": "44",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "46",
+      "eventTime": "2026-08-01T02:41:24.192120672Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611224",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "47",
+      "eventTime": "2026-08-01T02:41:24.197477213Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611228",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "46",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "96a7f735-8041-48d6-989c-95b3794a041f",
+        "historySizeBytes": "10657"
+      }
+    },
+    {
+      "eventId": "48",
+      "eventTime": "2026-08-01T02:41:24.208320338Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611232",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "46",
+        "startedEventId": "47",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "49",
+      "eventTime": "2026-08-01T02:41:24.208452047Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611233",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "8",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6Imh5ZHJhdGlvbiIsImNvbXBsZXRlZFByZXZpb3VzIjoiaW5kZXhpbmciLCJydW5LZXkiOiJjZWZhOTgzMi1jMjU0LTRlZTMtYTg4Ni1iZjQxNjI3NDhlYzQiLCJzdGFnZU91dHB1dCI6eyJlZGl0c0luZGV4ZWQiOjAsInB1Ymxpc2hlZFNwbGl0Q291bnQiOjAsInF1aWNrd2l0IjpmYWxzZX19"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "48",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "50",
+      "eventTime": "2026-08-01T02:41:24.212956088Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611238",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "49",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "96ad78e5-3eb4-4d9e-9fac-6f92ff045337",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "51",
+      "eventTime": "2026-08-01T02:41:24.225809297Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611239",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "49",
+        "startedEventId": "50",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "52",
+      "eventTime": "2026-08-01T02:41:24.225815713Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611240",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "53",
+      "eventTime": "2026-08-01T02:41:24.231538172Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611244",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "52",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "dff919a8-dfd0-4af6-81c0-adcb5cc5b53d",
+        "historySizeBytes": "11908"
+      }
+    },
+    {
+      "eventId": "54",
+      "eventTime": "2026-08-01T02:41:24.240270380Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611248",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "52",
+        "startedEventId": "53",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "55",
+      "eventTime": "2026-08-01T02:41:24.240305713Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611249",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "9",
+        "activityType": {
+          "name": "runHydrationActivityProxy"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsInB1Ymxpc2hlZFNwbGl0SWRzIjpbXX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "1800s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "54",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 10
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "56",
+      "eventTime": "2026-08-01T02:41:24.244998797Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611254",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "55",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "e570d796-d4fe-46cb-990f-8662d835df41",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "57",
+      "eventTime": "2026-08-01T02:41:29.260373299Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611255",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJwcmVmZXRjaGVkIjowfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "55",
+        "startedEventId": "56",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "58",
+      "eventTime": "2026-08-01T02:41:29.260398507Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611256",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "59",
+      "eventTime": "2026-08-01T02:41:29.266796882Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611260",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "58",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "2bf94677-ca61-4e53-a62d-fc049f0b2935",
+        "historySizeBytes": "13025"
+      }
+    },
+    {
+      "eventId": "60",
+      "eventTime": "2026-08-01T02:41:29.277946924Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611264",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "58",
+        "startedEventId": "59",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "61",
+      "eventTime": "2026-08-01T02:41:29.278059799Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611265",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "10",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6bnVsbCwiY29tcGxldGVkUHJldmlvdXMiOiJoeWRyYXRpb24iLCJydW5LZXkiOiJjZWZhOTgzMi1jMjU0LTRlZTMtYTg4Ni1iZjQxNjI3NDhlYzQiLCJzdGFnZU91dHB1dCI6eyJwcmVmZXRjaGVkIjowfX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "60",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "62",
+      "eventTime": "2026-08-01T02:41:29.283563591Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611270",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "61",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "6701ca75-479a-4fd4-bd38-a09a7bd9a7d8",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "63",
+      "eventTime": "2026-08-01T02:41:29.302822882Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611271",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "61",
+        "startedEventId": "62",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "64",
+      "eventTime": "2026-08-01T02:41:29.302832424Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611272",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "65",
+      "eventTime": "2026-08-01T02:41:29.307106382Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611276",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "64",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "16d1c510-1e50-455b-b95f-be8b30a0f233",
+        "historySizeBytes": "14233"
+      }
+    },
+    {
+      "eventId": "66",
+      "eventTime": "2026-08-01T02:41:29.314406507Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611280",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "64",
+        "startedEventId": "65",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "67",
+      "eventTime": "2026-08-01T02:41:29.314442966Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611281",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "11",
+        "activityType": {
+          "name": "projectFunnelTerminalActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsInN0YXR1cyI6ImluZGV4ZWQiLCJvYmplY3RzSW5kZXhlZCI6MCwiZnVubmVsUnVuSWQiOiIzZjMwNjNiZC04MDAwLTQ5NjgtYTU1MS1hYzQyNmNlMTY4OGEiLCJydW5LZXkiOiJjZWZhOTgzMi1jMjU0LTRlZTMtYTg4Ni1iZjQxNjI3NDhlYzQifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "66",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "68",
+      "eventTime": "2026-08-01T02:41:29.318815091Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611286",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "67",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "f63efbce-2df9-4d7d-b88f-77f9d2ad2f9e",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "69",
+      "eventTime": "2026-08-01T02:41:29.340294091Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611287",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "67",
+        "startedEventId": "68",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "70",
+      "eventTime": "2026-08-01T02:41:29.340322716Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611288",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "71",
+      "eventTime": "2026-08-01T02:41:29.344175966Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611292",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "70",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "1259ff80-b252-4ee6-9d40-261528c8588e",
+        "historySizeBytes": "15457"
+      }
+    },
+    {
+      "eventId": "72",
+      "eventTime": "2026-08-01T02:41:29.350826716Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611296",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "70",
+        "startedEventId": "71",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "73",
+      "eventTime": "2026-08-01T02:41:29.350875674Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "taskId": "250611297",
+      "timerStartedEventAttributes": {
+        "timerId": "3",
+        "startToFireTimeout": "300s",
+        "workflowTaskCompletedEventId": "72"
+      }
+    },
+    {
+      "eventId": "74",
+      "eventTime": "2026-08-01T02:41:29.350887966Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "taskId": "250611298",
+      "timerStartedEventAttributes": {
+        "timerId": "4",
+        "startToFireTimeout": "300s",
+        "workflowTaskCompletedEventId": "72"
+      }
+    },
+    {
+      "eventId": "75",
+      "eventTime": "2026-08-01T02:43:47.801290502Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED",
+      "taskId": "250611300",
+      "workflowExecutionSignaledEventAttributes": {
+        "signalName": "sourceTransactionCommitted",
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzaWduYWxJZCI6IjJhNzA4OTAxLWFiN2ItNGM3YS04ODc3LWRkYTY3NGIzMjkxYyIsImZ1bm5lbFJ1bklkIjoiNjQ5ZWE2NWItZGQyYS00NmNiLTlhZjAtN2UxODljYjdhMWE4In0="
+            }
+          ]
+        },
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "header": {}
+      }
+    },
+    {
+      "eventId": "76",
+      "eventTime": "2026-08-01T02:43:47.801375544Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611301",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "77",
+      "eventTime": "2026-08-01T02:43:47.856316669Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611305",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "76",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "27155f6c-c521-4a2b-966b-54bf64400ec1",
+        "historySizeBytes": "16233"
+      }
+    },
+    {
+      "eventId": "78",
+      "eventTime": "2026-08-01T02:43:47.993212002Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611309",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "76",
+        "startedEventId": "77",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "79",
+      "eventTime": "2026-08-01T02:43:47.993389544Z",
+      "eventType": "EVENT_TYPE_TIMER_CANCELED",
+      "taskId": "250611310",
+      "timerCanceledEventAttributes": {
+        "timerId": "3",
+        "startedEventId": "73",
+        "workflowTaskCompletedEventId": "78",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "80",
+      "eventTime": "2026-08-01T02:43:47.994929544Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611311",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "12",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6ImNoYW5nZWxvZyIsInJ1bktleSI6IjJhNzA4OTAxLWFiN2ItNGM3YS04ODc3LWRkYTY3NGIzMjkxYyJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "78",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "81",
+      "eventTime": "2026-08-01T02:43:48.058319627Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611316",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "80",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "1d4075e4-eb95-4720-bd50-577cf4c23482",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "82",
+      "eventTime": "2026-08-01T02:43:48.191221877Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611317",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "80",
+        "startedEventId": "81",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "83",
+      "eventTime": "2026-08-01T02:43:48.191242002Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611318",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "84",
+      "eventTime": "2026-08-01T02:43:48.203540294Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611322",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "83",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "572210f7-8b0d-4526-aa06-f2ae7c4cd7ca",
+        "historySizeBytes": "17488"
+      }
+    },
+    {
+      "eventId": "85",
+      "eventTime": "2026-08-01T02:43:48.221310710Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611326",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "83",
+        "startedEventId": "84",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "86",
+      "eventTime": "2026-08-01T02:43:48.221358335Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611327",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "13",
+        "activityType": {
+          "name": "runChangelogActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "3600s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "85",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "87",
+      "eventTime": "2026-08-01T02:43:48.229407877Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611332",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "86",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "ee2e6f5f-de0b-4ae3-8638-d49fce1317dd",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "88",
+      "eventTime": "2026-08-01T02:43:53.405687338Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611333",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzbmFwc2hvdElkIjoiZDE2NjEyNjQtYTdmNS00ZjIzLTk0MTItN2YyOTE0NDhiOTIxIiwicm93c0VtaXR0ZWQiOjAsIm1hbmlmZXN0IjpbeyJmaWxlX3BhdGgiOiJzMzovL19mdW5uZWwvQXZ0T3JkZXJGaXh0dXJlL2NoYW5nZWxvZy9kZWZhdWx0L2RhdGEvMjAyNi0wOC0wMVQwMjo0Mzo1My4zMTlaLnBhcnF1ZXQiLCJmaWxlX3NpemVfYnl0ZXMiOjAsInJvd19jb3VudCI6MCwib3BlcmF0aW9uIjoiYWRkZWQifV0sIm93bmVkUHJvcGVydGllcyI6W119"
+            }
+          ]
+        },
+        "scheduledEventId": "86",
+        "startedEventId": "87",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "89",
+      "eventTime": "2026-08-01T02:43:53.405739005Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611334",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "90",
+      "eventTime": "2026-08-01T02:43:53.421737255Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611338",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "89",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "415653b6-5482-4507-a709-474da4025f75",
+        "historySizeBytes": "18827"
+      }
+    },
+    {
+      "eventId": "91",
+      "eventTime": "2026-08-01T02:43:53.451739463Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611342",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "89",
+        "startedEventId": "90",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "92",
+      "eventTime": "2026-08-01T02:43:53.452137338Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611343",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "14",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6Im1lcmdlIiwiY29tcGxldGVkUHJldmlvdXMiOiJjaGFuZ2Vsb2ciLCJydW5LZXkiOiIyYTcwODkwMS1hYjdiLTRjN2EtODg3Ny1kZGE2NzRiMzI5MWMiLCJzdGFnZU91dHB1dCI6eyJyb3dzRW1pdHRlZCI6MCwic25hcHNob3RJZCI6ImQxNjYxMjY0LWE3ZjUtNGYyMy05NDEyLTdmMjkxNDQ4YjkyMSJ9fQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "91",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "93",
+      "eventTime": "2026-08-01T02:43:53.459260796Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611348",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "92",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "a6b66b44-8ac9-41bf-9b8b-5dc21af14ef0",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "94",
+      "eventTime": "2026-08-01T02:43:53.489170880Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611349",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "92",
+        "startedEventId": "93",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "95",
+      "eventTime": "2026-08-01T02:43:53.489175963Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611350",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "96",
+      "eventTime": "2026-08-01T02:43:53.493866963Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611354",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "95",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "7d5de5dd-496c-4927-a0c3-f42f4c3a1dae",
+        "historySizeBytes": "20093"
+      }
+    },
+    {
+      "eventId": "97",
+      "eventTime": "2026-08-01T02:43:53.500566255Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611358",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "95",
+        "startedEventId": "96",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "98",
+      "eventTime": "2026-08-01T02:43:53.500603046Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611359",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "15",
+        "activityType": {
+          "name": "runMergeActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImNoYW5nZWxvZ1NuYXBzaG90SWQiOiJkMTY2MTI2NC1hN2Y1LTRmMjMtOTQxMi03ZjI5MTQ0OGI5MjEiLCJjaGFuZ2Vsb2dPd25lZFByb3BlcnRpZXMiOltdLCJydW5LZXkiOiIyYTcwODkwMS1hYjdiLTRjN2EtODg3Ny1kZGE2NzRiMzI5MWMifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "7200s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "97",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "99",
+      "eventTime": "2026-08-01T02:43:53.505080338Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611364",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "98",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "67e3b146-5fd1-4f8b-bfef-e3e0feed0a83",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "100",
+      "eventTime": "2026-08-01T02:43:58.560972549Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611365",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJtZXJnZWRTbmFwc2hvdElkIjoiMDIyOWZkYWItMDllZS00MWM3LTgyMWMtYTU0MmIyZGJkYjExIiwidXBzZXJ0cyI6MCwiZGVsZXRlcyI6MCwiZWRpdElkcyI6W10sIm1lcmdlZFJvd0NvdW50IjowfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "98",
+        "startedEventId": "99",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "101",
+      "eventTime": "2026-08-01T02:43:58.561018382Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611366",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "102",
+      "eventTime": "2026-08-01T02:43:58.620524549Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611370",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "101",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "bd78d5ac-e034-4da9-b140-ef9f73d2a363",
+        "historySizeBytes": "21427"
+      }
+    },
+    {
+      "eventId": "103",
+      "eventTime": "2026-08-01T02:43:58.665320465Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611374",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "101",
+        "startedEventId": "102",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "104",
+      "eventTime": "2026-08-01T02:43:58.710142799Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611375",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "16",
+        "activityType": {
+          "name": "syncOpenSearchActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "3600s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "103",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "105",
+      "eventTime": "2026-08-01T02:43:58.745151132Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611380",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "104",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "53ed9963-1a50-48fc-ad24-73a92a19a4c0",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "106",
+      "eventTime": "2026-08-01T02:44:00.043710508Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611381",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpbmRleE5hbWUiOiJ2ZXJpZnktbWFpbi1vbnRvbG9neS1hdnRvcmRlcmZpeHR1cmUiLCJpbmRleENyZWF0ZWQiOmZhbHNlLCJyb3dzUmVhZCI6NzQ2LCJyb3dzSW5kZXhlZCI6NzQ2LCJyb3dzRmFpbGVkIjowLCJyb3dzT3JwaGFuRGVsZXRlZCI6MCwiZHVyYXRpb25NcyI6MTEzOH0="
+            }
+          ]
+        },
+        "scheduledEventId": "104",
+        "startedEventId": "105",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "107",
+      "eventTime": "2026-08-01T02:44:00.043750424Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611382",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "108",
+      "eventTime": "2026-08-01T02:44:00.054111299Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611386",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "107",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "4f97d174-d83e-4081-9c7d-b09f2324c3f4",
+        "historySizeBytes": "22673"
+      }
+    },
+    {
+      "eventId": "109",
+      "eventTime": "2026-08-01T02:44:00.067461299Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611390",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "107",
+        "startedEventId": "108",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "110",
+      "eventTime": "2026-08-01T02:44:00.067612508Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611391",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "17",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6ImluZGV4aW5nIiwib2JqZWN0c0luZGV4ZWQiOjAsImNvbXBsZXRlZFByZXZpb3VzIjoibWVyZ2UiLCJydW5LZXkiOiIyYTcwODkwMS1hYjdiLTRjN2EtODg3Ny1kZGE2NzRiMzI5MWMiLCJzdGFnZU91dHB1dCI6eyJ1cHNlcnRzIjowLCJkZWxldGVzIjowLCJtZXJnZWRSb3dDb3VudCI6MCwibWVyZ2VkU25hcHNob3RJZCI6IjAyMjlmZGFiLTA5ZWUtNDFjNy04MjFjLWE1NDJiMmRiZGIxMSJ9fQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "109",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "111",
+      "eventTime": "2026-08-01T02:44:00.074620258Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611396",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "110",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "94f331f8-fc5f-4c6c-9e49-48d0371eb119",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "112",
+      "eventTime": "2026-08-01T02:44:00.104720258Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611397",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "110",
+        "startedEventId": "111",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "113",
+      "eventTime": "2026-08-01T02:44:00.104727008Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611398",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "114",
+      "eventTime": "2026-08-01T02:44:00.114490216Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611402",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "113",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "d59f75ce-44f4-4bcd-9c69-208ba063fbcb",
+        "historySizeBytes": "23984"
+      }
+    },
+    {
+      "eventId": "115",
+      "eventTime": "2026-08-01T02:44:00.126904174Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611406",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "113",
+        "startedEventId": "114",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "116",
+      "eventTime": "2026-08-01T02:44:00.126956758Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611407",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "18",
+        "activityType": {
+          "name": "runIndexingActivityProxy"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsIm1lcmdlZFNuYXBzaG90SWQiOiIwMjI5ZmRhYi0wOWVlLTQxYzctODIxYy1hNTQyYjJkYmRiMTEiLCJtZXJnZWRSb3dDb3VudCI6MH0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "14400s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "115",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "117",
+      "eventTime": "2026-08-01T02:44:00.144834674Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611412",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "116",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "b311cf85-286f-4092-a440-406f68d33e17",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "118",
+      "eventTime": "2026-08-01T02:44:05.181854927Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611413",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJlZGl0c0luZGV4ZWQiOjAsInB1Ymxpc2hlZFNwbGl0SWRzIjpbXSwicXVpY2t3aXQiOmZhbHNlfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "116",
+        "startedEventId": "117",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "119",
+      "eventTime": "2026-08-01T02:44:05.181893802Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611414",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "120",
+      "eventTime": "2026-08-01T02:44:05.188492718Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611418",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "119",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "5a089b78-77c3-4a51-96bb-6a59d1445a83",
+        "historySizeBytes": "25199"
+      }
+    },
+    {
+      "eventId": "121",
+      "eventTime": "2026-08-01T02:44:05.204584260Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611422",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "119",
+        "startedEventId": "120",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "122",
+      "eventTime": "2026-08-01T02:44:05.204776010Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611423",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "19",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6Imh5ZHJhdGlvbiIsImNvbXBsZXRlZFByZXZpb3VzIjoiaW5kZXhpbmciLCJydW5LZXkiOiIyYTcwODkwMS1hYjdiLTRjN2EtODg3Ny1kZGE2NzRiMzI5MWMiLCJzdGFnZU91dHB1dCI6eyJlZGl0c0luZGV4ZWQiOjAsInB1Ymxpc2hlZFNwbGl0Q291bnQiOjAsInF1aWNrd2l0IjpmYWxzZX19"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "121",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "123",
+      "eventTime": "2026-08-01T02:44:05.211178468Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611428",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "122",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "fcce62a3-4610-4847-ab40-b42bede55c3b",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "124",
+      "eventTime": "2026-08-01T02:44:05.243648677Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611429",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "122",
+        "startedEventId": "123",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "125",
+      "eventTime": "2026-08-01T02:44:05.243706427Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611430",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "126",
+      "eventTime": "2026-08-01T02:44:05.249629843Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611434",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "125",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "b4473a23-72f8-42a2-b186-67965d0f2992",
+        "historySizeBytes": "26452"
+      }
+    },
+    {
+      "eventId": "127",
+      "eventTime": "2026-08-01T02:44:05.257521593Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611438",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "125",
+        "startedEventId": "126",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "128",
+      "eventTime": "2026-08-01T02:44:05.257571343Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611439",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "20",
+        "activityType": {
+          "name": "runHydrationActivityProxy"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsInB1Ymxpc2hlZFNwbGl0SWRzIjpbXX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "1800s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "127",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 10
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "129",
+      "eventTime": "2026-08-01T02:44:05.262809010Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611444",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "128",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "2c955b17-fa7b-438a-96c1-f3152d55a222",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "130",
+      "eventTime": "2026-08-01T02:44:10.302969679Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611445",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJwcmVmZXRjaGVkIjowfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "128",
+        "startedEventId": "129",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "131",
+      "eventTime": "2026-08-01T02:44:10.303036888Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611446",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "132",
+      "eventTime": "2026-08-01T02:44:10.317604304Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611450",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "131",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "3670cc94-52c2-41c0-9804-6af1801c82a1",
+        "historySizeBytes": "27580"
+      }
+    },
+    {
+      "eventId": "133",
+      "eventTime": "2026-08-01T02:44:10.345275929Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611454",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "131",
+        "startedEventId": "132",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "134",
+      "eventTime": "2026-08-01T02:44:10.345438846Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611455",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "21",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6bnVsbCwiY29tcGxldGVkUHJldmlvdXMiOiJoeWRyYXRpb24iLCJydW5LZXkiOiIyYTcwODkwMS1hYjdiLTRjN2EtODg3Ny1kZGE2NzRiMzI5MWMiLCJzdGFnZU91dHB1dCI6eyJwcmVmZXRjaGVkIjowfX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "133",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "135",
+      "eventTime": "2026-08-01T02:44:10.351576179Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611460",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "134",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "e55674a5-11a8-45e1-9a66-29f636c9ff72",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "136",
+      "eventTime": "2026-08-01T02:44:10.370431221Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611461",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "134",
+        "startedEventId": "135",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "137",
+      "eventTime": "2026-08-01T02:44:10.370437221Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611462",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "138",
+      "eventTime": "2026-08-01T02:44:10.377694429Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611466",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "137",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "fd9dddf6-a70c-40c8-9294-086af4a1764c",
+        "historySizeBytes": "28803"
+      }
+    },
+    {
+      "eventId": "139",
+      "eventTime": "2026-08-01T02:44:10.399163721Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611470",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "137",
+        "startedEventId": "138",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "140",
+      "eventTime": "2026-08-01T02:44:10.399332346Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611471",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "22",
+        "activityType": {
+          "name": "projectFunnelTerminalActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsInN0YXR1cyI6ImluZGV4ZWQiLCJvYmplY3RzSW5kZXhlZCI6MCwiZnVubmVsUnVuSWQiOiI2NDllYTY1Yi1kZDJhLTQ2Y2ItOWFmMC03ZTE4OWNiN2ExYTgiLCJydW5LZXkiOiIyYTcwODkwMS1hYjdiLTRjN2EtODg3Ny1kZGE2NzRiMzI5MWMifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "139",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "141",
+      "eventTime": "2026-08-01T02:44:10.407281096Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611476",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "140",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "8015e1c7-7089-42ee-92d9-be5b1e7b1a18",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "142",
+      "eventTime": "2026-08-01T02:44:10.419882096Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611477",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "140",
+        "startedEventId": "141",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "143",
+      "eventTime": "2026-08-01T02:44:10.419888138Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611478",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "144",
+      "eventTime": "2026-08-01T02:44:10.425426471Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611482",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "143",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "593bfe4c-1ed3-4b4d-89cd-d8ac319b50dc",
+        "historySizeBytes": "30041"
+      }
+    },
+    {
+      "eventId": "145",
+      "eventTime": "2026-08-01T02:44:10.441800513Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611486",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "143",
+        "startedEventId": "144",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "146",
+      "eventTime": "2026-08-01T02:44:10.442186221Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "taskId": "250611487",
+      "timerStartedEventAttributes": {
+        "timerId": "5",
+        "startToFireTimeout": "300s",
+        "workflowTaskCompletedEventId": "145"
+      }
+    },
+    {
+      "eventId": "147",
+      "eventTime": "2026-08-01T02:44:10.442199846Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "taskId": "250611488",
+      "timerStartedEventAttributes": {
+        "timerId": "6",
+        "startToFireTimeout": "300s",
+        "workflowTaskCompletedEventId": "145"
+      }
+    },
+    {
+      "eventId": "148",
+      "eventTime": "2026-08-01T02:44:21.747183129Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED",
+      "taskId": "250611490",
+      "workflowExecutionSignaledEventAttributes": {
+        "signalName": "sourceTransactionCommitted",
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzaWduYWxJZCI6IjBkNDM3ZWFmLTlkY2ItNGEzOS1iYmJiLWFiMzA0ZWU3MjEzZiIsImZ1bm5lbFJ1bklkIjoiODI0MGZmOTgtOGQxYS00ZWZkLTk4MWMtMzliYmMwMmYzOGQxIn0="
+            }
+          ]
+        },
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "header": {}
+      }
+    },
+    {
+      "eventId": "149",
+      "eventTime": "2026-08-01T02:44:21.747355462Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611491",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "150",
+      "eventTime": "2026-08-01T02:44:21.910059920Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611495",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "149",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "d78ca22b-ae99-4cfa-9695-2b292cda9a4a",
+        "historySizeBytes": "30829"
+      }
+    },
+    {
+      "eventId": "151",
+      "eventTime": "2026-08-01T02:44:21.969909837Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611499",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "149",
+        "startedEventId": "150",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "152",
+      "eventTime": "2026-08-01T02:44:21.970125920Z",
+      "eventType": "EVENT_TYPE_TIMER_CANCELED",
+      "taskId": "250611500",
+      "timerCanceledEventAttributes": {
+        "timerId": "5",
+        "startedEventId": "146",
+        "workflowTaskCompletedEventId": "151",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "153",
+      "eventTime": "2026-08-01T02:44:21.970286795Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611501",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "23",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6ImNoYW5nZWxvZyIsInJ1bktleSI6IjBkNDM3ZWFmLTlkY2ItNGEzOS1iYmJiLWFiMzA0ZWU3MjEzZiJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "151",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "154",
+      "eventTime": "2026-08-01T02:44:22.031000170Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611506",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "153",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "a6666531-a91c-4579-8a03-47d495cf30b0",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "155",
+      "eventTime": "2026-08-01T02:44:22.092147295Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611507",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "153",
+        "startedEventId": "154",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "156",
+      "eventTime": "2026-08-01T02:44:22.092176129Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611508",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "157",
+      "eventTime": "2026-08-01T02:44:22.130995295Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611512",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "156",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "b6ed0a62-493a-41fa-96dd-3d0998f3b897",
+        "historySizeBytes": "32101"
+      }
+    },
+    {
+      "eventId": "158",
+      "eventTime": "2026-08-01T02:44:22.171607379Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611516",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "156",
+        "startedEventId": "157",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "159",
+      "eventTime": "2026-08-01T02:44:22.171645004Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611517",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "24",
+        "activityType": {
+          "name": "runChangelogActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "3600s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "158",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "160",
+      "eventTime": "2026-08-01T02:44:22.184892254Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611522",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "159",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "e6fa56d4-6996-451b-9911-e951dd9bf4d4",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "161",
+      "eventTime": "2026-08-01T02:44:27.280540423Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611523",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzbmFwc2hvdElkIjoiNjQxOGExNTctNTZlMS00OTFjLTliYjEtZjhkODQ2ZDE5MmYwIiwicm93c0VtaXR0ZWQiOjAsIm1hbmlmZXN0IjpbeyJmaWxlX3BhdGgiOiJzMzovL19mdW5uZWwvQXZ0T3JkZXJGaXh0dXJlL2NoYW5nZWxvZy9kZWZhdWx0L2RhdGEvMjAyNi0wOC0wMVQwMjo0NDoyNy4yNDdaLnBhcnF1ZXQiLCJmaWxlX3NpemVfYnl0ZXMiOjAsInJvd19jb3VudCI6MCwib3BlcmF0aW9uIjoiYWRkZWQifV0sIm93bmVkUHJvcGVydGllcyI6W119"
+            }
+          ]
+        },
+        "scheduledEventId": "159",
+        "startedEventId": "160",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "162",
+      "eventTime": "2026-08-01T02:44:27.280708965Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611524",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "163",
+      "eventTime": "2026-08-01T02:44:27.361152756Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611528",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "162",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "00ea6bcb-a557-4f0b-8043-0027d79d340b",
+        "historySizeBytes": "33453"
+      }
+    },
+    {
+      "eventId": "164",
+      "eventTime": "2026-08-01T02:44:27.387772923Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611532",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "162",
+        "startedEventId": "163",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "165",
+      "eventTime": "2026-08-01T02:44:27.387977423Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611533",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "25",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6Im1lcmdlIiwiY29tcGxldGVkUHJldmlvdXMiOiJjaGFuZ2Vsb2ciLCJydW5LZXkiOiIwZDQzN2VhZi05ZGNiLTRhMzktYmJiYi1hYjMwNGVlNzIxM2YiLCJzdGFnZU91dHB1dCI6eyJyb3dzRW1pdHRlZCI6MCwic25hcHNob3RJZCI6IjY0MThhMTU3LTU2ZTEtNDkxYy05YmIxLWY4ZDg0NmQxOTJmMCJ9fQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "164",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "166",
+      "eventTime": "2026-08-01T02:44:27.400847756Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611538",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "165",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "a9b4d530-d30c-41a1-8dce-217b357cb878",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "167",
+      "eventTime": "2026-08-01T02:44:27.426829340Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611539",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "165",
+        "startedEventId": "166",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "168",
+      "eventTime": "2026-08-01T02:44:27.426928923Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611540",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "169",
+      "eventTime": "2026-08-01T02:44:27.457713715Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611544",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "168",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "37c14819-97d1-4277-939a-50bdb6958514",
+        "historySizeBytes": "34732"
+      }
+    },
+    {
+      "eventId": "170",
+      "eventTime": "2026-08-01T02:44:27.472494881Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611548",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "168",
+        "startedEventId": "169",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "171",
+      "eventTime": "2026-08-01T02:44:27.472790006Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611549",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "26",
+        "activityType": {
+          "name": "runMergeActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImNoYW5nZWxvZ1NuYXBzaG90SWQiOiI2NDE4YTE1Ny01NmUxLTQ5MWMtOWJiMS1mOGQ4NDZkMTkyZjAiLCJjaGFuZ2Vsb2dPd25lZFByb3BlcnRpZXMiOltdLCJydW5LZXkiOiIwZDQzN2VhZi05ZGNiLTRhMzktYmJiYi1hYjMwNGVlNzIxM2YifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "7200s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "170",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "172",
+      "eventTime": "2026-08-01T02:44:27.489079965Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611554",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "171",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "470d3115-b035-45ca-964b-59589c8d1b7b",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "173",
+      "eventTime": "2026-08-01T02:44:33.303279259Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611555",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJtZXJnZWRTbmFwc2hvdElkIjoiYjg1ZDhlMGMtZWNkYi00NjA0LWJiNDQtZWMwMTYwYzk1NjgxIiwidXBzZXJ0cyI6MCwiZGVsZXRlcyI6MCwiZWRpdElkcyI6W10sIm1lcmdlZFJvd0NvdW50IjowfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "171",
+        "startedEventId": "172",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "174",
+      "eventTime": "2026-08-01T02:44:33.303346634Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611556",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "175",
+      "eventTime": "2026-08-01T02:44:33.351258634Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611560",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "174",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "ba61708a-98ad-4391-a4ed-5a8834d6ee49",
+        "historySizeBytes": "36079"
+      }
+    },
+    {
+      "eventId": "176",
+      "eventTime": "2026-08-01T02:44:33.394030009Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611564",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "174",
+        "startedEventId": "175",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "177",
+      "eventTime": "2026-08-01T02:44:33.394431551Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611565",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "27",
+        "activityType": {
+          "name": "syncOpenSearchActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "3600s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "176",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "178",
+      "eventTime": "2026-08-01T02:44:33.409728842Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611570",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "177",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "aa318b83-9647-4503-9b8e-4d0d33f1c50d",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "179",
+      "eventTime": "2026-08-01T02:44:34.359601135Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611571",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpbmRleE5hbWUiOiJ2ZXJpZnktbWFpbi1vbnRvbG9neS1hdnRvcmRlcmZpeHR1cmUiLCJpbmRleENyZWF0ZWQiOmZhbHNlLCJyb3dzUmVhZCI6NzQ2LCJyb3dzSW5kZXhlZCI6NzQ2LCJyb3dzRmFpbGVkIjowLCJyb3dzT3JwaGFuRGVsZXRlZCI6MCwiZHVyYXRpb25NcyI6OTMxfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "177",
+        "startedEventId": "178",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "180",
+      "eventTime": "2026-08-01T02:44:34.359620051Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611572",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "181",
+      "eventTime": "2026-08-01T02:44:34.370192176Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611576",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "180",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "c783e659-f900-47a3-bd9d-3db8705db24c",
+        "historySizeBytes": "37339"
+      }
+    },
+    {
+      "eventId": "182",
+      "eventTime": "2026-08-01T02:44:34.384407926Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611580",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "180",
+        "startedEventId": "181",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "183",
+      "eventTime": "2026-08-01T02:44:34.384447176Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611581",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "28",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6ImluZGV4aW5nIiwib2JqZWN0c0luZGV4ZWQiOjAsImNvbXBsZXRlZFByZXZpb3VzIjoibWVyZ2UiLCJydW5LZXkiOiIwZDQzN2VhZi05ZGNiLTRhMzktYmJiYi1hYjMwNGVlNzIxM2YiLCJzdGFnZU91dHB1dCI6eyJ1cHNlcnRzIjowLCJkZWxldGVzIjowLCJtZXJnZWRSb3dDb3VudCI6MCwibWVyZ2VkU25hcHNob3RJZCI6ImI4NWQ4ZTBjLWVjZGItNDYwNC1iYjQ0LWVjMDE2MGM5NTY4MSJ9fQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "182",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "184",
+      "eventTime": "2026-08-01T02:44:34.399187051Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611586",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "183",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "de584615-a47a-48f5-a41e-34aca2f6a5c6",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "185",
+      "eventTime": "2026-08-01T02:44:34.428511135Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611587",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "183",
+        "startedEventId": "184",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "186",
+      "eventTime": "2026-08-01T02:44:34.428534468Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611588",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "187",
+      "eventTime": "2026-08-01T02:44:34.440120301Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611592",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "186",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "aa5c5506-678a-45fa-b9b2-b5690325005b",
+        "historySizeBytes": "38669"
+      }
+    },
+    {
+      "eventId": "188",
+      "eventTime": "2026-08-01T02:44:34.457516718Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611596",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "186",
+        "startedEventId": "187",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "189",
+      "eventTime": "2026-08-01T02:44:34.457660926Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611597",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "29",
+        "activityType": {
+          "name": "runIndexingActivityProxy"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsIm1lcmdlZFNuYXBzaG90SWQiOiJiODVkOGUwYy1lY2RiLTQ2MDQtYmI0NC1lYzAxNjBjOTU2ODEiLCJtZXJnZWRSb3dDb3VudCI6MH0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "14400s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "188",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "190",
+      "eventTime": "2026-08-01T02:44:34.467238676Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611602",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "189",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "c732b93a-325f-4372-92b2-3b4129a402c5",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "191",
+      "eventTime": "2026-08-01T02:44:39.719297845Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611603",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJlZGl0c0luZGV4ZWQiOjAsInB1Ymxpc2hlZFNwbGl0SWRzIjpbXSwicXVpY2t3aXQiOmZhbHNlfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "189",
+        "startedEventId": "190",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "192",
+      "eventTime": "2026-08-01T02:44:39.732607220Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611604",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "193",
+      "eventTime": "2026-08-01T02:44:39.973871512Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611608",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "192",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "81436442-de52-4cf6-a127-f038d6bf288d",
+        "historySizeBytes": "39903"
+      }
+    },
+    {
+      "eventId": "194",
+      "eventTime": "2026-08-01T02:44:40.096492387Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611612",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "192",
+        "startedEventId": "193",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "195",
+      "eventTime": "2026-08-01T02:44:40.098422679Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611613",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "30",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6Imh5ZHJhdGlvbiIsImNvbXBsZXRlZFByZXZpb3VzIjoiaW5kZXhpbmciLCJydW5LZXkiOiIwZDQzN2VhZi05ZGNiLTRhMzktYmJiYi1hYjMwNGVlNzIxM2YiLCJzdGFnZU91dHB1dCI6eyJlZGl0c0luZGV4ZWQiOjAsInB1Ymxpc2hlZFNwbGl0Q291bnQiOjAsInF1aWNrd2l0IjpmYWxzZX19"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "194",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "196",
+      "eventTime": "2026-08-01T02:44:40.182482137Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611618",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "195",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "599351ab-a881-4d0b-85cf-0b314c11b5cf",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "197",
+      "eventTime": "2026-08-01T02:44:40.389118137Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611619",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "195",
+        "startedEventId": "196",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "198",
+      "eventTime": "2026-08-01T02:44:40.389125929Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611620",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "199",
+      "eventTime": "2026-08-01T02:44:40.428891762Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611624",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "198",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "843fb070-ec19-4255-b901-dad5bacc7c6c",
+        "historySizeBytes": "41172"
+      }
+    },
+    {
+      "eventId": "200",
+      "eventTime": "2026-08-01T02:44:40.470866346Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611628",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "198",
+        "startedEventId": "199",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "201",
+      "eventTime": "2026-08-01T02:44:40.470930221Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611629",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "31",
+        "activityType": {
+          "name": "runHydrationActivityProxy"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsInB1Ymxpc2hlZFNwbGl0SWRzIjpbXX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "1800s",
+        "heartbeatTimeout": "120s",
+        "workflowTaskCompletedEventId": "200",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 10
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "202",
+      "eventTime": "2026-08-01T02:44:40.489253429Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611634",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "201",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "0f928d06-a464-4dc2-85e5-6bc499618f9e",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "203",
+      "eventTime": "2026-08-01T02:44:45.612802251Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611635",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJwcmVmZXRjaGVkIjowfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "201",
+        "startedEventId": "202",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "204",
+      "eventTime": "2026-08-01T02:44:45.612856792Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611636",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "205",
+      "eventTime": "2026-08-01T02:44:45.652396501Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611640",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "204",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "cd9c6b78-09cf-4254-b047-48b4317326b8",
+        "historySizeBytes": "42310"
+      }
+    },
+    {
+      "eventId": "206",
+      "eventTime": "2026-08-01T02:44:45.676233417Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611644",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "204",
+        "startedEventId": "205",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "207",
+      "eventTime": "2026-08-01T02:44:45.676424001Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611645",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "32",
+        "activityType": {
+          "name": "projectStageToPostgres"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsImN1cnJlbnRTdGFnZSI6bnVsbCwiY29tcGxldGVkUHJldmlvdXMiOiJoeWRyYXRpb24iLCJydW5LZXkiOiIwZDQzN2VhZi05ZGNiLTRhMzktYmJiYi1hYjMwNGVlNzIxM2YiLCJzdGFnZU91dHB1dCI6eyJwcmVmZXRjaGVkIjowfX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "206",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "208",
+      "eventTime": "2026-08-01T02:44:45.685172542Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611650",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "207",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "142bf95b-3afc-40df-a2dd-a6a957945d60",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "209",
+      "eventTime": "2026-08-01T02:44:45.714047917Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611651",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "207",
+        "startedEventId": "208",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "210",
+      "eventTime": "2026-08-01T02:44:45.714054501Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611652",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "211",
+      "eventTime": "2026-08-01T02:44:45.729243834Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611656",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "210",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "3b54c57e-c12a-452e-964f-fd3700ee82a4",
+        "historySizeBytes": "43533"
+      }
+    },
+    {
+      "eventId": "212",
+      "eventTime": "2026-08-01T02:44:45.758564292Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611660",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "210",
+        "startedEventId": "211",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "213",
+      "eventTime": "2026-08-01T02:44:45.758603001Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "250611661",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "33",
+        "activityType": {
+          "name": "projectFunnelTerminalActivity"
+        },
+        "taskQueue": {
+          "name": "tellus-funnel-verify-main",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvbnRvbG9neUlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwib2JqZWN0VHlwZUFwaU5hbWUiOiJBdnRPcmRlckZpeHR1cmUiLCJvYmplY3RUeXBlUmlkIjoiZTg0NTc2NzMtNzQ2Ny00ODk1LWJhZDUtMGIwNTVhMGY4MzBiIiwiZW52aXJvbm1lbnRJZCI6InRlbGx1cy1hdXRvbWF0ZS12ZXJpZnktbWFpbiIsInN0YXR1cyI6ImluZGV4ZWQiLCJvYmplY3RzSW5kZXhlZCI6MCwiZnVubmVsUnVuSWQiOiI4MjQwZmY5OC04ZDFhLTRlZmQtOTgxYy0zOWJiYzAyZjM4ZDEiLCJydW5LZXkiOiIwZDQzN2VhZi05ZGNiLTRhMzktYmJiYi1hYjMwNGVlNzIxM2YifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "212",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "214",
+      "eventTime": "2026-08-01T02:44:45.767109376Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "250611666",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "213",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "20652b85-08fa-4c72-8e34-b2f789513645",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        }
+      }
+    },
+    {
+      "eventId": "215",
+      "eventTime": "2026-08-01T02:44:45.807023792Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "250611667",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "YmluYXJ5L251bGw="
+              }
+            }
+          ]
+        },
+        "scheduledEventId": "213",
+        "startedEventId": "214",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local"
+      }
+    },
+    {
+      "eventId": "216",
+      "eventTime": "2026-08-01T02:44:45.807029667Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "250611668",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local-7d1034e405ea4e729f09d02792e34df4",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tellus-funnel-verify-main"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "217",
+      "eventTime": "2026-08-01T02:44:45.825635834Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "250611672",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "216",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "requestId": "f80320ae-df27-47ea-a845-86c2a3becf8a",
+        "historySizeBytes": "44771"
+      }
+    },
+    {
+      "eventId": "218",
+      "eventTime": "2026-08-01T02:44:45.874993542Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "250611676",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "216",
+        "startedEventId": "217",
+        "identity": "tellus-automate-verify-main:f1d28079f802:5644@Olivier-HABIMANA.local",
+        "workerVersion": {
+          "buildId": "f1d28079f802",
+          "useVersioning": true
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "219",
+      "eventTime": "2026-08-01T02:44:45.875054751Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "taskId": "250611677",
+      "timerStartedEventAttributes": {
+        "timerId": "7",
+        "startToFireTimeout": "300s",
+        "workflowTaskCompletedEventId": "218"
+      }
+    },
+    {
+      "eventId": "220",
+      "eventTime": "2026-08-01T02:44:45.875063334Z",
+      "eventType": "EVENT_TYPE_TIMER_STARTED",
+      "taskId": "250611678",
+      "timerStartedEventAttributes": {
+        "timerId": "8",
+        "startToFireTimeout": "300s",
+        "workflowTaskCompletedEventId": "218"
+      }
+    }
+  ]
+}

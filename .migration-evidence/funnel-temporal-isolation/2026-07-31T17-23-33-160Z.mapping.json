@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "kind": "legacy-workflow-migration-mapping",
+  "capturedAtUtc": "2026-07-31T17:23:33.160Z",
+  "captureFile": "funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json",
+  "oldNamespace": "tellus-funnel",
+  "replacementNamespace": "tellus-funnel-tellus-dev",
+  "entries": [
+    {
+      "kind": "funnel",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "ObjectTypeFunnelWorkflow-OlivierOrder",
+      "oldRunId": "3fc15425-75f5-4c05-a8c3-419bfa99f989",
+      "oldRunIdNote": "captured by funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json and verified with temporal workflow describe",
+      "lastCompletedStage": "indexing",
+      "lastCompletedStageEvidence": "olivierorder-20260731T191845Z/dev__funnel_stage_run.txt",
+      "stuckState": "funnel_state stuck at 'indexing' for OlivierOrder from 2026-07-31 15:35:41+00 until repair; the sibling verify-environment phantom run 7ffa9ddf-7e90-4915-8699-4d08d83b2609 was left at running/merge (changelog succeeded, merge running) — see incidents/FUNN-ISO-2026-07-31-split-brain.json",
+      "pendingSignals": "see olivierorder-20260731T191845Z/temporal__workflow_history.json",
+      "replacementNamespace": "tellus-funnel-tellus-dev",
+      "replacementWorkflowId": "ObjectTypeFunnelWorkflow/00000000-0000-0000-0000-000000000001/94d42ac1-6c2f-4caf-a44c-96b9fd7bf8a5",
+      "stateReconstructedFrom": "olivierorder-20260731T191845Z/dev__funnel_state_after.txt",
+      "resultingFunnelRun": {
+        "runId": "1a4338fa-9974-4128-9d82-0dcbfa3e1629",
+        "evidenceFile": "olivierorder-20260731T191845Z/dev__funnel_run_after.txt"
+      },
+      "terminalStatus": "indexed",
+      "terminalRowCount": 746
+    },
+    {
+      "kind": "funnel",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "ObjectTypeFunnelWorkflow-OlivierOrderJune",
+      "oldRunId": "feb9f3f3-c5ba-4181-9e12-b0c02b18f6e5",
+      "oldRunIdNote": "captured by funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json and verified with temporal workflow describe",
+      "lastCompletedStage": null,
+      "pendingSignals": "see funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json",
+      "replacementNamespace": "tellus-funnel-tellus-dev",
+      "replacementWorkflowId": null,
+      "stateReconstructedFrom": null,
+      "resultingFunnelRun": null,
+      "terminalStatus": "terminated",
+      "note": "Experimental object type with no backing funnel_run rows preserved; terminated with the namespace retirement and not reconstructed — object type was not under active verification."
+    },
+    {
+      "kind": "funnel",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "ObjectTypeFunnelWorkflow-OlivierOrder11",
+      "oldRunId": "871895b7-7c1e-4916-a8b9-3d39b88347fc",
+      "oldRunIdNote": "captured by funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json and verified with temporal workflow describe",
+      "lastCompletedStage": null,
+      "pendingSignals": "see funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json",
+      "replacementNamespace": "tellus-funnel-tellus-dev",
+      "replacementWorkflowId": null,
+      "stateReconstructedFrom": null,
+      "resultingFunnelRun": null,
+      "terminalStatus": "terminated",
+      "note": "Experimental object type with no backing funnel_run rows preserved; terminated with the namespace retirement and not reconstructed — object type was not under active verification."
+    },
+    {
+      "kind": "funnel",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "ObjectTypeFunnelWorkflow-RealEstateProperty",
+      "oldRunId": "53c5daec-4997-4b48-a6c9-ffffcf4c78f8",
+      "oldRunIdNote": "captured by funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json and verified with temporal workflow describe",
+      "lastCompletedStage": null,
+      "pendingSignals": "see funnel-temporal-isolation/2026-07-31T17-23-33-160Z.json",
+      "replacementNamespace": "tellus-funnel-tellus-dev",
+      "replacementWorkflowId": null,
+      "stateReconstructedFrom": null,
+      "resultingFunnelRun": null,
+      "terminalStatus": "terminated",
+      "note": "Idle since 2026-06-24; terminated with the namespace retirement and not reconstructed — no pending funnel work."
+    },
+    {
+      "kind": "pipeline-maintenance",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "pb-b4-iceberg-maintenance-workflow-2026-07-31T17:00:00Z",
+      "oldRunId": "85edbba6-88c8-4062-8655-2d60e3f7a958",
+      "classification": "external-scheduler-regenerated (pipeline maintenance dispatcher recreates them each supervisor tick; no funnel state lost)"
+    },
+    {
+      "kind": "pipeline-maintenance",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "pb-b4-iceberg-maintenance-workflow-2026-07-31T13:00:00Z",
+      "oldRunId": "aa119937-b82f-4df0-b690-ed4127f06bfe",
+      "classification": "external-scheduler-regenerated (pipeline maintenance dispatcher recreates them each supervisor tick; no funnel state lost)"
+    },
+    {
+      "kind": "pipeline-maintenance",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "pb-b4-iceberg-maintenance-workflow-2026-07-31T02:00:00Z",
+      "oldRunId": "7dbd6101-ff32-4c44-a619-01e1d5a23ef0",
+      "classification": "external-scheduler-regenerated (pipeline maintenance dispatcher recreates them each supervisor tick; no funnel state lost)"
+    },
+    {
+      "kind": "pipeline-maintenance",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "pb-b4-iceberg-maintenance-workflow-2026-07-30T21:00:00Z",
+      "oldRunId": "6de6c2ed-79da-4512-b160-1e84353e5fce",
+      "classification": "external-scheduler-regenerated (pipeline maintenance dispatcher recreates them each supervisor tick; no funnel state lost)"
+    },
+    {
+      "kind": "pipeline-maintenance",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "pb-b4-iceberg-maintenance-workflow-2026-07-30T17:00:00Z",
+      "oldRunId": "838e2cbb-f5f6-42d3-a71b-81c77dabe558",
+      "classification": "external-scheduler-regenerated (pipeline maintenance dispatcher recreates them each supervisor tick; no funnel state lost)"
+    },
+    {
+      "kind": "pipeline-maintenance",
+      "oldNamespace": "tellus-funnel",
+      "oldWorkflowId": "pb-b4-iceberg-maintenance-workflow-2026-07-30T02:00:00Z",
+      "oldRunId": "d84ef085-83fe-4d94-bf80-f6e5443647e4",
+      "classification": "external-scheduler-regenerated (pipeline maintenance dispatcher recreates them each supervisor tick; no funnel state lost)"
+    }
+  ],
+  "notes": [
+    "The termination capture lists 6 running pb-b4-iceberg-maintenance-workflow-* executions at capture time (2026-07-31T17:23:33.160Z); each is regenerated by the pipeline maintenance dispatcher on its next supervisor tick, so terminating them loses no state.",
+    "All 4 legacy funnel workflows were terminated by scripts/migrate-funnel-temporal-isolation.ts; only OlivierOrder had recoverable funnel_run evidence and was reconstructed under tellus-funnel-tellus-dev."
+  ]
+}

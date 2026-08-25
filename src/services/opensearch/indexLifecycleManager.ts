@@ -13,6 +13,7 @@
 
 import { client } from "./client";
 import {
+  expectedShardCountForObjectType,
   generateIndexMapping,
   getIndexName,
   IndexMappingResult,
@@ -120,11 +121,12 @@ function extractErrorMessage(err: unknown): string {
  *         or the OpenSearch create call fails.
  */
 async function createIndex(
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  ontologyId?: string,
 ): Promise<CreateIndexResult> {
   // Generate the full mapping from PostgreSQL metadata
   const mappingResult: IndexMappingResult =
-    await generateIndexMapping(objectTypeApiName);
+    await generateIndexMapping(objectTypeApiName, ontologyId);
   const { indexName, mapping, propertyCount } = mappingResult;
 
   // Check if the index already exists
@@ -190,24 +192,89 @@ async function deleteIndex(
 ): Promise<DeleteIndexResult> {
   const indexName = getIndexName(objectTypeApiName);
 
-  // Check if the index exists
+  // A crash between replacement-index creation and alias swap can leave a
+  // concrete `-replacement-*` generation after the base alias/type has gone.
+  // It is not returned by `exists(indexName)`, but it will collide with a later
+  // deterministic reindex and leaks shards between QA runs.
   const { body: exists } = await client.indices.exists({ index: indexName });
 
-  if (!exists) {
+  // A reindex replaces the original concrete index with an alias pointing at
+  // a generation.  OpenSearch refuses `DELETE <alias>` (and leaving those
+  // generations behind exhausts the shard budget in repeated QA runs), so
+  // resolve the alias to its concrete targets first.  A direct index retains
+  // the old one-element target list.
+  const deleteTargets = new Set<string>();
+  if (exists) deleteTargets.add(indexName);
+  try {
+    const aliases = await client.indices.getAlias({ name: indexName });
+    const aliasBody = (aliases as { body?: Record<string, unknown> }).body ?? aliases;
+    const concrete = Object.keys(aliasBody as Record<string, unknown>);
+    if (concrete.length > 0) {
+      // OpenSearch will not accept an alias in a delete expression, even when
+      // the same request also names its concrete target.
+      deleteTargets.delete(indexName);
+      for (const target of concrete) deleteTargets.add(target);
+    }
+  } catch (err: unknown) {
+    const status = (err as { statusCode?: number; meta?: { statusCode?: number } }).statusCode
+      ?? (err as { meta?: { statusCode?: number } }).meta?.statusCode;
+    // A 404 means this is a direct index, not an alias. Other failures are
+    // handled by the delete below so callers receive actionable context.
+    if (status !== 404) throw err;
+  }
+
+  try {
+    const generations = await client.indices.get({ index: `${indexName}-replacement-*` });
+    const generationBody = (generations as { body?: Record<string, unknown> }).body ?? generations;
+    for (const concrete of Object.keys(generationBody as Record<string, unknown>)) deleteTargets.add(concrete);
+  } catch (err: unknown) {
+    const status = (err as { statusCode?: number; meta?: { statusCode?: number } }).statusCode
+      ?? (err as { meta?: { statusCode?: number } }).meta?.statusCode;
+    if (status !== 404) throw err;
+  }
+
+  if (deleteTargets.size === 0) {
     return {
       success: true,
       indexName,
-      message: `Index '${indexName}' does not exist, nothing to delete`,
+      message: `Index '${indexName}' and its replacement generations do not exist, nothing to delete`,
     };
   }
 
-  // Delete the index
+  // Delete the concrete index or all concrete alias generations.
   try {
-    await client.indices.delete({ index: indexName });
+    await client.indices.delete({ index: [...deleteTargets].join(",") });
   } catch (err: unknown) {
     throw new Error(
       `Failed to delete index '${indexName}': ${extractErrorMessage(err)}`
     );
+  }
+
+  // Poll HEAD <index> until 404 (the delete is durable). `indices.delete`
+  // returns on `acknowledged`, which is NOT the same as durable — under a
+  // concurrent cluster restart the cluster state can be recovered from disk
+  // before the delete persists, silently resurrecting the index (observed:
+  // curl DELETE -> acknowledged -> OS restart -> index back with 2.77M docs).
+  // Poll up to OS_DELETE_VERIFY_TIMEOUT_MS (default 30s); throw if it never
+  // clears so the caller does not proceed against a resurrected index.
+  const pollTimeoutMs = Number(
+    process.env.OS_DELETE_VERIFY_TIMEOUT_MS ?? "30000",
+  );
+  const pollIntervalMs = 500;
+  const deadline = Date.now() + pollTimeoutMs;
+  for (;;) {
+    const { body: stillExists } = await client.indices.exists({
+      index: `${indexName},${indexName}-replacement-*`,
+    });
+    if (!stillExists) break;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Index '${indexName}' delete was acknowledged but still exists after ${pollTimeoutMs}ms. ` +
+          `Refusing to proceed — the cluster may have recovered a stale index from disk (concurrent restart). ` +
+          `Re-run deleteIndex after the cluster is stable.`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
 
   console.log(
@@ -393,6 +460,42 @@ async function indexExists(
     exists: Boolean(exists),
     indexName,
   };
+}
+
+/**
+ * Verify the existing index's number_of_shards matches the configured
+ * OS_INDEX_SHARDS. THROWS on mismatch — a sync must NOT silently upsert into
+ * an index whose shard count drifted from the config (e.g. an index created
+ * before OS_INDEX_SHARDS was changed: ontology-olivierorder1=1 shard vs a
+ * later-configured 4). Call after `indexExists` returns true, before
+ * bulk-indexing. The caller (syncObjectInstancesToOpenSearch) uses this to
+ * fail fast instead of indexing into the wrong shape.
+ *
+ * @param objectTypeApiName - The API name of the object type.
+ */
+export async function verifyIndexShardCount(
+  objectTypeApiName: string
+): Promise<void> {
+  const indexName = getIndexName(objectTypeApiName);
+  // Size-aware: MUST resolve through the same function the create path
+  // uses (expectedShardCountForObjectType), otherwise a large OT created
+  // at OS_INDEX_SHARDS_LARGE=4 would be rejected here against the small
+  // default of 1.
+  const expectedShards = await expectedShardCountForObjectType(
+    objectTypeApiName
+  );
+  const { body } = await client.indices.getSettings({ index: indexName });
+  const settingsIndex = (
+    body as Record<string, { settings: { index: { number_of_shards?: string } } }>
+  )[indexName]?.settings?.index;
+  const actualShards = Number(settingsIndex?.number_of_shards ?? "1");
+  if (actualShards !== expectedShards) {
+    throw new Error(
+      `Index '${indexName}' exists with number_of_shards=${actualShards}, but the configured/size-aware expectation is ${expectedShards}. ` +
+        `Refusing to sync into a shard-mismatched index (silent drift). ` +
+        `Run deleteIndex() (or recreateIndex()) then re-sync to recreate with the configured shard count.`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

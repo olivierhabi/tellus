@@ -26,6 +26,12 @@ let REAL_RUN_ID = "";
 let HANDOFF_RUN_ID = "";
 
 beforeAll(async () => {
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "funnel-runs-fixture-cleanup",
+    skipApiProbe: true,
+  });
   // Singleton-ontology: do NOT insert into ontology (uq_ontology_singleton).
   // The canonical ontology row already exists; just insert our own
   // object_type fixture (FK satisfied by the canonical ontology_id).

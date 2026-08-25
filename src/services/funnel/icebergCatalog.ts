@@ -90,6 +90,12 @@ export interface CommitSnapshotInput {
   manifest: ManifestEntry[];
   summary?: Record<string, unknown>;
   parentSnapshotId?: string | null; // optimistic concurrency
+  /** Pre-generated snapshot id (uuid). When supplied, the row is inserted
+   *  with this id explicitly — used by the Parquet by-reference path so the
+   *  MinIO object can be keyed by the snapshot id BEFORE the row commits
+   *  (write-parquet-first ordering). When omitted, Postgres generates the
+   *  id via the column default. */
+  snapshotId?: string;
 }
 
 /**
@@ -205,9 +211,11 @@ export async function commitSnapshot(
 
     const inserted = await client.query(
       `INSERT INTO funnel_snapshot
-         (dataset_table_id, parent_snapshot_id, operation,
+         (snapshot_id, dataset_table_id, parent_snapshot_id, operation,
           manifest_json, summary_json, added_rows, added_files)
-       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
+       VALUES (
+         COALESCE($8::uuid, gen_random_uuid()),
+         $1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
        RETURNING *`,
       [
         input.tableId,
@@ -217,6 +225,7 @@ export async function commitSnapshot(
         JSON.stringify(input.summary ?? {}),
         addedRows,
         addedFiles,
+        input.snapshotId ?? null,
       ]
     );
 

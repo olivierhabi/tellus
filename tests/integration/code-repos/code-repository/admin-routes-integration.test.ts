@@ -462,6 +462,13 @@ describe("B2 admin routes — DELETE /repositories/:rid (soft-delete)", () => {
 
     const r = await withAuth(request(app).get(`/api/v1/code-repositories/${rid}`));
     expect(r.status).toBe(404);
+
+    // GC: DELETE must call stemma.tombstone() so the Stemma content (branches
+    // + blobs) is freed, not just the code_repository metadata row. Without
+    // this the content lingers forever (the delete->GC gap, fix #1). Against
+    // the in-memory adapter the repo's branches are gone post-tombstone.
+    const branches = await stemma.listBranches({ repositoryRid: rid });
+    expect(branches.kind).toBe("not-found");
   });
 });
 

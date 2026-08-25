@@ -16,6 +16,7 @@
 import { getClient, query } from "../db";
 import type { PoolClient } from "pg";
 import { createHash } from "node:crypto";
+import { deriveMainBranchId } from "./branchContext";
 
 /**
  * Canonicalize a value using the audit-chain's canonicalJson (F-P3-14 BM-4
@@ -112,14 +113,14 @@ async function getBranchEdits(
     ? `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE branch_id = $1 AND edit_id > $2
        ORDER BY commit_seq ASC`
     : `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE branch_id = $1
        ORDER BY commit_seq ASC`;
@@ -159,14 +160,14 @@ async function getParentEditsSinceFork(
     ? `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND ${branchCond} AND edit_id > $3
        ORDER BY commit_seq ASC`
     : `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND ${branchCond}
        ORDER BY commit_seq ASC`;
@@ -183,7 +184,7 @@ async function getParentEditsSinceFork(
       `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id = $2 AND edit_id > $3
        ORDER BY commit_seq ASC`,
@@ -194,7 +195,7 @@ async function getParentEditsSinceFork(
       `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id = $2
        ORDER BY commit_seq ASC`,
@@ -205,7 +206,7 @@ async function getParentEditsSinceFork(
       `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id IS NULL AND edit_id > $2
        ORDER BY commit_seq ASC`,
@@ -216,7 +217,7 @@ async function getParentEditsSinceFork(
       `SELECT edit_id, object_type_api_name AS "objectType",
               primary_key AS "primaryKey", operation,
               property_values AS "propertyValues",
-              created_at AS "createdAt"
+              executed_at AS "createdAt"
        FROM ontology_edit
        WHERE ontology_id_fk = $1 AND branch_id IS NULL
        ORDER BY commit_seq ASC`,
@@ -445,25 +446,46 @@ export async function mergeThreeWay(
         // id still means every call-site can detect duplicates.
         const forkSeq = (branch as { fork_point_commit_seq?: number | null }).fork_point_commit_seq ?? null;
         const mergeOpId = deriveMergeOpId(branchId, parentBranchId ?? "__root__", forkSeq);
-        const editExecutionId = `${mergeOpId.slice(0, 16)}-${mergedCount}`;
+        // Format the per-edit execution_id as a valid UUID (the
+        // ontology_edit.execution_id column is typed `uuid`, so the prior
+        // `${mergeOpId.slice(0, 16)}-${mergedCount}` shape — e.g.
+        // `abff5466cd1b06c9-0` — was rejected by PG with
+        // `invalid input syntax for type uuid`). Re-hash mergeOpId + the
+        // edit index so each edit gets a distinct, deterministic, UUID-shaped
+        // id (same inputs → same execution_id across retries).
+        const editHash = createHash("sha256")
+          .update(`${mergeOpId}:${mergedCount}`, "utf8")
+          .digest("hex");
+        const editExecutionId = `${editHash.slice(0, 8)}-${editHash.slice(8, 12)}-${editHash.slice(12, 16)}-${editHash.slice(16, 20)}-${editHash.slice(20, 32)}`;
+        // ontology_edit.branch_id + ontology_id are NOT NULL with no default.
+        // The merge replays the branch's edits onto the PARENT branch — when
+        // the parent is `main` (parentBranchId is null), resolve to the
+        // ontology's main branch UUID (deriveMainBranchId — pure uuidv5, no
+        // DB lookup; the executor + editApplicator do the same for regular
+        // applies). Without this the INSERT fails with 23502 not_null_violation
+        // (mapped to 400 REQUIRED_FIELD_MISSING) whenever a branch merges
+        // into main. Also include ontology_id (NOT NULL, no default) — the
+        // prior INSERT omitted it entirely.
+        const targetBranchId = parentBranchId ?? deriveMainBranchId(ontologyId);
         await pgClient.query(
           `INSERT INTO ontology_edit
              (object_type_api_name, primary_key, operation, property_values,
               link_edits, action_type_api_name, execution_id, action_parameters,
-              executed_by, edit_strategy, branch_id)
-           VALUES ($1, $2, $3, $4, '[]', 'branch_merge', $5, '{}', $7, 'branch_merge', $6)`,
+              executed_by, edit_strategy, ontology_id, branch_id)
+           VALUES ($1, $2, $3, $4, '[]', 'branch_merge', $5, '{}', $7, 'latest_wins', $8, $6)`,
           [
             edit.objectType,
             edit.primaryKey,
             edit.operation,
             JSON.stringify(edit.operation === "delete" ? {} : filteredProps),
             editExecutionId,
-            parentBranchId ?? null,
+            targetBranchId,
             // F-P3-14 BM-8 closure — record the merging principal, not
             // 'system'. Callers are now required to pass mergedBy; the
             // default remains 'system' for backward compatibility during
             // the migration window.
             mergedBy ?? "system",
+            ontologyId,
           ]
         );
         mergedCount++;

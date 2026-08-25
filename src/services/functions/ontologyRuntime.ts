@@ -23,7 +23,12 @@
 // happens before the sandbox runs.
 // ---------------------------------------------------------------------------
 
+import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { getOverlayStore } from "../overlay/getOverlayStore";
+import { writeOverlay } from "../overlay/writebackOverlay";
+import type { OverlayRecord } from "../overlay/overlayStore";
+import { sendSignal } from "../funnel/durableWorkflow";
 
 /** A materialised object: its declared properties plus `$`-prefixed metadata. */
 export interface OntologyObject {
@@ -47,6 +52,17 @@ export interface OntologySnapshot {
   readonly ontologyId: string;
   readonly objectCount: number;
   readonly objectTypes: readonly string[];
+  /**
+   * The object types the code repository DECLARES as imports
+   * (`code_repository_resource_imports`, `kind='object_type'`) — sourced from
+   * `loadOntologySnapshot`'s `objectTypes` filter arg. This is the set a
+   * generated `@ontology/sdk` would expose: a function may
+   * `import { SomeType } from "@ontology/sdk"` for a type that has ZERO rows
+   * in this snapshot. `objectTypeDescriptors` is keyed off this list (falling
+   * back to `objectTypes` only when a caller didn't pass a filter), so
+   * `SomeType.apiName` always resolves regardless of instance count.
+   */
+  readonly importedTypes?: readonly string[];
 }
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -130,7 +146,18 @@ export async function loadOntologySnapshot(
     });
     count += 1;
   }
-  return { byType, ontologyId: args.ontologyId, objectCount: count, objectTypes: [...byType.keys()] };
+  // `importedTypes` mirrors the caller's `objectTypes` filter (the repo's
+  // declared imports) so `buildOntologySdk` can build `objectTypeDescriptors`
+  // from DECLARED imports — not just types that happen to have rows. Undefined
+  // when the caller passed no filter (buildOntologySdk then falls back to the
+  // loaded `objectTypes`, preserving the pre-fix behaviour for unfiltered loads).
+  return {
+    byType,
+    ontologyId: args.ontologyId,
+    objectCount: count,
+    objectTypes: [...byType.keys()],
+    importedTypes: args.objectTypes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +224,17 @@ function toNumber(v: unknown): number {
   return 0;
 }
 
+/**
+ * Wire-boundary type guard: `v` is a returned ObjectSet. The invoke route
+ * uses this to serialize the set as its row ARRAY instead of the internal
+ * `{"rows":[...]}` representation — Palantir's public surface exposes object
+ * collections as plain arrays (`data` in the REST/Ontology API), never with
+ * an internal `rows` key.
+ */
+export function isObjectSet(v: unknown): v is ObjectSet {
+  return v instanceof ObjectSet;
+}
+
 // ---------------------------------------------------------------------------
 // createEditBatch — Foundry TypeScript Functions v2 Ontology-edits API.
 // (https://www.palantir.com/docs/foundry/functions/typescript-v2-ontology-edits)
@@ -254,10 +292,10 @@ function collapseEdits(raw: ReadonlyArray<OntologyEdit>): OntologyEdit[] {
   const objects = new Map<string, OntologyEdit>();
   const order: string[] = [];
   const links = new Map<string, OntologyEdit>();
-  const okey = (t: string, pk: string) => `${t} ${pk}`;
+  const okey = (t: string, pk: string) => `${t}\u0000${pk}`;
   for (const e of raw) {
     if (e.op === "link" || e.op === "unlink") {
-      links.set(`${e.linkType} ${e.sourcePrimaryKey} ${e.targetPrimaryKey}`, e); // last wins
+      links.set(`${e.linkType}\u0000${e.sourcePrimaryKey}\u0000${e.targetPrimaryKey}`, e); // last wins
       continue;
     }
     const k = okey(e.objectType, e.primaryKey);
@@ -349,22 +387,85 @@ export interface OntologySdk {
   readonly objectTypeDescriptors: Record<string, { apiName: string }>;
 }
 
+/**
+ * Per-object-type access timing accumulated during execution — one entry per
+ * object TYPE (not per call), so a function calling `Objects.get` in a loop
+ * yields a single aggregated record (`calls` keeps the multiplicity).
+ *
+ * Accuracy note: snapshot reads are in-memory `Map.get`s — the real loading
+ * I/O happened at snapshot build time (tracked by the route's
+ * "Load ontology snapshot" phase). These timings measure the cost of the
+ * materialisation + property bind per access from the function's perspective,
+ * which is the in-executor counterpart of Foundry's "Load objects from
+ * arguments/links" waterfall bars. Timestamps are wall-clock `Date.now()`
+ * (NOT `performance.now()`) so offsets are comparable across worker threads
+ * (each worker has its own perf-hooks time origin).
+ */
+export interface ObjectLoadTiming {
+  readonly objectType: string;
+  readonly calls: number;
+  /** Wall-clock timestamp of the FIRST access to this type. */
+  readonly firstStartAt: number;
+  /** Wall-clock timestamp of the LAST access START to this type. */
+  readonly lastStartAt: number;
+  /** Cumulative time spent inside search/get for this type. */
+  readonly totalDurationMs: number;
+}
+
 export interface BuiltSdk {
   readonly sdk: OntologySdk;
   /** The edits collected during execution (read after the function returns). */
   getEdits(): OntologyEdit[];
+  /**
+   * The object types the function QUERIED via `Objects.search`/`Objects.get`
+   * during execution — read after the function returns. The invoke route
+   * diffs this against the repo's imported object types to surface an
+   * actionable "accessed but not imported" warning (the runtime enforces
+   * imports fail-silently: a non-imported type yields an empty `ObjectSet`,
+   * so without this record the user sees an unexplained empty result).
+   * `Objects.types()` is NOT recorded — it lists loaded types, not a request.
+   */
+  getRequestedTypes(): string[];
+  /** Per-type access timings (performance.phases source). */
+  getObjectLoads(): ObjectLoadTiming[];
 }
 
 export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
   const edits: OntologyEdit[] = [];
+  // Every object type the function asked `Objects.search`/`Objects.get` for.
+  // Insertion-ordered; duplicates collapse (a Set). Read post-run by the
+  // worker and threaded back to the invoke route for the import diff.
+  const requestedTypes = new Set<string>();
+  const objectLoads = new Map<
+    string,
+    { calls: number; firstStartAt: number; lastStartAt: number; totalDurationMs: number }
+  >();
+  const recordLoad = (objectType: string, startAt: number, durationMs: number): void => {
+    const prev = objectLoads.get(objectType);
+    if (prev) {
+      prev.calls += 1;
+      prev.lastStartAt = startAt;
+      prev.totalDurationMs += durationMs;
+    } else {
+      objectLoads.set(objectType, { calls: 1, firstStartAt: startAt, lastStartAt: startAt, totalDurationMs: durationMs });
+    }
+  };
   const sdk: OntologySdk = {
     Objects: {
       search(objectType: string): ObjectSet {
+        const startAt = Date.now();
+        requestedTypes.add(String(objectType));
         const bucket = snapshot.byType.get(objectType);
-        return new ObjectSet(bucket ? [...bucket.values()] : []);
+        const out = new ObjectSet(bucket ? [...bucket.values()] : []);
+        recordLoad(String(objectType), startAt, Date.now() - startAt);
+        return out;
       },
       get(objectType: string, primaryKey: string): OntologyObject | undefined {
-        return snapshot.byType.get(objectType)?.get(String(primaryKey));
+        const startAt = Date.now();
+        requestedTypes.add(String(objectType));
+        const out = snapshot.byType.get(objectType)?.get(String(primaryKey));
+        recordLoad(String(objectType), startAt, Date.now() - startAt);
+        return out;
       },
       types(): string[] {
         return [...snapshot.byType.keys()];
@@ -386,11 +487,41 @@ export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
       getEdits() { return edits.slice(); },
     },
     createEditBatch: () => createEditBatchImpl(),
+    // Descriptors are keyed off the repo's DECLARED imports
+    // (`snapshot.importedTypes`), NOT the types that happen to have rows
+    // (`snapshot.objectTypes`). A generated `@ontology/sdk` exposes every
+    // imported type regardless of instance count, so a function may read
+    // `SomeType.apiName` for a type with zero rows in this snapshot — that
+    // must resolve to `{ apiName }` (it is a TYPE descriptor, not data), else
+    // `import { SomeType } from "@ontology/sdk"` is `undefined` in the sandbox
+    // and `SomeType.apiName` throws `Cannot read properties of undefined`.
+    //
+    // Use DECLARED imports only when NON-EMPTY (not `??`): an empty
+    // `importedTypes: []` must NOT shadow real rows loaded by an unfiltered
+    // `loadOntologySnapshot` call — `[]` is non-nullish, so `??` would wrongly
+    // pick it and yield an empty descriptor map. The non-empty guard preserves
+    // the pre-fix behaviour (descriptors = loaded types) for that edge case +
+    // for callers that load without an import filter.
     objectTypeDescriptors: Object.fromEntries(
-      snapshot.objectTypes.map((t) => [t, { apiName: t }]),
+      (snapshot.importedTypes && snapshot.importedTypes.length > 0
+        ? snapshot.importedTypes
+        : snapshot.objectTypes
+      ).map((t) => [t, { apiName: t }]),
     ),
   };
-  return { sdk, getEdits: () => edits.slice() };
+  return {
+    sdk,
+    getEdits: () => edits.slice(),
+    getRequestedTypes: () => [...requestedTypes],
+    getObjectLoads: () =>
+      [...objectLoads.entries()].map(([objectType, t]) => ({
+        objectType,
+        calls: t.calls,
+        firstStartAt: t.firstStartAt,
+        lastStartAt: t.lastStartAt,
+        totalDurationMs: t.totalDurationMs,
+      })),
+  };
 }
 
 function cryptoRandomId(): string {
@@ -408,6 +539,9 @@ export interface ApplyEditsArgs {
   readonly ontologyId: string;
   readonly edits: readonly OntologyEdit[];
   readonly actorUserId?: string | null;
+  /** Function-backed Actions use this to append their audit row in the same
+   * transaction as the ontology mutations. Preview/invoke callers omit it. */
+  readonly preCommitHook?: (client: PoolClient) => Promise<void>;
 }
 export interface ApplyEditsResult {
   readonly created: number;
@@ -418,9 +552,21 @@ export interface ApplyEditsResult {
 }
 
 export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<ApplyEditsResult> {
-  if (args.edits.length === 0) return { created: 0, updated: 0, deleted: 0, linked: 0, unlinked: 0 };
+  // Preview callers can return immediately for an empty batch. Action callers
+  // still need a transaction so their pre-commit audit hook runs for a
+  // successful no-op Function invocation.
+  if (args.edits.length === 0 && !args.preCommitHook) {
+    return { created: 0, updated: 0, deleted: 0, linked: 0, unlinked: 0 };
+  }
   const client: PoolClient = await pool.connect();
   let created = 0, updated = 0, deleted = 0, linked = 0, unlinked = 0;
+  const editBatchId = randomUUID();
+  // Function-backed Actions historically bypassed editApplicator's B7
+  // writeback overlay. PostgreSQL advanced immediately, but object search
+  // continued returning the older indexed document. Collect the committed
+  // post-edit projections here and publish them only after COMMIT, preventing
+  // both stale reads and phantom overlay records on rollback.
+  const committedOverlays: OverlayRecord[] = [];
   try {
     await client.query("BEGIN");
     const linkTablePresent = await client.query<{ exists: boolean }>(
@@ -442,26 +588,52 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
 
     for (const e of args.edits) {
       if (e.op === "create") {
-        await client.query(
+        const r = await client.query<{ properties: Record<string, unknown>; version: number; rid: string | null }>(
           `INSERT INTO object_instances
              (ontology_id, branch_id, object_type_api_name, primary_key, properties, last_modified_at, version)
            VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, now(), 1)
            ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
            DO UPDATE SET properties = EXCLUDED.properties, last_modified_at = now(),
-                         version = object_instances.version + 1`,
+                         version = object_instances.version + 1
+           RETURNING properties, version, rid`,
           [args.ontologyId, branchId, e.objectType, e.primaryKey, JSON.stringify(e.properties)],
         );
+        const row = r.rows[0];
+        if (row) committedOverlays.push({
+          branchId: "_main",
+          objectType: e.objectType,
+          primaryKey: e.primaryKey,
+          doc: { ...row.properties, ...(row.rid ? { __rid: row.rid } : {}) },
+          deleted: false,
+          version: Number(row.version),
+          createdAt: Date.now(),
+          editId: randomUUID(),
+          actorUserId: args.actorUserId ?? null,
+        });
         created += 1;
       } else if (e.op === "update") {
-        const r = await client.query(
+        const r = await client.query<{ properties: Record<string, unknown>; version: number; rid: string | null }>(
           `UPDATE object_instances
               SET properties = properties || $5::jsonb, last_modified_at = now(),
                   version = version + 1
             WHERE ontology_id = $1::uuid AND branch_id = $2::uuid
-              AND object_type_api_name = $3 AND primary_key = $4`,
+              AND object_type_api_name = $3 AND primary_key = $4
+          RETURNING properties, version, rid`,
           [args.ontologyId, branchId, e.objectType, e.primaryKey, JSON.stringify(e.patch)],
         );
         updated += r.rowCount ?? 0;
+        const row = r.rows[0];
+        if (row) committedOverlays.push({
+          branchId: "_main",
+          objectType: e.objectType,
+          primaryKey: e.primaryKey,
+          doc: { ...row.properties, ...(row.rid ? { __rid: row.rid } : {}) },
+          deleted: false,
+          version: Number(row.version),
+          createdAt: Date.now(),
+          editId: randomUUID(),
+          actorUserId: args.actorUserId ?? null,
+        });
         if (canAudit) {
           for (const [prop, val] of Object.entries(e.patch)) {
             await client.query(
@@ -474,13 +646,27 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
           }
         }
       } else if (e.op === "delete") {
-        const r = await client.query(
+        const r = await client.query<{ version: number }>(
           `DELETE FROM object_instances
             WHERE ontology_id = $1::uuid AND branch_id = $2::uuid
-              AND object_type_api_name = $3 AND primary_key = $4`,
+              AND object_type_api_name = $3 AND primary_key = $4
+          RETURNING version`,
           [args.ontologyId, branchId, e.objectType, e.primaryKey],
         );
         deleted += r.rowCount ?? 0;
+        const row = r.rows[0];
+        if (row) committedOverlays.push({
+          branchId: "_main",
+          objectType: e.objectType,
+          primaryKey: e.primaryKey,
+          doc: {},
+          deleted: true,
+          // A delete is the next state transition after the removed row.
+          version: Number(row.version) + 1,
+          createdAt: Date.now(),
+          editId: randomUUID(),
+          actorUserId: args.actorUserId ?? null,
+        });
       } else {
         // link / unlink → an append-only edit in link_edit (operation add|remove).
         if (canLink) {
@@ -496,7 +682,46 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
         if (e.op === "link") linked += 1; else unlinked += 1;
       }
     }
+    // Wake the durable Funnel in the SAME transaction as the object edits.
+    // This is the long-term projection path; the overlay below only provides
+    // immediate read-your-writes while indexing is in flight. A rollback
+    // removes both mutations and signals, so no phantom reindex can escape.
+    const affectedTypes = new Set(
+      args.edits.flatMap((edit) =>
+        "objectType" in edit && typeof edit.objectType === "string"
+          ? [edit.objectType]
+          : [],
+      ),
+    );
+    for (const objectTypeApiName of affectedTypes) {
+      await sendSignal({
+        ontologyId: args.ontologyId,
+        objectTypeApiName,
+        signalType: "editBatchPending",
+        fingerprint: `function-edit:${editBatchId}:${objectTypeApiName}`,
+        payload: { source: "function-action", editBatchId },
+        client,
+      });
+    }
+    if (args.preCommitHook) await args.preCommitHook(client);
     await client.query("COMMIT");
+    if (committedOverlays.length > 0) {
+      try {
+        const store = await getOverlayStore();
+        const commitTimeout = Number(process.env.QUICKWIT_COMMIT_TIMEOUT_SECS ?? 60);
+        const ttlSeconds = Math.max(60, (Number.isFinite(commitTimeout) ? commitTimeout : 60) * 3);
+        await Promise.all(
+          committedOverlays.map((record) => writeOverlay(record, store, ttlSeconds)),
+        );
+      } catch (error) {
+        // PostgreSQL is authoritative and the durable indexing pipeline still
+        // consumes object_edits. Overlay failure must not turn a committed
+        // Action into a reported failure, but it must be observable.
+        console.warn(
+          `[function-edits] post-commit overlay publish failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     return { created, updated, deleted, linked, unlinked };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

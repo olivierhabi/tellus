@@ -1,0 +1,146 @@
+# Gap 5 (CI/PR gating): runs the transforms-python END-TO-END parity suite on
+# every PR + push, BACKEND-ONLY. The unit logic is also gated by ci.yml's
+# `unit` job; THIS workflow's e2e job gates the behavioral parity that unit
+# tests cannot cover: a live backend + Postgres + PySpark running a real
+# build end-to-end via this repo's own scripts
+# (scripts/verify-transforms-e2e.sh + scripts/test-template-parity.sh).
+#
+# The former browser/cross-repo leg (bash verify scripts + cypress specs from
+# the sibling tellus-fe repo) was REMOVED: tellus-fe no longer contains that
+# e2e harness, and checking out a second private repo requires a PAT we do
+# not maintain. Sandbox (container-mode) + cypress browser parity are
+# exercised by the local verify stack / unit lanes instead.
+name: transforms-parity
+on:
+  pull_request:
+    paths:
+      - "src/services/codeRepository/transforms/**"
+      - "src/services/templates/manifest.ts"
+      - "src/services/templates/DECISIONS.md"
+      - "src/migrations/10[3-9]_*.sql"
+      - "tests/unit/code-repos/code-repository/transforms/**"
+      - "tests/unit/code-repos/templates/**"
+      - "scripts/test-template-parity.sh"
+      - ".github/workflows/transforms-parity.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  unit:
+    # Re-affirms the transforms unit suite as a gate (mirrors ci.yml's unit job
+    # but scoped to transforms so a PR touching only transforms sees a focused
+    # signal). Pure logic — no services.
+    name: transforms unit logic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with: { node-version: 24.12.0, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: pnpm vitest run --config vitest.unit.config.ts tests/unit/code-repos/code-repository/transforms/ tests/unit/code-repos/templates/
+
+  parity-e2e:
+    name: transforms parity (bash, live backend) — backend only
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports: ["5432:5432"]
+        options: --health-cmd="pg_isready -U tellus -d tellus_db" --health-interval=5s --health-timeout=5s --health-retries=10
+    env:
+      PGDATABASE: tellus_db
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      PGHOST: localhost
+      CODE_REPOS_TEST_AUTH: "1"
+      NODE_ENV: development
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with: { node-version: 24.12.0, cache: pnpm }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: "21" }
+      - run: pnpm install --frozen-lockfile
+      - name: Provision PySpark venv
+        run: |
+          python -m venv /tmp/pyspark-venv
+          /tmp/pyspark-venv/bin/pip install --quiet pyspark pandas pyarrow
+      - name: Run migrations
+        run: pnpm run migrate:all
+      - name: Start backend (local mode)
+        run: |
+          env TELLUS_PYTHON_BIN=/tmp/pyspark-venv/bin/python JAVA_HOME=$JAVA_HOME \
+            nohup npx tsx src/server.ts > /tmp/tellus.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:3000/health && exit 0; sleep 1; done
+          cat /tmp/tellus.log; exit 1
+      - name: bash parity — transforms-python template parity (2.0.0)
+        # HTTP-level guard: scaffolds transforms-python@2.0.0 via POST /api/v1/scaffold
+        # and asserts the Foundry-faithful file set + content invariants + datasetRid
+        # substitution (✅/➕/➖ report). See scripts/test-template-parity.sh + DECISIONS.md.
+        run: TELLUS_BASE=http://localhost:3000 bash scripts/test-template-parity.sh
+      - name: bash parity — backend e2e (repo → dataset → @transform → build → lineage)
+        # Full loop on this repo alone: create a transforms repo, seed an input
+        # dataset, commit a real @transform, run the build against the live
+        # PySpark venv, and assert job_spec rows + materialized output +
+        # lineage edges. See scripts/verify-transforms-e2e.sh.
+        run: bash scripts/verify-transforms-e2e.sh 3000
+      - name: Build transform-runtime image (Gap 3 sandbox)
+        run: docker build -t tellus/transform-runtime:py38 -f scripts/transform-runtime.Dockerfile scripts
+      - name: bash parity — sandboxed execution (container mode)
+        # Gap 3 proof on this repo alone: a normal transform SUCCEEDS in the
+        # container; a host-filesystem read FAILS with FileNotFoundError; a
+        # network socket FAILS under --network=none. See
+        # scripts/verify-transforms-sandbox.sh. Exits non-zero on any miss.
+        run: |
+          # Kill by PORT, not by name: `npx tsx src/server.ts` actually runs
+          # as `node .../tsx/dist/cli.mjs src/server.ts`, so name-based
+          # `pkill -f "tsx src/server.ts"` matches nothing and the old
+          # server keeps serving :3000 (run 32091038735 + rerun). The
+          # container-mode server below must not die with EADDRINUSE —
+          # that would silently exercise STALE local-mode execution and
+          # the negative isolation probes would "succeed" un-sandboxed.
+          OLD_PIDS="$(lsof -t -i TCP:3000 -s TCP:LISTEN || true)"
+          if [ -n "$OLD_PIDS" ]; then kill $OLD_PIDS 2>/dev/null || true; fi
+          sleep 3
+          OLD_PIDS="$(lsof -t -i TCP:3000 -s TCP:LISTEN || true)"
+          if [ -n "$OLD_PIDS" ]; then kill -9 $OLD_PIDS 2>/dev/null || true; fi
+          pkill -9 -f "src/server.ts" 2>/dev/null || true
+          # Wait for the OLD (local-mode) server to actually release :3000.
+          for i in $(seq 1 30); do
+            if ! curl -s -m 1 http://localhost:3000/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          if curl -s -m 1 http://localhost:3000/health >/dev/null 2>&1; then
+            echo "old server on :3000 did not exit after 30s"; exit 1
+          fi
+          env JAVA_HOME=$JAVA_HOME \
+            TELLUS_TRANSFORM_EXECUTION_MODE=container nohup npx tsx src/server.ts > /tmp/tellus-c.log 2>&1 &
+          READY=""
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/health >/dev/null 2>&1; then READY=1; break; fi
+            sleep 1
+          done
+          if [ -z "$READY" ]; then
+            echo "container-mode server failed to start:"; cat /tmp/tellus-c.log; exit 1
+          fi
+          # Image sanity: the runtime image must be able to import pyspark and
+          # run a plain shell command under `docker run` — isolates "image is
+          # broken on this platform" from "orchestration/driver failed".
+          docker run --rm tellus/transform-runtime:py38 bash -c 'echo shell-ok; python3 --version'
+          docker run --rm --network=none --user spark --read-only \
+            --tmpfs /tmp:size=128m,mode=1777,exec --tmpfs /home/spark:size=64m,mode=1777 \
+            -e HOME=/home/spark \
+            -v "$PWD:/work:ro" \
+            tellus/transform-runtime:py38 bash -c 'python3 -c "import pyspark, pandas, pyarrow; print(\"imports-ok\", pyspark.__version__)"'
+          bash scripts/verify-transforms-sandbox.sh

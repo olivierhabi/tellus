@@ -20,6 +20,7 @@ import { z } from "zod";
 import { getWorkshopDb } from "./db.js";
 import { workshopError } from "./errors.js";
 import { invalidateOntology } from "./omsFacade.js";
+import { V1_DEFAULT_SEMANTICS } from "../../actions/actionSemantics.js";
 import { emitWorkshopAudit } from "./audit.js";
 import type { Actor } from "./moduleService.js";
 import {
@@ -173,8 +174,9 @@ async function _createActionTypeInner(
       updated_at: Date;
     }>(
       `INSERT INTO action_type
-         (ontology_id, api_name, display_name, description, parameters, rules, submission_criteria, is_enabled, max_affected_objects)
-       VALUES ($1, $2, $3, $4, $5::jsonb, '[]'::jsonb, $6::jsonb, $7, $8)
+         (ontology_id, api_name, display_name, description, parameters, rules, submission_criteria, is_enabled, max_affected_objects,
+          semantics_version, execution_mode, delete_policy)
+       VALUES ($1, $2, $3, $4, $5::jsonb, '[]'::jsonb, $6::jsonb, $7, $8, $9, $10, $11)
        RETURNING action_type_id, ontology_id, api_name, display_name, description, parameters, submission_criteria, is_enabled, max_affected_objects, created_at, updated_at`,
       [
         req.ontologyRid,
@@ -187,6 +189,11 @@ async function _createActionTypeInner(
           : null,
         req.isEnabled,
         req.maxAffectedObjects,
+        // Migration 124: semantics columns are NOT NULL. Workshop-created
+        // action types carry the legacy v1 semantics triple.
+        V1_DEFAULT_SEMANTICS.semanticsVersion,
+        V1_DEFAULT_SEMANTICS.executionMode,
+        V1_DEFAULT_SEMANTICS.deletePolicy,
       ],
     );
     const r = result.rows[0]!;

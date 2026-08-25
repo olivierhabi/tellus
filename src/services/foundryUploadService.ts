@@ -1,6 +1,8 @@
 import { Knex } from 'knex';
+import * as fs from 'fs';
 import { scheduleParseJob } from '../jobs/parseDatasetJob';
 import { buildObjectKey, uploadObject, deleteObject } from './storageService';
+import { recordProgress } from './uploadProgress';
 import { ROOT_SPACE_RID } from '../lib/rid';
 
 /**
@@ -69,23 +71,59 @@ export function formatFileSize(
 export class UploadService {
   constructor(private knex: Knex) {}
 
-  async processUpload(projectId: string, folderId: string | null, ownerId: string, files: Express.Multer.File[]): Promise<Record<string, unknown>[]> {
+  async processUpload(projectId: string, folderId: string | null, ownerId: string, files: Express.Multer.File[], uploadId?: string): Promise<Record<string, unknown>[]> {
     const datasets: Record<string, unknown>[] = [];
     const uploadedKeys: string[] = [];
 
+    // Aggregate S3-stream progress (only reported when an uploadId is present,
+    // i.e. the foundry dialog path). Files upload sequentially, so at any
+    // moment one file is in flight: aggregate loaded = completed files' bytes
+    // + the in-flight file's httpUploadProgress.loaded. total = sum of staged
+    // file sizes (known because diskStorage staged them first).
+    const totalBytes = files.reduce((sum, f) => sum + (f.size || 0), 0);
+    let completedBytes = 0;
+
     try {
-      // 1. Upload each file to S3/MinIO
-      for (const file of files) {
+      // 1. Stream each staged file to S3/MinIO. With diskStorage `file.path`
+      //    is set and `file.buffer` is undefined; the buffer fallback only
+      //    matters for any caller still on memoryStorage. Streaming the
+      //    staged file (rather than buffering it) keeps the heap bounded by
+      //    the S3 partSize, so a multi-GB upload can't OOM the process.
+      for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+        const file = files[fileIndex];
         const uniqueFilename = (file as any).uniqueFilename || file.originalname;
         const objectKey = buildObjectKey(projectId, folderId, uniqueFilename);
 
-        await uploadObject(objectKey, file.buffer, file.mimetype, {
-          'original-filename': file.originalname,
-          'project-id': projectId,
-          ...(folderId ? { 'folder-id': folderId } : {}),
-          'owner-id': ownerId,
-        });
+        const body: Buffer | fs.ReadStream = file.path
+          ? fs.createReadStream(file.path)
+          : file.buffer;
+        // Forward lib-storage's httpUploadProgress (per-file loaded/total) to
+        // the progress store as an aggregate across all files in the request.
+        const onProgress = uploadId
+          ? (loaded: number) =>
+              recordProgress(uploadId, {
+                phase: 's3',
+                loaded: completedBytes + loaded,
+                total: totalBytes,
+                fileIndex,
+                fileName: file.originalname,
+              })
+          : undefined;
+        await uploadObject(
+          objectKey,
+          body,
+          file.mimetype,
+          {
+            'original-filename': file.originalname,
+            'project-id': projectId,
+            ...(folderId ? { 'folder-id': folderId } : {}),
+            'owner-id': ownerId,
+          },
+          file.size,
+          onProgress,
+        );
 
+        completedBytes += file.size || 0;
         uploadedKeys.push(objectKey);
 
         // Stash the S3 key on the file object for DB insert
@@ -145,12 +183,45 @@ export class UploadService {
           );
         }
       });
+
+      // S3 + DB both committed — mark the upload done for any polling client.
+      if (uploadId) {
+        await recordProgress(uploadId, {
+          phase: 's3',
+          status: 'done',
+          loaded: totalBytes,
+          total: totalBytes,
+        }).catch(() => {});
+      }
     } catch (error) {
+      // Mark the upload failed for any polling client, then roll back S3.
+      if (uploadId) {
+        await recordProgress(uploadId, {
+          phase: 's3',
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Upload failed',
+        }).catch(() => {});
+      }
       // Rollback: remove any S3 objects that were uploaded before the failure
       await Promise.allSettled(
         uploadedKeys.map((key) => deleteObject(key).catch(() => {}))
       );
       throw error;
+    } finally {
+      // Always remove the disk-staged multer files once the S3 upload (and any
+      // rollback) is done. Files staged by diskStorage would otherwise leak on
+      // every upload and eventually fill the staging volume. The async parse
+      // job reads from S3 (dataset.file_path holds the S3 object key, not the
+      // local staged path — see parseDatasetJob.ts → csvParsingService.parseFile),
+      // so deleting the local copy here is safe.
+      await Promise.allSettled(
+        files.map((f) => {
+          const stagedPath = f.path;
+          return stagedPath
+            ? fs.promises.unlink(stagedPath).catch(() => {})
+            : Promise.resolve();
+        }),
+      );
     }
 
     // 3. Schedule async parse jobs

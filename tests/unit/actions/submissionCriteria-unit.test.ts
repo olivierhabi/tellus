@@ -49,6 +49,14 @@ describe("evaluateSubmissionCriteria", () => {
     expect(evaluateSubmissionCriteria(crit, {}, { roles: ["admin"], groups: ["eng"] }).ok).toBe(false);
   });
 
+  it("evaluates an exact current-user condition", () => {
+    const crit = { conditions: [{ username: "user-123" }] };
+    expect(evaluateSubmissionCriteria(crit, {}, { username: "user-123" }).ok).toBe(true);
+    const denied = evaluateSubmissionCriteria(crit, {}, { username: "user-456" });
+    expect(denied.ok).toBe(false);
+    expect(denied.failures[0]).toMatch(/required user/);
+  });
+
   it("accepts a bare conditions array and ignores string labels", () => {
     const crit = [{ parameter: "x", operator: "gt", value: 0 }, "someLabel"];
     expect(evaluateSubmissionCriteria(crit, { x: 5 }).ok).toBe(true);

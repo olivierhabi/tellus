@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import { randomUUID } from 'crypto';
 import { createUploadMiddleware, createProjectUploadMiddleware } from '../config/foundryMulter';
 import { foundryEnv } from '../config/foundryEnv';
 import { AppError } from '../utils/foundryAppError';
@@ -33,6 +34,9 @@ export class UploadController {
       const projectId = req.params.projectId as string;
       const folderId = req.params.folderId as string;
       const ownerId = this.getOwnerId(req);
+      // Client-generated correlation id for the progress poll channel. If the
+      // client didn't send one, mint one so progress is still recorded.
+      const uploadId = req.get('X-Upload-Id') || randomUUID();
 
       // Validate project exists (authorizeRoles already verified membership)
       const exists = await this.projectService.projectExists(projectId);
@@ -67,7 +71,8 @@ export class UploadController {
         projectId,
         folderId,
         ownerId,
-        files
+        files,
+        uploadId,
       );
 
       // Build response with formatted file sizes
@@ -116,6 +121,9 @@ export class UploadController {
     try {
       const projectId = req.params.projectId as string;
       const ownerId = this.getOwnerId(req);
+      // Client-generated correlation id for the progress poll channel. If the
+      // client didn't send one, mint one so progress is still recorded.
+      const uploadId = req.get('X-Upload-Id') || randomUUID();
 
       // Validate project exists (authorizeRoles already verified membership)
       const exists = await this.projectService.projectExists(projectId);
@@ -144,7 +152,8 @@ export class UploadController {
         projectId,
         null,
         ownerId,
-        files
+        files,
+        uploadId,
       );
 
       // Build response with formatted file sizes

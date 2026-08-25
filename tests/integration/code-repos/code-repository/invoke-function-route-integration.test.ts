@@ -207,6 +207,128 @@ describe("POST /:rid/functions/invoke", () => {
     expect(r.body.parameters?.field).toBe("inlineSource");
   });
 
+  // -----------------------------------------------------------------------
+  // performance.phases — the Performance-tab waterfall data (Foundry parity).
+  // An ok invoke must carry an "Execute function" phase plus a per-type
+  // "Load objects: <type>" child phase for every type the function queried,
+  // aggregated by type (`calls`), all with finite offset/duration values.
+  // -----------------------------------------------------------------------
+  it("ok response carries performance.phases (Execute function + per-type object loads)", async () => {
+    const rid = await createRepo("InvokePerf");
+    const draft =
+      `import { Objects } from "@foundry/functions-api";\n` +
+      `export default async function probe() {\n` +
+      `  Objects.get("Order", "ord-1");\n` +
+      `  const set = Objects.search("Order").filter(() => true);\n` +
+      `  return set.count() > -1;\n` +
+      `}\n`;
+    const r = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/functions/invoke`)
+        .send({
+          apiName: "probe",
+          args: {},
+          inlineSource: draft,
+          inlineSourcePath: "typescript-functions/src/functions/probe.ts",
+        }),
+    );
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.status).toBe("ok");
+
+    expect(r.body.performance).toBeDefined();
+    const phases = r.body.performance.phases as Array<{
+      name: string;
+      startOffsetMs: number;
+      durationMs: number;
+      depth?: number;
+      calls?: number;
+    }>;
+    expect(Array.isArray(phases)).toBe(true);
+    for (const p of phases) {
+      expect(typeof p.name).toBe("string");
+      expect(Number.isFinite(p.startOffsetMs)).toBe(true);
+      expect(Number.isFinite(p.durationMs)).toBe(true);
+      expect(p.startOffsetMs).toBeGreaterThanOrEqual(0);
+    }
+
+    const exec = phases.find((p) => p.name === "Execute function");
+    expect(exec).toBeDefined();
+
+    // The function queried "Order" twice via two different access paths —
+    // aggregated into ONE child phase with calls = 2.
+    const loads = phases.filter((p) => p.name === "Load objects: Order");
+    expect(loads).toHaveLength(1);
+    expect(loads[0]!.depth).toBe(1);
+    expect(loads[0]!.calls).toBe(2);
+
+    // scoping surface unchanged: Order is not imported by this repo.
+    expect(r.body.unimportedAccessedTypes).toContain("Order");
+  });
+
+  // -----------------------------------------------------------------------
+  // ObjectSet returns serialize as a plain row ARRAY — never the internal
+  // `{"rows":[...]}` class representation. Palantir's public surface exposes
+  // object collections as arrays (REST: `data`); the FE renders arrays as
+  // result tables.
+  // -----------------------------------------------------------------------
+  // -----------------------------------------------------------------------
+  // Positional binding — when the annotation-derived signature declares ≥2
+  // parameters, args bind by NAME (typescript-v2-positional-v2), NOT the
+  // legacy "(CLIENT_STUB first) + envelope by name" heuristic that used to
+  // feed ordinary multi-param functions a throwing client stub as arg #1.
+  // -----------------------------------------------------------------------
+  it("binds multi-parameter annotated functions positionally by name", async () => {
+    const rid = await createRepo("InvokeMulti");
+    const draft =
+      `export default async function range(start: number, end: number, step?: number): Promise<number[]> {\n` +
+      `  const s = step ?? 1;\n` +
+      `  const out: number[] = [];\n` +
+      `  for (let i = start; i < end; i += s) out.push(i);\n` +
+      `  return out;\n` +
+      `}\n`;
+    const r = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/functions/invoke`)
+        .send({
+          apiName: "range",
+          args: { start: 0, end: 5, step: 2 },
+          inlineSource: draft,
+          inlineSourcePath: "typescript-functions/src/functions/range.ts",
+        }),
+    );
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.status).toBe("ok");
+    const parsed: unknown =
+      typeof r.body.result === "string" ? JSON.parse(r.body.result) : r.body.result;
+    expect(parsed).toEqual([0, 2, 4]);
+  });
+
+  it("serializes a returned ObjectSet as a plain row array (no internal rows wrapper)", async () => {
+    const rid = await createRepo("InvokeObjectSet");
+    const draft =
+      `import { Objects } from "@foundry/functions-api";\n` +
+      `export default async function probe() { return Objects.search("AckManualSrc"); }\n`;
+    const r = await withAuth(
+      request(app)
+        .post(`/api/v1/code-repositories/${rid}/functions/invoke`)
+        .send({
+          apiName: "probe",
+          args: {},
+          inlineSource: draft,
+          inlineSourcePath: "typescript-functions/src/functions/probe.ts",
+        }),
+    );
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.status).toBe("ok");
+    const parsed: unknown =
+      typeof r.body.result === "string" ? JSON.parse(r.body.result) : r.body.result;
+    // MUST be an array of objects — never { rows: [...] } (internal shape).
+    expect(Array.isArray(parsed)).toBe(true);
+    // The repo imported nothing here → empty result set, but an ARRAY-shaped
+    // empty result: distinguishes "ObjectSet (0 rows)" from a scalar null.
+    expect(parsed).toEqual([]);
+  });
+
   it("rejects non-string inlineSource", async () => {
     const rid = await createRepo("InvokeInlineWrongType");
     const r = await withAuth(

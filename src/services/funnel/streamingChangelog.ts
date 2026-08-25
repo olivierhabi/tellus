@@ -32,7 +32,6 @@ import {
 import { query } from "../../db";
 import {
   ChangelogRow,
-  ComputeChangelogResult,
   DEFAULT_THROUGHPUT_CAP,
   SourceChangeRow,
   ThroughputGuard,
@@ -61,10 +60,26 @@ export interface StreamingChangelogInput {
   heartbeatExitAfterMs?: number;
 }
 
+/**
+ * Result of a streaming (Kafka) changelog batch commit. The Kafka path
+ * commits bounded batches (throughput-capped at 2 MiB/s) and embeds
+ * `kafka_offsets` in the snapshot summary — it does NOT use the
+ * `parquet_ref` by-reference path (the batch is small enough to return by
+ * value). Kept separate from `ComputeChangelogResult` so the
+ * foundry-CSV/Temporal path can drop its `rows` field without forcing
+ * the Kafka path through the same shape change.
+ */
+export interface StreamingCommitResult {
+  snapshotId: string;
+  rowsEmitted: number;
+  manifest: ManifestEntry[];
+  rows: ChangelogRow[];
+}
+
 export interface StreamingChangelogHandle {
   stop(): Promise<void>;
   /** Committed snapshots in the order they were produced. */
-  commits: ComputeChangelogResult[];
+  commits: StreamingCommitResult[];
 }
 
 export interface CdcMessage {
@@ -138,7 +153,7 @@ export async function runStreamingChangelog(
 
   const pending: ChangelogRow[] = [];
   const offsetBuffer = new Map<number, string>();
-  const commits: ComputeChangelogResult[] = [];
+  const commits: StreamingCommitResult[] = [];
   const startedAt = Date.now();
 
   let resolveStopped: () => void;
@@ -271,7 +286,7 @@ async function commitStreamingBatch(args: {
   datasource_id: string;
   rows: ChangelogRow[];
   kafkaOffsets: Record<string, string>;
-}): Promise<ComputeChangelogResult> {
+}): Promise<StreamingCommitResult> {
   const manifest: ManifestEntry[] = [
     {
       file_path: `kafka://streaming/${args.datasource_id}/${Date.now()}`,

@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS tpa_sdk_build_jobs;
+DROP INDEX IF EXISTS idx_tpa_sdk_package_versions;
+DROP INDEX IF EXISTS uq_tpa_sdk_artifact_object_key;
+DROP INDEX IF EXISTS uq_tpa_sdk_artifact_digest;
+ALTER TABLE tpa_sdk_versions DROP COLUMN IF EXISTS revoked_at;
+ALTER TABLE tpa_sdk_versions DROP COLUMN IF EXISTS published_at;
+ALTER TABLE tpa_sdk_versions DROP COLUMN IF EXISTS artifact_manifest;
+ALTER TABLE tpa_sdk_versions DROP COLUMN IF EXISTS artifact_size_bytes;
+ALTER TABLE tpa_sdk_versions DROP COLUMN IF EXISTS artifact_object_key;
+ALTER TABLE tpa_sdk_versions DROP COLUMN IF EXISTS artifact_digest;

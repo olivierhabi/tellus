@@ -23,6 +23,7 @@ import {
   type ScheduleOverlapPolicy,
   type ScheduleSpec,
 } from "@temporalio/client";
+import { getEnvironmentIdentity } from "../../../../config/environmentIdentity";
 
 const PREFIX = "table-import-";
 const OVERLAP: ScheduleOverlapPolicy = "SKIP";
@@ -49,11 +50,11 @@ export interface ScheduleOpResult {
 }
 
 async function connect(): Promise<Client | null> {
-  const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
-  const namespace = process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
+  // FUNN-ISO: deployment-scoped namespace, never implicit sharing.
+  const identity = getEnvironmentIdentity();
   try {
-    const connection = await Connection.connect({ address });
-    return new Client({ connection, namespace });
+    const connection = await Connection.connect({ address: identity.temporalAddress });
+    return new Client({ connection, namespace: identity.temporalNamespace, identity: identity.workerIdentity });
   } catch (err) {
     console.warn(`[table-import-schedule] temporal unreachable: ${(err as Error).message}`);
     return null;
@@ -92,7 +93,7 @@ export async function upsertImportSchedule(
   const client = await connect();
   if (!client) return { ok: false, reason: "temporal-unreachable" };
 
-  const taskQueue = taskQueueOverride ?? process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
+  const taskQueue = taskQueueOverride ?? getEnvironmentIdentity().temporalTaskQueue;
   const scheduleId = scheduleIdFor(importRid);
   const action = {
     type: "startWorkflow" as const,

@@ -28,18 +28,22 @@
 
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "node:crypto";
 import { query, getClient } from "../db";
 import { appError } from "../utils/appError";
 import { convertValue } from "./indexing/typeConverter";
 import { client } from "./opensearch/client";
 import {
   getIndexName,
-  deleteIndex,
-  createIndex,
 } from "./opensearch/indexLifecycleManager";
-import { getObjectBuffer } from "./storageService";
+import { generateIndexMapping } from "./opensearch/indexMappingGenerator";
+import { getObjectBuffer, getObjectStream } from "./storageService";
+import { parseCsvReadable } from "./indexing/streamingCsv";
 import { ensureDocumentSecurity } from "./security/documentSecurity";
+import { bulkUpsertInstances } from "../models/objectInstance";
+import { deterministicObjectRid } from "./objectIdentity";
 import type { PropertyInput } from "./mapping/typeMapper";
+import { deriveMainBranchId } from "./branchContext";
 
 // ---------------------------------------------------------------------------
 // Pipeline stage tracking — matches the 4-stage Funnel spec
@@ -47,6 +51,16 @@ import type { PropertyInput } from "./mapping/typeMapper";
 // ---------------------------------------------------------------------------
 
 type PipelineStage = "changelog" | "merge_changes" | "indexing" | "hydration";
+
+/** Keep the live generation and at most one immediate rollback generation. */
+export function obsoleteReindexGenerations(
+  generations: readonly string[],
+  live: string,
+  rollback: string | null,
+): string[] {
+  const retained = new Set([live, ...(rollback ? [rollback] : [])]);
+  return generations.filter((index) => !retained.has(index));
+}
 
 /**
  * Write the live pipeline stage into `funnel_pipeline_state`. Called
@@ -108,48 +122,43 @@ function stripFoundryTags(filePath: string): string {
 async function readFoundryBridgedFile(
   rawFilePath: string,
   format: string,
-): Promise<{ rows: Record<string, unknown>[]; headers: string[] }> {
+): Promise<{ rows: AsyncIterable<Record<string, unknown>> }> {
   const s3Key = stripFoundryTags(rawFilePath);
   if (!s3Key) {
     throw new Error(
       `Foundry-bridged datasource has no resolvable S3 key in '${rawFilePath}'`,
     );
   }
-  const buffer = await getObjectBuffer(s3Key);
-  let content = buffer.toString("utf-8");
-  // Strip BOM
-  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
 
   if (format === "csv" || format === "tsv") {
-    const { parse } = await import("csv-parse/sync");
-    const { sanitizeCsvHeader } = await import("../utils/csvHeader");
-    const records: Record<string, string>[] = parse(content, {
-      // See `src/utils/csvHeader.ts` — prevents silent column drop when
-      // the foundry-bridged file has duplicate or blank header cells.
-      columns: (h: string[]) => sanitizeCsvHeader(h, { source: rawFilePath }),
-      skip_empty_lines: true,
-      relax_column_count: true,
-      trim: true,
+    // Stream the S3 object straight through csv-parse — never
+    // materializing the whole file as a Buffer/string. The legacy path
+    // did `getObjectBuffer(s3Key).toString("utf-8")`, which for any file
+    // larger than `Buffer.constants.MAX_STRING_LENGTH` (512 MiB) throws
+    // "Cannot create a string longer than 0x1fffffe8 characters" and
+    // sinks the whole reindex (stuck at changelog/merge). A 5.6 M-row
+    // / 854 MB backing CSV hit exactly this. Streaming keeps memory flat
+    // at csv-parse's high-water-mark regardless of file size.
+    //
+    // `normalizeNulls: true` preserves the legacy semantics where empty
+    // / null-like cells become SQL NULL before `convertValue` sees them.
+    const stream = await getObjectStream(s3Key);
+    const { rows } = await parseCsvReadable(stream, {
+      source: rawFilePath,
       delimiter: format === "tsv" ? "\t" : ",",
+      normalizeNulls: true,
     });
-    // Normalise null-likes so downstream type conversion treats
-    // empty cells as SQL NULL rather than the literal string "".
-    for (const record of records) {
-      for (const key of Object.keys(record)) {
-        const v = (record as Record<string, unknown>)[key];
-        if (typeof v === "string") {
-          const n = v.trim().toLowerCase();
-          if (n === "" || n === "null" || n === "na" || n === "n/a") {
-            (record as Record<string, unknown>)[key] = null;
-          }
-        }
-      }
-    }
-    const headers = records.length > 0 ? Object.keys(records[0]) : [];
-    return { rows: records, headers };
+    return { rows };
   }
+
   if (format === "json" || format === "jsonl") {
-    const trimmed = content.trim();
+    // JSON can't be row-streamed as cheaply as CSV (a top-level array
+    // needs the whole document), so the buffered read stays here. The
+    // reported breakage is CSV-only; JSON backings are typically small
+    // NDJSON/arrays. A >512 MiB JSON backing would need a streaming
+    // JSON parser — flagged as a known limitation, not the bug at hand.
+    const buffer = await getObjectBuffer(s3Key);
+    const trimmed = buffer.toString("utf-8").trim();
     let records: Record<string, unknown>[];
     if (trimmed.startsWith("[")) {
       records = JSON.parse(trimmed);
@@ -159,19 +168,12 @@ async function readFoundryBridgedFile(
         .filter((l) => l.trim().length > 0)
         .map((l) => JSON.parse(l));
     }
-    const headers: string[] = [];
-    const seen = new Set<string>();
-    for (const row of records) {
-      if (row && typeof row === "object" && !Array.isArray(row)) {
-        for (const k of Object.keys(row)) {
-          if (!seen.has(k)) {
-            seen.add(k);
-            headers.push(k);
-          }
-        }
-      }
-    }
-    return { rows: records, headers };
+    // Wrap the materialized array in an async iterable so the merge loop
+    // can use one uniform `for await` contract for CSV (streamed) + JSON.
+    const rows: AsyncIterable<Record<string, unknown>> = (async function* () {
+      for (const r of records) yield r;
+    })();
+    return { rows };
   }
   throw new Error(`Unsupported foundry-bridge file format: '${format}'`);
 }
@@ -192,6 +194,7 @@ export interface ReindexResult {
   };
   totalObjectsIndexed: number;
   skippedNullPk: number;
+  duplicatePkInTransaction: number;
   durationMs: number;
 }
 
@@ -200,10 +203,23 @@ interface TransactionFile {
   file_path: string;
   transaction_type: string;
   committed_at: string;
+  /**
+   * True for the SYNTHETIC transaction that legacy file-backed and
+   * foundry-bridged datasources fabricate below — those have no row in
+   * `dataset_transaction`, so their `transaction_id` is a human-readable label
+   * ("legacy" / "foundry-bridge"), NOT a uuid. It must never reach
+   * `object_instances.source_transaction_id`, which is a `uuid` column: doing so
+   * aborts the whole reindex with `invalid input syntax for type uuid:
+   * "foundry-bridge"` (a 2026-08-16 production 500 on Force Reindex for every
+   * wizard-created object type). The label stays usable for logs and the
+   * reindex_history metadata blob.
+   */
+  synthetic?: boolean;
 }
 
 interface ReindexStats {
   skippedNullPk: number;
+  duplicatePkInTransaction: number;
   createCount: number;
   updateCount: number;
   deleteCount: number;
@@ -215,47 +231,18 @@ interface ReindexStats {
 
 async function readCsvFile(
   filePath: string
-): Promise<{ rows: Record<string, string>[]; headers: string[] }> {
-  const { parse } = await import("csv-parse/sync");
-
-  let content = fs.readFileSync(filePath, "utf-8");
-
-  // Strip BOM
-  if (content.charCodeAt(0) === 0xfeff) {
-    content = content.slice(1);
-  }
-
-  const { sanitizeCsvHeader } = await import("../utils/csvHeader");
-  const records: Record<string, string>[] = parse(content, {
-    // See `src/utils/csvHeader.ts` — prevents silent column drop when
-    // the on-disk transaction file has duplicate or blank header cells.
-    columns: (h: string[]) => sanitizeCsvHeader(h, { source: filePath }),
-    skip_empty_lines: true,
-    relax_column_count: true,
-    trim: true,
+): Promise<{ rows: AsyncIterable<Record<string, unknown>> }> {
+  // Stream the disk file through csv-parse instead of `fs.readFileSync` +
+  // `parse(content)`. Same MAX_STRING_LENGTH fix as the foundry-bridged
+  // path — a local transaction file can also exceed 512 MiB, and the
+  // old whole-string read would throw identically. `normalizeNulls`
+  // preserves the legacy null-like -> SQL NULL coercion.
+  const stream = fs.createReadStream(filePath);
+  const { rows } = await parseCsvReadable(stream, {
+    source: filePath,
+    normalizeNulls: true,
   });
-
-  const headers = records.length > 0 ? Object.keys(records[0]) : [];
-
-  // Normalize null-like values
-  for (const record of records) {
-    for (const key of Object.keys(record)) {
-      const val = record[key];
-      if (val !== null && val !== undefined) {
-        const normalized = val.trim().toLowerCase();
-        if (
-          normalized === "" ||
-          normalized === "null" ||
-          normalized === "na" ||
-          normalized === "n/a"
-        ) {
-          (record as any)[key] = null;
-        }
-      }
-    }
-  }
-
-  return { rows: records, headers };
+  return { rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +251,15 @@ async function readCsvFile(
 
 async function readJsonFile(
   filePath: string
-): Promise<{ rows: Record<string, unknown>[]; headers: string[] }> {
+): Promise<{ rows: AsyncIterable<Record<string, unknown>> }> {
+  // KNOWN LIMITATION (same as the foundry-bridged JSON branch): JSON can't
+  // be row-streamed as cheaply as CSV (a top-level array needs the whole
+  // document), so this stays a whole-file `readFileSync` + `JSON.parse`. A
+  // >512 MiB local JSON/JSONL transaction file would throw the same
+  // `Cannot create a string longer than 0x1fffffe8 characters` the CSV
+  // streaming path fixed. Large JSON backings are uncommon vs CSV; if one
+  // shows up, route it through a streaming JSON parser (JSONL line-stream
+  // or a streaming JSON AST reader).
   let content = fs.readFileSync(filePath, "utf-8");
 
   // Strip BOM
@@ -290,19 +285,6 @@ async function readJsonFile(
       .map((line) => JSON.parse(line));
   }
 
-  const headers: string[] = [];
-  const keySet = new Set<string>();
-  for (const row of records) {
-    if (row && typeof row === "object" && !Array.isArray(row)) {
-      for (const key of Object.keys(row)) {
-        if (!keySet.has(key)) {
-          keySet.add(key);
-          headers.push(key);
-        }
-      }
-    }
-  }
-
   // Normalize null-like string values
   for (const record of records) {
     for (const key of Object.keys(record)) {
@@ -321,7 +303,12 @@ async function readJsonFile(
     }
   }
 
-  return { rows: records, headers };
+  // Wrap the materialized array in an async iterable so the merge loop's
+  // uniform `for await` contract holds for JSON as well as streamed CSV.
+  const rows: AsyncIterable<Record<string, unknown>> = (async function* () {
+    for (const r of records) yield r;
+  })();
+  return { rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +318,7 @@ async function readJsonFile(
 async function readFile(
   filePath: string,
   format: string
-): Promise<{ rows: Record<string, unknown>[]; headers: string[] }> {
+): Promise<{ rows: AsyncIterable<Record<string, unknown>> }> {
   if (!fs.existsSync(filePath)) {
     throw new Error(`File not found: ${filePath}`);
   }
@@ -343,6 +330,58 @@ async function readFile(
     return readJsonFile(filePath);
   }
   throw new Error(`Unsupported file format: '${format}'`);
+}
+
+/**
+ * Classify an OpenSearch bulk error as transient (retry-worthy) vs.
+ * permanent. Socket resets / timeouts / throttling / server errors are
+ * transient — a fresh connection from the pool usually succeeds next try.
+ * Per-item 4xx (e.g. a malformed doc) is permanent and is surfaced via the
+ * batch's `bulkErrors` collection rather than retried here.
+ */
+function isTransientBulkError(err: any): boolean {
+  const msg = String(err?.message ?? "").toLowerCase();
+  const code = String(err?.code ?? err?.name ?? "").toLowerCase();
+  if (
+    code === "es_connection_error" ||
+    code === "response_timeout" ||
+    code === "not_found_connection"
+  ) {
+    return true;
+  }
+  if (
+    /epipe|econnreset|econnrefused|etimedout|socket hang up|write epipe|connection|timeout|reset by peer/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  const status: number | undefined =
+    err?.meta?.statusCode ?? err?.statusCode ?? err?.status;
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  );
+}
+
+/**
+ * Parse a positive-integer env override with a safe default. A bare
+ * `Number(process.env.X ?? def)` silently yields NaN (non-numeric value),
+ * 0, or a negative for misconfigurations like `REINDEX_BULK_BATCH_DOCS=abc`
+ * / `=0` / `= ` — which would either never flush (NaN → one giant bulk) or
+ * flush every single doc (0 → 5.6 M one-doc bulks), reintroducing the exact
+ * memory/request-size blowup the streaming + batching fix removed. Fail loud
+ * is not an option at boot, so fall back to the documented default instead.
+ */
+function parsePositiveIntEnv(
+  value: string | undefined,
+  def: number,
+): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : def;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,13 +398,25 @@ export async function reindexObjectType(
   const startTime = Date.now();
   const stats: ReindexStats = {
     skippedNullPk: 0,
+    duplicatePkInTransaction: 0,
     createCount: 0,
     updateCount: 0,
     deleteCount: 0,
   };
 
   let objectTypeId: string;
+  /** Label of the last transaction merged — for logs and reindex_history only. */
   let lastTransactionId: string | null = null;
+  /**
+   * The same value, but ONLY when it is a real `dataset_transaction` uuid. This
+   * is the one that may be written to `object_instances.source_transaction_id`
+   * (a `uuid` column). Synthetic labels stay null here — see
+   * TransactionFile.synthetic.
+   */
+  let lastTransactionUuid: string | null = null;
+  let replacementIndexName: string | null = null;
+  let replacementCutoverComplete = false;
+  let rollbackIndexName: string | null = null;
 
   try {
     // =================================================================
@@ -487,6 +538,8 @@ export async function reindexObjectType(
           file_path: datasource.file_path,
           transaction_type: "SNAPSHOT",
           committed_at: new Date().toISOString(),
+          // Not a uuid — see TransactionFile.synthetic.
+          synthetic: true,
         },
       ];
       // Format detection: prefer the explicit `file_format` column
@@ -530,8 +583,44 @@ export async function reindexObjectType(
 
     const objectMap = new Map<string, Record<string, unknown>>();
 
+    // BOUNDED, and honest about why. The transaction FILES are streamed
+    // (parseCsvReadable), so we no longer materialise a 5.6 M-row array before
+    // the merge starts — but this Map is still O(distinct PKs) live objects,
+    // each holding a full property doc. At a few million objects that is
+    // multiple GB of heap, and the failure mode is the worst kind: V8
+    // aborts the WHOLE Node process on OOM, so one oversized Force Reindex
+    // takes down every unrelated request in flight, and the run's own
+    // funnel_run row is left stranded at status='running' with no error
+    // recorded (there is no catch block that survives an OOM abort).
+    //
+    // This guard does NOT make the legacy reindex path scale — it converts an
+    // unattributable process kill into a clean, attributable, per-object-type
+    // error that names the object type, the count, and the knob. Genuinely
+    // fixing it means spilling the merge to disk (DuckDB, as the OSv2 funnel's
+    // mergeChangesSQL already does) instead of collapsing it in heap; that is
+    // the Object Storage V2 funnel path, which is why large types should go
+    // through the funnel rather than Force Reindex.
+    const REINDEX_MAX_MERGED_OBJECTS = parsePositiveIntEnv(
+      process.env.REINDEX_MAX_MERGED_OBJECTS,
+      2_000_000,
+    );
+    const assertMergeBudget = () => {
+      if (objectMap.size <= REINDEX_MAX_MERGED_OBJECTS) return;
+      throw appError(
+        "REINDEX_TOO_LARGE",
+        `Object type '${objectTypeApiName}' merged past ${REINDEX_MAX_MERGED_OBJECTS} distinct primary keys, ` +
+          `the in-memory limit for the datasource reindex path. Aborting before the process runs out of heap. ` +
+          `Index this object type through the Object Storage V2 funnel (which merges on disk via DuckDB), ` +
+          `or raise REINDEX_MAX_MERGED_OBJECTS if this process has headroom for it.`,
+        { failedAtStep: "merge_changes" },
+      );
+    };
+
     for (const txn of transactions) {
-      let rows: Record<string, unknown>[];
+      // Rows now arrive as an async iterable (streamed from S3/disk via
+      // `parseCsvReadable`) rather than a materialized array, so a 5.6 M-row
+      // backing file no longer OOMs the process before the merge even starts.
+      let rowSource: AsyncIterable<Record<string, unknown>>;
       try {
         // Case C (foundry-dataset bridge): the synthetic file_path
         // contains `#foundry-dataset:<uuid>` — we strip the tag to
@@ -545,7 +634,7 @@ export async function reindexObjectType(
         const fileResult = isFoundryBridgedPath(txn.file_path)
           ? await readFoundryBridgedFile(txn.file_path, datasetFormat)
           : await readFile(txn.file_path, datasetFormat);
-        rows = fileResult.rows;
+        rowSource = fileResult.rows;
       } catch (err: any) {
         throw appError(
           "REINDEX_FAILED",
@@ -562,7 +651,7 @@ export async function reindexObjectType(
       // Track duplicate PKs within this single transaction
       const seenInTransaction = new Set<string>();
 
-      for (const row of rows) {
+      for await (const row of rowSource) {
         const pkRawValue = row[primaryKeyColumn];
 
         // Skip rows with null/empty primary key
@@ -577,15 +666,25 @@ export async function reindexObjectType(
 
         const pkStr = String(pkRawValue).trim();
 
-        // Duplicate PK within same transaction = error
+        // Same PK seen earlier in THIS transaction. Re-snapshot / CDC
+        // sources legitimately re-record an object with updated values
+        // (the orders_bureau_transactional_system.part01.csv backing has
+        // ~949 K such updated duplicates across 5.6 M rows — same order_id,
+        // different quantity/dates). The merge's `objectMap.set` below
+        // implements "last row wins" (the most recent state of the object),
+        // which is the correct semantics for updates and is already how
+        // cross-transaction duplicates are resolved. Throwing here (the old
+        // behaviour) was inconsistent with that and broke any re-snapshot
+        // datasource the moment it was large enough to reach this check
+        // (before the streaming-read fix it died earlier at MAX_STRING_LENGTH
+        // and masked this guard). Count + continue so operators still see
+        // the duplicates in the run stats without blocking the index.
         if (seenInTransaction.has(pkStr)) {
-          throw appError(
-            "REINDEX_FAILED",
-            `Duplicate primary key '${pkStr}' found within transaction '${txn.transaction_id}'. Each primary key must appear only once per transaction.`,
-            { failedAtStep: "duplicate_pk_check" }
-          );
+          stats.duplicatePkInTransaction++;
+          // fall through — objectMap.set below overwrites with this (latest) row
+        } else {
+          seenInTransaction.add(pkStr);
         }
-        seenInTransaction.add(pkStr);
 
         // Map CSV/JSON columns to Ontology properties using columnMapping
         const doc: Record<string, unknown> = {};
@@ -613,19 +712,41 @@ export async function reindexObjectType(
           }
         }
 
-        // "Most recent transaction wins" — later transactions overwrite
-        objectMap.set(pkStr, doc);
+        // "Most recent row wins" across the changelog. For a re-snapshot
+        // (a duplicate PK within this transaction) merge field-by-field and
+        // DON'T let a null/missing cell on the later row null out a real
+        // value the earlier row set: a ragged shorter row under
+        // relax_column_count omits the column → rawValue undefined →
+        // convertValue→null, and a blind objectMap.set would clobber the
+        // real value with null (silent data loss). Latest-non-null wins.
+        const existing = objectMap.get(pkStr);
+        if (existing) {
+          for (const [k, v] of Object.entries(doc)) {
+            if (v !== null && v !== undefined) existing[k] = v;
+          }
+        } else {
+          objectMap.set(pkStr, doc);
+          // Only a NEW key can grow the map, so check on that edge only —
+          // an overwrite of an existing key is memory-neutral.
+          if (objectMap.size % 50_000 === 0) assertMergeBudget();
+        }
       }
 
       lastTransactionId = txn.transaction_id;
+      lastTransactionUuid = txn.synthetic ? null : txn.transaction_id;
     }
+
+    // The sampled check above fires every 50 000 new keys, so a run that ends
+    // just past the budget slips through it. Check once more on the exact
+    // final size before committing to the indexing stage.
+    assertMergeBudget();
 
     // Capture datasource count BEFORE applying edits
     const objectsFromDatasource = objectMap.size;
 
     console.log(
       `[Reindex] Step 3: Merged ${transactions.length} transaction(s) → ` +
-        `${objectsFromDatasource} objects (${stats.skippedNullPk} skipped null PK)`
+        `${objectsFromDatasource} objects (${stats.skippedNullPk} skipped null PK, ${stats.duplicatePkInTransaction} duplicate-PK updates applied last-wins)`
     );
 
     // =================================================================
@@ -714,101 +835,402 @@ export async function reindexObjectType(
     await setPipelineStage(objectTypeApiName, "indexing");
 
     const indexName = getIndexName(objectTypeApiName);
-    const bulkBody: Record<string, unknown>[] = [];
-
-    for (const [pk, doc] of objectMap) {
-      bulkBody.push({ index: { _index: indexName, _id: pk } });
-      // Phase A4 (F-03) — stamp `_security.markings` via the shared helper
-      // so reindexed docs are visible to marking-constrained users. The
-      // helper is idempotent: if the source doc already carries
-      // `_security`, its classification is preserved.
-      bulkBody.push(
-        ensureDocumentSecurity({
-          __pk: pk,
-          __objectType: objectTypeApiName,
-          __lastModified: new Date().toISOString(),
-          __version: 1,
-          ...doc,
-        }),
+    // Snapshot the serving generation before creating the replacement. A
+    // Funnel sync can create the canonical index asynchronously; resolving it
+    // after a long bulk write would mistake that concurrent index for the
+    // generation this run must preserve as rollback state.
+    let servingIndices: string[] = [];
+    let canonicalIsAlias = false;
+    try {
+      const aliases = await client.indices.getAlias({ name: indexName });
+      const aliasBody = (aliases as any)?.body ?? {};
+      servingIndices = Object.keys(aliasBody);
+      canonicalIsAlias = servingIndices.length > 0;
+      rollbackIndexName =
+        servingIndices.find(
+          (candidate) =>
+            aliasBody[candidate]?.aliases?.[indexName]?.is_write_index === true,
+        ) ??
+        servingIndices[0] ??
+        null;
+    } catch {
+      const exists = await client.indices.exists({ index: indexName });
+      if ((exists as any)?.body === true) servingIndices = [indexName];
+    }
+    // Millisecond timestamps alone collide when a previously interrupted
+    // process is restarted with a restored/frozen clock. The replacement is
+    // never a durable identifier, so add entropy while retaining a sortable
+    // timestamp prefix for operations and lifecycle cleanup.
+    // =================================================================
+    // Step 8: Create an isolated sibling index. The serving index/alias is
+    // left untouched until every replacement document has landed.
+    // =================================================================
+    try {
+      const generated = await generateIndexMapping(objectTypeApiName, ontologyId);
+      let created = false;
+      let lastCreateError: Error | null = null;
+      // An interrupted client can receive a create retry after OpenSearch has
+      // already accepted the first request. Treat name contention as a normal
+      // allocation retry; any other create failure remains terminal.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        replacementIndexName =
+          `${indexName}-replacement-${Date.now().toString(36)}-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        try {
+          await client.indices.create({
+            index: replacementIndexName,
+            body: generated.mapping as unknown as Record<string, unknown>,
+          });
+          created = true;
+          break;
+        } catch (err: any) {
+          lastCreateError = err;
+          if (!String(err?.message ?? err).includes("resource_already_exists_exception")) {
+            throw err;
+          }
+        }
+      }
+      if (!created) throw lastCreateError ?? new Error("replacement index allocation failed");
+    } catch (err: any) {
+      throw appError(
+        "REINDEX_FAILED",
+        `Failed to create replacement OpenSearch index '${replacementIndexName}': ${err.message}`,
+        { failedAtStep: "opensearch_indexing" }
+      );
+    }
+    if (!replacementIndexName) {
+      throw appError(
+        "REINDEX_FAILED",
+        "Replacement index allocation completed without an index name.",
+        { failedAtStep: "opensearch_indexing" },
       );
     }
 
     console.log(
-      `[Reindex] Step 7: Built bulk request with ${objectMap.size} documents`
+      `[Reindex] Step 8: Replacement index '${replacementIndexName}' created; serving '${indexName}' remains online`
     );
 
     // =================================================================
-    // Step 8: Delete/recreate index
+    // Step 7 + 9: Batched bulk index. The old path built ONE giant
+    // `bulkBody` array (2 entries per object — action + doc) for the whole
+    // merged map, then issued a single `client.bulk` with it. For a 5.6 M-
+    // row object type that's an 11.2 M-entry array (~GBs) AND a single
+    // OpenSearch request far past its budget. Stream the map through fixed-
+    // size batches instead — memory stays bounded by `BULK_BATCH_DOCS`,
+    // not by the object count, and each batch is a normal-sized bulk
+    // request. `refresh` is deferred to the final batch so the index only
+    // pays the refresh cost once the whole run has landed.
     // =================================================================
 
-    try {
-      await deleteIndex(objectTypeApiName);
-    } catch {
-      // Index might not exist yet — that's fine
+    const BULK_BATCH_DOCS = parsePositiveIntEnv(
+      process.env.REINDEX_BULK_BATCH_DOCS,
+      2000,
+    );
+    // Bulk writes are NOT read-SLO traffic. The shared opensearch client is
+    // capped at a 5 s `requestTimeout` (F-P4-04) so a single slow read can't
+    // head-of-line-block the process — but a 2000-doc bulk into a growing
+    // index (segment merges, refresh) legitimately takes longer than 5 s, so
+    // that cap turns every bulk past ~1 M docs into a "socket hang up" /
+    // ECONNRESET. Override the timeout per bulk call so writes aren't bound
+    // by the read SLO. Reads still use the 5 s default.
+    const BULK_REQUEST_TIMEOUT = parsePositiveIntEnv(
+      process.env.OPENSEARCH_BULK_REQUEST_TIMEOUT,
+      60_000,
+    );
+    const totalDocs = objectMap.size;
+    let indexedCount = 0;
+    const bulkErrors: any[] = [];
+    const batch: Record<string, unknown>[] = [];
+    let batchDocs = 0;
+    let processedDocs = 0;
+
+    const flushBatch = async (refresh: boolean | "wait_for") => {
+      if (batch.length === 0) return;
+      // The `index` action is keyed by `_id`, so a retried batch is
+      // idempotent (re-indexing the same _id overwrites). Sustained bulk
+      // load against a small cluster occasionally drops a socket
+      // (write EPIPE / ECONNRESET / timeout / 429 / 5xx) — retry the
+      // batch a few times with backoff before failing the whole run.
+      const MAX_BULK_ATTEMPTS = 4;
+      let result: any;
+      for (let attempt = 1; attempt <= MAX_BULK_ATTEMPTS; attempt++) {
+        try {
+          result = await client.bulk(
+            { body: batch, refresh },
+            // Per-call transport override: bulk writes are not bound by the
+            // 5 s read SLO (see BULK_REQUEST_TIMEOUT above). Passed as the
+            // transport-options arg, not a Bulk_Request field.
+            { requestTimeout: BULK_REQUEST_TIMEOUT },
+          );
+          break;
+        } catch (err: any) {
+          if (isTransientBulkError(err) && attempt < MAX_BULK_ATTEMPTS) {
+            console.warn(
+              `[Reindex] bulk batch failed (attempt ${attempt}/${MAX_BULK_ATTEMPTS}): ${err.message}; retrying…`
+            );
+            await new Promise((r) => setTimeout(r, 500 * attempt));
+            continue;
+          }
+          if (err.code === "REINDEX_FAILED") throw err;
+          throw appError(
+            "REINDEX_FAILED",
+            `OpenSearch bulk indexing failed: ${err.message}`,
+            { failedAtStep: "opensearch_indexing" }
+          );
+        }
+      }
+      const items: any[] = result?.body?.items || [];
+      for (const item of items) {
+        if (
+          item.index?.status === 200 ||
+          item.index?.status === 201
+        ) {
+          indexedCount++;
+        } else if (item.index?.error && bulkErrors.length < 10) {
+          bulkErrors.push(item.index.error);
+        }
+      }
+      batch.length = 0;
+      batchDocs = 0;
+    };
+
+    const instanceRows: import("../models/objectInstance").UpsertInstanceInput[] = [];
+    for (const [pk, doc] of objectMap) {
+      // Phase A4 (F-03) — stamp `_security.markings` via the shared helper
+      // so reindexed docs are visible to marking-constrained users. The
+      // helper is idempotent: if the source doc already carries
+      // `_security`, its classification is preserved.
+      const secured = ensureDocumentSecurity({
+        __pk: pk,
+        // Phase 2 (object identity): persist-stable rid on reindex.
+        __rid:
+          (doc.__rid as string | undefined) ??
+          deterministicObjectRid(ontologyId, objectTypeApiName, pk),
+        __objectType: objectTypeApiName,
+        __ontology: ontologyId,
+        __lastModified: new Date().toISOString(),
+        __version: 1,
+        ...doc,
+      });
+      batch.push({ index: { _index: replacementIndexName, _id: pk } });
+      batch.push(secured);
+      // Rwanda QA §3.4 — the direct read-by-primary-key path resolves from
+      // object_instances; a datasource reindex must leave it populated too,
+      // otherwise read-your-writes breaks for every datasource-backed type.
+      instanceRows.push({
+        ontology_id: ontologyId,
+        object_type_api_name: objectTypeApiName,
+        primary_key: pk,
+        properties: doc,
+        markings: secured._security?.markings ?? [],
+        source_datasource_id: null,
+        // NOT lastTransactionId — that may be a synthetic label
+        // ("foundry-bridge" / "legacy") and this column is a `uuid`.
+        source_transaction_id: lastTransactionUuid,
+      });
+      batchDocs++;
+      processedDocs++;
+      if (batchDocs >= BULK_BATCH_DOCS) {
+        await flushBatch(processedDocs >= totalDocs ? "wait_for" : false);
+        await bulkUpsertInstances(instanceRows.splice(0));
+      }
+    }
+    // Flush any trailing partial batch (no-op if the last full batch above
+    // already wait_for'd — in which case `batch` is empty).
+    await flushBatch("wait_for");
+    await bulkUpsertInstances(instanceRows.splice(0));
+
+    // The datasource documents above are assembled before Object Storage's
+    // upsert decides whether an existing row keeps or increments its version.
+    // Synchronize the authoritative versions into the replacement index
+    // before cutover; hard-coding `__version: 1` made every browser selection
+    // stale after the second seed/reindex run.
+    const versionRows = await query(
+      `SELECT primary_key, version
+         FROM object_instances
+        WHERE ontology_id = $1
+          AND branch_id = $2
+          AND object_type_api_name = $3
+          -- A recreated datasource can legitimately omit a row that remains
+          -- in object_instances from a prior action/writeback. Only update
+          -- documents materialized into this replacement index; otherwise
+          -- OpenSearch rejects the bulk update as a missing document.
+          AND primary_key = ANY($4::text[])`,
+      [
+        ontologyId,
+        deriveMainBranchId(ontologyId),
+        objectTypeApiName,
+        [...objectMap.keys()],
+      ],
+    );
+    for (let offset = 0; offset < versionRows.rows.length; offset += 1_000) {
+      const versionBody: Array<Record<string, unknown>> = [];
+      for (const row of versionRows.rows.slice(offset, offset + 1_000)) {
+        versionBody.push({ update: { _index: replacementIndexName, _id: row.primary_key } });
+        versionBody.push({ doc: { __version: Number(row.version) } });
+      }
+      if (versionBody.length > 0) {
+        const versionResult = await client.bulk({
+          body: versionBody,
+          refresh: offset + 1_000 >= versionRows.rows.length ? "wait_for" : false,
+        } as any);
+        if ((versionResult as any)?.body?.errors) {
+          throw appError(
+            "REINDEX_FAILED",
+            "Failed to synchronize object versions into the replacement index.",
+            { failedAtStep: "opensearch_version_sync" },
+          );
+        }
+      }
     }
 
-    try {
-      await createIndex(objectTypeApiName);
-    } catch (err: any) {
+    if (bulkErrors.length > 0) {
       throw appError(
         "REINDEX_FAILED",
-        `Failed to create OpenSearch index '${indexName}': ${err.message}`,
+        `Bulk indexing failed for some objects. First error: ${JSON.stringify(bulkErrors[0])}`,
         { failedAtStep: "opensearch_indexing" }
       );
     }
 
     console.log(
-      `[Reindex] Step 8: Index '${indexName}' recreated`
+      `[Reindex] Step 7+9: Indexed ${indexedCount} of ${totalDocs} objects into '${replacementIndexName}'`
     );
 
-    // =================================================================
-    // Step 9: Execute the bulk index
-    // =================================================================
-
-    let indexedCount = objectMap.size;
-
-    if (bulkBody.length > 0) {
-      try {
-        const result = await client.bulk({
-          body: bulkBody,
-          refresh: "wait_for",
-        });
-
-        if (result.body.errors) {
-          const errorItems = (result.body.items || []).filter(
-            (item: any) => item.index?.error
-          );
-          if (errorItems.length > 0) {
-            const firstError = errorItems[0].index.error;
-            throw appError(
-              "REINDEX_FAILED",
-              `Bulk indexing failed for ${errorItems.length} objects. First error: ${JSON.stringify(firstError)}`,
-              { failedAtStep: "opensearch_indexing" }
-            );
-          }
-        }
-
-        // Count successes
-        const items = result.body.items || [];
-        indexedCount = items.filter(
-          (item: any) =>
-            item.index?.status === 200 || item.index?.status === 201
-        ).length;
-      } catch (err: any) {
-        if (err.code === "REINDEX_FAILED") throw err;
-        throw appError(
-          "REINDEX_FAILED",
-          `OpenSearch bulk indexing failed: ${err.message}`,
-          { failedAtStep: "opensearch_indexing" }
-        );
-      }
-    } else {
-      indexedCount = 0;
+    // Confirm the replacement is complete before cutover. A mismatch means
+    // the sibling is discarded and the serving generation remains intact.
+    const replacementCount = await client.count({
+      index: replacementIndexName,
+    });
+    const actualReplacementCount = Number(
+      (replacementCount as any)?.body?.count ?? 0,
+    );
+    if (actualReplacementCount !== totalDocs) {
+      throw appError(
+        "REINDEX_FAILED",
+        `Replacement index count mismatch: expected ${totalDocs}, got ${actualReplacementCount}.`,
+        { failedAtStep: "opensearch_validation" },
+      );
     }
 
+    if (!canonicalIsAlias && servingIndices.includes(indexName)) {
+      rollbackIndexName =
+        `${indexName}-rollback-${Date.now().toString(36)}`;
+      const generated = await generateIndexMapping(
+        objectTypeApiName,
+        ontologyId,
+      );
+      await client.indices.create({
+        index: rollbackIndexName,
+        body: generated.mapping as unknown as Record<string, unknown>,
+      });
+      await client.reindex({
+        body: {
+          source: { index: indexName },
+          dest: { index: rollbackIndexName },
+        },
+        wait_for_completion: true,
+        refresh: true,
+      } as any);
+      const rollbackCount = await client.count({ index: rollbackIndexName });
+      const actualRollbackCount = Number(
+        (rollbackCount as any)?.body?.count ?? 0,
+      );
+      const servingCount = await client.count({ index: indexName });
+      const expectedRollbackCount = Number(
+        (servingCount as any)?.body?.count ?? 0,
+      );
+      if (actualRollbackCount !== expectedRollbackCount) {
+        throw appError(
+          "REINDEX_FAILED",
+          `Rollback copy count mismatch: expected ${expectedRollbackCount}, got ${actualRollbackCount}.`,
+          { failedAtStep: "opensearch_rollback_copy" },
+        );
+      }
+    }
+
+    // If no serving generation existed when this run started, a concurrently
+    // dispatched Funnel sync may have created the canonical index while the
+    // replacement was bulk-indexing. It cannot be a rollback source, because
+    // it was never serving at this run's snapshot. Only remove it when it has
+    // converged to the exact replacement cardinality; otherwise fail closed
+    // rather than cutting over around an incomplete concurrent writer.
+    if (!canonicalIsAlias && servingIndices.length === 0) {
+      const lateCanonicalExists = await client.indices.exists({ index: indexName });
+      if ((lateCanonicalExists as any)?.body === true) {
+        let actualLateCanonicalCount = -1;
+        // The competing sync may have created its index just before its final
+        // bulk/refresh. Give that in-flight writer a short, bounded window to
+        // converge; a different or stalled writer is still rejected below.
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const lateCanonicalCount = await client.count({ index: indexName });
+          actualLateCanonicalCount = Number(
+            (lateCanonicalCount as any)?.body?.count ?? 0,
+          );
+          if (actualLateCanonicalCount === totalDocs) break;
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        if (actualLateCanonicalCount !== totalDocs) {
+          throw appError(
+            "REINDEX_FAILED",
+            `Concurrent canonical index count mismatch: expected ${totalDocs}, got ${actualLateCanonicalCount}.`,
+            { failedAtStep: "opensearch_concurrent_indexing" },
+          );
+        }
+        servingIndices = [indexName];
+      }
+    }
+
+    const aliasActions: Array<Record<string, unknown>> = [];
+    if (canonicalIsAlias) {
+      for (const oldIndex of servingIndices) {
+        aliasActions.push({
+          remove: { index: oldIndex, alias: indexName },
+        });
+      }
+    } else if (servingIndices.includes(indexName)) {
+      aliasActions.push({ remove_index: { index: indexName } });
+    }
+    aliasActions.push({
+      add: {
+        index: replacementIndexName,
+        alias: indexName,
+        is_write_index: true,
+      },
+    });
+    await client.indices.updateAliases({
+      body: { actions: aliasActions },
+    });
+    replacementCutoverComplete = true;
     console.log(
-      `[Reindex] Step 9: Indexed ${indexedCount} objects into '${indexName}'`
+      `[Reindex] Cutover: alias '${indexName}' now serves '${replacementIndexName}'` +
+        (rollbackIndexName
+          ? `; rollback generation retained as '${rollbackIndexName}'`
+          : ""),
     );
+
+    // Successful reindexes used to retain every historical sibling forever.
+    // Frequent clean-seed QA runs therefore exhausted OpenSearch's shard
+    // ceiling. Retain only the live generation and its immediate predecessor;
+    // older siblings have no alias and cannot participate in rollback.
+    try {
+      const generations = await client.indices.get({
+        index: `${indexName}-replacement-*,${indexName}-rollback-*`,
+        allow_no_indices: true,
+        ignore_unavailable: true,
+      } as any);
+      const names = Object.keys((generations as any)?.body ?? {});
+      const obsolete = obsoleteReindexGenerations(
+        names,
+        replacementIndexName,
+        rollbackIndexName,
+      );
+      if (obsolete.length > 0) {
+        await client.indices.delete({ index: obsolete.join(",") });
+      }
+    } catch (cleanupError) {
+      console.warn(
+        `[Reindex] historical generation cleanup failed (best-effort): ${(cleanupError as Error).message}`,
+      );
+    }
 
     // =================================================================
     // Stage 4: HYDRATION — mark the `ontology_edit` rows as indexed
@@ -903,7 +1325,10 @@ export async function reindexObjectType(
         indexedCount,
         JSON.stringify({
           lastTransactionId,
+          replacementIndexName,
+          rollbackIndexName,
           skippedNullPk: stats.skippedNullPk,
+          duplicatePkInTransaction: stats.duplicatePkInTransaction,
           editsBreakdown: {
             creates: stats.createCount,
             updates: stats.updateCount,
@@ -933,6 +1358,7 @@ export async function reindexObjectType(
       },
       totalObjectsIndexed: indexedCount,
       skippedNullPk: stats.skippedNullPk,
+      duplicatePkInTransaction: stats.duplicatePkInTransaction,
       durationMs,
     };
   } catch (err: any) {
@@ -940,6 +1366,16 @@ export async function reindexObjectType(
     // Error handling: update funnel_state to 'failed'
     // =================================================================
     const durationMs = Date.now() - startTime;
+
+    // Before cutover, a failed sibling is never allowed to affect the live
+    // alias. Best-effort cleanup keeps retries idempotent.
+    if (replacementIndexName && !replacementCutoverComplete) {
+      try {
+        await client.indices.delete({ index: replacementIndexName });
+      } catch {
+        // The sibling may not have been created, or OpenSearch may be down.
+      }
+    }
 
     // Try to update funnel_state with failure info
     try {

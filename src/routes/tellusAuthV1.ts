@@ -28,6 +28,7 @@ import {
   getTotpService,
   saveMfaChallenge,
   loadMfaChallenge,
+  peekMfaChallenge,
   consumeMfaChallenge,
   newMfaChallengeId,
   registerMfaFailure,
@@ -47,6 +48,7 @@ import { validatePatScopes, TELLUS_PAT_SCOPES, requirePatScope } from '../servic
 import { getPatScopeManifest } from '../services/patScopeMap';
 import { AppError } from '../utils/foundryAppError';
 import { requireTellusAuth } from '../middleware/tellusAuth';
+import { csrfSameOrigin } from '../middleware/csrfSameOrigin';
 import { requireSuperAdmin, TELLUS_SUPERADMIN_ROLE } from '../middleware/requireSuperAdmin';
 import { ensureLocalUserForClaims } from '../services/userProvisioning';
 import {
@@ -58,11 +60,16 @@ import {
   KNOWN_SETTINGS,
   type KnownSettingKey,
 } from '../services/systemSettingsService';
+import { getAdminRolesService } from '../services/adminRolesService';
 import { getKeycloakRealm } from '../auth/keycloakConfig'; // F-P4-26
 import { SESSION_MAX_AGE_SECONDS, SESSION_IDLE_TIMEOUT_SECONDS } from '../config/sessionConfig';
 
 const TELLUS_COOKIE = 'TELLUS_TOKEN';
 const TELLUS_REFRESH_COOKIE = 'TELLUS_REFRESH';
+// Non-httpOnly, Path=/, value=epoch-ms. Server-issued at every interactive
+// boundary (P0-1) — the FE absolute cap + the edge middleware liveness gate
+// read it. Non-secret (a timestamp); forging it only skips the edge redirect.
+const TELLUS_SESSION_EXPIRES_COOKIE = 'TELLUS_SESSION_EXPIRES';
 
 const router = Router();
 
@@ -117,22 +124,25 @@ const loginLimiter = rateLimit({
     res.status(429).json(envelope('AUTH_RATE_LIMIT', 429, 'Too many authentication attempts', req)),
 });
 
-function setSessionCookies(res: Response, accessToken: string, refreshToken?: string) {
+function setSessionCookies(
+  res: Response,
+  accessToken: string,
+  refreshToken: string | undefined,
+  // Absolute session expiry (epoch ms). The marker cookie value AND the Max-Age
+  // of both token cookies are derived from this so all three EXPIRE TOGETHER.
+  // /login + /login/mfa + /enroll/passkey/verify pass Date.now()+SESSION_MAX_AGE_SECONDS*1000
+  // (fresh window); /refresh reads the value from the INCOMING marker cookie so
+  // refresh ROTATES the token but does NOT extend the absolute window — kills
+  // the rolling-backend-vs-absolute-FE divergence (plan P0-1).
+  absoluteExpiryMs: number,
+) {
   const isProd = process.env.NODE_ENV === 'production';
-  // Both cookies share the single configured session window
-  // (TELLUS_SESSION_MAX_AGE). The access cookie is the edge gate's
-  // liveness signal and the refresh cookie is what silentRefresh()
-  // rotates against — keeping their Max-Age identical (and matched to
-  // the FE marker via the `sessionMaxAgeSeconds` we echo back) means a
-  // tab opened any time inside the window always finds a cookie to act
-  // on, instead of the gate lapsing while the session is still
-  // refreshable. See src/config/sessionConfig.ts.
-  const maxAgeMs = SESSION_MAX_AGE_SECONDS * 1000;
+  const remainingMs = Math.max(0, absoluteExpiryMs - Date.now());
   res.cookie(TELLUS_COOKIE, accessToken, {
     httpOnly: true,
     secure: isProd,
     sameSite: isProd ? 'strict' : 'lax',
-    maxAge: maxAgeMs,
+    maxAge: remainingMs,
     path: '/',
   });
   if (refreshToken) {
@@ -140,10 +150,21 @@ function setSessionCookies(res: Response, accessToken: string, refreshToken?: st
       httpOnly: true,
       secure: isProd,
       sameSite: isProd ? 'strict' : 'lax',
-      maxAge: maxAgeMs,
+      maxAge: remainingMs,
       path: '/api/v1/auth',
     });
   }
+  // Server-issued marker — single source of truth for the FE absolute cap +
+  // the edge middleware liveness gate. Non-httpOnly (AuthGuard, middleware,
+  // Cypress read it); non-secret (a timestamp). Max-Age matches the token
+  // cookies so the browser evicts all three together.
+  res.cookie(TELLUS_SESSION_EXPIRES_COOKIE, String(absoluteExpiryMs), {
+    httpOnly: false,
+    secure: isProd,
+    sameSite: isProd ? 'strict' : 'lax',
+    maxAge: remainingMs,
+    path: '/',
+  });
 }
 
 function clearSessionCookies(res: Response) {
@@ -154,6 +175,7 @@ function clearSessionCookies(res: Response) {
   if (res.headersSent || res.writableEnded) return;
   res.clearCookie(TELLUS_COOKIE, { path: '/' });
   res.clearCookie(TELLUS_REFRESH_COOKIE, { path: '/api/v1/auth' });
+  res.clearCookie(TELLUS_SESSION_EXPIRES_COOKIE, { path: '/' });
 }
 
 // ----- POST /login — two-step MFA-aware ------------------------------------
@@ -169,7 +191,7 @@ const LoginSchema = z.object({
   password: z.string().min(1),
 }).refine((v) => v.username || v.email, { message: 'username or email required' });
 
-router.post('/login', loginLimiter, async (req: Request, res: Response) => {
+router.post('/login', loginLimiter, csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const parsed = LoginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -277,7 +299,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
       return;
     }
 
-    setSessionCookies(res, result.accessToken, result.refreshToken);
+    setSessionCookies(res, result.accessToken, result.refreshToken, Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
     await resetMfaBudget(foundryDb as unknown as Knex, result.claims.sub);
     await emitAuditEvent({
       keycloakSub: result.claims.sub,
@@ -305,6 +327,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
         sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        sessionExpiresAt: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
         idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
         hasPasskey,
         requiresPasskeyEnrollment: !hasPasskey,
@@ -328,7 +351,7 @@ const LoginMfaWebauthnSchema = z.object({
   assertionResponse: z.any(),
 });
 
-router.post('/login/mfa', loginLimiter, async (req: Request, res: Response) => {
+router.post('/login/mfa', loginLimiter, csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const body = req.body as { method?: string };
     const knex = foundryDb as unknown as Knex;
@@ -449,7 +472,7 @@ router.post('/login/mfa', loginLimiter, async (req: Request, res: Response) => {
 // sync. If the refresh cookie is missing, invalid, or expired the
 // caller gets a clean 401 REFRESH_TOKEN_INVALID envelope and should
 // redirect to /login.
-router.post('/refresh', async (req: Request, res: Response) => {
+router.post('/refresh', csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const refresh = (req.cookies && (req.cookies as Record<string, string>)[TELLUS_REFRESH_COOKIE]) as
       | string
@@ -457,8 +480,86 @@ router.post('/refresh', async (req: Request, res: Response) => {
     if (!refresh) {
       throw new AppError('No refresh token cookie', 401, 'REFRESH_TOKEN_MISSING');
     }
+
+    // Dev-only test-auth bypass — when NODE_ENV !== 'production' AND
+    // TELLUS_TEST_HOOKS=1, a refresh token starting with "test-auth:" is
+    // accepted without a Keycloak refresh grant. Returns a synthetic
+    // accessToken + tokenInfo so the FE's silentRefresh() hydrates
+    // without Keycloak. The userId is extracted from the token.
+    if (
+      refresh.startsWith('test-auth:') &&
+      process.env.NODE_ENV !== 'production' &&
+      process.env.TELLUS_TEST_HOOKS === '1'
+    ) {
+      const raw = refresh.slice('test-auth:'.length).trim();
+      const colonIdx = raw.indexOf(':');
+      const userId = colonIdx === -1 ? raw : raw.slice(0, colonIdx);
+      const rolePart = colonIdx === -1 ? undefined : raw.slice(colonIdx + 1);
+      const roles = rolePart
+        ? rolePart.split(',').map((r) => r.trim()).filter(Boolean)
+        : ['ontology-editor', 'default-roles-tellus'];
+      const now = Math.floor(Date.now() / 1000);
+      const accessToken = `test-auth:${userId}`;
+      const absoluteExpiryMs = Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
+      setSessionCookies(res, accessToken, refresh, absoluteExpiryMs);
+      const markings = roles.filter((r) => r.startsWith('marking:'));
+      const realmRoles = roles.filter((r) => !r.startsWith('marking:'));
+      res.json({
+        success: true,
+        data: {
+          tokenType: 'Bearer',
+          accessToken,
+          expiresIn: 3600,
+          tokenInfo: {
+            sub: userId,
+            jti: `test-jti-${now}`,
+            org: 'tellus',
+            email: `test-${userId.slice(0, 8)}@tellus.local`,
+            preferredUsername: `test-${userId.slice(0, 8)}@tellus.local`,
+            name: 'Test User',
+            givenName: 'Test',
+            familyName: 'User',
+            realmRoles,
+            markings: markings,
+            orgs: ['tellus'],
+            cbacClearance: null,
+            sessionScope: [],
+            exp: now + 3600,
+            iat: now,
+            iss: `${process.env.KEYCLOAK_URL ?? 'http://127.0.0.1:8086'}/realms/${process.env.KEYCLOAK_REALM ?? 'tellus'}`,
+            hasWebAuthn: false,
+          },
+          sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+          sessionExpiresAt: absoluteExpiryMs,
+          idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
+        },
+      });
+      return;
+    }
+
     const result = await tellusAuthService.refreshSession(refresh);
-    setSessionCookies(res, result.accessToken, result.refreshToken);
+    // Absolute cap is anchored at the ORIGINAL interactive login (the marker).
+    // Refresh ROTATES the access/refresh tokens but must NOT extend the window
+    // — the cookies' Max-Age is the REMAINING time so they expire exactly when
+    // the marker does.
+    //
+    // Missing/invalid marker: re-anchor to a full SESSION_MAX_AGE window
+    // rather than fail-closed with Max-Age=0. Fail-closed wiped a live
+    // session whenever the non-httpOnly marker was dropped (ITP, cookie
+    // jar partial clear, older clients) while the httpOnly refresh cookie
+    // was still valid — the user was bounced to re-auth despite a
+    // perfectly refreshable session. Re-anchoring preserves the product
+    // invariant "a valid refresh cookie keeps you signed in" and still
+    // caps the new window at SESSION_MAX_AGE.
+    const markerRaw = (req.cookies && (req.cookies as Record<string, string>)[TELLUS_SESSION_EXPIRES_COOKIE]) as
+      | string
+      | undefined;
+    const markerMs = markerRaw ? Number(markerRaw) : NaN;
+    const absoluteExpiryMs =
+      Number.isFinite(markerMs) && markerMs > Date.now()
+        ? markerMs
+        : Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
+    setSessionCookies(res, result.accessToken, result.refreshToken, absoluteExpiryMs);
     res.json({
       success: true,
       data: {
@@ -467,23 +568,41 @@ router.post('/refresh', async (req: Request, res: Response) => {
         expiresIn: result.expiresIn,
         tokenInfo: tellusAuthService.toTokenInfo(result.claims),
         sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        sessionExpiresAt: absoluteExpiryMs,
         idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
       },
     });
   } catch (err) {
-    // Clear stale cookies so the FE can't keep retrying on the same
-    // dead refresh token.
-    clearSessionCookies(res);
+    // Only a CONFIRMED dead session (Keycloak rejected the grant → 401
+    // REFRESH_TOKEN_*) wipes the cookies, so the FE can't keep retrying
+    // on the same dead refresh token. Transient upstream failures
+    // (Keycloak slow/down, fetch timeout, JWKS hiccup — 5xx) MUST leave
+    // them intact: the httpOnly refresh cookie is still valid, the FE
+    // retries, and the session survives the blip. Clearing on a blip
+    // collapsed the 24h TELLUS_SESSION_MAX_AGE window to one access-token
+    // lifespan — the user was bounced to /login roughly every ~10 min
+    // whenever Keycloak hiccuped near a refresh boundary.
+    if (err instanceof AppError && err.statusCode === 401) {
+      clearSessionCookies(res);
+    }
     sendError(err, req, res);
   }
 });
 
 // Build the WebAuthn authentication options for an in-flight MFA challenge.
+//
+// Uses peekMfaChallenge() (read-only) — NOT loadMfaChallenge(). Fetching
+// WebAuthn options is a prerequisite to the ceremony, not an auth attempt,
+// so it must not burn one of the 5 brute-force slots on auth_mfa_challenges.
+// Burning a slot here meant every passkey retry AND every dismissed OS
+// prompt (options fetched, ceremony cancelled) ate into MFA_MAX_ATTEMPTS,
+// so a user who dismissed the prompt a few times was wrongly told to
+// "Start over from the sign-in screen" before ever submitting an assertion.
 router.post('/login/mfa/webauthn-options', async (req: Request, res: Response) => {
   try {
     const id = (req.body?.mfaChallenge as string | undefined) || '';
     if (!id) throw new AppError('mfaChallenge required', 400, 'VALIDATION_ERROR');
-    const challenge = await loadMfaChallenge(foundryDb as unknown as Knex, id);
+    const challenge = await peekMfaChallenge(foundryDb as unknown as Knex, id);
     if (!challenge) throw new AppError('MFA challenge expired', 401, 'MFA_CHALLENGE_INVALID');
     const options = await getWebauthnService(
       foundryDb as unknown as Knex,
@@ -542,6 +661,9 @@ const EnrollOptionsSchema = z.object({
   // The caller can ask for 'preferred' in case of an older authenticator
   // but the default is the strict setting.
   residentKey: z.enum(['required', 'preferred', 'discouraged']).default('required'),
+  // Prefer the built-in device authenticator (Touch ID / Windows Hello)
+  // over Edge's cross-device QR-code flow for first-time enrollment.
+  authenticatorAttachment: z.enum(['platform', 'cross-platform']).default('platform'),
 });
 
 router.post('/enroll/passkey/options', loginLimiter, async (req: Request, res: Response) => {
@@ -573,10 +695,7 @@ router.post('/enroll/passkey/options', loginLimiter, async (req: Request, res: R
       userLabel: parsed.data.userLabel,
       residentKey: parsed.data.residentKey,
       userVerification: 'required',
-      // Leave authenticatorAttachment undefined so the browser offers
-      // every available authenticator: Touch ID on a MacBook, Windows
-      // Hello on a PC, a plugged-in YubiKey, or a phone as a roaming
-      // authenticator via hybrid transport. The user gets to choose.
+      authenticatorAttachment: parsed.data.authenticatorAttachment,
     });
     res.json({ success: true, data: options });
   } catch (err) {
@@ -616,6 +735,7 @@ router.post('/enroll/passkey/verify', loginLimiter, async (req: Request, res: Re
       res,
       resolved.stashedAccessToken,
       resolved.stashedRefreshToken ?? undefined,
+      Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
     );
 
     let claims: TellusClaims;
@@ -658,6 +778,7 @@ router.post('/enroll/passkey/verify', loginLimiter, async (req: Request, res: Re
         accessToken: resolved.stashedAccessToken,
         tokenInfo: tellusAuthService.toTokenInfo(claims),
         sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+        sessionExpiresAt: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
         idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
         credential: {
           credentialId: registerResult.credentialId,
@@ -676,7 +797,7 @@ async function completeMfaLogin(
   req?: Request,
 ) {
   const claims = await tellusAuthService.verifyAccessToken(challenge.accessToken);
-  setSessionCookies(res, challenge.accessToken, challenge.refreshToken ?? undefined);
+  setSessionCookies(res, challenge.accessToken, challenge.refreshToken ?? undefined, Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
   // Re-probe passkey enrollment AFTER the second factor succeeds so the
   // FE soft-prompt decision survives the MFA detour. A user who passed
   // /login with TOTP but has no passkey will still see the soft prompt
@@ -698,6 +819,7 @@ async function completeMfaLogin(
       accessToken: challenge.accessToken,
       tokenInfo: tellusAuthService.toTokenInfo(claims),
       sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+      sessionExpiresAt: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
       idleTimeoutSeconds: SESSION_IDLE_TIMEOUT_SECONDS,
       hasPasskey,
       requiresPasskeyEnrollment: !hasPasskey,
@@ -706,7 +828,7 @@ async function completeMfaLogin(
 }
 
 // ----- POST /logout ----------------------------------------------------------
-router.post('/logout', requireTellusAuth({ allowPat: false }), async (req: Request, res: Response) => {
+router.post('/logout', requireTellusAuth({ allowPat: false }), csrfSameOrigin, async (req: Request, res: Response) => {
   try {
     const claims = (req as Request & { tellusClaims?: TellusClaims }).tellusClaims;
     const refresh = (req.cookies && req.cookies[TELLUS_REFRESH_COOKIE]) as string | undefined;
@@ -1430,6 +1552,9 @@ const WebauthnRegisterOptionsSchema = z.object({
   // passkey) that supports usernameless + synced login. Callers
   // can still downgrade to 'preferred' for older authenticators.
   residentKey: z.enum(['required', 'preferred', 'discouraged']).default('required'),
+  // Prefer the built-in device authenticator by default. Callers that
+  // intentionally enroll a security key can still request cross-platform.
+  authenticatorAttachment: z.enum(['platform', 'cross-platform']).default('platform'),
 });
 
 router.post('/me/webauthn/register-options', requireTellusAuth({ allowPat: false }), async (req: Request, res: Response) => {
@@ -1443,6 +1568,7 @@ router.post('/me/webauthn/register-options', requireTellusAuth({ allowPat: false
       displayName: claims.preferred_username || claims.email || claims.sub,
       userLabel: parsed.data.userLabel,
       residentKey: parsed.data.residentKey,
+      authenticatorAttachment: parsed.data.authenticatorAttachment,
     });
     res.json({ success: true, data: options });
   } catch (err) {
@@ -1858,8 +1984,13 @@ router.get(
 const CreateUserSchema = z.object({
   email: z.string().email().max(320),
   username: z.string().min(1).max(255).optional(),
-  firstName: z.string().max(128).optional(),
-  lastName: z.string().max(128).optional(),
+  // firstName/lastName are REQUIRED: the Keycloak realm requires non-blank
+  // names for direct-grant (Keycloak blocks the password grant with
+  // "Account is not fully set up" when either is blank), and fabricating a
+  // placeholder leaks a fake `name` claim into the greeting. The admin UI
+  // form collects both; reject early here so the operator sees the reason.
+  firstName: z.string().min(1).max(128),
+  lastName: z.string().min(1).max(128),
   // The realm's password policy enforces 12+ chars, one upper, one
   // lower, one digit, one symbol — KC will 400 the create call if
   // the password violates that, and we surface the KC error straight
@@ -1904,6 +2035,11 @@ router.post(
         emailVerified: parsed.data.emailVerified ?? true,
       });
 
+      // Grant the standard member role bundle — without an ontology-*
+      // role every content route fails closed, and without a marking
+      // role marked content is invisible.
+      const roles = await kcAdmin().assignDefaultMemberRoles(userId);
+
       await emitAuditEvent({
         keycloakSub: actor.sub,
         category: 'admin',
@@ -1913,6 +2049,7 @@ router.post(
         details: {
           targetUserId: userId,
           targetEmail: parsed.data.email,
+          assignedRoles: roles,
         },
       });
 
@@ -1926,7 +2063,149 @@ router.post(
           lastName: parsed.data.lastName ?? null,
           enabled: parsed.data.enabled ?? true,
           emailVerified: parsed.data.emailVerified ?? true,
-          roles: [] as string[],
+          roles,
+        },
+      });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+// --- Invite --------------------------------------------------------------
+
+/**
+ * Generate a temporary password guaranteed to satisfy the tellus realm's
+ * password policy (12+ chars, upper, lower, digit, symbol). Symbols are
+ * drawn from a subset of Keycloak's default `specialChars` list that
+ * survives shell-copying without escapes.
+ */
+function generateInvitePassword(): string {
+  const uppers = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lowers = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!#$%&*+-=?@';
+  const pick = (pool: string) => pool[crypto.randomInt(0, pool.length)];
+  const pools = [uppers, lowers, digits, symbols];
+  // Guarantee one char from every policy category, then fill the rest
+  // from the union and shuffle so category positions aren't predictable.
+  const chars = pools.map(pick);
+  const union = pools.join('');
+  while (chars.length < 16) chars.push(pick(union));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
+
+const InviteUserSchema = z.object({
+  email: z.string().email().max(320),
+  firstName: z.string().min(1).max(128),
+  lastName: z.string().min(1).max(128),
+  /**
+   * Optional admin-provided initial password. When omitted, the backend
+   * generates a cryptographically random one that satisfies the realm
+   * policy. Either way the credentials are delivered through the email
+   * outbox — never returned in the response.
+   */
+  password: z.string().min(12).max(256).optional(),
+});
+
+/**
+ * POST /admin/users/invite — the Control Panel "Send invite" flow.
+ *
+ * Creates the Keycloak account with a cryptographically random temporary
+ * password (never set manually, never returned), then enqueues an
+ * invitation email carrying the credentials through the email outbox
+ * (emailOutboxService — logfile sender in dev, pluggable SES/SMTP sender
+ * in production). emailVerified stays false so the admin console can
+ * distinguish invited-not-yet-activated accounts from fully active ones;
+ * the mandatory passkey-enrollment gate applies on first login as usual.
+ *
+ * The temporary password is intentionally absent from the response body:
+ * the email outbox is the single credential-delivery channel.
+ */
+router.post(
+  '/admin/users/invite',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = InviteUserSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+
+      const existing = await kcAdmin().findUserByEmail(parsed.data.email);
+      if (existing) {
+        throw new AppError(
+          'A user with this email already exists',
+          409,
+          'USER_ALREADY_EXISTS',
+        );
+      }
+
+      const temporaryPassword = parsed.data.password ?? generateInvitePassword();
+      const userId = await kcAdmin().createUser({
+        username: parsed.data.email,
+        email: parsed.data.email,
+        firstName: parsed.data.firstName,
+        lastName: parsed.data.lastName,
+        password: temporaryPassword,
+        enabled: true,
+        emailVerified: false,
+      });
+
+      // Grant the standard member role bundle — without an ontology-*
+      // role every content route fails closed, and without a marking
+      // role marked content is invisible.
+      const roles = await kcAdmin().assignDefaultMemberRoles(userId);
+
+      await emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.user.invite',
+        result: 'SUCCESS',
+        req,
+        details: {
+          targetUserId: userId,
+          targetEmail: parsed.data.email,
+          assignedRoles: roles,
+        },
+      });
+
+      try {
+        const rendered = renderEmail(
+          'user-invited',
+          "You've been invited to Tellus",
+          {
+            firstName: parsed.data.firstName,
+            email: parsed.data.email,
+            temporaryPassword,
+            invitedBy: actor.email ?? actor.preferred_username ?? actor.sub,
+            tellusOrigin: process.env.TELLUS_FRONTEND_URL || 'http://localhost:3001',
+          },
+        );
+        await enqueueEmail({ to: parsed.data.email, rendered });
+      } catch {
+        /* template/infrastructure failure must never roll back the invite —
+           the account exists and the admin can resend credentials manually. */
+      }
+
+      res.status(201).json({
+        success: true,
+        data: {
+          id: userId,
+          username: parsed.data.email,
+          email: parsed.data.email,
+          firstName: parsed.data.firstName,
+          lastName: parsed.data.lastName,
+          enabled: true,
+          emailVerified: false,
+          roles,
+          inviteEmailQueued: true,
         },
       });
     } catch (err) {
@@ -2130,6 +2409,244 @@ router.get('/health', async (_req: Request, res: Response) => {
     });
   }
 });
+
+// ===========================================================================
+// Roles directory — GET /roles.
+//
+// Any-authenticated-user listing of realm role identities (id + name +
+// description ONLY). Exists for authoring UIs that must offer a role picker
+// — the Ontology Manager's submission-criteria editor gates actions on
+// `{ role: "<name>" }` conditions evaluated against the submitter's JWT
+// realm_access.roles, and the superadmin-only /admin/roles console below is
+// unreadable by the ontology authors who write those conditions. Membership,
+// composite edges and counts stay behind requireSuperAdmin; this route only
+// exposes names already visible in every issued JWT.
+// ===========================================================================
+
+router.get(
+  '/roles',
+  requireTellusAuth(),
+  async (_req: Request, res: Response) => {
+    try {
+      const roles = await getAdminRolesService().listRoleDirectory();
+      res.json({ success: true, data: { roles, total: roles.length } });
+    } catch (err) {
+      sendError(err, _req, res);
+    }
+  },
+);
+
+// ===========================================================================
+// Superadmin roles console — /admin/roles + composites + members.
+// Business invariants (built-in protection, cycle detection, last-superadmin
+// guard) live in services/adminRolesService.ts; these routes are
+// validation + envelope + audit only. Wire format matches the FE contract
+// in tellus-fe/lib/rolesApi.ts verbatim.
+// ===========================================================================
+
+const ROLE_NAME_RE = /^[a-zA-Z][a-zA-Z0-9-_:.]{1,254}$/;
+
+const ListRolesQuerySchema = z.object({
+  search: z.string().max(255).optional(),
+  first: z.coerce.number().int().min(0).max(10_000).optional(),
+  max: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+const CreateRoleSchema = z.object({
+  name: z.string().min(2).max(255).regex(ROLE_NAME_RE, 'Invalid role name'),
+  description: z.string().max(4000).optional(),
+  compositeRoleIds: z.array(z.string().min(1)).max(50).optional(),
+});
+
+const UpdateRoleSchema = z.object({
+  description: z.string().max(4000).optional(),
+  compositeRoleIds: z.array(z.string().min(1)).max(50).optional(),
+});
+
+const AddRoleMemberSchema = z.object({
+  userId: z.string().min(1).max(255),
+});
+
+router.get(
+  '/admin/roles',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = ListRolesQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const { roles, total } = await getAdminRolesService().listRoles({
+        search: parsed.data.search,
+        first: parsed.data.first,
+        max: parsed.data.max,
+      });
+      res.json({ success: true, data: { roles, total } });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.post(
+  '/admin/roles',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = CreateRoleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+      const role = await getAdminRolesService().createRole(parsed.data);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.create',
+        result: 'SUCCESS',
+        req,
+        details: { roleName: role.name, compositeCount: role.compositeRoleIds.length },
+      });
+      res.status(201).json({ success: true, data: role });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.get(
+  '/admin/roles/:id',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const role = await getAdminRolesService().getRole(req.params.id);
+      res.json({ success: true, data: role });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.put(
+  '/admin/roles/:id',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = UpdateRoleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+      const role = await getAdminRolesService().updateRole(req.params.id, parsed.data);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.update',
+        result: 'SUCCESS',
+        req,
+        details: {
+          roleName: role.name,
+          descriptionTouched: parsed.data.description !== undefined,
+          compositeCount: role.compositeRoleIds.length,
+        },
+      });
+      res.json({ success: true, data: role });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.delete(
+  '/admin/roles/:id',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const actor = requireClaimsFor(req);
+      await getAdminRolesService().deleteRole(req.params.id);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.delete',
+        result: 'SUCCESS',
+        req,
+        details: { roleId: req.params.id },
+      });
+      res.status(204).end();
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.get(
+  '/admin/roles/:id/members',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { users, total } = await getAdminRolesService().listMembers(req.params.id);
+      res.json({ success: true, data: { users, total } });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.post(
+  '/admin/roles/:id/members',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = AddRoleMemberSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const actor = requireClaimsFor(req);
+      await getAdminRolesService().addMember(req.params.id, parsed.data.userId);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.member.add',
+        result: 'SUCCESS',
+        req,
+        details: { roleId: req.params.id, memberUserId: parsed.data.userId },
+      });
+      res.status(204).end();
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.delete(
+  '/admin/roles/:id/members/:userId',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const actor = requireClaimsFor(req);
+      await getAdminRolesService().removeMember(req.params.id, req.params.userId);
+      emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.role.member.remove',
+        result: 'SUCCESS',
+        req,
+        details: { roleId: req.params.id, memberUserId: req.params.userId },
+      });
+      res.status(204).end();
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
 
 // ===========================================================================
 // Example: a protected /me/audit/export endpoint that demonstrates

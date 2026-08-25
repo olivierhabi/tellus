@@ -129,6 +129,7 @@ router.post(
       const {
         apiName,
         displayName,
+        pluralName,
         description,
         icon,
         iconColor,
@@ -165,6 +166,7 @@ router.post(
       const result = await objectTypeService.batchCreate(ontologyId, {
         apiName,
         displayName,
+        pluralName,
         description,
         icon,
         iconColor,

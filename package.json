@@ -1,6 +1,7 @@
 {
   "name": "ontology-engine",
   "version": "0.3.0",
+  "packageManager": "pnpm@10.28.2",
   "description": "Ontology Engine - a robust PostgreSQL-backed API server",
   "main": "dist/server.js",
   "scripts": {
@@ -12,6 +13,8 @@
     "migrate": "tsx src/migrate.ts",
     "migrate:foundry": "tsx src/foundryMigrate.ts",
     "migrate:auth": "tsx src/migrateAuth.ts",
+    "migrate:backfill-object-rids": "tsx src/scripts/backfillObjectRids.ts",
+    "contract:check-oss-v2": "tsx src/scripts/checkOssV2Contract.ts",
     "migrate:all": "npm run migrate && npm run migrate:foundry && npm run migrate:auth && npm run migrate",
     "seed": "tsx src/seed.ts",
     "test": "vitest run",
@@ -21,6 +24,7 @@
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:unit:watch": "vitest --config vitest.unit.config.ts",
     "test:unit:coverage": "vitest run --config vitest.unit.config.ts --coverage",
+    "test:ai-contract": "vitest run --config vitest.codeRepos.config.ts tests/integration/code-repos/functions-publish/aiEditContract-integration.test.ts",
     "test:integration": "vitest run",
     "test:integration:legacy": "bash tests/integration/run-all.sh",
     "test:daily": "bash tests/daily/run-all.sh",
@@ -37,7 +41,6 @@
     "test:pb:integration": "vitest run tests/foundry/integration",
     "test:pb:e2e": "bash scripts/test-pb-all-endpoints-e2e.sh",
     "test:pb:chaos": "bash scripts/test-pb-b9-db-kill-chaos.sh && bash scripts/test-pb-b9-lakekeeper-kill-chaos.sh && bash scripts/test-pb-b9-minio-kill-chaos.sh && bash scripts/test-pb-b9-temporal-kill-chaos.sh",
-    "test:pb:observability": "bash scripts/verify-pb-b9-observability-stack.sh",
     "test:perf": "bash tests/performance/run-all.sh",
     "test:all": "tsx tests/runAll.ts",
     "test:legacy": "tsx tests/index.ts",
@@ -54,6 +57,7 @@
     "test:connectivity": "vitest run tests/connectivity",
     "test:connectivity:unit": "vitest run tests/connectivity/unit",
     "test:connectivity:integration": "vitest run tests/connectivity/integration",
+    "test:connectivity:api-qa": "bash scripts/qa/api-tests/run-api-tests.sh",
     "auth:bootstrap": "bash scripts/bootstrap-keycloak.sh",
     "auth:verify": "bash scripts/verify-auth-all.sh",
     "auth:verify:realm": "bash scripts/verify-auth-realm.sh",
@@ -93,6 +97,7 @@
     "bcrypt": "^6.0.0",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
+    "cron-parser": "^5.6.2",
     "csv-parse": "^5.6.0",
     "dotenv": "^17.3.1",
     "duckdb": "^1.4.4",
@@ -107,6 +112,7 @@
     "knex": "^3.1.0",
     "libpg-query": "^17.7.3",
     "lru-cache": "^11.2.7",
+    "luxon": "^3.7.2",
     "multer": "^2.2.0",
     "nodejs-polars": "^0.24.1",
     "otplib": "^13.4.0",
@@ -116,6 +122,7 @@
     "redis": "^4.7.0",
     "seedrandom": "^3.0.5",
     "swagger-ui-express": "^5.0.1",
+    "typescript": "^5.9.3",
     "uuid": "^13.0.0",
     "ws": "^8.21.0",
     "zod": "^4.3.6"
@@ -128,6 +135,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/luxon": "^3.7.2",
     "@types/morgan": "^1.9.10",
     "@types/multer": "^1.4.12",
     "@types/node": "^25.4.0",
@@ -151,29 +159,59 @@
     "tsc-alias": "^1.8.16",
     "tsconfig-paths": "^4.2.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   },
   "pnpm": {
+    "onlyBuiltDependencies": [
+      "@mongodb-js/zstd",
+      "@parcel/watcher",
+      "cpu-features",
+      "duckdb",
+      "esbuild",
+      "msgpackr-extract",
+      "protobufjs",
+      "ssh2"
+    ],
     "overrides": {
-      "tar@<7.5.11": "^7.5.11",
-      "fast-xml-parser@<5.5.6": "^5.5.6",
+      "@grpc/grpc-js@<1.14.4": "^1.14.4",
+      "@opentelemetry/propagator-jaeger@<2.9.0": "^2.9.0",
+      "adm-zip@<0.6.0": "^0.6.0",
+      "brace-expansion@5": "^5.0.9",
+      "brace-expansion@<2": "^1.1.18",
+      "brace-expansion@>=2 <2.1.4": "^2.1.4",
+      "fast-uri@<3.1.5": "^3.1.5",
       "fast-xml-builder@<1.1.7": "^1.1.7",
-      "fast-uri@<3.1.2": "^3.1.2",
+      "fast-xml-parser@<5.7.0": "^5.7.0",
+      "form-data@<4.0.6": "^4.0.6",
+      "ip-address@<10.3.1": "^10.3.1",
+      "js-yaml@<4.3.1": "^4.3.1",
+      "lodash@<4.18.0": "^4.18.0",
+      "nanoid@3": "^3.3.18",
+      "path-to-regexp@<0.1.13": "^0.1.13",
+      "picomatch@2": "^2.3.2",
+      "picomatch@4": "^4.0.4",
+      "postcss@8": "^8.5.23",
       "protobufjs@7": "^7.5.6",
       "protobufjs@8": "^8.0.2",
-      "path-to-regexp@<0.1.13": "^0.1.13",
-      "lodash@<4.18.0": "^4.18.0",
-      "form-data@<4.0.6": "^4.0.6",
-      "@grpc/grpc-js@<1.14.4": "^1.14.4",
-      "vite@<8.0.5": "^8.0.5",
-      "picomatch@2": "^2.3.2",
-      "picomatch@4": "^4.0.4"
+      "tar@<7.5.21": "^7.5.21",
+      "vite@<8.0.5": "^8.0.5"
     },
     "auditConfig": {
       "ignoreGhsas": [
         "GHSA-298w-vvm4-ww55"
       ]
     }
-  }
+  },
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/olivierhabi/tellus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/olivierhabi/tellus/issues"
+  },
+  "homepage": "https://github.com/olivierhabi/tellus#readme"
 }

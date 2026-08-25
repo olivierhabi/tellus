@@ -208,6 +208,40 @@ describe("B03 — publish + resolve", () => {
   );
 
   itp(
+    "B03 C-02a: list versions returns real semvers newest-first and deduplicates republished tags",
+    async () => {
+      const rid = await createOne();
+      await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.0.0" });
+      await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.1.0" });
+      await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.0.0" });
+
+      const result = await request(app).get(
+        `/api/v1/workshop/modules/${rid}/versions`,
+      );
+
+      expect(result.status).toBe(200);
+      expect(result.body.versions).toHaveLength(2);
+      expect(
+        result.body.versions.map(
+          (version: { semver: string }) => version.semver,
+        ),
+      ).toEqual(["1.0.0", "1.1.0"]);
+      expect(result.body.versions[0]).toMatchObject({
+        rid,
+        semver: "1.0.0",
+        schemaVersion: 4,
+        publishedBy: "u-publish",
+      });
+    },
+  );
+
+  itp(
     "B03 C-03: rollback to older semver → 200 + WORKSHOP_MODULE_ROLLED_BACK",
     async () => {
       const rid = await createOne();

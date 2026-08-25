@@ -16,6 +16,7 @@ import { query } from "../db";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { client as osClient } from "../services/opensearch/client";
 import { dataPlaneGuard } from "../middleware/requireRole";
+import { objectTypeIndexName } from "../services/opensearch/objectIndexNames";
 
 const router = Router({ mergeParams: true });
 
@@ -68,7 +69,7 @@ router.post("/execute", async (req: Request, res: Response, next: NextFunction) 
       );
     }
 
-    const aliasName = `ontology-${objectTypeApiName.toLowerCase()}`;
+    const aliasName = objectTypeIndexName(objectTypeApiName);
 
     // Determine the next version number by inspecting any existing
     // aliased indices. New indices are versioned: objects-flight-v1, -v2, …

@@ -52,7 +52,10 @@ export type FilterUiKind =
   | "number-range"
   | "date-timeline"
   | "id-multi"
-  | "enum-multi";
+  | "enum-multi"
+  | "boolean-single";
+
+export type FilterOperator = "is" | "null" | "contain";
 
 /** All eleven uiKinds, in stable declaration order. */
 export const ALL_UI_KINDS: readonly FilterUiKind[] = Object.freeze([
@@ -67,6 +70,7 @@ export const ALL_UI_KINDS: readonly FilterUiKind[] = Object.freeze([
   "date-timeline",
   "id-multi",
   "enum-multi",
+  "boolean-single",
 ] as const);
 
 /**
@@ -89,11 +93,16 @@ export const COMPAT: Readonly<Record<FilterUiKind, readonly PropertyType[]>> =
     "date-timeline": Object.freeze(["date", "timestamp"] as const),
     "id-multi": Object.freeze(["id", "string"] as const),
     "enum-multi": Object.freeze(["string"] as const),
+    "boolean-single": Object.freeze(["boolean"] as const),
   });
 
 export interface FilterValueIn {
   uiKind: FilterUiKind;
   property: string;
+  /** Foundry object-set operator. CONTAIN is deliberately prefix-only. */
+  operator?: FilterOperator;
+  /** Negates the complete compiled clause, including NULL/range predicates. */
+  negated?: boolean;
   /** Per the eleven uiKinds, value shapes vary; declared per-kind. */
   value: unknown;
 }
@@ -105,6 +114,8 @@ export type Predicate =
   | { type: "term"; field: string; value: string | number | boolean }
   | { type: "terms"; field: string; values: ReadonlyArray<string | number> }
   | { type: "wildcard"; field: string; value: string }
+  | { type: "prefix"; field: string; value: string }
+  | { type: "isNull"; field: string }
   | {
       type: "range";
       field: string;
@@ -266,20 +277,52 @@ export function compileFilter(
 
   assertCompatible(uiKind, propType, property);
 
+  const operator = filter.operator ?? "is";
+  if (operator === "null") {
+    const predicate: Predicate = { type: "isNull", field: property };
+    return filter.negated ? { type: "not", clause: predicate } : predicate;
+  }
+  if (operator === "contain") {
+    if (propType !== "string" && propType !== "id") {
+      throw workshopError({
+        errorName: "Tellus:Workshop:UnsupportedFilterOperator",
+        status: 400,
+        message: `Filter operator 'contain' requires a string or id property`,
+        parameters: { property, propertyType: propType, operator },
+      });
+    }
+    const terms = Array.isArray(value) ? asStringArray(value, property, uiKind) :
+      typeof value === "string" ? [value] : asStringArray(value, property, uiKind);
+    const prefixes = terms.filter((term) => term.length > 0).map<Predicate>((term) => ({
+      type: "prefix",
+      field: property,
+      value: term,
+    }));
+    const predicate: Predicate = prefixes.length === 0
+      ? { type: "matchAll" }
+      : prefixes.length === 1
+        ? prefixes[0]!
+        : { type: "or", clauses: prefixes };
+    return filter.negated && predicate.type !== "matchAll"
+      ? { type: "not", clause: predicate }
+      : predicate;
+  }
+
+  let predicate: Predicate;
   switch (uiKind) {
     case "string-eq": {
       // Multi-select with single value behaves like terms; empty array → matchAll
       const arr = asStringArray(value, property, uiKind);
-      if (arr.length === 0) return { type: "matchAll" };
-      return { type: "terms", field: property, values: arr };
+      predicate = arr.length === 0 ? { type: "matchAll" } : { type: "terms", field: property, values: arr };
+      break;
     }
     case "string-multi":
     case "string-in":
     case "id-multi":
     case "enum-multi": {
       const arr = asStringArray(value, property, uiKind);
-      if (arr.length === 0) return { type: "matchAll" };
-      return { type: "terms", field: property, values: arr };
+      predicate = arr.length === 0 ? { type: "matchAll" } : { type: "terms", field: property, values: arr };
+      break;
     }
     case "string-default": {
       // "default" string-search uses wildcard contains
@@ -290,19 +333,20 @@ export function compileFilter(
           message: `Filter 'string-default' for '${property}' requires a string`,
           parameters: { field: property, kind: uiKind },
         });
-      if (value === "") return { type: "matchAll" };
-      return { type: "wildcard", field: property, value: `*${value}*` };
+      predicate = value === "" ? { type: "matchAll" } : { type: "wildcard", field: property, value: `*${value}*` };
+      break;
     }
     case "number-multi": {
       const arr = asNumberArray(value, property, uiKind);
-      if (arr.length === 0) return { type: "matchAll" };
-      return { type: "terms", field: property, values: arr };
+      predicate = arr.length === 0 ? { type: "matchAll" } : { type: "terms", field: property, values: arr };
+      break;
     }
     case "number-histogram":
     case "number-default":
     case "number-range": {
       const r = asRange(value, property, uiKind);
-      return { type: "range", field: property, ...r };
+      predicate = { type: "range", field: property, ...r };
+      break;
     }
     case "date-timeline": {
       // Timeline filters carry { from, to } as ISO date strings
@@ -320,8 +364,20 @@ export function compileFilter(
       if (typeof from === "string" && from.length > 0) (range as { gte?: string }).gte = from;
       if (typeof to === "string" && to.length > 0) (range as { lte?: string }).lte = to;
       // If neither bound provided, matchAll
-      if (!("gte" in range) && !("lte" in range)) return { type: "matchAll" };
-      return range;
+      predicate = (!("gte" in range) && !("lte" in range)) ? { type: "matchAll" } : range;
+      break;
+    }
+    case "boolean-single": {
+      if (value !== true && value !== false) {
+        throw workshopError({
+          errorName: "Tellus:Workshop:InvalidFilterValue",
+          status: 400,
+          message: `Filter 'boolean-single' for '${property}' requires true or false`,
+          parameters: { field: property, kind: uiKind },
+        });
+      }
+      predicate = { type: "term", field: property, value };
+      break;
     }
     default: {
       // Exhaustive: TypeScript will complain if a uiKind is missed
@@ -334,6 +390,9 @@ export function compileFilter(
       });
     }
   }
+  return filter.negated && predicate.type !== "matchAll"
+    ? { type: "not", clause: predicate }
+    : predicate;
 }
 
 // -----------------------------------------------------------------------------

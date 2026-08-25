@@ -1,6 +1,15 @@
 // ---------------------------------------------------------------------------
 // connectivity_credentials repo (B2).
 // All bytes are returned as Uint8Array; the BYTEA round-trip preserves length.
+//
+// F8 — the credential-field vocabulary is EXTENDED beyond the original
+// ("password"|"client_key"|"service_account_json"|"token"|"other") to include
+// descriptive REST-API secret names ("api_key", "bearer_token", "basic_auth",
+// "custom_header") so each REST secret type gets its own credential row
+// instead of being bundled into a single "other" JSON blob. The DB CHECK
+// constraint on `field` is relaxed by migration 161 to admit the new names;
+// the legacy "other" row is retained for back-compat (read path falls back to
+// it for connections authored before this change).
 // ---------------------------------------------------------------------------
 
 import { pool } from "../../../db";
@@ -10,7 +19,12 @@ export type CredentialField =
   | "client_key"
   | "service_account_json"
   | "token"
-  | "other";
+  | "other"
+  // F8 — named per-secret storage for REST-API sources.
+  | "api_key"
+  | "bearer_token"
+  | "basic_auth"
+  | "custom_header";
 
 export interface CredentialHead {
   id: number;

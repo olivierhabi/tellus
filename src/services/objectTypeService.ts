@@ -185,6 +185,19 @@ async function getByApiName(ontologyId: string, apiName: string) {
       .map((lt: any) => {
         const isSource = lt.source_object_type === objectType.object_type_id;
         const isTarget = lt.target_object_type === objectType.object_type_id;
+        // A5/A6 — surface, at config time, whether this link's foreign-key
+        // property IS the primary key of the FK-bearing object type (the
+        // linked-type misconfiguration that would silently rename an object).
+        // For a forward link the FK sits on the SOURCE (this object); for a
+        // reverse/bidirectional link the FK sits on the TARGET (this object).
+        // Either way the FK-bearing object is THIS object type, so compare the
+        // relevant FK property id to this object's primary_key_property_id.
+        const fkPropertyId = isSource
+          ? lt.source_property_id
+          : lt.target_property_id;
+        const isFkPrimaryKey =
+          fkPropertyId != null &&
+          fkPropertyId === objectType.primary_key_property_id;
         if (isSource && isTarget) {
           // Self-referential — show as forward
           return {
@@ -193,6 +206,7 @@ async function getByApiName(ontologyId: string, apiName: string) {
             targetObjectType: apiName, // self-ref points to itself
             cardinality: lt.cardinality,
             direction: "forward",
+            isFkPrimaryKey,
           };
         } else if (isSource) {
           return {
@@ -201,6 +215,7 @@ async function getByApiName(ontologyId: string, apiName: string) {
             targetObjectType: lt._targetApiName, // resolved below
             cardinality: lt.cardinality,
             direction: "forward",
+            isFkPrimaryKey,
           };
         } else if (isTarget && lt.is_bidirectional) {
           return {
@@ -209,6 +224,7 @@ async function getByApiName(ontologyId: string, apiName: string) {
             targetObjectType: lt._sourceApiName, // resolved below
             cardinality: invertCardinality(lt.cardinality),
             direction: "reverse",
+            isFkPrimaryKey,
           };
         }
         // Non-bidirectional link where this object is the target — skip
@@ -495,7 +511,7 @@ async function remove(ontologyId: string, apiName: string): Promise<void> {
   //    a zombie funnel workflow retrying against a missing type, or an orphaned
   //    OpenSearch index serving stale rows. The row is already gone, so these
   //    failures MUST NOT roll back or throw — log and continue.
-  await cleanupAfterDelete(apiName);
+  await cleanupAfterDelete(apiName, { ontologyId, objectTypeRid: objectTypeId });
 
   console.log(
     `Deleted object type ${apiName} (${objectTypeId}) with all cascaded resources`
@@ -507,12 +523,18 @@ async function remove(ontologyId: string, apiName: string): Promise<void> {
  * object type. Both are best-effort and isolated so one failure doesn't block
  * the other or the delete.
  */
-async function cleanupAfterDelete(apiName: string): Promise<void> {
+async function cleanupAfterDelete(
+  apiName: string,
+  identity: { ontologyId: string; objectTypeRid: string },
+): Promise<void> {
   try {
     const { terminateTemporalWorkflow } = await import(
       "./funnel/temporal/worker"
     );
-    await terminateTemporalWorkflow(apiName, "object type deleted");
+    // Terminates BOTH the RID-keyed workflow and the legacy api-name-keyed
+    // one (migration window) so a deleted type cannot leave a zombie of
+    // either generation.
+    await terminateTemporalWorkflow(apiName, "object type deleted", identity);
   } catch (err) {
     console.warn(
       `[objectType.delete] funnel workflow terminate failed for ${apiName}: ${(err as Error).message}`
@@ -1107,6 +1129,7 @@ async function getStatistics(ontologyId: string, apiName: string) {
 interface BatchCreateInput {
   apiName: string;
   displayName: string;
+  pluralName?: string | null;
   description?: string | null;
   icon?: string;
   iconColor?: string;
@@ -1151,6 +1174,7 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
   const {
     apiName,
     displayName,
+    pluralName = null,
     description = null,
     icon = "cube",
     iconColor = "#1565C0",
@@ -1236,13 +1260,14 @@ async function batchCreate(ontologyId: string, data: BatchCreateInput) {
       try {
         const otResult = await client.query(
           `INSERT INTO object_type
-             (ontology_id, api_name, display_name, description, icon, icon_color, status, requested_api_name)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             (ontology_id, api_name, display_name, plural_name, description, icon, icon_color, status, requested_api_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING *`,
           [
             ontologyId,
             finalApiName,
             displayName,
+            pluralName,
             description,
             icon,
             iconColor,

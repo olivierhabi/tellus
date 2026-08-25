@@ -299,7 +299,20 @@ export function formatProperty(dbRow: DbRow): Record<string, unknown> {
     isRequired: dbRow.is_required,
     isArray: dbRow.is_array,
     ordinal: dbRow.ordinal,
+    // Property visibility in user applications (Foundry Ontology Manager
+    // Display tab — normal / prominent / hidden). Column is NOT NULL with a
+    // 'normal' default; the fallback guards rows read mid-migration.
+    visibility: (dbRow.visibility as string) ?? "normal",
     conditionalFormatting: dbRow.conditional_formatting ?? null,
+    inlineEditActionId: (dbRow.inline_edit_action_id as string | null) ?? null,
+    // Column-level visibility markings (migration 045 / Rwanda QA §3.3). An
+    // unset marking projects as an empty array — never null — so clients can
+    // rely on the field's presence.
+    markingRequired: Array.isArray(dbRow.marking_required)
+      ? dbRow.marking_required
+      : dbRow.marking_required
+        ? [dbRow.marking_required]
+        : [],
   };
 }
 
@@ -392,6 +405,7 @@ export const ERROR_CODES: Record<string, number> = {
   REQUIRED_FIELD_MISSING: 400,
   OPENSEARCH_CONNECTION_ERROR: 503,
   NO_BACKING_DATASOURCE: 400,
+  REINDEX_TOO_LARGE: 413,
   INDEXING_IN_PROGRESS: 409,
   DATA_VALIDATION_ERROR: 400,
   ACTION_TYPE_NOT_FOUND: 404,
@@ -451,6 +465,7 @@ export const ERROR_CODES: Record<string, number> = {
   INSUFFICIENT_ROLE: 403,
   MARKING_ACCESS_DENIED: 403,
   ORG_ACCESS_DENIED: 403,
+  STORAGE_MIGRATION_FAILED: 500,
   // FOUNDRY-GAPS §8 — purpose-based access control (purposeGate middleware).
   PURPOSE_REQUIRED: 403,
   PURPOSE_UNKNOWN: 403,
@@ -474,7 +489,57 @@ export const ERROR_CODES: Record<string, number> = {
   PK_UNIQUENESS_VIOLATION: 409,
   MISSING_REQUIRED_PARAMETER: 400,
   FUNCTION_TIMEOUT: 504,
+  // AI engine (telos-AIE-agent) proxy — /api/v1/code-assistant/typescript-v2.
+  AI_ENGINE_UNAVAILABLE: 502,
+  AI_ENGINE_TIMEOUT: 504,
+  AI_ENGINE_BAD_REQUEST: 400,
+  AI_ENGINE_ERROR: 502,
   RULE_EXECUTION_FAILED: 500,
+  // Action Semantics v2 — http status mapping per the §8 directive.
+  INVALID_OBJECT_REFERENCE: 400,
+  INVALID_PRIMARY_KEY: 400,
+  OBJECT_TYPE_MISMATCH: 400,
+  OBJECT_ALREADY_EXISTS: 400,
+  SAME_INVOCATION_REFERENCE_FORBIDDEN: 422,
+  DELETE_BLOCKED_BY_RELATIONSHIPS: 422,
+  DANGLING_RELATIONSHIP: 422,
+  FINAL_STATE_INVALID: 422,
+  INVALID_RULE_PARAMETER_TYPE: 400,
+  UNSUPPORTED_SEMANTICS_VERSION: 422,
+  INCOMPATIBLE_ACTION_SEMANTICS: 422,
+  INVALID_EXECUTION_MODE: 422,
+  INVALID_DELETE_POLICY: 422,
+   // Action Semantics v2 — migration workflow audit + concurrency controls.
+   MIGRATION_ACKNOWLEDGEMENT_REQUIRED: 422,
+   MIGRATION_STALE_DEFINITION: 409,
+   MIGRATION_ROLLBACK_NOT_AVAILABLE: 409,
+   MIGRATION_INCOMPATIBLE: 422,
+   // Action rule validation — link / interface-link / webhook / writeback / side effect.
+   // Phase 1: link-rule shape errors + interface-link Phase-2 gate.
+   // Phase 2-5: the remaining structured codes light up alongside their runtime.
+   // NOTE: `LINK_TYPE_NOT_FOUND` is deliberately NOT added here — it already
+   // exists at line ~401 with HTTP 404 (used by routes/links.ts). Action-rule
+   // validation that needs to surface a missing-link-type reference reuses
+   // `VALIDATION_FAILED` + a structured `validationErrors[]` array rather
+   // than overwriting the existing code's HTTP status.
+   INVALID_LINK_MAPPING: 422,
+   UNSUPPORTED_RULE_TYPE: 422,
+   AMBIGUOUS_INTERFACE_LINK_IMPLEMENTATION: 422,
+   MISSING_INTERFACE_LINK_IMPLEMENTATION: 422,
+   CARDINALITY_VIOLATION: 422,
+   DUPLICATE_LINK: 409,
+   CONFLICTING_FOREIGN_KEY_EDITS: 409,
+   INVALID_WEBHOOK_INPUT_MAPPING: 422,
+   INVALID_WEBHOOK_OUTPUT_MAPPING: 422,
+   WEBHOOK_NOT_FOUND: 404,
+   WEBHOOK_ALREADY_EXISTS: 409,
+   WEBHOOK_VERSION_DISABLED: 409,
+   WRITEBACK_TIMEOUT: 504,
+   WRITEBACK_REJECTED: 502,
+   WRITEBACK_OUTPUT_SCHEMA_MISMATCH: 422,
+   WRITEBACK_CONFIG_INVALID: 422,
+   SIDE_EFFECT_CONFIGURATION_INVALID: 422,
+  DEADLOCK_RETRY_EXHAUSTED: 500,
   TIMESERIES_WINDOW_TOO_LARGE: 400,
   QUERY_TIMEOUT: 504,
   UNDO_WINDOW_EXPIRED: 410,
@@ -755,7 +820,7 @@ export function runSelfTests(): void {
     "formatError retains legacy envelope"
   );
 
-  // Additional: ERROR_CODES has exactly 19 entries
+  // Additional: ERROR_CODES has at least 23 entries (incl. AI_ENGINE_* etc.)
   const errorCodeCount = Object.keys(ERROR_CODES).length;
   assert(
     errorCodeCount >= 23,

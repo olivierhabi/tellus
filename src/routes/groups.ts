@@ -4,6 +4,7 @@
 
 import { Router, Request, Response, NextFunction } from "express";
 import { query } from "../db";
+import { objectTypeIndexName } from "../services/opensearch/objectIndexNames";
 import {
   sendSuccess,
   sendCreated,
@@ -33,7 +34,7 @@ async function getCachedCount(apiName: string): Promise<number | null> {
   const cached = countCache.get(apiName);
   if (cached && cached.expires > Date.now()) return cached.count;
   try {
-    const result = await osClient.count({ index: `ontology-${apiName.toLowerCase()}` });
+    const result = await osClient.count({ index: objectTypeIndexName(apiName) });
     const count = Number((result.body as { count?: number })?.count ?? 0);
     countCache.set(apiName, { count, expires: Date.now() + COUNT_CACHE_TTL_MS });
     return count;

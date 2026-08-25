@@ -1,17 +1,23 @@
 import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { AppError } from '../utils/foundryAppError';
-import { convertValue } from '../utils/typeConverter';
+import { convertValue, inferDateFormat } from '../utils/typeConverter';
 import { sanitizeCsvHeader } from '../utils/csvHeader';
-import { findNearNameMatches } from '../utils/columnNameReconciler';
+import { findNearNameMatches, unionSideLabels } from '../utils/columnNameReconciler';
 import { getObjectStream, toDuckDbReadUri } from './storageService';
 import { validateUdfSpec } from './pipelines/udfTransform';
 import { runUdfTransform } from './pipelines/udfRunner';
+import {
+  buildJoinMatchWarnings,
+  coalescedJoinKeyNames,
+  compareJoinValues,
+} from './pipelines/joinMatchRate';
 import {
   chainHashFromNodeConfig,
   fingerprintSchema,
   hashTransformChain,
 } from './pipelines/previewSnapshot';
+import { resolveUnionInputIds } from '../types/pipeline';
 import type {
   CastTargetType,
   CastPreviewInput,
@@ -30,8 +36,49 @@ import type {
   JoinPreviewInput,
   JoinApplyInput,
   JoinType,
+  JoinOperator,
   UnionPreviewInput,
   UnionApplyInput,
+  SelectPreviewInput,
+  SelectApplyInput,
+  SortPreviewInput,
+  SortApplyInput,
+  DropDuplicatesPreviewInput,
+  DropDuplicatesApplyInput,
+  UppercaseColumnNamesPreviewInput,
+  UppercaseColumnNamesApplyInput,
+  RowSizePreviewInput,
+  RowSizeApplyInput,
+  ApplyExpressionPreviewInput,
+  ApplyExpressionApplyInput,
+  ApplyMultipleExpressionsPreviewInput,
+  ApplyMultipleExpressionsApplyInput,
+  ApplyToMultipleColumnsPreviewInput,
+  ApplyToMultipleColumnsApplyInput,
+  ComputeIfExpressionAbsentPreviewInput,
+  ComputeIfExpressionAbsentApplyInput,
+  TextBlockPreviewInput,
+  TextBlockApplyInput,
+  AggregatePreviewInput,
+  AggregateApplyInput,
+  RollupPreviewInput,
+  RollupApplyInput,
+  AggregateOnConditionPreviewInput,
+  AggregateOnConditionApplyInput,
+  TopRowsPreviewInput,
+  TopRowsApplyInput,
+  PivotPreviewInput,
+  PivotApplyInput,
+  UnpivotPreviewInput,
+  UnpivotApplyInput,
+  KeepDuplicatesPreviewInput,
+  KeepDuplicatesApplyInput,
+  AggregationItem,
+  ColumnPredicate,
+  DynamicAggregation,
+  Operand,
+  BinaryOperator,
+  ExpressionItem,
 } from '../types/pipeline';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +106,268 @@ const CONVERTER_TYPE_MAP: Record<CastTargetType, string> = {
   date: 'date',
   timestamp: 'timestamp',
 };
+
+// ---------------------------------------------------------------------------
+// Binary-expression evaluator (legacy TS engine). Applies the same small DSL
+// used by ApplyExpression / Apply Multiple Expressions / Apply to Multiple
+// Columns / Compute if Expression Absent. The SQL compilers translate the
+// same DSL to native operators.
+//
+// Operator semantics:
+//   + - * /   numeric arithmetic; operands coerced to Number.
+//   ||        string concatenation.
+//   == !=     equality (string or numeric, by inferred type).
+//   > < >= <= ordered comparison (numeric when both look like numbers, else
+//             lexicographic).
+//
+// All comparisons return boolean true/false. Arithmetic returns numbers,
+// or null when either operand is null/absent. Concat returns string. Cast to
+// `outputType` (when requested) is applied via convertValue after the eval.
+// ---------------------------------------------------------------------------
+
+function coerceNumeric(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function coerceString(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  return String(v);
+}
+
+function parseLiteral(op: Operand): unknown {
+  // kind === 'literal'
+  if (op.kind !== 'literal') return op.value;
+  const t = op.literalType ?? 'string';
+  switch (t) {
+    case 'integer': {
+      const n = parseInt(op.value, 10);
+      return Number.isFinite(n) ? n : null;
+    }
+    case 'numeric': {
+      const n = parseFloat(op.value);
+      return Number.isFinite(n) ? n : null;
+    }
+    case 'boolean':
+      return op.value === 'true';
+    case 'string':
+    default:
+      return op.value;
+  }
+}
+
+/**
+ * Evaluate one binary expression per row. Left/right operands are
+ * resolved to row values (kind=column) or to literals (kind=literal).
+ */
+function evaluateExpression(
+  row: Record<string, unknown>,
+  expr: Pick<ExpressionItem, 'left' | 'operator' | 'right'>,
+): unknown {
+  const left = expr.left.kind === 'column' ? row[expr.left.value] : parseLiteral(expr.left);
+  const right = expr.right.kind === 'column' ? row[expr.right.value] : parseLiteral(expr.right);
+  const op = expr.operator as BinaryOperator;
+
+  // Null propagation for arithmetic / concat.
+  if (
+    (op === '+' || op === '-' || op === '*' || op === '/') &&
+    (left === null || left === undefined || right === null || right === undefined)
+  ) {
+    return null;
+  }
+
+  switch (op) {
+    case '+': return (coerceNumeric(left) ?? 0) + (coerceNumeric(right) ?? 0);
+    case '-': return (coerceNumeric(left) ?? 0) - (coerceNumeric(right) ?? 0);
+    case '*': return (coerceNumeric(left) ?? 0) * (coerceNumeric(right) ?? 0);
+    case '/': {
+      const r = coerceNumeric(right);
+      if (r === null || r === 0) return null;
+      return (coerceNumeric(left) ?? 0) / r;
+    }
+    case '||':
+      return coerceString(left) + coerceString(right);
+    case '==':
+      return compareEq(left, right);
+    case '!=':
+      return !compareEq(left, right);
+    case '>': return compareOrd(left, right) > 0;
+    case '<': return compareOrd(left, right) < 0;
+    case '>=': return compareOrd(left, right) >= 0;
+    case '<=': return compareOrd(left, right) <= 0;
+    default:
+      return null;
+  }
+}
+
+function compareEq(a: unknown, b: unknown): boolean {
+  const an = coerceNumeric(a);
+  const bn = coerceNumeric(b);
+  if (an !== null && bn !== null) return an === bn;
+  return coerceString(a) === coerceString(b);
+}
+
+function compareOrd(a: unknown, b: unknown): number {
+  const an = coerceNumeric(a);
+  const bn = coerceNumeric(b);
+  if (an !== null && bn !== null) {
+    if (an < bn) return -1;
+    if (an > bn) return 1;
+    return 0;
+  }
+  const as = coerceString(a);
+  const bs = coerceString(b);
+  if (as < bs) return -1;
+  if (as > bs) return 1;
+  return 0;
+}
+
+/**
+ * Build the ConvertOptions for a Cast, inferring the day/month order from the
+ * column's own values when casting to date/timestamp.
+ *
+ * convertValue defaults to "dmy" (Rwanda). Spreadsheet exports are very often
+ * month-first, and under the dmy default an ambiguous "7/6/23" silently
+ * becomes June 7 instead of July 6. Sniffing the column for a value that can
+ * only be read one way ("7/30/23") fixes the whole column. When the sample
+ * carries no decisive evidence, inferDateFormat returns null and the dmy
+ * default stands.
+ */
+function castOptionsForColumn(
+  rows: Array<Record<string, unknown>>,
+  sourceCol: string,
+  converterType: string,
+): { coerce: true; dateFormat?: 'dmy' | 'mdy' } {
+  if (converterType !== 'date' && converterType !== 'timestamp') {
+    return { coerce: true };
+  }
+  // Cap the sniff sample: one decisive value is enough, and columns can be
+  // large. 1000 rows is ample and bounded.
+  const samples: unknown[] = [];
+  for (const row of rows) {
+    samples.push(row[sourceCol]);
+    if (samples.length >= 1000) break;
+  }
+  const inferred = inferDateFormat(samples);
+  return inferred ? { coerce: true, dateFormat: inferred } : { coerce: true };
+}
+
+/**
+ * Coerce an expression result to the requested logical type. Uses the same
+ * convertValue path as Cast so chains behave consistently.
+ */
+function castExpressionResult(value: unknown, outputType: CastTargetType | undefined): unknown {
+  if (outputType === undefined) return value;
+  try {
+    return convertValue(value, CONVERTER_TYPE_MAP[outputType], { coerce: true });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Collects the ExpressionItem objects carried by an Apply-family transform
+ * record persisted in `config.transforms[]`. Handles the four variants:
+ *   - ApplyExpression           → single `expression`
+ *   - ApplyMultipleExpressions   → array `expressions`
+ *   - ApplyToMultipleColumns    → expand: one expression per input column
+ *   - ComputeIfExpressionAbsent → single expression with `outputColumn` on
+ *                                  the transform (not on the expression).
+ */
+function collectExpressionItems(tx: Record<string, unknown>): ExpressionItem[] {
+  const fn = tx.function as string;
+  if (fn === 'ApplyExpression' || fn === 'ApplyMultipleExpressions') {
+    const list = (tx.expressions ?? (tx.expression ? [tx.expression] : [])) as ExpressionItem[];
+    return list;
+  }
+  if (fn === 'ComputeIfExpressionAbsent') {
+    const inner = (tx.expression as Omit<ExpressionItem, 'outputColumn'>) ?? null;
+    if (!inner) return [];
+    return [{ ...(inner as object), outputColumn: tx.outputColumn as string } as unknown as ExpressionItem];
+  }
+  if (fn === 'ApplyToMultipleColumns') {
+    const cols = (tx.columns as string[]) ?? [];
+    const op = tx.operator as BinaryOperator;
+    const right = tx.right as Operand;
+    const suffix = (tx.outputSuffix as string) ?? '_calc';
+    const outs = (tx.outputColumns as string[] | undefined) ?? cols.map((c) => `${c}${suffix}`);
+    const outType = tx.outputType as CastTargetType | undefined;
+    return cols.map((c, i) => ({
+      left: { kind: 'column', value: c },
+      operator: op,
+      right,
+      outputColumn: outs[i],
+      outputType: outType,
+    }));
+  }
+  return [];
+}
+
+/**
+ * How many source rows a preview reads before it stops.
+ *
+ * Previews run in the request path against the raw CSV, so they are bounded
+ * rather than complete. That bound is invisible in the response unless we say
+ * so: a `totalRows` of 5000 on a million-row dataset reads as "this dataset has
+ * 5000 rows", which is wrong in a way that silently misleads whoever is
+ * building the transform. `sampleInfo` (below) makes the distinction explicit.
+ */
+export const PREVIEW_SOURCE_ROW_LIMIT = 5000;
+
+/**
+ * How many source rows the legacy `/transforms/execute` path reads.
+ *
+ * Higher than a preview because this is the "Apply All" result the canvas
+ * snapshots, but still bounded: it runs in the request path with the whole
+ * result in memory. Deploy does not go through here — `materializeForDeploy`
+ * re-reads every input unbounded — so this cap costs snapshot completeness,
+ * not written-dataset completeness. It is reported via `truncated` so the
+ * caller never reads a clipped result as a total.
+ */
+export const EXECUTE_SOURCE_ROW_LIMIT = 10000;
+
+/**
+ * Describe the sample a preview was computed over.
+ *
+ * `truncated` is true when the reader hit the cap, which means every count in
+ * the response describes the first PREVIEW_SOURCE_ROW_LIMIT source rows and not
+ * the dataset. Callers that surface row counts should qualify them when this is
+ * set; `/transforms/execute` is the unbounded path.
+ */
+function sampleInfo(rawRowsRead: number): {
+  sampledSourceRows: number;
+  sourceRowLimit: number;
+  truncated: boolean;
+} {
+  return {
+    sampledSourceRows: rawRowsRead,
+    sourceRowLimit: PREVIEW_SOURCE_ROW_LIMIT,
+    truncated: rawRowsRead >= PREVIEW_SOURCE_ROW_LIMIT,
+  };
+}
+
+/**
+ * Validates that each `kind: 'column'` operand references a column that exists
+ * in `effectiveCols`. Throws VALIDATION_ERROR with the available list.
+ */
+function validateExpressionColumns(
+  expr: Pick<ExpressionItem, 'left' | 'right'>,
+  effectiveCols: Array<{ name: string }>,
+): void {
+  for (const op of [expr.left, expr.right]) {
+    if (op.kind !== 'column') continue;
+    const want = stripBom(op.value);
+    if (!effectiveCols.some((c) => stripBom(c.name) === want)) {
+      throw new AppError(
+        `Expression references column "${want}" which does not exist. ` +
+          `Available: ${effectiveCols.map((c) => c.name).join(', ')}`,
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Service
@@ -173,7 +482,7 @@ export class TransformService {
     }
 
     // Read CSV rows from S3, then replay prior transforms in the chain
-    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms)
       .slice(0, input.limit);
 
@@ -184,17 +493,33 @@ export class TransformService {
     );
 
     // Apply the Cast transform
+    const castOptions = castOptionsForColumn(rows, sourceCol, converterType);
     let castErrors = 0;
+    // Lenient mode nulls a failed cast, which is correct — but discarding *why*
+    // it failed makes "N of N values could not be cast" a dead end: the user
+    // cannot tell an unsupported input shape (a real bug, fix the converter)
+    // from a column that simply is not of that type (e.g. days_until_due holds
+    // '59', a day count, so no timestamp exists to cast it to). Keep the first
+    // reason and one offending sample so the message can say which it is.
+    let castErrorReason: string | undefined;
+    let castErrorSample: string | undefined;
     const transformedRows = rows.map((row) => {
       const rawValue = row[sourceCol];
       let castValue: unknown;
 
       try {
-        castValue = convertValue(rawValue, converterType, { coerce: true });
-      } catch {
+        castValue = convertValue(rawValue, converterType, castOptions);
+      } catch (err) {
         // Lenient mode: failed casts become null (matches Palantir behaviour)
         castValue = null;
         castErrors++;
+        if (castErrorReason === undefined) {
+          castErrorReason =
+            err instanceof Error ? err.message : String(err);
+          // Truncate: a sample is for recognising the shape, not dumping a cell.
+          const asText = rawValue === null || rawValue === undefined ? "" : String(rawValue);
+          castErrorSample = asText.length > 60 ? `${asText.slice(0, 60)}…` : asText;
+        }
       }
 
       // Build the output row
@@ -218,7 +543,10 @@ export class TransformService {
       columns: outputColumns,
       rows: transformedRows,
       rowCount: transformedRows.length,
+      ...sampleInfo(rawRows.length),
       castErrors,
+      castErrorReason,
+      castErrorSample,
       castExpression: `CAST("${sourceCol}" AS ${input.targetType.toUpperCase()})`,
     };
   }
@@ -319,10 +647,21 @@ export class TransformService {
         );
       }
       cond.column = cleanCol;
+      if (cond.valueIsColumn && cond.value) {
+        const cleanValueCol = stripBom(cond.value);
+        if (!effectiveCols.some((c) => stripBom(c.name) === cleanValueCol)) {
+          throw new AppError(
+            `Comparison column "${cleanValueCol}" does not exist. Available: ${effectiveCols.map((c) => stripBom(c.name)).join(', ')}`,
+            400,
+            'VALIDATION_ERROR',
+          );
+        }
+        cond.value = cleanValueCol;
+      }
     }
 
     // Read CSV rows, then replay prior transforms in the chain
-    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const allRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Apply filter — convert rows to string for comparison
@@ -354,6 +693,7 @@ export class TransformService {
       columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
       rows,
       rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
       totalMatched: filtered.length,
       totalRows: allRows.length,
       filterSummary: `${input.mode === 'keep' ? 'Keep' : 'Remove'} rows where ${input.match} of ${input.conditions.length} condition(s) match`,
@@ -447,8 +787,14 @@ export class TransformService {
       }
     }
 
+    // Refuse to drop every column — the DuckDB build compiler enforces the
+    // same rule ("Drop removed every column.").
+    if (colsToDrop.size >= effectiveCols.length) {
+      throw new AppError('Drop removed every column.', 400, 'DROP_ALL_COLUMNS');
+    }
+
     // Read and replay prior transforms
-    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Drop columns from each row
@@ -471,6 +817,7 @@ export class TransformService {
       columns: outputColumns,
       rows,
       rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
       totalRows: chainedRows.length,
       droppedColumns: [...colsToDrop],
     };
@@ -556,7 +903,7 @@ export class TransformService {
     }
 
     // Read and replay prior transforms
-    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Apply renames to rows
@@ -588,6 +935,7 @@ export class TransformService {
       columns: outputColumns,
       rows,
       rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
       totalRows: chainedRows.length,
       renames: input.renames,
     };
@@ -662,7 +1010,7 @@ export class TransformService {
     }
 
     // Read and replay prior transforms
-    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Apply normalization to rows
@@ -690,6 +1038,7 @@ export class TransformService {
       columns: outputColumns,
       rows,
       rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
       totalRows: chainedRows.length,
       removeSpecialCharacters: input.removeSpecialCharacters,
     };
@@ -722,6 +1071,1392 @@ export class TransformService {
       .where({ id: nodeId, pipeline_id: pipelineId })
       .update({ config: JSON.stringify(config) }).returning('*');
     return updated;
+  }
+
+  // =========================================================================
+  // Select Columns — Preview / Apply
+  //
+  // Keeps only the listed columns and removes the others — the inverse of
+  // Drop. Palantir selectV1.
+  // =========================================================================
+
+  async selectPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: SelectPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const want = new Set(input.columns.map(stripBom));
+    const unknown = input.columns.filter((c) => !effectiveCols.some((ec) => stripBom(ec.name) === stripBom(c)));
+    if (unknown.length > 0) {
+      throw new AppError(
+        `Columns not found: ${unknown.join(', ')}. Available: ${effectiveCols.map((c) => c.name).join(', ')}`,
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+
+    // Preserve order to user's listed order.
+    const ordered = input.columns.map(stripBom);
+    const transformed = rows
+      .map((row) => {
+        const out: Record<string, unknown> = {};
+        for (const k of ordered) out[k] = row[k] ?? null;
+        return out;
+      })
+      .slice(0, input.limit);
+
+    const outputColumns = ordered.map((name) => {
+      const found = effectiveCols.find((c) => stripBom(c.name) === name);
+      return { name, type: found?.type ?? 'string' };
+    });
+
+    return {
+      columns: outputColumns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      totalRows: rows.length,
+      selectSummary: `Keep ${ordered.length} of ${effectiveCols.length} columns`,
+    };
+  }
+
+  async selectApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: SelectApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'Select',
+      columns: input.columns,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Sort — Preview / Apply
+  //
+  // Stable multi-key ordering. Palantir sortV2.
+  // =========================================================================
+
+  async sortPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: SortPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    for (const k of input.sorts) {
+      const c = stripBom(k.column);
+      if (!effectiveCols.some((ec) => stripBom(ec.name) === c)) {
+        throw new AppError(
+          `Sort column "${c}" does not exist. Available: ${effectiveCols.map((ec) => ec.name).join(', ')}`,
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+    }
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+
+    const sorted = this.applySort(rows, input.sorts);
+    const sliced = sorted.slice(0, input.limit);
+
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    return {
+      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
+      rows: sliced,
+      rowCount: sliced.length,
+      ...sampleInfo(rawRows.length),
+      totalRows: rows.length,
+      sortSummary: input.sorts.map((s) => `${s.column} ${s.direction.toUpperCase()}`).join(', '),
+    };
+  }
+
+  async sortApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: SortApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'Sort',
+      sorts: input.sorts,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Drop Duplicates — Preview / Apply
+  //
+  // Palantir dropDuplicatesV1. When `columns` is omitted, dedupe on the
+  // entire row (every column's value must match to be considered duplicate).
+  // =========================================================================
+
+  async dropDuplicatesPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: DropDuplicatesPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const keyCols = input.columns?.map(stripBom) ?? null;
+    if (keyCols) {
+      for (const c of keyCols) {
+        if (!effectiveCols.some((ec) => stripBom(ec.name) === c)) {
+          throw new AppError(
+            `Deduplicate key column "${c}" does not exist. Available: ${effectiveCols.map((ec) => ec.name).join(', ')}`,
+            400,
+            'VALIDATION_ERROR',
+          );
+        }
+      }
+    }
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const seen = new Set<string>();
+    const deduped = rows.filter((row) => {
+      let key: string;
+      if (keyCols) {
+        key = keyCols.map((c) => String(row[c] ?? '')).join('\u0001');
+      } else {
+        key = Object.keys(row).sort().map((k) => `${k}=${row[k] ?? ''}`).join('\u0001');
+      }
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const sliced = deduped.slice(0, input.limit);
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    return {
+      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
+      rows: sliced,
+      rowCount: sliced.length,
+      ...sampleInfo(rawRows.length),
+      totalRows: rows.length,
+      duplicatesRemoved: rows.length - deduped.length,
+      dedupeSummary: keyCols ? `By ${keyCols.join(', ')}` : 'By all columns',
+    };
+  }
+
+  async dropDuplicatesApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: DropDuplicatesApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'DropDuplicates',
+      columns: input.columns,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Uppercase Column Names — Preview / Apply
+  //
+  // Palantir uppercaseColumnNamesV1. Pure rename — no value changes.
+  // =========================================================================
+
+  async uppercaseColumnNamesPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: UppercaseColumnNamesPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+
+    const transformed = rows.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(row)) out[k.toUpperCase()] = v;
+      return out;
+    }).slice(0, input.limit);
+
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms)
+      .map((c) => ({ name: c.name.toUpperCase(), type: c.type, normalized: true }));
+
+    return {
+      columns: effectiveColumns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      renameSummary: `Uppercased ${effectiveColumns.length} column names`,
+    };
+  }
+
+  async uppercaseColumnNamesApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: UppercaseColumnNamesApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'UppercaseColumnNames',
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Row Size — Preview / Apply
+  //
+  // Palantir rowSizeV1. Estimation: byte length of JSON.stringify(row).
+  // =========================================================================
+
+  async rowSizePreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: RowSizePreviewInput,
+  ) {
+    const outCol = input.outputColumn?.trim() || 'row_size';
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const transformed = rows
+      .map((row) => ({ ...row, [outCol]: Buffer.byteLength(JSON.stringify(row), 'utf8') }))
+      .slice(0, input.limit);
+
+    const baseCols = effectiveCols.map((c) => ({ name: c.name, type: c.type }));
+    const exists = baseCols.some((c) => c.name === outCol);
+    const outputColumns = exists
+      ? baseCols.map((c) => (c.name === outCol ? { ...c, type: 'integer' } : c))
+      : [...baseCols, { name: outCol, type: 'integer', isNew: true }];
+
+    return {
+      columns: outputColumns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      rowSizeSummary: `Added column "${outCol}" with row byte size`,
+    };
+  }
+
+  async rowSizeApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: RowSizeApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'RowSize',
+      outputColumn: input.outputColumn?.trim() || 'row_size',
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Apply Expression — Preview / Apply
+  //
+  // Palantir applyExpressionV1 — single binary expression producing a column.
+  // =========================================================================
+
+  private applyExpressionToRows(
+    rows: Array<Record<string, unknown>>,
+    expr: ExpressionItem,
+  ): Array<Record<string, unknown>> {
+    return rows.map((row) => {
+      const result = evaluateExpression(row, expr);
+      const cast = castExpressionResult(result, expr.outputType);
+      return { ...row, [expr.outputColumn]: cast };
+    });
+  }
+
+  async applyExpressionPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ApplyExpressionPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    validateExpressionColumns(input.expression, effectiveCols);
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const outCol = input.expression.outputColumn;
+    const transformed = this.applyExpressionToRows(rows, input.expression).slice(0, input.limit);
+
+    const baseCols = effectiveCols.map((c) => ({ name: c.name, type: c.type }));
+    const resultType = input.expression.outputType ?? 'string';
+    const exists = baseCols.some((c) => c.name === outCol);
+    const outputColumns = exists
+      ? baseCols.map((c) => (c.name === outCol ? { ...c, type: resultType } : c))
+      : [...baseCols, { name: outCol, type: resultType, isNew: true }];
+
+    return {
+      columns: outputColumns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      expressionSummary: `Applied expression to column "${outCol}"`,
+    };
+  }
+
+  async applyExpressionApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ApplyExpressionApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'ApplyExpression',
+      expression: input.expression,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Apply Multiple Expressions — Preview / Apply
+  //
+  // Palantir projectV1 — multiple binary expressions producing columns.
+  // =========================================================================
+
+  async applyMultipleExpressionsPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ApplyMultipleExpressionsPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    for (const e of input.expressions) validateExpressionColumns(e, effectiveCols);
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    let rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    for (const e of input.expressions) rows = this.applyExpressionToRows(rows, e);
+    const transformed = rows.slice(0, input.limit);
+
+    let outputColumns: Array<{ name: string; type: string; isNew?: boolean }> =
+      effectiveCols.map((c) => ({ name: c.name, type: c.type }));
+    for (const e of input.expressions) {
+      const t = e.outputType ?? 'string';
+      const idx = outputColumns.findIndex((c) => c.name === e.outputColumn);
+      if (idx >= 0) outputColumns[idx] = { ...outputColumns[idx], type: t };
+      else outputColumns.push({ name: e.outputColumn, type: t, isNew: true });
+    }
+
+    return {
+      columns: outputColumns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      expressionSummary: `Applied ${input.expressions.length} expression(s)`,
+    };
+  }
+
+  async applyMultipleExpressionsApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ApplyMultipleExpressionsApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'ApplyMultipleExpressions',
+      expressions: input.expressions,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Apply To Multiple Columns — Preview / Apply
+  //
+  // Palantir projectOnConditionV1 — apply the same operator+right operand to
+  // N columns (substituted in the left role), producing N new columns.
+  // =========================================================================
+
+  async applyToMultipleColumnsPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ApplyToMultipleColumnsPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const cols = input.columns.map(stripBom);
+    for (const c of cols) {
+      if (!effectiveCols.some((ec) => stripBom(ec.name) === c)) {
+        throw new AppError(
+          `Column "${c}" does not exist. Available: ${effectiveCols.map((ec) => ec.name).join(', ')}`,
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+    }
+    if (input.right.kind === 'column') {
+      const r = stripBom(input.right.value);
+      if (!effectiveCols.some((ec) => stripBom(ec.name) === r)) {
+        throw new AppError(
+          `Right-operand column "${r}" does not exist. Available: ${effectiveCols.map((ec) => ec.name).join(', ')}`,
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+    }
+    if (input.outputColumns && input.outputColumns.length !== cols.length) {
+      throw new AppError(
+        `outputColumns length (${input.outputColumns.length}) must match columns length (${cols.length}).`,
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    const suffix = input.outputSuffix ?? '_calc';
+    const outNames = input.outputColumns ?? cols.map((c) => `${c}${suffix}`);
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const transformed = rows.map((row) => {
+      const out: Record<string, unknown> = { ...row };
+      for (let i = 0; i < cols.length; i++) {
+        const expr: ExpressionItem = {
+          left: { kind: 'column', value: cols[i] },
+          operator: input.operator,
+          right: input.right,
+          outputColumn: outNames[i],
+          outputType: input.outputType,
+        };
+        const v = evaluateExpression(row, expr);
+        out[outNames[i]] = castExpressionResult(v, input.outputType);
+      }
+      return out;
+    }).slice(0, input.limit);
+
+    let outputColumns: Array<{ name: string; type: string; isNew?: boolean }> =
+      effectiveCols.map((c) => ({ name: c.name, type: c.type }));
+    const t = input.outputType ?? 'string';
+    for (const n of outNames) {
+      const idx = outputColumns.findIndex((c) => c.name === n);
+      if (idx >= 0) outputColumns[idx] = { ...outputColumns[idx], type: t, isNew: false };
+      else outputColumns.push({ name: n, type: t, isNew: true });
+    }
+
+    return {
+      columns: outputColumns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      expressionSummary: `Applied "${input.operator}" to ${cols.length} column(s) → ${outNames.join(', ')}`,
+    };
+  }
+
+  async applyToMultipleColumnsApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ApplyToMultipleColumnsApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'ApplyToMultipleColumns',
+      columns: input.columns,
+      operator: input.operator,
+      right: input.right,
+      outputSuffix: input.outputSuffix,
+      outputColumns: input.outputColumns,
+      outputType: input.outputType,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Compute If Expression Absent — Preview / Apply
+  //
+  // Palantir computeExpressionIfAbsentV1 — only fill the column when the
+  // target column is null / empty-string / missing.
+  // =========================================================================
+
+  private isValueAbsent(v: unknown): boolean {
+    return v === undefined || v === null || v === '' || (typeof v === 'string' && v.toLowerCase() === 'null');
+  }
+
+  async computeIfExpressionAbsentPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ComputeIfExpressionAbsentPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    validateExpressionColumns(input.expression, effectiveCols);
+
+    const outCol = input.outputColumn;
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const transformed = rows.map((row) => {
+      const current = row[outCol];
+      if (!this.isValueAbsent(current)) return row;
+      const result = evaluateExpression(row, input.expression);
+      const cast = castExpressionResult(
+        result,
+        (input.expression as { outputType?: CastTargetType }).outputType,
+      );
+      return { ...row, [outCol]: cast };
+    }).slice(0, input.limit);
+
+    const baseCols = effectiveCols.map((c) => ({ name: c.name, type: c.type }));
+    const resultType = (input.expression as { outputType?: CastTargetType }).outputType ?? 'string';
+    const exists = baseCols.some((c) => c.name === outCol);
+    const outputColumns = exists
+      ? baseCols.map((c) => (c.name === outCol ? { ...c, type: resultType } : c))
+      : [...baseCols, { name: outCol, type: resultType, isNew: true }];
+
+    return {
+      columns: outputColumns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      expressionSummary: `Filled "${outCol}" when absent`,
+    };
+  }
+
+  async computeIfExpressionAbsentApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ComputeIfExpressionAbsentApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'ComputeIfExpressionAbsent',
+      outputColumn: input.outputColumn,
+      expression: input.expression,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Text Block — Preview / Apply
+  //
+  // Palantir textBlockV1 — pure annotation; passes data through untouched
+  // so the chain hash remains stable when an annotation is added.
+  // =========================================================================
+
+  async textBlockPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: TextBlockPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms).slice(0, input.limit);
+
+    return {
+      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      textBlockSummary: input.title ? `Annotation: ${input.title}` : 'Annotation',
+    };
+  }
+
+  async textBlockApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: TextBlockApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'TextBlock',
+      text: input.text,
+      title: input.title,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Aggregate-family transforms (PB-B2.follow-2) — shared TS-engine helpers.
+  //
+  // These mirror the field-reference semantics of the corresponding DuckDB
+  // compilers in duckdbTransformEngine.ts; preview rows flow through the
+  // legacy CSV path, so every helper here tolerates stringly-typed values
+  // and coerces numerics exactly like evalBinaryExpression does.
+  // =========================================================================
+
+  /** Logical output type of an aggregation, derived from its input column. */
+  private aggregationOutputType(item: AggregationItem, sourceType: string): string {
+    switch (item.function) {
+      case 'count':
+      case 'count_distinct':
+        return 'integer';
+      case 'avg':
+      case 'stddev':
+      case 'variance':
+        return 'double';
+      case 'sum':
+      case 'min':
+      case 'max':
+        return item.column ? sourceType : 'double';
+    }
+  }
+
+  /**
+   * Evaluate one aggregation item over the rows of a single group. Mirror
+   * of the DuckDB engine's aggregateSql:
+   *   count(col)   = non-null count; bare count = COUNT(*) (nulls included)
+   *   *_distinct   = distinct non-null values
+   *   numeric fns  = nulls skipped; all-null group → null
+   *   stddev/var   = sample (n−1 denominator), n<2 → null (STDDEV_SAMP/VAR_SAMP)
+   */
+  private evalAggregation(
+    item: AggregationItem,
+    rows: Array<Record<string, unknown>>,
+  ): unknown {
+    const vals = item.column ? rows.map((r) => r[item.column as string]) : [];
+    const nonNull = vals.filter((v) => v !== null && v !== undefined && v !== '');
+    const numericVals: number[] = [];
+    for (const v of nonNull) {
+      const n = coerceNumeric(v);
+      if (n !== null) numericVals.push(n);
+    }
+    switch (item.function) {
+      case 'count':
+        return item.column ? nonNull.length : rows.length;
+      case 'count_distinct':
+        return new Set(nonNull.map(String)).size;
+      case 'sum':
+        return numericVals.length ? numericVals.reduce((a, b) => a + b, 0) : null;
+      case 'avg':
+        return numericVals.length
+          ? numericVals.reduce((a, b) => a + b, 0) / numericVals.length
+          : null;
+      case 'min':
+        return numericVals.length ? Math.min(...numericVals) : null;
+      case 'max':
+        return numericVals.length ? Math.max(...numericVals) : null;
+      case 'stddev':
+      case 'variance': {
+        if (numericVals.length < 2) return null;
+        const mean = numericVals.reduce((a, b) => a + b, 0) / numericVals.length;
+        const sq = numericVals.reduce((acc, b) => acc + (b - mean) ** 2, 0);
+        const varSamp = sq / (numericVals.length - 1);
+        return item.function === 'variance' ? varSamp : Math.sqrt(varSamp);
+      }
+    }
+  }
+
+  /**
+   * GroupAndAggregate core: group rows by `groupBy` (nulls form their own
+   * group, matching DuckDB GROUP BY) and evaluate every aggregation item
+   * per group. Group order follows first appearance in the input.
+   * When `aggregations` is empty the result is DISTINCT group keys —
+   * mirrors Palantir groupAndAggregate note ("no aggregations → dedupe").
+   */
+  private computeAggregations(
+    rows: Array<Record<string, unknown>>,
+    groupBy: string[],
+    aggregations: AggregationItem[],
+  ): Array<Record<string, unknown>> {
+    if (aggregations.length === 0) {
+      const seen = new Set<string>();
+      const out: Array<Record<string, unknown>> = [];
+      for (const row of rows) {
+        const key = JSON.stringify(groupBy.map((c) => row[c] ?? null));
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const outRow: Record<string, unknown> = {};
+        for (const c of groupBy) outRow[c] = row[c] ?? null;
+        out.push(outRow);
+      }
+      return out;
+    }
+    const groups = new Map<string, Array<Record<string, unknown>>>();
+    const order: string[] = [];
+    for (const row of rows) {
+      const key = JSON.stringify(groupBy.map((c) => row[c] ?? null));
+      if (!groups.has(key)) {
+        groups.set(key, []);
+        order.push(key);
+      }
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(row);
+    }
+    return order.map((key) => {
+      const keyVals = JSON.parse(key) as unknown[];
+      const outRow: Record<string, unknown> = {};
+      groupBy.forEach((c, i) => { outRow[c] = keyVals[i]; });
+      aggregations.forEach((item) => {
+        outRow[item.outputColumn] = this.evalAggregation(item, groups.get(key) ?? []);
+      });
+      return outRow;
+    });
+  }
+
+  /**
+   * RollupV1 core: prefix-hierarchy grouping sets over rollupColumns.
+   * Emits most-detailed groups first (all k columns) down to the grand
+   * total (level 0, all key columns null) — DuckDB UNION ordering.
+   */
+  private computeRollup(
+    rows: Array<Record<string, unknown>>,
+    rollupColumns: string[],
+    aggregations: AggregationItem[],
+  ): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    for (let level = rollupColumns.length; level >= 0; level--) {
+      const gbs = rollupColumns.slice(0, level);
+      for (const row of this.computeAggregations(rows, gbs, aggregations)) {
+        for (const c of rollupColumns.slice(level)) row[c] = null;
+        out.push(row);
+      }
+    }
+    return out;
+  }
+
+  /** Resolve an aggregateOnCondition ColumnPredicate to named columns. */
+  private resolveOnConditionTargets(
+    predicate: ColumnPredicate,
+    columns: Array<{ name: string; type: string }>,
+  ): string[] {
+    if (predicate.kind === 'all') return columns.map((c) => c.name);
+    const wanted = (predicate.columnType ?? '').toLowerCase();
+    const NUMERICish = new Set(['numeric', 'double', 'decimal', 'number', 'float', 'real']);
+    const INTEGERish = new Set(['integer', 'int', 'long', 'bigint', 'smallint']);
+    return columns
+      .filter((c) => {
+        const t = (c.type ?? 'string').toLowerCase();
+        if (NUMERICish.has(wanted)) return NUMERICish.has(t);
+        if (INTEGERish.has(wanted)) return INTEGERish.has(t);
+        return t === wanted;
+      })
+      .map((c) => c.name);
+  }
+
+  // =========================================================================
+  // Aggregate — Preview / Apply
+  //
+  // Palantir groupAndAggregateV1.
+  // =========================================================================
+
+  async aggregatePreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: AggregatePreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
+    this.assertColumnsExist(effectiveNames, [...input.groupBy, ...input.aggregations.map((a) => a.column).filter((c): c is string => Boolean(c))], 'Aggregate');
+
+    const typeOf = (c: string) => effectiveColumns.find((col) => col.name === c)?.type ?? 'string';
+    const outColumns = [
+      ...input.groupBy.map((g) => ({ name: g, type: typeOf(g) })),
+      ...input.aggregations.map((item) => ({
+        name: item.outputColumn,
+        type: this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+      })),
+    ];
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
+    const rows = this.computeAggregations(chained, input.groupBy, input.aggregations).slice(0, input.limit);
+
+    return {
+      columns: outColumns,
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      aggregateSummary: `Group by [${input.groupBy.join(', ') || '(all)'}] · ${input.aggregations.length} aggregation(s)`,
+    };
+  }
+
+  async aggregateApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: AggregateApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'Aggregate',
+      groupBy: input.groupBy,
+      aggregations: input.aggregations,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Rollup — Preview / Apply
+  //
+  // Palantir rollupV1.
+  // =========================================================================
+
+  async rollupPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: RollupPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
+    if (input.rollupColumns.length === 0 || input.aggregations.length === 0) {
+      throw new AppError('Rollup requires at least one column and one aggregation', 400, 'VALIDATION_ERROR');
+    }
+    this.assertColumnsExist(effectiveNames, [...input.rollupColumns, ...input.aggregations.map((a) => a.column).filter((c): c is string => Boolean(c))], 'Rollup');
+
+    const typeOf = (c: string) => effectiveColumns.find((col) => col.name === c)?.type ?? 'string';
+    const outColumns = [
+      ...input.rollupColumns.map((g) => ({ name: g, type: typeOf(g) })),
+      ...input.aggregations.map((item) => ({
+        name: item.outputColumn,
+        type: this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+      })),
+    ];
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
+    const rows = this.computeRollup(chained, input.rollupColumns, input.aggregations).slice(0, input.limit);
+
+    return {
+      columns: outColumns,
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      rollupSummary: `Rollup [${input.rollupColumns.join(' → ')}] · ${input.aggregations.length} aggregation(s)`,
+    };
+  }
+
+  async rollupApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: RollupApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'Rollup',
+      rollupColumns: input.rollupColumns,
+      aggregations: input.aggregations,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Aggregate on Condition — Preview / Apply
+  //
+  // Palantir aggregateOnConditionV2.
+  // =========================================================================
+
+  /** Build the concrete aggregation list for an on-condition step. Each
+   * dynamic aggregation lands on every target column with output name
+   * `<column><suffix>` (Palantir columnNameConcat). */
+  private buildOnConditionAggregations(
+    targets: string[],
+    expressions: DynamicAggregation[],
+  ): AggregationItem[] {
+    const items: AggregationItem[] = [];
+    for (const target of targets) {
+      for (const expr of expressions) {
+        items.push({
+          function: expr.function,
+          column: target,
+          outputColumn: `${target}${expr.suffix}`,
+        });
+      }
+    }
+    return items;
+  }
+
+  async aggregateOnConditionPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: AggregateOnConditionPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const targets = this.resolveOnConditionTargets(input.predicate, effectiveColumns);
+    if (targets.length === 0) {
+      throw new AppError('Aggregate on Condition matched no columns for the given predicate', 400, 'VALIDATION_ERROR');
+    }
+    const aggregations = this.buildOnConditionAggregations(targets, input.aggregations);
+
+    const typeOf = (c: string) => effectiveColumns.find((col) => col.name === c)?.type ?? 'string';
+    const outColumns = [
+      ...input.groupBy.map((g) => ({ name: g, type: typeOf(g) })),
+      ...aggregations.map((item) => ({
+        name: item.outputColumn,
+        type: this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+      })),
+    ];
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
+    const rows = this.computeAggregations(chained, input.groupBy, aggregations).slice(0, input.limit);
+
+    return {
+      columns: outColumns,
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      matchedColumns: targets,
+    };
+  }
+
+  async aggregateOnConditionApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: AggregateOnConditionApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'AggregateOnCondition',
+      predicate: input.predicate,
+      groupBy: input.groupBy,
+      aggregations: input.aggregations,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Top Rows — Preview / Apply
+  //
+  // Palantir topRowsV1.
+  // =========================================================================
+
+  /** topRowV2 core: partition → per-partition sort → first N rows. Mirror
+   * of the DuckDB engine's ROW_NUMBER() OVER (PARTITION … ORDER BY …). */
+  private computeTopRows(
+    rows: Array<Record<string, unknown>>,
+    partitionBy: string[],
+    sorts: Array<{ column: string; direction: 'asc' | 'desc'; nulls?: 'first' | 'last' }>,
+    topN: number,
+  ): Array<Record<string, unknown>> {
+    if (partitionBy.length === 0) {
+      return this.applySort(rows, sorts).slice(0, topN);
+    }
+    const groups = new Map<string, Array<Record<string, unknown>>>();
+    const order: string[] = [];
+    for (const row of rows) {
+      const key = JSON.stringify(partitionBy.map((c) => row[c] ?? null));
+      if (!groups.has(key)) {
+        groups.set(key, []);
+        order.push(key);
+      }
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(row);
+    }
+    const out: Array<Record<string, unknown>> = [];
+    for (const key of order) {
+      out.push(...this.applySort(groups.get(key) ?? [], sorts).slice(0, topN));
+    }
+    return out;
+  }
+
+  async topRowsPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: TopRowsPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
+    if (input.sorts.length === 0) {
+      throw new AppError('Top Rows requires at least one sort column', 400, 'VALIDATION_ERROR');
+    }
+    this.assertColumnsExist(effectiveNames, [...input.partitionBy, ...input.sorts.map((s) => s.column)], 'TopRows');
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
+    const rows = this.computeTopRows(chained, input.partitionBy, input.sorts, input.topN).slice(0, input.limit);
+
+    return {
+      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      topRowSummary: `Top ${input.topN} rows per ${input.partitionBy.length ? `[${input.partitionBy.join(', ')}]` : 'table'}`,
+    };
+  }
+
+  async topRowsApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: TopRowsApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'TopRows',
+      partitionBy: input.partitionBy,
+      sorts: input.sorts,
+      topN: input.topN,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Pivot — Preview / Apply
+  //
+  // Palantir pivotV1: long → wide.
+  // =========================================================================
+
+  /**
+   * PivotV1 core. Mirrors the DuckDB emitter: one column per
+   * (pivotValue × aggregation), valued by a filtered aggregate over the
+   * rows where `pivotColumn = value`; output name is
+   * `prefix` → `<alias>_<outputColumn>` / `suffix` → `<outputColumn>_<alias>`.
+   * Values outside `pivotValues` contribute no columns or groups; groups
+   * with no matching rows produce SQL-consistent cells (count=0, sum=null).
+   */
+  private computePivot(
+    rows: Array<Record<string, unknown>>,
+    groupBy: string[],
+    pivotColumn: string,
+    pivotValues: Array<{ value: string; alias: string }>,
+    aggregations: AggregationItem[],
+    aliasPosition: 'prefix' | 'suffix',
+  ): { rows: Array<Record<string, unknown>>; valueColumns: string[] } {
+    const nameFor = (alias: string, agg: AggregationItem) =>
+      aliasPosition === 'prefix'
+        ? `${alias}_${agg.outputColumn}`
+        : `${agg.outputColumn}_${alias}`;
+    const valueColumns = pivotValues.flatMap((pv) =>
+      aggregations.map((agg) => nameFor(pv.alias, agg)),
+    );
+    // Group rows by the groupBy key (nulls form their own group, first
+    // appearance order — same as computeAggregations).
+    const groups = new Map<string, Array<Record<string, unknown>>>();
+    const order: string[] = [];
+    for (const row of rows) {
+      const key = JSON.stringify(groupBy.map((c) => row[c] ?? null));
+      if (!groups.has(key)) {
+        groups.set(key, []);
+        order.push(key);
+      }
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(row);
+    }
+    const rowsOut = order.map((key) => {
+      const keyVals = JSON.parse(key) as unknown[];
+      const groupRows = groups.get(key) ?? [];
+      const outRow: Record<string, unknown> = {};
+      groupBy.forEach((c, i) => { outRow[c] = keyVals[i]; });
+      for (const pv of pivotValues) {
+        const cellRows = groupRows.filter((r) => {
+          const v = r[pivotColumn];
+          return v !== null && v !== undefined && String(v) === pv.value;
+        });
+        for (const agg of aggregations) {
+          outRow[nameFor(pv.alias, agg)] = this.evalAggregation(agg, cellRows);
+        }
+      }
+      return outRow;
+    });
+    return { rows: rowsOut, valueColumns };
+  }
+
+  async pivotPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: PivotPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
+    this.assertColumnsExist(effectiveNames, [input.pivotColumn, ...input.groupBy, ...input.aggregations.map((a) => a.column).filter((c): c is string => Boolean(c))], 'Pivot');
+    if (input.aggregations.some((a) => !a.column)) {
+      throw new AppError('Pivot aggregations require a column (count(*) pivot is not supported).', 400, 'VALIDATION_ERROR');
+    }
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
+    const { rows: allRows, valueColumns } = this.computePivot(
+      chained, input.groupBy, input.pivotColumn, input.pivotValues, input.aggregations, input.aliasPosition,
+    );
+
+    const typeOf = (c: string) => effectiveColumns.find((col) => col.name === c)?.type ?? 'string';
+    const typesByName = new Map(input.aggregations.map((item) => [
+      item.outputColumn,
+      this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+    ]));
+    const outColumns = [
+      ...input.groupBy.map((g) => ({ name: g, type: typeOf(g) })),
+      ...valueColumns.map((vc) => {
+        const aggName = input.aggregations
+          .map((a) => a.outputColumn)
+          .find((n) => vc.endsWith(`_${n}`) || vc.startsWith(`${n}_`));
+        return { name: vc, type: aggName ? (typesByName.get(aggName) ?? 'string') : 'string' };
+      }),
+    ];
+
+    const rows = allRows.slice(0, input.limit);
+    return {
+      columns: outColumns,
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      pivotSummary: `Pivot "${input.pivotColumn}" → ${valueColumns.length} output column(s)`,
+    };
+  }
+
+  async pivotApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: PivotApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'Pivot',
+      groupBy: input.groupBy,
+      pivotColumn: input.pivotColumn,
+      pivotValues: input.pivotValues,
+      aggregations: input.aggregations,
+      aliasPosition: input.aliasPosition,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Unpivot — Preview / Apply
+  //
+  // Palantir unpivotV1: wide → long; keeps NULL values.
+  // =========================================================================
+
+  /** unpivotV1 core: one row per (keat key, unpivoted column). */
+  private computeUnpivot(
+    rows: Array<Record<string, unknown>>,
+    columnsToUnpivot: string[],
+    nameColumn: string,
+    valueColumn: string,
+    keptColumns: string[],
+  ): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    for (const row of rows) {
+      for (const c of columnsToUnpivot) {
+        const outRow: Record<string, unknown> = {
+          [nameColumn]: c,
+          [valueColumn]: row[c] ?? null,
+        };
+        for (const k of keptColumns) outRow[k] = row[k] ?? null;
+        out.push(outRow);
+      }
+    }
+    return out;
+  }
+
+  async unpivotPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: UnpivotPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
+    this.assertColumnsExist(effectiveNames, input.columns, 'Unpivot');
+    if (effectiveNames.has(input.nameColumn) || effectiveNames.has(input.valueColumn)) {
+      throw new AppError('Unpivot name/value column names must not collide with existing columns', 400, 'VALIDATION_ERROR');
+    }
+
+    const unpivotSet = new Set(input.columns);
+    const keptColumns = effectiveColumns.filter((c) => !unpivotSet.has(c.name));
+    const outColumns = [
+      { name: input.nameColumn, type: 'string' },
+      { name: input.valueColumn, type: 'string' },
+      ...keptColumns.map((c) => ({ name: c.name, type: c.type })),
+    ];
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
+    const rows = this.computeUnpivot(chained, input.columns, input.nameColumn, input.valueColumn, keptColumns.map((c) => c.name)).slice(0, input.limit);
+
+    return {
+      columns: outColumns,
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      unpivotSummary: `Unpivot ${input.columns.length} column(s) → "${input.nameColumn}" / "${input.valueColumn}"`,
+    };
+  }
+
+  async unpivotApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: UnpivotApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'Unpivot',
+      columns: input.columns,
+      nameColumn: input.nameColumn,
+      valueColumn: input.valueColumn,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Keep Duplicates — Preview / Apply
+  //
+  // Palantir keepDuplicatesV1: keep ALL rows whose key appears more than
+  // once (contrast dropDuplicates which keeps only one).
+  // =========================================================================
+
+  /** keepDuplicatesV1 core: key-frequency filter, original order preserved. */
+  private computeKeepDuplicates(
+    rows: Array<Record<string, unknown>>,
+    subset: string[],
+    allColumns: string[],
+  ): Array<Record<string, unknown>> {
+    const keys = subset.length ? subset : allColumns;
+    const keyOf = (row: Record<string, unknown>) => JSON.stringify(keys.map((c) => row[c] ?? null));
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const key = keyOf(row);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return rows.filter((row) => (counts.get(keyOf(row)) ?? 0) > 1);
+  }
+
+  async keepDuplicatesPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: KeepDuplicatesPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
+    // Omitting `columns` = exact-duplicate mode (key = every column).
+    const subset = input.columns ?? [];
+    this.assertColumnsExist(effectiveNames, subset, 'KeepDuplicates');
+
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
+    const allNames = effectiveColumns.map((c) => c.name);
+    const rows = this.computeKeepDuplicates(chained, subset, allNames).slice(0, input.limit);
+
+    return {
+      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
+      rows,
+      rowCount: rows.length,
+      ...sampleInfo(rawRows.length),
+      keepDuplicatesSummary: `Keeping rows where (${subset.join(', ') || 'all columns'}) appears > 1 time`,
+    };
+  }
+
+  async keepDuplicatesApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: KeepDuplicatesApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({
+      function: 'KeepDuplicates',
+      columns: input.columns,
+      createdAt: new Date().toISOString(),
+    });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Private helpers — fetch / persist node config (DRY for the new apply
+  // methods above; mirrors the inline pattern used by castApply et al).
+  // =========================================================================
+
+  private async fetchNodeConfig(
+    projectId: string, pipelineId: string, nodeId: string,
+  ): Promise<{ id: string; config: Record<string, unknown> }> {
+    const node = await this.knex('pipeline_nodes as pn')
+      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
+      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
+      .select('pn.id', 'pn.config').first();
+    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
+    const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    return { id: node.id, config };
+  }
+
+  private async saveNodeConfig(
+    nodeId: string, pipelineId: string, config: Record<string, unknown>,
+  ) {
+    const [updated] = await this.knex('pipeline_nodes')
+      .where({ id: nodeId, pipeline_id: pipelineId })
+      .update({ config: JSON.stringify(config) }).returning('*');
+    return updated;
+  }
+
+  /**
+   * Shared column-existence validation for the aggregate-family previews.
+   * Throws the same 400 shape used by the older preview methods.
+   */
+  private assertColumnsExist(
+    effectiveNames: Set<string>,
+    needed: string[],
+    fnName: string,
+  ): void {
+    for (const c of needed) {
+      if (!effectiveNames.has(c)) {
+        throw new AppError(
+          `${fnName} column "${c}" does not exist. Available: ${[...effectiveNames].join(', ')}`,
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+    }
+  }
+
+  /**
+   * Stable multi-key sort. Nulls are ordered first or last per SortKey.nulls
+   * (default: 'last' for ascending, 'first' for descending — the SQL-standard
+   * default in DuckDB/Postgres).
+   */
+  private applySort(
+    rows: Array<Record<string, unknown>>,
+    sorts: Array<{ column: string; direction: 'asc' | 'desc'; nulls?: 'first' | 'last' }>,
+  ): Array<Record<string, unknown>> {
+    const withIdx = rows.map((row, idx) => ({ row, idx }));
+    withIdx.sort((a, b) => {
+      for (const k of sorts) {
+        const av = a.row[k.column];
+        const bv = b.row[k.column];
+        const aNull = av === null || av === undefined || av === '';
+        const bNull = bv === null || bv === undefined || bv === '';
+        if (aNull && bNull) continue;
+        const nullsFirst = k.nulls === 'first' ? true : k.nulls === 'last' ? false : k.direction === 'desc';
+        if (aNull) return nullsFirst ? -1 : 1;
+        if (bNull) return nullsFirst ? 1 : -1;
+        const an = coerceNumeric(av);
+        const bn = coerceNumeric(bv);
+        let cmp: number;
+        if (an !== null && bn !== null) cmp = an < bn ? -1 : an > bn ? 1 : 0;
+        else cmp = String(av) < String(bv) ? -1 : String(av) > String(bv) ? 1 : 0;
+        if (cmp !== 0) return k.direction === 'desc' ? -cmp : cmp;
+      }
+      // Stable: preserve original index for ties.
+      return a.idx - b.idx;
+    });
+    return withIdx.map((x) => x.row);
   }
 
   // =========================================================================
@@ -799,9 +2534,9 @@ export class TransformService {
 
     // ── Read data ───────────────────────────────────────────────────
     const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const leftRaw = await this.readCsvRows(leftDataset.file_path, 5000);
+    const leftRaw = await this.readCsvRows(leftDataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const leftRows = this.applyExistingTransforms(leftRaw, chainTransforms);
-    const rightRows = await this.readCsvRows(rightDataset.file_path, 5000);
+    const rightRows = await this.readCsvRows(rightDataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
 
     if (leftRows.length === 0) {
       throw new AppError('Left input contains no rows. Apply transforms or check the source dataset.', 400, 'LEFT_EMPTY');
@@ -846,7 +2581,11 @@ export class TransformService {
     const rightPrefix = input.rightPrefix ?? 'right_';
 
     // ── Execute join ──────────────────────────────────────────────────
-    const joinedRows = this.executeJoin(leftRows, rightRows, input.joinType, input.conditions, effectiveLeftCols, rightCols, rightPrefix);
+    const coalesceJoinKeys = input.coalesceJoinKeys ?? false;
+    const joinedRows = this.executeJoin(
+      leftRows, rightRows, input.joinType, input.conditions,
+      effectiveLeftCols, rightCols, rightPrefix, coalesceJoinKeys,
+    );
     const rows = joinedRows.slice(0, input.limit);
 
     // Warn about zero matches
@@ -856,6 +2595,21 @@ export class TransformService {
         message: `Inner join produced 0 rows. No matching values were found between the join columns. Verify the match condition columns contain overlapping values.`,
       });
     } else if (input.joinType !== 'cross') {
+      // An *outer* join hides the same failure an inner join makes obvious:
+      // with zero overlap a left join still returns every left row, so nothing
+      // errors and the only symptom is that every right-side column is null.
+      // See joinMatchRate.ts for why this lives in a pure module.
+      if (input.joinType === 'left' || input.joinType === 'right' || input.joinType === 'full_outer') {
+        warnings.push(
+          ...buildJoinMatchWarnings(
+            leftRows,
+            rightRows,
+            input.joinType,
+            input.conditions,
+            stripBom,
+          ),
+        );
+      }
       // Check for high null rate on join keys
       for (const cond of input.conditions) {
         const leftNulls = leftRows.filter((r) => {
@@ -894,19 +2648,29 @@ export class TransformService {
     const filteredLeftCols = leftSelectedSet
       ? effectiveLeftCols.filter((c) => leftSelectedSet.has(c.name))
       : effectiveLeftCols;
-    const filteredRightCols = rightSelectedSet
-      ? rightCols.filter((c) => rightSelectedSet.has(c.name))
-      : rightCols;
+    // Semi/anti joins surface LEFT columns only (Palantir joinV2) —
+    // any right-side selection is ignored.
+    const filteredRightCols = (input.joinType === 'semi' || input.joinType === 'anti')
+      ? []
+      : rightSelectedSet
+        ? rightCols.filter((c) => rightSelectedSet.has(c.name))
+        : rightCols;
 
-    // Build output columns: left columns + right columns (prefixed if collision)
+    // Build output columns: left columns + right columns (prefixed if collision,
+    // or dropped entirely when the key was coalesced into its left twin).
     const leftNames = new Set(filteredLeftCols.map((c) => c.name));
+    const coalescedNames = coalesceJoinKeys
+      ? coalescedJoinKeyNames(input.conditions, leftNames, stripBom)
+      : new Set<string>();
     const outputCols = [
       ...filteredLeftCols.map((c) => ({ name: c.name, type: c.type, source: 'left' as const })),
-      ...filteredRightCols.map((c) => ({
-        name: leftNames.has(c.name) ? `${rightPrefix}${c.name}` : c.name,
-        type: c.type,
-        source: 'right' as const,
-      })),
+      ...filteredRightCols
+        .filter((c) => !coalescedNames.has(c.name))
+        .map((c) => ({
+          name: leftNames.has(c.name) ? `${rightPrefix}${c.name}` : c.name,
+          type: c.type,
+          source: 'right' as const,
+        })),
     ];
 
     // Strip deselected columns from rows
@@ -926,6 +2690,10 @@ export class TransformService {
       totalJoined: joinedRows.length,
       leftRowCount: leftRows.length,
       rightRowCount: rightRows.length,
+      // Two bounded reads, so either side can be the truncated one — a join
+      // preview whose left input was clipped is missing matches, not merely
+      // showing fewer rows.
+      ...sampleInfo(Math.max(leftRaw.length, rightRows.length)),
       joinType: input.joinType,
       warnings,
     };
@@ -952,6 +2720,11 @@ export class TransformService {
       rightNodeId: input.rightNodeId,
       joinType: input.joinType,
       conditions: input.conditions,
+      // The deploy path reads joinStep.rightPrefix, so a non-default prefix
+      // that was not persisted here would silently revert to `right_` on
+      // deploy while preview showed the chosen one.
+      ...(input.rightPrefix ? { rightPrefix: input.rightPrefix } : {}),
+      ...(input.coalesceJoinKeys ? { coalesceJoinKeys: true } : {}),
       createdAt: new Date().toISOString(),
     });
     config.transforms = transforms;
@@ -999,7 +2772,16 @@ export class TransformService {
     priorTransforms?: unknown[],
     /** Internal guard: detect sourceNodeId cycles in malformed graphs. */
     _visited: Set<string> = new Set<string>(),
-  ): Promise<{ columns: Array<{ name: string; type: string }>; rows: Array<Record<string, unknown>> }> {
+  ): Promise<{
+    columns: Array<{ name: string; type: string }>;
+    rows: Array<Record<string, unknown>>;
+    /**
+     * True when this branch's rows came from a bounded CSV read that hit the
+     * cap. Snapshot-backed branches report false: a snapshot is whatever Apply
+     * captured, and its own truncation was recorded at capture time.
+     */
+    truncated?: boolean;
+  }> {
     if (_visited.has(nodeId)) {
       throw new AppError(
         `Cycle detected in pipeline node graph at ${nodeId}.`,
@@ -1064,10 +2846,14 @@ export class TransformService {
     const { dataset, sourceColumns, existingTransforms } =
       await this.resolveNodeDataset(projectId, pipelineId, nodeId);
     const transforms = priorTransforms ?? existingTransforms;
-    const raw = await this.readCsvRows(dataset.file_path, 5000);
+    const raw = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(raw, transforms);
     const columns = this.applyExistingTransformColumns(sourceColumns, transforms);
-    return { columns, rows };
+    return {
+      columns,
+      rows,
+      truncated: raw.length >= PREVIEW_SOURCE_ROW_LIMIT,
+    };
   }
 
   // ── Output node preview ──────────────────────────────────────────────────
@@ -1078,11 +2864,29 @@ export class TransformService {
   async outputPreview(
     projectId: string, pipelineId: string, nodeId: string,
     limit = 500,
-  ): Promise<{ columns: Array<{ name: string; type: string }>; rows: Array<Record<string, unknown>>; totalRows: number }> {
+  ): Promise<{
+    columns: Array<{ name: string; type: string }>;
+    rows: Array<Record<string, unknown>>;
+    totalRows: number;
+    sampledSourceRows: number;
+    sourceRowLimit: number;
+    truncated: boolean;
+  }> {
     const data = await this.resolveNodeData(projectId, pipelineId, nodeId);
     const totalRows = data.rows.length;
     const rows = data.rows.slice(0, limit);
-    return { columns: data.columns, rows, totalRows };
+    // `totalRows` here is post-transform, so it can legitimately differ from
+    // the rows read; what matters to the caller is whether the read that fed
+    // it was itself clipped. Deploy uses materializeForDeploy, which is
+    // unbounded, so this flag is a preview-only caveat.
+    return {
+      columns: data.columns,
+      rows,
+      totalRows,
+      sampledSourceRows: data.rows.length,
+      sourceRowLimit: PREVIEW_SOURCE_ROW_LIMIT,
+      truncated: Boolean(data.truncated),
+    };
   }
 
   // ============================================================================
@@ -1237,16 +3041,20 @@ export class TransformService {
         ) as
           | {
               joinType?: JoinType;
-              conditions?: Array<{ leftColumn: string; rightColumn: string }>;
+              conditions?: Array<{ leftColumn: string; rightColumn: string; operator?: JoinOperator }>;
               rightNodeId?: string;
               rightPrefix?: string;
+              coalesceJoinKeys?: boolean;
             }
           | undefined;
         const joinType =
           ((cfg.joinType ?? joinStep?.joinType) as JoinType | undefined);
         const conditions = (cfg.conditions ?? joinStep?.conditions) as
-          | Array<{ leftColumn: string; rightColumn: string }>
+          | Array<{ leftColumn: string; rightColumn: string; operator?: JoinOperator }>
           | undefined;
+        const coalesceJoinKeys = Boolean(
+          cfg.coalesceJoinKeys ?? joinStep?.coalesceJoinKeys,
+        );
         const leftSrc = cfg.sourceNodeId as string | undefined;
         const rightSrc =
           (cfg.rightNodeId as string | undefined) ?? joinStep?.rightNodeId;
@@ -1300,6 +3108,7 @@ export class TransformService {
           left.columns,
           right.columns,
           rightPrefix,
+          coalesceJoinKeys,
         );
         // Compose output columns mirroring joinPreview: filter each
         // side by its *SelectedColumns set, then concatenate with the
@@ -1311,12 +3120,20 @@ export class TransformService {
           ? right.columns.filter((c) => rightSelected.has(c.name))
           : right.columns;
         const leftNames = new Set(filteredLeftCols.map((c) => c.name));
+        // Same derivation as joinPreview: a coalesced right key must be
+        // absent here too, or deploy would emit a column the rows do not
+        // carry (blank downstream) while preview showed one merged column.
+        const coalescedNames = coalesceJoinKeys
+          ? coalescedJoinKeyNames(conditions, leftNames, stripBom)
+          : new Set<string>();
         const columns: Array<{ name: string; type: string }> = [
           ...filteredLeftCols,
-          ...filteredRightCols.map((c) => ({
-            name: leftNames.has(c.name) ? `${rightPrefix}${c.name}` : c.name,
-            type: c.type,
-          })),
+          ...filteredRightCols
+            .filter((c) => !coalescedNames.has(c.name))
+            .map((c) => ({
+              name: leftNames.has(c.name) ? `${rightPrefix}${c.name}` : c.name,
+              type: c.type,
+            })),
         ];
         // Project rows down to the selected column set (preserves
         // output ordering; absent keys are omitted, matching the
@@ -1332,10 +3149,17 @@ export class TransformService {
 
       case 'union': {
         const leftSrc = cfg.sourceNodeId as string | undefined;
-        const rightSrc = cfg.rightNodeId as string | undefined;
-        if (!leftSrc || !rightSrc) {
+        // N-input union (Palantir `List<Table>`): `rightNodeIds` is the list
+        // unionApply persists; the singular `rightNodeId` is the legacy shape
+        // and is folded in by resolveUnionInputIds.
+        const additionalSrc = resolveUnionInputIds({
+          rightNodeId: cfg.rightNodeId as string | undefined,
+          rightNodeIds: cfg.rightNodeIds as string[] | undefined,
+        });
+        if (!leftSrc || additionalSrc.length === 0) {
           throw new AppError(
-            `Union node ${nodeId} requires both sourceNodeId and rightNodeId.`,
+            `Union node ${nodeId} requires sourceNodeId and at least one ` +
+              `additional input (rightNodeIds, or the legacy rightNodeId).`,
             400,
             'UNION_UNWIRED',
           );
@@ -1343,20 +3167,44 @@ export class TransformService {
         const left = await this.materializeForDeploy(
           projectId, pipelineId, leftSrc, new Set<string>(_visited),
         );
-        const right = await this.materializeForDeploy(
-          projectId, pipelineId, rightSrc, new Set<string>(_visited),
+        const others = await Promise.all(
+          additionalSrc.map((src) => this.materializeForDeploy(
+            projectId, pipelineId, src, new Set<string>(_visited),
+          )),
         );
-        // Union-by-name (canvas default): output columns = unique union
-        // with left ordering preserved; rows from each side are rebased
-        // onto the unified column set with null-fill for missing names.
-        const seen = new Set<string>();
-        const columns: Array<{ name: string; type: string }> = [];
-        for (const c of left.columns) {
-          if (!seen.has(c.name)) { seen.add(c.name); columns.push(c); }
+        const branches = [left, ...others];
+        // Union modes (unionV1): cfg.mode persists the canvas choice.
+        //   first : first input's schema only; later-only columns dropped.
+        //   narrow: columns present in EVERY input.
+        //   wide  : name superset in input order (canvas default).
+        const mode = (cfg.mode as string | undefined) ?? 'wide';
+        const otherNameSets = others.map((b) => new Set(b.columns.map((c) => c.name)));
+        let columns: Array<{ name: string; type: string }>;
+        if (mode === 'first') {
+          columns = left.columns;
+        } else if (mode === 'narrow') {
+          columns = left.columns.filter((c) => otherNameSets.every((s) => s.has(c.name)));
+          if (columns.length === 0) {
+            throw new AppError(
+              `Union node ${nodeId} in "narrow" mode produced zero columns: ` +
+                `the ${branches.length} inputs share no column names.`,
+              400,
+              'UNION_NARROW_EMPTY',
+            );
+          }
+        } else {
+          // Union-by-name (canvas default): output columns = unique union
+          // with input ordering preserved (first input, then each later one).
+          const seen = new Set<string>();
+          columns = [];
+          for (const branch of branches) {
+            for (const c of branch.columns) {
+              if (!seen.has(c.name)) { seen.add(c.name); columns.push(c); }
+            }
+          }
         }
-        for (const c of right.columns) {
-          if (!seen.has(c.name)) { seen.add(c.name); columns.push(c); }
-        }
+        // Rows from each input are rebased onto the output column set
+        // with null-fill for missing names.
         const colNames = columns.map((c) => c.name);
         const rebase = (
           r: Record<string, unknown>,
@@ -1365,10 +3213,7 @@ export class TransformService {
           for (const c of colNames) out[c] = (c in r) ? r[c] : null;
           return out;
         };
-        const rows = [
-          ...left.rows.map(rebase),
-          ...right.rows.map(rebase),
-        ];
+        const rows = branches.flatMap((b) => b.rows.map(rebase));
         return { columns, rows, totalRows: rows.length };
       }
 
@@ -1388,71 +3233,169 @@ export class TransformService {
     const warnings: Array<{ code: string; message: string; details?: unknown }> = [];
     const mode = input.mode ?? 'name-merge';
 
-    // ── Resolve left and right data (uses snapshot if available) ──
+    // ── Resolve every input (uses snapshot if available) ──────────
+    // Palantir's `union*ByNameV1` transforms take `List<Table>`, so a
+    // three-way union is ONE node rather than two chained ones. The node the
+    // request is addressed to is the first input; `rightNodeIds` (or the
+    // legacy singular `rightNodeId`) supplies the rest, in order.
+    const additionalIds = resolveUnionInputIds(input);
     const left = await this.resolveNodeData(projectId, pipelineId, nodeId, input.priorTransforms);
-    const right = await this.resolveNodeData(projectId, pipelineId, input.rightNodeId);
+    const others = await Promise.all(
+      additionalIds.map((id) => this.resolveNodeData(projectId, pipelineId, id)),
+    );
+    const branches = [left, ...others];
 
     const effectiveLeftCols = left.columns;
     const leftRows = left.rows;
-    const effectiveRightCols = right.columns;
-    const rightRows = right.rows;
+    // Retained for the two-input wire shape the canvas still speaks; with more
+    // than two inputs this collapses the tail branches together and
+    // `branchRowCounts` carries the per-branch detail.
+    const rightRows = others.flatMap((b) => b.rows);
 
-    if (leftRows.length === 0 && rightRows.length === 0) {
-      throw new AppError('Both inputs contain no rows.', 400, 'BOTH_EMPTY');
+    if (branches.every((b) => b.rows.length === 0)) {
+      throw new AppError(
+        branches.length === 2
+          ? 'Both inputs contain no rows.'
+          : `All ${branches.length} inputs contain no rows.`,
+        400,
+        'BOTH_EMPTY',
+      );
     }
 
-    // ── Union by name: merge columns ────────────────────────────
-    // Output columns = union of all column names from both sides.
-    // Columns present in both keep the left type. Columns unique to
-    // one side get null for rows from the other.
+    // ── Union column merge — Palantir unionV1 modes ─────────────
+    //   first : keep the FIRST input's schema; columns only in later inputs
+    //           are dropped, and their rows get null for any missing column.
+    //   narrow: keep columns present in EVERY input (first-input ordering).
+    //   wide  : union of all inputs (canvas default, "name-merge").
     const leftColMap = new Map(effectiveLeftCols.map((c) => [c.name, c.type]));
-    const rightColMap = new Map(effectiveRightCols.map((c) => [c.name, c.type]));
+    const otherColMaps = others.map((b) => new Map(b.columns.map((c) => [c.name, c.type])));
 
-    const outputColNames: string[] = [];
-    const outputCols: Array<{ name: string; type: string; source: string }> = [];
-    const seen = new Set<string>();
+    /** Present in every input — what `narrow` keeps. */
+    const inEveryInput = (name: string): boolean =>
+      otherColMaps.every((m) => m.has(name));
+    /** Present in at least one input other than the first. */
+    const inSomeOther = (name: string): boolean =>
+      otherColMaps.some((m) => m.has(name));
 
-    // Left columns first (preserves left ordering)
+    // For two inputs these are exactly the historical leftOnly/rightOnly.
+    const leftOnly = effectiveLeftCols.filter((c) => !inEveryInput(c.name)).map((c) => c.name);
+    const rightOnly: string[] = [];
+    for (const branch of others) {
+      for (const c of branch.columns) {
+        if (!leftColMap.has(c.name) && !rightOnly.includes(c.name)) rightOnly.push(c.name);
+      }
+    }
+
+    // Type-mismatch warnings apply in every mode that keeps shared columns.
     for (const c of effectiveLeftCols) {
-      if (!seen.has(c.name)) {
-        seen.add(c.name);
-        outputColNames.push(c.name);
-        const rightType = rightColMap.get(c.name);
-        const source = rightType ? 'both' : 'left';
-        outputCols.push({ name: c.name, type: c.type, source });
-        if (rightType && rightType !== c.type) {
+      for (const [i, m] of otherColMaps.entries()) {
+        const otherType = m.get(c.name);
+        if (otherType && otherType !== c.type) {
           warnings.push({
             code: 'TYPE_MISMATCH',
-            message: `Column "${c.name}" has type "${c.type}" in left and "${rightType}" in right. Values are cast to text.`,
+            message:
+              branches.length === 2
+                ? `Column "${c.name}" has type "${c.type}" in left and "${otherType}" in right. Values are cast to text.`
+                : `Column "${c.name}" has type "${c.type}" in input 1 and "${otherType}" in input ${i + 2}. Values are cast to text.`,
           });
         }
       }
     }
-    // Right-only columns
-    for (const c of effectiveRightCols) {
-      if (!seen.has(c.name)) {
-        seen.add(c.name);
-        outputColNames.push(c.name);
-        outputCols.push({ name: c.name, type: c.type, source: 'right' });
-      }
-    }
 
-    // Warn about columns unique to one side
-    const leftOnly = effectiveLeftCols.filter((c) => !rightColMap.has(c.name)).map((c) => c.name);
-    const rightOnly = effectiveRightCols.filter((c) => !leftColMap.has(c.name)).map((c) => c.name);
-    if (leftOnly.length > 0) {
-      warnings.push({
-        code: 'LEFT_ONLY_COLUMNS',
-        message: `${leftOnly.length} column${leftOnly.length > 1 ? 's' : ''} only in left: ${leftOnly.join(', ')}. Right rows will have null for these.`,
-        details: { columns: leftOnly },
-      });
-    }
-    if (rightOnly.length > 0) {
-      warnings.push({
-        code: 'RIGHT_ONLY_COLUMNS',
-        message: `${rightOnly.length} column${rightOnly.length > 1 ? 's' : ''} only in right: ${rightOnly.join(', ')}. Left rows will have null for these.`,
-        details: { columns: rightOnly },
-      });
+    // "left"/"right" only read correctly for two inputs; N-input unions need
+    // first-vs-later phrasing so the user knows which input to look at.
+    const sideLabels = unionSideLabels(branches.length);
+
+    let outputColNames: string[];
+    let outputCols: Array<{ name: string; type: string; source: string }>;
+
+    if (mode === 'first') {
+      outputCols = effectiveLeftCols.map((c) => ({
+        name: c.name,
+        type: c.type,
+        source: inSomeOther(c.name) ? 'both' : 'left',
+      }));
+      outputColNames = outputCols.map((c) => c.name);
+      if (rightOnly.length > 0) {
+        warnings.push({
+          code: 'RIGHT_ONLY_COLUMNS_DROPPED',
+          message: `${rightOnly.length} column${rightOnly.length > 1 ? 's' : ''} ${sideLabels.laterOnly} dropped by "first input schema" mode: ${rightOnly.join(', ')}.`,
+          details: { columns: rightOnly },
+        });
+      }
+    } else if (mode === 'narrow') {
+      outputCols = effectiveLeftCols
+        .filter((c) => inEveryInput(c.name))
+        .map((c) => ({ name: c.name, type: c.type, source: 'both' }));
+      outputColNames = outputCols.map((c) => c.name);
+      if (outputCols.length === 0) {
+        throw new AppError(
+          `Union in "narrow" mode produced zero columns: the ${branches.length} inputs share no column names.`,
+          400,
+          'UNION_NARROW_EMPTY',
+        );
+      }
+      if (leftOnly.length > 0) {
+        warnings.push({
+          code: 'LEFT_ONLY_COLUMNS_DROPPED',
+          message: `${leftOnly.length} column${leftOnly.length > 1 ? 's' : ''} ${sideLabels.firstOnly} dropped by "narrow" mode: ${leftOnly.join(', ')}.`,
+          details: { columns: leftOnly },
+        });
+      }
+      if (rightOnly.length > 0) {
+        warnings.push({
+          code: 'RIGHT_ONLY_COLUMNS_DROPPED',
+          message: `${rightOnly.length} column${rightOnly.length > 1 ? 's' : ''} ${sideLabels.laterOnly} dropped by "narrow" mode: ${rightOnly.join(', ')}.`,
+          details: { columns: rightOnly },
+        });
+      }
+    } else {
+      // wide / name-merge (default): superset, left ordering preserved.
+      outputCols = [];
+      outputColNames = [];
+      const seen = new Set<string>();
+      for (const c of effectiveLeftCols) {
+        if (!seen.has(c.name)) {
+          seen.add(c.name);
+          outputColNames.push(c.name);
+          outputCols.push({ name: c.name, type: c.type, source: inSomeOther(c.name) ? 'both' : 'left' });
+        }
+      }
+      // Later inputs contribute their new columns in input order, so column
+      // ordering follows the first input then each additional one — the
+      // ordering Palantir's wideUnionByNameV1 examples show.
+      for (const branch of others) {
+        for (const c of branch.columns) {
+          if (!seen.has(c.name)) {
+            seen.add(c.name);
+            outputColNames.push(c.name);
+            outputCols.push({ name: c.name, type: c.type, source: 'right' });
+          }
+        }
+      }
+      const twoBranches = branches.length === 2;
+      if (leftOnly.length > 0) {
+        warnings.push({
+          code: 'LEFT_ONLY_COLUMNS',
+          message:
+            `${leftOnly.length} column${leftOnly.length > 1 ? 's' : ''} ${sideLabels.firstOnly}: ${leftOnly.join(', ')}. ` +
+            (twoBranches
+              ? 'Right rows will have null for these.'
+              : 'Rows from the inputs that lack them will have null.'),
+          details: { columns: leftOnly },
+        });
+      }
+      if (rightOnly.length > 0) {
+        warnings.push({
+          code: 'RIGHT_ONLY_COLUMNS',
+          message:
+            `${rightOnly.length} column${rightOnly.length > 1 ? 's' : ''} ${sideLabels.laterOnly}: ${rightOnly.join(', ')}. ` +
+            (twoBranches
+              ? 'Left rows will have null for these.'
+              : 'Rows from inputs that lack them will have null.'),
+          details: { columns: rightOnly },
+        });
+      }
     }
 
     // ── Near-name detection ────────────────────────────────────
@@ -1483,9 +3426,9 @@ export class TransformService {
     // into strict mode rather than silently widening.
     if (mode === 'strict' && (leftOnly.length > 0 || rightOnly.length > 0)) {
       const err = new AppError(
-        'Union in strict mode requires identical column sets on both inputs. ' +
-          (leftOnly.length > 0 ? `Left-only: ${leftOnly.join(', ')}. ` : '') +
-          (rightOnly.length > 0 ? `Right-only: ${rightOnly.join(', ')}.` : ''),
+        `Union in strict mode requires identical column sets on ${sideLabels.allInputs}. ` +
+          (leftOnly.length > 0 ? `Columns ${sideLabels.firstOnly}: ${leftOnly.join(', ')}. ` : '') +
+          (rightOnly.length > 0 ? `Columns ${sideLabels.laterOnly}: ${rightOnly.join(', ')}.` : ''),
         400,
         'UNION_SCHEMA_MISMATCH',
       );
@@ -1500,22 +3443,46 @@ export class TransformService {
     // ── Build unified rows ──────────────────────────────────────
     const unifiedRows: Array<Record<string, unknown>> = [];
 
-    for (const row of leftRows) {
-      const out: Record<string, unknown> = {};
-      for (const col of outputColNames) {
-        out[col] = col in row ? row[col] : null;
+    // Rows are concatenated in input order — no dedup, matching Palantir
+    // ("retains all rows, including duplicates").
+    for (const branch of branches) {
+      for (const row of branch.rows) {
+        const out: Record<string, unknown> = {};
+        for (const col of outputColNames) {
+          out[col] = col in row ? row[col] : null;
+        }
+        unifiedRows.push(out);
       }
-      unifiedRows.push(out);
-    }
-    for (const row of rightRows) {
-      const out: Record<string, unknown> = {};
-      for (const col of outputColNames) {
-        out[col] = col in row ? row[col] : null;
-      }
-      unifiedRows.push(out);
     }
 
     const rows = unifiedRows.slice(0, input.limit);
+
+    // A preview window that ends inside the first branch shows only that
+    // branch's rows, which reads as "the union dropped my other input" — the
+    // exact confusion the 500-row default produces on a 500-row left branch.
+    const branchRowCounts = branches.map((b) => b.rows.length);
+    if (rows.length < unifiedRows.length) {
+      let covered = 0;
+      let branchesShown = 0;
+      for (const n of branchRowCounts) {
+        if (covered >= rows.length) break;
+        branchesShown++;
+        covered += n;
+      }
+      if (branchesShown < branches.length) {
+        warnings.push({
+          code: 'PREVIEW_WINDOW_ONE_BRANCH',
+          message:
+            `This ${rows.length.toLocaleString()}-row preview covers only ` +
+            `${branchesShown} of ${branches.length} inputs — the remaining ` +
+            `input${branches.length - branchesShown > 1 ? 's contribute' : ' contributes'} ` +
+            `rows past the preview window. The union itself has ` +
+            `${unifiedRows.length.toLocaleString()} rows; raise the row limit ` +
+            `to see the later inputs.`,
+          details: { branchesShown, branchCount: branches.length, branchRowCounts },
+        });
+      }
+    }
 
     return {
       columns: outputCols,
@@ -1523,7 +3490,16 @@ export class TransformService {
       rowCount: rows.length,
       totalUnioned: unifiedRows.length,
       leftRowCount: leftRows.length,
+      // With more than two inputs this is every later input combined;
+      // `branchRowCounts` is the per-input breakdown.
       rightRowCount: rightRows.length,
+      inputCount: branches.length,
+      branchRowCounts,
+      // Any branch reaching the read cap makes totalUnioned a floor rather
+      // than a count, so report the union as sampled if any side was.
+      sampledSourceRows: branchRowCounts.reduce((a, b) => a + b, 0),
+      sourceRowLimit: PREVIEW_SOURCE_ROW_LIMIT,
+      truncated: branches.some((b) => b.truncated),
       warnings,
     };
   }
@@ -1543,7 +3519,15 @@ export class TransformService {
     if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
 
     const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
-    config.rightNodeId = input.rightNodeId;
+    // Persist BOTH shapes: `rightNodeIds` is the N-input list the deploy path
+    // reads, and `rightNodeId` stays populated with the first entry so any
+    // older reader (or a graph inspector) still sees a wired second input.
+    const inputIds = resolveUnionInputIds(input);
+    config.rightNodeIds = inputIds;
+    config.rightNodeId = inputIds[0];
+    // Union mode (unionV1): first / narrow / wide. Persisted so replay and
+    // deploy materialization agree with the canvas preview. Absent = wide.
+    if (input.mode) config.mode = input.mode;
 
     const [updated] = await this.knex('pipeline_nodes')
       .where({ id: nodeId, pipeline_id: pipelineId })
@@ -1603,7 +3587,7 @@ export class TransformService {
     const { dataset, existingTransforms } = await this.resolveNodeDataset(
       projectId, pipelineId, nodeId,
     );
-    const rawRows = await this.readCsvRows(dataset.file_path, 5000);
+    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, existingTransforms)
       .slice(0, limit);
 
@@ -1617,7 +3601,12 @@ export class TransformService {
     const columns = spec.outputColumns.length
       ? spec.outputColumns
       : Object.keys(out[0] ?? {}).map((name) => ({ name, type: 'string' }));
-    return { columns, rows: out, rowCount: out.length };
+    return {
+      columns,
+      rows: out,
+      rowCount: out.length,
+      ...sampleInfo(rawRows.length),
+    };
   }
 
   // =========================================================================
@@ -1628,13 +3617,19 @@ export class TransformService {
     leftRows: Array<Record<string, unknown>>,
     rightRows: Array<Record<string, unknown>>,
     joinType: JoinType,
-    conditions: Array<{ leftColumn: string; rightColumn: string }>,
+    conditions: Array<{ leftColumn: string; rightColumn: string; operator?: JoinOperator }>,
     leftCols: Array<{ name: string; type: string }>,
     rightCols: Array<{ name: string; type: string }>,
     rightPrefix = 'right_',
+    coalesceJoinKeys = false,
   ): Array<Record<string, unknown>> {
     const leftNames = new Set(leftCols.map((c) => c.name));
     const result: Array<Record<string, unknown>> = [];
+
+    // Same-named equality keys that collapse into a single output column.
+    const coalescedRight = coalesceJoinKeys
+      ? coalescedJoinKeyNames(conditions, leftNames, stripBom)
+      : new Set<string>();
 
     // Helper: merge a left row with a right row, prefixing right columns if collision
     const mergeRow = (
@@ -1646,11 +3641,20 @@ export class TransformService {
       else { for (const c of leftCols) out[c.name] = null; }
       if (right) {
         for (const [k, v] of Object.entries(right)) {
-          const key = leftNames.has(stripBom(k)) ? `${rightPrefix}${k}` : k;
+          const bare = stripBom(k);
+          if (coalescedRight.has(bare)) {
+            // COALESCE(l.k, r.k): on a matched row both sides carry the same
+            // value; on a right-only outer row the left side is null and the
+            // right value is what the single column must show.
+            if (out[bare] === undefined || out[bare] === null || out[bare] === '') out[bare] = v;
+            continue;
+          }
+          const key = leftNames.has(bare) ? `${rightPrefix}${k}` : k;
           out[key] = v;
         }
       } else {
         for (const c of rightCols) {
+          if (coalescedRight.has(c.name)) continue;
           const key = leftNames.has(c.name) ? `${rightPrefix}${c.name}` : c.name;
           out[key] = null;
         }
@@ -1659,6 +3663,7 @@ export class TransformService {
     };
 
     // Helper: check if a left row matches a right row on all conditions.
+    // A condition list is Palantir's `and(...)` — every one must hold.
     // Per Palantir spec: null ≠ null — if either side is null/empty, no match.
     const isNullish = (v: unknown): boolean =>
       v === undefined || v === null || v === '' || String(v).toLowerCase() === 'null';
@@ -1668,7 +3673,7 @@ export class TransformService {
         const lv = left[stripBom(c.leftColumn)];
         const rv = right[stripBom(c.rightColumn)];
         if (isNullish(lv) || isNullish(rv)) return false;
-        return String(lv) === String(rv);
+        return compareJoinValues(lv, rv, c.operator ?? 'equals');
       });
     };
 
@@ -1676,8 +3681,24 @@ export class TransformService {
       for (const l of leftRows) {
         for (const r of rightRows) {
           result.push(mergeRow(l, r));
-          if (result.length >= 5000) return result;
+          if (result.length >= PREVIEW_SOURCE_ROW_LIMIT) return result;
         }
+      }
+      return result;
+    }
+
+    // Semi/anti (joinV2): existence filter on the left — no right columns
+    // are surfaced. Callers strip right-side columns from the output.
+    if (joinType === 'semi') {
+      for (const l of leftRows) {
+        if (rightRows.some((r) => matches(l, r))) result.push(mergeRow(l, null));
+      }
+      return result;
+    }
+
+    if (joinType === 'anti') {
+      for (const l of leftRows) {
+        if (!rightRows.some((r) => matches(l, r))) result.push(mergeRow(l, null));
       }
       return result;
     }
@@ -1752,12 +3773,15 @@ export class TransformService {
 
     if (existingTransforms.length === 0) {
       // No transforms — return raw data
-      const rawRows = await this.readCsvRows(dataset.file_path, 10000);
+      const rawRows = await this.readCsvRows(dataset.file_path, EXECUTE_SOURCE_ROW_LIMIT);
       return {
         columns: sourceColumns.map((c) => ({ name: c.name, type: c.type })),
         rows: rawRows,
         rowCount: rawRows.length,
         transformCount: 0,
+        sampledSourceRows: rawRows.length,
+        sourceRowLimit: EXECUTE_SOURCE_ROW_LIMIT,
+        truncated: rawRows.length >= EXECUTE_SOURCE_ROW_LIMIT,
       };
     }
 
@@ -1768,16 +3792,19 @@ export class TransformService {
     //   'legacy_nodejs' → the pure-TS engine below (kept for one release
     //                     cycle so existing pipelines keep green).
     //
-    // Chains containing `Normalize` fall back to legacy automatically
-    // because Normalize requires the legacy engine's unicode folding
-    // until PB-B2.follow-2 ships the Rust UDF — instead of compiling a
+    // Chains containing `Normalize`, `UppercaseColumnNames` or `RowSize`
+    // fall back to legacy automatically — those three need the legacy TS
+    // engine (Normalize for unicode folding, UppercaseColumnNames for the
+    // column-name fold, RowSize for a portable whole-row byte estimate)
+    // until PB-B2.follow-2 ships the Rust UDFs — instead of compiling a
     // broken SQL statement we route around it so the user's request
     // still completes with matching semantics.
     const computeType = await this.getComputeType(pipelineId);
-    const hasNormalize = existingTransforms.some(
-      (t) => (t as { function?: string })?.function === 'Normalize',
+    const needsLegacy = new Set(['Normalize', 'UppercaseColumnNames', 'RowSize']);
+    const hasLegacyOnly = existingTransforms.some((t) =>
+      needsLegacy.has((t as { function?: string })?.function ?? ''),
     );
-    if (computeType === 'duckdb' && !hasNormalize) {
+    if (computeType === 'duckdb' && !hasLegacyOnly) {
       try {
         const { executeTransformChain } = await import(
           './pipelines/duckdbTransformEngine'
@@ -1794,7 +3821,7 @@ export class TransformService {
         const inputUri = toDuckDbReadUri(dataset.file_path);
         const out = await executeTransformChain(
           existingTransforms as Parameters<typeof executeTransformChain>[0],
-          { inputPath: inputUri, limit: 10_000 },
+          { inputPath: inputUri, limit: EXECUTE_SOURCE_ROW_LIMIT },
         );
         return {
           columns: out.columns,
@@ -1802,6 +3829,13 @@ export class TransformService {
           rowCount: out.rowCount,
           transformCount: existingTransforms.length,
           engine: 'duckdb' as const,
+          // The SQL limit lands on the chain's *output*, so a full result is
+          // only distinguishable from a clipped one by whether it hit the cap.
+          // Both engines report this identically so the canvas doesn't have to
+          // know which one ran.
+          sampledSourceRows: out.rowCount,
+          sourceRowLimit: EXECUTE_SOURCE_ROW_LIMIT,
+          truncated: out.rowCount >= EXECUTE_SOURCE_ROW_LIMIT,
         };
       } catch (err) {
         // Already-typed errors (compile rejection, cross-join, native
@@ -1831,6 +3865,23 @@ export class TransformService {
             'DATASET_FILE_NOT_FOUND',
           );
         }
+        // A connection failure is a different problem from a missing object:
+        // the object store is unreachable from this process (wrong endpoint
+        // hostname, MinIO/S3 down, network policy). Reporting it as a generic
+        // 500 sent people hunting for a bug in the transform chain, so name it.
+        if (
+          /Could not establish connection/i.test(message) ||
+          /Connection refused|ECONNREFUSED/i.test(message) ||
+          /Could not resolve host|Timeout was reached/i.test(message)
+        ) {
+          throw new AppError(
+            `Object storage is unreachable from the server, so the transform ` +
+              `chain could not be materialised. Check that the storage service ` +
+              `is running and that S3_ENDPOINT resolves from this process.`,
+            503,
+            'OBJECT_STORAGE_UNREACHABLE',
+          );
+        }
         // Anything else bubbles as 500 — let the global error handler
         // log it with the request id for follow-up.
         throw err;
@@ -1838,7 +3889,7 @@ export class TransformService {
     }
 
     // Legacy TS engine path.
-    const rawRows = await this.readCsvRows(dataset.file_path, 10000);
+    const rawRows = await this.readCsvRows(dataset.file_path, EXECUTE_SOURCE_ROW_LIMIT);
     const transformedRows = this.applyExistingTransforms(rawRows, existingTransforms);
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, existingTransforms);
 
@@ -1848,6 +3899,9 @@ export class TransformService {
       rowCount: transformedRows.length,
       transformCount: existingTransforms.length,
       engine: 'legacy_nodejs' as const,
+      sampledSourceRows: rawRows.length,
+      sourceRowLimit: EXECUTE_SOURCE_ROW_LIMIT,
+      truncated: rawRows.length >= EXECUTE_SOURCE_ROW_LIMIT,
     };
   }
 
@@ -2074,6 +4128,114 @@ export class TransformService {
           return { ...c, name: newName };
         });
       }
+      if (fn === 'Select') {
+        const keep = (tx.columns ?? []) as string[];
+        const keepSet = new Set(keep.map(stripBom));
+        cols = keep
+          .map(stripBom)
+          .map((name) => {
+            const found = cols.find((c) => stripBom(c.name) === name);
+            return found ?? { name, type: 'string' };
+          })
+          .filter((c) => keepSet.has(stripBom(c.name)));
+      }
+      if (fn === 'UppercaseColumnNames') {
+        cols = cols.map((c) => ({ ...c, name: c.name.toUpperCase() }));
+      }
+      if (fn === 'RowSize') {
+        const out = (tx.outputColumn ?? 'row_size') as string;
+        if (!cols.some((c) => c.name === out)) cols.push({ name: out, type: 'integer' });
+      }
+      if (
+        fn === 'ApplyExpression' ||
+        fn === 'ApplyMultipleExpressions' ||
+        fn === 'ApplyToMultipleColumns' ||
+        fn === 'ComputeIfExpressionAbsent'
+      ) {
+        const exprs = collectExpressionItems(tx);
+        for (const e of exprs) {
+          const t = e.outputType ?? 'string';
+          const idx = cols.findIndex((c) => c.name === e.outputColumn);
+          if (idx >= 0) cols[idx] = { ...cols[idx], type: t };
+          else cols.push({ name: e.outputColumn, type: t });
+        }
+      }
+      if (fn === 'Aggregate') {
+        const groupBy = (tx.groupBy ?? []) as string[];
+        const aggs = (tx.aggregations ?? []) as AggregationItem[];
+        const typeOf = (c: string) => cols.find((col) => col.name === c)?.type ?? 'string';
+        cols = [
+          ...groupBy.map((g) => ({ name: g, type: typeOf(g) })),
+          ...aggs.map((item) => ({
+            name: item.outputColumn,
+            type: this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+          })),
+        ];
+      }
+      if (fn === 'Rollup') {
+        const rollupColumns = (tx.rollupColumns ?? []) as string[];
+        const aggs = (tx.aggregations ?? []) as AggregationItem[];
+        const typeOf = (c: string) => cols.find((col) => col.name === c)?.type ?? 'string';
+        cols = [
+          ...rollupColumns.map((g) => ({ name: g, type: typeOf(g) })),
+          ...aggs.map((item) => ({
+            name: item.outputColumn,
+            type: this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+          })),
+        ];
+      }
+      if (fn === 'AggregateOnCondition') {
+        const groupBy = (tx.groupBy ?? []) as string[];
+        const targets = this.resolveOnConditionTargets(
+          tx.predicate as ColumnPredicate,
+          cols,
+        );
+        const aggs = this.buildOnConditionAggregations(
+          targets,
+          (tx.aggregations ?? []) as DynamicAggregation[],
+        );
+        const typeOf = (c: string) => cols.find((col) => col.name === c)?.type ?? 'string';
+        cols = [
+          ...groupBy.map((g) => ({ name: g, type: typeOf(g) })),
+          ...aggs.map((item) => ({
+            name: item.outputColumn,
+            type: this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+          })),
+        ];
+      }
+      if (fn === 'Pivot') {
+        const groupBy = (tx.groupBy ?? []) as string[];
+        const aggs = (tx.aggregations ?? []) as AggregationItem[];
+        const pivotValues = (tx.pivotValues ?? []) as Array<{ value: string; alias: string }>;
+        const aliasPosition = (tx.aliasPosition ?? 'prefix') as 'prefix' | 'suffix';
+        const typeOf = (c: string) => cols.find((col) => col.name === c)?.type ?? 'string';
+        // Schema-only path: pivot values are declared explicitly in the
+        // spec (unpivotV1-style wildcard pivots are not supported), so the
+        // value columns are fully known here.
+        cols = [
+          ...groupBy.map((g) => ({ name: g, type: typeOf(g) })),
+          ...pivotValues.flatMap((pv) =>
+            aggs.map((item) => ({
+              name: aliasPosition === 'prefix'
+                ? `${pv.alias}_${item.outputColumn}`
+                : `${item.outputColumn}_${pv.alias}`,
+              type: this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
+            })),
+          ),
+        ];
+      }
+      if (fn === 'Unpivot') {
+        const unpivotSet = new Set((tx.columns ?? []) as string[]);
+        const nameColumn = tx.nameColumn as string;
+        const valueColumn = tx.valueColumn as string;
+        cols = [
+          { name: nameColumn, type: 'string' },
+          { name: valueColumn, type: 'string' },
+          ...cols.filter((c) => !unpivotSet.has(c.name)),
+        ];
+      }
+      // Sort, DropDuplicates, TopRows, KeepDuplicates, TextBlock don't
+      // change column metadata — skip
     }
 
     return cols;
@@ -2106,12 +4268,13 @@ export class TransformService {
         const outputCol = (tx.outputColumn ?? expr) as string;
         const targetType = tx.targetType as string;
         const converterType = CONVERTER_TYPE_MAP[targetType as CastTargetType] ?? 'string';
+        const castOptions = castOptionsForColumn(result, expr, converterType);
 
         result = result.map((row) => {
           const rawValue = row[expr];
           let castValue: unknown;
           try {
-            castValue = convertValue(rawValue, converterType, { coerce: true });
+            castValue = convertValue(rawValue, converterType, castOptions);
           } catch {
             castValue = null;
           }
@@ -2145,6 +4308,9 @@ export class TransformService {
           }
           return out;
         });
+        if (result.length > 0 && Object.keys(result[0]).length === 0) {
+          throw new AppError('Drop removed every column.', 400, 'DROP_ALL_COLUMNS');
+        }
       } else if (fn === 'Rename') {
         const renames = (tx.renames ?? []) as Array<{ from: string; to: string }>;
         const map = new Map(renames.map((r) => [stripBom(r.from), r.to]));
@@ -2174,6 +4340,127 @@ export class TransformService {
             return out;
           });
         }
+      } else if (fn === 'Select') {
+        const keep = ((tx.columns ?? []) as string[]).map(stripBom);
+        result = result.map((row) => {
+          const out: Record<string, unknown> = {};
+          for (const k of keep) out[k] = row[k] ?? null;
+          return out;
+        });
+        if (result.length > 0 && Object.keys(result[0]).length === 0) {
+          throw new AppError('Select kept zero columns.', 400, 'VALIDATION_ERROR');
+        }
+      } else if (fn === 'Sort') {
+        const sorts = (tx.sorts ?? []) as Array<{
+          column: string; direction: 'asc' | 'desc'; nulls?: 'first' | 'last';
+        }>;
+        result = this.applySort(result, sorts);
+      } else if (fn === 'DropDuplicates') {
+        const keyCols = ((tx.columns ?? null) as string[] | null)?.map(stripBom) ?? null;
+        const seen = new Set<string>();
+        result = result.filter((row) => {
+          let key: string;
+          if (keyCols) key = keyCols.map((c) => String(row[c] ?? '')).join('\u0001');
+          else key = Object.keys(row).sort().map((k) => `${k}=${row[k] ?? ''}`).join('\u0001');
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      } else if (fn === 'UppercaseColumnNames') {
+        result = result.map((row) => {
+          const out: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(row)) out[k.toUpperCase()] = v;
+          return out;
+        });
+      } else if (fn === 'RowSize') {
+        const out = (tx.outputColumn ?? 'row_size') as string;
+        result = result.map((row) => ({ ...row, [out]: Buffer.byteLength(JSON.stringify(row), 'utf8') }));
+      } else if (fn === 'ApplyExpression') {
+        const exprs = collectExpressionItems(tx);
+        for (const e of exprs) result = this.applyExpressionToRows(result, e);
+      } else if (fn === 'ApplyMultipleExpressions') {
+        const exprs = collectExpressionItems(tx);
+        for (const e of exprs) result = this.applyExpressionToRows(result, e);
+      } else if (fn === 'ApplyToMultipleColumns') {
+        const cols = ((tx.columns ?? []) as string[]).map(stripBom);
+        const op = tx.operator as BinaryOperator;
+        const right = tx.right as Operand;
+        const suffix = (tx.outputSuffix ?? '_calc') as string;
+        const outNames = (tx.outputColumns as string[] | undefined) ?? cols.map((c) => `${c}${suffix}`);
+        const outType = tx.outputType as CastTargetType | undefined;
+        for (let i = 0; i < cols.length; i++) {
+          const e: ExpressionItem = {
+            left: { kind: 'column', value: cols[i] },
+            operator: op,
+            right,
+            outputColumn: outNames[i],
+            outputType: outType,
+          };
+          result = this.applyExpressionToRows(result, e);
+        }
+      } else if (fn === 'ComputeIfExpressionAbsent') {
+        const out = tx.outputColumn as string;
+        const exprs = collectExpressionItems(tx);
+        const e = exprs[0];
+        result = result.map((row) => {
+          const cur = row[out];
+          if (!this.isValueAbsent(cur)) return row;
+          const v = evaluateExpression(row, e);
+          return { ...row, [out]: castExpressionResult(v, e.outputType) };
+        });
+      } else if (fn === 'TextBlock') {
+        // Text block is pure annotation — pass rows through unchanged.
+      } else if (fn === 'Aggregate') {
+        result = this.computeAggregations(
+          result,
+          (tx.groupBy ?? []) as string[],
+          (tx.aggregations ?? []) as AggregationItem[],
+        );
+      } else if (fn === 'Rollup') {
+        result = this.computeRollup(
+          result,
+          (tx.rollupColumns ?? []) as string[],
+          (tx.aggregations ?? []) as AggregationItem[],
+        );
+      } else if (fn === 'AggregateOnCondition') {
+        // Rows-only replay: resolve the type predicate against the current
+        // row keys (all 'string'-typed here; a predicate on a non-string
+        // type matches nothing unless it targets strings or 'all').
+        const colNames = result.length ? Object.keys(result[0]) : [];
+        const targets = this.resolveOnConditionTargets(
+          tx.predicate as ColumnPredicate,
+          colNames.map((name) => ({ name, type: 'string' })),
+        );
+        const aggregations = this.buildOnConditionAggregations(
+          targets,
+          (tx.aggregations ?? []) as DynamicAggregation[],
+        );
+        result = this.computeAggregations(result, (tx.groupBy ?? []) as string[], aggregations);
+      } else if (fn === 'TopRows') {
+        result = this.computeTopRows(
+          result,
+          (tx.partitionBy ?? []) as string[],
+          (tx.sorts ?? []) as Array<{ column: string; direction: 'asc' | 'desc'; nulls?: 'first' | 'last' }>,
+          (tx.topN ?? 1) as number,
+        );
+      } else if (fn === 'Pivot') {
+        result = this.computePivot(
+          result,
+          (tx.groupBy ?? []) as string[],
+          tx.pivotColumn as string,
+          (tx.pivotValues ?? []) as Array<{ value: string; alias: string }>,
+          (tx.aggregations ?? []) as AggregationItem[],
+          (tx.aliasPosition ?? 'prefix') as 'prefix' | 'suffix',
+        ).rows;
+      } else if (fn === 'Unpivot') {
+        const unpivotCols = (tx.columns ?? []) as string[];
+        const unpivotSet = new Set(unpivotCols);
+        const kept = result.length ? Object.keys(result[0]).filter((k) => !unpivotSet.has(k)) : [];
+        result = this.computeUnpivot(result, unpivotCols, tx.nameColumn as string, tx.valueColumn as string, kept);
+      } else if (fn === 'KeepDuplicates') {
+        const subset = ((tx.columns ?? []) as string[]);
+        const all = result.length ? Object.keys(result[0]) : [];
+        result = this.computeKeepDuplicates(result, subset, all);
       }
     }
 
@@ -2213,6 +4500,11 @@ export class TransformService {
 
     const op = cond.operator as FilterOperator;
 
+    // Right-hand operand: literal by default; when valueIsColumn is set the
+    // value names another column, so resolve it from the row. A missing
+    // right-hand column compares as empty string (never matches eq).
+    const rhs = cond.valueIsColumn ? (row[cond.value ?? ''] ?? '') : (cond.value ?? '');
+
     switch (op) {
       case 'is_null':
         // is_null always treats empty string as null (CSV semantics)
@@ -2222,24 +4514,24 @@ export class TransformService {
         return isNotNullEffective;
 
       case 'eq':
-        return !isNullValue && raw === (cond.value ?? '');
+        return !isNullValue && raw === rhs;
 
       case 'neq':
-        return isNullValue || raw !== (cond.value ?? '');
+        return isNullValue || raw !== rhs;
 
       case 'starts_with':
-        return !isNullValue && raw.startsWith(cond.value ?? '');
+        return !isNullValue && raw.startsWith(rhs);
 
       case 'ends_with':
-        return !isNullValue && raw.endsWith(cond.value ?? '');
+        return !isNullValue && raw.endsWith(rhs);
 
       case 'contains':
-        return !isNullValue && raw.includes(cond.value ?? '');
+        return !isNullValue && raw.includes(rhs);
 
       case 'regex_find': {
         if (isNullValue || !cond.value) return false;
         try {
-          return new RegExp(cond.value).test(raw);
+          return new RegExp(rhs).test(raw);
         } catch {
           return false;
         }
@@ -2248,7 +4540,7 @@ export class TransformService {
       case 'regex_match': {
         if (isNullValue || !cond.value) return false;
         try {
-          const re = new RegExp(`^${cond.value}$`);
+          const re = new RegExp(`^${rhs}$`);
           return re.test(raw);
         } catch {
           return false;

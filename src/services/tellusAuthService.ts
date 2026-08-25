@@ -38,6 +38,17 @@ export interface TellusClaims {
   org: string;
   email?: string;
   preferred_username?: string;
+  /**
+   * Human-readable full name, built by Keycloak from the user's
+   * firstName + lastName via the default `profile` client scope.
+   * Optional because PAT principals and tokens minted by realms
+   * without the profile mapper omit it.
+   */
+  name?: string;
+  /** Keycloak given_name (firstName). See `name`. */
+  given_name?: string;
+  /** Keycloak family_name (lastName). See `name`. */
+  family_name?: string;
   realm_access?: { roles: string[] };
   resource_access?: Record<string, { roles: string[] }>;
   iss: string;
@@ -93,6 +104,34 @@ const PAT_PREFIX = 'tellus_pat_';
  */
 const REVOKED_JTIS: Map<string, number> = new Map();
 
+/**
+ * Process-wide single-flight + short reuse-grace for refresh_token grants.
+ *
+ * Keycloak's tellus realm runs with revokeRefreshToken=true and
+ * refreshTokenMaxReuse=0: the first successful refresh invalidates the
+ * presented refresh token. Concurrent /auth/refresh calls that all carry
+ * the same cookie (multi-tab 401 storms, silentRefresh racing the axios
+ * interceptor) therefore produce 1 success + N REFRESH_TOKEN_INVALID
+ * failures. The failure path in tellusAuthV1 clears ALL session cookies
+ * (Set-Cookie Max-Age=0), which races past the winner's Set-Cookie and
+ * wipes a live session — the user is forced to re-authenticate roughly
+ * every access-token lifespan (~5 min with the previous client setting).
+ *
+ * Module-level (not per-instance) so every TellusAuthService singleton
+ * shares one map. Keyed by sha256(refreshToken).
+ *
+ *   • in-flight map: concurrent callers with the same token await one
+ *     Keycloak round-trip and all receive the same LoginResult.
+ *   • recent map: a short post-success grace (below) so a late arriver
+ *     that missed the in-flight window still gets the rotated tokens
+ *     instead of a reuse 401 + cookie wipe.
+ */
+const REFRESH_IN_FLIGHT: Map<string, Promise<LoginResult>> = new Map();
+const REFRESH_RECENT: Map<string, { result: LoginResult; expiresAt: number }> =
+  new Map();
+/** How long a successful rotation is replayable for the OLD refresh token. */
+const REFRESH_REUSE_GRACE_MS = 15_000;
+
 // hasOperation() stub — matches spec's centralized authorization model.
 // Real Palantir resolves via Multipass.hasOperation(token, op, resource);
 // here we approximate with role-based checks on Keycloak realm roles.
@@ -146,16 +185,17 @@ export class TellusAuthService {
       scope: 'openid profile email offline_access',
     });
 
-    // F-P4-08: bound the password-grant call. Keycloak p99 under normal
-    // load is ~300ms; 5s gives generous slack while still preventing a
-    // frozen authenticator from starving login traffic.
+    // F-P4-08: bound the password-grant call. A cold local/CI Keycloak can
+    // legitimately take longer than five seconds while realm caches warm.
+    // Ten seconds keeps the request bounded without turning that startup
+    // condition into a flaky authentication failure.
     const res = await fetch(
       `${this.issuer}/protocol/openid-connect/token`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.timeout(10_000),
       },
     );
 
@@ -186,11 +226,59 @@ export class TellusAuthService {
    * Rotate an access token using the Keycloak refresh_token grant. The
    * realm has revokeRefreshToken=true so the returned refresh_token is
    * brand-new and the old one is invalidated on Keycloak's side —
-   * surviving our 5-minute access token lifespan without forcing a
-   * full re-login. If Keycloak rejects the refresh (expired, revoked,
-   * or reuse-detected) we map it back to a clean 401 envelope.
+   * surviving a short access-token lifespan without forcing a full
+   * re-login. Concurrent callers presenting the SAME refresh token are
+   * single-flighted (and briefly grace-cached) so Keycloak's
+   * reuse-detection cannot wipe a just-rotated session — see the
+   * REFRESH_IN_FLIGHT / REFRESH_RECENT module comment.
+   *
+   * If Keycloak rejects the refresh (expired, revoked, or a genuine
+   * reuse outside the grace window) we map it back to a clean 401
+   * envelope.
    */
   async refreshSession(refreshToken: string): Promise<LoginResult> {
+    const key = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+    const recent = REFRESH_RECENT.get(key);
+    if (recent && recent.expiresAt > Date.now()) {
+      return recent.result;
+    }
+    // Drop expired grace entries opportunistically so the map can't grow
+    // without bound under a long-lived process.
+    if (recent) REFRESH_RECENT.delete(key);
+
+    const inFlight = REFRESH_IN_FLIGHT.get(key);
+    if (inFlight) return inFlight;
+
+    const p = this.doRefreshGrant(refreshToken)
+      .then((result) => {
+        const entry = {
+          result,
+          expiresAt: Date.now() + REFRESH_REUSE_GRACE_MS,
+        };
+        // Replayable under the OLD token (the concurrent late-arriver case).
+        REFRESH_RECENT.set(key, entry);
+        // Also under the NEW token so a follow-up that already observed the
+        // rotated cookie and retries within the grace window is cheap.
+        if (result.refreshToken) {
+          const newKey = crypto
+            .createHash('sha256')
+            .update(result.refreshToken)
+            .digest('hex');
+          REFRESH_RECENT.set(newKey, entry);
+        }
+        return result;
+      })
+      .finally(() => {
+        REFRESH_IN_FLIGHT.delete(key);
+      });
+
+    REFRESH_IN_FLIGHT.set(key, p);
+    return p;
+  }
+
+  /** One Keycloak refresh_token grant. Not single-flighted — callers use refreshSession. */
+  private async doRefreshGrant(refreshToken: string): Promise<LoginResult> {
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
       client_id: this.config.kcFrontendClientId,
@@ -198,11 +286,21 @@ export class TellusAuthService {
     });
     // F-P4-08: same 5s bound as loginWithPassword; callers expect
     // token-rotation to be cheap.
+    //
+    // A timeout/abort/connection failure is TRANSIENT: a slow or down
+    // Keycloak says NOTHING about the presented refresh token's validity.
+    // Map it to a typed 5xx so the route layer leaves the session cookies
+    // alone and the FE treats the attempt as retryable. Letting the raw
+    // AbortError escape (as a 500) — or worse, clearing cookies on it —
+    // collapsed a 24h session to one access-token lifespan whenever
+    // Keycloak hiccuped at a refresh boundary.
     const res = await fetch(`${this.issuer}/protocol/openid-connect/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
       signal: AbortSignal.timeout(5_000),
+    }).catch(() => {
+      throw new AppError('Keycloak unreachable during refresh', 503, 'KEYCLOAK_UNREACHABLE');
     });
     if (!res.ok) {
       if (res.status === 400 || res.status === 401) {
@@ -215,7 +313,16 @@ export class TellusAuthService {
       refresh_token?: string;
       expires_in: number;
     };
-    const claims = await this.verifyAccessToken(data.access_token);
+    // A freshly-minted token failing local verification is an upstream or
+    // local-config problem (JWKS fetch hiccup, clock skew) — never proof
+    // that the USER's session died. 5xx keeps the refresh cookie intact so
+    // the next attempt can succeed; a 401 here would wipe a live session.
+    let claims: TellusClaims;
+    try {
+      claims = await this.verifyAccessToken(data.access_token);
+    } catch {
+      throw new AppError('Keycloak token verification failed during refresh', 503, 'KEYCLOAK_UNREACHABLE');
+    }
     return {
       accessToken: data.access_token,
       refreshToken: data.refresh_token,
@@ -259,6 +366,13 @@ export class TellusAuthService {
       org: c.org ?? c.azp ?? this.config.kcRealm,
       email: c.email,
       preferredUsername: c.preferred_username,
+      // Surface the Keycloak profile claims so the FE can greet the
+      // user by name rather than by email-shaped preferred_username.
+      // All optional — absent for PAT principals / realms without the
+      // profile mapper; the FE falls back gracefully (see tokenInfoToUser).
+      name: c.name,
+      givenName: c.given_name,
+      familyName: c.family_name,
       realmRoles: c.realm_access?.roles ?? [],
       markings: [] as string[], // Task 6 — stubbed until CBAC ships
       orgs: [c.org ?? this.config.kcRealm],

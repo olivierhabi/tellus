@@ -583,6 +583,9 @@ async function migrate(): Promise<void> {
         api_name TEXT NOT NULL,
         display_name TEXT NOT NULL,
         description TEXT DEFAULT '',
+        icon_name TEXT DEFAULT 'manually-entered-data',
+        icon_color TEXT DEFAULT '#1A2230',
+        save_location_rid TEXT DEFAULT NULL,
 
         -- Parameters: defines the inputs the caller must provide when executing this action.
         -- This is a JSON array of parameter definition objects. Each parameter has:
@@ -769,6 +772,69 @@ async function migrate(): Promise<void> {
     `);
 
     logTableStatus("action_audit_log", auditLogExisted);
+
+    // ------------------------------------------------------------------
+    // Table: attachment
+    //
+    // Action parameter attachments (Foundry parity). Files are uploaded
+    // before the action runs via POST /api/v2/ontologies/attachments/upload;
+    // the returned rid is then passed as the attachment parameter value.
+    // Blob bytes live in object storage (storage_key); this table is the
+    // metadata + authorization record. Mirrors Palantir's AttachmentV2
+    // resource (rid / filename / sizeBytes / mediaType). Per Foundry docs,
+    // an attachment not linked to an object via an action is expected to be
+    // cleaned up later — `linked_at` marks successful linkage so a future
+    // sweeper can distinguish live attachments from orphans.
+    // ------------------------------------------------------------------
+    const attachmentExisted = await tableExists(client, "attachment");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS attachment (
+        rid TEXT PRIMARY KEY,
+        ontology_id UUID NULL REFERENCES ontology(ontology_id) ON DELETE SET NULL,
+        filename TEXT NOT NULL,
+        size_bytes BIGINT NOT NULL,
+        media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        storage_key TEXT NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        linked_at TIMESTAMPTZ NULL
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_attachment_created
+        ON attachment(created_at DESC);
+    `);
+
+    logTableStatus("attachment", attachmentExisted);
+
+    // ------------------------------------------------------------------
+    // Table: media_item
+    //
+    // Media reference items uploaded via the action-form media picker
+    // (upload-only parity — Tellus has no media-set browser). Blob bytes
+    // live in object storage (storage_key); reads are authorized and
+    // tokenized by the existing media-reference signing path
+    // (`signMediaReadToken` in services/oss/productionDeps.ts), which is
+    // keyed solely on the media item rid.
+    // ------------------------------------------------------------------
+    const mediaItemExisted = await tableExists(client, "media_item");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS media_item (
+        rid TEXT PRIMARY KEY,
+        ontology_id UUID NULL REFERENCES ontology(ontology_id) ON DELETE SET NULL,
+        filename TEXT NOT NULL,
+        size_bytes BIGINT NOT NULL,
+        media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        storage_key TEXT NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+
+    logTableStatus("media_item", mediaItemExisted);
 
     // ------------------------------------------------------------------
     // Table 11: link_edit
@@ -1176,6 +1242,23 @@ async function migrate(): Promise<void> {
 
     logTableStatus("object_type_interface", objectTypeInterfaceExisted);
 
+    // ------------------------------------------------------------------
+    // P0 authz: persist the build principal so the boot-recovery path
+    // (rerunQueuedBuild) can re-authorize inputs/outputs without a request.
+    // transform_build is created by migrations/103_create_transforms.sql; this
+    // ALTER is idempotent + backfills pre-existing rows from `actor`.
+    // ------------------------------------------------------------------
+    if (await tableExists(client, "transform_build")) {
+      await client.query(
+        `ALTER TABLE transform_build ADD COLUMN IF NOT EXISTS principal JSONB`,
+      );
+      await client.query(
+        `UPDATE transform_build
+            SET principal = COALESCE(principal, jsonb_build_object('userId', actor, 'roles', '[]'::jsonb))
+          WHERE principal IS NULL`,
+      );
+    }
+
     await client.query("COMMIT");
     console.log(
       "Migration complete. Tables: ontology, object_type, property, backing_datasource, funnel_state, funnel_pipeline_state, link_type, ontology_edit, action_type, action_audit_log, link_edit, idempotency_key, dataset, dataset_transaction, reindex_history, interface, interface_property, object_type_interface"
@@ -1469,6 +1552,16 @@ async function migrate(): Promise<void> {
     // the FE `ConditionalFormattingRule[]` shape; null/empty means no rules.
     await client.query(
       `ALTER TABLE property ADD COLUMN IF NOT EXISTS conditional_formatting JSONB`
+    );
+
+    // Property.visibility — Foundry "Display → Visibility" (normal /
+    // prominent / hidden) authored in the Ontology Manager property
+    // inspector; 'normal' is the documented default for new + legacy rows.
+    await client.query(
+      `ALTER TABLE property ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal'`
+    );
+    await client.query(
+      `UPDATE property SET visibility = 'normal' WHERE visibility IS NULL`
     );
 
     console.log("Created Phase 2 tables (branch, proposal, group, function, favorite, exploration, export, marking, organization, pii_scan_result, usage_event_daily matview)");

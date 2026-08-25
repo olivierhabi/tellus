@@ -17,7 +17,7 @@
 // narrow on purpose so the swap is a one-file change.
 // ---------------------------------------------------------------------------
 
-type LabelMap = Record<string, string>;
+type LabelMap = Record<string, unknown>;
 
 interface CounterState {
   help: string;
@@ -75,8 +75,11 @@ function labelKey(labels: LabelMap): string {
   return entries.map(([k, v]) => `${k}="${escapeLabel(v)}"`).join(",");
 }
 
-function escapeLabel(v: string): string {
-  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+function escapeLabel(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n");
 }
 
 export function incCounter(name: string, labels: LabelMap = {}, amount: number = 1): void {
@@ -208,10 +211,31 @@ const COUNTER_HELP: Record<string, string> = {
   // T-09 — full-text spec syntax usage.
   tellus_full_text_spec_syntax_total:
     "Count of full-text queries by whether spec syntax (operators, wildcards, quotes) was detected.",
+  // P5 — durable side-effect outbox counters.
+  tellus_side_effect_claim_total:
+    "Count of jobs claimed by the side-effect worker per cycle, partitioned by kind.",
+  tellus_side_effect_succeeded_total:
+    "Count of dispatches that succeeded, partitioned by kind.",
+  tellus_side_effect_retry_total:
+    "Count of dispatch retries triggered by infra failure, partitioned by kind and error_code.",
+  tellus_side_effect_dead_total:
+    "Count of jobs dead-lettered after exhausting the retry policy, partitioned by kind and error_code.",
+  tellus_action_generated_sequence_allocations_total:
+    "Count of generated identifier allocations by outcome.",
+  tellus_action_generated_sequence_exhausted_total:
+    "Count of generated identifier allocations rejected outside the supported numeric range.",
+  tellus_action_generated_sequence_collisions_total:
+    "Count of pre-existing generated identifiers skipped while reconciling a sequence counter.",
+  // P5.6.1 — notification recipient data filter counters.
+  tellus_side_effect_notification_dropped_total:
+    "Count of notification jobs the Phase 6.1 recipient data filter refused to dispatch, partitioned by reason (insufficient_visibility / user_not_resolved / lookup_error).",
 };
 const GAUGE_HELP: Record<string, string> = {
   funnel_run_in_flight:
     "Current number of running funnel_run rows per object_type.",
+  // P5 — outbox queue depth by status.
+  tellus_side_effect_queue_size:
+    "Current depth of the action_side_effect_job queue partitioned by status (pending/running/retrying/dead).",
 };
 const HISTOGRAM_HELP: Record<string, string> = {
   funnel_stage_duration_seconds:
@@ -234,4 +258,9 @@ const HISTOGRAM_HELP: Record<string, string> = {
   // T-10 — per-route latency.
   tellus_route_duration_seconds:
     "Per-route end-to-end duration in seconds, partitioned by route and status_class.",
+  // P5 — per-dispatch latency.
+  tellus_side_effect_dispatch_duration_seconds:
+    "Per-dispatch latency in seconds for the side-effect worker, partitioned by kind and outcome (ok/retry/dead).",
+  tellus_action_generated_sequence_allocation_duration_seconds:
+    "PostgreSQL generated identifier allocation latency in seconds.",
 };

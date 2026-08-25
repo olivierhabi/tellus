@@ -59,6 +59,15 @@ export interface WriteOverlayInput {
   doc: Record<string, unknown>;
   /** True when the edit is a delete (tombstone). */
   deleted: boolean;
+  /**
+   * Edit operation. `update` is a PARTIAL modify: the on-conflict UPSERT
+   * MERGES `doc` into the existing `object_instances.properties` instead of
+   * replacing it (a bare `properties = EXCLUDED.properties` clobbers every
+   * un-touched property — modifyObject's contract is partial). `create`
+   * and `delete` replace the full property set (create re-seeds; delete
+   * tombstones with `{}`).
+   */
+  operation?: "create" | "update" | "delete";
   version: number;
   editId: string;
   actorUserId?: string | null;
@@ -72,6 +81,43 @@ export interface WriteOverlayOutputs {
   editId: string;
   wroteOverlay: boolean;
   upsertedInstance: boolean;
+}
+
+/**
+ * Publishes an overlay for an object row which has already been committed to
+ * Postgres by a set-based writer.  This keeps specialised high-volume action
+ * paths immediately consistent with Object Search without forcing them to
+ * perform a second, per-object `object_instances` UPSERT.
+ *
+ * The caller owns durability: this function intentionally only touches the
+ * short-lived read projection.  A Redis failure must therefore be handled by
+ * the caller as a degraded-read concern, never by rolling back committed data.
+ */
+export async function publishCommittedObjectOverlay(input: {
+  branchId?: string | null;
+  objectType: string;
+  primaryKey: string;
+  doc: Record<string, unknown>;
+  deleted: boolean;
+  version: number;
+  editId: string;
+  actorUserId?: string | null;
+  ttlSeconds?: number;
+  store?: OverlayStore;
+}): Promise<void> {
+  const record: OverlayRecord = {
+    branchId: resolveBranchSlot(input.branchId),
+    objectType: input.objectType,
+    primaryKey: input.primaryKey,
+    doc: input.doc,
+    deleted: input.deleted,
+    version: input.version,
+    createdAt: Date.now(),
+    editId: input.editId,
+    actorUserId: input.actorUserId ?? null,
+  };
+  await writeOverlay(record, input.store ?? (await getOverlayStore()), computeTtlSeconds(input.ttlSeconds));
+  recordOverlayWrite(input.editId, record.createdAt);
 }
 
 const DEFAULT_COMMIT_TIMEOUT = 60;
@@ -259,18 +305,28 @@ export async function writeOverlayForEdit(
     // so the INSERT resolves and branch isolation semantics are preserved
     // (T-04 layers an explicit-branch keyspace on top — the PG row is
     // still per-ontology-`_main`-by-default for now).
-    const branchUuid = deriveMainBranchId(input.ontologyId);
+    const branchUuid = input.branchId ?? deriveMainBranchId(input.ontologyId);
+    // Phase 2 (object identity): persist a stable object rid on first
+    // write. Caller-supplied rid wins; otherwise mint one. On conflict
+    // the EXISTING rid is kept — rids never change for the lifetime of
+    // an object (they survive edits, overlays and reindexes).
     const res = await client.query(
       `INSERT INTO object_instances
          (ontology_id, branch_id, object_type_api_name, primary_key, properties,
           markings, source_datasource_id, source_transaction_id,
-          last_modified_at, version)
-       VALUES ($1, $6::uuid, $2, $3, $4::jsonb, ARRAY[]::text[], NULL, NULL, NOW(), $5)
-       ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
-         DO UPDATE SET properties        = EXCLUDED.properties,
-                       last_modified_at  = NOW(),
-                       version           = object_instances.version + 1
-       RETURNING version`,
+          last_modified_at, version, rid)
+       VALUES ($1, $6::uuid, $2, $3, $4::jsonb, ARRAY[]::text[], NULL, NULL, NOW(), $5,
+               COALESCE($7, 'ri.tellus.main.object.' || gen_random_uuid()))
+        ON CONFLICT (ontology_id, branch_id, object_type_api_name, primary_key)
+          DO UPDATE SET properties        = CASE
+                                                WHEN $8 = 'update'
+                                                  THEN object_instances.properties || EXCLUDED.properties
+                                                ELSE EXCLUDED.properties
+                                              END,
+                        last_modified_at  = NOW(),
+                        version           = object_instances.version + 1,
+                        rid               = COALESCE(object_instances.rid, EXCLUDED.rid)
+        RETURNING version, rid`,
       [
         input.ontologyId,
         input.objectType,
@@ -278,9 +334,16 @@ export async function writeOverlayForEdit(
         JSON.stringify(input.doc),
         input.version,
         branchUuid,
+        (input as { rid?: string }).rid ?? null,
+        input.operation ?? (input.deleted ? "delete" : "create"),
       ],
     );
     upsertedInstance = (res.rowCount ?? 0) > 0;
+    // Stamp the persisted rid into the overlay doc so overlay-merged
+    // reads expose `__rid` immediately (before the index absorbs it).
+    if (upsertedInstance && typeof res.rows[0]?.rid === "string") {
+      input.doc.__rid = res.rows[0].rid;
+    }
     // Capture the canonical monotonic version from the UPSERT — on INSERT
     // it equals the inserted value, on UPDATE it equals existing+1. This
     // is what we MUST stamp on the overlay record; using the caller's
@@ -305,7 +368,15 @@ export async function writeOverlayForEdit(
   // Step 3 — Redis overlay. Routed through `writeOverlay` for CAS,
   // dual-write, and metrics. Errors propagate up to the caller for
   // observability; the caller decides whether to retry from the sweeper.
-  const slot = resolveBranchSlot(input.branchId);
+  // Object Query's untagged read contract addresses the main branch through
+  // the `_main` slot. The executor resolves that branch to its UUID before
+  // writeback, so normalise it back here; otherwise a successful generic
+  // action is invisible to the default Workshop/Object Type query until the
+  // asynchronous index catches up. Explicit non-main branches retain their
+  // UUID key and remain isolated.
+  const slot = resolveBranchSlot(
+    input.branchId === deriveMainBranchId(input.ontologyId) ? null : input.branchId,
+  );
   const record: OverlayRecord = {
     branchId: slot,
     objectType: input.objectType,
@@ -359,7 +430,7 @@ export async function applyOverlayToResults(
   const store = storeOverride ?? (await getOverlayStore());
 
   const pks = hits
-    .map((h) => asString(h.__pk))
+    .map(primaryKeyOf)
     .filter((pk): pk is string => pk !== null);
   if (pks.length === 0) return hits;
 
@@ -378,7 +449,7 @@ export async function applyOverlayToResults(
 
   const out: Array<Record<string, unknown>> = [];
   for (const hit of hits) {
-    const pk = asString(hit.__pk);
+    const pk = primaryKeyOf(hit);
     if (pk === null) {
       out.push(hit);
       continue;
@@ -464,6 +535,14 @@ function asString(v: unknown): string | null {
   return null;
 }
 
+// OpenSearch/Quickwit hits expose `__pk`, whereas the object-serving path
+// serializes the same identity as `__primaryKey`. Overlay reconciliation must
+// treat those representations as one object; otherwise an indexed writeback
+// record is returned once as a base hit and again as an overlay-only extra.
+function primaryKeyOf(doc: Record<string, unknown>): string | null {
+  return asString(doc.__pk) ?? asString(doc.__primaryKey);
+}
+
 function numberOrNull(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   return null;
@@ -494,11 +573,11 @@ export async function mergeOverlayIntoSearch(
   // Dedup by PK — a PK already in `replaced` must not appear again.
   const seen = new Set<string>();
   for (const h of replaced) {
-    const pk = asString(h.__pk);
+    const pk = primaryKeyOf(h);
     if (pk) seen.add(pk);
   }
   for (const e of extras) {
-    const pk = asString(e.__pk);
+    const pk = primaryKeyOf(e);
     if (pk && !seen.has(pk)) {
       replaced.push(e);
       seen.add(pk);

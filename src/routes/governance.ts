@@ -28,6 +28,7 @@ import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
 import { incCounter } from "../services/funnel/metrics";
 import { dataPlaneGuard } from "../middleware/requireRole";
+import { objectTypeIndexName } from "../services/opensearch/objectIndexNames";
 
 const router = Router({ mergeParams: true });
 
@@ -351,7 +352,7 @@ router.post(
             scoped: String(branchId !== null),
           });
           const result = await searchObjects(
-            `ontology-${objectTypeApiName.toLowerCase()}`,
+            objectTypeIndexName(objectTypeApiName),
             { size: PII_SCAN_BATCH_SIZE, query: { match_all: {} } },
             buildSecurityFilter(req.security),
             branchId

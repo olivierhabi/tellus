@@ -26,6 +26,7 @@ import { applyContextToQuery } from "../services/opensearch/applyContext";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
 import { routeMetric } from "../utils/routeInstrumentation";
+import { objectTypeIndexName } from "../services/opensearch/objectIndexNames";
 
 const router = Router({ mergeParams: true });
 
@@ -95,7 +96,7 @@ router.post(
       // validate every handler at PR time (see T-10).
       routeMetric(req, "comparisons.aggregate", branchId);
 
-      const index = `ontology-${objectTypeApiName.toLowerCase()}`;
+      const index = objectTypeIndexName(objectTypeApiName);
       const msearchBody: unknown[] = [
         { index },
         // The `aggs` block is NOT wrapped — only the per-sub-body

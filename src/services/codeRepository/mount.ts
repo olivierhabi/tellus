@@ -31,12 +31,14 @@ import type {
   StemmaAdapter,
   TemplateAdapter,
 } from "./adapters/types";
+import type { FunctionsPublishService } from "../functionsPublish/service";
 
 export interface MountCodeRepositoryRouterDeps {
   readonly pool: Pool;
   readonly compass?: CompassAdapter;
   readonly stemma?: StemmaAdapter;
   readonly template?: TemplateAdapter;
+  readonly functionsPublisher?: FunctionsPublishService;
 }
 
 export interface CodeRepositoryAdapters {
@@ -81,6 +83,7 @@ export function mountCodeRepository(deps: MountCodeRepositoryRouterDeps): MountC
     compass: adapters.compass,
     stemma: adapters.stemma,
     template: adapters.template,
+    functionsPublisher: deps.functionsPublisher,
   });
   return { router, adapters };
 }

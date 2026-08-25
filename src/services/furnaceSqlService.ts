@@ -35,6 +35,7 @@ import { buildSecurityFilter } from '../middleware/securityContext';
 import type { SecurityContext } from '../middleware/securityContext';
 import { incCounter, observeHistogram } from './funnel/metrics';
 import pool from '../db';
+import { objectTypeIndexName } from "./opensearch/objectIndexNames";
 import {
   SQL_STATEMENT_TIMEOUT_MS,
   SQL_CACHE_TTL_MS,
@@ -217,7 +218,7 @@ async function listObjectTypes(
 }
 
 function indexFor(apiName: string): string {
-  return `ontology-${String(apiName).toLowerCase()}`;
+  return objectTypeIndexName(String(apiName));
 }
 
 function safeIdent(apiName: string): string {

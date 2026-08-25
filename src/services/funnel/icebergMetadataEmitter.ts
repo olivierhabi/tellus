@@ -238,6 +238,13 @@ function normalizeSummary(
     ),
   };
   for (const [k, v] of Object.entries(summary ?? {})) {
+    // `inline_rows` is the pass-by-reference row payload stored on
+    // summary_json for downstream activities to re-read by snapshot_id
+    // (Temporal payload fix). It can be tens of MB; it must NOT be
+    // serialised into the S3 metadata.json side-emission — Postgres is
+    // the source of truth for it, and a 42 MB metadata.json would make
+    // every snapshot commit write a huge object to S3. Skip it here.
+    if (k === "inline_rows") continue;
     out[k] = typeof v === "string" ? v : JSON.stringify(v);
   }
   return out;

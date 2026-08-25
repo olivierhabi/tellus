@@ -25,16 +25,29 @@
 // ---------------------------------------------------------------------------
 
 import { Router, type Request, type Response, type NextFunction } from "express";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 
 import { isRid, isStructurallyRid, mintFunctionVersionRid } from "../../codeRepos/contracts/rid";
 import { publishVersion, listVersions } from "../../functionsRegistry/store";
-import { parseSemver, compareSemver } from "../../functionsRegistry/semver";
+import {
+  authorizePublish,
+} from "../../functions/executionPolicy";
+import {
+  FUNCTION_IDENTITY_RE,
+  parseFunctionPath,
+} from "../../functions/discovery";
+import { parseSemver, compareSemver, isPreviewRelease } from "../../functionsRegistry/semver";
+import {
+  createS3FunctionArtifactStore,
+  FunctionArtifactError,
+  resolveFunctionSource,
+} from "../../functionsRegistry/artifactStore";
 import { ERROR_CODES } from "../../codeRepos/contracts/errors";
 import { requireCodeReposAuth } from "../../codeRepos/middleware/principal";
 import { idempotencyMiddleware } from "../../codeRepos/middleware/idempotency";
 import { codeReposError, type CodeReposErrorName } from "../errors";
+import { inferFunctionObjectType } from "../functionObjectType";
 import {
   applyEdits,
   loadOntologySnapshot,
@@ -42,11 +55,69 @@ import {
   type OntologyEdit,
   type OntologySnapshot,
 } from "../../functions/ontologyRuntime";
+import { inspectTypeScriptV2Function } from "../../functionsPublish/service";
+import type { FunctionType } from "../../functions/canonicalSignature";
+
+/** Wire shape for a function's input signature on the functions listing —
+ * normalized from EITHER the publish-time manifest
+ * (`manifest.signatures`, recorded by the functionsPublish worker) or a
+ * live TS-AST inspection of the working-tree source (same canonical model —
+ * functions/canonicalSignature.ts). `null` means "couldn't derive"
+ * (unannotated params, legacy layout) → the FE falls back to the JSON tab.
+ */
+interface ListingSignature {
+  readonly parameters: ReadonlyArray<{
+    readonly name: string;
+    readonly position: number;
+    readonly type: string;
+    readonly typeModel: FunctionType;
+    readonly optional: boolean;
+    readonly hasDefault: boolean;
+  }>;
+  readonly output: string | null;
+}
+
+/** Defensive normalization of a persisted manifest signature record. */
+function toWireSignature(raw: unknown): ListingSignature | null {
+  if (!raw || typeof raw !== "object") return null;
+  const rec = raw as { parameters?: unknown; output?: unknown };
+  if (!Array.isArray(rec.parameters)) return null;
+  const parameters = rec.parameters
+    .filter((p): p is Record<string, unknown> => !!p && typeof p === "object")
+    .map((p, i) => ({
+      name: String(p.name ?? ""),
+      position: typeof p.position === "number" ? p.position : i,
+      type: String(p.type ?? ""),
+      typeModel: (p.typeModel && typeof p.typeModel === "object"
+        ? p.typeModel
+        : { kind: "unsupported", typeText: String(p.type ?? "") }) as FunctionType,
+      optional: Boolean(p.optional),
+      hasDefault: Boolean(p.hasDefault),
+    }));
+  return {
+    parameters,
+    output: typeof rec.output === "string" ? rec.output : null,
+  };
+}
+
+/** Derive the wire signature from live TypeScript source. Fail-open: any
+ * shape that inspectTypeScriptV2Function rejects (no default export,
+ * unannotated types) yields null so the FE shows its JSON-tab fallback
+ * instead of a half-correct form. */
+function deriveSignatureFromSource(path: string, source: string): ListingSignature | null {
+  try {
+    const sig = inspectTypeScriptV2Function(path, source);
+    return toWireSignature(sig);
+  } catch {
+    return null;
+  }
+}
 import {
   createTtlCache,
   transpileCacheKey,
 } from "./invokeCache";
 import { runSandboxedWithSdkAsync } from "../../functionWorkerPool";
+import type { SandboxBinding } from "../../functionRuntime";
 import {
   executeCreateRepositorySaga,
   type SagaExecutorDeps,
@@ -64,12 +135,31 @@ import {
 import { validateDepth, validateRelativePath } from "../stemma/path";
 import { detectBinary } from "../stemma/binary";
 import { mimeForPath } from "../stemma/mime";
+import {
+  clearDrafts,
+  listDrafts,
+  replaceDrafts,
+  validateDraftsBody,
+} from "../drafts/draftStore";
+import {
+  ChatSessionLimitExceededError,
+  createChatSession,
+  deleteChatSession,
+  getChatSession,
+  listChatSessions,
+  updateChatSession,
+  validateCreateChatSessionBody,
+  validateUpdateChatSessionBody,
+  type ChatMessageInput,
+  type ChatSessionRow,
+} from "../chatSessions/chatSessionStore";
 
 import type {
   CompassAdapter,
   StemmaAdapter,
   TemplateAdapter,
 } from "../adapters/types";
+import { FunctionsPublishError, type FunctionsPublishService } from "../../functionsPublish/service";
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -80,6 +170,7 @@ export interface CodeRepositoryRoutesDeps {
   readonly compass: CompassAdapter;
   readonly stemma: StemmaAdapter;
   readonly template: TemplateAdapter;
+  readonly functionsPublisher?: FunctionsPublishService;
 }
 
 interface CreateRepoBody {
@@ -110,6 +201,22 @@ const snapshotCache = createTtlCache<string, OntologySnapshot>({
   maxEntries: 8,
   ttlMs: SNAPSHOT_TTL_MS,
 });
+
+/**
+ * Unwrap a returned ObjectSet to its row array for the wire. Duck-typed (the
+ * ObjectSet class is private to ontologyRuntime and worker results lose their
+ * prototype crossing postMessage): the canonical serialized shape is exactly
+ * `{ rows: Object[] }` — a genuine user value with that single-key shape is
+ * not a supported return type risk (Palantir never uses `rows`; their object
+ * collections are `data`-shaped).
+ */
+function unwrapObjectSetRows(v: unknown): unknown {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const rec = v as Record<string, unknown>;
+    if (Object.keys(rec).length === 1 && Array.isArray(rec.rows)) return rec.rows;
+  }
+  return v;
+}
 
 export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
   const router = Router();
@@ -260,6 +367,15 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         req.query.importsObjectType.length > 0
           ? req.query.importsObjectType
           : null;
+      // Optional filter: only repos whose template_id contains this substring
+      // (ILIKE). Used by the ActionTypeDialog's unscoped function picker to
+      // fetch ONLY typescript-function repos without paginating through every
+      // transforms-python repo in the deployment.
+      const templateIdContains =
+        typeof req.query.templateIdContains === "string" &&
+        req.query.templateIdContains.length > 0
+          ? req.query.templateIdContains
+          : null;
       const params: unknown[] = [stateFilter];
       let where = "WHERE state = $1";
       if (parentFolderRid) {
@@ -275,6 +391,10 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           params.push(importsObjectType);
           where += ` AND EXISTS (SELECT 1 FROM code_repository_resource_imports i WHERE i.repository_rid = code_repository.rid AND i.api_name = $${params.length})`;
         }
+      }
+      if (templateIdContains) {
+        params.push(`%${templateIdContains}%`);
+        where += ` AND template_id ILIKE $${params.length}`;
       }
       params.push(limit);
       const r = await pool.query(
@@ -454,6 +574,18 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           currentVersion: ex.rows[0].resource_version,
         }));
       }
+
+      // GC: free Stemma content (branches + blobs) now that metadata is TRASHED.
+      // Best-effort; a failure here must not undo the trash. tombstone() deletes
+      // branch rows, which ON DELETE CASCADE the blobs (migration 086). Without
+      // this the coderepo_stemma_* content lingers forever (unbounded growth).
+      try {
+        await deps.stemma.tombstone({ repositoryRid: rid });
+      } catch (e) {
+        console.error(
+          `code-repos.delete.tombstone-failed rid=${rid} err=${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -531,6 +663,350 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       branches.sort((a, b) => a.name.localeCompare(b.name));
 
       res.status(200).json({ branches });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Uncommitted drafts (migration 104). Per-user, per-branch, pre-commit
+  // file drafts persisted backend-side so they survive across browsers/
+  // sessions — but NOT a git commit; the frontend clears them on commit.
+  //   GET    /:rid/branches/:branch/drafts  — list the caller's drafts
+  //   PUT    /:rid/branches/:branch/drafts  — replace the caller's draft set
+  //   DELETE /:rid/branches/:branch/drafts  — clear all (after a commit)
+  // Keyed by `principal_sub` (derived UUID) so each user's drafts are private.
+  // -------------------------------------------------------------------------
+  router.get("/:rid/branches/:branch/drafts", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const branch = req.params.branch;
+      if (!isLegalBranchName(branch)) {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+      }
+      const exists = await pool.query(
+        `SELECT 1 FROM code_repository WHERE rid = $1 AND state IN ('ACTIVE','ARCHIVED')`,
+        [rid],
+      );
+      if (exists.rowCount === 0) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const drafts = await listDrafts(pool, { principalSub, repositoryRid: rid, branch });
+      res.status(200).json({ drafts });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/:rid/branches/:branch/drafts", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const branch = req.params.branch;
+      if (!isLegalBranchName(branch)) {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+      }
+      const exists = await pool.query(
+        `SELECT 1 FROM code_repository WHERE rid = $1 AND state IN ('ACTIVE','ARCHIVED')`,
+        [rid],
+      );
+      if (exists.rowCount === 0) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const validation = validateDraftsBody(req.body);
+      if (validation.kind === "invalid") {
+        return sendError(res, codeReposError(validation.errorName, validation.parameters));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const drafts = await replaceDrafts(pool, {
+        principalSub,
+        repositoryRid: rid,
+        branch,
+        drafts: validation.drafts,
+      });
+      res.status(200).json({ drafts });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/:rid/branches/:branch/drafts", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const branch = req.params.branch;
+      if (!isLegalBranchName(branch)) {
+        return sendError(res, codeReposError("CodeRepos:BranchNotFound", { rid, branch }));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      await clearDrafts(pool, { principalSub, repositoryRid: rid, branch });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Chat sessions (migration 126). Per-user, per-repo persistent chat
+  // transcripts for the Code Assistant panel mounted inside the repo browser.
+  // Sessions are private to the caller (`principal_sub`) — every query
+  // filters on it, so an IDOR attempt to read another user's session by id
+  // returns 404 (matches the IDOR-as-404 convention used by /drafts).
+  //
+  //   GET    /:rid/chat-sessions              — list the caller's sessions
+  //                                            (no message bodies).
+  //   POST   /:rid/chat-sessions              — create session + initial
+  //                                            messages (atomic, Idempotency-Key).
+  //   GET    /:rid/chat-sessions/:sessionId   — fetch one session WITH messages.
+  //   PUT    /:rid/chat-sessions/:sessionId   — replace metadata and/or the
+  //                                            full message set atomically.
+  //   DELETE /:rid/chat-sessions/:sessionId   — delete one session (+ messages).
+  // -------------------------------------------------------------------------
+  router.get("/:rid/chat-sessions", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const exists = await pool.query(
+        `SELECT 1 FROM code_repository WHERE rid = $1 AND state IN ('ACTIVE','ARCHIVED')`,
+        [rid],
+      );
+      if (exists.rowCount === 0) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const sessions = await listChatSessions(pool, { principalSub, repositoryRid: rid });
+      const items: ChatSessionRow[] = sessions;
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    "/:rid/chat-sessions",
+    auth,
+    idempotencyMiddleware({ pool }),
+    async (req, res, next) => {
+      try {
+        const rid = req.params.rid;
+        if (!isRid(rid)) {
+          return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+        }
+        const exists = await pool.query(
+          `SELECT 1 FROM code_repository WHERE rid = $1 AND state IN ('ACTIVE','ARCHIVED')`,
+          [rid],
+        );
+        if (exists.rowCount === 0) {
+          return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+        }
+        const validation = validateCreateChatSessionBody(req.body);
+        if (validation.kind === "invalid") {
+          return sendError(res, codeReposError(validation.errorName, validation.parameters));
+        }
+        const principal = req.codeReposPrincipal;
+        if (!principal) {
+          return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+        }
+        const principalSub = isUuidV4(principal.userId)
+          ? principal.userId
+          : derivePrincipalSubUuid(principal.userId);
+        // Checksum: pull `Idempotency-Key` from header so a replayed POST returns
+        // the same created row (matches the createRepository saga contract).
+        const idem = (req.header("Idempotency-Key") ?? "").trim();
+        if (!idem) {
+          return sendError(res, codeReposError("CodeRepos:InvalidSettings", { field: "Idempotency-Key" }));
+        }
+
+        try {
+          const created = await createChatSession(pool, {
+            principalSub,
+            repositoryRid: rid,
+            session: validation.session,
+            messages: validation.messages,
+          });
+          res.status(201).json({
+            sessionId: created.sessionId,
+            assistantPath: created.assistantPath,
+            title: created.title,
+            branch: created.branch,
+            lastActiveFilePath: created.lastActiveFilePath,
+            modelId: created.modelId,
+            mode: created.mode,
+            messageCount: created.messageCount,
+            createdAt: created.createdAt,
+            updatedAt: created.updatedAt,
+            messages: created.messages,
+          });
+        } catch (sessErr) {
+          if (sessErr instanceof ChatSessionLimitExceededError) {
+            return sendError(
+              res,
+              codeReposError("CodeRepos:ChatSessionLimitExceeded", {
+                limit: sessErr.limit,
+                repositoryRid: rid,
+              }),
+            );
+          }
+          throw sessErr;
+        }
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.get("/:rid/chat-sessions/:sessionId", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const sessionId = req.params.sessionId;
+      if (!isUuidV4(sessionId)) {
+        return sendError(res, codeReposError("CodeRepos:ChatSessionNotFound", { sessionId }));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const session = await getChatSession(pool, {
+        principalSub,
+        repositoryRid: rid,
+        sessionId,
+      });
+      if (!session) {
+        return sendError(res, codeReposError("CodeRepos:ChatSessionNotFound", { sessionId }));
+      }
+      res.status(200).json({
+        sessionId: session.sessionId,
+        assistantPath: session.assistantPath,
+        title: session.title,
+        branch: session.branch,
+        lastActiveFilePath: session.lastActiveFilePath,
+        modelId: session.modelId,
+        mode: session.mode,
+        messageCount: session.messageCount,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messages: session.messages,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/:rid/chat-sessions/:sessionId", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const sessionId = req.params.sessionId;
+      if (!isUuidV4(sessionId)) {
+        return sendError(res, codeReposError("CodeRepos:ChatSessionNotFound", { sessionId }));
+      }
+      const validation = validateUpdateChatSessionBody(req.body);
+      if (validation.kind === "invalid") {
+        return sendError(res, codeReposError(validation.errorName, validation.parameters));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const updated = await updateChatSession(pool, {
+        principalSub,
+        repositoryRid: rid,
+        sessionId,
+        patch: validation.patch,
+        messages: validation.messages,
+      });
+      if (!updated) {
+        return sendError(res, codeReposError("CodeRepos:ChatSessionNotFound", { sessionId }));
+      }
+      res.status(200).json({
+        sessionId: updated.sessionId,
+        assistantPath: updated.assistantPath,
+        title: updated.title,
+        branch: updated.branch,
+        lastActiveFilePath: updated.lastActiveFilePath,
+        modelId: updated.modelId,
+        mode: updated.mode,
+        messageCount: updated.messageCount,
+        createdAt: updated.createdAt,
+        updatedAt: updated.updatedAt,
+        messages: updated.messages,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/:rid/chat-sessions/:sessionId", auth, async (req, res, next) => {
+    try {
+      const rid = req.params.rid;
+      if (!isRid(rid)) {
+        return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+      }
+      const sessionId = req.params.sessionId;
+      if (!isUuidV4(sessionId)) {
+        return sendError(res, codeReposError("CodeRepos:ChatSessionNotFound", { sessionId }));
+      }
+      const principal = req.codeReposPrincipal;
+      if (!principal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const principalSub = isUuidV4(principal.userId)
+        ? principal.userId
+        : derivePrincipalSubUuid(principal.userId);
+      const deleted = await deleteChatSession(pool, {
+        principalSub,
+        repositoryRid: rid,
+        sessionId,
+      });
+      if (!deleted) {
+        return sendError(res, codeReposError("CodeRepos:ChatSessionNotFound", { sessionId }));
+      }
+      res.status(204).end();
     } catch (err) {
       next(err);
     }
@@ -1604,6 +2080,56 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       const rid = req.params.rid;
       if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
 
+      // Publish authorization gate (execution security boundary): the
+      // current executor is worker_threads + vm — NOT an untrusted-code
+      // sandbox — so publishing executable Functions requires the publish
+      // role, an active function_publish_grants entry, the legacy env
+      // allowlist (deprecated), or open-development mode (never honored in
+      // production). Every decision is persisted to
+      // function_publish_audit_log; an allow whose audit write fails is
+      // refused. See functions/executionPolicy.ts and
+      // docs/operations/automate-function-invocation-contract.md.
+      const publishPrincipal = req.codeReposPrincipal;
+      if (!publishPrincipal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      // Read the tag early so the audit record can carry release_tag; full
+      // SemVer validation happens below after the authorization check.
+      const requestedTag = typeof (req.body as { semver?: unknown })?.semver === "string"
+        ? ((req.body as { semver: string }).semver)
+        : typeof (req.body as { tag?: unknown })?.tag === "string"
+          ? ((req.body as { tag: string }).tag)
+          : null;
+      const publishDecision = await authorizePublish(pool, {
+        localUserId: publishPrincipal.userId,
+        keycloakSub: publishPrincipal.keycloakSub,
+        roles: publishPrincipal.roles,
+        repositoryRid: rid,
+        releaseTag: requestedTag,
+      });
+      if (!publishDecision.allowed) {
+        console.warn(
+          JSON.stringify({
+            type: "functions.publish.authorization_denied",
+            repositoryRid: rid,
+            userId: publishPrincipal.userId,
+            reason: publishDecision.reason,
+          }),
+        );
+        if (publishDecision.auditFailed) {
+          return sendError(
+            res,
+            codeReposError("CodeRepos:Internal", { reason: "publish-audit-unavailable" }),
+          );
+        }
+        return sendError(
+          res,
+          codeReposError("CodeRepos:PermissionDenied", {
+            reason: publishDecision.reason,
+          }),
+        );
+      }
+
       const b = (req.body ?? {}) as { tag?: unknown; semver?: unknown; branch?: unknown; message?: unknown };
       const semverStr = typeof b.semver === "string" ? b.semver : typeof b.tag === "string" ? b.tag : "";
       let parsedSemver;
@@ -1623,9 +2149,57 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       }
       const defaultBranch = repoRows[0].default_branch;
       const branch = typeof b.branch === "string" && b.branch.length > 0 ? b.branch : defaultBranch;
-      // Preview vs stable: a release off a non-default branch, or a prerelease
-      // SemVer (1.2.3-rc1), is a preview build (never resolves on default).
-      const isPreview = branch !== defaultBranch || parsedSemver.preRelease.length > 0;
+      // Preview vs stable: single shared predicate (see
+      // functionsRegistry/semver.ts) — non-default branch or a
+      // prerelease SemVer is a preview build.
+      const isPreview = isPreviewRelease(branch, defaultBranch, semver);
+
+      // TypeScript v2 uses the durable functions-publish pipeline. Keep the
+      // legacy synchronous implementation below as a compatibility fallback
+      // for standalone route tests that do not inject the worker service.
+      if (deps.functionsPublisher) {
+        const principal = req.codeReposPrincipal;
+        if (!principal) {
+          return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+        }
+        try {
+          const run = await deps.functionsPublisher.enqueue({
+            repositoryRid: rid,
+            branch,
+            defaultBranch,
+            semver,
+            message: typeof b.message === "string" ? b.message.slice(0, 1024) : null,
+            triggeredBy: derivePrincipalSubUuid(principal.userId),
+            idempotencyKey: (req.header("Idempotency-Key") ?? randomUUID()).trim(),
+          });
+          res.setHeader("Location", `/api/v1/jemma/runs/${encodeURIComponent(run.runRid)}`);
+          return res.status(run.replayed ? 200 : 202).json({
+            run,
+            status: run.state,
+            deduplicated: run.replayed,
+          });
+        } catch (error) {
+          if (error instanceof FunctionsPublishError) {
+            if (error.code === "BRANCH_NOT_FOUND") {
+              return sendError(res, codeReposError("CodeRepos:BranchNotFound", { branch }));
+            }
+            if (error.code === "NO_FUNCTIONS") {
+              return sendError(res, codeReposError("CodeRepos:NoFunctionsToPublish", { branch }));
+            }
+            if (error.code === "RUN_ALREADY_ACTIVE") {
+              return sendError(res, codeReposError("CodeRepos:RunAlreadyActive", {
+                branch,
+                ...error.details,
+              }));
+            }
+            return sendError(res, codeReposError("CodeRepos:VersionConflict", {
+              reason: error.message,
+              ...error.details,
+            }));
+          }
+          throw error;
+        }
+      }
 
       // 1 + 2 — tree + function discovery.
       const tree = await deps.stemma.listTree({ repositoryRid: rid, branch, path: "", depth: 6 });
@@ -1636,13 +2210,15 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         return sendError(res, codeReposError("CodeRepos:Internal", { reason: "tree-read-failed" }));
       }
       const commitSha = tree.treeSha; // content-pinned identifier of the release tree
-      const FN_RE = /(^|\/)src\/functions\/([A-Za-z_][A-Za-z0-9_]*)\.ts$/;
       const discovered: Array<{ apiName: string; path: string }> = [];
       for (const entry of tree.entries) {
         if (entry.type !== "blob") continue;
-        if (entry.name.includes(".test.")) continue;
-        const m = FN_RE.exec(entry.path);
-        if (m) discovered.push({ apiName: m[2], path: entry.path });
+        // Shared identity rules (functions/discovery.ts): nested folders
+        // under src/functions/ are first-class; the path is the identity.
+        const parsed = parseFunctionPath(entry.path);
+        if (parsed !== null && parsed.runtime === "NODE_20") {
+          discovered.push({ apiName: parsed.apiName, path: entry.path });
+        }
       }
       if (discovered.length === 0) {
         return sendError(res, codeReposError("CodeRepos:NoFunctionsToPublish", { branch }));
@@ -1702,16 +2278,32 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       }
 
       // 5 — publish the immutable bundle.
+      const canonical = JSON.stringify({ exports: exportsList, sources });
+      const artifactSha256 = createHash("sha256").update(canonical).digest("hex");
+      const artifactBytes = Buffer.byteLength(canonical, "utf8");
+      // Track 2 #8: real content-addressed blob — the same
+      // store as the worker pipeline. The manifest carries no
+      // source text; there is no inline fallback anywhere.
+      let artifactBlobId: string;
+      try {
+        const put = await createS3FunctionArtifactStore().put({
+          digest: artifactSha256,
+          bundle: canonical,
+        });
+        artifactBlobId = put.blobId;
+      } catch (e) {
+        if (e instanceof FunctionArtifactError && e.code === "ARTIFACT_TOO_LARGE") {
+          return sendError(res, codeReposError("CodeRepos:InvalidSettings", { reason: e.message }));
+        }
+        throw e;
+      }
       const manifest = {
         exports: exportsList,
-        sources,
+        artifactFormat: "functions-publish-bundle/v1",
         runtime: "NODE_20" as const,
         functionCount: exportsList.length,
         message: typeof b.message === "string" ? b.message.slice(0, 1024) : null,
       };
-      const canonical = JSON.stringify({ exports: exportsList, sources });
-      const artifactSha256 = createHash("sha256").update(canonical).digest("hex");
-      const artifactBytes = Buffer.byteLength(canonical, "utf8");
 
       let publishResult;
       try {
@@ -1723,7 +2315,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           semver,
           commitSha,
           runtime: "NODE_20",
-          artifactBlobId: `inline:${artifactSha256.slice(0, 16)}`,
+          artifactBlobId,
           artifactSha256,
           artifactBytes,
           manifest,
@@ -1809,6 +2401,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       type MergedFunctionRow = {
         apiName: string;
         versionRid: string | null;
+        /** Stable registry RID for deep-links (function_registry_function). */
+        functionRid: string | null;
         semver: string | null;
         branch: string;
         isPreview: boolean;
@@ -1817,6 +2411,21 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         publishedAt: string | null;
         source: "published" | "working_tree";
         path: string | null;
+        /** Path under `src/functions/` WITH extension (e.g. "orders/calc.ts")
+         *  — drives the FE's subdirectory grouping (Foundry parity). */
+        relativePath: string | null;
+        /** True when the row exists ONLY as an uncommitted draft. */
+        draftOnly: boolean;
+        /** True when a committed file has an open (uncommitted) draft edit. */
+        hasDraft: boolean;
+        /** Object-type apiName the function binds to (from `@ontology/sdk`
+         *  import / `ObjectSet<X>`), or null for a pure utility. The FE
+         *  overlays the ontology display name + icon + colour. */
+        objectTypeName: string | null;
+        objectTypeIcon: string | null;
+        /** Function input signature (null = not derivable) — drives the
+         *  Functions tester's signature-driven Form tab. */
+        signature: ListingSignature | null;
       };
       const byApiName = new Map<string, MergedFunctionRow>();
 
@@ -1842,7 +2451,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           // 1184) as a raw ISO string, not a JS Date (src/db.ts). So this is
           // a string at runtime — never call Date methods on it directly.
           published_at: string | Date;
-          manifest_json: { exports?: unknown };
+          manifest_json: { exports?: unknown; signatures?: unknown; objectTypes?: unknown };
         }>(
           `SELECT rid, branch, semver, is_preview, runtime, commit_sha, published_at, manifest_json
              FROM function_version
@@ -1853,13 +2462,22 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         for (const r of rowsRes.rows) {
           const exportsRaw = r.manifest_json?.exports;
           if (!Array.isArray(exportsRaw)) continue;
+          // Ontology bindings stamped at publish time (functionsPublish
+          // worker, manifest.objectTypes). Historical manifests predate the
+          // field — their rows fall back to live-tree inference below.
+          const manifestObjectTypes =
+            r.manifest_json && typeof (r.manifest_json as { objectTypes?: unknown }).objectTypes === "object"
+              ? ((r.manifest_json as { objectTypes: Record<string, unknown> }).objectTypes)
+              : null;
           for (const name of exportsRaw) {
             if (typeof name !== "string" || name.length === 0) continue;
             const prev = byApiName.get(name);
             if (prev === undefined || compareSemverLoose(r.semver, prev.semver ?? "") > 0) {
+              const stamped = manifestObjectTypes?.[name];
               byApiName.set(name, {
                 apiName: name,
                 versionRid: r.rid,
+                functionRid: null, // resolved per-export below (registry deep-link)
                 semver: r.semver,
                 branch: r.branch,
                 isPreview: r.is_preview,
@@ -1872,6 +2490,19 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                     : new Date(r.published_at).toISOString(),
                 source: "published",
                 path: null,
+                relativePath: null,
+                draftOnly: false,
+                hasDraft: false,
+                // Publish-time binding from manifest.objectTypes when present;
+                // historical manifests fall back to live-tree inference below.
+                objectTypeName: typeof stamped === "string" ? stamped : null,
+                objectTypeIcon: null,
+                // Publish-time canonical signature (manifest.signatures) —
+                // historical manifests predating the field fall back to the
+                // live-tree derivation stamped below.
+                signature: toWireSignature(
+                  (r.manifest_json?.signatures as Record<string, unknown> | undefined)?.[name] ?? null,
+                ),
               });
             }
           }
@@ -1896,6 +2527,11 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // exists — the exact symptom users hit after Tag & Release.
       const workingTree: MergedFunctionRow[] = [];
       const wtSeen = new Set<string>();
+      // apiName → bound object-type apiName, inferred from each function's
+      // source (`@ontology/sdk` import / `ObjectSet<X>`). Used to stamp BOTH
+      // the working-tree row and the published row (the FE dedupes
+      // published-first, so the published row must carry the type too).
+      const objectTypeByApi = new Map<string, string | null>();
       try {
         const tree = await deps.stemma.listTree({
           repositoryRid: rid,
@@ -1904,30 +2540,60 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           depth: 5,
         });
         if (tree.kind === "ok") {
-          const FUNCTIONS_DIR_RE = /(^|\/)src\/functions\/([A-Za-z_][A-Za-z0-9_]*)\.(ts|py)$/;
           for (const entry of tree.entries) {
             if (entry.type !== "blob") continue;
-            const m = FUNCTIONS_DIR_RE.exec(entry.path);
-            if (m === null) continue;
-            const apiName = m[2];
-            const ext = m[3];
-            // Skip test files and obvious non-functions defensively (the
-            // convention says one function per file, but a `helloWorld.test.ts`
-            // sibling could land in the same directory in real repos).
-            if (apiName.endsWith("Test") || entry.name.includes(".test.")) continue;
-            if (wtSeen.has(apiName)) continue; // one working-tree entry per apiName
+            // Shared identity rules (functions/discovery.ts): nested folders
+            // supported — identity is the path under src/functions/ without
+            // extension ("orders/calc"); root files keep their basename.
+            const parsed = parseFunctionPath(entry.path);
+            if (parsed === null) continue;
+            const { apiName } = parsed;
+            const ext = parsed.relativePath.endsWith(".py") ? "py" : "ts";
+            if (wtSeen.has(apiName)) continue; // one working-tree entry per identity
             wtSeen.add(apiName);
+            // Infer the bound object type from the source. TS only — Python
+            // functions use a different convention and surface null (utility)
+            // for now. Per-file try/catch so one unreadable file can't blank
+            // detection for the rest.
+            let objectTypeName: string | null = null;
+            let signature: ListingSignature | null = null;
+            if (ext === "ts") {
+              try {
+                const blob = await deps.stemma.readBlob({
+                  repositoryRid: rid,
+                  branch,
+                  path: entry.path,
+                });
+                if (blob.kind === "ok") {
+                  const src = new TextDecoder("utf-8").decode(blob.content);
+                  objectTypeName = inferFunctionObjectType(src);
+                  // Same read already pays for the source: derive the input
+                  // signature in the same pass (no extra I/O).
+                  signature = deriveSignatureFromSource(entry.path, src);
+                }
+              } catch {
+                // Best-effort: a read failure leaves this fn untyped (utility).
+              }
+            }
+            objectTypeByApi.set(apiName, objectTypeName);
             workingTree.push({
               apiName,
               versionRid: null,
+              functionRid: null,
               semver: null,
               branch,
               isPreview: true,
-              runtime: ext === "py" ? "PY_311" : "NODE_20",
+              runtime: parsed.runtime,
               commitSha: null,
               publishedAt: null,
               source: "working_tree",
               path: entry.path,
+              relativePath: parsed.relativePath,
+              draftOnly: false,
+              hasDraft: false,
+              objectTypeName,
+              objectTypeIcon: null, // FE overlays icon/colour from the ontology
+              signature,
             });
           }
         }
@@ -1936,9 +2602,109 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         // published-versions response.
       }
 
+      // ---- Draft overlay (Foundry live-preview parity) ---------------------
+      // Uncommitted editor work must appear in Live Preview BEFORE any
+      // commit. Drafts are per-user (principal_sub), read fresh. A draft
+      //     * editing a tracked file     → row content re-inferred from DRAFT
+      //     * adding a NEW function file → extra row flagged draftOnly
+      // File deletions are not drafts — the FE commits deletes immediately.
+      const wtByApiName = new Map(workingTree.map((row) => [row.apiName, row]));
+      const publishPrincipal = req.codeReposPrincipal;
+      if (publishPrincipal) {
+        try {
+          const principalSub = isUuidV4(publishPrincipal.userId)
+            ? publishPrincipal.userId
+            : derivePrincipalSubUuid(publishPrincipal.userId);
+          const drafts = await listDrafts(pool, { principalSub, repositoryRid: rid, branch });
+          for (const draft of drafts) {
+            const parsed = parseFunctionPath(draft.path);
+            if (parsed === null) continue;
+            const existing = wtByApiName.get(parsed.apiName);
+            const objectTypeName =
+              parsed.runtime === "NODE_20" ? inferFunctionObjectType(draft.content) : null;
+            // The signature follows the DRAFT's source (Live Preview reflects
+            // the editor, not HEAD) — same derivation pass as tree entries.
+            const signature =
+              parsed.runtime === "NODE_20"
+                ? deriveSignatureFromSource(draft.path, draft.content)
+                : null;
+            objectTypeByApi.set(parsed.apiName, objectTypeName);
+            if (existing) {
+              // Draft wins over HEAD: the Live Preview tab reflects the
+              // editor, not the last commit.
+              existing.objectTypeName = objectTypeName;
+              existing.hasDraft = true;
+              existing.signature = signature;
+            } else {
+              const row: MergedFunctionRow = {
+                apiName: parsed.apiName,
+                versionRid: null,
+                functionRid: null,
+                semver: null,
+                branch,
+                isPreview: true,
+                runtime: parsed.runtime,
+                commitSha: null,
+                publishedAt: null,
+                source: "working_tree",
+                path: draft.path,
+                relativePath: parsed.relativePath,
+                draftOnly: true,
+                hasDraft: true,
+                objectTypeName,
+                objectTypeIcon: null,
+                signature,
+              };
+              workingTree.push(row);
+              wtByApiName.set(parsed.apiName, row);
+            }
+          }
+        } catch {
+          // Draft overlay is best-effort — the committed discovery above is
+          // authoritative on its own.
+        }
+      }
+
+      // Stamp the bound object type onto published rows WITHOUT a publish-time
+      // `objectTypes` entry (historical manifests) via live-tree inference.
+      for (const row of byApiName.values()) {
+        if (row.objectTypeName === null && objectTypeByApi.has(row.apiName)) {
+          row.objectTypeName = objectTypeByApi.get(row.apiName) ?? null;
+        }
+        // Historical manifests predating manifest.signatures: derive from the
+        // live working-tree source (same apiName convention) when available.
+        if (row.signature === null && objectTypeByApi.has(row.apiName)) {
+          const wt = workingTree.find((w) => w.apiName === row.apiName);
+          if (wt?.signature) row.signature = wt.signature;
+        }
+      }
+
+      // Resolve registry function RIDs for deep-links (one query for all
+      // published exports on this repo; retired rows excluded).
+      if (byApiName.size > 0) {
+        try {
+          const apiNames = [...byApiName.keys()];
+          const ridRes = await pool.query<{ rid: string; api_name: string }>(
+            `SELECT rid, api_name FROM function_registry_function
+              WHERE repository_rid = $1 AND api_name = ANY($2::text[]) AND retired_at IS NULL`,
+            [rid, apiNames],
+          );
+          const ridByApi = new Map(ridRes.rows.map((r) => [r.api_name, r.rid]));
+          for (const row of byApiName.values()) {
+            row.functionRid = ridByApi.get(row.apiName) ?? null;
+          }
+        } catch {
+          // Deep-link enrichment is optional — never fail the listing for it.
+        }
+      }
+
       const data = [...byApiName.values(), ...workingTree].sort((a, b) =>
         a.apiName.localeCompare(b.apiName) || a.source.localeCompare(b.source),
       );
+      // The response embeds live working-tree + draft state; it must never
+      // be served from a browser/intermediary cache or the IDE's Live
+      // Preview would lag file adds/removes.
+      res.setHeader("Cache-Control", "no-store");
       res
         .status(200)
         .type("application/json")
@@ -1961,6 +2727,17 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
   // -------------------------------------------------------------------------
   router.post("/:rid/functions/invoke", auth, async (req, res, next) => {
     try {
+      // Wall-clock origin for performance.phases (all phase times use
+      // Date.now() — never performance.now() — because the sandbox runs in a
+      // worker thread whose perf-hooks time origin differs).
+      const t0 = Date.now();
+      const phases: Array<{
+        name: string;
+        startOffsetMs: number;
+        durationMs: number;
+        depth?: number;
+        calls?: number;
+      }> = [];
       const rid = req.params.rid;
       if (!isRid(rid)) return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
 
@@ -1976,12 +2753,14 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         applyEdits?: unknown;
       };
       const apiName = typeof body.apiName === "string" ? body.apiName : "";
-      if (!apiName || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiName) || apiName.length > 128) {
+      // Identity can be a plain identifier ("calc") or a directory-qualified
+      // path under src/functions/ ("orders/calc") — see functions/discovery.ts.
+      if (!apiName || !FUNCTION_IDENTITY_RE.test(apiName) || apiName.length > 256) {
         return sendError(
           res,
           codeReposError("CodeRepos:InvalidArgumentBody", {
             field: "apiName",
-            reason: "required; must match [A-Za-z_][A-Za-z0-9_]{0,127}",
+            reason: "required; must be a function identity (identifier or nested path under src/functions/)",
           }),
         );
       }
@@ -2094,21 +2873,59 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       } else if (body.source === "published") {
         // Path B (published) — run the artifact registered by Tag & Release.
         // Resolve the highest-semver AVAILABLE version on the branch and pull
-        // the function's source from its bundle manifest.
+        // the function's source through resolveFunctionSource: compact
+        // bundle manifests read from the artifact store, historical inline
+        // manifests (manifest.sources) keep working.
         const versions = await listVersions(deps.pool, rid, { branch, includeYanked: false });
-        let chosen: { semver: string; sources: Record<string, string> } | null = null;
+        let chosen: { semver: string; source: string } | null = null;
+        // One version whose content-addressed bundle is gone (object store
+        // rebuilt while Postgres metadata survived) must not poison invokes —
+        // previously any ARTIFACT_NOT_FOUND escaped the loop and 500'd the
+        // whole published-invoke path even though a healthy newer version
+        // already resolved. Skip per-version, and only when NO version
+        // delivers a source do we surface an actionable envelope.
+        let artifactFailure: { semver: string; code: string } | null = null;
         for (const v of versions) {
-          const m = v.manifest as { sources?: Record<string, unknown> };
-          const src = m.sources && typeof m.sources[apiName] === "string" ? (m.sources[apiName] as string) : null;
+          let src: string | null;
+          try {
+            src = await resolveFunctionSource(
+              { manifest_json: v.manifest as { sources?: Record<string, unknown> } | null, artifact_blob_id: v.artifactBlobId },
+              apiName,
+            );
+          } catch (e) {
+            if (e instanceof FunctionArtifactError) {
+              console.warn(
+                `[functions/invoke] published artifact unavailable for ${apiName} ` +
+                  `at ${rid}@${branch}:${v.semver} — skipping version: [${e.code}] ${e.message}`,
+              );
+              artifactFailure ??= { semver: v.semver, code: e.code };
+              continue;
+            }
+            throw e;
+          }
           if (src === null) continue;
           if (chosen === null || compareSemver(parseSemver(v.semver), parseSemver(chosen.semver)) > 0) {
-            chosen = { semver: v.semver, sources: { [apiName]: src } };
+            chosen = { semver: v.semver, source: src };
           }
         }
         if (chosen === null) {
+          if (artifactFailure) {
+            return sendError(
+              res,
+              codeReposError("CodeRepos:PublishedArtifactMissing", {
+                apiName,
+                branch,
+                semver: artifactFailure.semver,
+                artifactErrorCode: artifactFailure.code,
+                reason:
+                  `Published artifact for "${apiName}" (${artifactFailure.semver}) ` +
+                  `is missing from object storage — try republishing the release.`,
+              }),
+            );
+          }
           return sendError(res, codeReposError("CodeRepos:FunctionNotFound", { apiName, source: "published" }));
         }
-        source = chosen.sources[apiName];
+        source = chosen.source;
         runtime = "NODE_20";
         resolvedPath = `published:${chosen.semver}`;
       } else {
@@ -2124,6 +2941,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         if (tree.kind !== "ok") {
           return sendError(res, codeReposError("CodeRepos:FunctionNotFound", { apiName }));
         }
+        // apiName is the identity (path under src/functions/ without ext),
+        // so nested functions resolve to src/functions/<identity>.{ts,py}.
         const FN_RE = new RegExp(
           `(^|\\/)src\\/functions\\/${apiName.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\.(ts|py)$`,
         );
@@ -2243,6 +3062,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       const snapshotKey = ontologyId
         ? `${ontologyId}:${[...importedTypes].sort().join(",")}`
         : "";
+      const snapshotStartAt = Date.now();
       let snapshot: OntologySnapshot | undefined =
         ontologyId ? snapshotCache.get(snapshotKey) : undefined;
       if (ontologyId && !snapshot) {
@@ -2269,18 +3089,85 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         snapshotCache.set(snapshotKey, loaded);
         snapshot = loaded;
       }
+      if (ontologyId) {
+        // The one real object-loading I/O phase of this pipeline (a cached
+        // hit measures ~0 ms — the bar collapses, which is truthful).
+        phases.push({
+          name: "Load ontology snapshot",
+          startOffsetMs: snapshotStartAt - t0,
+          durationMs: Date.now() - snapshotStartAt,
+        });
+      }
       const resolvedSnapshot: OntologySnapshot = snapshot ?? {
         byType: new Map(),
         ontologyId: "",
         objectCount: 0,
         objectTypes: [] as string[],
+        // No imports → no declared types → empty descriptor map (a function
+        // in a repo that imports nothing has no `@ontology/sdk` types).
+        importedTypes: [] as readonly string[],
       };
+      // Invocation contract: when the function's annotation-derived signature
+      // has ≥2 parameters, bind them POSITIONALLY by name — the tester must
+      // match how published functions/Actions invoke (typescript-v2-positional-
+      // v2), NOT the legacy "(CLIENT_STUB first) + envelope" heuristic, which
+      // produced a throwing client-stub as the FIRST argument for ordinary
+      // multi-parameter functions (e.g. `range(start, end)` got `start =
+      // stub`, crashing at first property access). 0–1-parameter functions
+      // keep the legacy envelope (fn(bag)) — preserving every existing
+      // single-envelope caller (Workshop function columns, Live Preview).
+      let binding: SandboxBinding | undefined;
+      {
+        const sig = deriveSignatureFromSource(resolvedPath ?? `${apiName}.ts`, source);
+        if (sig !== null && sig.parameters.length >= 2) {
+          binding = {
+            contract: "typescript-v2-positional-v2",
+            parameters: sig.parameters.map((p) => ({
+              name: p.name,
+              optional: p.optional,
+              position: p.position,
+              injected: p.typeModel.kind === "client" ? ("client" as const) : undefined,
+            })),
+          };
+        }
+      }
       // Execute the sandboxed function OFF the main event loop (a worker
       // pool) so a long-running function cannot starve concurrent request
       // handling (e.g. object-search reads → 504). Falls back to inline
       // sync execution if the pool is unavailable. Edits are collected by
       // the SDK during execution and returned with the result.
-      const result = await runSandboxedWithSdkAsync(transpiled, input, resolvedSnapshot);
+      const execStartAt = Date.now();
+      const result = await runSandboxedWithSdkAsync(transpiled, input, resolvedSnapshot, binding);
+      phases.push({
+        name: "Execute function",
+        startOffsetMs: execStartAt - t0,
+        durationMs: Date.now() - execStartAt,
+      });
+      // Child phases: the object types the function loaded DURING execution,
+      // indented under "Execute function" (Foundry: "Load objects from
+      // arguments" bars nested inside the execution window).
+      for (const load of result.objectLoads ?? []) {
+        phases.push({
+          name: `Load objects: ${load.objectType}`,
+          startOffsetMs: load.firstStartAt - t0,
+          durationMs: load.totalDurationMs,
+          depth: 1,
+          calls: load.calls,
+        });
+      }
+      // Resource-imports scoping is enforced fail-silently above (only imported
+      // object types are loaded into the snapshot, so Objects.search on a
+      // non-imported type returns an empty ObjectSet). To turn that silent empty
+      // into an actionable UX, diff the types the function actually queried
+      // (recorded by the SDK) against the repo's imported object types and
+      // surface the difference as a warning field on the response. The FE renders
+      // an amber "accessed but not imported" banner with an "Open Resource
+      // imports" action. Computed regardless of run status so a function that
+      // queried a non-imported type then threw/timeout still surfaces it.
+      const importedTypeSet = new Set(importedTypes);
+      const unimportedAccessedTypes = (result.requestedTypes ?? []).filter(
+        (t) => !importedTypeSet.has(t),
+      );
       // Foundry TS v2: an edit function RETURNS `batch.getEdits()`. Prefer the
       // returned edit array; fall back to the ambient `Edits` side-channel
       // (v1-style functions that mutate via Edits.update and return a value).
@@ -2300,6 +3187,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // Action committing the batch to the Ontology system-of-record.
       let editsApplied: { created: number; updated: number; deleted: number; linked: number; unlinked: number } | null = null;
       if (result.status === "ok" && collectedEdits.length > 0 && body.applyEdits === true && ontologyId) {
+        const editsStartAt = Date.now();
         try {
           editsApplied = await applyEdits(deps.pool, {
             ontologyId,
@@ -2312,6 +3200,11 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
             message: (e as Error)?.message ?? "unknown",
           }));
         }
+        phases.push({
+          name: "Apply edits",
+          startOffsetMs: editsStartAt - t0,
+          durationMs: Date.now() - editsStartAt,
+        });
       }
 
       // Partition captured logs into stdout/stderr (the runtime tags
@@ -2337,6 +3230,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 (result.errorMessage ?? "Execution exceeded 5 s cap.") +
                 (stderrLines.length > 0 ? "\n" + stderrLines.join("\n") : ""),
               status: "timeout",
+              unimportedAccessedTypes,
+              performance: { phases },
             }),
           );
       }
@@ -2355,18 +3250,29 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
                 (result.errorMessage ?? "") +
                 (stderrLines.length > 0 ? "\n" + stderrLines.join("\n") : ""),
               status: "error",
+              unimportedAccessedTypes,
+              performance: { phases },
             }),
           );
       }
 
       // Stringify the result so the wire shape is always a string per the
       // FE contract; objects/numbers/booleans are JSON.stringified.
+      // A returned ObjectSet must be serialized as its row ARRAY — never as
+      // the internal `{"rows":[...]}` representation (Palantir object
+      // collections are array/`data`-shaped; the FE renders arrays as result
+      // tables). Duck-typed, not instanceof: worker results cross postMessage
+      // (structured clone), which strips the ObjectSet prototype. The
+      // single-key shape cannot collide with the edit-batch contract (edits
+      // are `Object.isArray(output) && every(isEdit)` — a {rows:[...]}
+      // wrapper is never an array).
+      const outputForWire = unwrapObjectSetRows(result.output);
       const serialized =
-        typeof result.output === "string"
-          ? result.output
-          : result.output === undefined
+        typeof outputForWire === "string"
+          ? outputForWire
+          : outputForWire === undefined
             ? ""
-            : JSON.stringify(result.output);
+            : JSON.stringify(outputForWire);
 
       return res
         .status(200)
@@ -2387,6 +3293,8 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
               objectsLoaded: resolvedSnapshot.objectCount,
               objectTypes: resolvedSnapshot.objectTypes,
             },
+            unimportedAccessedTypes,
+            performance: { phases },
           }),
         );
     } catch (err) {

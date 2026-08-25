@@ -26,6 +26,7 @@ import { readCSV, ReadCSVResult } from "./csvReader";
 import { validatePrimaryKeys, PKValidationResult } from "./primaryKeyValidator";
 import { buildBatch, BuildBatchResult, BatchProgress } from "./batchDocumentBuilder";
 import { mergeEditsWithDatasource, MergeResult, QueryFn } from "./editMerger";
+import { objectTypeIndexName } from "../opensearch/objectIndexNames";
 import {
   createIndex,
   deleteIndex,
@@ -711,6 +712,22 @@ export default { indexObjectType };
 // ---------------------------------------------------------------------------
 
 export async function runSelfTests(): Promise<void> {
+  // These self-tests assert the DEFAULT index-name shape (e.g.
+  // "ontology-employee") byte-for-byte. Under a FUNN-ISO prefixed lane
+  // (vitest pins OS_INDEX_PREFIX=ttest-ontology-) the assertion broke —
+  // the naming mechanics they check are prefix-independent. Pin the
+  // default prefix for the duration of the test; restore after.
+  const savedPrefix = process.env.OS_INDEX_PREFIX;
+  process.env.OS_INDEX_PREFIX = "ontology-";
+  try {
+    await runSelfTestsImpl();
+  } finally {
+    if (savedPrefix === undefined) delete process.env.OS_INDEX_PREFIX;
+    else process.env.OS_INDEX_PREFIX = savedPrefix;
+  }
+}
+
+async function runSelfTestsImpl(): Promise<void> {
   let passed = 0;
   let failed = 0;
 
@@ -831,26 +848,26 @@ export async function runSelfTests(): Promise<void> {
 
       indexExists: async (apiName: string) => ({
         exists: ixExists,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
 
       createIndex: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
 
       recreateIndex: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
         recreated: true as const,
       }),
 
       updateMapping: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
 
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
 
       readCSV: async (filePath: string): Promise<ReadCSVResult> => {
         if (readFail) {

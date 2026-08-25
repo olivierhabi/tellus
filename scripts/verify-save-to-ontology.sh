@@ -47,7 +47,7 @@
 set -o pipefail
 
 KC="${KC_URL:-http://localhost:8086}"
-REALM="${KC_REALM:-tellus}"
+REALM="${KC_REALM:-${KEYCLOAK_REALM:-tellus}}"
 CLIENT="${KC_CLIENT:-tellus-frontend}"
 USER="${TELLUS_USER:-cypress@tellus.local}"
 PASS="${TELLUS_PASS:-Password123!}"
@@ -118,24 +118,23 @@ order_id,customer_id,item_name,quantity
 3,cust-a,Sprocket,25
 CSV
 
+# POST /api/v1/datasets/upload is the canonical dataset-ingest path: it
+# scans the CSV SYNCHRONOUSLY and returns the dataset row + schema in one
+# shot. (The older project-file-upload route no longer materialises a
+# dataset row or its columns, which is why polling for columns here
+# never succeeded — the verify script had rotted.)
 UPLOAD_JSON=$(curl -sf -X POST -H "$AUTH" \
-  -F "files=@$TMP_CSV" \
-  "$API/v1/projects/$PROJECT_ID/upload") || die "Upload failed"
-DATASET_ID=$(echo "$UPLOAD_JSON" | jq -r '
-  .data[0].dataset.id // .data[0].id // .data[0].datasetId // empty
-')
+  -F "file=@$TMP_CSV" \
+  -F "name=save-to-ontology-$STAMP" \
+  "$API/v1/datasets/upload") || die "Upload failed"
+DATASET_ID=$(echo "$UPLOAD_JSON" | jq -r '.dataset.datasetId // empty')
 [ -n "$DATASET_ID" ] && [ "$DATASET_ID" != "null" ] \
-  || die "No dataset id in upload response: $UPLOAD_JSON"
+  || die "No datasetId in upload response: $UPLOAD_JSON"
 note "dataset=$DATASET_ID"
 
-# Wait for the async column scan.
-for attempt in $(seq 1 30); do
-  COL_COUNT=$(curl -sf -H "$AUTH" "$API/v1/datasets/$DATASET_ID" \
-    | jq '(.data.columns // .columns // .data.schema_info.columns // []) | length')
-  [ "${COL_COUNT:-0}" -ge 4 ] && break
-  sleep 2
-done
-[ "${COL_COUNT:-0}" -ge 4 ] || die "Dataset never materialised its columns"
+COL_COUNT=$(echo "$UPLOAD_JSON" \
+  | jq '(.dataset.schemaDefinition.columns // []) | length')
+[ "${COL_COUNT:-0}" -ge 4 ] || die "Dataset never materialised its columns: $UPLOAD_JSON"
 ok "fixture ready (project + dataset with $COL_COUNT columns)"
 
 OBJECT_TYPE_API_NAME="SaveProbe$STAMP"
@@ -179,7 +178,7 @@ ok "created object type apiName=$OBJECT_TYPE_API_NAME id=$OBJECT_TYPE_ID"
 
 curl -sf -X POST -H "$AUTH" -H "Content-Type: application/json" \
   -d "$(jq -n --arg id "$DATASET_ID" \
-    '{foundryDatasetId: $id,
+    '{datasetId: $id,
       columnMapping: {orderId:"order_id", customerId:"customer_id",
                       itemName:"item_name", quantity:"quantity"},
       primaryKeyColumn: "order_id"}')" \

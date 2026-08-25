@@ -15,8 +15,12 @@ import {
 
 const IN = "/tmp/orders.csv";
 
-function compile(transforms: TransformStep[], limit?: number): string {
-  return compileTransformChain(transforms, { inputPath: IN, limit }).sql;
+function compile(
+  transforms: TransformStep[],
+  limit?: number,
+  extra?: { sourceColumns?: string[] },
+): string {
+  return compileTransformChain(transforms, { inputPath: IN, limit, ...extra }).sql;
 }
 
 describe("duckdbTransformEngine compiler", () => {
@@ -52,6 +56,65 @@ describe("duckdbTransformEngine compiler", () => {
     expect(sql).toMatch(
       /SELECT \*, TRY_CAST\("amount" AS DOUBLE\) AS "amount_dbl" FROM t0/,
     );
+  });
+
+  // A bare TRY_CAST(col AS DATE) nulls every 2-digit-year value ('7/30/23'),
+  // which is what produced the "500 of 500 values could not be cast to Date"
+  // report. Worse, TRY_CAST does not fail on '30/7/23' — it returns year 0030 —
+  // so shape dispatch has to run before any TRY_CAST for date targets.
+  it("Cast to date emits shape-dispatched strptime, not a bare TRY_CAST", () => {
+    const sql = compile([
+      { function: "Cast", expression: "order_due_date", targetType: "date" },
+    ]);
+    expect(sql).not.toMatch(/TRY_CAST\("order_due_date" AS DATE\) AS "order_due_date"/);
+    // Both 2-digit and 4-digit slash shapes are handled explicitly.
+    expect(sql).toContain("'%m/%d/%y'");
+    expect(sql).toContain("'%d/%m/%y'");
+    expect(sql).toContain("'%m/%d/%Y'");
+    expect(sql).toContain("'%d/%m/%Y'");
+    // ISO YYYY/MM/DD keeps its own branch.
+    expect(sql).toContain("'%Y/%m/%d'");
+    // Separators are normalised so '-' and '.' take the same path as '/'.
+    expect(sql).toContain("regexp_replace");
+    // Column order is still preserved via EXCLUDE.
+    expect(sql).toMatch(/SELECT \* EXCLUDE \("order_due_date"\),/);
+  });
+
+  it("Cast to date infers day/month order from the column's own values", () => {
+    const sql = compile([
+      { function: "Cast", expression: "order_due_date", targetType: "date" },
+    ]);
+    // The probe counts values decisive for each reading and branches on the
+    // majority, so an mdy column and a dmy column both parse correctly.
+    expect(sql).toMatch(/__p2 > 12 AND __p1 <= 12/);
+    expect(sql).toMatch(/__p1 > 12 AND __p2 <= 12/);
+    // Probe reads from the same upstream CTE the cast projects from.
+    expect(sql).toMatch(/FROM \(SELECT regexp_replace\([\s\S]*?FROM t0\)\)/);
+  });
+
+  it("Cast to timestamp gets the same shape dispatch as date", () => {
+    const sql = compile([
+      { function: "Cast", expression: "seen_at", targetType: "timestamp" },
+    ]);
+    expect(sql).toContain("AS TIMESTAMP");
+    expect(sql).toContain("'%m/%d/%y'");
+    expect(sql).not.toMatch(/TRY_CAST\("seen_at" AS TIMESTAMP\) AS "seen_at"/);
+  });
+
+  it("non-date cast targets stay on a plain lenient TRY_CAST", () => {
+    for (const [target, sqlType] of [
+      ["integer", "BIGINT"],
+      ["string", "VARCHAR"],
+      ["boolean", "BOOLEAN"],
+    ] as const) {
+      const sql = compile([
+        { function: "Cast", expression: "c", targetType: target },
+      ]);
+      expect(sql).toMatch(
+        new RegExp(`TRY_CAST\\("c" AS ${sqlType}\\) AS "c"`),
+      );
+      expect(sql).not.toContain("strptime");
+    }
   });
 
   it("Filter with match=all emits an AND-joined predicate", () => {
@@ -207,5 +270,225 @@ describe("duckdbTransformEngine compiler", () => {
     expect(sql).toMatch(/t3 AS \(SELECT \* EXCLUDE \("internal_notes"\) FROM t2/);
     expect(sql).toMatch(/t4 AS \(SELECT \* RENAME \("o_id" AS "order_id"\) FROM t3/);
     expect(sql.endsWith("SELECT * FROM t4")).toBe(true);
+  });
+
+  // -------------------------------------------------------------------
+  // PB-B2.follow-2 — Tier B aggregate-family transforms
+  // -------------------------------------------------------------------
+
+  it("Aggregate emits GROUP BY with named aggregation outputs", () => {
+    const sql = compile([
+      {
+        function: "Aggregate",
+        groupBy: ["country"],
+        aggregations: [
+          { column: "amount", function: "sum", outputColumn: "total" },
+          { function: "count", outputColumn: "n" },
+        ],
+      },
+    ]);
+    expect(sql).toMatch(
+      /SELECT "country", SUM\("amount"\) AS "total", COUNT\(\*\) AS "n" FROM t0 GROUP BY "country"/,
+    );
+  });
+
+  it("Aggregate without groupBy emits a global aggregation row", () => {
+    const sql = compile([
+      {
+        function: "Aggregate",
+        aggregations: [{ column: "a", function: "avg", outputColumn: "m" }],
+      },
+    ]);
+    expect(sql).toMatch(/SELECT AVG\("a"\) AS "m" FROM t0/);
+    expect(sql).not.toMatch(/GROUP BY/);
+  });
+
+  it("count(col) counts non-null values; count_distinct dedupes", () => {
+    const sql = compile([
+      {
+        function: "Aggregate",
+        aggregations: [
+          { column: "a", function: "count", outputColumn: "nn" },
+          { column: "a", function: "count_distinct", outputColumn: "dc" },
+        ],
+      },
+    ]);
+    expect(sql).toMatch(/COUNT\("a"\) AS "nn"/);
+    expect(sql).toMatch(/COUNT\(DISTINCT "a"\) AS "dc"/);
+  });
+
+  it("stddev/variance emit sample statistics (STDDEV_SAMP / VAR_SAMP)", () => {
+    const sql = compile([
+      {
+        function: "Aggregate",
+        aggregations: [
+          { column: "a", function: "stddev", outputColumn: "s" },
+          { column: "a", function: "variance", outputColumn: "v" },
+        ],
+      },
+    ]);
+    expect(sql).toMatch(/STDDEV_SAMP\("a"\) AS "s"/);
+    expect(sql).toMatch(/VAR_SAMP\("a"\) AS "v"/);
+  });
+
+  it("Rollup emits GROUP BY ROLLUP over the declared columns", () => {
+    const sql = compile([
+      {
+        function: "Rollup",
+        rollupColumns: ["year", "month"],
+        aggregations: [{ column: "v", function: "sum", outputColumn: "s" }],
+      },
+    ]);
+    expect(sql).toMatch(/GROUP BY ROLLUP\("year", "month"\)/);
+  });
+
+  it("AggregateOnCondition kind=all expands one expr per source column with suffix names", () => {
+    const sql = compile(
+      [
+        {
+          function: "AggregateOnCondition",
+          predicate: { kind: "all" },
+          groupBy: ["g"],
+          aggregations: [
+            { function: "sum", suffix: "_total" },
+            { function: "count", suffix: "_n" },
+          ],
+        },
+      ],
+      undefined,
+      { sourceColumns: ["price", "qty"] },
+    );
+    expect(sql).toMatch(/GROUP BY "g"/);
+    expect(sql).toMatch(/SUM\("price"\) AS "price_total"/);
+    expect(sql).toMatch(/SUM\("qty"\) AS "qty_total"/);
+    expect(sql).toMatch(/COUNT\("price"\) AS "price_n"/);
+  });
+
+  it("AggregateOnCondition with a column-type predicate defers to the legacy engine", () => {
+    try {
+      compile([
+        {
+          function: "AggregateOnCondition",
+          predicate: { kind: "columnHasType", columnType: "integer" },
+          aggregations: [{ function: "sum", suffix: "_s" }],
+        },
+      ]);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe("AOC_REQUIRES_LEGACY_ENGINE");
+    }
+  });
+
+  it("TopRows emits ROW_NUMBER() OVER partition with the row cap", () => {
+    const sql = compile([
+      {
+        function: "TopRows",
+        partitionBy: ["region"],
+        sorts: [{ column: "score", direction: "desc" }],
+        topN: 3,
+      },
+    ]);
+    expect(sql).toMatch(/ROW_NUMBER\(\) OVER \(PARTITION BY "region" ORDER BY "score" DESC NULLS FIRST\)/);
+    expect(sql).toMatch(/__top_rows_rn <= 3/);
+    expect(sql).toMatch(/SELECT \* EXCLUDE \(__top_rows_rn\)/);
+  });
+
+  it("Pivot expands one filtered aggregate per (pivotValue × aggregation) with prefix aliases", () => {
+    const sql = compile([
+      {
+        function: "Pivot",
+        groupBy: ["airline"],
+        pivotColumn: "airport",
+        pivotValues: [
+          { value: "JFK", alias: "new_york" },
+          { value: "LHR", alias: "london" },
+        ],
+        aggregations: [{ column: "miles", function: "avg", outputColumn: "avg_miles" }],
+      },
+    ]);
+    expect(sql).toMatch(/GROUP BY "airline"/);
+    expect(sql).toMatch(
+      /AVG\(CASE WHEN CAST\("airport" AS VARCHAR\) = 'JFK' THEN "miles" END\) AS "new_york_avg_miles"/,
+    );
+    expect(sql).toMatch(/AS "london_avg_miles"/);
+  });
+
+  it("Pivot with aliasPosition=suffix puts the aggregation name first", () => {
+    const sql = compile([
+      {
+        function: "Pivot",
+        pivotColumn: "c",
+        pivotValues: [{ value: "X", alias: "x" }],
+        aggregations: [{ column: "m", function: "sum", outputColumn: "s" }],
+        aliasPosition: "suffix",
+      },
+    ]);
+    expect(sql).toMatch(/AS "s_x"/);
+  });
+
+  it("Unpivot emits one SELECT branch per column joined by UNION ALL BY NAME, keeping nulls", () => {
+    const sql = compile([
+      {
+        function: "Unpivot",
+        columns: ["air", "sea"],
+        nameColumn: "mode",
+        valueColumn: "hours",
+      },
+    ]);
+    expect(sql).toMatch(/SELECT 'air' AS "mode", "air" AS "hours", \* EXCLUDE \("air", "sea"\) FROM t0/);
+    expect(sql).toMatch(/UNION ALL BY NAME/);
+    expect(sql).toMatch(/SELECT 'sea' AS "mode", "sea" AS "hours"/);
+  });
+
+  it("KeepDuplicates with a subset emits COUNT(*) OVER (PARTITION BY …)", () => {
+    const sql = compile([
+      { function: "KeepDuplicates", columns: ["col2", "col3"] },
+    ]);
+    expect(sql).toMatch(/COUNT\(\*\) OVER \(PARTITION BY "col2", "col3"\) AS __keep_dups_n/);
+    expect(sql).toMatch(/WHERE __keep_dups_n > 1/);
+  });
+
+  it("KeepDuplicates with an empty subset requires legacy (compile-time column knowledge)", () => {
+    try {
+      compile([{ function: "KeepDuplicates", columns: [] }]);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe("VALIDATION_ERROR");
+    }
+  });
+
+  it("semi join emits SELECT l.* with SEMI JOIN (left columns only)", () => {
+    const sql = compile([
+      {
+        function: "Join",
+        rightPath: "/tmp/c.csv",
+        joinType: "semi",
+        on: [{ left: "id", right: "id" }],
+      },
+    ]);
+    expect(sql).toMatch(/SELECT l\.\* FROM t0 AS l SEMI JOIN/);
+  });
+
+  it("anti join emits SELECT l.* with ANTI JOIN", () => {
+    const sql = compile([
+      {
+        function: "Join",
+        rightPath: "/tmp/c.csv",
+        joinType: "anti",
+        on: [{ left: "id", right: "id" }],
+      },
+    ]);
+    expect(sql).toMatch(/ANTI JOIN read_csv_auto\('\/tmp\/c\.csv'\)/);
+  });
+
+  it("Union mode=wide compiles to UNION ALL BY NAME; first/narrow defer to legacy", () => {
+    const wide = compile([{ function: "Union", otherPath: "/tmp/o2.csv", mode: "wide" }]);
+    expect(wide).toMatch(/UNION ALL BY NAME/);
+    try {
+      compile([{ function: "Union", otherPath: "/tmp/o2.csv", mode: "first" }]);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe("UNION_MODE_REQUIRES_LEGACY_ENGINE");
+    }
   });
 });

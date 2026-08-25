@@ -13,7 +13,7 @@ import { query } from "../db";
 import { appError } from "../utils/appError";
 import type { LinkTypeRow, Cardinality } from "../models/linkType";
 import { incCounter, observeHistogram } from "./funnel/metrics";
-import { buildSortClause } from "./queryTranslator";
+import { buildSortClause, translateFilter } from "./queryTranslator";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -45,6 +45,9 @@ export interface LinkCountResult {
 
 export interface SearchAroundOptions {
   sourceFilter?: Record<string, unknown>;
+  /** Canonical ontology-search where DSL. Prefer this for Workshop linked
+   * filters; `sourceFilter` remains for legacy flat equality maps. */
+  sourceWhere?: Record<string, unknown>;
   targetFilter?: Record<string, unknown>;
   pageSize?: number;
   pageToken?: string;
@@ -53,6 +56,13 @@ export interface SearchAroundOptions {
    *  the regular `/search` route's `orderBy`; resolved against the
    *  resolve-side object type via `buildSortClause`. */
   orderBy?: Array<{ field: string; direction: string }>;
+  /**
+   * Injected edge-resolution seam (serving-store cutover): when set, the
+   * M2M branch calls this instead of parsing the CSV join table. Query
+   * shape, filters, pagination and security of the surrounding function
+   * are unchanged — only the edge PK lookup is delegated.
+   */
+  edgeResolver?: (sourcePKs: string[], direction: "forward" | "reverse") => Promise<string[]>;
 }
 
 export interface LinkAnalysis {
@@ -266,6 +276,29 @@ function parseJoinTableCSV(filePath: string): Array<{ source: string; target: st
     }
   }
   return rows;
+}
+
+/**
+ * Legacy M2M CSV edge resolution — extracted so the serving-store
+ * shadow-compare path uses the IDENTICAL code the production route used
+ * pre-cutover (visible for shadow tests; deprecated for new code).
+ */
+export function resolveLegacyCsvM2mPks(
+  linkType: LinkTypeRow,
+  sourcePKs: string[],
+  direction: "forward" | "reverse",
+): string[] {
+  const out = new Set<string>();
+  if (!linkType.join_table_file_path) return [];
+  const rows = parseJoinTableCSV(linkType.join_table_file_path);
+  for (const pk of sourcePKs) {
+    if (direction === "forward") {
+      rows.filter((r) => r.source === pk).forEach((r) => out.add(r.target));
+    } else {
+      rows.filter((r) => r.target === pk).forEach((r) => out.add(r.source));
+    }
+  }
+  return [...out];
 }
 
 function getTargetPKsFromJoinTable(filePath: string, sourcePK: string): string[] {
@@ -494,8 +527,23 @@ async function resolveReverse(
     case "ONE_TO_ONE": {
       if (linkType.source_property_id) {
         const sourcePropName = await getPropertyApiName(linkType.source_property_id);
+        // fix(A5): reverse ONE_TO_ONE resolves the linked SOURCE object by
+        // searching the SOURCE FK property for the TARGET pk. `term` on a
+        // `.keyword` subfield fails when the OS mapping's FK property is
+        // text-analysed (no .keyword multi-field) — the per-application-query
+        // dash-separated pk is tokenised and the term query token ≠ indexed
+        // token. Add a `match_phrase` should-clause (matches text-analysed
+        // fields) so reverse reads work across both mappings.
         const musts: Array<Record<string, unknown>> = [
-          { term: { [termField(sourcePropName)]: targetPK } },
+          {
+            bool: {
+              minimum_should_match: 1,
+              should: [
+                { term: { [termField(sourcePropName)]: targetPK } },
+                { match_phrase: { [sourcePropName]: targetPK } },
+              ],
+            },
+          },
           ...filterClauses,
         ];
         const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1, undefined, securityFilter, branchId);
@@ -595,8 +643,14 @@ export async function countLinks(
       }
       case "MANY_TO_MANY": {
         if (linkType.join_table_file_path) {
+          // Stage-4 (indexed security): the CSV mask-direct count was a
+          // leak (no marking checks). Never count by CSV alone — honour
+          // the marking filter via the doc-side countIndex: target PKs from
+          // the join file are only the candidate list; countIndex applies
+          // `_security` correctly.
           const targetPKs = getTargetPKsFromJoinTable(linkType.join_table_file_path, objectPK);
-          return targetPKs.length;
+          if (targetPKs.length === 0) return 0;
+          return countIndex(getIndexName(targetOtApiName), { terms: { __pk: targetPKs } }, securityFilter, branchId);
         }
         const targetPropName = linkType.target_property_id
           ? await getPropertyApiName(linkType.target_property_id) : null;
@@ -623,8 +677,11 @@ export async function countLinks(
       }
       case "MANY_TO_MANY": {
         if (linkType.join_table_file_path) {
+          // Same Stage-4 closing: reverse count must also pass through
+          // the marking envelope, never CSV-only.
           const sourcePKs = getSourcePKsFromJoinTable(linkType.join_table_file_path, objectPK);
-          return sourcePKs.length;
+          if (sourcePKs.length === 0) return 0;
+          return countIndex(getIndexName(sourceOtApiName), { terms: { __pk: sourcePKs } }, securityFilter, branchId);
         }
         const sourcePropName = linkType.source_property_id
           ? await getPropertyApiName(linkType.source_property_id) : null;
@@ -691,10 +748,11 @@ export async function searchAround(
   const searchOtApiName = direction === "forward" ? sourceOtApiName : targetOtApiName;
   const searchIndexName = getIndexName(searchOtApiName);
   const sourceFilterClauses = buildFilterClauses(options.sourceFilter);
-
-  const sourceQuery: Record<string, unknown> = sourceFilterClauses.length > 0
-    ? { bool: { must: sourceFilterClauses } }
-    : { match_all: {} };
+  const sourceQuery: Record<string, unknown> = options.sourceWhere
+    ? await translateFilter(options.sourceWhere, searchOtApiName)
+    : sourceFilterClauses.length > 0
+      ? { bool: { must: sourceFilterClauses } }
+      : { match_all: {} };
 
   let sourcePKs: string[] = [];
   const MAX_SOURCE = 100000;
@@ -705,17 +763,24 @@ export async function searchAround(
       body: injectSecurityFilter({ size: MAX_SOURCE, _source: ["__pk"], query: sourceQuery }, securityFilter, branchId),
     });
     const hitsObj = (resp as any).hits;
+
     const totalHits = typeof hitsObj.total === "object" ? hitsObj.total.value : hitsObj.total;
     sourcePKs = (hitsObj.hits as any[]).map((h: any) => h._source.__pk as string);
 
     if (totalHits > MAX_SOURCE) {
       warnings.push(`Source filter matched ${totalHits} objects but only first ${MAX_SOURCE} were used.`);
     }
-  } catch {
+  } catch (srcErr) {
+    if (process.env.OSV2_TRACE === "1") {
+      console.log(JSON.stringify({ t: "searchAround-src-err", error: (srcErr as Error).message.slice(0, 200) }));
+    }
     return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
   }
 
   if (sourcePKs.length === 0) {
+    if (process.env.OSV2_TRACE === "1") {
+      console.log(JSON.stringify({ t: "searchAround-src-no-hits" }));
+    }
     return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
   }
 
@@ -765,22 +830,30 @@ export async function searchAround(
     return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
   }
 
-  // For M2M with join table
-  if (cardinality === "MANY_TO_MANY" && linkType.join_table_file_path) {
-    const allTargetPKs = new Set<string>();
-    const rows = parseJoinTableCSV(linkType.join_table_file_path);
-    for (const pk of sourcePKs) {
-      if (direction === "forward") {
-        rows.filter((r) => r.source === pk).forEach((r) => allTargetPKs.add(r.target));
-      } else {
-        rows.filter((r) => r.target === pk).forEach((r) => allTargetPKs.add(r.source));
-      }
-    }
-    if (allTargetPKs.size === 0) {
+  // For M2M: injected serving-store edge resolver takes precedence over
+  // the legacy CSV join table (servingFlags: shadow/indexed modes).
+  if (cardinality === "MANY_TO_MANY" && options.edgeResolver) {
+    const linked = await options.edgeResolver(sourcePKs, direction);
+    if (linked.length === 0) {
       return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
     }
     const musts: Array<Record<string, unknown>> = [
-      { terms: { __pk: Array.from(allTargetPKs).slice(0, 100000) } },
+      { terms: { __pk: linked.slice(0, 100000) } },
+      ...targetFilterClauses,
+    ];
+    const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, sortClause, securityFilter, branchId);
+    const nextPageToken = from + pageSize < total ? encodeToken(from + pageSize) : null;
+    return { linkedObjects: hits, totalCount: total, nextPageToken, warnings };
+  }
+
+  // For M2M with join table
+  if (cardinality === "MANY_TO_MANY" && linkType.join_table_file_path) {
+    const allTargetPKs = resolveLegacyCsvM2mPks(linkType, sourcePKs, direction);
+    if (allTargetPKs.length === 0) {
+      return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
+    }
+    const musts: Array<Record<string, unknown>> = [
+      { terms: { __pk: allTargetPKs.slice(0, 100000) } },
       ...targetFilterClauses,
     ];
     const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, sortClause, securityFilter, branchId);

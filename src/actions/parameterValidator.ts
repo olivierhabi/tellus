@@ -18,9 +18,21 @@
 //   Step 6: Return result
 // ---------------------------------------------------------------------------
 
+import { evalParamPredicate } from "./submissionCriteria";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/** A single field of a struct parameter (Foundry-style struct authoring). */
+export interface StructFieldDefinition {
+  apiName: string;
+  displayName?: string;
+  /** Primitive types only: string, boolean, integer, long, byte, short,
+   * double, float, decimal, date, timestamp. */
+  type: string;
+  required?: boolean;
+}
 
 /** A single parameter definition from action_type.parameters. */
 export interface ParameterDefinition {
@@ -29,12 +41,42 @@ export interface ParameterDefinition {
   type: string;
   required?: boolean;
   objectType?: string;
+  /** Required for interface_reference and interface_reference_array. */
+  interfaceId?: string;
   defaultValue?: unknown;
+  /** Contextual default resolved from the authenticated action subject. */
+  defaultValueTypeClass?: "currentUserId";
+  /** Form interaction metadata used to make contextual values tamper-proof. */
+  visible?: boolean;
+  editable?: boolean;
   constraints?: ParameterConstraints;
+  /** Field schema for struct parameters. When present, struct values are
+   * coerced field-by-field and unknown keys are rejected. */
+  structFields?: StructFieldDefinition[];
+  /**
+   * B13 — resolve this parameter's default from a PROPERTY of the object
+   * referenced by another (object_reference) parameter, against the live
+   * object state at submit time. Applied in Step 3b AFTER static defaults and
+   * BEFORE type coercion, so the resolved value is type-validated. Only used
+   * when the parameter's own value is unset (user edits override).
+   */
+  defaultFromObjectReference?: {
+    parameter: string;
+    objectProperty: string;
+    /**
+     * B1 (cross-functionality) — explicit object type for the referenced
+     * object, when the source `parameter` is a STRING primary-key param (no
+     * `objectType` on the source param's own def). Falls back to the source
+     * param's `objectType` (the D13 object_reference case).
+     */
+    objectType?: string;
+  };
 }
 
 /** Constraint rules for a parameter. */
 export interface ParameterConstraints {
+  /** Canonical principal constraint. Values are Keycloak/Multipass user IDs. */
+  valueType?: "user" | "group";
   regex?: string;
   min?: number;
   max?: number;
@@ -50,6 +92,23 @@ export type ObjectExistsChecker = (
   objectType: string,
   primaryKey: string
 ) => Promise<boolean>;
+
+/**
+ * Async function to fetch an object's persisted properties (B13 —
+ * property-derived defaults need the referenced object's property value).
+ * Returns the object document or null if not found.
+ */
+export type ObjectFetcher = (
+  objectType: string,
+  primaryKey: string
+) => Promise<Record<string, unknown> | null>;
+
+export interface ParameterValidationContext {
+  /** Canonical authenticated principal ID, never accepted from request data. */
+  currentUserId?: string;
+  /** Authoritative identity-directory lookup used for user constraints. */
+  userExists?: (userId: string) => Promise<boolean>;
+}
 
 /** Result of parameter validation. */
 export interface ValidationResult {
@@ -80,6 +139,81 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIMESTAMP_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
+/**
+ * Read a property value from a fetched object by its authoring apiName
+ * (camelCase). The persisted object document can be keyed by EITHER the
+ * apiName (camelCase — objects created by the BE action runtime) OR the
+ * backing DB column name (snake_case — legacy/seed objects). Try apiName
+ * first, then its snake_case form, so B13 (default-from-object-property)
+ * and B15 (cascade filter) resolve against the live object state regardless
+ * of which storage convention the object used.
+ */
+function propertyByApiName(
+  obj: Record<string, unknown> | null,
+  apiName: string,
+): unknown {
+  if (!obj || typeof apiName !== "string" || apiName === "") return undefined;
+  if (obj[apiName] !== undefined) return obj[apiName];
+  const snake = apiName.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  if (snake !== apiName && obj[snake] !== undefined) return obj[snake];
+  return undefined;
+}
+
+/**
+ * C21 — collect the apiNames of parameters that live in a HIDDEN form-content
+ * section, so the required check (Step 2) does not block submission when a
+ * section is predicate-hidden or statically hidden. A section is hidden when:
+ *   - `visibility === "hidden"` (static), or
+ *   - `visibility` is an object with a `predicate` and that predicate does
+ *     NOT hold over the provided parameter values (predicate-driven visibility).
+ * The form-content layout is persisted on the FIRST parameter's `formContent`
+ * field (FE authoring convention). Returns an empty set when there is no
+ * form-content (backward compatible — nothing is hidden).
+ */
+function computeHiddenSectionParams(
+  parameterDefinitions: ParameterDefinition[],
+  providedParameters: Record<string, unknown>,
+): Set<string> {
+  const out = new Set<string>();
+  const first = parameterDefinitions[0] as ParameterDefinition & {
+    formContent?: unknown;
+  };
+  const formContent = first?.formContent as
+    | { items?: unknown[] }
+    | undefined;
+  if (!formContent || !Array.isArray(formContent.items)) return out;
+  for (const raw of formContent.items) {
+    const item = raw as {
+      kind?: string;
+      visibility?: unknown;
+      parameterApiNames?: string[];
+    };
+    if (!item || item.kind !== "section") continue;
+    let hidden = false;
+    const vis = item.visibility;
+    if (vis === "hidden") hidden = true;
+    else if (vis && typeof vis === "object" && "predicate" in vis) {
+      const pred = (vis as { predicate: unknown }).predicate;
+      if (pred && typeof pred === "object") {
+        try {
+          hidden = !evalParamPredicate(
+            pred as never,
+            providedParameters,
+          );
+        } catch {
+          hidden = true; // fail-closed: an unresolvable predicate hides the section
+        }
+      }
+    }
+    if (hidden && Array.isArray(item.parameterApiNames)) {
+      for (const apiName of item.parameterApiNames) {
+        if (typeof apiName === "string") out.add(apiName);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Main function
 // ---------------------------------------------------------------------------
@@ -95,10 +229,13 @@ const TIMESTAMP_RE =
 export async function validateParameters(
   parameterDefinitions: ParameterDefinition[],
   providedParameters: Record<string, unknown>,
-  objectExistsChecker: ObjectExistsChecker
+  objectExistsChecker: ObjectExistsChecker,
+  objectFetcher?: ObjectFetcher,
+  context: ParameterValidationContext = {},
 ): Promise<ValidationResult> {
   const errors: string[] = [];
   const resolved: Record<string, unknown> = {};
+  const effectiveParameters = { ...providedParameters };
 
   // Build lookup map of parameter definitions
   const defMap = new Map<string, ParameterDefinition>();
@@ -124,13 +261,56 @@ export async function validateParameters(
     return { valid: false, errors, resolvedParameters: null };
   }
 
-  // -----------------------------------------------------------------------
-  // Step 2: Check required parameters
-  // -----------------------------------------------------------------------
+  // Resolve contextual defaults before requiredness. For hidden/disabled
+  // fields, reject caller substitution and bind the value to the authenticated
+  // principal. Visible + editable fields retain normal prefill semantics and
+  // may be changed to another valid directory user.
   for (const def of parameterDefinitions) {
-    if (def.required === true) {
-      const value = providedParameters[def.apiName];
-      if (value === undefined || value === null) {
+    if (def.defaultValueTypeClass !== "currentUserId") continue;
+    const currentUserId = context.currentUserId?.trim();
+    if (!currentUserId) {
+      errors.push(
+        `Parameter '${def.apiName}' requires an authenticated current user`,
+      );
+      continue;
+    }
+    const supplied = effectiveParameters[def.apiName];
+    const locked = def.visible === false || def.editable === false;
+    if (locked && supplied != null && String(supplied) !== currentUserId) {
+      errors.push(
+        `Parameter '${def.apiName}' is bound to the authenticated current user`,
+      );
+      continue;
+    }
+    if (supplied === undefined || supplied === null || locked) {
+      effectiveParameters[def.apiName] = currentUserId;
+    }
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors, resolvedParameters: null };
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 2: Check required parameters (C21: skip params in a hidden
+  // form-content section — predicate-hidden or statically hidden).
+  // -----------------------------------------------------------------------
+  const hiddenSectionParams = computeHiddenSectionParams(
+    parameterDefinitions,
+    effectiveParameters,
+  );
+  for (const def of parameterDefinitions) {
+    if (def.required === true && !hiddenSectionParams.has(def.apiName)) {
+      const value = effectiveParameters[def.apiName];
+      // fix(F34): a required string parameter supplied as "" or whitespace-only
+      // is missing (the Workshop form already enforces this client-side; the
+      // API path must not persist whitespace PKs).
+      const blankString =
+        def.type === "string" &&
+        typeof value === "string" &&
+        value.trim() === "" &&
+        !(def.constraints?.allowedValues ?? []).includes(value);
+      if (value === undefined || value === null || blankString) {
         errors.push(
           `Required parameter '${def.apiName}' (${def.displayName}) is missing`
         );
@@ -148,7 +328,7 @@ export async function validateParameters(
   // Step 3: Apply default values
   // -----------------------------------------------------------------------
   for (const def of parameterDefinitions) {
-    const provided = providedParameters[def.apiName];
+    const provided = effectiveParameters[def.apiName];
     if (provided !== undefined && provided !== null) {
       resolved[def.apiName] = provided;
     } else if (def.required !== true && (provided === undefined || provided === null)) {
@@ -164,6 +344,45 @@ export async function validateParameters(
     } else {
       // Required parameter — already verified as present in step 2
       resolved[def.apiName] = provided;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 3b: Property-derived defaults (B13). A parameter whose value is
+  // still unset and carries `defaultFromObjectReference` resolves its default
+  // from a PROPERTY of the object referenced by another (object_reference)
+  // parameter, fetched against the live object state. Runs AFTER static
+  // defaults and BEFORE type coercion so the resolved value is type-validated.
+  // A missing fetcher / unfound object / absent property leaves the value
+  // unset (fall through to required/blank handling); never fabricates a value.
+  // -----------------------------------------------------------------------
+  if (objectFetcher) {
+    for (const def of parameterDefinitions) {
+      if (!def.defaultFromObjectReference) continue;
+      const current = resolved[def.apiName];
+      const isBlank =
+        current === undefined ||
+        current === null ||
+        current === "" ||
+        (Array.isArray(current) && current.length === 0);
+      if (!isBlank) continue;
+      const { parameter: sourceParam, objectProperty } = def.defaultFromObjectReference;
+      const sourceDef = defMap.get(sourceParam);
+      // B1: honor an explicit `objectType` on the spec so a STRING primary-key
+      // source parameter (no sourceDef.objectType) can resolve too.
+      const sourceObjectType = def.defaultFromObjectReference.objectType ?? sourceDef?.objectType;
+      const sourcePk = resolved[sourceParam];
+      if (!sourceObjectType || sourcePk == null || sourcePk === "") continue;
+      try {
+        const obj = await objectFetcher(sourceObjectType, String(sourcePk));
+        const v = propertyByApiName(obj, objectProperty);
+        if (v !== undefined && v !== null) {
+          resolved[def.apiName] = v;
+        }
+      } catch {
+        // Fail-soft: leave the value unset; required/blank handling applies.
+        continue;
+      }
     }
   }
 
@@ -211,6 +430,131 @@ export async function validateParameters(
     validateConstraints(def, value, errors);
   }
 
+  // User constraints are an identity boundary, not a presentation hint.
+  // Validate against the authoritative directory and fail closed when no
+  // checker is available. Cache lookups within one submission for batch-like
+  // schemas that repeat the same principal.
+  const userExistence = new Map<string, boolean>();
+  for (const def of parameterDefinitions) {
+    if (def.constraints?.valueType !== "user") continue;
+    const value = resolved[def.apiName];
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value !== "string") {
+      errors.push(`Parameter '${def.apiName}' must be a user ID`);
+      continue;
+    }
+    if (!context.userExists) {
+      errors.push(`Parameter '${def.apiName}' user identity could not be validated`);
+      continue;
+    }
+    let exists = userExistence.get(value);
+    if (exists === undefined) {
+      try {
+        exists = await context.userExists(value);
+      } catch {
+        errors.push(`Parameter '${def.apiName}' user identity could not be validated`);
+        continue;
+      }
+      userExistence.set(value, exists);
+    }
+    if (!exists) {
+      errors.push(`Parameter '${def.apiName}' references an unknown or disabled user`);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 5b: Object-reference cascade filter enforcement (B15). A
+  // `constraints.filterByObjectReference: { parameter, property }` declares
+  // that the selected object's `property` must equal the upstream parameter's
+  // resolved value. The UI filters the dropdown; the BE enforces it on the
+  // apply/API path so a client bypass (submitting an option that no longer
+  // satisfies the filter) is rejected. Runs after coercion so the value is a
+  // resolved PK and the upstream param is resolved too.
+  // -----------------------------------------------------------------------
+  if (objectFetcher) {
+    for (const def of parameterDefinitions) {
+      const spec = (def.constraints as unknown as Record<string, unknown> | undefined)
+        ?.filterByObjectReference as
+        | { parameter: string; property: string }
+        | undefined;
+      if (!spec || !spec.parameter || !spec.property) continue;
+      const pk = resolved[def.apiName];
+      if (pk == null || pk === "") continue;
+      if (!def.objectType) continue;
+      const upstream = resolved[spec.parameter];
+      try {
+        const obj = await objectFetcher(def.objectType, String(pk));
+        if (obj == null) continue; // existence already enforced in Step 4
+        const actual = propertyByApiName(obj, spec.property);
+        const ok =
+          actual === upstream ||
+          String(actual) === String(upstream);
+        if (!ok) {
+          errors.push(
+            `Parameter '${def.apiName}' object's '${spec.property}' is '${JSON.stringify(actual)}' which does not match the cascade filter (upstream '${spec.parameter}'='${JSON.stringify(upstream)}'); select an option that satisfies the filter.`,
+          );
+        }
+      } catch {
+        // Fail-soft: skip enforcement if the object can't be fetched; the
+        // existence check (Step 4) remains authoritative.
+        continue;
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 5c: Conditional parameter overrides (B18/B19). A parameter's
+  // `conditionalOverrides` are evaluated against the resolved params; the
+  // first override whose `when` predicate holds yields the effective
+  // {required, visible, allowedValues}. Enforce the EFFECTIVE constraints on
+  // the apply/API path (never trust the client): an effectively-required AND
+  // visible parameter must be present; an allowedValues override validates
+  // the value. An effectively-hidden parameter is not required (and the FE
+  // filters it from submission). Backward compatible: no overrides ⇒ the
+  // authored constraints (already enforced in Steps 2/5) stand.
+  // -----------------------------------------------------------------------
+  for (const def of parameterDefinitions) {
+    const overrides = (def as unknown as { conditionalOverrides?: unknown[] })
+      .conditionalOverrides;
+    if (!Array.isArray(overrides) || overrides.length === 0) continue;
+    let eff: Record<string, unknown> | null = null;
+    for (const ov of overrides) {
+      const o = ov as { when?: unknown };
+      if (o && o.when && evalParamPredicate(o.when as never, resolved)) {
+        eff = ov as Record<string, unknown>;
+        break; // first-match-wins
+      }
+    }
+    if (!eff) continue;
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(eff, k);
+    const effVisible = has("visible") ? eff.visible : null;
+    if (effVisible === false) continue; // effectively hidden ⇒ not required
+    if (has("required") && eff.required === true) {
+      const v = resolved[def.apiName];
+      const blank =
+        v === undefined || v === null || v === "" ||
+        (Array.isArray(v) && v.length === 0);
+      if (blank) {
+        errors.push(
+          `Required parameter '${def.apiName}' (${def.displayName}) is missing (conditionally required)`,
+        );
+      }
+    }
+    if (has("allowedValues") && Array.isArray(eff.allowedValues) && eff.allowedValues.length > 0) {
+      const v = resolved[def.apiName];
+      const allowed = eff.allowedValues as unknown[];
+      if (
+        v !== undefined && v !== null && v !== "" &&
+        !allowed.includes(v) &&
+        !allowed.map(String).includes(String(v))
+      ) {
+        errors.push(
+          `Parameter '${def.apiName}' must be one of the conditionally-allowed values: ${(eff.allowedValues as unknown[]).map(String).join(", ")}`,
+        );
+      }
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Step 6: Return result
   // -----------------------------------------------------------------------
@@ -247,11 +591,18 @@ async function validateAndCoerceType(
     case "integer":
       return coerceInteger(apiName, value, errors);
 
+    case "byte":
+      return coerceBoundedInteger(apiName, value, -128, 127, "byte", errors);
+
+    case "short":
+      return coerceBoundedInteger(apiName, value, -32768, 32767, "short", errors);
+
     case "long":
       return coerceLong(apiName, value, errors);
 
     case "double":
     case "float":
+    case "decimal":
       return coerceDouble(apiName, value, paramType, errors);
 
     case "date":
@@ -263,8 +614,23 @@ async function validateAndCoerceType(
     case "object_reference":
       return coerceObjectReference(apiName, value, def, objectExistsChecker, errors);
 
+    case "object_type_reference":
+      if (typeof value !== "string" || value.length === 0) {
+        errors.push(
+          `Parameter '${apiName}' must be the API name of an object type implementing interface '${def.interfaceId ?? ""}'.`,
+        );
+        return undefined;
+      }
+      return value;
+
+    case "interface_reference":
+      return coerceInterfaceReference(apiName, value, def, objectExistsChecker, errors);
+
+    case "interface_reference_array":
+      return coerceInterfaceReferenceArray(apiName, value, def, objectExistsChecker, errors);
+
     case "object_set":
-      return coerceObjectSet(apiName, value, errors);
+      return coerceObjectSet(apiName, value, def, objectExistsChecker, errors);
 
     case "string_array":
       return coerceTypedArray(apiName, value, "string", errors);
@@ -275,8 +641,26 @@ async function validateAndCoerceType(
     case "double_array":
       return coerceTypedArray(apiName, value, "double", errors);
 
+    case "boolean_array":
+      return coerceTypedArray(apiName, value, "boolean", errors);
+
+    case "timestamp_array":
+      return coerceTypedArray(apiName, value, "timestamp", errors);
+
+    case "geopoint":
+      return coerceGeopoint(apiName, value, errors);
+
+    case "geoshape":
+      return coerceGeoshape(apiName, value, errors);
+
     case "struct":
-      return coerceStruct(apiName, value, errors);
+      return coerceStruct(apiName, value, def, errors);
+
+    case "attachment":
+    case "marking":
+    case "media_reference":
+    case "timeseries":
+      return value;
 
     default:
       errors.push(
@@ -284,6 +668,79 @@ async function validateAndCoerceType(
       );
       return undefined;
   }
+}
+
+export interface ResolvedInterfaceReference {
+  objectType: string;
+  primaryKey: string;
+}
+
+async function coerceInterfaceReference(
+  apiName: string,
+  value: unknown,
+  def: ParameterDefinition,
+  objectExistsChecker: ObjectExistsChecker,
+  errors: string[],
+): Promise<ResolvedInterfaceReference | undefined> {
+  if (!def.interfaceId) {
+    errors.push(
+      `Parameter '${apiName}' is type 'interface_reference' but has no interfaceId configured.`,
+    );
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(
+      `Parameter '${apiName}' must be an interface reference object with objectType and primaryKey.`,
+    );
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.objectType !== "string" ||
+    candidate.objectType.length === 0 ||
+    typeof candidate.primaryKey !== "string" ||
+    candidate.primaryKey.length === 0
+  ) {
+    errors.push(
+      `Parameter '${apiName}' must contain non-empty string objectType and primaryKey fields.`,
+    );
+    return undefined;
+  }
+  if (!(await objectExistsChecker(candidate.objectType, candidate.primaryKey))) {
+    errors.push(
+      `Parameter '${apiName}' references object '${candidate.primaryKey}' of type '${candidate.objectType}' which does not exist in the Ontology.`,
+    );
+    return undefined;
+  }
+  return {
+    objectType: candidate.objectType,
+    primaryKey: candidate.primaryKey,
+  };
+}
+
+async function coerceInterfaceReferenceArray(
+  apiName: string,
+  value: unknown,
+  def: ParameterDefinition,
+  objectExistsChecker: ObjectExistsChecker,
+  errors: string[],
+): Promise<ResolvedInterfaceReference[] | undefined> {
+  if (!Array.isArray(value)) {
+    errors.push(`Parameter '${apiName}' must be an array of interface references.`);
+    return undefined;
+  }
+  const resolved: ResolvedInterfaceReference[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = await coerceInterfaceReference(
+      `${apiName}[${index}]`,
+      value[index],
+      def,
+      objectExistsChecker,
+      errors,
+    );
+    if (item) resolved.push(item);
+  }
+  return resolved.length === value.length ? resolved : undefined;
 }
 
 // --- String ---
@@ -365,6 +822,27 @@ function coerceInteger(
     return undefined;
   }
   return num;
+}
+
+function coerceBoundedInteger(
+  apiName: string,
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  typeName: string,
+  errors: string[],
+): number | undefined {
+  const localErrors: string[] = [];
+  const coerced = coerceInteger(apiName, value, localErrors);
+  if (coerced === undefined) {
+    errors.push(...localErrors);
+    return undefined;
+  }
+  if (coerced < minimum || coerced > maximum) {
+    errors.push(`Parameter '${apiName}' must be a ${typeName} (${minimum} to ${maximum}), received: ${coerced}`);
+    return undefined;
+  }
+  return coerced;
 }
 
 // --- Long (64-bit signed) ---
@@ -560,21 +1038,43 @@ async function coerceObjectReference(
 }
 
 // --- Object Set ---
-function coerceObjectSet(
+async function coerceObjectSet(
   apiName: string,
   value: unknown,
+  def: ParameterDefinition,
+  objectExistsChecker: ObjectExistsChecker,
   errors: string[]
-): string[] | undefined {
+): Promise<string[] | undefined> {
   if (!Array.isArray(value)) {
     errors.push(
       `Parameter '${apiName}' must be an array of strings (object set), received: ${typeof value}`
     );
     return undefined;
   }
+  // Foundry's documented object-reference-list limit. Enforce it at the
+  // boundary so a Workshop selection cannot turn into an unbounded action.
+  if (value.length > 1_000) {
+    errors.push(
+      `Parameter '${apiName}' exceeds the maximum of 1000 object references`,
+    );
+    return undefined;
+  }
+  if (!def.objectType) {
+    errors.push(
+      `Parameter '${apiName}' is type 'object_set' but has no objectType configured.`,
+    );
+    return undefined;
+  }
   for (let i = 0; i < value.length; i++) {
-    if (typeof value[i] !== "string") {
+    if (typeof value[i] !== "string" || !(value[i] as string).trim()) {
       errors.push(
-        `Parameter '${apiName}' array element at index ${i} must be a string, received: ${typeof value[i]}`
+        `Parameter '${apiName}' array element at index ${i} must be a non-empty string, received: ${typeof value[i]}`
+      );
+      return undefined;
+    }
+    if (!await objectExistsChecker(def.objectType, value[i] as string)) {
+      errors.push(
+        `Parameter '${apiName}' references object '${value[i]}' of type '${def.objectType}' which does not exist in the Ontology`,
       );
       return undefined;
     }
@@ -586,7 +1086,7 @@ function coerceObjectSet(
 function coerceTypedArray(
   apiName: string,
   value: unknown,
-  baseType: "string" | "integer" | "double",
+  baseType: "string" | "integer" | "double" | "boolean" | "timestamp",
   errors: string[]
 ): unknown[] | undefined {
   if (!Array.isArray(value)) {
@@ -608,9 +1108,13 @@ function coerceTypedArray(
       coerced = coerceString(`${apiName}[${i}]`, elem, elemErrors);
     } else if (baseType === "integer") {
       coerced = coerceInteger(`${apiName}[${i}]`, elem, elemErrors);
-    } else {
+    } else if (baseType === "double") {
       // double
       coerced = coerceDouble(`${apiName}[${i}]`, elem, "double", elemErrors);
+    } else if (baseType === "boolean") {
+      coerced = coerceBoolean(`${apiName}[${i}]`, elem, elemErrors);
+    } else {
+      coerced = coerceTimestamp(`${apiName}[${i}]`, elem, elemErrors);
     }
 
     if (elemErrors.length > 0) {
@@ -628,10 +1132,80 @@ function coerceTypedArray(
   return hasError ? undefined : result;
 }
 
+function coerceGeopoint(
+  apiName: string,
+  value: unknown,
+  errors: string[],
+): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`Parameter '${apiName}' must be a geopoint object with lat/lon.`);
+    return undefined;
+  }
+  const point = value as Record<string, unknown>;
+  if (
+    typeof point.lat !== "number" || point.lat < -90 || point.lat > 90 ||
+    typeof point.lon !== "number" || point.lon < -180 || point.lon > 180
+  ) {
+    errors.push(`Parameter '${apiName}' must contain lat -90..90 and lon -180..180.`);
+    return undefined;
+  }
+  return point as Record<string, number>;
+}
+
+function coerceGeoshape(
+  apiName: string,
+  value: unknown,
+  errors: string[],
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as Record<string, unknown>).type !== "string") {
+    errors.push(`Parameter '${apiName}' must be a GeoJSON object with a type field.`);
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
 // --- Struct ---
+
+/** Field-aware scalar coercion for struct members (primitive types only). */
+function coerceStructField(
+  fieldPath: string,
+  fieldType: string,
+  raw: unknown,
+  errors: string[],
+): unknown {
+  switch (fieldType) {
+    case "string":
+      return coerceString(fieldPath, raw, errors);
+    case "boolean":
+      return coerceBoolean(fieldPath, raw, errors);
+    case "integer":
+      return coerceInteger(fieldPath, raw, errors);
+    case "byte":
+      return coerceBoundedInteger(fieldPath, raw, -128, 127, "byte", errors);
+    case "short":
+      return coerceBoundedInteger(fieldPath, raw, -32768, 32767, "short", errors);
+    case "long":
+      return coerceLong(fieldPath, raw, errors);
+    case "double":
+    case "float":
+    case "decimal":
+      return coerceDouble(fieldPath, raw, fieldType, errors);
+    case "date":
+      return coerceDate(fieldPath, raw, errors);
+    case "timestamp":
+      return coerceTimestamp(fieldPath, raw, errors);
+    default:
+      errors.push(
+        `Struct field '${fieldPath}' has unsupported type '${fieldType}'.`,
+      );
+      return undefined;
+  }
+}
+
 function coerceStruct(
   apiName: string,
   value: unknown,
+  def: ParameterDefinition,
   errors: string[]
 ): Record<string, unknown> | undefined {
   if (
@@ -646,7 +1220,50 @@ function coerceStruct(
     );
     return undefined;
   }
-  return value as Record<string, unknown>;
+  const record = value as Record<string, unknown>;
+  const fields = def.structFields;
+  if (!Array.isArray(fields) || fields.length === 0) {
+    // No authored schema — legacy pass-through (plain object).
+    return record;
+  }
+
+  // Authored struct schema (Foundry semantics): required fields must be
+  // present, unknown keys are rejected, known fields are coerced by type.
+  const byName = new Map(fields.map((field) => [field.apiName, field]));
+  for (const key of Object.keys(record)) {
+    if (!byName.has(key)) {
+      errors.push(
+        `Parameter '${apiName}' contains unknown struct field '${key}'.`,
+      );
+    }
+  }
+  const out: Record<string, unknown> = {};
+  let failed = false;
+  for (const field of fields) {
+    const raw = record[field.apiName];
+    if (raw === undefined || raw === null) {
+      if (field.required) {
+        errors.push(
+          `Parameter '${apiName}.${field.apiName}' is required.`,
+        );
+        failed = true;
+      }
+      continue;
+    }
+    const before = errors.length;
+    const coerced = coerceStructField(
+      `${apiName}.${field.apiName}`,
+      field.type,
+      raw,
+      errors,
+    );
+    if (errors.length !== before || coerced === undefined) {
+      failed = true;
+      continue;
+    }
+    out[field.apiName] = coerced;
+  }
+  return failed ? undefined : out;
 }
 
 // ---------------------------------------------------------------------------

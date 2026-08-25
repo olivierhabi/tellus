@@ -34,6 +34,7 @@ import {
   type AuditRowBody,
 } from "../services/audit/hashChain";
 import { incCounter } from "../services/funnel/metrics";
+import { V1_DEFAULT_SEMANTICS } from "../actions/actionSemantics";
 
 /** Result classification mirrored in DB CHECK (action_audit_log.result). */
 export type AuditResult = "success" | "failed" | "partial";
@@ -46,6 +47,8 @@ export type FailureType =
   | "scale_limit"
   | "permission_denied"
   | "concurrency_conflict"
+  // Phase 4 — writeback pre-edit stage rejection.
+  | "writeback_rejected"
   | "unclassified"
   | null;
 
@@ -69,6 +72,10 @@ export interface AuditLogEntry {
   source_ip?: string | null;
   branch_id?: string | null;
   metadata?: Record<string, unknown>;
+  // Phase 8 — semantics audit fields (migration 121).
+  semantics_version?: number | null;
+  execution_mode?: string | null;
+  correlation_id?: string | null;
 }
 
 /**
@@ -103,6 +110,18 @@ function toRowBody(entry: AuditLogEntry): AuditRowBody {
     branch_id: entry.branch_id ?? null,
     source_ip: entry.source_ip ?? null,
     metadata: entry.metadata ?? {},
+    // Migration 124 made action_audit_log.{semantics_version, execution_mode}
+    // NOT NULL with domain CHECKs. Callers that predated the semantics
+    // columns (or never resolved the action type's triple before a pipeline
+    // failure) omit them; the honest mapping for such legacy rows is the
+    // same v1 fallback resolveActionSemantics() applies to NULL stored rows
+    // — audit and semantics answer "which semantics governed this execution"
+    // identically.
+    semantics_version:
+      (entry as any).semantics_version ?? V1_DEFAULT_SEMANTICS.semanticsVersion,
+    execution_mode:
+      (entry as any).execution_mode ?? V1_DEFAULT_SEMANTICS.executionMode,
+    correlation_id: (entry as any).correlation_id ?? null,
   };
 }
 

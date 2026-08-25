@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import { client } from "./client";
+import { objectIndexPrefix } from "../../config/environmentIdentity";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,8 +33,23 @@ export interface EnsureTemplateResult {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Template name registered in OpenSearch. */
+/** Base template name registered in OpenSearch. */
 const TEMPLATE_NAME = "ontology-template";
+
+/**
+ * Deployment-scoped template identity: the default prefix keeps the
+ * historical name/pattern; a custom OS_INDEX_PREFIX gets its own
+ * template (named + patterned by prefix) so test/verify stacks never
+ * collide with the dev template.
+ */
+function templateName(): string {
+  const prefix = objectIndexPrefix();
+  if (prefix === "ontology-") return TEMPLATE_NAME;
+  return `${TEMPLATE_NAME}-${prefix.replace(/-$/, "").replace(/[^a-z0-9-]/g, "-")}`;
+}
+function templatePattern(): string {
+  return `${objectIndexPrefix()}*`;
+}
 
 /**
  * System field mappings — identical to the ones in indexMappingGenerator.ts.
@@ -43,11 +59,14 @@ const TEMPLATE_NAME = "ontology-template";
  */
 const SYSTEM_FIELD_MAPPINGS = {
   __pk: { type: "keyword" as const },
+  __ontology: { type: "keyword" as const },
+  __rid: { type: "keyword" as const },
   __objectType: { type: "keyword" as const },
   __lastModified: { type: "date" as const },
   __version: { type: "long" as const },
   __editedBy: { type: "keyword" as const },
   __datasourceVersion: { type: "keyword" as const },
+  __branch: { type: "keyword" as const },
 };
 
 /**
@@ -55,8 +74,18 @@ const SYSTEM_FIELD_MAPPINGS = {
  * These match the settings in indexMappingGenerator.ts.
  */
 const DEFAULT_TEMPLATE_SETTINGS = {
-  number_of_shards: 1,
-  number_of_replicas: 0,
+  // Env-tunable: a single shard caps OpenSearch indexing at one thread, which
+  // made the 5.6M-row OlivierOrder2 bulk-sync crawl (~8 s / 5000-doc page,
+  // ~2 hr). 4 shards parallelise indexing on multi-core dev boxes (~4×). Prod
+  // defaults to 1 (one OT index is small; shard overhead isn't worth it there).
+  number_of_shards: Number(process.env.OS_INDEX_SHARDS ?? "1"),
+  // Env-tunable: 0 replicas for single-node dev (no HA). Prod must set
+  // OS_INDEX_REPLICAS >= 1 once a multi-node cluster topology exists; do NOT
+  // hardcode a prod value here (we don't have that topology yet). Both this
+  // file and indexMappingGenerator.ts read the SAME env var — keep them in
+  // sync (drift would make template-created vs explicitly-created indices
+  // diverge on replica count).
+  number_of_replicas: Number(process.env.OS_INDEX_REPLICAS ?? "0"),
   refresh_interval: "1s",
   max_result_window: 100000,
 };
@@ -68,7 +97,7 @@ const DEFAULT_TEMPLATE_SETTINGS = {
 /**
  * Create or update the `ontology-template` index template in OpenSearch.
  *
- * This template matches all `ontology-*` indices and applies:
+ * This template matches all `<prefix>*` indices (default `ontology-*`) and applies:
  *   - Default index settings (shards, replicas, refresh interval, etc.)
  *   - System field mappings (__pk, __objectType, __lastModified, etc.)
  *
@@ -96,9 +125,9 @@ export async function ensureIndexTemplate(): Promise<EnsureTemplateResult> {
 
   try {
     await client.indices.putTemplate({
-      name: TEMPLATE_NAME,
+      name: templateName(),
       body: {
-        index_patterns: ["ontology-*"],
+        index_patterns: [templatePattern()],
         settings: DEFAULT_TEMPLATE_SETTINGS,
         mappings: {
           properties: SYSTEM_FIELD_MAPPINGS,
@@ -107,13 +136,13 @@ export async function ensureIndexTemplate(): Promise<EnsureTemplateResult> {
     });
 
     console.log(
-      `Index template '${TEMPLATE_NAME}' ensured (action: ${action})`
+      `Index template '${templateName()}' ensured (action: ${action}, pattern: ${templatePattern()})`
     );
 
     return {
       success: true,
       action,
-      templateName: TEMPLATE_NAME,
+      templateName: templateName(),
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -123,7 +152,7 @@ export async function ensureIndexTemplate(): Promise<EnsureTemplateResult> {
         : message;
 
     throw new Error(
-      `Failed to ${action === "created" ? "create" : "update"} index template '${TEMPLATE_NAME}': ${details}`
+      `Failed to ${action === "created" ? "create" : "update"} index template '${templateName()}': ${details}`
     );
   }
 }

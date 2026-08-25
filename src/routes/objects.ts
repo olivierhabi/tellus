@@ -25,11 +25,12 @@ import {
   validateAggregateQuery,
 } from "../services/queryValidator";
 import { resolveLinks, countLinks, searchAround, validateForeignKeys } from "../services/linkResolverService";
-import linkTypeModel from "../models/linkType";
+import linkTypeModel, { resolveObjectTypeApiName } from "../models/linkType";
 import { sendSuccess, sendError } from "../utils/responseFormatter";
 import { appError } from "../utils/appError";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import { readBranchHeader } from "../middleware/branchHeader";
+import { resolveBranchIdOrMain } from "../services/branchContext";
 import { incCounter } from "../services/funnel/metrics";
 import { routeMetric } from "../utils/routeInstrumentation";
 import {
@@ -40,12 +41,134 @@ import {
 import { getOverlayStore, markOverlayDegraded } from "../services/overlay/getOverlayStore";
 import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 import { CellMarkingService, redactCells } from "../services/security/cellMarkingService";
+import {
+  enforceQueryMarkings,
+  stripRestrictedRows,
+} from "../services/security/propertyMarkingGuard";
 
 const router = Router();
 
 // FOUNDRY-GAPS §8 — cell-level marking redaction at read time. Stateless over
 // the shared `query` pool, so one instance is reused across requests.
 const cellMarkingService = new CellMarkingService();
+
+export type PropertyMarking = {
+  api_name: string;
+  column_name?: string | null;
+  marking_required: string[] | string | null;
+};
+
+function snakeCase(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+/**
+ * Enforce the property-projection rule used by direct reads: unavailable
+ * properties are omitted, never nulled or masked in the client. PostgreSQL
+ * returns `text[]` for the current schema, while the string branch keeps
+ * mixed-version deployments safe during migration 045.
+ */
+export function omitUnauthorizedProperties(
+  properties: Record<string, unknown>,
+  markings: readonly PropertyMarking[],
+  grantedMarkings: ReadonlySet<string>,
+  markingBypass = false,
+): string[] {
+  if (markingBypass) return [];
+  const omitted: string[] = [];
+  for (const row of markings) {
+    const required = Array.isArray(row.marking_required)
+      ? row.marking_required
+      : typeof row.marking_required === "string" && row.marking_required
+        ? [row.marking_required]
+        : [];
+    if (required.length === 0 || required.every((marking) => grantedMarkings.has(marking))) {
+      continue;
+    }
+    // Object-serving documents can use the ontology API name or the mapped
+    // datasource column. Remove every representation so an API-name policy
+    // cannot leak through a snake_case backing field on direct reads.
+    const aliases = new Set([row.api_name, snakeCase(row.api_name)]);
+    if (row.column_name) aliases.add(row.column_name);
+    let found = false;
+    for (const property of aliases) {
+      if (!Object.prototype.hasOwnProperty.call(properties, property)) continue;
+      delete properties[property];
+      found = true;
+    }
+    if (found) {
+      omitted.push(row.api_name);
+    }
+  }
+  return omitted;
+}
+
+type LinkedWhere = {
+  type: "linked";
+  ontologyId: string;
+  linkTypeApiName: string;
+  targetObjectTypeApiName: string;
+  targetWhere?: Record<string, unknown>;
+  negated?: boolean;
+};
+
+/** Resolve Filter List linked predicates into a primary-key predicate before
+ * normal schema validation/query translation. Resolution happens against the
+ * complete target result set (cursor-paged) and the canonical link service,
+ * so aggregate/facet/chart queries all share identical traversal semantics. */
+async function resolveLinkedWhere(
+  where: unknown,
+  sourceObjectType: string,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
+): Promise<unknown> {
+  if (!where || typeof where !== "object" || Array.isArray(where)) return where;
+  const node = where as Record<string, unknown>;
+  if (node.type === "and" || node.type === "or") {
+    const children = Array.isArray(node.value) ? node.value : [];
+    return { ...node, value: await Promise.all(children.map((child) => resolveLinkedWhere(child, sourceObjectType, securityFilter, branchId))) };
+  }
+  if (node.type === "not") {
+    const children = Array.isArray(node.value) ? node.value : [];
+    return { ...node, value: await Promise.all(children.map((child) => resolveLinkedWhere(child, sourceObjectType, securityFilter, branchId))) };
+  }
+  if (node.type !== "linked") return where;
+
+  const linked = node as unknown as LinkedWhere;
+  if (!linked.ontologyId || !linked.linkTypeApiName || !linked.targetObjectTypeApiName) {
+    throw appError("INVALID_ARGUMENT", "Linked filter requires ontologyId, linkTypeApiName, and targetObjectTypeApiName.");
+  }
+  const linkType = await linkTypeModel.getByApiName(linked.ontologyId, linked.linkTypeApiName);
+  if (!linkType) throw appError("NOT_FOUND", `Link type '${linked.linkTypeApiName}' was not found.`);
+  const linkSourceType = await resolveObjectTypeApiName(linkType.source_object_type);
+  const linkTargetType = await resolveObjectTypeApiName(linkType.target_object_type);
+  const direction: "forward" | "reverse" = linkSourceType === sourceObjectType ? "reverse" : "forward";
+  const targetType = direction === "reverse" ? linkTargetType : linkSourceType;
+  if (targetType !== linked.targetObjectTypeApiName) {
+    throw appError("INVALID_ARGUMENT", `Linked filter target '${linked.targetObjectTypeApiName}' is incompatible with '${linked.linkTypeApiName}'.`);
+  }
+
+  if (linked.targetWhere) {
+    await validateSearchQuery({ where: linked.targetWhere, $pageSize: 1 }, targetType);
+  }
+  const sourcePks = new Set<string>();
+  let pageToken: string | undefined;
+  do {
+    const resolved = await searchAround(linkType, direction, {
+      pageSize: 1000,
+      ...(pageToken ? { pageToken } : {}),
+      ...(linked.targetWhere ? { sourceWhere: linked.targetWhere } : {}),
+    }, securityFilter, branchId);
+    for (const object of resolved.linkedObjects) if (object.__pk != null) sourcePks.add(String(object.__pk));
+    pageToken = resolved.nextPageToken ?? undefined;
+    if (sourcePks.size > 100_000) throw appError("INVALID_ARGUMENT", "Linked filter exceeds the 100,000 source safety limit; narrow the linked predicate.");
+  } while (pageToken);
+  // The public validator intentionally rejects empty `in` arrays. Preserve
+  // match-none semantics with an impossible reserved PK sentinel instead of
+  // widening an empty traversal to the complete source set.
+  const predicate = { type: "in", field: "__pk", value: sourcePks.size ? Array.from(sourcePks) : ["__tellus_no_link_match__"] };
+  return linked.negated ? { type: "not", value: [predicate] } : predicate;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -127,6 +250,78 @@ async function mergeWithOverlay<R extends { data: unknown[] }>(
         /* best-effort */
       }
     }
+  }
+}
+
+/**
+ * Reconcile a page of indexed hits with the authoritative B1 projection.
+ *
+ * The writeback overlay makes newly committed actions visible immediately,
+ * but it is intentionally short-lived. During a deployment/restart, or for
+ * edits committed before overlay rollout, OpenSearch can still hold an older
+ * document version. Returning that older version causes Workshop to submit a
+ * stale OCC token even though the object has not changed since the user read
+ * it. A single batched lookup closes that gap without an N+1 query pattern.
+ */
+async function hydrateStaleIndexedRows<R extends { data: unknown[] }>(
+  objectType: string,
+  result: R,
+  requestedBranchId: string | null,
+): Promise<R> {
+  const hits = result.data.filter(
+    (value): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  const primaryKeys = hits
+    .map((hit) => hit.__pk ?? hit.__primaryKey)
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+  if (primaryKeys.length === 0) return result;
+
+  try {
+    const type = await query(
+      "SELECT ontology_id FROM object_type WHERE api_name = $1 LIMIT 1",
+      [objectType],
+    );
+    const ontologyId = type.rows[0]?.ontology_id;
+    if (typeof ontologyId !== "string") return result;
+    const branchId = await resolveBranchIdOrMain(ontologyId, requestedBranchId);
+    const instances = await query(
+      `SELECT primary_key, properties, version
+         FROM object_instances
+        WHERE ontology_id = $1::uuid
+          AND branch_id = $2::uuid
+          AND object_type_api_name = $3
+          AND primary_key = ANY($4::text[])`,
+      [ontologyId, branchId, objectType, [...new Set(primaryKeys)]],
+    );
+    const authoritative = new Map((instances.rows as Array<{
+      primary_key: string;
+      properties: Record<string, unknown>;
+      version: number | string;
+    }>).map((row) => [row.primary_key, row]));
+    const data = result.data.map((value) => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+      const hit = value as Record<string, unknown>;
+      const primaryKey = typeof hit.__pk === "string"
+        ? hit.__pk
+        : typeof hit.__primaryKey === "string" ? hit.__primaryKey : null;
+      const instance = primaryKey ? authoritative.get(primaryKey) : undefined;
+      const indexedVersion = typeof hit.__version === "number" ? hit.__version : Number(hit.__version);
+      const instanceVersion = instance ? Number(instance.version) : Number.NaN;
+      if (!instance || !Number.isFinite(instanceVersion) || instanceVersion <= indexedVersion) return value;
+      return {
+        ...hit,
+        ...instance.properties,
+        __pk: instance.primary_key,
+        __objectType: hit.__objectType ?? objectType,
+        __version: instanceVersion,
+        __overlay_source: "object_instances",
+      };
+    });
+    return { ...result, data } as R;
+  } catch {
+    // Object Search remains available if a transitional deployment has not
+    // created B1 tables yet; the index continues as the safe fallback.
+    return result;
   }
 }
 
@@ -291,7 +486,16 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.search", branchId);
+      body.where = await resolveLinkedWhere(body.where, objectType, secFilter, branchId);
       const validated = await validateSearchQuery(body, objectType);
+      // Rwanda QA §3.3 — reject predicates on marking-restricted properties
+      // and strip restricted columns from the serialized result.
+      const restricted = await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        where: validated.where,
+        orderBy: validated.$orderBy,
+        security: req.security,
+      });
       const rawResult = await executeSearch(objectType, {
         where: validated.where,
         $orderBy: validated.$orderBy,
@@ -303,7 +507,9 @@ router.post(
       // B7: merge the writeback overlay so recent edits are visible
       // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
       // the index document for matching PKs; misses pass through.
-      const result = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where, branchId);
+      const overlayMerged = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where, branchId);
+      const result = await hydrateStaleIndexedRows(objectType, overlayMerged, branchId);
+      stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       // B9: shadow-diff during soak. Fire-and-forget — hurts neither
       // latency nor correctness if Quickwit is unreachable.
@@ -353,6 +559,12 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.searchFullText", branchId);
+      const restricted = await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        where,
+        orderBy: $orderBy,
+        security: req.security,
+      });
       const rawResult = await executeFullTextSearch(objectType, searchQuery.trim(), {
         where,
         $orderBy,
@@ -362,6 +574,7 @@ router.post(
       }, secFilter, branchId);
       // B7: overlay merge for immediate edit visibility.
       const result = await mergeWithOverlay(objectType, rawResult, undefined, branchId);
+      stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -390,7 +603,16 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.aggregate", branchId);
-      const validated = await validateAggregateQuery(req.body || {}, objectType);
+      const aggregateBody = { ...(req.body || {}) };
+      aggregateBody.where = await resolveLinkedWhere(aggregateBody.where, objectType, secFilter, branchId);
+      const validated = await validateAggregateQuery(aggregateBody, objectType);
+      // Rwanda QA §3.3 — aggregates never include restricted properties.
+      await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        where: validated.where,
+        aggregations: validated.aggregations,
+        security: req.security,
+      });
       const result = await executeAggregate(objectType, {
         where: validated.where,
         aggregations: validated.aggregations,
@@ -428,6 +650,12 @@ router.get(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.list", branchId);
+      // Rwanda QA §3.3 — sort/select on restricted properties is rejected.
+      const restricted = await enforceQueryMarkings({
+        objectTypeApiName: objectType,
+        orderBy: validated.orderBy,
+        security: req.security,
+      });
       const rawResult = await executeSearch(objectType, {
         $orderBy: validated.orderBy.length > 0 ? validated.orderBy : undefined,
         $pageSize: validated.pageSize,
@@ -436,6 +664,7 @@ router.get(
       }, secFilter, branchId);
       // B7: overlay merge — recent edits visible within 1s.
       const result = await mergeWithOverlay(objectType, rawResult, undefined, branchId);
+      stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       const elapsed = Date.now() - start;
       console.log(
@@ -488,9 +717,27 @@ router.post(
       const secFilter = buildSecurityFilter(req.security);
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.searchAround", branchId);
-      const result = await searchAround(linkType, effectiveDirection, {
+      const searchOptions: import("../services/linkResolverService").SearchAroundOptions = {
         sourceFilter, targetFilter, pageSize, pageToken,
-      }, secFilter, branchId);
+      };
+      if (linkType.cardinality === "MANY_TO_MANY") {
+        // Serving-store cutover: per-scope rollout flag routes M2M edge
+        // resolution through the versioned index (shadow/indexed modes).
+        const { maybeServingEdgeResolver } = await import(
+          "../services/serving/linkServingStore"
+        );
+        const { resolveRequestTenant } = await import("../utils/requestTenant");
+        const edgeResolver = await maybeServingEdgeResolver({
+          linkType,
+          direction: effectiveDirection,
+          branchId,
+          userMarkings: new Set(req.security?.markings ?? []),
+          tenantId: resolveRequestTenant(req),
+          capability: "objects.searchAround",
+        });
+        if (edgeResolver) searchOptions.edgeResolver = edgeResolver;
+      }
+      const result = await searchAround(linkType, effectiveDirection, searchOptions, secFilter, branchId);
 
       return sendSuccess(res, result);
     } catch (err: any) {
@@ -544,6 +791,24 @@ router.post(
       const branchId = readBranchHeader(req);
       routeMetric(req, "objects.searchAround", branchId);
 
+      let edgeResolver:
+        | import("../services/linkResolverService").SearchAroundOptions["edgeResolver"]
+        | undefined;
+      if (linkType.cardinality === "MANY_TO_MANY") {
+        const { maybeServingEdgeResolver } = await import(
+          "../services/serving/linkServingStore"
+        );
+        const { resolveRequestTenant } = await import("../utils/requestTenant");
+        edgeResolver = await maybeServingEdgeResolver({
+          linkType,
+          direction,
+          branchId,
+          userMarkings: new Set(req.security?.markings ?? []),
+          tenantId: resolveRequestTenant(req),
+          capability: "objects.searchAround",
+        });
+      }
+
       const result = await searchAround(
         linkType,
         direction,
@@ -553,6 +818,7 @@ router.post(
           pageSize: $pageSize,
           pageToken: $pageToken,
           orderBy: $orderBy,
+          edgeResolver,
         },
         secFilter,
         branchId
@@ -942,7 +1208,43 @@ router.get(
 
       const branchId = readBranchHeader(req); // F-P3-13
       routeMetric(req, "objects.get", branchId);
-      let obj = await executeGetObject(objectType, primaryKey, buildSecurityFilter(req.security), branchId);
+
+      // Stage-5 slice #1: object GET routed through objects.get rollout —
+      // the state-of-shape difference between modes is preserved.
+      const ontologyIdResult = await query(
+        "SELECT ontology_id FROM object_type WHERE api_name = $1",
+        [objectType],
+      );
+      const ontologyId = ontologyIdResult.rows[0] ? String(ontologyIdResult.rows[0].ontology_id) : "00000000-0000-0000-0000-000000000001";
+      const { resolveRequestTenant } = await import("../utils/requestTenant");
+      const { objectServingStoreGet } = await import("../services/serving/objectServingStore");
+      let obj = await objectServingStoreGet(
+        {
+          objectTypeApiName: objectType,
+          primaryKey,
+          scope: {
+            tenantId: resolveRequestTenant(req),
+            ontologyId,
+            branchId: branchId ?? "",
+          },
+        },
+        // PG-hydrated doc wins when present; objects that were indexed
+        // BEFORE their funnel hydration committed (or through the legacy
+        // standalone index trigger, which never hydrates object_instances)
+        // fall back to the serving index so pre-cutover reads keep working.
+        //
+        // REGRESSION FIX (CI-only GET-single 404): pgObjectAsDoc() returns a
+        // PROMISE — the previous `(await import(...)).pgObjectAsDoc(...) ??
+        // executeGetObject(...)` form tested the promise object itself,
+        // which is always non-nullish, so the `??` short-circuited and the
+        // OS-index fallback NEVER ran. Any object not hydrated into
+        // object_instances (funnel down, e.g. CI) then 404'd even though the
+        // serving index had the doc. Await both sides explicitly.
+        async (ot, pk) =>
+          await (await import("../services/serving/pgObjectAsDoc")).pgObjectAsDoc(ontologyId, ot, pk)
+          ?? await executeGetObject(ot, pk, buildSecurityFilter(req.security), branchId),
+        async (args) => executeGetObject(args.objectTypeApiName, args.primaryKey, buildSecurityFilter(req.security), branchId),
+      );
 
       // B7: overlay read — if a recent edit is in the overlay but the
       // index hasn't absorbed it yet, the overlay is authoritative for
@@ -992,6 +1294,7 @@ router.get(
         /* overlay optional */
       }
 
+
       if (!obj || (obj as { __deleted?: boolean }).__deleted) {
         // Spec §Task 28: return 404 (not 403) for unauthorised/missing
         // lookups to prevent IDOR information leakage.
@@ -1013,17 +1316,19 @@ router.get(
           [objectType]
         );
         if (propResult.rows.length > 0) {
-          const userMarkings = new Set(
-            ((req as any).security?.markings as string[]) || []
-          );
-          const properties = (obj as { properties?: Record<string, unknown> }).properties;
+          const security = (req as any).security;
+          const userMarkings = new Set((security?.markings as string[]) || []);
+          const nestedProperties = (obj as { properties?: Record<string, unknown> }).properties;
+          const properties = nestedProperties && typeof nestedProperties === "object"
+            ? nestedProperties
+            : (obj as Record<string, unknown>);
           if (properties) {
-            for (const row of propResult.rows) {
-              const required = row.marking_required as string;
-              if (!userMarkings.has(required)) {
-                delete properties[row.api_name as string];
-              }
-            }
+            omitUnauthorizedProperties(
+              properties,
+              propResult.rows as PropertyMarking[],
+              userMarkings,
+              security?.markingBypass === true,
+            );
           }
         }
       } catch {

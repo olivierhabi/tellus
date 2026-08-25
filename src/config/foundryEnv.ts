@@ -32,7 +32,7 @@ function parseIntEnv(key: string, fallback: number): number {
  * the env var is unset.
  */
 export const foundryEnv = {
-  MAX_FILE_SIZE_MB: parseIntEnv('MAX_FILE_SIZE_MB', 50),
+  MAX_FILE_SIZE_MB: parseIntEnv('MAX_FILE_SIZE_MB', 1024),
   FRONTEND_URL: envWithDefault('FRONTEND_URL', 'http://localhost:3000'),
   NODE_ENV: envWithDefault('NODE_ENV', 'development'),
   PORT: parseIntEnv('PORT', 3000),

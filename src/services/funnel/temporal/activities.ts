@@ -17,15 +17,16 @@ import {
   computeChangelog,
   SnapshotDiffReader,
   SourceChangeRow,
-  ChangelogRow,
 } from "../changelogStage";
-import { DatasourceContribution } from "../mergeStage";
 import {
   duckdbIcebergDiffReader,
   isDuckDBAvailable,
-  mergeChangesMaybeDuckDB,
 } from "../duckdbIceberg";
-import { createTable, funnelNamespace, getTable } from "../icebergCatalog";
+import { createTable, funnelNamespace, getTable, ManifestEntry } from "../icebergCatalog";
+import {
+  mergeChangesFromSnapshots,
+  streamMergedRowsFromSnapshot,
+} from "../mergeStage";
 import {
   getPendingMergeEdits,
   getPendingIndexEdits,
@@ -33,23 +34,62 @@ import {
 } from "../../../models/ontologyEdit";
 import { runIndexingActivity } from "../../quickwit/indexingActivity";
 import { ensureIndex } from "../../quickwit/indexManager";
-import { MergedRow } from "../../quickwit/docBuilder";
+import {
+  streamFullIndexBatches,
+  recordIndexingDeferred,
+  updatePendingIndexGauges,
+} from "../indexingStage";
 import { runHydrationActivity } from "../../quickwit/hydrationActivity";
-import { sleepForStageDelay } from "../stageDelay";
+import { sleepForStageDelay, writeStageReceipt } from "../stageDelay";
+import { closeOpenStageRuns } from "../stageRunClosure";
 import {
   projectFunnelTerminalToState,
   type FunnelStateStatus,
 } from "../funnelStateProjection";
-import { getObjectBuffer } from "../../storageService";
+import {
+  fenceExecutionContext,
+  FunnelExecutionEnvironmentMismatch,
+  FunnelObjectTypeMissing,
+  FunnelStaleStateTransition,
+} from "../environmentGuard";
+import {
+  recordMissingObjectType,
+  recordMissingDatasource,
+  recordTerminalProjectionFailed,
+} from "../isolationMetrics";
+import { ApplicationFailure } from "@temporalio/activity";
+import { getObjectBuffer, getObjectStream, headObject } from "../../storageService";
+import { parseCsvReadable } from "../../indexing/streamingCsv";
+import {
+  acquireConnection,
+  runAll,
+  streamQuery,
+  releaseConnection,
+} from "../../duckdb/pool";
+import {
+  runWithStageProgress,
+  reportStageProgress,
+  shouldHeartbeat,
+  type StageProgressState,
+} from "./stageProgress";
+import { randomUUID } from "node:crypto";
+import * as readline from "node:readline";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import { pipeline } from "stream/promises";
 
 // Heartbeat + stage-duration helper. Every long-running activity wraps
 // its body in `withStageInstrumentation(stage, obj, async () => ...)`.
 // The helper:
 //   * records wall-clock duration into funnel_stage_duration_seconds
-//   * starts a 5s heartbeat so Temporal knows the worker is alive (a
-//     merge/indexing activity that quietly blocks without heartbeating
-//     would otherwise stay in "running" until startToCloseTimeout hits —
-//     precisely the "stuck on sync" symptom we saw in prod)
+//   * runs a PROGRESS-COUPLED heartbeat loop: it beats while the stage keeps
+//     calling reportStageProgress(), and goes SILENT once the stage stops,
+//     so Temporal's heartbeatTimeout can actually fail a stalled attempt.
+//     The old loop beat on a bare timer, which proved only that the process
+//     was alive — that is why the 2026-08-16 Redis deadlock sat "running"
+//     for three days with a 56-second-old heartbeat and a 120s timeout.
+//     See temporal/stageProgress.ts for the full incident write-up.
 //   * counts errors per stage so on-call sees which stage is flaky
 async function withStageInstrumentation<T>(
   stage: "changelog" | "merge" | "indexing" | "hydration",
@@ -57,9 +97,15 @@ async function withStageInstrumentation<T>(
   fn: () => Promise<T>
 ): Promise<T> {
   const started = Date.now();
-  const heartbeat = startHeartbeatLoop();
+  let progress: StageProgressState | undefined;
+  const heartbeat = startHeartbeatLoop(
+    () => progress,
+    `${stage}/${objectTypeApiName}`,
+  );
   try {
-    const out = await fn();
+    const out = await runWithStageProgress(fn, (state) => {
+      progress = state;
+    });
     observeHistogram("funnel_stage_duration_seconds", (Date.now() - started) / 1000, {
       stage,
       object_type: objectTypeApiName,
@@ -82,25 +128,55 @@ async function withStageInstrumentation<T>(
   }
 }
 
-function startHeartbeatLoop(): { stop: () => void } {
+/**
+ * Progress-coupled heartbeat loop. `getProgress` returns the running stage's
+ * progress state (undefined until runWithStageProgress installs it).
+ *
+ * The loop stops beating — deliberately — once an instrumented stage has been
+ * silent for longer than the stall window, so Temporal's heartbeatTimeout
+ * expires and the attempt is retried on a healthy worker. It logs once when it
+ * makes that decision, so the operator sees WHY the attempt timed out rather
+ * than an unexplained heartbeat timeout.
+ */
+function startHeartbeatLoop(
+  getProgress: () => StageProgressState | undefined,
+  label: string,
+): { stop: () => void } {
   let cancelled = false;
   let timer: NodeJS.Timeout | null = null;
+  let loggedStall = false;
   const tick = () => {
     if (cancelled) return;
-    try {
-      // The @temporalio/activity Context is only available when the
-      // activity runs inside a Temporal worker. When these functions
-      // are invoked directly (from the PG dispatcher or a unit test),
-      // `Context.current()` throws — treat that as a no-op heartbeat.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { Context } = require("@temporalio/activity") as typeof import("@temporalio/activity");
-      Context.current().heartbeat();
-    } catch {
-      /* not inside a Temporal activity — no heartbeat needed */
+    const progress = getProgress();
+    const alive = !progress || shouldHeartbeat(progress, Date.now());
+    if (alive) {
+      loggedStall = false;
+      try {
+        // The @temporalio/activity Context is only available when the
+        // activity runs inside a Temporal worker. When these functions
+        // are invoked directly (from the PG dispatcher or a unit test),
+        // `Context.current()` throws — treat that as a no-op heartbeat.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { Context } = require("@temporalio/activity") as typeof import("@temporalio/activity");
+        Context.current().heartbeat();
+      } catch {
+        /* not inside a Temporal activity — no heartbeat needed */
+      }
+    } else if (!loggedStall) {
+      loggedStall = true;
+      const stalledFor = Math.round((Date.now() - progress!.lastProgressAt) / 1000);
+      console.warn(
+        `[funnel] ${label} reported no progress for ${stalledFor}s (last step: ` +
+          `${progress!.lastMarker || "unknown"}) — withholding heartbeats so ` +
+          `Temporal's heartbeatTimeout fails this attempt`,
+      );
+      incCounter("funnel_stage_stall_detected_total", { stage: label });
     }
     timer = setTimeout(tick, 5000);
+    timer.unref?.();
   };
   timer = setTimeout(tick, 5000);
+  timer.unref?.();
   return {
     stop() {
       cancelled = true;
@@ -112,6 +188,36 @@ function startHeartbeatLoop(): { stop: () => void } {
 export interface ObjectTypeCtx {
   ontologyId: string;
   objectTypeApiName: string;
+  /** FUNN-ISO — dispatch-stamped stable identity + environment. The fence
+   *  verifies (env ↔ worker ↔ database seal) before ANY read or write. */
+  objectTypeRid?: string;
+  environmentId?: string;
+}
+
+/**
+ * FUNN-ISO — execution-context fence. Called at the top of EVERY activity.
+ * Guard errors are re-thrown as NON-RETRYABLE ApplicationFailures: a retry
+ * can never repair a worker wired to the wrong environment, and converting
+ * the mismatch into retries would repeat the 2026-07-31 silent-green
+ * failure pattern at a slower cadence.
+ */
+async function fence(input: { environmentId?: string }): Promise<void> {
+  try {
+    await fenceExecutionContext({ environmentId: input.environmentId });
+  } catch (err) {
+    if (
+      err instanceof FunnelExecutionEnvironmentMismatch ||
+      err instanceof FunnelObjectTypeMissing ||
+      err instanceof FunnelStaleStateTransition
+    ) {
+      throw ApplicationFailure.create({
+        message: err.message,
+        type: err.name,
+        nonRetryable: true,
+      });
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +226,15 @@ export interface ObjectTypeCtx {
 
 export async function runChangelogActivity(
   input: ObjectTypeCtx
-): Promise<{ snapshotId: string; rowsEmitted: number; rows: ChangelogRow[] }> {
+): Promise<{
+  snapshotId: string;
+  rowsEmitted: number;
+  manifest: ManifestEntry[];
+  /** Property names the Merge stage must overlay for this datasource
+   *  (column-wise MDO). Carried in the small activity return instead of
+   *  the full row array so the Temporal completion payload stays bounded. */
+  ownedProperties: string[];
+}> {
   return withStageInstrumentation("changelog", input.objectTypeApiName, async () =>
     runChangelogActivityImpl(input)
   );
@@ -128,8 +242,15 @@ export async function runChangelogActivity(
 
 async function runChangelogActivityImpl(
   input: ObjectTypeCtx
-): Promise<{ snapshotId: string; rowsEmitted: number; rows: ChangelogRow[] }> {
+): Promise<{
+  snapshotId: string;
+  rowsEmitted: number;
+  manifest: ManifestEntry[];
+  ownedProperties: string[];
+}> {
+  await fence(input);
   // Optional dev/demo pacing — no-op in production (env default 0).
+  writeStageReceipt("changelog");
   await sleepForStageDelay();
   const table = await ensureTable(input.objectTypeApiName, "changelog", "default");
   // Reader-selection precedence (most specific first):
@@ -154,9 +275,51 @@ async function runChangelogActivityImpl(
   } else {
     const foundry = await loadFoundryBridgedDatasource(input.objectTypeApiName);
     if (foundry) {
+      // Option D — fail-fast circuit-breaker. HEAD the backing object BEFORE
+      // attempting to stream it. Default ceiling is NONE (streaming has no
+      // size ceiling — the old 512 MiB MAX_STRING_LENGTH wall is gone); a
+      // configurable TELLUS_FOUNDRY_SOURCE_MAX_BYTES catches an oversized
+      // source with a clear, actionable error instead of the generic
+      // "Activity task failed" that masked the OO7 root cause. If the HEAD
+      // itself fails (object missing / MinIO down), fail fast too — that's
+      // "stream setup can't be established", surfaced as a real message.
+      const guardKey = stripFoundryTags(foundry.filePath);
+      if (guardKey) {
+        let foundryHead: { contentLength: number } | null = null;
+        try {
+          foundryHead = await headObject(guardKey);
+        } catch (headErr) {
+          throw new Error(
+            `foundry-bridged backing source '${guardKey}' is not reachable ` +
+              `(HEAD failed — stream setup could not be established): ` +
+              `${(headErr as Error).message}`,
+          );
+        }
+        const maxBytes = Number(process.env.TELLUS_FOUNDRY_SOURCE_MAX_BYTES ?? "") || 0;
+        if (maxBytes > 0 && foundryHead.contentLength > maxBytes) {
+          throw new Error(
+            `foundry-bridged backing source '${guardKey}' is ${foundryHead.contentLength} ` +
+              `bytes which exceeds the configured ceiling ` +
+              `TELLUS_FOUNDRY_SOURCE_MAX_BYTES=${maxBytes}. Re-upload in smaller ` +
+              `parts or raise the ceiling.`,
+          );
+        }
+      }
       reader = await buildFoundryBridgedReader(foundry);
     } else {
       const pending = await getPendingMergeEdits(input.objectTypeApiName);
+      // FUNN-ISO-4 observability: a funnel pass with NO backing datasource
+      // and NO edits is not an error per se (a legitimately empty OT does
+      // this), but it is the exact signature of the cross-database failure
+      // class — the OTHER environment's datasource is invisible here.
+      // Count it loudly so dashboards can catch the anomaly; the fence
+      // already guarantees the activity ran in the right environment.
+      if (pending.length === 0) {
+        recordMissingDatasource({
+          object_type: input.objectTypeApiName,
+          environment: input.environmentId ?? "unknown",
+        });
+      }
       const rows: SourceChangeRow[] = pending.map((e) => ({
         primary_key: e.primary_key,
         operation:
@@ -185,7 +348,22 @@ async function runChangelogActivityImpl(
     },
     reader
   );
-  return { snapshotId: result.snapshotId, rowsEmitted: result.rowsEmitted, rows: result.rows };
+  // PASS-BY-REFERENCE (Option 2): the emitted rows are persisted as a
+  // Parquet object in MinIO; the committed snapshot's `summary_json`
+  // carries only a small `parquet_ref` (computeChangelog does the write).
+  // Downstream re-reads via `loadChangelogRowsFromSnapshot(snapshotId)`.
+  // We do NOT return the row array here — a ~42 MB Temporal completion
+  // payload exceeds the activity-result limit (the original 83k "stuck at
+  // changelog" symptom), and inlining rows into `summary_json` jsonb
+  // crashed the Postgres backend at ~573 MB for 1M rows (the 1M incident).
+  // `ownedProperties` is the small property-name set the Merge stage needs
+  // for column-wise MDO; `computeChangelog` collects it during the stream.
+  return {
+    snapshotId: result.snapshotId,
+    rowsEmitted: result.rowsEmitted,
+    manifest: result.manifest,
+    ownedProperties: result.ownedProperties,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,19 +371,32 @@ async function runChangelogActivityImpl(
 // ---------------------------------------------------------------------------
 
 export async function runMergeActivity(
-  input: ObjectTypeCtx & { changelogRows: ChangelogRow[] }
+  input: ObjectTypeCtx & {
+    /** PASS-BY-REFERENCE: the changelog snapshot id (not the row array).
+     *  The Merge stage re-resolves the snapshot's `parquet_ref` (NOT a row
+     *  load) via `mergeChangesFromSnapshots` → `mergeChangesSQL` so the
+     *  rows never cross the Temporal activity-boundary payload limit. */
+    changelogSnapshotId: string;
+    changelogOwnedProperties: string[];
+    /** The driving signal's id — threads through to `mergeChangesSQL` as
+     *  the Redis checkpoint key (`merge:progress:<runKey>`). Lets a retry
+     *  that crashed AFTER the PG COMMIT skip the re-upsert of the merged
+     *  tail (the committed rows are already in object_instances). */
+    runKey?: string;
+  }
 ): Promise<{
-  snapshotId: string;
+  mergedSnapshotId: string;
   upserts: number;
   deletes: number;
   editIds: string[];
-  mergedRows: Array<{
-    primary_key: string;
-    properties: Record<string, unknown>;
-    markings: string[];
-    operation: "upsert" | "delete";
-    source_transaction_id: string | null;
-  }>;
+  /** Count of rows in the merged snapshot. Carried instead of the
+   *  full `mergedRows` array — the SQL merge path does NOT materialise
+   *  mergedRows (they live in the merged parquet_ref); the Indexing stage
+   *  re-reads them from the merged snapshot by `mergedSnapshotId` only
+   *  when Quickwit is reachable. */
+  mergedRowCount: number;
+  /** Current materialized object cardinality after the merge. */
+  objectsIndexed: number;
 }> {
   return withStageInstrumentation("merge", input.objectTypeApiName, async () =>
     runMergeActivityImpl(input)
@@ -213,52 +404,63 @@ export async function runMergeActivity(
 }
 
 async function runMergeActivityImpl(
-  input: ObjectTypeCtx & { changelogRows: ChangelogRow[] }
+  input: ObjectTypeCtx & {
+    changelogSnapshotId: string;
+    changelogOwnedProperties: string[];
+    runKey?: string;
+  }
 ): Promise<{
-  snapshotId: string;
+  mergedSnapshotId: string;
   upserts: number;
   deletes: number;
   editIds: string[];
-  mergedRows: Array<{
-    primary_key: string;
-    properties: Record<string, unknown>;
-    markings: string[];
-    operation: "upsert" | "delete";
-    source_transaction_id: string | null;
-  }>;
+  mergedRowCount: number;
+  objectsIndexed: number;
 }> {
+  await fence(input);
+  writeStageReceipt("merge");
   await sleepForStageDelay();
   const mergedTable = await ensureTable(input.objectTypeApiName, "merged", "state");
   const pending = await getPendingMergeEdits(input.objectTypeApiName);
-  const contributions: DatasourceContribution[] = [
-    {
-      datasource_id: ZERO_UUID,
-      owned_properties: uniqueProps(input.changelogRows),
-      changelog_rows: input.changelogRows,
-      markings: [],
-    },
-  ];
-  const out = await mergeChangesMaybeDuckDB({
+  // PASS-BY-REFERENCE: `mergeChangesFromSnapshots` resolves the changelog
+  // snapshot's `parquet_ref` (a small PG read — NOT the full row array that
+  // was the OO7 wall) and delegates to `mergeChangesSQL` (DuckDB SQL k-way
+  // merge + COPY to parquet + stream to batched PG upserts/deletes). The
+  // merged result rows are persisted as a parquet object on the freshly-
+  // committed merged snapshot, so the Indexing stage re-reads them by
+  // `mergedSnapshotId` without a by-value hop.
+  const out = await mergeChangesFromSnapshots({
     ontologyId: input.ontologyId,
     objectTypeApiName: input.objectTypeApiName,
-    contributions,
-    pendingEdits: pending,
+    changelogSnapshots: [
+      {
+        datasource_id: ZERO_UUID,
+        snapshot_id: input.changelogSnapshotId,
+        owned_properties: input.changelogOwnedProperties,
+      },
+    ],
+    editsBatch: pending,
     editStrategy: "user_edit_wins",
     mergedTableId: mergedTable.dataset_table_id,
     mergedOutputFileLocation: `${mergedTable.location}/data/${new Date().toISOString()}.parquet`,
+    runKey: input.runKey,
   });
+  const objectCountResult = await query(
+    `SELECT count(*)::int AS n
+       FROM object_instances
+      WHERE ontology_id = $1 AND object_type_api_name = $2`,
+    [input.ontologyId, input.objectTypeApiName],
+  );
   return {
-    snapshotId: out.snapshotId,
+    mergedSnapshotId: out.snapshotId,
     upserts: out.upserts,
     deletes: out.deletes,
     editIds: pending.map((e) => e.edit_id),
-    mergedRows: out.mergedRows.map((r) => ({
-      primary_key: r.primary_key,
-      properties: r.properties,
-      markings: r.markings,
-      operation: r.operation,
-      source_transaction_id: r.source_transaction_id ?? null,
-    })),
+    // `upserts + deletes` is this run's mutation delta and can be zero for
+    // an unchanged 746-row snapshot. Use persisted snapshot cardinality.
+    mergedRowCount: out.parquetRef?.rowCount ?? out.mergedRows.length,
+    // Terminal/UI state needs current cardinality, not mutation count.
+    objectsIndexed: Number(objectCountResult.rows[0]?.n ?? 0),
   };
 }
 
@@ -268,14 +470,12 @@ async function runMergeActivityImpl(
 
 export async function runIndexingActivityProxy(
   input: ObjectTypeCtx & {
-    mergedRows: Array<{
-      primary_key: string;
-      properties: Record<string, unknown>;
-      markings: string[];
-      operation: "upsert" | "delete";
-      source_transaction_id: string | null;
-    }>;
-    editIds: string[];
+    /** PASS-BY-REFERENCE: the merged snapshot id (not the row array).
+     *  Merged rows are re-read from `funnel_snapshot.summary_json.inline_rows`
+     *  via `loadMergedRowsFromSnapshot` ONLY when Quickwit is reachable
+     *  — they never cross the Temporal activity-boundary payload limit. */
+    mergedSnapshotId: string;
+    mergedRowCount: number;
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
   return withStageInstrumentation("indexing", input.objectTypeApiName, async () =>
@@ -285,38 +485,75 @@ export async function runIndexingActivityProxy(
 
 async function runIndexingActivityProxyImpl(
   input: ObjectTypeCtx & {
-    mergedRows: Array<{
-      primary_key: string;
-      properties: Record<string, unknown>;
-      markings: string[];
-      operation: "upsert" | "delete";
-      source_transaction_id: string | null;
-    }>;
-    editIds: string[];
+  mergedSnapshotId: string;
+  mergedRowCount: number;
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
+  await fence(input);
+  writeStageReceipt("indexing");
   await sleepForStageDelay();
   const pending = await getPendingIndexEdits(input.objectTypeApiName);
   const editIds = pending.map((e) => e.edit_id);
 
+  // TRUTHFUL ACKNOWLEDGEMENT (OSv2 serving-index parity): we stamp
+  // applied_to_index_at ONLY after Quickwit confirms split publication.
+  // When Quickwit is unreachable or any step fails we leave the edits
+  // pending — the Redis overlay stays alive (the sweeper keys off
+  // applied_to_index_at) and the retry covers repairs via
+  // buildFullIndexBatch (re-reads object_instances for edits merged by
+  // earlier runs). See indexingStage.ts for the invariant.
+  if (editIds.length === 0) {
+    updatePendingIndexGauges(input.objectTypeApiName, pending);
+    return { editsIndexed: 0, publishedSplitIds: [], quickwit: false };
+  }
+
   const reachable = await isQuickwitReachable();
-  if (!reachable || input.mergedRows.length === 0) {
-    await markEditsAppliedToIndex(editIds);
-    return { editsIndexed: editIds.length, publishedSplitIds: [], quickwit: false };
+  if (!reachable) {
+    recordIndexingDeferred({
+      objectTypeApiName: input.objectTypeApiName,
+      pending,
+      reason: "quickwit_unreachable",
+    });
+    return { editsIndexed: 0, publishedSplitIds: [], quickwit: false };
   }
 
   try {
     await ensureIndex({ objectTypeApiName: input.objectTypeApiName });
-    const mergedRows: MergedRow[] = input.mergedRows.map((r, i) => ({
-      primary_key: r.primary_key,
-      properties: r.properties,
-      operation: r.operation === "delete" ? "DELETE" : "UPDATE",
-      version: i + 1,
-      source_transaction_id: r.source_transaction_id ?? undefined,
-    }));
-    const reader = (async function* () {
-      yield { rows: mergedRows, editIds };
-    });
+    // PASS-BY-REFERENCE: re-read the merged rows from the committed
+    // merged snapshot by id (NOT from a Temporal activity return value).
+    // Skipped entirely when this run merged nothing — the repair pass
+    // covers everything from object_instances in that case.
+    //
+    // STREAMED, not materialised. The previous version called the array-
+    // returning `loadMergedRowsFromSnapshot`, which goes through
+    // `readParquetRows` — and that function THROWS above
+    // TELLUS_PARQUET_READ_MAX_ROWS (2M) because building a multi-million-row
+    // JS array is a genuine heap wall. The gate was right; this caller was
+    // wrong. The consequence was inverted from what anyone would want: the
+    // BIGGEST Object Types were exactly the ones that could never reach the
+    // Quickwit serving index (OO7 sits at 4.65M rows, so every indexing
+    // attempt for it died with "exceeds TELLUS_PARQUET_READ_MAX_ROWS" and the
+    // catch below deferred it forever).
+    //
+    // `streamFullIndexBatches` yields fixed-size batches instead, and
+    // `runIndexingActivity`'s reader contract already accepts many batches
+    // (`for await (const batch of input.reader())`), so peak heap is now the
+    // batch size rather than the snapshot size.
+    //
+    // editIds are collected up-front, unconditionally, exactly as the array
+    // variant did — coverage never affected acknowledgement — and are still
+    // stamped only after runIndexingActivity confirms split publication.
+    const emptySource = (async function* () {})() as AsyncIterable<never>;
+    const reader = () =>
+      streamFullIndexBatches({
+        ontologyId: input.ontologyId,
+        objectTypeApiName: input.objectTypeApiName,
+        baseRows:
+          input.mergedRowCount > 0
+            ? streamMergedRowsFromSnapshot(input.mergedSnapshotId)
+            : emptySource,
+        pending,
+      });
     const out = await runIndexingActivity({
       ontologyId: input.ontologyId,
       objectTypeApiName: input.objectTypeApiName,
@@ -326,6 +563,7 @@ async function runIndexingActivityProxyImpl(
       publishPollMs: 1_000,
     });
     await markEditsAppliedToIndex(editIds);
+    updatePendingIndexGauges(input.objectTypeApiName, []);
     return {
       editsIndexed: editIds.length,
       publishedSplitIds: out.publishedSplitIds,
@@ -333,8 +571,13 @@ async function runIndexingActivityProxyImpl(
     };
   } catch (err) {
     console.warn(`[temporal/indexing] ${(err as Error).message}`);
-    await markEditsAppliedToIndex(editIds);
-    return { editsIndexed: editIds.length, publishedSplitIds: [], quickwit: false };
+    recordIndexingDeferred({
+      objectTypeApiName: input.objectTypeApiName,
+      pending,
+      reason: "quickwit_indexing_failed",
+      error: (err as Error).message,
+    });
+    return { editsIndexed: 0, publishedSplitIds: [], quickwit: false };
   }
 }
 
@@ -353,6 +596,8 @@ export async function runHydrationActivityProxy(
 async function runHydrationActivityProxyImpl(
   input: ObjectTypeCtx & { publishedSplitIds: string[] }
 ): Promise<{ prefetched: number }> {
+  await fence(input);
+  writeStageReceipt("hydration");
   await sleepForStageDelay();
   if (input.publishedSplitIds.length === 0) return { prefetched: 0 };
   // Hydration errors must NOT be silently swallowed — the spec §B3
@@ -377,8 +622,18 @@ async function runHydrationActivityProxyImpl(
 export async function projectStageToPostgres(input: {
   ontologyId: string;
   objectTypeApiName: string;
+  /** FUNN-ISO — deployment identity carried by the workflow. The fence
+   *  gates the write so a projection from another environment can never
+   *  land in this database. */
+  environmentId?: string;
+  objectTypeRid?: string;
   currentStage: "changelog" | "merge" | "indexing" | "hydration" | null;
   objectsIndexed?: number;
+  /** Per-stage evidence counts (rowsEmitted/upserts/deletes/…) merged
+   *  into the stage row's output_json — the operator-facing record that
+   *  distinguishes "valid empty source" from "stage executed nothing
+   *  suspiciously" and feeds the terminal indexed-consistency checks. */
+  stageOutput?: Record<string, unknown>;
   /** When true, the previous stage just completed and should be
    *  stamped `succeeded` in funnel_stage_run. The workflow calls
    *  projectStageToPostgres twice per stage transition: once on
@@ -397,6 +652,16 @@ export async function projectStageToPostgres(input: {
   runKey?: string;
 }): Promise<void> {
   try {
+    // projectStageToPostgres is the best-effort PROGRESS marker (it must
+    // never fail the workflow on a PG blip). Hard environment fencing
+    // belongs to the stage activities + projectFunnelTerminalActivity. When
+    // the caller DID stamp an environment, however, a mismatch with this
+    // worker/DB is a split-brain symptom and is metricated loudly, while
+    // legacy unstamped callers (e.g. the non-Temporal replay path in tests)
+    // remain best-effort.
+    if (input.environmentId) {
+      await fence(input);
+    }
     const { ontologyId, objectTypeApiName, currentStage, objectsIndexed, runKey } = input;
     // Temporal gives us a stable workflowId per workflow instance. For
     // long-lived parent workflows we further scope with `runKey` (the
@@ -417,15 +682,30 @@ export async function projectStageToPostgres(input: {
     } catch {
       baseWorkflowId = `non-temporal-${objectTypeApiName}`;
     }
+    // NOTE: the value stored in funnel_run.temporal_workflow_id is a
+    // PER-SAVE UPSERT key (`<bareWorkflowId>:<runKey>`), NOT the Temporal
+    // workflow id. The `:runKey` suffix is load-bearing: without it, the
+    // `ON CONFLICT (temporal_workflow_id)` upsert collapses every save
+    // for an Object Type into a single funnel_run row and the UI loses
+    // per-save distinction. The actual Temporal workflow id is the bare
+    // `baseWorkflowId` (== funnelWorkflowId(objectTypeApiName) — see
+    // temporal/worker.ts); reconcilers recover it from
+    // object_type_api_name, NOT from this stored column. (See the
+    // PASS-BY-REFERENCE notes + durableWorkflow.sweepViaTemporalVisibility.)
     const workflowId = runKey ? `${baseWorkflowId}:${runKey}` : baseWorkflowId;
+    // FUNN-ISO-4: stamp the immutable execution-plan snapshot on creation —
+    // ON CONFLICT keeps the pre-existing run's original snapshot intact.
+    const { currentDefinition: funnelCurrentDefinition } = await import("../../funnel/executionPlan");
+    const defPlan = funnelCurrentDefinition();
 
     if (currentStage === null) {
       const updated = await query(
         `INSERT INTO funnel_run
            (ontology_id, object_type_api_name, workflow_type, status,
-            current_stage, objects_indexed, temporal_workflow_id, started_at, completed_at)
+            current_stage, objects_indexed, temporal_workflow_id, started_at, completed_at,
+            environment_id, definition_version, execution_plan)
          VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'completed',
-                 NULL, COALESCE($3, 0), $4, now(), now())
+                 NULL, COALESCE($3, 0), $4, now(), now(), $5, $6, $7::jsonb)
          ON CONFLICT (temporal_workflow_id)
          WHERE temporal_workflow_id IS NOT NULL
          DO UPDATE SET status = 'completed',
@@ -433,29 +713,66 @@ export async function projectStageToPostgres(input: {
                        objects_indexed = COALESCE(EXCLUDED.objects_indexed, funnel_run.objects_indexed),
                        completed_at = now()
          RETURNING run_id`,
-        [ontologyId, objectTypeApiName, objectsIndexed ?? null, workflowId]
+        [ontologyId, objectTypeApiName, objectsIndexed ?? null, workflowId, input.environmentId ?? null,
+         defPlan.definitionVersion, JSON.stringify(defPlan)]
       );
-      // Close the last open stage_run row.
+      // Close the last open stage_run row (with evidence counts merged).
       if (updated.rows[0]?.run_id && input.completedPrevious) {
         await query(
           `UPDATE funnel_stage_run
-              SET status = 'succeeded', finished_at = now()
+              SET status = 'succeeded', finished_at = now(),
+                  output_json = COALESCE($3::jsonb, output_json)
             WHERE run_id = $1 AND stage = $2 AND status = 'running'`,
-          [updated.rows[0].run_id, input.completedPrevious]
+          [
+            updated.rows[0].run_id,
+            input.completedPrevious,
+            input.stageOutput ? JSON.stringify(input.stageOutput) : null,
+          ]
         );
+      }
+      // The run is now 'completed', so ANY other stage row still at
+      // pending/running is a leak, not a state — and the FE renders such a row
+      // as a perpetual spinner regardless of the run's status. The update
+      // above closes only `completedPrevious`; an earlier stage whose own
+      // projection was lost (this whole function is best-effort and swallows
+      // its errors) would otherwise stay open forever, unreachable by the boot
+      // sweeps, which only select runs still at 'running'. See stageRunClosure.
+      if (updated.rows[0]?.run_id) {
+        const stranded = await closeOpenStageRuns(
+          updated.rows[0].run_id,
+          "run completed with this stage still open (stage projection was lost)"
+        );
+        if (stranded > 0) {
+          console.warn(JSON.stringify({
+            level: "warn",
+            type: "funnel_stage_run_open_on_completed_run",
+            runId: updated.rows[0].run_id,
+            objectTypeApiName,
+            closed: stranded,
+          }));
+        }
       }
       return;
     }
     const runRow = await query(
       `INSERT INTO funnel_run
          (ontology_id, object_type_api_name, workflow_type, status,
-          current_stage, objects_indexed, temporal_workflow_id, started_at)
+          current_stage, objects_indexed, temporal_workflow_id, started_at,
+          environment_id, definition_version, execution_plan)
        VALUES ($1, $2, 'ObjectTypeFunnelWorkflow.temporal', 'running',
-               $3, COALESCE($4, 0), $5, now())
+               $3, COALESCE($4, 0), $5, now(), $6, $7, $8::jsonb)
        ON CONFLICT (temporal_workflow_id)
        WHERE temporal_workflow_id IS NOT NULL
        DO UPDATE SET current_stage = EXCLUDED.current_stage,
-                     objects_indexed = COALESCE(EXCLUDED.objects_indexed, funnel_run.objects_indexed)
+                     objects_indexed = COALESCE(EXCLUDED.objects_indexed, funnel_run.objects_indexed),
+                     -- CAS: dispatch_pending / workflow_started rows move to
+                     -- 'running' only when execution actually begins — a
+                     -- completed/cancelled row is NEVER regressed.
+                     status = CASE
+                       WHEN funnel_run.status IN ('dispatch_pending', 'workflow_started', 'running')
+                         THEN 'running'
+                       ELSE funnel_run.status
+                     END
        RETURNING run_id`,
       [
         ontologyId,
@@ -463,17 +780,28 @@ export async function projectStageToPostgres(input: {
         currentStage,
         objectsIndexed ?? null,
         workflowId,
+        input.environmentId ?? null,
+        defPlan.definitionVersion,
+        JSON.stringify(defPlan),
       ]
     );
+    // NOTE: re-dispatch of the SAME signal id onto a terminal run row is
+    // rejected by the CASE-guard above (status is preserved, never
+    // regressed); the environment fence is the primary cross-env block.
     const runId = runRow.rows[0]?.run_id as string | undefined;
     if (runId) {
       // Close the previously-running stage (if any) + open a new one.
       if (input.completedPrevious) {
         await query(
           `UPDATE funnel_stage_run
-              SET status = 'succeeded', finished_at = now()
+              SET status = 'succeeded', finished_at = now(),
+                  output_json = COALESCE($3::jsonb, output_json)
             WHERE run_id = $1 AND stage = $2 AND status = 'running'`,
-          [runId, input.completedPrevious]
+          [
+            runId,
+            input.completedPrevious,
+            input.stageOutput ? JSON.stringify(input.stageOutput) : null,
+          ]
         );
       }
       await query(
@@ -509,12 +837,6 @@ async function ensureTable(
     schema: {},
     location: `s3://_funnel/${objectTypeApiName}/${kind}/${tableName}`,
   });
-}
-
-function uniqueProps(rows: ChangelogRow[]): string[] {
-  const set = new Set<string>();
-  for (const r of rows) for (const k of Object.keys(r.properties)) set.add(k);
-  return Array.from(set);
 }
 
 async function loadIcebergSource(
@@ -634,7 +956,9 @@ function extractFoundryDatasetUuid(filePath: string): string | null {
   return m ? m[1] : null;
 }
 
-async function buildFoundryBridgedReader(
+/** Exported for the streaming-dedup unit test (scripts/test-foundry-dedup.ts);
+ *  not called outside this module in production. */
+export async function buildFoundryBridgedReader(
   ds: FoundryBridgedDatasource
 ): Promise<SnapshotDiffReader> {
   const s3Key = stripFoundryTags(ds.filePath);
@@ -644,16 +968,6 @@ async function buildFoundryBridgedReader(
     // throwing — the projection activity will surface this as an empty run.
     return { async *read() { /* no rows */ } };
   }
-  const buffer = await getObjectBuffer(s3Key);
-  let content = buffer.toString("utf-8");
-  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
-
-  // Parse once, eagerly, so we don't keep the MinIO buffer alive during
-  // the (potentially long) stream-yield. The reader yields synchronously
-  // from an in-memory array; for >100k-row datasources we should swap
-  // this for a streaming parser, but the foundry CSV upload path already
-  // caps at the multer max (50 MiB) so the eager path is bounded.
-  const rows = await parseFoundryRows(content, ds.fileFormat, ds.filePath);
   const pkCol = ds.primaryKeyColumn ?? "primary_key";
   // `source_transaction_id` lands in `object_instances.source_transaction_id`
   // which is a `uuid` column — passing a path-string here trips
@@ -665,72 +979,283 @@ async function buildFoundryBridgedReader(
   const txnId = extractFoundryDatasetUuid(ds.filePath) ?? ZERO_UUID;
   const ts = new Date().toISOString();
 
-  // The funnel's `computeChangelog` rejects duplicate primary keys within
-  // a single source transaction (see `seenInTxn` in changelogStage.ts).
-  // De-dupe with last-wins semantics — matches the SNAPSHOT transaction
-  // behaviour of `reindexService.ts` and avoids a "duplicate primary key"
-  // error that would otherwise abort the entire funnel run on dirty CSVs.
-  const dedup = new Map<string, SourceChangeRow>();
-  for (const row of rows) {
-    const pk = row[pkCol];
-    if (pk == null || pk === "") continue; // skip null-PK rows, mirror reindexService
-    const key = String(pk);
-    dedup.set(key, {
-      primary_key: key,
-      operation: "INSERT",
-      properties: row,
-      source_transaction_id: txnId,
-      source_commit_timestamp: ts,
-    });
-  }
-  const out = Array.from(dedup.values());
+  // STREAMING + DuckDB dedup (Option B). This replaces the old eager
+  // `getObjectBuffer` + `buffer.toString("utf-8")` + sync `parseFoundryRows`
+  // + in-memory `Map<string, SourceChangeRow>` dedup, which:
+  //   (A) threw Node's Buffer.toString MAX_STRING_LENGTH (0x1fffffe8 =
+  //       512 MiB) on ANY foundry-bridged CSV > 512 MiB — OO7's 895 MiB /
+  //       5.6M-row test04.csv, with 949,181 duplicate order_ids — failing
+  //       the changelog activity with the generic "Activity task failed"
+  //       and leaving funnel_run stuck at "changelog".
+  //   (B) materialised ALL rows into one JS array (~8-11 GiB at 5.6M),
+  //   (C) held a `Map` of ALL deduped rows (~1.6-3.4 GiB).
+  // The new path streams the S3 object through `parseCsvReadable` (csv-parse,
+  // native backpressure, flat memory) into a DuckDB TEMP table staged in
+  // BATCH=500, then dedups with `SELECT DISTINCT ON (primary_key) ... ORDER
+  // BY primary_key, __seq DESC` (last-wins by file order — Q1 proved ON
+  // CONFLICT is first-wins within a multi-row INSERT, unusable for last-wins;
+  // DISTINCT ON over the disk-spilled temp table is the reliable path). The
+  // deduped rows stream back out via `streamQuery` (one row at a time). The
+  // full row set NEVER materialises in Node heap; the DuckDB TEMP table
+  // spills to `/tmp/duckdb_spill` past the memory_limit. `readerKind:
+  // "foundry-bridged"` lets computeChangelog skip its own `seenInTxn` O(N)
+  // Map (redundant + would re-introduce the heap wall). Iceberg + pending-
+  // edit readers keep the hard-throw (they don't pre-dedupe).
   return {
+    readerKind: "foundry-bridged",
     async *read() {
-      for (const r of out) yield r;
+      // CSV/TSV (the large-foundry-CSV case — OO7's 895 MiB / 5.6M-row
+      // test04.csv) take the FAST path: DuckDB reads the file natively +
+      // dedups in SQL (no per-row JS, no 11k multi-row INSERT statements).
+      // JSONL/JSON stay on the general INSERT path (smaller volumes;
+      // read_csv_auto is CSV-only).
+      if (ds.fileFormat === "csv" || ds.fileFormat === "tsv") {
+        yield* dedupFoundryCsvViaDuckDB(ds, s3Key, pkCol, txnId, ts);
+      } else {
+        yield* dedupFoundryRows(streamFoundryRows(ds, s3Key), pkCol, txnId, ts);
+      }
     },
   };
 }
 
-async function parseFoundryRows(
-  content: string,
-  format: string,
-  rawFilePath: string,
-): Promise<Record<string, unknown>[]> {
-  if (format === "csv" || format === "tsv") {
-    const { parse } = await import("csv-parse/sync");
-    const { sanitizeCsvHeader } = await import("../../../utils/csvHeader");
-    const records: Record<string, string>[] = parse(content, {
-      columns: (h: string[]) => sanitizeCsvHeader(h, { source: rawFilePath }),
-      skip_empty_lines: true,
-      relax_column_count: true,
-      trim: true,
-      delimiter: format === "tsv" ? "\t" : ",",
+/**
+ * FAST path for CSV/TSV foundry sources: stream the S3 object to a local
+ * temp file, then let DuckDB read + dedup it NATIVELY (read_csv_auto +
+ * DISTINCT ON). This replaces the per-row JS of `dedupFoundryRows`
+ * (JSON.stringify + sqlStr + ~11k multi-row INSERTs) that made OO7's 5.6M-
+ * row changelog take ~22 min on Attempt 1. DuckDB's vectorized CSV reader +
+ * in-engine DISTINCT ON do the same work in ~seconds.
+ *
+ * `all_varchar=true` forces string types — matches parseCsvReadable (csv-parse
+ * returns strings) and avoids BigInt type-inference that would break the
+ * `JSON.stringify(r.properties)` in computeChangelog's rowIterable. `PARALLEL=
+ * false` makes `row_number() OVER ()` deterministic file order so DISTINCT ON
+ * (pk) ... ORDER BY pk, rn DESC is genuine last-wins-by-file-order (proven by
+ * scripts/duckdb-all-varchar-test.js + scripts/duckdb-csv-order-test.js).
+ */
+async function* dedupFoundryCsvViaDuckDB(
+  ds: FoundryBridgedDatasource,
+  s3Key: string,
+  pkCol: string,
+  txnId: string,
+  ts: string,
+): AsyncGenerator<SourceChangeRow> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fb-csv-"));
+  const localPath = path.join(dir, "source.csv");
+  const conn = await acquireConnection({ skipHttpfs: true });
+  try {
+    // Stream S3 → local file (disk, bounded; getObjectStream backpressure
+    // keeps memory flat during the download — the 895 MiB object never
+    // materialises as a JS Buffer/string, unlike the old getObjectBuffer path).
+    const stream = await getObjectStream(s3Key);
+    await pipeline(stream, fs.createWriteStream(localPath));
+
+    const pkQ = `"${pkCol.replace(/"/g, '""')}"`;
+    const lp = localPath.replace(/'/g, "''");
+    // Explicit delim matches the old parseFoundryRows/parseCsvReadable behavior
+    // (CSV ',', TSV literal tab).
+    const delim = ds.fileFormat === "tsv" ? "\t" : ",";
+    const sql =
+      `SELECT DISTINCT ON (${pkQ}) * FROM (` +
+      `SELECT *, row_number() OVER () AS rn FROM read_csv_auto('${lp}', delim='${delim}', PARALLEL=false, all_varchar=true)` +
+      `) ORDER BY ${pkQ}, rn DESC`;
+    for await (const row of streamQuery<Record<string, unknown> & { rn?: unknown }>(conn, sql)) {
+      const pkVal = row[pkCol];
+      if (pkVal == null || pkVal === "") continue; // skip null-PK rows, mirror reindexService
+      // properties = all columns EXCEPT the internal `rn` tiebreaker.
+      const { rn: _rn, ...properties } = row;
+      void _rn;
+      yield {
+        primary_key: String(pkVal),
+        operation: "INSERT" as SourceChangeRow["operation"],
+        properties: properties as Record<string, unknown>,
+        source_transaction_id: txnId,
+        source_commit_timestamp: ts,
+      };
+    }
+  } finally {
+    releaseConnection(conn);
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Lazily stream raw (un-deduped) source rows from the foundry-bridged MinIO
+ * object. CSV/TSV stream through `parseCsvReadable` (the SAME helper
+ * reindexService/dataPreview use — no second CSV parser, BOM + header
+ * sanitization + null-norm handled in its columns callback); JSONL streams
+ * line-by-line through `readline` + per-line `JSON.parse`; top-level bracket
+ * -array JSON is the ONE bounded path (`getObjectBuffer` + `JSON.parse`)
+ * and is only safe for small objects — a >512 MiB bracket JSON throws at
+ * `buffer.toString` (the same MAX_STRING_LENGTH wall). That bracket-JSON
+ * case is a known, flagged limitation; OO7 is CSV.
+ */
+async function* streamFoundryRows(
+  ds: FoundryBridgedDatasource,
+  s3Key: string,
+): AsyncGenerator<Record<string, unknown>> {
+  const fmt = ds.fileFormat;
+  if (fmt === "csv" || fmt === "tsv") {
+    const stream = await getObjectStream(s3Key);
+    const delimiter = fmt === "tsv" ? "\t" : ",";
+    const { rows } = await parseCsvReadable(stream, {
+      delimiter,
+      normalizeNulls: true,
+      source: ds.filePath,
     });
-    for (const record of records) {
-      for (const key of Object.keys(record)) {
-        const v = (record as Record<string, unknown>)[key];
-        if (typeof v === "string") {
-          const n = v.trim().toLowerCase();
-          if (n === "" || n === "null" || n === "na" || n === "n/a") {
-            (record as Record<string, unknown>)[key] = null;
-          }
-        }
+    for await (const r of rows) yield r as Record<string, unknown>;
+    return;
+  }
+  if (fmt === "jsonl") {
+    const stream = await getObjectStream(s3Key);
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of rl) {
+        const t = line.trim();
+        if (!t) continue;
+        yield JSON.parse(t) as Record<string, unknown>;
+      }
+    } finally {
+      rl.close();
+      stream.destroy();
+    }
+    return;
+  }
+  if (fmt === "json") {
+    // Bounded path — small top-level bracket-array JSON only. parseCsvReadable
+    // is CSV-only; a streaming bracket-JSON parser would need a new dep. The
+    // Option D guard's configurable ceiling (TELLUS_FOUNDRY_SOURCE_MAX_BYTES)
+    // catches the >512 MiB case before this read; otherwise a giant bracket
+    // JSON throws at buffer.toString (known limitation — flagged in writeup).
+    const buffer = await getObjectBuffer(s3Key);
+    const trimmed = buffer.toString("utf-8").trim();
+    const parsed = trimmed.startsWith("[")
+      ? (JSON.parse(trimmed) as unknown[])
+      : [JSON.parse(trimmed)];
+    for (const r of parsed) yield r as Record<string, unknown>;
+    return;
+  }
+  throw new Error(`Unsupported foundry-bridge file format: '${fmt}'`);
+}
+
+/**
+ * De-duplicate a stream of raw source rows by `pkCol` with LAST-WINS-by-file
+ * -order, yielding `SourceChangeRow`s, in O(1) JS heap via a disk-spilled
+ * DuckDB TEMP table. See `buildFoundryBridgedReader` for the O(N) walls this
+ * replaces (the old `Map<string, SourceChangeRow>`).
+ */
+async function* dedupFoundryRows(
+  rows: AsyncIterable<Record<string, unknown>>,
+  pkCol: string,
+  txnId: string,
+  ts: string,
+): AsyncGenerator<SourceChangeRow> {
+  const conn = await acquireConnection({ skipHttpfs: true });
+  const tempTable = `fb_dedup_${randomUUID().replace(/-/g, "_")}`;
+  try {
+    await runAll(
+      conn,
+      `CREATE TEMP TABLE ${tempTable} (` +
+        `primary_key VARCHAR, operation VARCHAR, properties VARCHAR, ` +
+        `source_transaction_id VARCHAR, source_commit_timestamp VARCHAR, ` +
+        `__seq BIGINT)`,
+    );
+    let seq = 0;
+    const BATCH = 500;
+    let batch: string[] = [];
+    const flush = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      await runAll(conn, `INSERT INTO ${tempTable} VALUES ${batch.join(", ")}`);
+      batch = [];
+    };
+    for await (const row of rows) {
+      const pk = row[pkCol];
+      if (pk == null || pk === "") continue; // skip null-PK rows, mirror reindexService
+      const key = String(pk);
+      // `properties` is stored as a JSON string in the temp table and
+      // JSON.parsed back to an object on the deduped read-out (computeChangelog
+      // re-stringifies it for the parquet). sqlStr doubles single quotes so a
+      // value like "O'Brien" stays a valid DuckDB string literal.
+      const propsJson = sqlStr(JSON.stringify(row));
+      batch.push(
+        `(${sqlStr(key)},'INSERT',${propsJson},${sqlStr(txnId)},${sqlStr(ts)},${seq})`,
+      );
+      seq++;
+      if (batch.length >= BATCH) {
+        await flush();
+        // Liveness evidence for the heartbeat loop (temporal/stageProgress.ts).
+        // A stalled S3 read or a wedged DuckDB insert now stops the heartbeats
+        // instead of being masked by a free-running timer.
+        reportStageProgress(`changelog dedup insert seq=${seq}`);
       }
     }
-    return records;
-  }
-  if (format === "json" || format === "jsonl") {
-    const trimmed = content.trim();
-    if (trimmed.startsWith("[")) {
-      return JSON.parse(trimmed) as Record<string, unknown>[];
+    await flush(); // final partial batch
+    if (seq === 0) return; // empty source — Parquet cannot represent zero rows
+
+    // DISTINCT ON last-wins by file order (__seq DESC). Q1 proved ON CONFLICT
+    // is first-wins within a multi-row INSERT — unusable here. DISTINCT ON
+    // over the disk-spilled TEMP table (temp_directory=/tmp/duckdb_spill)
+    // sorts + dedups in O(N log N) on disk, never in JS heap.
+    const dedupSql =
+      `SELECT DISTINCT ON (primary_key) primary_key, operation, properties, ` +
+      `source_transaction_id, source_commit_timestamp FROM ${tempTable} ` +
+      `ORDER BY primary_key, __seq DESC`;
+    let emitted = 0;
+    for await (const r of streamQuery<{
+      primary_key: string;
+      operation: string;
+      properties: string;
+      source_transaction_id: string;
+      source_commit_timestamp: string;
+    }>(conn, dedupSql)) {
+      let properties: Record<string, unknown> = {};
+      if (r.properties) {
+        try {
+          const p = JSON.parse(r.properties);
+          if (p && typeof p === "object" && !Array.isArray(p)) {
+            properties = p as Record<string, unknown>;
+          }
+        } catch {
+          /* keep {} — shouldn't happen (we JSON.stringify'd on insert) */
+        }
+      }
+      emitted++;
+      if (emitted % 5000 === 0) reportStageProgress(`changelog dedup read=${emitted}`);
+      yield {
+        primary_key: r.primary_key,
+        operation: r.operation as SourceChangeRow["operation"],
+        properties,
+        source_transaction_id: r.source_transaction_id,
+        source_commit_timestamp: r.source_commit_timestamp,
+      };
     }
-    return trimmed
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  } finally {
+    try {
+      await runAll(conn, `DROP TABLE IF EXISTS ${tempTable}`);
+    } catch {
+      /* ignore — connection is released anyway */
+    }
+    releaseConnection(conn);
   }
-  throw new Error(`Unsupported foundry-bridge file format: '${format}'`);
 }
+
+/** SQL string literal: single-quote-doubling (DuckDB standard SQL strings). */
+function sqlStr(s: string): string {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+// NOTE: the old eager `parseFoundryRows(content, format, path)` (csv-parse
+// SYNC over a whole-file string + a JSON whole-doc parse) was removed when
+// `buildFoundryBridgedReader` switched to streaming. CSV/TSV now stream
+// through `parseCsvReadable` (csv-parse stream-mode) and JSONL through
+// `readline`; only the small bracket-array JSON path still does a bounded
+// `getObjectBuffer` + `JSON.parse` (see `streamFoundryRows`). The whole-file
+// `buffer.toString("utf-8")` that threw Node's 512 MiB MAX_STRING_LENGTH is
+// gone for every streaming format.
 
 // ---------------------------------------------------------------------------
 // projectFunnelTerminalActivity
@@ -750,20 +1275,48 @@ async function parseFoundryRows(
 export async function projectFunnelTerminalActivity(input: {
   ontologyId: string;
   objectTypeApiName: string;
+  /** FUNN-ISO — stamped dispatch identity (fence + CAS inputs). */
+  objectTypeRid?: string;
+  environmentId?: string;
   status: FunnelStateStatus;
   objectsIndexed?: number;
   errorMessage?: string;
+  /** The driving signal's id — passed through so the failed path can mark
+   *  `funnel_run` failed by `temporal_workflow_id` (not just `funnel_state`),
+   *  closing the bookkeeping divergence that left `funnel_run` stuck at
+   *  "changelog" while Temporal was terminal FAILED. */
+  runKey?: string;
+  /** The pre-created dispatch run (FUNN-ISO-6) — CAS anchor. */
+  funnelRunId?: string;
+  /** Permit the explicit object_type_deleted terminal marking. */
+  allowObjectTypeDeletedMarking?: boolean;
 }): Promise<void> {
-  await projectFunnelTerminalToState(
-    input.ontologyId,
-    input.objectTypeApiName,
-    input.status,
-    {
+  await fence(input);
+  try {
+    await projectFunnelTerminalToState(
+      input.ontologyId,
+      input.objectTypeApiName,
+      input.status,
+      {
       objectsIndexed: input.objectsIndexed,
       errorMessage: input.errorMessage,
-      path: "post",
-    },
-  );
+      runKey: input.runKey,
+      runId: input.funnelRunId,
+      environmentId: input.environmentId,
+      objectTypeRid: input.objectTypeRid,
+        allowObjectTypeDeletedMarking: input.allowObjectTypeDeletedMarking,
+        path: "post",
+      },
+    );
+  } catch (err) {
+    recordTerminalProjectionFailed({
+      object_type: input.objectTypeApiName,
+      status: input.status,
+      environment: input.environmentId ?? "unknown",
+      error_class: err instanceof Error ? err.constructor.name : "unknown",
+    });
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +1339,8 @@ export async function projectFunnelTerminalActivity(input: {
 export async function syncOpenSearchActivity(input: {
   ontologyId: string;
   objectTypeApiName: string;
+  objectTypeRid?: string;
+  environmentId?: string;
 }): Promise<{
   indexName: string;
   indexCreated: boolean;
@@ -793,30 +1348,40 @@ export async function syncOpenSearchActivity(input: {
   rowsIndexed: number;
   durationMs: number;
 }> {
+  await fence(input);
   // The Object Type may have been deleted while its funnel workflow was still
   // alive — durable `ObjectTypeFunnelWorkflow` instances outlive the type they
   // index. Syncing a now-missing type throws "not found in metadata store"
   // (indexMappingGenerator), which fails the activity on every retry and the
   // whole workflow with it. Treat a deleted type as a no-op so the workflow
   // completes cleanly instead of error-looping.
+  const rid = (input as { objectTypeRid?: string }).objectTypeRid;
   const exists = await query(
-    "SELECT 1 FROM object_type WHERE api_name = $1 LIMIT 1",
-    [input.objectTypeApiName]
+    `SELECT object_type_id
+       FROM object_type
+      WHERE ontology_id = $1 AND api_name = $2
+      LIMIT 1`,
+    [input.ontologyId, input.objectTypeApiName]
   );
-  if (exists.rows.length === 0) {
-    console.warn(
-      `[temporal/indexing] object type '${input.objectTypeApiName}' no longer exists — skipping OpenSearch sync (deleted)`
-    );
-    const { getIndexName } = await import(
-      "../../opensearch/indexMappingGenerator"
-    );
-    return {
-      indexName: getIndexName(input.objectTypeApiName),
-      indexCreated: false,
-      rowsRead: 0,
-      rowsIndexed: 0,
-      durationMs: 0,
-    };
+  if (
+    exists.rows.length === 0 ||
+    (rid && exists.rows[0].object_type_id !== rid)
+  ) {
+    // FAIL-CLOSED (FUNN-ISO-4): the workflow expected this type. A missing
+    // type means mid-run deletion (legitimate) or cross-environment
+    // execution (the 2026-07-31 bug). Throw a typed error — the workflow
+    // converts it to the explicit `object_type_deleted` terminal state;
+    // never a silent green no-op.
+    recordMissingObjectType({
+      object_type: input.objectTypeApiName,
+      status: "sync_opensearch",
+      environment: (input as { environmentId?: string }).environmentId ?? "unknown",
+    });
+    throw ApplicationFailure.create({
+      message: `object type '${input.objectTypeApiName}' (rid=${rid ?? "?"}) not found in this database — refusing OpenSearch sync`,
+      type: "FunnelObjectTypeMissing",
+      nonRetryable: true,
+    });
   }
 
   // Lazy import so the worker's bundle doesn't pull the opensearch
@@ -824,5 +1389,8 @@ export async function syncOpenSearchActivity(input: {
   const { syncObjectInstancesToOpenSearch } = await import(
     "../../opensearch/syncFromInstances"
   );
-  return syncObjectInstancesToOpenSearch(input.objectTypeApiName);
+  return syncObjectInstancesToOpenSearch(
+    input.objectTypeApiName,
+    input.ontologyId,
+  );
 }

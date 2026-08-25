@@ -31,6 +31,8 @@ export const FUNCTIONS_ERROR_NAMES = [
   "Functions:Unauthenticated",
   "Functions:PermissionDenied",
   "Functions:Internal",
+  "Functions:GrantConflict",
+  "Functions:GrantNotFound",
 ] as const;
 
 export type FunctionsErrorName = (typeof FUNCTIONS_ERROR_NAMES)[number];
@@ -48,8 +50,10 @@ const FUNCTIONS_ERROR_TABLE: Record<FunctionsErrorName, FunctionsErrorSpec> = {
   "Functions:ArtifactCorrupt":          { status: 400, errorCode: ERROR_CODES.INVALID_ARGUMENT },
   "Functions:InvalidArgument":          { status: 400, errorCode: ERROR_CODES.INVALID_ARGUMENT },
   "Functions:Unauthenticated":          { status: 401, errorCode: ERROR_CODES.UNAUTHENTICATED },
-  "Functions:PermissionDenied":         { status: 403, errorCode: ERROR_CODES.PERMISSION_DENIED },
-  "Functions:Internal":                 { status: 500, errorCode: ERROR_CODES.INTERNAL },
+  "Functions:PermissionDenied":      { status: 403, errorCode: ERROR_CODES.PERMISSION_DENIED },
+  "Functions:Internal":              { status: 500, errorCode: ERROR_CODES.INTERNAL },
+  "Functions:GrantConflict":         { status: 409, errorCode: ERROR_CODES.CONFLICT },
+  "Functions:GrantNotFound":         { status: 404, errorCode: ERROR_CODES.NOT_FOUND },
 };
 
 export interface FunctionsError {

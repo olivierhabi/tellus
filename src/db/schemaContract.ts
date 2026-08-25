@@ -170,6 +170,39 @@ export const SCHEMA_CONTRACTS: readonly TableContract[] = [
       "resource_version",
     ],
   },
+  // 126 — Code-assistant chat sessions. The chat-session service writes to
+  // both tables via raw INSERT/UPDATE/DELETE with positional `$1..` params;
+  // a missing column on either side crashes the first chat save in
+  // production, so register both in the startup schema contract.
+  {
+    table: "code_repository_chat_session",
+    required: [
+      "session_id",
+      "principal_sub",
+      "repository_rid",
+      "assistant_path",
+      "title",
+      "branch",
+      "last_active_file_path",
+      "model_id",
+      "mode",
+      "message_count",
+      "created_at",
+      "updated_at",
+    ],
+  },
+  {
+    table: "code_repository_chat_message",
+    required: [
+      "message_id",
+      "session_id",
+      "seq",
+      "role",
+      "content",
+      "metadata",
+      "created_at",
+    ],
+  },
   {
     table: "workshop_module",
     required: [

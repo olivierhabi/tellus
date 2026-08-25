@@ -40,6 +40,12 @@ const OBJECT_TYPE_API_NAME = `RunKeyProbe${STAMP}`;
 let OBJECT_TYPE_ID = "";
 
 beforeAll(async () => {
+  await (
+    await import("../../../src/services/testing/destructiveTestGuard")
+  ).assertDestructiveTestEnvironment({
+    operation: "temporal-run-key-fixture-cleanup",
+    skipApiProbe: true,
+  });
   // Singleton-ontology adaptation: the canonical ontology already exists,
   // so we only insert our object_type fixture (FK satisfied by canonical).
   // `projectStageToPostgres` only needs a matching object_type_api_name to

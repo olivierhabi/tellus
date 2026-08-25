@@ -25,6 +25,40 @@ import {
   JoinApplySchema,
   UnionPreviewSchema,
   UnionApplySchema,
+  SelectPreviewSchema,
+  SelectApplySchema,
+  SortPreviewSchema,
+  SortApplySchema,
+  DropDuplicatesPreviewSchema,
+  DropDuplicatesApplySchema,
+  UppercaseColumnNamesPreviewSchema,
+  UppercaseColumnNamesApplySchema,
+  RowSizePreviewSchema,
+  RowSizeApplySchema,
+  ApplyExpressionPreviewSchema,
+  ApplyExpressionApplySchema,
+  ApplyMultipleExpressionsPreviewSchema,
+  ApplyMultipleExpressionsApplySchema,
+  ApplyToMultipleColumnsPreviewSchema,
+  ApplyToMultipleColumnsApplySchema,
+  ComputeIfExpressionAbsentPreviewSchema,
+  ComputeIfExpressionAbsentApplySchema,
+  TextBlockPreviewSchema,
+  TextBlockApplySchema,
+  AggregatePreviewSchema,
+  AggregateApplySchema,
+  RollupPreviewSchema,
+  RollupApplySchema,
+  AggregateOnConditionPreviewSchema,
+  AggregateOnConditionApplySchema,
+  TopRowsPreviewSchema,
+  TopRowsApplySchema,
+  PivotPreviewSchema,
+  PivotApplySchema,
+  UnpivotPreviewSchema,
+  UnpivotApplySchema,
+  KeepDuplicatesPreviewSchema,
+  KeepDuplicatesApplySchema,
   SavePreviewSnapshotSchema,
   SavePipelineProgressSchema,
   DeployPipelineSchema,
@@ -778,6 +812,473 @@ export class PipelineController {
       const bodyParsed = NormalizeApplySchema.safeParse(req.body);
       if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
       const node = await this.transformService.normalizeApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  /* ======================================================================= */
+  /*  Transform endpoints — Tier A single-input (PB-B2.follow)               */
+  /*                                                                         */
+  /*  Select / Sort / DropDuplicates / UppercaseColumnNames / RowSize /      */
+  /*  ApplyExpression / ApplyMultipleExpressions / ApplyToMultipleColumns /  */
+  /*  ComputeIfExpressionAbsent / TextBlock.                                 */
+  /* ======================================================================= */
+
+  // ---- Select -----------------------------------------------------------
+  selectPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = SelectPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.selectPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  selectApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = SelectApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.selectApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Sort ------------------------------------------------------------
+  sortPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = SortPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.sortPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  sortApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = SortApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.sortApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Drop Duplicates -------------------------------------------------
+  dropDuplicatesPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = DropDuplicatesPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.dropDuplicatesPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  dropDuplicatesApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = DropDuplicatesApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.dropDuplicatesApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Uppercase Column Names ------------------------------------------
+  uppercaseColumnNamesPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = UppercaseColumnNamesPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.uppercaseColumnNamesPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  uppercaseColumnNamesApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = UppercaseColumnNamesApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.uppercaseColumnNamesApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Row Size --------------------------------------------------------
+  rowSizePreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = RowSizePreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.rowSizePreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  rowSizeApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = RowSizeApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.rowSizeApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Apply Expression ------------------------------------------------
+  applyExpressionPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ApplyExpressionPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.applyExpressionPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  applyExpressionApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ApplyExpressionApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.applyExpressionApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Apply Multiple Expressions --------------------------------------
+  applyMultipleExpressionsPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ApplyMultipleExpressionsPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.applyMultipleExpressionsPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  applyMultipleExpressionsApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ApplyMultipleExpressionsApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.applyMultipleExpressionsApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Apply To Multiple Columns ---------------------------------------
+  applyToMultipleColumnsPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ApplyToMultipleColumnsPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.applyToMultipleColumnsPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  applyToMultipleColumnsApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ApplyToMultipleColumnsApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.applyToMultipleColumnsApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Compute If Expression Absent ------------------------------------
+  computeIfExpressionAbsentPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ComputeIfExpressionAbsentPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.computeIfExpressionAbsentPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  computeIfExpressionAbsentApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ComputeIfExpressionAbsentApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.computeIfExpressionAbsentApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Text Block ------------------------------------------------------
+  textBlockPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = TextBlockPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.textBlockPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  textBlockApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = TextBlockApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.textBlockApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Aggregate (groupAndAggregateV1) --------------------------------
+  aggregatePreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = AggregatePreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.aggregatePreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  aggregateApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = AggregateApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.aggregateApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Rollup (rollupV1) ----------------------------------------------
+  rollupPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = RollupPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.rollupPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  rollupApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = RollupApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.rollupApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Aggregate on Condition (aggregateOnConditionV2) -----------------
+  aggregateOnConditionPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = AggregateOnConditionPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.aggregateOnConditionPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  aggregateOnConditionApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = AggregateOnConditionApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.aggregateOnConditionApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Top Rows (topRowsV1) --------------------------------------------
+  topRowsPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = TopRowsPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.topRowsPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  topRowsApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = TopRowsApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.topRowsApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Pivot (pivotV1) --------------------------------------------------
+  pivotPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = PivotPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.pivotPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  pivotApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = PivotApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.pivotApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Unpivot (unpivotV1) ----------------------------------------------
+  unpivotPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = UnpivotPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.unpivotPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  unpivotApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = UnpivotApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.unpivotApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Keep Duplicates (keepDuplicatesV1) --------------------------------
+  keepDuplicatesPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = KeepDuplicatesPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.keepDuplicatesPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  keepDuplicatesApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = KeepDuplicatesApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.keepDuplicatesApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
       res.json({ success: true, data: node });
     } catch (error) { next(error); }
   };

@@ -31,7 +31,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# ---------- defaults aligned with docker-compose-files/postgres.yml ---------
+# ---------- defaults aligned with the root docker-compose.yml ---------------
 : "${PGUSER:=tellus}"
 : "${PGPASSWORD:=tellus_password}"
 : "${PGHOST:=localhost}"

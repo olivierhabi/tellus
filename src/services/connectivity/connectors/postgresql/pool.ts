@@ -19,6 +19,7 @@ import * as credStore from "../../credentials/store.repo";
 import { installPgTypeParsers } from "./pg-types-config";
 import { assemblePgPoolOptions, type PgCredentialMaterial } from "./config";
 import { assertEgressAllowed, assertEgressResolved } from "./egress";
+import { setPoolCountProvider } from "../../metrics";
 import { assertAgentAvailable } from "../../agent/proxy";
 import { TellusError } from "../../../../lib/errors/envelope";
 import {
@@ -40,6 +41,9 @@ interface PoolEntry {
 const POOLS = new Map<string, PoolEntry>();
 const IDLE_TTL_MS = 10 * 60_000;
 let sweeper: NodeJS.Timeout | null = null;
+
+// Expose the cache size to the pools_open gauge, read at scrape time.
+setPoolCountProvider(() => POOLS.size);
 
 function ensureSweeper(): void {
   if (sweeper) return;

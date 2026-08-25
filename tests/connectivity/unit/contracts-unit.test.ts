@@ -20,6 +20,7 @@ import {
   DatasetRid,
   EgressPolicy,
   PostgresConfig,
+  RestApiConfig,
   TableImportRid,
 } from "../../../src/services/connectivity/contracts";
 
@@ -95,6 +96,51 @@ describe("PostgresConfig", () => {
   });
 });
 
+describe("RestApiConfig", () => {
+  it("accepts multiple HTTPS domains and secret-name references", () => {
+    const result = RestApiConfig.parse({
+      domains: [
+        {
+          baseUrl: "https://api.example.com/v1",
+          port: 443,
+          authentication: "bearer",
+        },
+        {
+          baseUrl: "https://auth.example.com/oauth",
+          port: 8443,
+          authentication: "basic",
+        },
+      ],
+      additionalSecretNames: ["clientId", "clientSecret"],
+      apiName: "ExampleApi",
+    });
+    expect(result.domains).toHaveLength(2);
+    expect(result.additionalSecretNames).toEqual(["clientId", "clientSecret"]);
+  });
+
+  it("rejects insecure HTTP domains, duplicates, and invalid secret names", () => {
+    expect(
+      RestApiConfig.safeParse({
+        domains: [{ baseUrl: "http://api.example.com", port: 443 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      RestApiConfig.safeParse({
+        domains: [
+          { baseUrl: "https://api.example.com/v1", port: 443 },
+          { baseUrl: "https://api.example.com/v1", port: 443 },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RestApiConfig.safeParse({
+        domains: [{ baseUrl: "https://api.example.com", port: 443 }],
+        additionalSecretNames: ["invalid-name"],
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe("EgressPolicy", () => {
   it("requires at least one allowlist entry", () => {
     expect(EgressPolicy.safeParse({ allowlist: [] }).success).toBe(false);
@@ -133,6 +179,34 @@ describe("ConnectionCreateRequest cross-field validation", () => {
 
   it("accepts a fully valid foundryWorker payload", () => {
     expect(ConnectionCreateRequest.safeParse(validBase).success).toBe(true);
+  });
+
+  it("accepts a REST API source with a matching config discriminator", () => {
+    expect(
+      ConnectionCreateRequest.safeParse({
+        ...validBase,
+        connectorType: "rest-api",
+        config: {
+          connectorType: "rest-api",
+          restApi: {
+            domains: [
+              {
+                baseUrl: "https://api.example.com/v1",
+                port: 443,
+                authentication: "bearer",
+              },
+            ],
+            additionalSecretNames: ["accessToken"],
+            apiName: "ExampleApi",
+          },
+        },
+        egressPolicy: {
+          allowlist: [
+            { kind: "host", host: "api.example.com", port: 443 },
+          ],
+        },
+      }).success,
+    ).toBe(true);
   });
 
   it("rejects agentProxy without agentGroupRid", () => {
@@ -200,6 +274,24 @@ describe("ConnectionConfig discriminator", () => {
       ConnectionConfig.safeParse({
         connectorType: "postgresql",
         postgres: { host: "x", database: "y" },
+      }).success,
+    ).toBe(true);
+  });
+  it("accepts REST API discriminator", () => {
+    expect(
+      ConnectionConfig.safeParse({
+        connectorType: "rest-api",
+        restApi: {
+          domains: [
+            {
+              baseUrl: "https://api.example.com/v1",
+              port: 443,
+              authentication: "bearer",
+            },
+          ],
+          additionalSecretNames: ["accessToken"],
+          apiName: "ExampleApi",
+        },
       }).success,
     ).toBe(true);
   });

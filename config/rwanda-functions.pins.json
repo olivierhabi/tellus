@@ -1,0 +1,17 @@
+{
+  "environment": "qa-local",
+  "functions": {
+    "calculateCreditRiskV2": 5,
+    "detectAffordabilityExceptionV2": 4,
+    "validateRraTaxClearanceV2": 4,
+    "verifyNationalIdMatchV2": 4,
+    "detectLandTitleConflictV2": 4,
+    "classifyIso8583FailureV2": 4,
+    "isReconciliationEligibleV2": 4,
+    "calculateTransactionSlaV2": 4,
+    "buildBulkReconciliationResultV2": 4,
+    "calculateCarrierHealthV2": 4,
+    "recommendFailoverRouteV2": 4,
+    "validateRouteSwitchV2": 4
+  }
+}

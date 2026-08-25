@@ -26,8 +26,7 @@
 //   emitted the query WITHOUT the $3 parameter; this test would fail
 //   because `branch_id` would not appear in the passed args.
 //
-// This file is the canonical evidence row for F-P3-12 in
-// docs/remediation/findings-closure.md.
+// This executable regression test is the canonical evidence for F-P3-12.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach, vi } from "vitest";

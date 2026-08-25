@@ -197,7 +197,7 @@ async function persist(e: RuntimeEvent): Promise<void> {
         );
         const row = r.rows[0];
         if (row) {
-          const { registerSyncedDataset } = await import(
+          const { registerSyncedDataset, persistSyncedSchema } = await import(
             "../../datasets/synced-dataset-registry"
           );
           await registerSyncedDataset({
@@ -211,6 +211,28 @@ async function persist(e: RuntimeEvent): Promise<void> {
             rowCount: rowsWritten,
             fileSizeBytes: bytesRead,
           });
+          // Persist the output's column scan into `dataset_columns` — the
+          // Iceberg equivalent of the upload CSV parse job. Without this the
+          // registry row has zero persisted columns and consumers of the
+          // persisted schema (ontology backing-datasource registration)
+          // fail with "has no columns yet". Best-effort: the build already
+          // succeeded; a scan failure only degrades to live-preview reads.
+          try {
+            await persistSyncedSchema(
+              String(row.dataset_rid).split(".").pop() ?? "",
+              {
+                schema: row.config.schema,
+                table: row.config.targetTable ?? row.config.table,
+                warehouseRoot: row.config.warehouseRoot,
+              },
+              row.tenant ?? "default",
+            );
+          } catch (scanErr) {
+            logger.warn(
+              { err: scanErr, datasetRid: row.dataset_rid },
+              "sync schema scan failed (best-effort)",
+            );
+          }
         }
       } catch {
         /* best-effort */

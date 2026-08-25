@@ -16,6 +16,31 @@ import { RedisOverlayStore, MinimalRedisClient } from "./redisStore";
 
 let store: OverlayStore | null = null;
 let connecting: Promise<OverlayStore> | null = null;
+// Retain a handle to the underlying node-redis client so verification
+// scripts (which drive the runtime in-process and then exit) can close the
+// keep-alive socket explicitly. The long-running API process never calls this.
+let rawRedisClient: { quit: () => Promise<void>; disconnect: () => void } | null =
+  null;
+
+/**
+ * Close the Redis overlay connection (if one was opened) and reset the
+ * singleton so a subsequent getOverlayStore() re-connects. No-op for the
+ * in-memory fallback. Used by verification scripts to release the keep-alive
+ * socket so the process can exit naturally instead of relying on a forced
+ * exit guard.
+ */
+export async function closeOverlayStore(): Promise<void> {
+  if (rawRedisClient) {
+    try {
+      await rawRedisClient.quit();
+    } catch {
+      /* best-effort — the socket may already be closed */
+    }
+    rawRedisClient = null;
+  }
+  store = null;
+  connecting = null;
+}
 
 export async function getOverlayStore(): Promise<OverlayStore> {
   if (store) return store;
@@ -102,6 +127,11 @@ export async function getOverlayStore(): Promise<OverlayStore> {
         dbSize: () => client.dbSize(),
       };
       store = new RedisOverlayStore(adapter);
+      rawRedisClient = {
+        quit: () => (client as unknown as { quit: () => Promise<void> }).quit(),
+        disconnect: () =>
+          (client as unknown as { disconnect: () => void }).disconnect(),
+      };
       console.log("[overlay] connected to Redis at", url);
       return store;
     } catch (err) {

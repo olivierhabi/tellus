@@ -26,3 +26,39 @@ ignore:
   - vulnerability: CVE-2026-1526
     package:
       name: undici
+  # CVE-2026-12151 (High) — same dev-only posture as the two undici entries
+  # above. Fixed in undici 6.27.0, but testcontainers 10.x pins undici 5.x,
+  # so an override would break the test harness. Revisit on the testcontainers
+  # upgrade tracked above.
+  - vulnerability: CVE-2026-12151
+    package:
+      name: undici
+
+  # --- vitest / vite — test-only toolchain, never shipped to production ---
+  # vitest is a devDependency (the unit/integration test runner) and vite is
+  # pulled transitively by vitest as its dev-server/build backend. Neither
+  # reaches the production image (`pnpm install --prod` in the Dockerfile),
+  # so these advisories are not exploitable in a deployed artifact. Both are
+  # bumpable in principle (vitest ^4.0.18 → 4.1.0 fixes CVE-2026-47429;
+  # vite → 8.0.16 fixes CVE-2026-53571), but the bump is deliberately deferred
+  # to avoid churning the manually-verified test harness mid-release — these
+  # suppressions match the established undici dev-only pattern above. Revisit
+  # both on the next dev-tooling upgrade pass.
+  - vulnerability: CVE-2026-47429
+    package:
+      name: vitest
+  - vulnerability: CVE-2026-53571
+    package:
+      name: vite
+
+  # --- extract-zip — dev/test-only (cypress), no fixed version exists ---
+  # CVE-2026-56876 (High) reaches the tree ONLY via cypress 13.x (a
+  # devDependency used for browser E2E). There is NO patched release of
+  # extract-zip 2.x, so it cannot be cleared by an override. The production
+  # image is built with `pnpm install --prod` (Dockerfile), so neither
+  # cypress nor extract-zip is present in the deployed artifact. Not
+  # exploitable in production. Revisit when cypress ships a fixed
+  # extract-zip.
+  - vulnerability: CVE-2026-56876
+    package:
+      name: extract-zip

@@ -25,6 +25,7 @@ import {
 } from "../middleware/validateBody";
 import { validatePropertyLimits } from "../utils/propertyLimits";
 import { dataPlaneGuard } from "../middleware/requireRole";
+import { validateInlineEditEligibility } from "../actions/inlineEditEligibility";
 
 const router = Router({ mergeParams: true });
 
@@ -267,6 +268,50 @@ router.put(
         structSchema: req.body?.structSchema,
         config: req.body?.config,
       });
+
+      // Pillar 1 — defense in depth: if the caller is setting
+      // inlineEditActionId, verify the referenced action type exists in this
+      // ontology AND passes the inline-edit eligibility validator (Pillar 2).
+      // Never rely on UI filtering alone; the backend MUST reject ineligible
+      // bindings so a stale/malicious client cannot persist them.
+      if (req.body?.inlineEditActionId !== undefined) {
+        const actionApiName = req.body.inlineEditActionId;
+        if (actionApiName && String(actionApiName).length > 0) {
+          const actionRow = await query(
+            `SELECT api_name, display_name, parameters, rules,
+                    submission_criteria, side_effects, writeback_config,
+                    is_enabled
+             FROM action_type
+             WHERE ontology_id = $1 AND api_name = $2`,
+            [req.params.ontologyId, String(actionApiName)]
+          );
+          if (actionRow.rows.length === 0) {
+            return sendError(
+              res,
+              "INLINE_EDIT_ACTION_NOT_FOUND",
+              `Action type "${actionApiName}" was not found in this ontology.`,
+            );
+          }
+          const at = actionRow.rows[0] as Record<string, unknown>;
+          const eligibility = validateInlineEditEligibility({
+            apiName: at.api_name as string,
+            isEnabled: at.is_enabled as boolean,
+            rules: at.rules as unknown[],
+            parameters: at.parameters as never[],
+            sideEffects: at.side_effects as never[],
+            writebackConfig: at.writeback_config,
+            submissionCriteria: at.submission_criteria,
+          });
+          if (!eligibility.eligible) {
+            return sendError(
+              res,
+              "INLINE_EDIT_ACTION_INELIGIBLE",
+              `Action type "${actionApiName}" does not meet Foundry's inline-edit requirements: ${eligibility.violations.map((v) => v.message).join(" ")}`,
+              { violations: eligibility.violations },
+            );
+          }
+        }
+      }
 
       const row = await propertyService.update(
         objectTypeId,

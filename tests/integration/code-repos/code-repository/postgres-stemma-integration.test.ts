@@ -126,5 +126,20 @@ describe("PostgresStemma — durable adapter", () => {
     const tree = await stemma.listTree({ repositoryRid: RID, branch: "main", path: "", depth: 5 });
     expect(tree.kind).toBe("branch-not-found");
     expect(await stemma.exists(RID)).toBe(false);
+
+    // GC guarantee: tombstone() must free the Stemma content rows, not just
+    // flip the tombstoned flag. Branch rows are deleted (migration 086 FK
+    // ON DELETE CASCADE removes the blobs), so neither branches nor blobs
+    // linger. This is the delete->GC contract the DELETE /:rid route relies on.
+    const br = await schema.pool.query(
+      "SELECT count(*) AS n FROM coderepo_stemma_branch WHERE repository_rid = $1",
+      [RID],
+    );
+    const bl = await schema.pool.query(
+      "SELECT count(*) AS n FROM coderepo_stemma_blob WHERE repository_rid = $1",
+      [RID],
+    );
+    expect(Number(br.rows[0].n)).toBe(0);
+    expect(Number(bl.rows[0].n)).toBe(0);
   });
 });

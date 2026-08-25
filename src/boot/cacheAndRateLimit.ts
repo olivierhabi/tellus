@@ -32,6 +32,7 @@ import type { Kafka } from "kafkajs";
 import { initRedisRateLimiters } from "../middleware/rateLimiter";
 import { initCacheInvalidationBus, shutdownCacheInvalidationBus } from "../services/cacheInvalidation";
 import { incCounter } from "../services/funnel/metrics";
+import { connectRedisBounded, describeRedisError } from "../lib/redisConnect";
 
 let bootedRedis: RedisClientType | null = null;
 let bootedKafka: Kafka | null = null;
@@ -45,25 +46,19 @@ async function connectRedis(): Promise<RedisClientType | null> {
     return null;
   }
   try {
-    const mod = await import("redis");
-    const client = mod.createClient({
+    // Bounded connect (lib/redisConnect.ts). The previous inline strategy
+    // returned a number, which node-redis reads as "retry forever" — so with
+    // RATE_LIMIT_BACKEND=redis and Redis down, `await client.connect()` never
+    // settled and server BOOT hung here instead of degrading to the in-memory
+    // limiter as the header above promises.
+    return await connectRedisBounded<RedisClientType>({
       url,
       password: process.env.REDIS_PASSWORD || undefined,
-      socket: {
-        connectTimeout: 5_000,
-        reconnectStrategy: (attempts: number) => Math.min(attempts * 500, 30_000),
-      },
-    }) as RedisClientType;
-    client.on("error", (err: Error) => {
-      console.warn(`[boot] redis client error: ${err.message}`);
+      logPrefix: "[boot]",
     });
-    await client.connect();
-    return client;
   } catch (err) {
     console.warn(
-      `[boot] redis connect failed — falling back to memory limiter: ${
-        err instanceof Error ? err.message : err
-      }`,
+      `[boot] redis connect failed — falling back to memory limiter: ${describeRedisError(err)}`,
     );
     incCounter("tellus_rate_limit_backend_selected_total", { backend: "memory_fallback" });
     return null;

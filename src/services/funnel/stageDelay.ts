@@ -38,3 +38,36 @@ export function sleepForStageDelay(): Promise<void> {
     setTimeout(resolve, FUNNEL_STAGE_DELAY_MS),
   );
 }
+
+/**
+ * Stage-scope receipts (FUNN-ISO-7 multi-replica attribution): when
+ * FUNNEL_STAGE_RECEIPT_FILE is set, every stage start writes one JSONL line
+ * `{stage, label, pid}` to that file. Which PROCESS executed which stage is
+ * otherwise invisible in Temporal's history (workflow task events carry the
+ * identity but activity events do not) — receipts close that attribution
+ * hole for replica tests. Receipts are ALSO useful to the failure-injection
+ * matrix (they prove WHICH stage was interrupted).
+ */
+export const FUNNEL_STAGE_RECEIPT_FILE: string | undefined =
+  process.env.FUNNEL_STAGE_RECEIPT_FILE?.trim() || undefined;
+export const FUNNEL_STAGE_RECEIPT_LABEL: string =
+  process.env.FUNNEL_STAGE_RECEIPT_LABEL?.trim() || `pid-${process.pid}`;
+
+export function writeStageReceipt(stage: string): void {
+  if (!FUNNEL_STAGE_RECEIPT_FILE) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require("fs") as typeof import("fs");
+    fs.appendFileSync(
+      FUNNEL_STAGE_RECEIPT_FILE,
+      JSON.stringify({
+        stage,
+        label: FUNNEL_STAGE_RECEIPT_LABEL,
+        pid: process.pid,
+        at: new Date().toISOString(),
+      }) + "\n",
+    );
+  } catch {
+    /* receipt writes are observability, never pipeline semantics */
+  }
+}

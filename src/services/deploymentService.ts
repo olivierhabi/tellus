@@ -293,6 +293,53 @@ export class DeploymentService {
     }
   }
 
+  // ============================================================================
+  // Output dataset placement
+  // ============================================================================
+  //
+  // Foundry parity: "After the first build of your pipeline, your dataset
+  // output will be created in the same folder as your pipeline."
+  // (pipeline-builder/outputs-add-dataset-output). Pipeline Builder offers no
+  // free-text path field for an output — placement is inherited, not authored.
+  //
+  // Before this, both `foundry_datasets` INSERT sites set `project_id` and left
+  // `folder_id` NULL, and `datasetService.listProjectRootDatasets` treats
+  // `folder_id IS NULL` as "project root" — so every deployed output surfaced
+  // at the root no matter which folder its pipeline lived in.
+  //
+  // Only the INSERT sites call this. The existing-dataset UPDATE branches are
+  // deliberately left alone: they are keyed on the immutable `outputDatasetId`,
+  // so once a dataset exists the user may move it in the file tree and a
+  // redeploy must not drag it back to the pipeline's folder.
+  //
+  // Returns null (→ project root, the previous behaviour) when the pipeline sits
+  // at the root itself, or when its folder is missing or belongs to another
+  // project. That last check matters because `folder_id` FKs to `folders`, whose
+  // own `project_id` is the authority for the file tree — inheriting a foreign
+  // project's folder would make the output vanish from this project's listing
+  // while still resolving the FK.
+  private async resolveOutputFolderId(
+    pipelineId: string,
+    projectId: string,
+  ): Promise<string | null> {
+    const pipeline = await this.knex('pipelines')
+      .where({ id: pipelineId })
+      .first('folder_id');
+    const folderId = pipeline?.folder_id as string | null | undefined;
+    if (!folderId) return null;
+    const folder = await this.knex('folders')
+      .where({ id: folderId, project_id: projectId })
+      .first('id');
+    if (!folder) {
+      console.warn(
+        `[deploy] pipeline ${pipelineId} references folder ${folderId} which is ` +
+          `not in project ${projectId}; placing output at the project root`,
+      );
+      return null;
+    }
+    return folderId;
+  }
+
   /**
    * Start a deployment — PB-B1 supervised path.
    *
@@ -582,11 +629,16 @@ export class DeploymentService {
         const { isTemporalConnected } = await import("./funnel/temporal/worker");
         if (isTemporalConnected()) {
           const { Connection, Client } = await import("@temporalio/client");
-          const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
-          const namespace = process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
-          const taskQueue = process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
-          const conn = await Connection.connect({ address });
-          const client = new Client({ connection: conn, namespace });
+          // FUNN-ISO: deployment-scoped namespace + queue.
+          const { getEnvironmentIdentity } = await import("../config/environmentIdentity");
+          const identity = getEnvironmentIdentity();
+          const conn = await Connection.connect({ address: identity.temporalAddress });
+          const client = new Client({
+            connection: conn,
+            namespace: identity.temporalNamespace,
+            identity: identity.workerIdentity,
+          });
+          const taskQueue = identity.temporalTaskQueue;
           // PB-B9 — propagate the inbound HTTP request's trace_id into
           // the Temporal workflow so spans stitch across HTTP → workflow
           // → activity → DuckDB/Iceberg. We push trace_id onto:
@@ -2395,6 +2447,11 @@ export class DeploymentService {
         .insert({
           ...datasetPatch,
           project_id: args.projectId,
+          // Foundry parity — a new output lands in the pipeline's own folder.
+          folder_id: await this.resolveOutputFolderId(
+            args.pipelineId,
+            args.projectId,
+          ),
           created_by: args.triggeredBy,
         })
         .returning('*');
@@ -3007,6 +3064,8 @@ export class DeploymentService {
             .insert({
               name: outputNode.label,
               project_id: projectId,
+              // Foundry parity — a new output lands in the pipeline's own folder.
+              folder_id: await this.resolveOutputFolderId(pipelineId, projectId),
               file_path: s3Key,
               original_filename: originalFilename,
               mime_type: mimeType,

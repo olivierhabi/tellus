@@ -60,9 +60,11 @@ export async function openTestSchema(label: string): Promise<SchemaContext> {
     user: process.env.PGUSER ?? "tellus",
     password: process.env.PGPASSWORD ?? "tellus123",
     max: 4,
-    // Connect quickly or fail loudly — these tests should not hang on a
-    // missing Postgres.
-    connectionTimeoutMillis: 5_000,
+    // Tolerate a saturated dev box (parallel dev servers +
+    // back-to-back suite runs churn connections): connect
+    // waits up to 15s before failing loudly. Assertions are
+    // unaffected — this only absorbs infra-level latency.
+    connectionTimeoutMillis: 15_000,
   });
 
   // Pin every connection acquired from this pool to the per-test schema so

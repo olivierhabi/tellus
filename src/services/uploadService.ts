@@ -10,6 +10,7 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import readline from "readline";
 import { parse } from "csv-parse";
 import { sanitizeCsvHeader } from "../utils/csvHeader";
 
@@ -17,8 +18,21 @@ import { sanitizeCsvHeader } from "../utils/csvHeader";
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Maximum upload size: 500 MB */
-const MAX_FILE_SIZE = 500 * 1024 * 1024;
+/** Maximum upload size: 1 GB */
+const MAX_FILE_SIZE = 1024 * 1024 * 1024;
+
+/**
+ * Maximum size of an inline JSON-array file that extractJsonMetadata will load
+ * whole into memory for schema inference. A JSON array is a single document —
+ * unlike JSONL it can't be parsed incrementally without a streaming JSON
+ * parser — so we bound it to stop a 1 GB upload from OOMing the process at
+ * metadata-extraction time. Larger files must be ingested as JSONL (one
+ * object per line), which IS streamed. Override with MAX_INLINE_JSON_MB.
+ */
+const MAX_INLINE_JSON_BYTES =
+  Math.max(1, parseInt(process.env.MAX_INLINE_JSON_MB ?? "64", 10) || 64) *
+  1024 *
+  1024;
 
 /** Allowed MIME types for upload */
 const ALLOWED_MIMES = new Set([
@@ -233,48 +247,66 @@ export async function extractJsonMetadata(
 ): Promise<FileMetadata> {
   const stat = fs.statSync(filePath);
   const fileSizeBytes = stat.size;
-  const content = fs.readFileSync(filePath, "utf-8");
 
-  let records: Record<string, unknown>[];
+  // We only ever need the column names, a handful of sample rows, and a row
+  // count. JSONL is streamed line-by-line so the whole file is never resident
+  // in memory; a JSON array can't be split without a streaming JSON parser,
+  // so it is size-guarded and the client is pointed at JSONL for large data.
+  let rowCount: number;
+  const sampleRows: Record<string, unknown>[] = [];
+  const keySet = new Set<string>();
+
+  const isObjectRecord = (r: unknown): r is Record<string, unknown> =>
+    r !== null && typeof r === "object" && !Array.isArray(r);
 
   if (format === "jsonl") {
-    // JSONL: one JSON object per line
-    records = content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return null;
-        }
-      })
-      .filter(
-        (r): r is Record<string, unknown> =>
-          r !== null && typeof r === "object" && !Array.isArray(r)
-      );
+    rowCount = 0;
+    const rl = readline.createInterface({
+      input: fs.createReadStream(filePath, "utf-8"),
+      crlfDelay: Infinity,
+    });
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(trimmed);
+      } catch {
+        // Malformed line — skip, matching the old split().map().filter() path
+        // (which swallowed parse failures into `null` and dropped them).
+        continue;
+      }
+      if (!isObjectRecord(record)) continue;
+      rowCount++;
+      if (sampleRows.length < MAX_SAMPLE_ROWS) {
+        sampleRows.push(record);
+        for (const key of Object.keys(record)) keySet.add(key);
+      }
+    }
   } else {
-    // JSON: top-level array
+    // JSON: top-level array — a single document, not incrementally parsable
+    // without a streaming JSON parser. Cap the inline parse to avoid OOM on a
+    // large upload; above the cap, refuse and direct the client to JSONL.
+    if (fileSizeBytes > MAX_INLINE_JSON_BYTES) {
+      throw new Error(
+        `Inline JSON array ingest is capped at ${Math.round(
+          MAX_INLINE_JSON_BYTES / 1024 / 1024,
+        )} MB to avoid loading the whole document into memory. Convert to JSONL (one object per line) and re-upload for larger files.`,
+      );
+    }
+    const content = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(content);
     if (!Array.isArray(parsed)) {
       throw new Error("JSON file must contain a top-level array.");
     }
-    records = parsed.filter(
-      (r: unknown): r is Record<string, unknown> =>
-        r !== null && typeof r === "object" && !Array.isArray(r)
-    );
-  }
-
-  const rowCount = records.length;
-  const sampleRows = records.slice(0, MAX_SAMPLE_ROWS);
-
-  // Union of all keys across sample rows
-  const keySet = new Set<string>();
-  for (const row of sampleRows) {
-    for (const key of Object.keys(row)) {
-      keySet.add(key);
+    const records = parsed.filter(isObjectRecord);
+    rowCount = records.length;
+    sampleRows.push(...records.slice(0, MAX_SAMPLE_ROWS));
+    for (const row of sampleRows) {
+      for (const key of Object.keys(row)) keySet.add(key);
     }
   }
+
   const columnNames = Array.from(keySet);
 
   const inferredTypes = inferColumnTypes(columnNames, sampleRows);

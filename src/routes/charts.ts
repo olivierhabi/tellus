@@ -24,6 +24,7 @@ import { buildSecurityFilter } from '../middleware/securityContext';
 import { readBranchHeader } from '../middleware/branchHeader';
 import { sendError } from '../utils/responseFormatter';
 import { routeMetric } from '../utils/routeInstrumentation';
+import { objectTypeIndexName } from "../services/opensearch/objectIndexNames";
 
 const router = Router();
 
@@ -58,7 +59,7 @@ router.post('/charts/batch', async (req: Request, res: Response) => {
       return sendError(res, 'VALIDATION_ERROR', 'objectType and specs[] required');
     }
 
-    const index = `ontology-${String(objectType).toLowerCase()}`;
+    const index = objectTypeIndexName(String(objectType));
     // T-01: every read-path query runs through the canonical
     // `applyContextToQuery` helper. The local `withSecurity` lambda
     // that previously lived here is intentionally deleted.

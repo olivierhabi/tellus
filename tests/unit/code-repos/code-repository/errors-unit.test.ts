@@ -60,7 +60,7 @@ describe("B2 — error catalog completeness", () => {
     expect(CODE_REPOS_ERROR_STATUS["CodeRepos:Internal"]?.status).toBe(500);
   });
 
-  it("CODE_REPOS_ERROR_NAMES enumerates exactly 34 names", () => {
+  it("CODE_REPOS_ERROR_NAMES enumerates exactly 41 names", () => {
     // 6 spec-mandated (B2-C-30..35) + 4 cross-cutting (G-C-08/09/13)
     // + 6 read-path (B2-C-10/11: InvalidPath, InvalidDepth, BranchNotFound,
     // FileNotFound, InvalidPathType, RateLimited)
@@ -68,8 +68,28 @@ describe("B2 — error catalog completeness", () => {
     // + 1 optimistic-concurrency (PreconditionFailed — RFC 7232 412 fix)
     // + 4 Tag & Release (NoFunctionsToPublish, BackwardIncompatible,
     //   VersionConflict, ReleaseCompileError)
+    // + 1 enqueue active-run guard (RunAlreadyActive — Track 2 #7)
     // + 2 branch lifecycle (BranchExists, CannotModifyDefaultBranch)
-    expect(CODE_REPOS_ERROR_NAMES.length).toBe(34);
+    // + 2 uncommitted-drafts (DraftTooLarge 413, DraftLimitExceeded 400 — the
+    //   Code Assistant propose_file / Monaco dirty-buffer draft store)
+    // + 3 chat session (ChatSessionNotFound, ChatSessionTooLarge,
+    //   ChatSessionLimitExceeded)
+    // + 2 imports-route (InvalidImportsBody, StaleImportsState)
+    // + 6 function-invoke (FunctionNotFound, RuntimeNotSupported,
+    //   FunctionCompileError, FunctionRuntimeError, FunctionTimeout,
+    //   PublishedArtifactMissing — missing content-addressed bundle for an
+    //   AVAILABLE version; surfaces an actionable envelope instead of a raw
+    //   InternalError and only when NO version resolved)
+    // + 3 body validation (InvalidArgumentBody, InvalidSettings,
+    //   Unauthenticated)
+    // NOTE: this guard previously expected 36 while HEAD already
+    // carried 39 — the function-invoke/chat/imports groups were
+    // added without updating the count. Fixed to the true count.
+    expect(CODE_REPOS_ERROR_NAMES.length).toBe(41);
+    expect(CODE_REPOS_ERROR_STATUS["CodeRepos:PublishedArtifactMissing"]?.status).toBe(500);
+    // The enqueue guard maps to the same 409 CONFLICT semantics as
+    // the retrigger Jemma:RunAlreadyActive contract.
+    expect(CODE_REPOS_ERROR_STATUS["CodeRepos:RunAlreadyActive"]?.status).toBe(409);
   });
 
   it("every error name matches the §1.6 ERROR_NAME_REGEX", () => {

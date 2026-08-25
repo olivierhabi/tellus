@@ -13,25 +13,90 @@
 // tests/tuesday/integration/rate-limiter-integration.test.ts can verify
 // the action rate limiter works correctly at 100/min and 10/min batch.
 //
-// The server is killed on teardown. If a developer has a server already
-// running on port 3000, it is killed and replaced — test determinism
-// requires a controlled process with known env vars.
+// The server is killed on teardown. Port 3000 is claimed FAIL-CLOSED: only
+// a leftover server that self-identifies (via /health.environmentId) as
+// THIS test lane is ever killed; dev/verify servers abort the run loudly.
+// The lane itself is pinned to dedicated infrastructure by ./laneEnv and
+// re-proofed through src/services/testing/destructiveTestGuard.ts.
 // ---------------------------------------------------------------------------
 
+// Lane env MUST be pinned before any other import executes (the pg pool,
+// envIdentity and auth configs all read process.env at import time). The
+// `./laneEnv` module applies the deterministic test-lane identity
+// (tellus_tests / tellus-tests-main / dedicated realm+indices+bucket) as an
+// import side effect — the default lane can no longer be steered into the
+// shared dev environment by a partially-overridden shell config.
+import "./laneEnv";
 import { spawn, execSync, spawnSync, type ChildProcess } from "child_process";
 import path from "path";
+import { LANE } from "./laneEnv";
+import { bootstrapTestStack } from "./testStackBootstrap";
+import { assertDestructiveTestEnvironment } from "../src/services/testing/destructiveTestGuard";
 
 const ROOT = path.resolve(__dirname, "..");
 let serverProcess: ChildProcess | null = null;
 
-function killPort3000(): void {
+// ---------------------------------------------------------------------------
+// Gap A — deterministic controlled webhook test service.
+//
+// A long-lived child process on 127.0.0.1:$CONTROLLED_WEBHOOK_PORT (default
+// 3329, advertised as http://localhost:<port>) that every integration / E2E /
+// Cypress test can target for writeback + side-effect webhook behavior. It is
+// started here so no test requires a developer to start it manually, and torn
+// down with the server. The app server's env also gets
+// WebhookAllowInsecureHttpForDev=1 so the production webhook transport's
+// buildEgressPolicy() permits HTTP to localhost ONLY (the SSRF-safe dev
+// relaxation; production NODE_ENV keeps httpsRequired=true + unrestricted, so
+// the relaxation never escapes the test environment). See §5 and §18 of the
+// completion directive. The CLI lives at tests/webhooks/controlledWebhookServer.ts
+// and the server factory at src/services/testing/controlledWebhookServer.ts.
+// ---------------------------------------------------------------------------
+let controlledWebhookProcess: ChildProcess | null = null;
+
+/**
+ * FUNN-ISO-1: port claiming is FAIL-CLOSED, not "kill whatever's there".
+ *
+ * A development server on :3000 self-identifies via /health.environmentId
+ * (default "tellus-dev"). We kill the port ONLY when the responder is the
+ * test lane's own leftover server (environmentId === lane env id). Any
+ * other responder — dev, verify, unknown, silent — is an error: test
+ * infrastructure never destroys a foreign process. That turn of the screw
+ * is what makes "the integration suite wiped the dev ontology" impossible
+ * even when a developer happens to leave their dev stack running.
+ */
+function laneApiPort(): number {
+  const u = new URL(LANE.TELLUS_TEST_API_BASE_URL);
+  return Number(u.port || 3000);
+}
+
+async function claimTestApiPort(port = laneApiPort()): Promise<void> {
+  let foreign: string | null = null;
   try {
-    execSync("lsof -ti:3000 | xargs kill -9 2>/dev/null || true", {
-      stdio: "ignore",
+    const res = await fetch(`http://localhost:${port}/health`, {
+      signal: AbortSignal.timeout(2000),
     });
+    if (res.ok) {
+      const body = (await res.json()) as { environmentId?: unknown };
+      foreign = typeof body?.environmentId === "string" ? body.environmentId : "<missing>";
+    } else {
+      foreign = `<http ${res.status}>`;
+    }
   } catch {
-    // Port might not be in use — expected
+    foreign = null; // unreachable — port is free
   }
+  if (foreign === null) return;
+  if (foreign !== LANE.TELLUS_ENVIRONMENT_ID) {
+    throw new Error(
+      `[globalSetup] REFUSING to scaffold the test lane: port ${port} is held by a ` +
+        `server that self-identifies as environmentId='${foreign}' ` +
+        `(expected '${LANE.TELLUS_ENVIRONMENT_ID}'). Stop it yourself — test ` +
+        `infrastructure never kills foreign processes.`,
+    );
+  }
+  console.log(
+    `[globalSetup] port ${port} held by a leftover '${foreign}' server — killing it (lane-owned).`,
+  );
+  execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: "ignore" });
 }
 
 /**
@@ -166,10 +231,21 @@ function runKeycloakBootstrap(): void {
   const r = spawnSync("bash", [path.join(ROOT, "scripts/bootstrap-keycloak.sh")], {
     cwd: ROOT,
     encoding: "utf8",
+    env: { ...process.env, KC_REALM: LANE.KEYCLOAK_REALM },
   });
   if (r.status !== 0) {
     console.error("[globalSetup] keycloak stdout:", r.stdout?.slice(-500));
     console.error("[globalSetup] keycloak stderr:", r.stderr?.slice(-500));
+    if (process.env.TELLUS_TEST_HOOKS === "1") {
+      // Test-auth bypass is active — Keycloak is not required for the
+      // integration suites. Warn but do not abort.
+      console.warn(
+        "[globalSetup] bootstrap-keycloak.sh failed (exit " +
+          r.status +
+          ") — continuing because TELLUS_TEST_HOOKS=1 (test-auth bypass active).",
+      );
+      return;
+    }
     throw new Error(
       `[globalSetup] bootstrap-keycloak.sh failed with exit code ${r.status}`,
     );
@@ -185,7 +261,10 @@ async function waitForPg(maxWaitMs = 30_000): Promise<void> {
     const p = new Pool({
       host: process.env.PGHOST || "localhost",
       port: parseInt(process.env.PGPORT || "5432", 10),
-      database: process.env.PGDATABASE || "tellus_db",
+      // Maintenance DB: the lane DB (PGDATABASE tellus_tests) may not EXIST
+      // yet — that's bootstrapTestStack's job; reachability is a server
+      // property, not a lane-DB property.
+      database: "postgres",
       user: process.env.PGUSER || "tellus",
       password: process.env.PGPASSWORD || "tellus123",
       connectionTimeoutMillis: 3000,
@@ -226,7 +305,7 @@ async function waitForPg(maxWaitMs = 30_000): Promise<void> {
  */
 async function isServerHealthy(): Promise<boolean> {
   try {
-    const res = await fetch("http://localhost:3000/health", {
+    const res = await fetch(`${LANE.TELLUS_TEST_API_BASE_URL}/health`, {
       signal: AbortSignal.timeout(2000),
     });
     return res.ok;
@@ -251,11 +330,42 @@ export async function setup(): Promise<void> {
     );
   }
 
+  // (FUNN-ISO-1) Step −1: the lane identity is pinned by `./laneEnv` on
+  // import. NOTHING in the following sequence may run unless the resulting
+  // environment passes the destructive-test guard end to end — including a
+  // live DB-level seal check. This is the structural turn of the screw that
+  // makes the 2026-07-31 "the integration suite wiped the dev ontology"
+  // incident unpossible.
+
   // Step 0: Ensure PostgreSQL is reachable before spawning the server.
   // Docker Desktop on macOS can take several seconds to wake up.
   console.log("[globalSetup] Waiting for PostgreSQL...");
   await waitForPg();
   console.log("[globalSetup] PostgreSQL ready.");
+
+  // Step 0.1: provision the lane's own infrastructure (idempotent):
+  // tellus_tests database + migrations + environment seal + dedicated
+  // Temporal namespace/search attributes. Non-destructive — runs BEFORE the
+  // destructive guard so a fresh machine can establish the seal the guard
+  // then demands.
+  await bootstrapTestStack();
+
+  // Step 0.2: prove this lane may destructively mutate infrastructure. Any
+  // missing/ambiguous/foreign fragment → hard failure, before ANY delete.
+  const proof = await assertDestructiveTestEnvironment({
+    operation: "vitest-globalSetup",
+    skipApiProbe: true, // the lane server does not exist yet
+  });
+  console.log(
+    `[globalSetup] destructive-test guard passed: lane='${proof.environmentId}' ` +
+      `db='${proof.databaseName}' realm='${proof.keycloakRealm}' prefix='${proof.objectIndexPrefix}' ` +
+      `bucket='${proof.objectStorageBucketOrPrefix}'`,
+  );
+
+  // Step 0.3: Quiesce — claim :3000 ONLY if it belongs to a leftover lane
+  // server (foreign environments are NEVER killed; see claimTestApiPort).
+  await claimTestApiPort(laneApiPort());
+  await new Promise((resolve) => setTimeout(resolve, 1500));
 
   // Step 0.5: Seed the canonical test ontology + action types. This must
   // run BEFORE the server spawns — some routes read the seeded ontology
@@ -264,12 +374,22 @@ export async function setup(): Promise<void> {
 
   // Step 0.6: Bootstrap Keycloak test realm + users so auth-dependent
   // integration suites can log in as cypress@tellus.local / Password123!.
-  // Idempotent and fast on a re-run (all upserts are HTTP 409-safe).
-  runKeycloakBootstrap();
-
-  killPort3000();
-  // Brief pause to let the port free up after kill
-  await new Promise((r) => setTimeout(r, 1500));
+  // Idempotent and fast on a re-rerun (all upserts are HTTP 409-safe).
+  //
+  // When TELLUS_TEST_HOOKS=1 (the test-auth bypass via X-Tellus-Test-Auth
+  // header), Keycloak is NOT required — the spawned BE accepts synthetic
+  // claims from the header. Allow skipping the bootstrap (and tolerate its
+  // failures) so suites can run in environments where Keycloak is flaky or
+  // absent (e.g. local dev, CI without a healthy Keycloak container).
+  if (process.env.TELLUS_TEST_HOOKS === "1" && process.env.TELLUS_SKIP_KC_BOOTSTRAP !== "0") {
+    console.log(
+      "[globalSetup] TELLUS_TEST_HOOKS=1 — skipping Keycloak bootstrap " +
+        "(test-auth bypass is active on the spawned BE). " +
+        "Set TELLUS_SKIP_KC_BOOTSTRAP=0 to force bootstrap.",
+    );
+  } else {
+    runKeycloakBootstrap();
+  }
 
   const serverPath = path.join(ROOT, "src/server.ts");
 
@@ -357,12 +477,72 @@ export async function setup(): Promise<void> {
       OVERLAY_SWEEPER_DISABLED: "true",
       REPLACEMENT_SCHEDULER_DISABLED: "true",
       TEMPORAL_WORKER_DISABLED: "true",
+      // Gap A — permit the production webhook transport to call the
+      // controlled webhook service over HTTP to localhost ONLY. The
+      // SSRF-safe buildEgressPolicy() relaxation requires NODE_ENV !==
+      // "production" AND WebhookAllowInsecureHttpForDev=1; the running
+      // test server is a dev process, so this is safe and scoped.
+      WebhookAllowInsecureHttpForDev: "1",
+      // Gap E/F — enable version-2 action-type creation so interface-object
+      // and interface-link rule discriminators can be authored on the test
+      // server. Gated off by default in production pending the v2 runbook.
+      ACTION_SEMANTICS_V2_CREATION_ENABLED: "1",
+      // V2 EXECUTION for the lane: interface-link/matrix fixtures and the
+      // writeback lifecycle suites CREATE v2 action types and immediately
+      // APPLY them, so execution + projection-ready must also be on. This
+      // is safe here precisely because the lane DB is a fresh scratch world:
+      // the link_instances projection is empty and the ledger is empty, so
+      // the "bootstrap + reconcile, THEN enable" operator precondition is
+      // trivially satisfied. Production keeps both flags default-off.
+      ACTION_SEMANTICS_V2_ENABLED: "1",
+      ACTION_SEMANTICS_V2_PROJECTION_READY: "1",
+      // Gap G/H — allow the action side-effect webhook delivery path
+      // (connectivity egress) to reach the controlled service on loopback.
+      // Mirrors the existing actionWebhooks unit-test opt-in. Test-only.
+      CONNECTIVITY_EGRESS_ALLOW_RESERVED: "localhost,127.0.0.1/8,::1",
+      // The request-timeout middleware defaults to 5000ms; the first action
+      // apply after a cold seed (fresh OpenSearch indices) can exceed that on
+      // a chilly CI box and falsely 504. Give the integration server a
+      // generous action budget (test-only; production keeps the 5s default).
+      REQUEST_TIMEOUT_MS: "30000",
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
 
   serverProcess.unref();
+
+  // Gap A — start the deterministic controlled webhook service alongside the
+  // app server. It advertises http://localhost:<port>; integration/E2E tests
+  // read CONTROLLED_WEBHOOK_URL (set below) to target it. Detached so it dies
+  // with the group on teardown.
+  const controlledPort = String(process.env.CONTROLLED_WEBHOOK_PORT ?? "3329");
+  try {
+    controlledWebhookProcess = spawn(
+      "npx",
+      ["tsx", path.join(ROOT, "tests/webhooks/controlledWebhookServer.ts")],
+      {
+        cwd: ROOT,
+        env: { ...process.env, CONTROLLED_WEBHOOK_PORT: controlledPort },
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      },
+    );
+    controlledWebhookProcess.unref();
+    process.env.CONTROLLED_WEBHOOK_URL = `http://localhost:${controlledPort}`;
+    // Tests that drive the side-effect worker IN-PROCESS (runOnce) deliver
+    // webhooks from the vitest process itself, so the connectivity egress
+    // guard reads THIS process's env — mirror the server child's allowlist
+    // or in-process deliveries are egress-blocked while server-loop
+    // deliveries succeed (flaky split-brain delivery in outbox tests).
+    process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED ??= "localhost,127.0.0.1/8,::1";
+    controlledWebhookProcess.stderr?.on("data", (c: Buffer) => {
+      // eslint-disable-next-line no-console
+      console.error(`[globalSetup] controlled-webhook stderr: ${c.toString()}`);
+    });
+  } catch {
+    controlledWebhookProcess = null;
+  }
 
   // Collect server stdout/stderr for diagnostic output on failure
   let serverLog = "";
@@ -380,13 +560,19 @@ export async function setup(): Promise<void> {
   // Wait for server to become healthy (max 60s — Docker Desktop can be slow)
   for (let i = 0; i < 60; i++) {
     try {
-      const res = await fetch("http://localhost:3000/health", {
+      const res = await fetch(`${LANE.TELLUS_TEST_API_BASE_URL}/health`, {
         signal: AbortSignal.timeout(2000),
       });
       if (res.ok) {
         console.log(
           `[globalSetup] Server ready (PID ${serverProcess.pid}) with RATE_LIMIT_MAX=999999`
         );
+        // Post-spawn re-proof: the lane API's own /health.environmentId must
+        // attest to identical identity. If an existing FOREIGN server got
+        // there first (race), we notice before any test touches it.
+        await assertDestructiveTestEnvironment({
+          operation: "vitest-globalSetup-post-spawn",
+        });
         // Server is up; seeded data has been indexed to OpenSearch via
         // editApplicator. Run the F-03 backfill last so both pre-existing
         // docs AND seed-generated docs carry _security.markings.
@@ -431,5 +617,16 @@ export async function teardown(): Promise<void> {
     }
     serverProcess = null;
   }
-  killPort3000();
+  // Gap A — stop the controlled webhook service with the server.
+  if (controlledWebhookProcess?.pid) {
+    try {
+      process.kill(-controlledWebhookProcess.pid, "SIGTERM");
+    } catch {
+      // Best-effort; the process may have already exited.
+    }
+    controlledWebhookProcess = null;
+  }
+  // Belt+braces: only kills the port if it currently belongs to the lane
+  // server (never a foreign process — see claimTestApiPort).
+  await claimTestApiPort(laneApiPort());
 }

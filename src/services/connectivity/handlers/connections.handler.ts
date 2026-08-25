@@ -34,7 +34,6 @@ import {
   CompassFolderNotFound,
   ConnectionNameAlreadyExists,
   ConnectionNotFound,
-  ConnectorNotSupported,
   HasActiveDependencies,
   InvalidConfiguration,
   ScopeRequired,
@@ -52,6 +51,7 @@ import {
   ConnectionRid,
   ConnectionUpdateRequest,
   PostgresConfig,
+  RestApiConfig,
 } from "../contracts";
 import * as repo from "../store/connections.repo";
 import * as outbox from "../store/outbox";
@@ -294,11 +294,6 @@ export const postConnection = instrument("/api/v1/connectivity/connections", "PO
     }
     const request = parsed.data;
 
-    if (request.connectorType !== "postgresql") {
-      throw new TellusError(ConnectorNotSupported, {
-        connectorType: request.connectorType,
-      });
-    }
     if (request.workerType === "agentProxy" && !request.agentGroupRid) {
       throw new TellusError(AgentGroupRequired, {});
     }
@@ -306,8 +301,21 @@ export const postConnection = instrument("/api/v1/connectivity/connections", "PO
     if ((request.workerType as string) === "agentWorker") {
       throw new TellusError(AgentWorkerRejected, {});
     }
-    if (request.connectorType === "postgresql") {
+    if (
+      request.connectorType === "postgresql" &&
+      request.config.connectorType === "postgresql"
+    ) {
       const cfg = PostgresConfig.safeParse(request.config.postgres);
+      if (!cfg.success) {
+        throw new TellusError(InvalidConfiguration, {
+          issues: cfg.error.issues,
+        });
+      }
+    } else if (
+      request.connectorType === "rest-api" &&
+      request.config.connectorType === "rest-api"
+    ) {
+      const cfg = RestApiConfig.safeParse(request.config.restApi);
       if (!cfg.success) {
         throw new TellusError(InvalidConfiguration, {
           issues: cfg.error.issues,
@@ -375,6 +383,44 @@ export const postConnection = instrument("/api/v1/connectivity/connections", "PO
       return conn;
     });
 
+    // F3 — inline secrets. When provided, write each entry to the vault in the
+    // SAME request as the connection insert so the connection + secrets are
+    // atomic. If any secret write fails, perform a COMPENSATING soft-delete
+    // of the just-created connection (and unregister it from Compass) so no
+    // partial state is left behind; the client retries from scratch.
+    if (request.secrets && Object.keys(request.secrets).length > 0) {
+      try {
+        for (const [field, plaintextBase64] of Object.entries(request.secrets)) {
+          const plaintext = Buffer.from(
+            plaintextBase64 as string,
+            "base64",
+          );
+          await vault.createOrRotate(
+            rid,
+            user.tenant,
+            field as vault.CredentialField,
+            new Uint8Array(plaintext),
+            user.id,
+          );
+          plaintext.fill(0);
+        }
+      } catch (secretErr) {
+        // Compensating delete: undo the connection + Compass registration so
+        // the failure is atomic from the client's perspective.
+        await withTransaction(async (client) => {
+          await repo.softDelete(client, rid, user.tenant, created.version, user.id).catch(() => undefined);
+          await outbox.enqueue(client, {
+            connectionRid: rid,
+            folderRid: request.compassFolderRid,
+            operation: "unregisterResource",
+            payload: { deletedBy: user.id, reason: "secret-write-compensation" },
+          });
+        });
+        await evictPgPool(rid).catch(() => undefined);
+        throw secretErr;
+      }
+    }
+
     setConnectivityEtag(res, created.version);
     res.setHeader("Location", `/api/v1/connectivity/connections/${rid}`);
     res.status(201).json(created);
@@ -388,8 +434,17 @@ export const getConnection = instrument(
   const user = extractUser(req);
   requireScope(user, "connectivity:read");
   const conn = await repo.findByRid(req.params.rid, user.tenant);
+  // Keep detail and list contracts consistent: metadata panels should never
+  // have to fall back to opaque Keycloak subject IDs merely because the
+  // connection was fetched by RID. Resolution is cached and best-effort.
+  const names = await resolvePrincipalNames([conn.createdBy, conn.updatedBy]);
+  const enriched = {
+    ...conn,
+    createdByName: names.get(conn.createdBy) ?? null,
+    updatedByName: names.get(conn.updatedBy) ?? null,
+  };
   setConnectivityEtag(res, conn.version);
-  res.status(200).json(conn);
+  res.status(200).json(enriched);
 });
 
 export const listConnections = instrument(

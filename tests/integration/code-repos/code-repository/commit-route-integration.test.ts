@@ -208,7 +208,14 @@ describe("B2-C-12 — POST commits happy path", () => {
     );
     expect(cache.rowCount).toBe(1);
     expect(cache.rows[0].head_sha).toBe(r.body.commitSha);
-    expect(cache.rows[0].last_commit_at).toBeInstanceOf(Date);
+    // src/db.ts registers a global TIMESTAMPTZ (OID 1184) → string parser
+    // for API-response serialization; whether this lane pool sees a Date or
+    // a string depends on module import ORDER in the vitest worker. The
+    // value-only contract is a parseable timestamp.
+    const committedTs = cache.rows[0].last_commit_at;
+    const committedMs =
+      committedTs instanceof Date ? committedTs.getTime() : Date.parse(String(committedTs));
+    expect(Number.isNaN(committedMs)).toBe(false);
 
     // Adapter HEAD advanced.
     expect(await headOf(rid, "main")).toBe(r.body.commitSha);

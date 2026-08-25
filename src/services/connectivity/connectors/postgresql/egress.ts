@@ -19,6 +19,21 @@
 import { lookup } from "node:dns/promises";
 import { TellusError } from "../../../../lib/errors/envelope";
 import { EgressBlocked } from "../../../../lib/errors/connectivity.errors";
+import { egressBlocked } from "../../metrics";
+
+/**
+ * Build the EgressBlocked error AND trip the security counter. Every refusal in
+ * this module goes through here so the alarm can never drift out of sync with
+ * the guard — a silent block is a block nobody investigates.
+ */
+function blocked(
+  guard: "allowlist" | "reserved" | "resolution",
+  reason: string,
+  params: Record<string, unknown>,
+): TellusError {
+  egressBlocked.labels(guard, reason).inc();
+  return new TellusError(EgressBlocked, params);
+}
 
 export interface EgressHostEntry {
   kind: "host";
@@ -96,7 +111,7 @@ export function assertEgressAllowed(
   policy: EgressPolicyShape | null | undefined,
 ): void {
   if (!isEgressAllowed(host, port, policy)) {
-    throw new TellusError(EgressBlocked, {
+    throw blocked("allowlist", "not covered by connection allowlist", {
       connectionRid,
       host,
       port,
@@ -235,7 +250,7 @@ function isReservedTarget(host: string): boolean {
  */
 export function assertEgressForConfig(host: string, port: number): void {
   if (isReservedTarget(host)) {
-    throw new TellusError(EgressBlocked, {
+    throw blocked("reserved", "reserved address range", {
       host,
       port,
       reason: "target resolves to a reserved or internal address range",
@@ -272,7 +287,7 @@ function isLiteralIp(host: string): boolean {
 export async function assertEgressResolved(host: string, port: number): Promise<string> {
   // Block obvious internal hostnames / literal reserved IPs up front.
   if (isReservedTarget(host)) {
-    throw new TellusError(EgressBlocked, {
+    throw blocked("reserved", "reserved address range", {
       host,
       port,
       reason: "target resolves to a reserved or internal address range",
@@ -289,14 +304,14 @@ export async function assertEgressResolved(host: string, port: number): Promise<
   try {
     resolved = await lookup(host, { all: true });
   } catch {
-    throw new TellusError(EgressBlocked, {
+    throw blocked("resolution", "unresolvable hostname", {
       host,
       port,
       reason: "target hostname could not be resolved",
     });
   }
   if (resolved.length === 0) {
-    throw new TellusError(EgressBlocked, {
+    throw blocked("resolution", "no addresses", {
       host,
       port,
       reason: "target hostname resolved to no addresses",
@@ -304,13 +319,21 @@ export async function assertEgressResolved(host: string, port: number): Promise<
   }
   for (const { address } of resolved) {
     if (isReservedTarget(address)) {
-      throw new TellusError(EgressBlocked, {
+      // DNS rebinding: a public-looking name pointing into private space. This
+      // is the highest-signal variant of the alarm — a literal reserved IP is
+      // usually a misconfiguration, this is usually deliberate.
+      throw blocked("reserved", "hostname resolved to reserved address", {
         host,
         port,
         reason: "target resolves to a reserved or internal address range",
       });
     }
   }
-  // Pin the first validated address; the caller keeps `host` for TLS servername.
-  return resolved[0].address;
+  // Pin a validated address; the caller keeps `host` for TLS servername.
+  // Prefer IPv4 when both families resolve: since Node 17 `lookup` returns
+  // addresses in resolver order (often ::1/IPv6 first), but many targets —
+  // Docker-published ports in particular — listen only on IPv4, so pinning
+  // the IPv6 address yields ECONNREFUSED against a perfectly healthy server.
+  const v4 = resolved.find((r) => r.family === 4);
+  return (v4 ?? resolved[0]).address;
 }

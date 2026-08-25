@@ -1,0 +1,178 @@
+{
+  "generatedAt": "2026-07-28",
+  "sdk": {
+    "package": "@osdk/foundry.ontologies",
+    "version": "2.70.0",
+    "license": "Apache-2.0",
+    "componentsUrl": "https://unpkg.com/@osdk/foundry.ontologies@2.70.0/build/esm/_components.d.ts",
+    "objectSetClientUrl": "https://unpkg.com/@osdk/foundry.ontologies@2.70.0/build/esm/public/OntologyObjectSet.d.ts",
+    "actionClientUrl": "https://unpkg.com/@osdk/foundry.ontologies@2.70.0/build/esm/public/Action.d.ts"
+  },
+  "officialDocs": {
+    "loadObjectSet": "https://www.palantir.com/docs/foundry/api/v2/ontologies-v2-resources/ontology-object-sets/load-object-set/",
+    "createTemporaryObjectSet": "https://www.palantir.com/docs/foundry/api/v2/ontologies-v2-resources/ontology-object-sets/create-temporary-object-set/",
+    "aggregateObjectSet": "https://www.palantir.com/docs/foundry/api/v2/ontologies-v2-resources/ontology-object-sets/aggregate-object-set/",
+    "applyAction": "https://www.palantir.com/docs/foundry/api/v2/ontologies-v2-resources/actions/apply-action/",
+    "applyActionBatch": "https://www.palantir.com/docs/foundry/api/v2/ontologies-v2-resources/actions/apply-action-batch/"
+  },
+  "objectSetNodeTypes": [
+    "asBaseObjectTypes",
+    "asType",
+    "base",
+    "filter",
+    "interfaceBase",
+    "interfaceLinkSearchAround",
+    "intersect",
+    "methodInput",
+    "nearestNeighbors",
+    "reference",
+    "searchAround",
+    "static",
+    "subtract",
+    "union",
+    "withProperties"
+  ],
+  "searchJsonQueryV2Types": [
+    "and",
+    "contains",
+    "containsAllTerms",
+    "containsAllTermsInOrder",
+    "containsAllTermsInOrderPrefixLastTerm",
+    "containsAnyTerm",
+    "doesNotIntersectBoundingBox",
+    "doesNotIntersectPolygon",
+    "eq",
+    "geoShapeV2",
+    "gt",
+    "gte",
+    "in",
+    "intersectsBoundingBox",
+    "intersectsPolygon",
+    "interval",
+    "isNull",
+    "lt",
+    "lte",
+    "not",
+    "or",
+    "regex",
+    "relativeDateRange",
+    "startsWith",
+    "wildcard",
+    "withinBoundingBox",
+    "withinDistanceOf",
+    "withinPolygon"
+  ],
+  "loadObjectSet": {
+    "path": "/api/v2/ontologies/{ontology}/objectSets/loadObjects",
+    "queryFields": [
+      "branch",
+      "executeInMemoryOnly",
+      "scenarioRid",
+      "sdkPackageRid",
+      "sdkVersion",
+      "transactionId"
+    ],
+    "bodyFields": [
+      "defaultLoadLevel",
+      "excludeRid",
+      "includeComputeUsage",
+      "loadPropertySecurities",
+      "objectSet",
+      "orderBy",
+      "pageSize",
+      "pageToken",
+      "referenceSigningOptions",
+      "select",
+      "selectV2",
+      "snapshot"
+    ],
+    "responseFacts": {
+      "totalCountType": "string",
+      "nullPropertiesOmitted": true,
+      "vectorPropertiesRequireExplicitSelection": true,
+      "selectAndSelectV2MutuallyExclusive": true,
+      "relevancePagingStable": false
+    }
+  },
+  "objectSets": {
+    "paths": [
+      "/v2/ontologies/{ontology}/objectSets/createTemporary",
+      "/v2/ontologies/{ontology}/objectSets/{objectSetRid}",
+      "/v2/ontologies/{ontology}/objectSets/loadObjects",
+      "/v2/ontologies/{ontology}/objectSets/loadObjectsMultipleObjectTypes",
+      "/v2/ontologies/{ontology}/objectSets/loadObjectsOrInterfaces",
+      "/v2/ontologies/{ontology}/objectSets/aggregate",
+      "/v2/ontologies/{ontology}/objectSets/loadLinks"
+    ]
+  },
+  "actions": {
+    "applyPath": "/api/v2/ontologies/{ontology}/actions/{action}/apply",
+    "applyBatchPath": "/api/v2/ontologies/{ontology}/actions/{action}/applyBatch",
+    "modes": [
+      "VALIDATE_ONLY",
+      "VALIDATE_AND_EXECUTE"
+    ],
+    "returnEdits": [
+      "ALL",
+      "ALL_V2_WITH_DELETIONS",
+      "NONE"
+    ],
+    "batchReturnEdits": [
+      "ALL",
+      "NONE"
+    ],
+    "batchMaximum": 20,
+    "batchNotificationsSupported": false,
+    "invalidValidationHttpStatus": 200
+  },
+  "runtimeCapabilities": {
+    "interfacePropertyMapping": "implemented",
+    "interfaceInheritance": "implemented",
+    "interfaceLinkSearchAround": "implementedByConcreteLinkFanout",
+    "nearestNeighborsVector": "implemented",
+    "nearestNeighborsText": "typedUnsupported",
+    "objectSetStreaming": "prototypeRegistryOnly"
+  },
+  "tellusDecisions": [
+    {
+      "feature": "snapshot",
+      "status": "implemented",
+      "behavior": "OpenSearch PIT ids are integrity-protected in the page token; writeback-overlay lag fails closed as ConsistentSnapshotError."
+    },
+    {
+      "feature": "transactionId",
+      "status": "typedUnsupported",
+      "behavior": "Rejected as UnsupportedObjectSetFeature; no silent main-state fallback."
+    },
+    {
+      "feature": "scenarioRid",
+      "status": "typedUnsupported",
+      "behavior": "Rejected as UnsupportedObjectSetFeature; no silent main-state fallback."
+    },
+    {
+      "feature": "executeInMemoryOnly=true",
+      "status": "typedUnsupported",
+      "behavior": "Rejected because Tellus cannot prove the requested execution mode."
+    },
+    {
+      "feature": "loadPropertySecurities=true",
+      "status": "typedUnsupported",
+      "behavior": "Rejected until property-security indices can be returned truthfully."
+    },
+    {
+      "feature": "referenceSigningOptions.signMediaReferences=true",
+      "status": "typedUnsupported",
+      "behavior": "Rejected until signed media references exist."
+    },
+    {
+      "feature": "PropertyLoadLevel reducers/extractors",
+      "status": "typedUnsupported",
+      "behavior": "noLoadLevel is accepted; reducer/extractor variants are rejected because the storage metadata is absent."
+    },
+    {
+      "feature": "sdkPackageRid/sdkVersion",
+      "status": "acceptedMetadata",
+      "behavior": "Validated and accepted; does not change storage execution."
+    }
+  ]
+}

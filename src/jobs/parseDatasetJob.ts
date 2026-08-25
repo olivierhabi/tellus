@@ -1,5 +1,6 @@
 import foundryDb from '../config/foundryDb';
 import { csvParsingService } from '../services/csvParsingService';
+import { headObject } from '../services/storageService';
 import { emitDatasetEvent } from '../utils/emitEvent';
 
 /**
@@ -67,12 +68,26 @@ export async function runParseJob(datasetId: string): Promise<void> {
     // S3 and applies sanitizeCsvHeader so duplicate/blank header cells
     // no longer collapse into a single key.
     const result = await csvParsingService.parseFile(dataset.file_path);
+    const persistedObject = await headObject(dataset.file_path);
+
+    // Defend against a concurrent overwrite / partial object-store write.
+    // The parser's byte count is the exact object body it consumed; a HEAD
+    // disagreement means that body cannot be promoted to a ready dataset.
+    if (persistedObject.contentLength !== result.fileSizeBytes) {
+      throw new Error(
+        `Persisted object changed while it was being validated: read ${result.fileSizeBytes} bytes, ` +
+          `storage reports ${persistedObject.contentLength} bytes.`,
+      );
+    }
 
     await foundryDb.transaction(async (trx) => {
       await trx('foundry_datasets').where({ id: datasetId }).update({
         status: 'ready',
         row_count: result.rowCount,
+        row_count_exact: result.rowCount,
         column_count: result.columns.length,
+        file_size_bytes: result.fileSizeBytes,
+        content_hash: result.contentHash,
         schema_info: JSON.stringify({
           columns: result.columns.map((col) => ({
             name: col.name,
@@ -80,6 +95,13 @@ export async function runParseJob(datasetId: string): Promise<void> {
             nullable: col.nullable,
           })),
           previewRows: result.previewRows,
+          ingestionValidation: {
+            status: 'validated',
+            parser: 'csv-parse-strict-v1',
+            fileSizeBytes: result.fileSizeBytes,
+            contentHash: result.contentHash,
+            validatedAt: new Date().toISOString(),
+          },
         }),
       });
 
@@ -130,6 +152,12 @@ export async function runParseJob(datasetId: string): Promise<void> {
         .update({
           status: 'error',
           schema_info: JSON.stringify({
+            ingestionValidation: {
+              status: 'rejected',
+              errorCode: (error as { code?: string }).code ?? 'DATASET_PARSE_FAILED',
+              message: (error as Error).message,
+              rejectedAt: new Date().toISOString(),
+            },
             error: (error as Error).message,
             timestamp: new Date().toISOString(),
           }),

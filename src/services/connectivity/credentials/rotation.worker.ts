@@ -14,6 +14,8 @@
 import { pool } from "../../../db";
 import { rewrap, ROTATION_LEEWAY_DAYS } from "./vault";
 import * as audit from "./audit.repo";
+import { credentialRotations } from "../metrics";
+import { withWorkerLease } from "../workerLease";
 
 let timer: NodeJS.Timeout | null = null;
 
@@ -24,13 +26,24 @@ export function startRotationWorker(): void {
   if (process.env.TELLUS_DISABLE_CRED_ROTATION === "1") return;
   if (timer) return;
   timer = setInterval(() => {
-    void rotateDue().catch((err) => {
+    void rotateTick().catch((err) => {
       // eslint-disable-next-line no-console
       console.error("[connectivity.credentials.rotation] tick failed", err);
     });
   }, POLL_MS);
+  // Background-only: never hold the event loop open for a rotation tick.
+  timer.unref?.();
   // First sweep on boot so a freshly-restarted process catches up.
-  void rotateDue().catch(() => undefined);
+  void rotateTick().catch(() => undefined);
+}
+
+/**
+ * One leader-gated sweep. The lease matters more here than for the prober:
+ * concurrent replicas would each rewrap the same credential, burning versions
+ * and writing duplicate audit rows for a single logical rotation.
+ */
+export function rotateTick(): Promise<{ rotated: number; failed: number } | null> {
+  return withWorkerLease("credential-rotation", rotateDue);
 }
 
 export function stopRotationWorker(): void {
@@ -75,8 +88,10 @@ export async function rotateDue(): Promise<{ rotated: number; failed: number }> 
           actor: "system:rotation-worker",
           outcome: "success",
         });
+        credentialRotations.labels("success").inc();
         rotated += 1;
       } catch (err) {
+        credentialRotations.labels("failure").inc();
         failed += 1;
         await audit
           .write({

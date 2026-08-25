@@ -1,5 +1,9 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
+// Single source of truth for the ISOLATED integration-lane identity
+// (FUNN-ISO-1). globalSetup pins the same values into its own process via
+// the module's import side effect; workers need them here (fresh process).
+import { LANE } from "./tests/laneEnv";
 
 export default defineConfig({
   test: {
@@ -41,6 +45,8 @@ export default defineConfig({
       "tests/**/*-unit.test.ts",
       "tests/**/*-integration.test.ts",
       "tests/**/*-e2e.test.ts",
+      // QA connectivity suite is named with a dotted suffix per request.
+      "tests/connectivity/integration/qa-additional.integration.test.ts",
     ],
     exclude: ["node_modules", "dist"],
 
@@ -64,10 +70,15 @@ export default defineConfig({
     },
     fileParallelism: false,
 
-    // Environment
+    // Environment — ISOLATED integration lane (FUNN-ISO-1).
+    // NOTE: PGDATABASE is deliberately NOT tellus_db anymore. The whole lane
+    // (DB, environment seal, Temporal ns/queue, Keycloak realm, OpenSearch
+    // index prefix, MinIO bucket, API stamp) targets the dedicated
+    // tellus_tests environment; the destructive-test guard refuses to let
+    // any destructive helper under this config reach shared dev resources.
     env: {
+      ...LANE,
       PGHOST: "localhost",
-      PGDATABASE: "tellus_db",
       PGUSER: "tellus",
       PGPASSWORD: "tellus123",
       // F-09: Disable rate limiter during tests to prevent cross-run
@@ -84,6 +95,13 @@ export default defineConfig({
       // Production code paths NEVER consult this header — the env var is the
       // single gate, and it is only set in test configs.
       CODE_REPOS_TEST_AUTH: "1",
+      // Publish-author trust gate: exercised by dedicated tests; other lanes
+      // opt out explicitly (never honored in production).
+      FUNCTION_EXECUTION_TRUST_MODE: "open-development",
+      // Same ceiling the osv2 lane raised in e9f7ec4: the spawned lane
+      // server's boot-time indexing storm can hold OpenSearch writes past
+      // the 5 s default, flaking tests that seed OS docs directly.
+      OPENSEARCH_REQUEST_TIMEOUT: "10000",
     },
 
     // Coverage configuration — scoped to modules exercised by unit tests.

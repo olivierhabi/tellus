@@ -75,10 +75,16 @@ export type AuditAction =
   | 'reauth.fail'
   // superadmin console
   | 'admin.user.create'
+  | 'admin.user.invite'
   | 'admin.user.delete'
   | 'admin.user.enable'
   | 'admin.user.disable'
   | 'admin.setting.update'
+  | 'admin.role.create'
+  | 'admin.role.update'
+  | 'admin.role.delete'
+  | 'admin.role.member.add'
+  | 'admin.role.member.remove'
   // PB-B7
   | 'pipeline.acl.grant'
   | 'pipeline.acl.revoke'
@@ -96,7 +102,10 @@ export type AuditAction =
   | 'link.delete'
   | 'search.execute'
   | 'action.execute'
-  | 'action.validate';
+  | 'action.validate'
+  // P0 build/materialize-path dataset access (deny + check-error outcomes).
+  | 'transform.dataset.read'
+  | 'transform.dataset.write';
 
 export interface EmitAuditOpts {
   keycloakSub: string;

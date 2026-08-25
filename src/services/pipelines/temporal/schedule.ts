@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import { Client, Connection, ScheduleAlreadyRunning } from "@temporalio/client";
+import { getEnvironmentIdentity } from "../../../config/environmentIdentity";
 
 const SCHEDULE_ID = "pb-b4-iceberg-maintenance";
 const DEFAULT_CRON = process.env.PB_B4_MAINTENANCE_CRON ?? "0 */1 * * *"; // hourly
@@ -19,9 +20,11 @@ export interface EnsureScheduleResult {
 }
 
 export async function ensureIcebergMaintenanceSchedule(): Promise<EnsureScheduleResult> {
-  const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
-  const namespace = process.env.TEMPORAL_NAMESPACE ?? "tellus-funnel";
-  const taskQueue = process.env.TEMPORAL_TASK_QUEUE ?? "tellus-funnel-queue";
+  // FUNN-ISO: deployment-scoped namespace + queue, never implicit sharing.
+  const identity = getEnvironmentIdentity();
+  const address = identity.temporalAddress;
+  const namespace = identity.temporalNamespace;
+  const taskQueue = identity.temporalTaskQueue;
 
   let connection: Connection;
   try {
@@ -33,7 +36,7 @@ export async function ensureIcebergMaintenanceSchedule(): Promise<EnsureSchedule
     };
   }
 
-  const client = new Client({ connection, namespace });
+  const client = new Client({ connection, namespace, identity: identity.workerIdentity });
   const scheduleClient = client.schedule;
 
   try {

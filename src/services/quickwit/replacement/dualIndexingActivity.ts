@@ -75,8 +75,10 @@ export async function runDualIndexingActivity(
       kafkaTopic: siblingTopic,
       // Pin to the sibling's publish; B6 default uses kafkaProducer which
       // keys by PK and returns broker offset.
-      publishDoc: async (_topic, key, doc) =>
-        publishMergedDoc(siblingTopic, key, doc),
+      publishDoc:
+        input.publishDoc ??
+        (async (_topic, key, doc) =>
+          publishMergedDoc(siblingTopic, key, doc)),
     }),
   ]);
 

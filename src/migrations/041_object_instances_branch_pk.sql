@@ -72,9 +72,20 @@ UPDATE object_instances
 ALTER TABLE object_instances
   ALTER COLUMN branch_id SET NOT NULL;
 
-ALTER TABLE object_instances
-  ADD CONSTRAINT object_instances_branch_fk
-  FOREIGN KEY (branch_id) REFERENCES ontology_branch(branch_id);
+-- Guarded: plain ADD CONSTRAINT is not idempotent, and this migration can
+-- legitimately be re-executed as schema drift repair (e.g. after a test
+-- probe dropped and restored object_instances from the pre-branch 012 DDL
+-- while 041 was already recorded in the ledger).
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'object_instances_branch_fk'
+  ) THEN
+    ALTER TABLE object_instances
+      ADD CONSTRAINT object_instances_branch_fk
+      FOREIGN KEY (branch_id) REFERENCES ontology_branch(branch_id);
+  END IF;
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- 041.2 Rebuild the primary key with branch_id as a segment.

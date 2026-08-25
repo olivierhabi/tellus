@@ -10,7 +10,7 @@
 import fs from "fs";
 import path from "path";
 
-const API = process.env.API_BASE || "http://localhost:3000";
+const API = process.env.API_BASE || (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 // ---------------------------------------------------------------------------
 // Multipart upload helper

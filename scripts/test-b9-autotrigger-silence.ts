@@ -46,13 +46,16 @@ console.error = (...a: unknown[]) => errors.push(a.map(String).join(" "));
   }, null, 2));
 
   // Restore object_instances so subsequent tests / dev server aren't
-  // left in the transitional state we simulated.
+  // left in the transitional state we simulated. 012 alone restores the
+  // PRE-branch shape (PK without branch_id); 041 re-adds the branch
+  // segment. 041 is idempotent, so this is safe whether or not the table
+  // was really dropped — skipping 041 would silently regress the schema
+  // because 041 is already recorded in the migration ledger.
   const fs = await import("fs");
-  const sql = fs.readFileSync(
-    new URL("../src/migrations/012_funnel_object_edits.sql", import.meta.url),
-    "utf8"
-  );
-  await query(sql).catch(() => {});
+  const read = (name: string) =>
+    fs.readFileSync(new URL(`../src/migrations/${name}`, import.meta.url), "utf8");
+  await query(read("012_funnel_object_edits.sql")).catch(() => {});
+  await query(read("041_object_instances_branch_pk.sql")).catch(() => {});
 
   process.exit(autoTriggerWarnings.length === 0 ? 0 : 1);
 })().catch((err) => {

@@ -21,6 +21,25 @@ export default defineConfig({
     testTimeout: 15_000,
     hookTimeout: 15_000,
     reporters: ["verbose"],
+    // Test-only env defaults so pure-unit files whose imports "(throw at read
+    // time if unset)" on DB config (e.g. foundryEnv) can import offline
+    // without Docker. These only need the vars to EXIST; no live DB/Keycloak
+    // is contacted by the pure-unit lane. Values mirror the dev docker stack.
+    env: {
+      PGPASSWORD: "tellus123",
+      PGUSER: "tellus",
+      PGHOST: "localhost",
+      PGPORT: "5432",
+      PGDATABASE: "tellus_db",
+      KEYCLOAK_ISSUER: "http://localhost:8086/realms/tellus",
+      KEYCLOAK_URL: "http://localhost:8086",
+      NODE_ENV: "test",
+      // Test lanes exercise publish ROUTES as the feature surface, not the
+      // author gate; the gate itself is covered by dedicated unit tests
+      // (tests/unit/functions/executionPolicy-unit.test.ts) under the real
+      // default mode. open-development is only honored outside production.
+      FUNCTION_EXECUTION_TRUST_MODE: "open-development",
+    },
     include: [
       "tests/unit/**/*-unit.test.ts",
       // Also include monday/tuesday/wednesday/thursday/friday/saturday/sunday

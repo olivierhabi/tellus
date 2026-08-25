@@ -10,6 +10,7 @@
 
 import { query } from "../db";
 import { appError } from "../utils/appError";
+import { connectRedisBounded, describeRedisError } from "../lib/redisConnect";
 
 const MAX_OFFSET = 10_000;
 const DEFAULT_PIT_TTL_SECONDS = 5 * 60;
@@ -95,23 +96,18 @@ let redisInstance: RedisLike | null | undefined;
 async function getRedis(): Promise<RedisLike | null> {
   if (redisInstance !== undefined) return redisInstance;
   try {
-    const mod: any = await import("redis");
-    const url = process.env.REDIS_URL ?? "redis://localhost:6379";
-    // F-P4-05: explicit connect timeout + bounded reconnect backoff so a
-    // Redis outage cannot hold the pagination path open indefinitely.
-    const client = mod.createClient({
-      url,
-      socket: {
-        connectTimeout: 5_000,
-        reconnectStrategy: (retries: number) => Math.min(retries * 500, 30_000),
-      },
+    // F-P4-05: bounded connect + give-up reconnect strategy so a Redis outage
+    // cannot hold the pagination path open indefinitely. The previous numeric
+    // reconnectStrategy retried forever, so connect() never settled and every
+    // paginated link read blocked instead of falling back to Postgres.
+    // See lib/redisConnect.ts.
+    redisInstance = await connectRedisBounded<RedisLike>({
+      logPrefix: "[link-pagination]",
     });
-    client.on("error", () => {
-      /* silenced — fall back to Postgres */
-    });
-    await client.connect();
-    redisInstance = client as RedisLike;
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[link-pagination] redis unavailable (${describeRedisError(err)}) — using Postgres session store`,
+    );
     redisInstance = null;
   }
   return redisInstance;

@@ -333,23 +333,23 @@ async function throwOccMiss(
 }
 
 /**
- * Tolerates absence of downstream tables (B5 table_imports, B8 virtual_tables)
- * via to_regclass guard. Returns false until those migrations exist.
+ * Checks the canonical B5/B8 dependency tables. Both are required by the
+ * connectivity migration gate, so referencing their real names is safer than
+ * an ineffective `to_regclass() AND EXISTS(...)` guard: PostgreSQL resolves a
+ * missing relation while parsing the statement, before boolean evaluation.
  */
 export async function hasActiveDependencies(rid: string): Promise<boolean> {
   const result = await pool.query<{ exists: boolean }>(
     `SELECT (
-       (to_regclass('public.connectivity_table_imports') IS NOT NULL
-        AND EXISTS (
-          SELECT 1 FROM connectivity_table_imports
-          WHERE connection_rid = $1
-        ))
+       EXISTS (
+         SELECT 1 FROM table_imports
+         WHERE connection_rid = $1
+       )
        OR
-       (to_regclass('public.connectivity_virtual_tables') IS NOT NULL
-        AND EXISTS (
-          SELECT 1 FROM connectivity_virtual_tables
-          WHERE connection_rid = $1
-        ))
+       EXISTS (
+         SELECT 1 FROM virtual_tables
+         WHERE connection_rid = $1
+       )
      )::boolean AS exists`,
     [rid],
   );

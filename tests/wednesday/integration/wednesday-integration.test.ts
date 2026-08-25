@@ -12,7 +12,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 // which would make every fetch URL become `//health`, `//api/v1/ontology`
 // and throw `Failed to parse URL`. Every other test file in this repo reads
 // `TEST_BASE_URL` via tests/helpers/api.ts for exactly this reason.
-const BASE_URL = process.env.TEST_BASE_URL || "http://localhost:3000";
+const BASE_URL = process.env.TEST_BASE_URL || (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 async function api(method: string, path: string, body?: unknown) {
   const opts: RequestInit = {

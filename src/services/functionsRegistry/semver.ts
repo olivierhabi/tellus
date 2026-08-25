@@ -63,6 +63,25 @@ export function isStableRelease(s: ParsedSemver): boolean {
   return s.preRelease.length === 0;
 }
 
+/**
+ * Preview vs stable release: a release off a non-default branch, or
+ * a prerelease SemVer (1.2.3-rc1), is a preview build — it never
+ * resolves as the default-branch stable.
+ *
+ * THE single predicate implementation, imported by both the
+ * tag-release route (codeRepository/admin/routes.ts) and the
+ * functions-publish worker (functionsPublish/service.ts). Throws
+ * whatever parseSemver throws on invalid input (both call sites
+ * validate earlier and surface their own 400 first).
+ */
+export function isPreviewRelease(
+  branch: string,
+  defaultBranch: string,
+  semver: string,
+): boolean {
+  return branch !== defaultBranch || parseSemver(semver).preRelease.length > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Comparison.
 // ---------------------------------------------------------------------------

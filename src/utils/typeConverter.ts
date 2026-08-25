@@ -53,6 +53,14 @@ const FALSY = new Set([
 const MONTH_ABBREVS: Record<string, number> = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
   jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  // Full names and the two common irregular abbreviations. The month regexes
+  // below used to be hardcoded to exactly three letters, so "30 March 2025"
+  // and "Sept 30, 2025" failed while "30-Mar-2025" worked — an arbitrary
+  // distinction from the user's point of view, and the kind of gap that only
+  // surfaces when a new source file happens to spell the month out.
+  january: 1, february: 2, march: 3, april: 4, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+  sept: 9,
 };
 
 /** Currency symbols and codes to strip before numeric parsing. */
@@ -253,7 +261,12 @@ export function convertValue(
       if (typeof raw !== "string" && typeof raw !== "number") {
         throw new Error(`Cannot convert ${typeof raw} to timestamp`);
       }
-      return convertTimestamp(String(raw));
+      // A timestamp target must accept everything a date target does — the
+      // compatibility table below says so (`timestamp: {timestamp, date}`), and
+      // widening a date to midnight is lossless. `dateFormat` has to be passed
+      // through: without it, "Cast to Timestamp" on a column of "7/30/23"
+      // failed on every row while "Cast to Date" on the same column succeeded.
+      return convertTimestamp(String(raw), dateFormat);
     }
 
     // -----------------------------------------------------------------
@@ -375,6 +388,45 @@ function convertDate(raw: string, dateFormat: "dmy" | "mdy" | "ymd"): string {
     throw new Error(`Invalid calendar date: '${s}'`);
   }
 
+  // 2b. Slash-separated with a 2-digit year: D/M/YY or M/D/YY ("7/30/23").
+  //     Spreadsheet exports emit this constantly. The century pivot follows
+  //     the POSIX/strptime %y convention used by Excel, Python and Java:
+  //     00-68 → 2000s, 69-99 → 1900s.
+  const slash2Match = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2})$/);
+  if (slash2Match) {
+    const p1 = parseInt(slash2Match[1], 10);
+    const p2 = parseInt(slash2Match[2], 10);
+    const yy = parseInt(slash2Match[3], 10);
+    const year = yy <= 68 ? 2000 + yy : 1900 + yy;
+
+    let day: number, month: number;
+    if (dateFormat === "mdy") {
+      // Unambiguous DMY (p1 > 12) still wins over the hint.
+      if (p1 > 12 && p2 <= 12) {
+        day = p1;
+        month = p2;
+      } else {
+        month = p1;
+        day = p2;
+      }
+    } else {
+      // dmy (default) and ymd — ymd cannot express a 2-digit-year leading
+      // field unambiguously, so treat it as dmy.
+      if (p1 > 31) throw new Error(`Invalid day: ${p1} in '${s}'`);
+      if (p2 > 12 && p1 <= 12) {
+        // Unambiguous MDY overrides the dmy hint.
+        month = p1;
+        day = p2;
+      } else {
+        day = p1;
+        month = p2;
+      }
+    }
+
+    if (isValidDate(year, month, day)) return formatDate(year, month, day);
+    throw new Error(`Invalid calendar date: '${s}'`);
+  }
+
   // 3. YYYY/MM/DD
   const ymdSlashMatch = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
   if (ymdSlashMatch) {
@@ -385,8 +437,10 @@ function convertDate(raw: string, dateFormat: "dmy" | "mdy" | "ymd"): string {
     throw new Error(`Invalid calendar date: '${s}'`);
   }
 
-  // 4. DD-Mon-YYYY (e.g., "11-Mar-2025")
-  const dMonYMatch = s.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+  // 4. DD-Mon-YYYY (e.g., "11-Mar-2025", "30 March 2025", "11 Sept 2025").
+  //    Dash or whitespace, abbreviated or spelled out — all the same date, so
+  //    accepting only the dashed 3-letter form was an arbitrary restriction.
+  const dMonYMatch = s.match(/^(\d{1,2})[-\s]+([A-Za-z]{3,9})[-\s,]+(\d{4})$/);
   if (dMonYMatch) {
     const month = MONTH_ABBREVS[dMonYMatch[2].toLowerCase()];
     if (month !== undefined) {
@@ -397,8 +451,8 @@ function convertDate(raw: string, dateFormat: "dmy" | "mdy" | "ymd"): string {
     throw new Error(`Invalid calendar date: '${s}'`);
   }
 
-  // 5. Mon DD, YYYY (e.g., "Mar 11, 2025")
-  const monDYMatch = s.match(/^([A-Za-z]{3})\s+(\d{1,2}),?\s*(\d{4})$/);
+  // 5. Mon DD, YYYY (e.g., "Mar 11, 2025", "March 11 2025", "Mar-11-2025")
+  const monDYMatch = s.match(/^([A-Za-z]{3,9})[-\s]+(\d{1,2}),?[-\s]*(\d{4})$/);
   if (monDYMatch) {
     const month = MONTH_ABBREVS[monDYMatch[1].toLowerCase()];
     if (month !== undefined) {
@@ -409,16 +463,77 @@ function convertDate(raw: string, dateFormat: "dmy" | "mdy" | "ymd"): string {
     throw new Error(`Invalid calendar date: '${s}'`);
   }
 
+  // 6. Compact ISO basic format YYYYMMDD (e.g. "20230730"). Emitted by many
+  //    warehouse exports and by Excel when a date column is stored as a number.
+  //    Deliberately exactly 8 digits and validated as a calendar date, so it
+  //    cannot collide with the 10- and 13-digit epoch forms handled in
+  //    convertTimestamp, and a non-date like "20231345" still fails loudly
+  //    rather than being coerced into something plausible.
+  const basicMatch = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (basicMatch) {
+    const y = parseInt(basicMatch[1], 10);
+    const m = parseInt(basicMatch[2], 10);
+    const d = parseInt(basicMatch[3], 10);
+    if (isValidDate(y, m, d)) return formatDate(y, m, d);
+    throw new Error(`Invalid calendar date: '${s}'`);
+  }
+
   throw new Error(
-    `Cannot convert '${raw}' to date. Accepted: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY, DD-Mon-YYYY, Mon DD YYYY`
+    `Cannot convert '${raw}' to date. Accepted: YYYY-MM-DD, YYYYMMDD, DD/MM/YYYY, MM/DD/YYYY, DD/MM/YY, MM/DD/YY, DD-Mon-YYYY, Mon DD YYYY`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Date-format inference
+// ---------------------------------------------------------------------------
+
+/**
+ * Infer whether a column of slash/dot/dash-separated dates is day-first or
+ * month-first by looking for values that can only be read one way.
+ *
+ * Ambiguous values like "7/6/23" carry no signal, but a single "7/30/23" in
+ * the same column proves the whole column is month-first. Without this, a
+ * US-formatted column parsed under the "dmy" default silently produces the
+ * wrong month for every ambiguous row — worse than a loud cast failure.
+ *
+ * @returns "mdy" or "dmy" when the sample contains decisive evidence,
+ *          otherwise null (caller keeps its own default).
+ */
+export function inferDateFormat(
+  samples: Array<unknown>
+): "dmy" | "mdy" | null {
+  let mdyEvidence = 0;
+  let dmyEvidence = 0;
+
+  for (const sample of samples) {
+    if (typeof sample !== "string") continue;
+    const m = sample
+      .trim()
+      .match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2}|\d{4})$/);
+    if (!m) continue;
+    const p1 = parseInt(m[1], 10);
+    const p2 = parseInt(m[2], 10);
+    // Only one field can exceed 12, and it must be the day.
+    if (p1 > 12 && p2 <= 12) dmyEvidence++;
+    else if (p2 > 12 && p1 <= 12) mdyEvidence++;
+  }
+
+  if (mdyEvidence === 0 && dmyEvidence === 0) return null;
+  // Mixed evidence means the column is genuinely inconsistent; go with the
+  // majority rather than throwing, since lenient cast already nulls the
+  // rows that fail either way.
+  if (mdyEvidence === dmyEvidence) return null;
+  return mdyEvidence > dmyEvidence ? "mdy" : "dmy";
 }
 
 // ---------------------------------------------------------------------------
 // Timestamp conversion
 // ---------------------------------------------------------------------------
 
-function convertTimestamp(raw: string): string {
+function convertTimestamp(
+  raw: string,
+  dateFormat: "dmy" | "mdy" | "ymd" = "dmy",
+): string {
   const s = raw.trim();
 
   // Unix epoch milliseconds (13 digits)
@@ -443,7 +558,36 @@ function convertTimestamp(raw: string): string {
     "$1T$2"
   );
 
-  const d = new Date(spaceTs);
+  // STRICT: only accept ISO-8601-shaped strings. Passing anything else to
+  // `new Date()` would fall into JS's lenient, implementation- and
+  // timezone-dependent parsing (e.g. "7/30/23" parses as mid might local
+  // time — which converted wrongly across server timezones and silently
+  // disagreed with the strict `convertDate` rules above).
+  const isoShape = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/.test(spaceTs);
+  if (!isoShape) {
+    // Not a timestamp shape. Before failing, try the date-only grammar:
+    // "7/30/23", "30-Mar-2025", "2023/07/30" and friends are all legitimate
+    // inputs for a timestamp column, widened to midnight.
+    //
+    // This delegates rather than re-implementing, so the two targets can never
+    // disagree about what a date *means* — including the day/month inference
+    // and the %y century pivot. Crucially it stays strict: convertDate throws
+    // on anything it does not recognise, so we never reach the lenient
+    // `new Date()` parsing that the comment above warns about.
+    const dateOnly = convertDate(s, dateFormat); // throws if not a date either
+    return new Date(`${dateOnly}T00:00:00.000Z`).toISOString();
+  }
+
+  // A timestamp with no zone designator is *naive*: the source data says
+  // "14:05" and means 14:05, not "14:05 wherever this server happens to be".
+  // `new Date("2023-07-30T14:05:00")` applies the host offset, so the same CSV
+  // produced 12:05Z on a +02:00 box and 14:05Z on a UTC one — and disagreed
+  // with the DuckDB engine, whose TIMESTAMP is timezone-naive and keeps 14:05.
+  // Anchoring to UTC makes the two engines agree and makes the result
+  // independent of where the process runs. An explicit Z or ±HH:MM is honoured
+  // as written, since there the source did state a zone.
+  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/.test(spaceTs);
+  const d = new Date(hasZone ? spaceTs : `${spaceTs}Z`);
   if (!isNaN(d.getTime())) return d.toISOString();
 
   throw new Error(
@@ -832,6 +976,79 @@ export async function runSelfTests(): Promise<void> {
 
   // Dot-separated dates (common in some EU formats)
   assert(convertValue("15.03.2025", "date") === "2025-03-15", "date: DD.MM.YYYY (dot)");
+
+  // =====================================================================
+  // convertValue — 2-digit years (spreadsheet exports)
+  // =====================================================================
+  console.log("\n--- date (2-digit year) ---");
+
+  assert(
+    convertValue("7/30/23", "date") === "2023-07-30",
+    "date2y: '7/30/23' unambiguous MDY overrides dmy default"
+  );
+  assert(
+    convertValue("30/7/23", "date") === "2023-07-30",
+    "date2y: '30/7/23' unambiguous DMY"
+  );
+  assert(
+    convertValue("7/6/23", "date") === "2023-06-07",
+    "date2y: ambiguous under dmy default → day=7 month=6"
+  );
+  assert(
+    convertValue("7/6/23", "date", { dateFormat: "mdy" }) === "2023-07-06",
+    "date2y: ambiguous with mdy hint → month=7 day=6"
+  );
+  assert(
+    convertValue("30/7/23", "date", { dateFormat: "mdy" }) === "2023-07-30",
+    "date2y: unambiguous DMY wins over mdy hint"
+  );
+  // Century pivot at the strptime %y boundary.
+  assert(convertValue("1/1/68", "date") === "2068-01-01", "date2y: 68 → 2068");
+  assert(convertValue("1/1/69", "date") === "1969-01-01", "date2y: 69 → 1969");
+  assert(convertValue("1/1/99", "date") === "1999-01-01", "date2y: 99 → 1999");
+  assert(convertValue("1/1/00", "date") === "2000-01-01", "date2y: 00 → 2000");
+  // Dash and dot separators with 2-digit years.
+  assert(convertValue("30-7-23", "date") === "2023-07-30", "date2y: dash separator");
+  assert(convertValue("30.7.23", "date") === "2023-07-30", "date2y: dot separator");
+  // 4-digit-year behaviour must not regress.
+  assert(convertValue("15/03/2025", "date") === "2025-03-15", "date2y: 4-digit still works");
+  assertThrows(() => convertValue("13/13/23", "date"), "date2y: month 13 both ways throws");
+  assertThrows(() => convertValue("2/30/23", "date"), "date2y: Feb 30 throws");
+
+  // =====================================================================
+  // inferDateFormat
+  // =====================================================================
+  console.log("\n--- inferDateFormat ---");
+
+  assert(
+    inferDateFormat(["7/6/23", "7/30/23", "6/2/23"]) === "mdy",
+    "infer: one month>12-in-p2 value proves mdy"
+  );
+  assert(
+    inferDateFormat(["7/6/23", "30/7/23", "2/6/23"]) === "dmy",
+    "infer: one day-first value proves dmy"
+  );
+  assert(
+    inferDateFormat(["7/6/23", "1/2/23"]) === null,
+    "infer: all-ambiguous → null (no opinion)"
+  );
+  assert(inferDateFormat([]) === null, "infer: empty → null");
+  assert(
+    inferDateFormat(["2025-03-11", "not-a-date", null, 42]) === null,
+    "infer: non-slash / non-string values ignored"
+  );
+  assert(
+    inferDateFormat(["7/30/23", "30/7/23"]) === null,
+    "infer: tied conflicting evidence → null"
+  );
+  assert(
+    inferDateFormat(["7/30/23", "8/31/23", "30/7/23"]) === "mdy",
+    "infer: majority wins on mixed evidence"
+  );
+  assert(
+    inferDateFormat(["03/11/2025", "12/25/2025"]) === "mdy",
+    "infer: works with 4-digit years too"
+  );
 
   // =====================================================================
   // convertValue — timestamp

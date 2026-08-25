@@ -79,6 +79,21 @@ export interface KeycloakEvent {
   details?: Record<string, string>;
 }
 
+export interface KeycloakGroup {
+  id: string;
+  name: string;
+  path: string;
+}
+
+/** Subset of Keycloak's RoleRepresentation the superadmin console consumes. */
+export interface KeycloakRealmRole {
+  id: string;
+  name: string;
+  description?: string;
+  composite?: boolean;
+  clientRole?: boolean;
+}
+
 export type RequiredAction = 'webauthn-register' | 'webauthn-register-passwordless' | 'CONFIGURE_TOTP' | 'UPDATE_PASSWORD' | 'VERIFY_EMAIL';
 
 interface CachedToken {
@@ -315,6 +330,21 @@ export class KeycloakAdminService {
     return res.value;
   }
 
+  /**
+   * Atomically creates a new Keycloak client secret and invalidates the old
+   * credential. Reading the current secret is not rotation and must never be
+   * used as a successful rotate response.
+   */
+  async regenerateClientSecret(clientUuid: string): Promise<string> {
+    const res = await this.call<{ value: string }>(
+      'POST',
+      `/clients/${clientUuid}/client-secret`,
+      { body: {} },
+    );
+    if (!res?.value) throw new Error('Keycloak returned no regenerated client secret');
+    return res.value;
+  }
+
   // --- Users ---------------------------------------------------------------
 
   async findUserByEmail(email: string): Promise<{ id: string; email?: string; username: string } | null> {
@@ -338,6 +368,7 @@ export class KeycloakAdminService {
     email: string | null;
     firstName: string | null;
     lastName: string | null;
+    enabled: boolean;
   } | null> {
     try {
       const u = await this.call<{
@@ -346,6 +377,7 @@ export class KeycloakAdminService {
         email?: string;
         firstName?: string;
         lastName?: string;
+        enabled?: boolean;
       }>('GET', `/users/${encodeURIComponent(id)}`, {
         query: { briefRepresentation: 'true' },
       });
@@ -356,6 +388,7 @@ export class KeycloakAdminService {
         email: u.email ?? null,
         firstName: u.firstName ?? null,
         lastName: u.lastName ?? null,
+        enabled: u.enabled ?? true,
       };
     } catch (err) {
       if (err instanceof AppError && err.statusCode === 404) return null;
@@ -446,27 +479,32 @@ export class KeycloakAdminService {
   async createUser(body: {
     username: string;
     email: string;
-    firstName?: string;
-    lastName?: string;
+    firstName: string;
+    lastName: string;
     password: string;
     enabled?: boolean;
     emailVerified?: boolean;
   }): Promise<string> {
-    // The tellus realm has KC's `Verify Profile` authenticator
-    // enabled, which inspects `firstName` + `lastName` at token
-    // time and short-circuits direct-grant with "Account is not
-    // fully set up" when either is blank. The operator creating a
-    // user through /admin/users may not know to supply both, so we
-    // default them from the email local-part. These are just
-    // placeholders the user can edit from /settings/profile after
-    // enrolling a passkey on first login.
-    const localPart = body.email.split('@')[0] || body.username;
-    const defaultedFirst =
-      body.firstName && body.firstName.trim().length > 0
-        ? body.firstName
-        : localPart;
-    const defaultedLast =
-      body.lastName && body.lastName.trim().length > 0 ? body.lastName : 'User';
+    // The tellus realm requires non-blank firstName + lastName for
+    // direct-grant: Keycloak short-circuits the password grant with
+    // `Account is not fully set up` when either is blank (the realm's
+    // user-profile config marks both required). We therefore REQUIRE
+    // the caller to supply real names rather than fabricate a
+    // misleading placeholder — the old default of `<email-local-part>`
+    // / `User` leaked into the JWT `name` claim and rendered as
+    // "foo User" in the greeting. Callers without a known real name
+    // (e.g. the superadmin bootstrap) pass a role-default the operator
+    // personalizes via /settings/profile. Validate BEFORE the KC POST
+    // so a missing name fails fast with no partial user created.
+    const first = body.firstName?.trim();
+    const last = body.lastName?.trim();
+    if (!first || !last) {
+      throw new AppError(
+        'firstName and lastName are required (the Keycloak realm requires both for direct-grant login)',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
 
     // Step 1 — create the user without a credential. We deliberately
     // do NOT pass `credentials` inline here: Keycloak's REST endpoint
@@ -479,8 +517,8 @@ export class KeycloakAdminService {
       body: {
         username: body.username,
         email: body.email,
-        firstName: defaultedFirst,
-        lastName: defaultedLast,
+        firstName: first,
+        lastName: last,
         enabled: body.enabled ?? true,
         emailVerified: body.emailVerified ?? true,
         // Explicitly clear default required-actions. Without this,
@@ -577,6 +615,110 @@ export class KeycloakAdminService {
     return rows.map((r) => r.name);
   }
 
+  async listUserGroups(userId: string): Promise<string[]> {
+    const groups = await this.listUserGroupReferences(userId);
+    return groups.map((group) => group.path);
+  }
+
+  async listUserGroupReferences(userId: string): Promise<KeycloakGroup[]> {
+    const groups = await this.call<Array<KeycloakGroup>>(
+      "GET",
+      `/users/${encodeURIComponent(userId)}/groups`,
+      { query: { briefRepresentation: "true", max: "1000" } },
+    );
+    return groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      path: group.path ?? group.name,
+    }));
+  }
+
+  async listGroups(opts: {
+    search?: string;
+    first?: number;
+    max?: number;
+  } = {}): Promise<KeycloakGroup[]> {
+    const groups = await this.call<Array<KeycloakGroup>>("GET", "/groups", {
+      query: {
+        search: opts.search,
+        first: opts.first?.toString(),
+        max: Math.min(opts.max ?? 100, 1_001).toString(),
+        briefRepresentation: "true",
+      },
+    });
+    return groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      path: group.path ?? group.name,
+    }));
+  }
+
+  async listGroupMembers(groupId: string): Promise<Array<{
+    id: string;
+    username: string;
+    email: string | null;
+    enabled: boolean;
+  }>> {
+    const users = await this.call<Array<{
+      id: string;
+      username: string;
+      email?: string;
+      enabled?: boolean;
+    }>>(
+      "GET",
+      `/groups/${encodeURIComponent(groupId)}/members`,
+      {
+        query: {
+          first: "0",
+          max: "1001",
+          briefRepresentation: "true",
+        },
+      },
+    );
+    if (users.length > 1_000) {
+      throw new AppError(
+        "Notification groups are limited to 1,000 members.",
+        422,
+        "NOTIFICATION_GROUP_TOO_LARGE",
+      );
+    }
+    return users.map((user) => ({
+      id: user.id,
+      username: user.username,
+      email: user.email ?? null,
+      enabled: user.enabled ?? true,
+    }));
+  }
+
+  /**
+   * Realm roles granted to every newly provisioned member. Mirrors the
+   * standard (non-admin) member archetype from
+   * scripts/bootstrap-keycloak.sh: `ontology-editor` for content
+   * read/write, plus every non-admin security marking so the user can
+   * see org content — TOP_SECRET stays an admin-only grant. Without
+   * these, every content route (requireRole / dataPlaneGuard) fails
+   * closed and the user can sign in but see nothing.
+   */
+  static readonly DEFAULT_MEMBER_ROLES: readonly string[] = [
+    'ontology-editor',
+    'marking:PUBLIC',
+    'marking:CONFIDENTIAL',
+    'marking:SECRET',
+  ];
+
+  /**
+   * Grant the standard member role bundle to a user. Idempotent per
+   * role (assignRealmRoleToUser skips already-held roles) and ordered —
+   * each ensure/assign failure propagates so a half-provisioned user
+   * surfaces as a route error instead of a silent accessless account.
+   */
+  async assignDefaultMemberRoles(userId: string): Promise<string[]> {
+    for (const roleName of KeycloakAdminService.DEFAULT_MEMBER_ROLES) {
+      await this.assignRealmRoleToUser(userId, roleName);
+    }
+    return [...KeycloakAdminService.DEFAULT_MEMBER_ROLES];
+  }
+
   async assignRealmRoleToUser(userId: string, roleName: string): Promise<void> {
     const role = await this.ensureRealmRole(roleName);
     const current = await this.listUserRealmRoles(userId);
@@ -589,6 +731,194 @@ export class KeycloakAdminService {
 
   async removeRealmRoleFromUser(userId: string, roleName: string): Promise<void> {
     const role = await this.ensureRealmRole(roleName);
+    await this.call('DELETE', `/users/${userId}/role-mappings/realm`, {
+      body: [{ id: role.id, name: role.name }],
+      parseJson: false,
+    });
+  }
+
+  // --- Realm role CRUD + composites (superadmin /admin/roles console) ------
+
+  /**
+   * List realm roles. Keycloak paginates /roles server-side (first/max) and
+   * supports `search` (prefix on the name) — we page internally in the
+   * caller-facing adminRolesService, this method just talks to Keycloak.
+   */
+  async listRoles(opts: { search?: string; first?: number; max?: number } = {}): Promise<KeycloakRealmRole[]> {
+    return this.call<KeycloakRealmRole[]>('GET', '/roles', {
+      query: {
+        search: opts.search,
+        first: opts.first?.toString(),
+        max: (opts.max ?? 200).toString(),
+      },
+    });
+  }
+
+  /**
+   * Look up a realm role by its Keycloak id. Null when absent — unlike
+   * the /roles/{name} endpoint, /roles-by-id is id-addressed, which is what
+   * the /admin/roles/:id routes key on.
+   */
+  async getRoleById(id: string): Promise<KeycloakRealmRole | null> {
+    try {
+      return await this.call<KeycloakRealmRole>(
+        'GET',
+        `/roles-by-id/${encodeURIComponent(id)}`,
+      );
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'NOT_FOUND') return null;
+      throw err;
+    }
+  }
+
+  async getRoleByName(name: string): Promise<KeycloakRealmRole | null> {
+    try {
+      return await this.call<KeycloakRealmRole>(
+        'GET',
+        `/roles/${encodeURIComponent(name)}`,
+      );
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'NOT_FOUND') return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Create a realm role. Unlike ensureRealmRole this is NOT idempotent: a
+   * 409 from Keycloak propagates (the route turns it into ROLE_NAME_TAKEN)
+   * because the superadmin console's create flow must distinguish "created"
+   * from "already existed".
+   */
+  async createRole(name: string, description: string): Promise<void> {
+    await this.call('POST', '/roles', {
+      body: { name, description },
+      parseJson: false,
+    });
+  }
+
+  /**
+   * Update a role's description. Keycloak's PUT /roles/{name} is a full
+   * representation replace: we fetch the current representation by id and
+   * PUT it back with the new description. Name/id/composite are NOT mutated
+   * here — composite edges are managed through the composites endpoints.
+   */
+  async updateRoleDescription(id: string, description: string): Promise<void> {
+    const rep = await this.getRoleById(id);
+    if (!rep) throw new AppError('Role not found', 404, 'NOT_FOUND');
+    await this.call('PUT', `/roles/${encodeURIComponent(rep.name)}`, {
+      body: { ...rep, description },
+      parseJson: false,
+    });
+  }
+
+  /** Delete a realm role by name (Keycloak's canonical delete endpoint). */
+  async deleteRole(name: string): Promise<void> {
+    await this.call('DELETE', `/roles/${encodeURIComponent(name)}`, {
+      parseJson: false,
+    });
+  }
+
+  /** The roles this role composites (the "permissions" it grants). */
+  async getRoleComposites(name: string): Promise<KeycloakRealmRole[]> {
+    return this.call<KeycloakRealmRole[]>(
+      'GET',
+      `/roles/${encodeURIComponent(name)}/composites`,
+    );
+  }
+
+  async addRoleComposites(name: string, roles: Array<{ id: string; name: string }>): Promise<void> {
+    await this.call('POST', `/roles/${encodeURIComponent(name)}/composites`, {
+      body: roles.map((r) => ({ id: r.id, name: r.name })),
+      parseJson: false,
+    });
+  }
+
+  async removeRoleComposites(name: string, roles: Array<{ id: string; name: string }>): Promise<void> {
+    await this.call('DELETE', `/roles/${encodeURIComponent(name)}/composites`, {
+      body: roles.map((r) => ({ id: r.id, name: r.name })),
+      parseJson: false,
+    });
+  }
+
+  /**
+   * Users currently granted this realm role, mapped to the same shape the
+   * /admin/users list returns (AdminUser). `max` is honoured server-side by
+   * Keycloak; realm-role membership lists don't carry a total, so the caller
+   * computes counts from the returned rows.
+   */
+  async listRoleUsers(opts: { name: string; first?: number; max?: number }): Promise<
+    Array<{
+      id: string;
+      username: string;
+      email: string | null;
+      firstName: string | null;
+      lastName: string | null;
+      enabled: boolean;
+      emailVerified: boolean;
+      createdTimestamp: number | null;
+      roles: string[];
+    }>
+  > {
+    const rows = await this.call<
+      Array<{
+        id: string;
+        username: string;
+        email?: string;
+        firstName?: string;
+        lastName?: string;
+        enabled?: boolean;
+        emailVerified?: boolean;
+        createdTimestamp?: number;
+      }>
+    >('GET', `/roles/${encodeURIComponent(opts.name)}/users`, {
+      query: {
+        first: opts.first?.toString(),
+        max: (opts.max ?? 200).toString(),
+        briefRepresentation: 'true',
+      },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      username: r.username,
+      email: r.email ?? null,
+      firstName: r.firstName ?? null,
+      lastName: r.lastName ?? null,
+      enabled: r.enabled ?? true,
+      emailVerified: r.emailVerified ?? false,
+      createdTimestamp: r.createdTimestamp ?? null,
+      roles: [],
+    }));
+  }
+
+  /**
+   * Cheap member-count probe: fetches at most `max` member rows and returns
+   * how many came back. Used by the roles LIST endpoint where we only need a
+   * count cell — the FE displays an exact number for small bands and the cap
+   * value when the band is truncated (documented in adminRolesService).
+   */
+  async countRoleUsers(name: string, max = 101): Promise<number> {
+    const rows = await this.call<unknown[]>(
+      'GET',
+      `/roles/${encodeURIComponent(name)}/users`,
+      { query: { first: '0', max: max.toString(), briefRepresentation: 'true' } },
+    );
+    return rows.length;
+  }
+
+  /** Idempotent grant by role id — adds the mapping only when not held. */
+  async assignRoleToUserById(userId: string, role: { id: string; name: string }): Promise<void> {
+    const current = await this.call<Array<{ id: string }>>(
+      'GET',
+      `/users/${userId}/role-mappings/realm`,
+    );
+    if (current.some((r) => r.id === role.id)) return; // idempotent
+    await this.call('POST', `/users/${userId}/role-mappings/realm`, {
+      body: [{ id: role.id, name: role.name }],
+      parseJson: false,
+    });
+  }
+
+  async removeRoleFromUserById(userId: string, role: { id: string; name: string }): Promise<void> {
     await this.call('DELETE', `/users/${userId}/role-mappings/realm`, {
       body: [{ id: role.id, name: role.name }],
       parseJson: false,

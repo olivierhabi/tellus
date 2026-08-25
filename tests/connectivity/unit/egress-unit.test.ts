@@ -70,6 +70,12 @@ describe("connectivity egress allowlist", () => {
 });
 
 describe("reserved-range SSRF guard (assertEgressForConfig)", () => {
+  beforeEach(() => {
+    // tests/globalSetup.ts pins CONNECTIVITY_EGRESS_ALLOW_RESERVED for the
+    // lane server; workers inherit the parent env, so this file must
+    // actively clear it to assert the stock deny-by-default behaviour.
+    delete process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED;
+  });
   afterEach(() => {
     delete process.env.CONNECTIVITY_EGRESS_ALLOW_RESERVED;
   });

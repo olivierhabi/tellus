@@ -61,11 +61,19 @@ export class ClickHouseClient {
   // -----------------------------------------------------------------------
   // exec() — send a SQL statement that returns rows (SELECT-like). Accepts
   // optional parameters. Always returns JSONEachRow rows.
+  //
+  // `opts.timeoutMs` overrides the per-attempt fetch timeout for THIS call
+  // only (deadline-aware callers like the link ack barrier bound each probe
+  // to the REMAINING deadline rather than the client default). Callers that
+  // omit it get the client-wide default — no behavior change.
   // -----------------------------------------------------------------------
 
-  async exec<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+  async exec<T = Record<string, unknown>>(
+    sql: string,
+    opts?: { timeoutMs?: number },
+  ): Promise<T[]> {
     const wrapped = /\bFORMAT\s+\w+/i.test(sql) ? sql : `${sql}\nFORMAT JSONEachRow`;
-    const text = await this.request(wrapped);
+    const text = await this.request(wrapped, undefined, opts?.timeoutMs);
     if (!text.trim()) return [];
     const rows: T[] = [];
     for (const line of text.split("\n")) {
@@ -110,7 +118,7 @@ export class ClickHouseClient {
   // Internal
   // -----------------------------------------------------------------------
 
-  private async request(sql: string, body?: string): Promise<string> {
+  private async request(sql: string, body?: string, timeoutMs?: number): Promise<string> {
     const url = new URL(this.baseUrl);
     url.searchParams.set("database", this.database);
     url.searchParams.set("query", sql);
@@ -122,7 +130,7 @@ export class ClickHouseClient {
     let lastErr: unknown;
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      const timer = setTimeout(() => controller.abort(), timeoutMs ?? this.timeoutMs);
       try {
         const resp = await this.fetchImpl(url.toString(), {
           method: "POST",

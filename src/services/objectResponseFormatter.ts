@@ -19,6 +19,15 @@ export interface FormattedListResponse {
   totalCount: number;
 }
 
+/**
+ * Phase 2 (OSSv2 parity) — formatting options.
+ * `excludeRid` mirrors the public v2 `excludeRid` request flag:
+ * when true, `__rid` is stripped from formatted objects.
+ */
+export interface FormatOptions {
+  excludeRid?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // formatObjectList
 // ---------------------------------------------------------------------------
@@ -33,7 +42,8 @@ export function formatObjectList(
   selectProperties: string[] | undefined,
   orderBy: Array<{ field: string; direction: string }>,
   whereClause: unknown,
-  pageSize: number
+  pageSize: number,
+  options?: FormatOptions
 ): FormattedListResponse {
   const hitsObj = opensearchResponse?.hits;
   if (!hitsObj || !hitsObj.hits) {
@@ -52,7 +62,7 @@ export function formatObjectList(
 
   for (const hit of hitsToReturn) {
     const source = hit._source || {};
-    const formatted = formatSingleSource(source, objectTypeApiName, allPropertyApiNames, selectProperties);
+    const formatted = formatSingleSource(source, objectTypeApiName, allPropertyApiNames, selectProperties, options);
 
     // Include highlights if present
     if (hit.highlight) {
@@ -83,11 +93,12 @@ export function formatObjectList(
  */
 export function formatSingleObject(
   opensearchResponse: any,
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  options?: FormatOptions
 ): Record<string, unknown> | null {
   const source = opensearchResponse?._source;
   if (!source) return null;
-  return formatSingleSource(source, objectTypeApiName, [], undefined);
+  return formatSingleSource(source, objectTypeApiName, [], undefined, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,13 +200,23 @@ function formatSingleSource(
   source: Record<string, unknown>,
   objectTypeApiName: string,
   allPropertyApiNames: string[],
-  selectProperties: string[] | undefined
+  selectProperties: string[] | undefined,
+  options?: FormatOptions
 ): Record<string, unknown> {
   const output: Record<string, unknown> = {};
 
-  // Always include system identity fields
+  // Always include system identity fields. `__apiName` is the v2 name
+  // for the object type's API name; `__objectType` is retained for v1
+  // backward compatibility (Phase 2 — additive, not a rename).
   output.__primaryKey = source.__pk ?? null;
   output.__objectType = source.__objectType ?? objectTypeApiName;
+  output.__apiName = source.__objectType ?? objectTypeApiName;
+  // `__rid` is emitted when the document carries one (migration 138 +
+  // indexer/editApplicator stamping). `excludeRid: true` strips it,
+  // mirroring the public v2 request flag.
+  if (source.__rid != null && options?.excludeRid !== true) {
+    output.__rid = source.__rid;
+  }
 
   if (selectProperties && selectProperties.length > 0) {
     // Only include selected properties + system fields

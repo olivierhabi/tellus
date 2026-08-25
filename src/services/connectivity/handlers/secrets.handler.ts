@@ -44,6 +44,11 @@ const FieldEnum = z.enum([
   "service_account_json",
   "token",
   "other",
+  // F8 — named per-secret storage for REST-API sources.
+  "api_key",
+  "bearer_token",
+  "basic_auth",
+  "custom_header",
 ]);
 
 const PutBody = z.object({
@@ -126,6 +131,11 @@ export async function listCredentials(
       "service_account_json",
       "token",
       "other",
+      // F8 — named per-secret storage for REST-API sources.
+      "api_key",
+      "bearer_token",
+      "basic_auth",
+      "custom_header",
     ];
     const result: Record<string, unknown> = {};
     for (const field of fields) {

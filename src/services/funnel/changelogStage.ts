@@ -33,6 +33,15 @@ import {
   SnapshotOperation,
 } from "./icebergCatalog";
 import { query } from "../../db";
+import {
+  CHANGELOG_PARQUET_COLUMNS,
+  changelogParquetKey,
+  deleteOrphanParquetRef,
+  newSnapshotId,
+  parquetRefToUri,
+  writeParquetRef,
+  type ParquetRef,
+} from "./funnelParquetStore";
 
 export type ChangelogOperation = "INSERT" | "UPDATE" | "DELETE";
 
@@ -74,6 +83,16 @@ export interface SnapshotDiffReader {
     fromSnapshotId: string | null;
     toSnapshotId: string;
   }): AsyncIterable<SourceChangeRow>;
+  /** Provenance flag that lets `computeChangelog` SKIP the per-PK
+   *  duplicate-throw (`seenInTxn`) when the reader ALREADY deduplicates.
+   *  Today only the foundry-bridged CSV reader sets this — it dedupes
+   *  last-wins in a disk-spilled DuckDB temp table (DISTINCT ON) before
+   *  yielding, so the O(N) `seenInTxn` Map would be both redundant AND
+   *  (for a 5.6M-row / 949k-duplicate-PK source) a re-introduced O(N)
+   *  heap allocation. Iceberg + pending-edit readers do NOT set this and
+   *  keep the Palantir hard-throw (they don't pre-dedupe). Explicit + named
+   *  rather than a boolean so a future reader kind is self-documenting. */
+  readerKind?: "foundry-bridged";
 }
 
 export interface ComputeChangelogInput {
@@ -96,7 +115,15 @@ export interface ComputeChangelogResult {
   snapshotId: string;
   rowsEmitted: number;
   manifest: ManifestEntry[];
-  rows: ChangelogRow[];
+  /** Property names the Merge stage must overlay for this datasource
+   *  (column-wise MDO). Collected during the stream so the rows never
+   *  need to be returned by value. */
+  ownedProperties: string[];
+  /** Reference to the Parquet object in MinIO holding the emitted rows,
+   *  or `null` when the source yielded zero rows. Downstream re-reads via
+   *  `loadChangelogRowsFromSnapshot` — rows never travel through a
+   *  Temporal activity return NOR through a jsonb INSERT param. */
+  parquetRef: ParquetRef | null;
 }
 
 export const DEFAULT_THROUGHPUT_CAP = 2 * 1024 * 1024; // 2 MiB/s per spec
@@ -126,68 +153,138 @@ export async function computeChangelog(
   );
 
   // Palantir rule: duplicate PKs within a single source transaction fail
-  // the build. We track (source_transaction_id, primary_key) → first seen
-  // index to give a clear error pointing at both occurrences.
-  const seenInTxn = new Map<string, Map<string, number>>();
-  const rows: ChangelogRow[] = [];
+  // the build — UNLESS the reader pre-deduplicates (foundry-bridged CSV,
+  // which dedupes last-wins in a disk-spilled DuckDB temp table; see
+  // `SnapshotDiffReader.readerKind`). For those readers the seenInTxn Map
+  // would be both redundant AND a re-introduced O(N) heap allocation on a
+  // 5.6M-row / 949k-duplicate-PK source, so we skip it and track only the
+  // tiny O(distinct-txns) txn-id set for the summary. Iceberg + pending-
+  // edit readers do NOT pre-dedupe and keep the hard-throw.
+  const skipDupCheck = reader.readerKind === "foundry-bridged";
+  const seenInTxn = skipDupCheck ? null : new Map<string, Map<string, number>>();
+  const distinctTxns = skipDupCheck ? new Set<string>() : null;
+  const ownedProperties = new Set<string>();
   let idx = 0;
 
-  for await (const r of reader.read({
-    sourceTableId: input.sourceTableId,
-    fromSnapshotId: input.fromSnapshotId,
-    toSnapshotId: input.toSnapshotId,
-  })) {
-    const txn = r.source_transaction_id;
-    if (!seenInTxn.has(txn)) seenInTxn.set(txn, new Map());
-    const txnMap = seenInTxn.get(txn)!;
-    if (txnMap.has(r.primary_key)) {
-      const firstIdx = txnMap.get(r.primary_key)!;
-      throw new Error(
-        `duplicate primary key '${r.primary_key}' within source transaction ` +
-          `'${txn}' (first seen at row ${firstIdx}, duplicate at row ${idx})`
-      );
-    }
-    txnMap.set(r.primary_key, idx);
+  // PASS-BY-REFERENCE (Option 2): stream the source rows straight into a
+  // Parquet object in MinIO. The full row array is NEVER materialised in
+  // Node memory — the generator yields one row at a time, DuckDB's temp
+  // table (disk-spillable) holds the batched inserts, and the COPY writes
+  // the Parquet. The previous design inlined the rows into
+  // `summary_json.inline_rows` (jsonb), which at ~573 MB for a 1M-row
+  // source crashed the 768 MiB-capped Postgres backend at the INSERT.
+  // `summary_json` now carries only a small `parquet_ref`; the Merge stage
+  // re-reads the rows from MinIO by `snapshotId`. Rows never travel
+  // through a Temporal activity return value NOR through a jsonb INSERT
+  // param — both walls are removed.
+  // Pre-generate the snapshot id so the MinIO Parquet object can be keyed
+  // by it BEFORE the Postgres row commits (write-parquet-first). The key
+  // is deterministic per snapshot; a failed-retry attempt (this id pre-gen'd
+  // but the row never committed) leaves a GC-able orphan at
+  // `changelogs/<apiName>/<this-snapshotId>.parquet`.
+  const preSnapshotId = newSnapshotId();
+  const parquetKey = changelogParquetKey(input.objectTypeApiName, preSnapshotId);
+  const rowIterable = (async function* () {
+    for await (const r of reader.read({
+      sourceTableId: input.sourceTableId,
+      fromSnapshotId: input.fromSnapshotId,
+      toSnapshotId: input.toSnapshotId,
+    })) {
+      const txn = r.source_transaction_id;
+      if (skipDupCheck) {
+        distinctTxns!.add(txn);
+      } else {
+        if (!seenInTxn!.has(txn)) seenInTxn!.set(txn, new Map());
+        const txnMap = seenInTxn!.get(txn)!;
+        if (txnMap.has(r.primary_key)) {
+          const firstIdx = txnMap.get(r.primary_key)!;
+          throw new Error(
+            `duplicate primary key '${r.primary_key}' within source transaction ` +
+              `'${txn}' (first seen at row ${firstIdx}, duplicate at row ${idx})`
+          );
+        }
+        txnMap.set(r.primary_key, idx);
+      }
 
-    if (r.byte_size && r.byte_size > 0) {
-      await throughput.consume(r.byte_size);
-    }
+      if (r.byte_size && r.byte_size > 0) {
+        await throughput.consume(r.byte_size);
+      }
 
-    rows.push({
-      primary_key: r.primary_key,
-      operation: r.operation,
-      properties: r.properties,
-      source_transaction_id: r.source_transaction_id,
-      source_commit_timestamp: r.source_commit_timestamp,
+      for (const k of Object.keys(r.properties)) ownedProperties.add(k);
+      idx++;
+
+      // Flatten to the fixed Parquet schema; `properties` is a JSON string.
+      yield {
+        primary_key: r.primary_key,
+        operation: r.operation,
+        properties: JSON.stringify(r.properties),
+        source_transaction_id: r.source_transaction_id,
+        source_commit_timestamp: r.source_commit_timestamp,
+      };
+    }
+  })();
+
+  // Write the Parquet object BEFORE committing the snapshot row. If the
+  // commit fails the orphaned object is best-effort deleted (idempotent);
+  // it is in any case safely ignorable + GC-able (the key is a per-call
+  // uuid, so retries never collide with a referenced object).
+  let parquetRef: ParquetRef | null = null;
+  try {
+    parquetRef = await writeParquetRef({
+      columns: CHANGELOG_PARQUET_COLUMNS,
+      rows: rowIterable,
+      key: parquetKey,
+      objectTypeApiName: input.objectTypeApiName,
+      stage: "changelog",
     });
-    idx++;
+  } catch (err) {
+    await deleteOrphanParquetRef(parquetRef);
+    throw err;
   }
 
-  // The manifest is a single data-file entry. In production the activity
-  // would additionally stream the rows to Parquet at outputFileLocation
-  // — that write is idempotent because the filename is uuid-named by the
-  // workflow ID + attempt, so retries don't corrupt.
-  const manifest: ManifestEntry[] = [
-    {
-      file_path: input.outputFileLocation,
-      file_size_bytes: rows.reduce((s, _) => s + 0, 0), // filled by writer
-      row_count: rows.length,
-      operation: "added",
-    },
-  ];
+  const rowsEmitted = parquetRef?.rowCount ?? 0;
+  const manifest: ManifestEntry[] = parquetRef
+    ? [
+        {
+          file_path: parquetRefToUri(parquetRef),
+          file_size_bytes: parquetRef.sizeBytes,
+          row_count: parquetRef.rowCount,
+          operation: "added",
+        },
+      ]
+    : [
+        {
+          // Zero-row source — no Parquet object; the manifest records the
+          // empty data-file at the logical table location for compatibility.
+          file_path: input.outputFileLocation,
+          file_size_bytes: 0,
+          row_count: 0,
+          operation: "added",
+        },
+      ];
 
-  const snapshot = await commitSnapshot({
-    tableId: input.changelogTableId,
-    operation: "append" as SnapshotOperation,
-    manifest,
-    summary: {
-      source_datasource_id: input.datasourceId,
-      source_from_snapshot: input.fromSnapshotId,
-      source_to_snapshot: input.toSnapshotId,
-      rows_emitted: rows.length,
-      distinct_source_transactions: seenInTxn.size,
-    },
-  });
+  let snapshot;
+  try {
+    snapshot = await commitSnapshot({
+      tableId: input.changelogTableId,
+      operation: "append" as SnapshotOperation,
+      manifest,
+      snapshotId: preSnapshotId,
+      summary: {
+        source_datasource_id: input.datasourceId,
+        source_from_snapshot: input.fromSnapshotId,
+        source_to_snapshot: input.toSnapshotId,
+        rows_emitted: rowsEmitted,
+        distinct_source_transactions: skipDupCheck ? distinctTxns!.size : seenInTxn!.size,
+        // Small, N-independent reference — replaces the old `inline_rows`
+        // array. `loadChangelogRowsFromSnapshot` resolves it back to rows.
+        parquet_ref: parquetRef,
+      },
+    });
+  } catch (err) {
+    await deleteOrphanParquetRef(parquetRef);
+    throw err;
+  }
 
   await query(
     `INSERT INTO funnel_changelog_watermark
@@ -205,15 +302,16 @@ export async function computeChangelog(
       input.datasourceId,
       input.fromSnapshotId,
       input.toSnapshotId,
-      rows.length,
+      rowsEmitted,
     ]
   );
 
   return {
     snapshotId: snapshot.snapshot_id,
-    rowsEmitted: rows.length,
+    rowsEmitted,
     manifest,
-    rows,
+    ownedProperties: Array.from(ownedProperties),
+    parquetRef,
   };
 }
 

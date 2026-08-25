@@ -23,8 +23,10 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeAll } from "vitest";
+import { createActionType } from "../../../src/models/actionType";
+import { ensureRuleRids } from "../../../src/routes/actionTypes";
 
-const BASE = "http://localhost:3000";
+const BASE = (process.env.TEST_BASE_URL ?? "http://localhost:3000");
 
 let serverReachable = false;
 let ontologyId = "";
@@ -223,32 +225,38 @@ describe("Action Type Impact Analysis (Task 24)", () => {
     // use the BASIC_ACTION and check its existing properties are valid.
 
     // 6. Action referencing a non-existent link type
-    // Similarly, link types are validated loosely at creation time for
-    // addLink/removeLink — we just need linkTypeApiName or objectType.
-    // We can create an action with a bogus linkTypeApiName:
-    await ensureActionType({
+    // Creation-time rule validation (validateRules) now hard-fails on
+    // bogus addLink targets AND on createObject rules that don't map every
+    // required property — so this fixture CANNOT be built via the public
+    // route. Test 7's contract is about the /impact endpoint *reporting*
+    // the dangling reference for a PRE-EXISTING row, so seed the row
+    // directly through the model layer (identical persisted shape, minus
+    // the route's structural gate).
+    const badLinkRules = ensureRuleRids([
+      {
+        type: "createObject",
+        objectType: "Taxpayer",
+        properties: {
+          tin: { source: "parameter", param: "tin" },
+        },
+      },
+      {
+        type: "addLink",
+        linkType: `nonExistentLink${RUN_ID}`,
+        linkTypeApiName: `nonExistentLink${RUN_ID}`,
+        sourceObject: { objectType: "Taxpayer", source: "parameter", param: "tin" },
+        targetObject: { objectType: "Business", source: "parameter", param: "bizId" },
+      },
+    ]);
+    await createActionType(ontologyId, {
       apiName: BAD_LINK_ACTION,
       displayName: "Impact Bad Link Action",
       parameters: [
         { apiName: "tin", displayName: "TIN", type: "string", required: true },
         { apiName: "bizId", displayName: "Biz ID", type: "string", required: true },
       ],
-      rules: [
-        {
-          type: "createObject",
-          objectType: "Taxpayer",
-          properties: {
-            tin: { source: "parameter", param: "tin" },
-          },
-        },
-        {
-          type: "addLink",
-          linkType: `nonExistentLink${RUN_ID}`,
-          linkTypeApiName: `nonExistentLink${RUN_ID}`,
-          sourceObject: { objectType: "Taxpayer", source: "parameter", param: "tin" },
-          targetObject: { objectType: "Business", source: "parameter", param: "bizId" },
-        },
-      ],
+      rules: badLinkRules,
+      createdBy: "tuesday-impact-integration",
     });
   });
 

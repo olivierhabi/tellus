@@ -32,16 +32,25 @@ import { Worker } from "worker_threads";
 import {
   FUNCTION_TIMEOUT_MS,
   runSandboxedWithSdk,
+  awaitSandboxPromise,
   type SandboxResult,
+  type SandboxBinding,
+  type SignatureParameter,
 } from "./functionRuntime";
 import {
   buildOntologySdk,
+  type ObjectLoadTiming,
   type OntologySnapshot,
   type OntologyEdit,
 } from "./functions/ontologyRuntime";
+import type { FunctionExecutor } from "./functionExecutor";
 
 export interface SandboxAsyncResult extends SandboxResult {
   readonly edits: OntologyEdit[];
+  /** Object types the function queried via Objects.search/get (post-run). */
+  readonly requestedTypes: string[];
+  /** Per-type object-load timings (wall-clock Date.now, cross-thread safe). */
+  readonly objectLoads: ObjectLoadTiming[];
 }
 
 // ---- Worker file resolution + dev/prod execArgv ---------------------------
@@ -64,11 +73,22 @@ const POOL_SIZE = Math.max(1, Number(process.env.FUNCTION_WORKER_POOL_SIZE ?? 4)
 // The vm cap is per-phase (module eval, then invocation). Allow both phases to
 // reach the cap plus slack before declaring the worker hung.
 const WORKER_WALL_BUDGET_MS = FUNCTION_TIMEOUT_MS * 2 + 2_000;
+// Per-worker V8 old-space cap (Phase 5). 256MB matches the publish
+// test-runner's child-process budget. Read lazily so deploy-time
+// overrides apply without a module reload.
+function workerMaxOldSpaceMb(): number {
+  return Math.max(
+    64,
+    Number(process.env.FUNCTION_WORKER_MAX_OLD_SPACE_MB ?? 256),
+  );
+}
 
 interface Task {
   readonly transpiled: string;
   readonly input: unknown;
   readonly snapshot: OntologySnapshot;
+  /** Pinned version's invocation contract + published signature. */
+  readonly binding?: SandboxBinding | SignatureParameter[];
 }
 interface Pending {
   readonly task: Task;
@@ -87,20 +107,52 @@ const queue: Pending[] = [];
 let poolInitialized = false;
 let nextTaskId = 1;
 
+/**
+ * Worker construction options (Phase 5 hardening):
+ *  * Memory cap — the vm timeout bounds CPU only; a memory-bomb
+ *    function must throw in-worker, not OOM the worker into a
+ *    respawn loop.
+ *  * Environment whitelist — workers inherit the full process.env
+ *    (DB credentials, LLM tokens) by default. The worker needs none
+ *    of them (the snapshot arrives via postMessage); strip
+ *    everything else so a sandbox escape finds no secrets in
+ *    process.env.
+ * Exported for construction tests (the pool itself falls back to
+ * sync execution where the .ts worker cannot be resolved).
+ */
+export function workerOptions(): {
+  execArgv: string[];
+  resourceLimits: { maxOldGenerationSizeMb: number };
+  env: Record<string, string>;
+} {
+  return {
+    execArgv: workerExecArgv,
+    resourceLimits: {
+      maxOldGenerationSizeMb: workerMaxOldSpaceMb(),
+    },
+    env: {
+      NODE_ENV: process.env.NODE_ENV ?? "development",
+      TZ: process.env.TZ ?? "",
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+    },
+  };
+}
+
 function spawnSlot(): Slot | null {
   if (!workerFile) return null;
   try {
-    const worker = new Worker(workerFile, { execArgv: workerExecArgv });
+    const worker = new Worker(workerFile, workerOptions());
     const slot: Slot = { worker, busy: false, current: null, dead: false };
 
-    worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[] }) => {
+    worker.on("message", (msg: { type?: string; id?: number; result?: SandboxResult; edits?: OntologyEdit[]; requestedTypes?: string[]; objectLoads?: ObjectLoadTiming[] }) => {
       if (msg?.type === "__ready__") return;
       const pending = slot.current;
       slot.current = null;
       slot.busy = false;
       if (pending && msg && typeof msg.id === "number" && msg.result) {
         clearTimeout(pending.timer);
-        pending.resolve({ ...msg.result, edits: msg.edits ?? [] });
+        pending.resolve({ ...msg.result, edits: msg.edits ?? [], requestedTypes: msg.requestedTypes ?? [], objectLoads: msg.objectLoads ?? [] });
       } else if (pending) {
         // Malformed worker response — fail this ONE task, keep the worker.
         clearTimeout(pending.timer);
@@ -166,6 +218,8 @@ function errorResult(message: string): SandboxAsyncResult {
     errorMessage: message,
     logs: [],
     edits: [],
+    requestedTypes: [],
+    objectLoads: [],
   };
 }
 
@@ -189,6 +243,7 @@ function dispatch(slot: Slot, pending: Pending): void {
     transpiled: pending.task.transpiled,
     input: pending.task.input,
     snapshot: pending.task.snapshot,
+    binding: pending.task.binding,
   });
 }
 
@@ -259,6 +314,8 @@ function timeoutResult(): SandboxAsyncResult {
     errorMessage: `Function worker exceeded the ${WORKER_WALL_BUDGET_MS}ms wall budget.`,
     logs: [],
     edits: [],
+    requestedTypes: [],
+    objectLoads: [],
   };
 }
 
@@ -273,30 +330,63 @@ export async function runSandboxedWithSdkAsync(
   transpiled: string,
   input: unknown,
   snapshot: OntologySnapshot,
+  binding?: SandboxBinding | SignatureParameter[],
 ): Promise<SandboxAsyncResult> {
   if (!POOL_ENABLED || !workerFile) {
-    return runSandboxedWithSdkSync(transpiled, input, snapshot);
+    return runSandboxedWithSdkSync(transpiled, input, snapshot, binding);
   }
-  return submitToPool({ transpiled, input, snapshot });
+  return submitToPool({ transpiled, input, snapshot, binding });
 }
 
 /**
  * Inline (main-thread) execution — the structural fallback, used only when the
  * worker pool is unavailable. Exported for direct unit testing.
  */
-export function runSandboxedWithSdkSync(
+export async function runSandboxedWithSdkSync(
   transpiled: string,
   input: unknown,
   snapshot: OntologySnapshot,
-): SandboxAsyncResult {
-  const { sdk, getEdits } = buildOntologySdk(snapshot);
-  const result = runSandboxedWithSdk(transpiled, input, {
+  binding?: SandboxBinding | SignatureParameter[],
+): Promise<SandboxAsyncResult> {
+  const { sdk, getEdits, getRequestedTypes, getObjectLoads } = buildOntologySdk(snapshot);
+  let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
     Objects: sdk.Objects,
     Edits: sdk.Edits,
     createEditBatch: sdk.createEditBatch,
     __ontologyTypes: sdk.objectTypeDescriptors,
-  });
-  return { ...result, edits: result.status === "ok" ? getEdits() : [] };
+  }, binding);
+  // Async function: the sandbox returned a Promise (vm can't await). Resolve it
+  // here under the timeout — the sync fallback is the structural path (pool
+  // unavailable), and it should still honor async Foundry functions.
+  if (result.pendingPromise) {
+    const settled = await awaitSandboxPromise(result.pendingPromise);
+    result = {
+      ...result,
+      output: settled.output,
+      status: settled.status,
+      errorMessage: settled.errorMessage,
+      pendingPromise: undefined,
+    };
+  }
+  return { ...result, edits: result.status === "ok" ? getEdits() : [], requestedTypes: getRequestedTypes(), objectLoads: getObjectLoads() };
+}
+
+/**
+ * The production FunctionExecutor (see functionExecutor.ts): the existing
+ * worker_threads pool behind the executor boundary. NOT a claimed security
+ * sandbox — full process/container isolation is the declared gap
+ * documented in functionExecutor.ts's header.
+ */
+export function createWorkerPoolExecutor(): FunctionExecutor {
+  return {
+    execute: (request) =>
+      runSandboxedWithSdkAsync(
+        request.transpiled,
+        request.input,
+        request.snapshot,
+        request.binding,
+      ),
+  };
 }
 
 // Test-only: reset pool state.

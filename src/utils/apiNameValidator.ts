@@ -5,6 +5,8 @@
 // Used by service layers to reject invalid names before they reach the DB.
 // ---------------------------------------------------------------------------
 
+import { objectIndexPrefix } from "../config/environmentIdentity";
+
 export interface NameValidationResult {
   valid: boolean;
   error?: string;
@@ -169,14 +171,16 @@ export function validateInterfaceName(name: string): NameValidationResult {
  * Convert an object type API name to an OpenSearch index name.
  *
  * Rules:
- *   - Prefix: "ontology-"
+ *   - Prefix: deployment's object-index prefix ("ontology-" by default,
+ *     OS_INDEX_PREFIX overrides — e.g. test/verify envs use a dedicated
+ *     prefix so they cannot touch dev indices)
  *   - apiName lowercased
  *   - Result must be all lowercase, max 255 bytes, chars in [a-z0-9-]
  *
  * Example: "Employee" -> "ontology-employee"
  */
 export function toIndexName(objectTypeApiName: string): string {
-  const indexName = "ontology-" + objectTypeApiName.toLowerCase();
+  const indexName = objectIndexPrefix() + objectTypeApiName.toLowerCase();
 
   if (
     indexName.length > 255 ||
@@ -246,16 +250,16 @@ export function runSelfTests(): void {
     "validatePropertyName('__pk') is invalid (reserved)"
   );
 
-  // 7. toIndexName('Employee') -> "ontology-employee"
+  // 7. toIndexName('Employee') -> "<prefix>employee" (default "ontology-employee")
   assert(
-    toIndexName("Employee") === "ontology-employee",
-    "toIndexName('Employee') === 'ontology-employee'"
+    toIndexName("Employee") === `${objectIndexPrefix()}employee`,
+    "toIndexName('Employee') === '<prefix>employee'"
   );
 
-  // 8. toIndexName('CustomsDeclaration') -> "ontology-customsdeclaration"
+  // 8. toIndexName('CustomsDeclaration') -> "<prefix>customsdeclaration"
   assert(
-    toIndexName("CustomsDeclaration") === "ontology-customsdeclaration",
-    "toIndexName('CustomsDeclaration') === 'ontology-customsdeclaration'"
+    toIndexName("CustomsDeclaration") === `${objectIndexPrefix()}customsdeclaration`,
+    "toIndexName('CustomsDeclaration') === '<prefix>customsdeclaration'"
   );
 
   // Additional coverage

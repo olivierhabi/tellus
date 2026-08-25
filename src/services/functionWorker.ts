@@ -19,10 +19,11 @@
 import { parentPort } from "worker_threads";
 import {
   buildOntologySdk,
+  type ObjectLoadTiming,
   type OntologySnapshot,
   type OntologyEdit,
 } from "./functions/ontologyRuntime";
-import { runSandboxedWithSdk, type SandboxResult } from "./functionRuntime";
+import { runSandboxedWithSdk, awaitSandboxPromise, type SandboxResult, type SandboxBinding, type SignatureParameter } from "./functionRuntime";
 
 interface WorkerRequest {
   /** Correlates the response with the pending task on the main thread. */
@@ -30,12 +31,19 @@ interface WorkerRequest {
   readonly transpiled: string;
   readonly input: unknown;
   readonly snapshot: OntologySnapshot;
+  /** Pinned version's published signature + persisted invocation contract
+   *  (contract-driven binding; a bare array is the legacy contract). */
+  readonly binding?: SandboxBinding | SignatureParameter[];
 }
 
 interface WorkerResponse {
   readonly id: number;
   readonly result: SandboxResult;
   readonly edits: OntologyEdit[];
+  /** Object types the function queried via Objects.search/get (post-run). */
+  readonly requestedTypes: string[];
+  /** Per-type object-load timings (wall-clock Date.now, cross-thread safe). */
+  readonly objectLoads: ObjectLoadTiming[];
 }
 
 if (!parentPort) {
@@ -44,19 +52,40 @@ if (!parentPort) {
 }
 const port = parentPort;
 
-port.on("message", (msg: WorkerRequest) => {
-  const { id, transpiled, input, snapshot } = msg;
+port.on("message", async (msg: WorkerRequest) => {
+  const { id, transpiled, input, snapshot, binding } = msg;
   try {
-    const { sdk, getEdits } = buildOntologySdk(snapshot);
-    const result = runSandboxedWithSdk(transpiled, input, {
+    const { sdk, getEdits, getRequestedTypes, getObjectLoads } = buildOntologySdk(snapshot);
+    let result: SandboxResult = runSandboxedWithSdk(transpiled, input, {
       Objects: sdk.Objects,
       Edits: sdk.Edits,
       createEditBatch: sdk.createEditBatch,
       __ontologyTypes: sdk.objectTypeDescriptors,
-    });
+    }, binding);
+    // Async function: the sandbox returned a Promise (vm can't await it).
+    // Resolve it here under the timeout BEFORE posting — Promises can't cross
+    // postMessage. The pool's wall budget is the backstop; the per-Promise
+    // timeout (FUNCTION_TIMEOUT_MS) is tighter.
+    if (result.pendingPromise) {
+      const settled = await awaitSandboxPromise(result.pendingPromise);
+      result = {
+        ...result,
+        output: settled.output,
+        status: settled.status,
+        errorMessage: settled.errorMessage,
+        pendingPromise: undefined,
+      };
+    }
     const edits: OntologyEdit[] =
       result.status === "ok" ? getEdits() : [];
-    const response: WorkerResponse = { id, result, edits };
+    // Requested types are collected regardless of run status — a function
+    // that queried a non-imported type then threw still surfaces the warning.
+    const requestedTypes = getRequestedTypes();
+    // Object-load timings are read regardless of run status (same rationale
+    // as requestedTypes: a function that loaded objects then threw still has
+    // meaningful phases for the performance waterline).
+    const objectLoads = getObjectLoads();
+    const response: WorkerResponse = { id, result, edits, requestedTypes, objectLoads };
     port.postMessage(response);
   } catch (err) {
     // runSandboxedWithSdk catches its own vm errors; this is a belt-and-braces
@@ -68,7 +97,7 @@ port.on("message", (msg: WorkerRequest) => {
       errorMessage: err instanceof Error ? err.message : String(err),
       logs: [],
     };
-    const response: WorkerResponse = { id, result, edits: [] };
+    const response: WorkerResponse = { id, result, edits: [], requestedTypes: [], objectLoads: [] };
     port.postMessage(response);
   }
 });

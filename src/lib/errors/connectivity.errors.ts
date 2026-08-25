@@ -233,6 +233,57 @@ export const EgressRateLimited = register(
   ),
 );
 
+// Source-scoped Webhooks -----------------------------------------------------
+
+export const WebhookNotFound = register(
+  def(
+    "Tellus:Connectivity:WebhookNotFound",
+    "NOT_FOUND",
+    "No webhook exists at the requested RID for this source and tenant.",
+  ),
+);
+
+export const WebhookExecutionNotFound = register(
+  def(
+    "Tellus:Connectivity:WebhookExecutionNotFound",
+    "NOT_FOUND",
+    "No webhook execution exists at the requested RID for this tenant.",
+  ),
+);
+
+export const WebhookNameAlreadyExists = register(
+  def(
+    "Tellus:Connectivity:WebhookNameAlreadyExists",
+    "CONFLICT",
+    "A webhook with this API name already exists for the REST source.",
+  ),
+);
+
+export const WebhookInvalidConfiguration = register(
+  def(
+    "Tellus:Connectivity:WebhookInvalidConfiguration",
+    "INVALID_ARGUMENT",
+    "The webhook configuration failed runtime schema or source validation.",
+  ),
+);
+
+export const WebhookNotActive = register(
+  def(
+    "Tellus:Connectivity:WebhookNotActive",
+    "FAILED_PRECONDITION",
+    "The webhook must be active before it can execute in production.",
+  ),
+);
+
+export const WebhookExecutionRateLimited = register(
+  def(
+    "Tellus:Connectivity:WebhookExecutionRateLimited",
+    "RESOURCE_EXHAUSTED",
+    "The webhook execution policy rate or concurrency limit was reached.",
+    429,
+  ),
+);
+
 // Named egress policy resource ----------------------------------------------
 
 export const EgressPolicyNotFound = register(

@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { query } from "../../db";
+import { objectIndexPrefix } from "../../config/environmentIdentity";
 import {
   mapPropertyToOpenSearch,
   PropertyInput,
@@ -26,6 +27,14 @@ import {
 /** System fields appended to every OpenSearch index mapping. */
 interface SystemFields {
   __pk: OpenSearchFieldMapping;
+  /** Owning ontology. Mandatory v2 isolation predicate. */
+  __ontology: OpenSearchFieldMapping;
+  /**
+   * Phase 2 (OSSv2 parity): stable object rid
+   * (`ri.tellus.main.object.<uuid>`). `keyword` so `static` ObjectSet
+   * nodes and rid-lookups use O(1) `terms` queries.
+   */
+  __rid: OpenSearchFieldMapping;
   __objectType: OpenSearchFieldMapping;
   __lastModified: OpenSearchFieldMapping;
   __version: OpenSearchFieldMapping;
@@ -44,6 +53,7 @@ interface SystemFields {
 
 /** The complete index settings block. */
 interface IndexSettings {
+  "index.knn"?: boolean;
   number_of_shards: number;
   number_of_replicas: number;
   refresh_interval: string;
@@ -83,6 +93,8 @@ export interface IndexMappingResult {
 /** System field names, in order. */
 const SYSTEM_FIELD_NAMES: readonly string[] = [
   "__pk",
+  "__ontology",
+  "__rid",
   "__objectType",
   "__lastModified",
   "__version",
@@ -95,6 +107,10 @@ const SYSTEM_FIELD_NAMES: readonly string[] = [
 const SYSTEM_FIELD_MAPPINGS: SystemFields = {
   // Primary key value — always keyword for exact-match lookups
   __pk: { type: "keyword" },
+  // Owning ontology — keyword for mandatory isolation filters
+  __ontology: { type: "keyword" },
+  // Stable object rid — keyword for exact-match `static` set lookups
+  __rid: { type: "keyword" },
   // API name of the object type — keyword for cross-index queries
   __objectType: { type: "keyword" },
   // Timestamp when this object was last indexed or edited
@@ -111,8 +127,14 @@ const SYSTEM_FIELD_MAPPINGS: SystemFields = {
 
 /** Default index settings for development. */
 const DEFAULT_INDEX_SETTINGS: IndexSettings = {
-  number_of_shards: 1,
-  number_of_replicas: 0,
+  // Env-tunable (see templateRegistry.ts DEFAULT_TEMPLATE_SETTINGS): 4 shards
+  // parallelise bulk indexing for large OTs (OlivierOrder2 5.6M). Prod = 1.
+  number_of_shards: Number(process.env.OS_INDEX_SHARDS ?? "1"),
+  // Env-tunable (see templateRegistry.ts DEFAULT_TEMPLATE_SETTINGS): 0 replicas
+  // for single-node dev. Prod must set OS_INDEX_REPLICAS >= 1 once a multi-node
+  // cluster exists. MUST match templateRegistry.ts (same env var) — drift
+  // diverges template-created vs explicitly-created indices.
+  number_of_replicas: Number(process.env.OS_INDEX_REPLICAS ?? "0"),
   refresh_interval: "1s",
   max_result_window: 100000,
   analysis: {
@@ -123,6 +145,62 @@ const DEFAULT_INDEX_SETTINGS: IndexSettings = {
     },
   },
 };
+
+// ---------------------------------------------------------------------------
+// Size-aware shard resolution
+//
+// A single-shard index is a single indexing pipeline — it caps bulk
+// throughput regardless of client-side concurrency. For large OTs (multi-
+// million rows) we want OS_INDEX_SHARDS_LARGE (default 4) shards so
+// concurrent _bulk requests actually parallelise across indexing threads.
+// Small OTs stay at OS_INDEX_SHARDS (default 1) — sharding a 746-row OT
+// only adds per-shard overhead.
+//
+// The row count comes from `backing_datasource.row_count` (stamped at
+// registration) with a fallback to a live `object_instances` count. Both
+// `generateIndexMapping` (create path) and `verifyIndexShardCount`
+// (existing-index guard) resolve through the SAME function so the guard
+// can never disagree with the creator.
+// ---------------------------------------------------------------------------
+
+const LARGE_OT_ROW_THRESHOLD = Number(
+  process.env.OS_LARGE_OT_ROWS ?? "1000000",
+);
+
+/** Pure: shard count for a given expected row count. */
+export function resolveShardCount(rowCount: number): number {
+  const small = Number(process.env.OS_INDEX_SHARDS ?? "1");
+  const large = Number(process.env.OS_INDEX_SHARDS_LARGE ?? "4");
+  return rowCount >= LARGE_OT_ROW_THRESHOLD ? large : small;
+}
+
+/**
+ * Expected shard count for an object type, resolved from its backing
+ * datasource row_count (fallback: live object_instances count; fallback: 0
+ * → small). Best-effort — on any lookup error returns the small default so
+ * index creation never fails on a metadata hiccup.
+ */
+export async function expectedShardCountForObjectType(
+  objectTypeApiName: string,
+): Promise<number> {
+  try {
+    const res = await query(
+      `SELECT COALESCE(
+         (SELECT bd.row_count
+            FROM backing_datasource bd
+            JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+           WHERE ot.api_name = $1
+           ORDER BY bd.registered_at DESC LIMIT 1),
+         (SELECT count(*) FROM object_instances
+           WHERE object_type_api_name = $1)
+       ) AS row_count`,
+      [objectTypeApiName],
+    );
+    return resolveShardCount(Number(res.rows[0]?.row_count ?? 0));
+  } catch {
+    return resolveShardCount(0);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // getIndexName()
@@ -167,7 +245,7 @@ export function getIndexName(
   const slug = objectTypeApiName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   if (ontologyId !== undefined && ontologyId !== null && ontologyId !== "") {
     const ontSlug = ontologyId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    return `ontology-${ontSlug}-${slug}`;
+    return `${objectIndexPrefix()}${ontSlug}-${slug}`;
   }
   // Legacy fallback — logged as missing-tenant. Callers should be updated.
   // Import lazily to avoid cyclic init when indexMappingGenerator is
@@ -183,7 +261,7 @@ export function getIndexName(
   } catch {
     // Metrics not loaded yet — silent during early boot is acceptable.
   }
-  return `ontology-${slug}`;
+  return `${objectIndexPrefix()}${slug}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,14 +281,19 @@ export function getIndexName(
  *         no primary key configured.
  */
 export async function generateIndexMapping(
-  objectTypeApiName: string
+  objectTypeApiName: string,
+  ontologyId?: string,
 ): Promise<IndexMappingResult> {
   // -----------------------------------------------------------------------
   // 1. Fetch the object type from PostgreSQL
   // -----------------------------------------------------------------------
   const otResult = await query(
-    "SELECT * FROM object_type WHERE api_name = $1",
-    [objectTypeApiName]
+    `SELECT *
+       FROM object_type
+      WHERE api_name = $1
+        AND ($2::uuid IS NULL OR ontology_id = $2::uuid)
+      ORDER BY ontology_id`,
+    [objectTypeApiName, ontologyId ?? null]
   );
 
   if (otResult.rows.length === 0) {
@@ -236,6 +319,20 @@ export async function generateIndexMapping(
   }
 
   const properties = propsResult.rows;
+  const embeddingResult = await query(
+    `SELECT property_api_name, dimensions
+       FROM ontology_embedding_config
+      WHERE ontology_id = $1
+        AND object_type_api_name = $2
+        AND enabled = true`,
+    [objectType.ontology_id, objectTypeApiName],
+  );
+  const embeddingDimensions = new Map<string, number>(
+    embeddingResult.rows.map((row) => [
+      String(row.property_api_name),
+      Number(row.dimensions),
+    ]),
+  );
 
   // -----------------------------------------------------------------------
   // 3. Verify the primary key property exists
@@ -278,7 +375,19 @@ export async function generateIndexMapping(
       struct_schema: prop.struct_schema ?? null,
     };
 
-    fieldMappings[prop.api_name] = mapPropertyToOpenSearch(propertyInput);
+    const dimensions = embeddingDimensions.get(String(prop.api_name));
+    fieldMappings[prop.api_name] =
+      dimensions && dimensions > 0
+        ? ({
+            type: "knn_vector",
+            dimension: dimensions,
+            method: {
+              name: "hnsw",
+              space_type: "l2",
+              engine: "lucene",
+            },
+          } as unknown as OpenSearchFieldMapping)
+        : mapPropertyToOpenSearch(propertyInput);
   }
 
   // -----------------------------------------------------------------------
@@ -286,8 +395,18 @@ export async function generateIndexMapping(
   // -----------------------------------------------------------------------
   const indexName = getIndexName(objectTypeApiName);
 
+  // Size-aware shards: large OTs get OS_INDEX_SHARDS_LARGE so bulk
+  // indexing parallelises across shards (see resolveShardCount above).
+  const numberOfShards = await expectedShardCountForObjectType(
+    objectTypeApiName,
+  );
+
   const mapping: IndexMappingDocument = {
-    settings: { ...DEFAULT_INDEX_SETTINGS },
+    settings: {
+      ...DEFAULT_INDEX_SETTINGS,
+      number_of_shards: numberOfShards,
+      ...(embeddingDimensions.size > 0 ? { "index.knn": true } : {}),
+    },
     mappings: {
       properties: fieldMappings,
     },

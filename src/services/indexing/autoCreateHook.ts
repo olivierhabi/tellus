@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { generateIndexMapping } from "../opensearch/indexMappingGenerator";
+import { objectTypeIndexName } from "../opensearch/objectIndexNames";
 import {
   indexExists,
   createIndex,
@@ -148,6 +149,22 @@ export default { onDatasourceRegistered };
 // ---------------------------------------------------------------------------
 
 export async function runSelfTests(): Promise<void> {
+  // These self-tests assert the DEFAULT index-name shape (e.g.
+  // "ontology-employee") byte-for-byte. Under a FUNN-ISO prefixed lane
+  // (vitest pins OS_INDEX_PREFIX=ttest-ontology-) the assertions broke —
+  // the naming mechanics they check are prefix-independent. Pin the
+  // default prefix for the duration of the test; restore after.
+  const savedPrefix = process.env.OS_INDEX_PREFIX;
+  process.env.OS_INDEX_PREFIX = "ontology-";
+  try {
+    await runSelfTestsImpl();
+  } finally {
+    if (savedPrefix === undefined) delete process.env.OS_INDEX_PREFIX;
+    else process.env.OS_INDEX_PREFIX = savedPrefix;
+  }
+}
+
+async function runSelfTestsImpl(): Promise<void> {
   let passed = 0;
   let failed = 0;
 
@@ -204,11 +221,11 @@ export async function runSelfTests(): Promise<void> {
         if (generateFail) {
           throw new Error(`Object type '${apiName}' not found in metadata store`);
         }
-        return { ...defaultMapping, objectTypeApiName: apiName, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { ...defaultMapping, objectTypeApiName: apiName, indexName: objectTypeIndexName(apiName) };
       },
       indexExists: async (apiName: string) => ({
         exists: ixExists,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
       createIndex: async (apiName: string) => {
         if (createFail) {
@@ -216,10 +233,10 @@ export async function runSelfTests(): Promise<void> {
         }
         return {
           success: true as const,
-          indexName: `ontology-${apiName.toLowerCase()}`,
+          indexName: objectTypeIndexName(apiName),
         };
       },
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
   }
 
@@ -344,17 +361,17 @@ export async function runSelfTests(): Promise<void> {
     const deps: AutoCreateDeps = {
       generateIndexMapping: async (apiName: string) => {
         callOrder.push("generateIndexMapping");
-        return { ...defaultMapping, objectTypeApiName: apiName, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { ...defaultMapping, objectTypeApiName: apiName, indexName: objectTypeIndexName(apiName) };
       },
       indexExists: async (apiName: string) => {
         callOrder.push("indexExists");
-        return { exists: false, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { exists: false, indexName: objectTypeIndexName(apiName) };
       },
       createIndex: async (apiName: string) => {
         callOrder.push("createIndex");
-        return { success: true as const, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { success: true as const, indexName: objectTypeIndexName(apiName) };
       },
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
 
     await onDatasourceRegistered("Employee", { deps });
@@ -373,17 +390,17 @@ export async function runSelfTests(): Promise<void> {
 
     const deps: AutoCreateDeps = {
       generateIndexMapping: async (apiName: string) => {
-        return { ...defaultMapping, objectTypeApiName: apiName, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { ...defaultMapping, objectTypeApiName: apiName, indexName: objectTypeIndexName(apiName) };
       },
       indexExists: async (apiName: string) => ({
         exists: true,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
       createIndex: async () => {
         createCalled = true;
         return { success: true as const, indexName: "ontology-employee" };
       },
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
 
     await onDatasourceRegistered("Employee", { deps });
@@ -403,13 +420,13 @@ export async function runSelfTests(): Promise<void> {
       },
       indexExists: async (apiName: string) => {
         indexExistsCalled = true;
-        return { exists: false, indexName: `ontology-${apiName.toLowerCase()}` };
+        return { exists: false, indexName: objectTypeIndexName(apiName) };
       },
       createIndex: async (apiName: string) => ({
         success: true as const,
-        indexName: `ontology-${apiName.toLowerCase()}`,
+        indexName: objectTypeIndexName(apiName),
       }),
-      getIndexName: (apiName: string) => `ontology-${apiName.toLowerCase()}`,
+      getIndexName: (apiName: string) => objectTypeIndexName(apiName),
     };
 
     try {

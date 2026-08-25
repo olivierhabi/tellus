@@ -200,6 +200,17 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 504,
     errorCode: ERROR_CODES.INTERNAL,
   },
+  // PublishedArtifactMissing — a function_version row is AVAILABLE but its
+  // content-addressed bundle is absent from object storage (e.g. the object
+  // store was rebuilt while Postgres metadata survived). 500 INTERNAL: the
+  // inconsistency is server-side, not caller-caused. The `parameters.reason`
+  // tells the user how to recover (republish). Individual missing versions
+  // are skipped during resolution; this fires only when NO AVAILABLE version
+  // of the function could be resolved.
+  "CodeRepos:PublishedArtifactMissing": {
+    status: 500,
+    errorCode: ERROR_CODES.INTERNAL,
+  },
   // -------------------------------------------------------------------------
   // InvalidArgumentBody — body.args is present but not a plain object.
   // The invoke contract is `{apiName, branch?, args?}` and `args` must be a
@@ -253,6 +264,14 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 409,
     errorCode: ERROR_CODES.CONFLICT,
   },
+  // RunAlreadyActive — a functions-publish run is already QUEUED or
+  // RUNNING for this (repository, branch); the client must wait for
+  // it or cancel it before tagging another release. 409, mirroring
+  // the Jemma:RunAlreadyActive retrigger contract.
+  "CodeRepos:RunAlreadyActive": {
+    status: 409,
+    errorCode: ERROR_CODES.CONFLICT,
+  },
   "CodeRepos:ReleaseCompileError": {
     status: 422,
     errorCode: ERROR_CODES.INVALID_ARGUMENT,
@@ -271,6 +290,55 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
   "CodeRepos:CannotModifyDefaultBranch": {
     status: 412,
     errorCode: ERROR_CODES.FAILED_PRECONDITION,
+  },
+  // -------------------------------------------------------------------------
+  // Uncommitted drafts (104). Per-user, per-branch, pre-commit file drafts
+  // (the Code Assistant propose_file flow + Monaco dirty buffers), persisted
+  // backend-side so they survive across browsers — but NOT a git commit.
+  //
+  // DraftTooLarge — a single draft's content (or base_content snapshot)
+  // exceeds the per-file 5 MiB cap. 413 RESOURCE_EXHAUSTED so the client can
+  // tell "your file is too big" apart from a shape error.
+  //
+  // DraftLimitExceeded — a single PUT carries more than MAX_DRAFTS entries.
+  // 400 — the request is shape-valid but semantically over the limit.
+  // -------------------------------------------------------------------------
+  "CodeRepos:DraftTooLarge": {
+    status: 413,
+    errorCode: ERROR_CODES.RESOURCE_EXHAUSTED,
+  },
+  "CodeRepos:DraftLimitExceeded": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
+  // -------------------------------------------------------------------------
+  // Chat sessions (126). Per-user, per-repo persistent transcripts for the
+  // Code Assistant panel. Errors mirror the drafts family:
+  //
+  // ChatSessionNotFound — GET/PUT/DELETE on a sessionId that does not exist
+  // OR exists but belongs to a different principal (IDOR-as-404). 404.
+  //
+  // ChatSessionTooLarge — the request body (a session + its messages) exceeds
+  // the soft cap; a single message's content exceeds the per-message cap; OR
+  // the serialized metadata blob exceeds the per-message metadata cap. 413
+  // RESOURCE_EXHAUSTED so the client can tell "your transcript is too big"
+  // apart from a shape error.
+  //
+  // ChatSessionLimitExceeded — a user already has MAX_SESSIONS_PER_REPO saved
+  // for this repo. 400 — the request is shape-valid but semantically over the
+  // per-repo cap.
+  // -------------------------------------------------------------------------
+  "CodeRepos:ChatSessionNotFound": {
+    status: 404,
+    errorCode: ERROR_CODES.NOT_FOUND,
+  },
+  "CodeRepos:ChatSessionTooLarge": {
+    status: 413,
+    errorCode: ERROR_CODES.RESOURCE_EXHAUSTED,
+  },
+  "CodeRepos:ChatSessionLimitExceeded": {
+    status: 400,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
   },
 });
 
