@@ -104,11 +104,19 @@ jobs:
         # scripts/verify-transforms-sandbox.sh. Exits non-zero on any miss.
         run: |
           pkill -f "tsx src/server.ts" || true
-          # Wait for the OLD (local-mode) server to actually release :3000 —
-          # otherwise the container-mode server below dies with EADDRINUSE
-          # and the script silently exercises STALE local-mode execution:
-          # the negative isolation probes then "succeed" (nothing sandboxed)
-          # exactly as in run 32091038735.
+          # Graceful shutdown can hang well past 30s here: the embedded
+          # Temporal runtime drains on SIGTERM, and with no Temporal server
+          # reachable in CI the drain never completes. Give it a short grace
+          # window, then SIGKILL — the container-mode server below must not
+          # die with EADDRINUSE (which would silently exercise STALE
+          # local-mode execution: the negative isolation probes then
+          # "succeed" exactly as in run 32091038735).
+          for i in $(seq 1 5); do
+            pgrep -f "tsx src/server.ts" >/dev/null || break
+            sleep 1
+          done
+          pkill -9 -f "tsx src/server.ts" || true
+          # Wait for the OLD (local-mode) server to actually release :3000.
           for i in $(seq 1 30); do
             if ! curl -s -m 1 http://localhost:3000/health >/dev/null 2>&1; then break; fi
             sleep 1

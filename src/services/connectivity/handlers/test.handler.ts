@@ -71,7 +71,7 @@ export function testRateLimit(
   // source) produced 429 EgressRateLimited friction for no real security gain.
   // The bucket is retained for the unauthenticated fallback as defense in depth
   // (globalAuth normally makes that path unreachable). Set
-  // CONNECTIVITY_TEST_RATE_LIMIT_ALL=0 to exempt authenticated callers.
+  // CONNECTIVITY_TEST_RATE_LIMIT_ALL=1 to throttle authenticated callers too.
   let principalId: string | null = null;
   try {
     principalId = extractUser(req).id;
@@ -79,7 +79,7 @@ export function testRateLimit(
     principalId = null;
   }
 
-  if (principalId && process.env.CONNECTIVITY_TEST_RATE_LIMIT_ALL === "0") {
+  if (principalId && process.env.CONNECTIVITY_TEST_RATE_LIMIT_ALL !== "1") {
     next();
     return;
   }

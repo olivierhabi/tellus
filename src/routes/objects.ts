@@ -1218,7 +1218,6 @@ router.get(
       const ontologyId = ontologyIdResult.rows[0] ? String(ontologyIdResult.rows[0].ontology_id) : "00000000-0000-0000-0000-000000000001";
       const { resolveRequestTenant } = await import("../utils/requestTenant");
       const { objectServingStoreGet } = await import("../services/serving/objectServingStore");
-      if (process.env.GET_DEBUG) console.error("[GET-DEBUG] filter=", JSON.stringify(buildSecurityFilter(req.security)), "branch=", branchId, "sec=", JSON.stringify({ markings: req.security?.markings, bypass: (req.security as any)?.markingBypass, sys: req.security?.systemPrincipal }));
       let obj = await objectServingStoreGet(
         {
           objectTypeApiName: objectType,
@@ -1233,12 +1232,19 @@ router.get(
         // BEFORE their funnel hydration committed (or through the legacy
         // standalone index trigger, which never hydrates object_instances)
         // fall back to the serving index so pre-cutover reads keep working.
+        //
+        // REGRESSION FIX (CI-only GET-single 404): pgObjectAsDoc() returns a
+        // PROMISE — the previous `(await import(...)).pgObjectAsDoc(...) ??
+        // executeGetObject(...)` form tested the promise object itself,
+        // which is always non-nullish, so the `??` short-circuited and the
+        // OS-index fallback NEVER ran. Any object not hydrated into
+        // object_instances (funnel down, e.g. CI) then 404'd even though the
+        // serving index had the doc. Await both sides explicitly.
         async (ot, pk) =>
-          (await import("../services/serving/pgObjectAsDoc")).pgObjectAsDoc(ontologyId, ot, pk)
+          await (await import("../services/serving/pgObjectAsDoc")).pgObjectAsDoc(ontologyId, ot, pk)
           ?? await executeGetObject(ot, pk, buildSecurityFilter(req.security), branchId),
         async (args) => executeGetObject(args.objectTypeApiName, args.primaryKey, buildSecurityFilter(req.security), branchId),
       );
-      if (process.env.GET_DEBUG) console.error("[GET-DEBUG] after-storeget obj=", obj===null||obj===undefined ? "NULL" : "HIT keys="+Object.keys(obj as object).slice(0,6));
 
       // B7: overlay read — if a recent edit is in the overlay but the
       // index hasn't absorbed it yet, the overlay is authoritative for
@@ -1288,7 +1294,6 @@ router.get(
         /* overlay optional */
       }
 
-      if (process.env.GET_DEBUG) console.error("[GET-DEBUG] after-overlay obj=", obj===null||obj===undefined ? "NULL" : "HIT keys="+Object.keys(obj as object).slice(0,6));
 
       if (!obj || (obj as { __deleted?: boolean }).__deleted) {
         // Spec §Task 28: return 404 (not 403) for unauthorised/missing

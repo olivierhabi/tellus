@@ -145,14 +145,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
-    # TEMP-DIAG (run 32098065017): saturday-integration + markings-cbac
-    # GET-single 404s with docs visible to search. Emits [XGET-DEBUG] /
-    # [GET-DEBUG] lines from queryExecutor + objects.ts into stdout.
-    # Remove once the root cause is found.
-    env:
-      GET_DEBUG: "1"
-
-
     services:
       clickhouse:
         # osv2-serving + funnel CH suites (ch-migration, cdc-topology,
@@ -295,8 +287,17 @@ jobs:
             -v "$PWD/deploy/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro" \
             temporalio/auto-setup:1.25.2
 
+          # Readiness probe MUST use the container's bridge IP, not
+          # "localhost": auto-setup binds the frontend ONLY to the container's
+          # eth0 address (verified: ss shows LISTEN on <bridge-ip>:7233 with
+          # no 127.0.0.1/::1 binding), so an in-container probe against
+          # localhost always gets "connection refused" even when the cluster
+          # is fully SERVING.
+          TEMPORAL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' temporal)"
+          echo "temporal container ip: $TEMPORAL_IP"
+
           for i in $(seq 1 90); do
-            if docker exec temporal temporal operator cluster health --address localhost:7233 2>/dev/null | grep -q SERVING; then
+            if docker exec temporal temporal operator cluster health --address "$TEMPORAL_IP:7233" 2>/dev/null | grep -q SERVING; then
               echo "temporal ready"; break
             fi
             [ "$i" -eq 90 ] && { echo "temporal failed to start"; docker logs temporal; exit 1; }
@@ -400,10 +401,6 @@ jobs:
       OS_INDEX_PREFIX: ttest-e2e-ontology-
       S3_BUCKET: tellus-tests-e2e-bucket
       TELLUS_TEST_API_BASE_URL: http://localhost:3000
-      # TEMP-DIAG (run 32098065017): saturday GET-single 404 with docs visible
-      # to search. Emits [XGET-DEBUG]/[GET-DEBUG] lines from queryExecutor +
-      # objects.ts into the e2e-server-log artifact. Remove once fixed.
-      GET_DEBUG: "1"
 
     services:
       postgres:
@@ -737,9 +734,6 @@ jobs:
       TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-all
       TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-all
       KEYCLOAK_REALM: tellus-tests-all
-      # TEMP-DIAG (run 32098065017): markings-cbac GET-single 404s here too —
-      # same XGET/GET debug tracing as the E2E job. Remove once fixed.
-      GET_DEBUG: "1"
       # NOTE: OS_INDEX_PREFIX is deliberately NOT job-env. This job runs
       # tests/runAll.ts, whose day suites + inline self-test modules (and
       # the vitest unit lane) assert the unprefixed default index names
