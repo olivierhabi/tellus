@@ -91,12 +91,18 @@ build_poll() {
 }
 
 dump_failure_events() {
-  # $1 repository rid  $2 build rid — print the raw build detail (events carry
-  # the per-transform stderr + terminal failures array). Bounded so CI logs
-  # stay readable.
-  [ -z "$2" ] && return 0
-  echo "--- raw build detail ($2) ---"
-  curl -s "$BASE/code-repositories/$1/builds/$2" "${AUTH[@]}" | head -c 4000
+  # $1 repository rid  $2 build rid — print the terminal build events straight
+  # from Postgres (the failures array carries the driver's stderr). HTTP is
+  # bypassed deliberately: the GET /builds/:id response has been observed
+  # empty mid-run, and the DB is the source of truth.
+  echo "--- failure events (repo $1) ---"
+  psql -tA -c \
+    "SELECT kind || ' :: ' || data::text
+       FROM transform_build_event
+      WHERE build_rid IN (SELECT rid FROM transform_build
+                           WHERE repository_rid = '$1'
+                           ORDER BY enqueued_at DESC LIMIT 1)
+      ORDER BY id" 2>&1 | tail -c 6000
   echo ""
 }
 
