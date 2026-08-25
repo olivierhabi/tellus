@@ -54,9 +54,17 @@ const OTHER_TIN = `other-${suffix}`;
 let ontologyId: string;
 let automationId: string;
 
-const securitySnapshot = {
+// The snapshot MUST reflect the owner's REAL Keycloak clearance. The
+    // evaluator refreshes the stored snapshot at runtime
+    // (currentOwnerSecuritySnapshot spreads it, keeping `markings`), and a
+    // marking-constrained scan with `markings: []` is fail-closed zero-hit —
+    // every indexed document carries `_security.markings: ['PUBLIC']`
+    // (F-03), which an empty terms clause can never match.
+    // cypress-admin holds PUBLIC/CONFIDENTIAL/SECRET/TOP_SECRET via the
+    // realm's `marking:*` role assignments (bootstrap-keycloak.sh).
+    const securitySnapshot = {
   roles: ["tellus-superadmin"],
-  markings: [],
+  markings: ["PUBLIC", "CONFIDENTIAL", "SECRET", "TOP_SECRET"],
   cbac: [],
   organizations: [],
   markingBypass: true,

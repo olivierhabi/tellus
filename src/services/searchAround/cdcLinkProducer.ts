@@ -24,37 +24,62 @@ let producer: Producer | null = null;
 let connecting: Promise<void> | null = null;
 let disabled = !ENABLED;
 
+// Cold-connect patience: under CI load (parallel vitest workers hammering
+// the same broker) the FIRST connect can blow its connectionTimeout even
+// though the broker is healthy — the outbox then burns a publish_attempts
+// on a row the broker never saw, and the background drainer succeeds
+// minutes later (breaking the drain-exactly-once contract:
+// run 32881622027, link-cdc-outbox-integration publish_attempts=2).
+// Retry whole connect rounds here instead of letting one timeout leak an
+// attempt into the durable ledger.
+const CONNECT_ROUNDS = 4;
+const CONNECT_ROUND_BACKOFF_MS = 400;
+
+async function connectProducerOnce(): Promise<Producer> {
+  // F-P4-06: explicit requestTimeout bounds broker silences so a
+  // wedged controller can't stall a link-edit write path.
+  const kafka = new Kafka({
+    clientId: "tellus-funnel-cdc-links",
+    brokers: BROKERS,
+    logLevel: logLevel.ERROR,
+    retry: { retries: 3, initialRetryTime: 300, maxRetryTime: 2000 },
+    connectionTimeout: 5000,
+    requestTimeout: 5000,
+  });
+  const p = kafka.producer({
+    allowAutoTopicCreation: true,
+    idempotent: true,
+    maxInFlightRequests: 5,
+  });
+  await p.connect();
+  return p;
+}
+
 async function getProducer(): Promise<Producer | null> {
   if (disabled) return null;
   if (producer) return producer;
   if (!connecting) {
     connecting = (async () => {
       try {
-        // F-P4-06: explicit requestTimeout bounds broker silences so a
-        // wedged controller can't stall a link-edit write path.
-        const kafka = new Kafka({
-          clientId: "tellus-funnel-cdc-links",
-          brokers: BROKERS,
-          logLevel: logLevel.ERROR,
-          retry: { retries: 3, initialRetryTime: 300, maxRetryTime: 2000 },
-          connectionTimeout: 2000,
-          requestTimeout: 5000,
-        });
-        const p = kafka.producer({
-          allowAutoTopicCreation: true,
-          idempotent: true,
-          maxInFlightRequests: 5,
-        });
-        await p.connect();
-        producer = p;
-        console.log(`[kafka/cdc-links] producer connected to ${BROKERS.join(",")}`);
-      } catch (err) {
+        let lastErr: unknown;
+        for (let round = 1; round <= CONNECT_ROUNDS; round++) {
+          try {
+            producer = await connectProducerOnce();
+            console.log(`[kafka/cdc-links] producer connected to ${BROKERS.join(",")}`);
+            return;
+          } catch (err) {
+            lastErr = err;
+            if (round < CONNECT_ROUNDS) {
+              await new Promise((r) => setTimeout(r, CONNECT_ROUND_BACKOFF_MS * round));
+            }
+          }
+        }
         // Do NOT permanently disable on a transient connect failure:
         // `producer` stays null and the next publish retries. The link
         // outbox (linkCdcOutbox.ts) bounds retries with backoff, so
         // retries naturally rate-limit and pickup is restart-safe.
         console.warn(
-          `[kafka/cdc-links] broker unreachable (${(err as Error).message}) — will retry`
+          `[kafka/cdc-links] broker unreachable after ${CONNECT_ROUNDS} connect rounds (${(lastErr as Error)?.message}) — will retry`
         );
       } finally {
         connecting = null;

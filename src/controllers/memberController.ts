@@ -3,10 +3,23 @@ import { MemberService } from '../services/memberService';
 import { AppError } from '../utils/foundryAppError';
 import { z } from 'zod';
 
-const AddMemberSchema = z.object({
-  userId: z.string().uuid(),
-  role: z.enum(['editor', 'viewer']),
-});
+// `userId` is the LOCAL users.id (what GET …/members and
+// project_members.user_id use). Directory search (/automations/discovery)
+// surfaces Keycloak ids instead, so callers MAY pass `email` — resolved
+// case-insensitively against the provisioned local user. Exactly one of
+// the two identifiers is required.
+const AddMemberSchema = z
+  .object({
+    userId: z.string().uuid().optional(),
+    email: z.string().email().optional(),
+    role: z.enum(['editor', 'viewer']),
+  })
+  .refine((d) => Boolean(d.userId ?? d.email), {
+    message: 'Either userId or email must be provided',
+  })
+  .refine((d) => !(d.userId && d.email), {
+    message: 'Pass either userId or email, not both',
+  });
 
 const UpdateRoleSchema = z.object({
   role: z.enum(['owner', 'editor', 'viewer']),
@@ -22,7 +35,11 @@ export class MemberController {
       if (!parsed.success) {
         throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
       }
-      const result = await this.memberService.addMember(projectId, parsed.data.userId, parsed.data.role);
+      const result = await this.memberService.addMember(
+        projectId,
+        { userId: parsed.data.userId, email: parsed.data.email },
+        parsed.data.role,
+      );
       res.status(201).json({ success: true, data: result });
     } catch (error) {
       next(error);

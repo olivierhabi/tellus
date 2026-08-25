@@ -4,14 +4,25 @@ import { AppError } from '../utils/foundryAppError';
 export class MemberService {
   constructor(private knex: Knex) {}
 
-  async addMember(projectId: string, userId: string, role: string) {
+  async addMember(
+    projectId: string,
+    userRef: { userId?: string; email?: string },
+    role: string,
+  ) {
     if (role === 'owner') throw new AppError('Cannot directly assign owner role', 400, 'VALIDATION_ERROR');
-    const user = await this.knex('users').where({ id: userId }).first();
+    // Directory search returns Keycloak ids which do not exist in the
+    // local users table; resolve by email in that flow. Local ids win
+    // when provided directly.
+    const user = userRef.userId
+      ? await this.knex('users').where({ id: userRef.userId }).first()
+      : await this.knex('users')
+          .whereRaw('lower(email) = lower(?)', [userRef.email ?? ''])
+          .first();
     if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
-    const existing = await this.knex('project_members').where({ project_id: projectId, user_id: userId }).first();
+    const existing = await this.knex('project_members').where({ project_id: projectId, user_id: user.id }).first();
     if (existing) throw new AppError('User is already a member of this project', 409, 'CONFLICT');
-    await this.knex('project_members').insert({ project_id: projectId, user_id: userId, role });
-    return { projectId, userId, role };
+    await this.knex('project_members').insert({ project_id: projectId, user_id: user.id, role });
+    return { projectId, userId: user.id, role };
   }
 
   async removeMember(projectId: string, userId: string) {

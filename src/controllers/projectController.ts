@@ -79,6 +79,11 @@ export class ProjectController {
         bodyParsed.data
       );
       if (!project) {
+        // The list endpoint surfaces org-shared (read-scoped) projects,
+        // so distinguish "does not exist" from "exists but not yours".
+        if (await this.projectService.exists(paramParsed.data.id)) {
+          throw new AppError('Only the project owner can update this project', 403, 'FORBIDDEN');
+        }
         throw new AppError('Project not found', 404, 'NOT_FOUND');
       }
       res.json({ success: true, data: project });
@@ -96,6 +101,12 @@ export class ProjectController {
       const ownerId = this.getOwnerId(req);
       const deleted = await this.projectService.deleteProject(paramParsed.data.id, ownerId);
       if (!deleted) {
+        // The list endpoint surfaces org-shared (read-scoped) projects,
+        // so distinguish "does not exist" from "exists but not yours" —
+        // deleting someone else's project is a permission failure.
+        if (await this.projectService.exists(paramParsed.data.id)) {
+          throw new AppError('Only the project owner can delete this project', 403, 'FORBIDDEN');
+        }
         throw new AppError('Project not found', 404, 'NOT_FOUND');
       }
       res.status(204).send();

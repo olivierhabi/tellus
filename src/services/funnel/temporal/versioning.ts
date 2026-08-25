@@ -157,11 +157,25 @@ export async function ensureQueueAssignmentRule(
       // bound; once Temporal rejects another insert, the new worker can be
       // RUNNING locally while receiving zero tasks. Replacing slot zero is
       // the intended atomic promotion operation.
+      //
+      // EMPTY-LIST BOOTSTRAP (run 32881622027): `replaceAssignmentRule`
+      // at index 0 is rejected by the server when the queue has NO
+      // assignment rules yet ("rule index 0 is out of bounds for
+      // assignment rule list of length 0") — exactly the state of every
+      // freshly-stamped self-provisioning queue (replica-queue-<ts>,
+      // fresh verify stacks). The first-ever rule must be INSERTED.
+      // NOTE: @temporalio/proto@1.16 has no addAssignmentRule oneof arm;
+      // sending one is silently DROPPED by protobuf encoding (update
+      // succeeds as a no-op). insertAssignmentRule is the supported op.
+      const fullRule = { targetBuildId: buildId, percentageRamp: { rampPercentage: 100 } };
+      const hasExistingRules = (rules.assignmentRules?.length ?? 0) > 0;
       const inserted = (await client.workflowService.updateWorkerVersioningRules({
         namespace,
         taskQueue,
         conflictToken: token,
-        replaceAssignmentRule: { ruleIndex: 0, rule: { targetBuildId: buildId, percentageRamp: { rampPercentage: 100 } } },
+        ...(hasExistingRules
+          ? { replaceAssignmentRule: { ruleIndex: 0, rule: fullRule } }
+          : { insertAssignmentRule: { ruleIndex: 0, rule: fullRule } }),
       })) as QueuedRules;
       token = inserted.conflictToken ?? token;
       if (previous) {

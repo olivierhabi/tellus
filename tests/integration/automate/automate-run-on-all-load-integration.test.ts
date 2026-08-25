@@ -257,9 +257,12 @@ describe("Run-on-all large-set load", () => {
         tenantId,
         ontologyId,
         actorUserId,
+        // Real clearance (see the marking-constrained scan note in this
+        // repo's other automate suites): an empty markings list is
+        // fail-closed zero-hit against F-03 PUBLIC-default documents.
         securitySnapshot: {
           roles: ["tellus-superadmin"],
-          markings: [],
+          markings: ["PUBLIC", "CONFIDENTIAL", "SECRET", "TOP_SECRET"],
           cbac: [],
           organizations: [],
           markingBypass: true,

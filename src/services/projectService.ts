@@ -174,6 +174,18 @@ export class ProjectService {
     return updated || null;
   }
 
+  /**
+   * Owner-gated mutations resolve "missing" vs "exists but not yours"
+   * differently so the controller can answer 404 vs 403 correctly: the
+   * projects list exposes org-shared (read-scoped) rows, so a caller may
+   * well address a project that exists but that they do not own — that
+   * is a permission failure, not a missing resource.
+   */
+  async exists(projectId: string): Promise<boolean> {
+    const row = await this.knex('projects').where({ id: projectId }).first();
+    return Boolean(row);
+  }
+
   async deleteProject(projectId: string, ownerId: string) {
     const deleted = await this.knex('projects').where({ id: projectId, owner_id: ownerId }).delete();
     if (!deleted) return false;

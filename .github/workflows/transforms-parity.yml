@@ -103,19 +103,19 @@ jobs:
         # network socket FAILS under --network=none. See
         # scripts/verify-transforms-sandbox.sh. Exits non-zero on any miss.
         run: |
-          pkill -f "tsx src/server.ts" || true
-          # Graceful shutdown can hang well past 30s here: the embedded
-          # Temporal runtime drains on SIGTERM, and with no Temporal server
-          # reachable in CI the drain never completes. Give it a short grace
-          # window, then SIGKILL — the container-mode server below must not
-          # die with EADDRINUSE (which would silently exercise STALE
-          # local-mode execution: the negative isolation probes then
-          # "succeed" exactly as in run 32091038735).
-          for i in $(seq 1 5); do
-            pgrep -f "tsx src/server.ts" >/dev/null || break
-            sleep 1
-          done
-          pkill -9 -f "tsx src/server.ts" || true
+          # Kill by PORT, not by name: `npx tsx src/server.ts` actually runs
+          # as `node .../tsx/dist/cli.mjs src/server.ts`, so name-based
+          # `pkill -f "tsx src/server.ts"` matches nothing and the old
+          # server keeps serving :3000 (run 32091038735 + rerun). The
+          # container-mode server below must not die with EADDRINUSE —
+          # that would silently exercise STALE local-mode execution and
+          # the negative isolation probes would "succeed" un-sandboxed.
+          OLD_PIDS="$(lsof -t -i TCP:3000 -s TCP:LISTEN || true)"
+          if [ -n "$OLD_PIDS" ]; then kill $OLD_PIDS 2>/dev/null || true; fi
+          sleep 3
+          OLD_PIDS="$(lsof -t -i TCP:3000 -s TCP:LISTEN || true)"
+          if [ -n "$OLD_PIDS" ]; then kill -9 $OLD_PIDS 2>/dev/null || true; fi
+          pkill -9 -f "src/server.ts" 2>/dev/null || true
           # Wait for the OLD (local-mode) server to actually release :3000.
           for i in $(seq 1 30); do
             if ! curl -s -m 1 http://localhost:3000/health >/dev/null 2>&1; then break; fi
