@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { pool } from "../../db";
-import { readSyncedPreview } from "./synced-dataset-reader";
+import { readSyncedPreview, type ImportConfigForRead } from "./synced-dataset-reader";
 
 const RID_PREFIX = "ri.foundry.main.dataset.";
 

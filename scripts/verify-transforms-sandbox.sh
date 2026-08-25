@@ -30,6 +30,7 @@ RUN=$(date +%s | tail -c 5)
 FAILURES=0
 
 AUTH=(-H "X-Tellus-Test-Principal: transforms-sandbox" -H "X-Tellus-Test-Roles: editor")
+LAST_BUILD_RID=""
 # Same fixed folder RID verify-transforms-e2e.sh uses (folders need Keycloak,
 # which CI does not run).
 FOLDER_RID="ri.compass.main.folder.0123abcd-ef01-4345-8789-abcdef012345"
@@ -69,10 +70,12 @@ setup_commit() {
 build_poll() {
   # $1 repository rid -> "status|reason"
   local BUILD S BODY REASON i
-  BUILD=$(curl -s -X POST "$BASE/code-repositories/$1/builds" "${AUTH[@]}" \
+  BODY=$(curl -s -X POST "$BASE/code-repositories/$1/builds" "${AUTH[@]}" \
     -H "Idempotency-Key: $(ukey)" -H 'Content-Type: application/json' \
-    -d '{"branch":"master"}' | jq -r '.buildRid // .rid // empty')
+    -d '{"branch":"master"}')
+  BUILD=$(echo "$BODY" | jq -r '.buildRid // .rid // empty')
   if [ -z "$BUILD" ] || [ "$BUILD" = "null" ]; then
+    red "build start failed for $1: $(echo "$BODY" | head -c 400)"
     echo "failed|build-not-started"; return
   fi
   S="running"; BODY=""
@@ -83,7 +86,19 @@ build_poll() {
     sleep 1
   done
   REASON=$(echo "$BODY" | jq -r '.build.reason // ""')
+  LAST_BUILD_RID="$BUILD"
   echo "$S|$REASON"
+}
+
+dump_failure_events() {
+  # $1 repository rid  $2 build rid — print the failing transform's stderr.
+  # $2 is empty when the build never started; skip in that case (the POST
+  # response was already printed by build_poll).
+  [ -z "$2" ] && return 0
+  curl -s "$BASE/code-repositories/$1/builds/$2" "${AUTH[@]}" | jq -r '
+    .events[]? | select(.kind == "log" and .data.phase == "failed") |
+    "[event] \(.data.transform): \(.data.error // "")\n" +
+    (.data.stderr // "" | split("\n") | last(15) | join("\n"))' || true
 }
 
 # --- (positive) container build ---------------------------------------------
@@ -91,6 +106,7 @@ PY_OK=$(printf 'from transforms.api import transform, Output, DataFrame\n@transf
 RID_OK=$(setup_commit "sandbox-ok-$RUN" "t.py" "$PY_OK") || exit 1
 green "=== (positive) container build ==="
 RES_OK=$(build_poll "$RID_OK"); S_OK="${RES_OK%%|*}"; R_OK="${RES_OK#*|}"
+[ "$S_OK" != "succeeded" ] && { red "--- failure events (positive) ---"; dump_failure_events "$RID_OK" "$LAST_BUILD_RID"; }
 green "positive -> $S_OK | $R_OK"
 curl -s -X DELETE "$BASE/code-repositories/$RID_OK" "${AUTH[@]}" >/dev/null 2>&1 || true
 
@@ -99,6 +115,8 @@ PY_FS=$(printf 'from transforms.api import transform, Output, DataFrame\n@transf
 RID_FS=$(setup_commit "sandbox-fs-$RUN" "t.py" "$PY_FS") || exit 1
 green "=== (negative A) host-FS read blocked ==="
 RES_FS=$(build_poll "$RID_FS"); S_FS="${RES_FS%%|*}"; R_FS="${RES_FS#*|}"
+[ "$S_FS" != "failed" ] && { red "--- failure events (negative A) ---"; dump_failure_events "$RID_FS" "$LAST_BUILD_RID"; }
+[ "$S_FS" = "failed" ] && ! echo "$R_FS" | grep -qiE "No such file or directory|FileNotFoundError|Errno 2" && { red "--- failure events (negative A, wrong reason) ---"; dump_failure_events "$RID_FS" "$LAST_BUILD_RID"; }
 green "host-FS read -> $S_FS | $R_FS"
 curl -s -X DELETE "$BASE/code-repositories/$RID_FS" "${AUTH[@]}" >/dev/null 2>&1 || true
 
@@ -107,6 +125,7 @@ PY_NET=$(printf 'from transforms.api import transform, Output, DataFrame\nimport
 RID_NET=$(setup_commit "sandbox-net-$RUN" "t.py" "$PY_NET") || exit 1
 green "=== (negative B) network egress blocked ==="
 RES_NET=$(build_poll "$RID_NET"); S_NET="${RES_NET%%|*}"; R_NET="${RES_NET#*|}"
+[ "$S_NET" != "failed" ] && { red "--- failure events (negative B) ---"; dump_failure_events "$RID_NET" "$LAST_BUILD_RID"; }
 green "network egress -> $S_NET | $R_NET"
 curl -s -X DELETE "$BASE/code-repositories/$RID_NET" "${AUTH[@]}" >/dev/null 2>&1 || true
 
