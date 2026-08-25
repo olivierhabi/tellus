@@ -1572,29 +1572,9 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           );
         }
 
-        // TEMP-COMMIT-DEBUG: locate where committed bytes mutate (CI parity).
-        try {
-          const raw = JSON.stringify(req.body);
-          const b64s = Array.isArray(req.body?.fileChanges)
-            ? (req.body.fileChanges as Array<Record<string, unknown>>)
-                .map((c) => (typeof c.contentBase64 === "string" ? c.contentBase64 : ""))
-                .join("|")
-            : "";
-          console.error(
-            `[COMMIT-DEBUG] bodyLen=${raw.length} b64len=${b64s.length} b64head=${b64s.slice(0, 24)} b64tail=${b64s.slice(-12)}`,
-          );
-        } catch { /* debug only */ }
-
         const validation = validateCommitBody(req.body);
         if (validation.kind === "invalid") {
           return sendError(res, codeReposError(validation.errorName, validation.parameters));
-        }
-        if (validation.kind === "ok") {
-          for (const f of validation.files) {
-            console.error(
-              `[COMMIT-DEBUG] validated path=${f.path} bytes=${f.content.byteLength} head40=${Buffer.from(f.content.buffer, f.content.byteOffset, Math.min(40, f.content.byteLength)).toString("utf8").replace(/[^\x20-\x7e]/g, ".")}`,
-            );
-          }
         }
 
         const repoRow = await pool.query<{ state: string }>(

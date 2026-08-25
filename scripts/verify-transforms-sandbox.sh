@@ -60,26 +60,23 @@ setup_commit() {
   sleep 2
   TIP=$(curl -s "$BASE/code-repositories/$RID/branches" "${AUTH[@]}" \
     | jq -r '.branches[] | select(.name == "master") | .headSha // empty' | head -1)
-  echo "[setup_commit] repo=$1 src-len=$(printf '%s' "$3" | wc -c | tr -d ' ') src-sha=$(printf '%s' "$3" | shasum -a 256 | cut -c1-24)" >&2
+  # Encode ONCE into a variable. NEVER inline `printf '%s' \"$3\"` inside
+  # "$( )" within a double-quoted JSON body: there the backslash-quotes are
+  # LITERAL characters, so $3 expands unquoted and bash word-splits the python
+  # source at every space/newline — printf then concatenates the tokens with
+  # no separators, storing whitespace-stripped source that discovery cannot
+  # parse (the entire sandbox leg silently built without the probe transform).
+  T_B64=$(printf '%s' "$3" | base64 | tr -d '\n')
   curl -s -X POST "$BASE/code-repositories/$RID/branches/master/commits" "${AUTH[@]}" \
     -H "Idempotency-Key: $(ukey)" ${TIP:+-H "If-Match: \"$TIP\""} -H 'Content-Type: application/json' \
-    -d "{\"message\":\"m\",\"fileChanges\":[{\"path\":\"transforms/$2\",\"op\":\"add\",\"contentBase64\":\"$(printf '%s' \"$3\" | base64 | tr -d '\n')\"}]}" \
+    -d "{\"message\":\"m\",\"fileChanges\":[{\"path\":\"transforms/$2\",\"op\":\"add\",\"contentBase64\":\"$T_B64\"}]}" \
     | jq -e '.commitSha // empty' >/dev/null || { red "commit failed for $1"; return 1; }
   echo "$RID"
-}
-
-dump_tree() {
-  # $1 repository rid — list the repo tree so a missing probe transform is
-  # visible directly in CI logs (discovery silently drops files it cannot
-  # parse; this shows whether the file even exists at master HEAD).
-  echo "--- repo tree transforms/ ($1) ---"
-  curl -s "$BASE/code-repositories/$1/branches/master/tree?path=transforms&depth=3" "${AUTH[@]}" | jq -c '[.entries[]? | .path]' 2>/dev/null || true
 }
 
 build_poll() {
   # $1 repository rid -> "status|reason"
   local BUILD S BODY REASON i
-  dump_tree "$1"
   BODY=$(curl -s -X POST "$BASE/code-repositories/$1/builds" "${AUTH[@]}" \
     -H "Idempotency-Key: $(ukey)" -H 'Content-Type: application/json' \
     -d '{"branch":"master"}')
@@ -113,26 +110,6 @@ dump_failure_events() {
                            WHERE repository_rid = '$1'
                            ORDER BY enqueued_at DESC LIMIT 1)
       ORDER BY id" 2>&1 | tail -c 6000
-  echo "--- stemma blobs (repo $1) ---"
-  psql -tA -c \
-    "SELECT branch || ' ' || path || ' bytes=' || octet_length(content)
-       FROM coderepo_stemma_blob
-      WHERE repository_rid = '$1' ORDER BY branch, path" 2>&1 | tail -c 2000
-  echo "--- t.py stored (repo $1) ---"
-  psql -tA -c \
-    "SELECT 'db-sha=' || sha || ' bytes=' || octet_length(content)
-       FROM coderepo_stemma_blob
-      WHERE repository_rid = '$1' AND path = 'transforms/t.py'" 2>&1 | head -c 300
-  psql -tA -c \
-    "SELECT 'first40=[' || substring(encode(content, 'escape') from 1 for 40) || ']'
-       FROM coderepo_stemma_blob
-      WHERE repository_rid = '$1' AND path = 'transforms/t.py'" 2>&1 | head -c 200
-  echo ""
-  echo "--- builds (repo $1) ---"
-  psql -tA -c \
-    "SELECT rid || ' status=' || status || ' commit=' || coalesce(commit_sha,'-') || ' count=' || transform_count
-       FROM transform_build
-      WHERE repository_rid = '$1' ORDER BY enqueued_at DESC LIMIT 2" 2>&1 | tail -c 1000
   echo ""
 }
 

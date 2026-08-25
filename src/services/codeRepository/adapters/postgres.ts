@@ -119,11 +119,6 @@ export class PostgresStemma implements StemmaAdapter {
 
       let totalBytes = 0;
       for (const f of args.files) {
-        // TEMP-COMMIT-DEBUG: what the adapter is about to persist.
-        const dbg = Buffer.from(f.content);
-        console.error(
-          `[COMMIT-DEBUG] adapter path=${f.path} bytes=${dbg.byteLength} head40=${dbg.subarray(0, Math.min(40, dbg.byteLength)).toString("utf8").replace(/[^\x20-\x7e]/g, ".")}`,
-        );
         const buf = Buffer.from(f.content);
         totalBytes += buf.byteLength;
         await client.query(
