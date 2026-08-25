@@ -590,8 +590,15 @@ function runChildContainer(
     // ('?'), crashing Spark's Ivy at startup ("basedir must be absolute:
     // ?/.ivy2/local"). The spark user has a passwd entry -> user.home=/home/spark.
     // The outdir (host-owned, 0700) is chmod'd 0777 below so uid 185 can write
-    // the output CSV. Still non-root + read-only + resource-capped + (sandbox)
-    // network=none.
+    // the output CSV, and the workdir is made world-readable/traversable so
+    // uid 185 can READ the mounted /work — on real Linux (CI runners) a
+    // mkdtemp workdir is 0700 and every open() inside returned
+    // "Permission denied" ("can't open file '/work/driver.py'"); Docker
+    // Desktop on macOS masks host perms, which is why dev runs never saw it.
+    // Inner files/dirs are written with umask 022 (644/755), so only the top
+    // dir needs widening. Still non-root + read-only + resource-capped +
+    // (sandbox) network=none.
+    try { fs.chmodSync(workdir, 0o755); } catch { /* best-effort */ }
     try { fs.chmodSync(outDir, 0o777); } catch { /* best-effort */ }
     // Gap 1 (distributed execution): when TELLUS_SPARK_MASTER is set, the
     // driver joins that standalone cluster. It needs network reachability to
