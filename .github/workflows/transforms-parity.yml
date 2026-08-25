@@ -143,4 +143,8 @@ jobs:
             -e HOME=/home/spark \
             -v "$PWD:/work:ro" \
             tellus/transform-runtime:py38 bash -c 'python3 -c "import pyspark, pandas, pyarrow; print(\"imports-ok\", pyspark.__version__)"'
-          bash scripts/verify-transforms-sandbox.sh
+          RC=0
+          bash scripts/verify-transforms-sandbox.sh || RC=$?
+          # Server stderr (incl. COMMIT-DEBUG brackets) lands here via nohup.
+          grep "COMMIT-DEBUG" /tmp/tellus-c.log | head -30 || true
+          exit $RC
