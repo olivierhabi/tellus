@@ -67,9 +67,19 @@ setup_commit() {
   echo "$RID"
 }
 
+dump_tree() {
+  # $1 repository rid — list the repo tree so a missing probe transform is
+  # visible directly in CI logs (discovery silently drops files it cannot
+  # parse; this shows whether the file even exists at master HEAD).
+  echo "--- repo tree ($1) ---"
+  curl -s "$BASE/code-repositories/$1/branches/master/tree" "${AUTH[@]}" | head -c 1500
+  echo ""
+}
+
 build_poll() {
   # $1 repository rid -> "status|reason"
   local BUILD S BODY REASON i
+  dump_tree "$1"
   BODY=$(curl -s -X POST "$BASE/code-repositories/$1/builds" "${AUTH[@]}" \
     -H "Idempotency-Key: $(ukey)" -H 'Content-Type: application/json' \
     -d '{"branch":"master"}')
