@@ -650,6 +650,15 @@ async function prepareBuild(
   if (jobSpecRejected.length > 0) {
     await appendEvent(buildRid, "log", { jobSpecRejected });
   }
+  // Discovery errors are non-fatal when at least one transform survives, but
+  // silently dropping files makes builds inexplicable from the outside (a
+  // repo whose probe transform vanishes builds "green" without it). Always
+  // record the discovered set + any errors so operators see exactly what was
+  // built and why anything was left out.
+  await appendEvent(buildRid, "log", {
+    discovered: discovery.transforms.map((t) => ({ name: t.name, path: t.sourcePath, output: t.outputRid })),
+    discoveryErrors: discovery.errors,
+  });
 
   // Run asynchronously; the route returns immediately and the client polls.
   void runBuild(buildRid, repositoryRid, branch, read.commitSha, actor, principal, read.files, [...discovery.transforms], read.requirements, libsRes.libs).catch(
