@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   objectTypeCreateConflict,
+  hasCompanionDatasourceBinding,
+  resolveCompositeIssues,
   orderWorkingChanges,
   stableOntologyValue,
   validateDraftObjectTypeId,
@@ -27,6 +29,22 @@ function change(changeId: string, operation: WorkingChange["operation"], depende
 }
 
 describe("Ontology Manager working-state domain", () => {
+  const objectCreate = (id = "object-1", dataset = "dataset-1"): WorkingChange => ({ ...change(`objectType:${id}:create`, "create"), resourceId: id,
+    proposedValue: { objectTypeId: id, requiredDatasourceId: dataset }, issues: [{ key: `objectType:${id}:create:datasource`, severity: "error", code: "REQUIRED_FIELD_MISSING", message: "A backing datasource or explicit unbacked location is required.", resourceKind: "objectType", resourceId: id }] });
+  const datasourceBind = (id = "object-1", dataset = "dataset-1"): WorkingChange => ({ ...change(`datasource:${id}:binding`, "bind"), resourceKind: "datasource", resourceId: id, proposedValue: { foundryDatasetId: dataset } });
+
+  it("resolves the datasource requirement only from the matching composite binding", () => {
+    const create = objectCreate(); const bind = datasourceBind();
+    expect(hasCompanionDatasourceBinding(create, [bind, create])).toBe(true);
+    expect(resolveCompositeIssues(create, create.issues, [bind, create])).toEqual([]);
+    expect(hasCompanionDatasourceBinding(create, [datasourceBind("other-object")])).toBe(false);
+    expect(hasCompanionDatasourceBinding(create, [datasourceBind("object-1", "other-dataset")])).toBe(false);
+  });
+
+  it("restores the datasource error when the dependent binding is removed", () => {
+    const create = objectCreate();
+    expect(resolveCompositeIssues(create, create.issues, [create])).toEqual(create.issues);
+  });
   it("orders composite changes deterministically while honoring dependencies", () => {
     const ordered = orderWorkingChanges([
       change("delete-old", "delete", ["bind-datasource"]),

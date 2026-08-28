@@ -365,6 +365,29 @@ function validateShape(input: WorkingChangeInput, effective: Record<string, unkn
   return issues;
 }
 
+/** A create wizard stages the object and its datasource as dependent changes.
+ * Validation is therefore evaluated against the complete change set, not each
+ * row in isolation. Otherwise a valid composite create is permanently blocked
+ * by the object row's earlier, single-row datasource issue. */
+export function hasCompanionDatasourceBinding(change: Pick<WorkingChange, "resourceKind" | "resourceId" | "proposedValue">, changes: ReadonlyArray<WorkingChange>) {
+  const createValue = change.proposedValue as Record<string, unknown> | null;
+  // New drafts carry an explicit expected datasource identity. Legacy drafts
+  // predate that field, so retain a narrow RID-only compatibility path until
+  // they are committed or discarded.
+  const expectedDatasourceId = String(createValue?.requiredDatasourceId ?? createValue?.datasourceRid ?? createValue?.foundryDatasetId ?? "");
+  return changes.some((candidate) => {
+    if (candidate.resourceKind !== "datasource" || candidate.operation !== "bind" || candidate.resourceId !== change.resourceId) return false;
+    const value = candidate.proposedValue as Record<string, unknown> | null;
+    const datasourceId = String(value?.foundryDatasetId ?? value?.datasourceRid ?? "");
+    return Boolean(datasourceId) && (!expectedDatasourceId || datasourceId === expectedDatasourceId);
+  });
+}
+
+export function resolveCompositeIssues(change: WorkingChange, issues: ValidationIssue[], changes: ReadonlyArray<WorkingChange>) {
+  if (change.resourceKind !== "objectType" || change.operation !== "create" || !hasCompanionDatasourceBinding(change, changes)) return issues;
+  return issues.filter((value) => !(value.code === "REQUIRED_FIELD_MISSING" && value.key === `${change.changeId}:datasource`));
+}
+
 async function ensureUnique(client: PoolClient, ontologyId: string, input: WorkingChangeInput, effective: Record<string, unknown>) {
   // A delete can never introduce a name conflict, and its resource id is
   // frequently the apiName of the very row being removed — checking would
@@ -424,7 +447,8 @@ async function reviewWithClient(client: PoolClient, ontologyId: string, principa
   const rows = ws.rowCount ? await client.query(
     `SELECT * FROM ontology_working_change WHERE working_state_id=$1 ORDER BY created_at, change_id`, [ws.rows[0].working_state_id],
   ) : { rows: [] as Record<string, unknown>[] };
-  const changes = rows.rows.map((row) => rowToChange(row as Record<string, unknown>));
+  const storedChanges = rows.rows.map((row) => rowToChange(row as Record<string, unknown>));
+  const changes = storedChanges.map((change) => ({ ...change, issues: resolveCompositeIssues(change, change.issues, storedChanges) }));
   const uniqueIssues = new Map<string, ValidationIssue>();
   for (const change of changes) for (const value of change.issues) uniqueIssues.set(value.key, value);
   const resourceKeys = new Set(changes.map((change) => `${change.resourceKind}:${change.resourceId}`));
@@ -884,7 +908,7 @@ export async function commitWorkingState(ontologyId: string, principalId: string
       }
       const proposed=change.proposedValue&&typeof change.proposedValue==="object"?change.proposedValue as Record<string,unknown>:{};
       const effective={...(latest&&typeof latest==="object"?latest as Record<string,unknown>:{}),...proposed,...(change.patch??{})};
-      const currentIssues=[...validateShape(change,effective),...await ensureUnique(client,ontologyId,change,effective)];
+      const currentIssues=resolveCompositeIssues(change,[...validateShape(change,effective),...await ensureUnique(client,ontologyId,change,effective)],review.changes);
       freshErrors.push(...currentIssues.filter(value=>value.severity==="error").map(value=>value.message));
     }
     // Blocking decisions use freshly computed issues only — persisted
