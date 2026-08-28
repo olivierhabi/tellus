@@ -104,6 +104,15 @@ export function resolveDraftActionTypeId(
   return UUID.test(candidate) ? candidate : null;
 }
 
+/** Link-type drafts use the same stable-ID contract as action-type drafts. */
+export function resolveDraftLinkTypeId(
+  change: Pick<WorkingChange, "resourceId" | "proposedValue">,
+): string | null {
+  const proposed = change.proposedValue as Record<string, unknown> | undefined;
+  const candidate = String(proposed?.linkTypeId ?? change.resourceId ?? "").trim();
+  return UUID.test(candidate) ? candidate : null;
+}
+
 type CanonicalFoundryDatasource = {
   id: string;
   name: string;
@@ -810,12 +819,12 @@ async function applyChange(client: PoolClient, ontologyId: string, commitId: str
       const sourcePropertyId=await resolveProperty(source.object_type_id,value.sourcePropertyId,value.sourcePropertyApiName);
       const targetPropertyId=await resolveProperty(target.object_type_id,value.targetPropertyId,value.targetPropertyApiName);
       await client.query(`INSERT INTO link_type
-        (ontology_id,api_name,display_name,description,cardinality,source_object_type,target_object_type,source_property_id,target_property_id,
+        (link_type_id,ontology_id,api_name,display_name,description,cardinality,source_object_type,target_object_type,source_property_id,target_property_id,
          join_table_file_path,join_table_source_column,join_table_target_column,is_bidirectional,storage_backend,violation_policy,
          reverse_api_name,reverse_display_name,reverse_description,reverse_visible,reverse_property_projection,reverse_actions_enabled,
          mandatory_control_property_id,mcp_propagation_mode,mcp_required_count)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
-        [ontologyId,value.apiName,value.displayName,value.description ?? null,value.cardinality,source.object_type_id,target.object_type_id,sourcePropertyId,targetPropertyId,
+        VALUES (COALESCE($1::uuid,gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
+        [resolveDraftLinkTypeId(change),ontologyId,value.apiName,value.displayName,value.description ?? null,value.cardinality,source.object_type_id,target.object_type_id,sourcePropertyId,targetPropertyId,
         value.joinTableFilePath ?? null,value.joinTableSourceColumn ?? null,value.joinTableTargetColumn ?? null,value.isBidirectional ?? false,
         value.storageBackend ?? "csv_legacy",value.violationPolicy ?? "warn",value.reverseApiName ?? null,value.reverseDisplayName ?? null,
         value.reverseDescription ?? null,value.reverseVisible ?? true,value.reversePropertyProjection ? JSON.stringify(value.reversePropertyProjection):null,

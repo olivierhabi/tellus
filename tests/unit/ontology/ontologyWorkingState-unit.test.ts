@@ -6,6 +6,7 @@ import {
   hasCompanionDatasourceBinding,
   resolveCompositeIssues,
   resolveDraftActionTypeId,
+  resolveDraftLinkTypeId,
   orderWorkingChanges,
   stableOntologyValue,
   validateDraftObjectTypeId,
@@ -90,6 +91,18 @@ describe("Ontology Manager working-state domain", () => {
     expect(resolveDraftActionTypeId({
       resourceId: "createLegacyOrder",
       proposedValue: { apiName: "createLegacyOrder" },
+    })).toBeNull();
+  });
+
+  it("preserves a staged link-type UUID so Review edits and Save use one identity", () => {
+    const draftRid = "a68537c7-98bc-4ba0-919d-489227251e19";
+    expect(resolveDraftLinkTypeId({
+      resourceId: draftRid,
+      proposedValue: { linkTypeId: draftRid },
+    })).toBe(draftRid);
+    expect(resolveDraftLinkTypeId({
+      resourceId: "ordersToCustomer",
+      proposedValue: { apiName: "ordersToCustomer" },
     })).toBeNull();
   });
 
