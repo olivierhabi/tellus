@@ -33,6 +33,12 @@ export interface VegaChartGenerationRequest {
 }
 
 function vegaType(baseType: string): string {
+  // Workshop geoshape properties contain GeoJSON geometry/features and must
+  // be exposed to the chart agent as such. Treating them as nominal invites a
+  // model to emit a compiling-but-blank geoshape over district labels.
+  if (/^(geoshape|geo_shape|geojson)$/i.test(baseType)) {
+    return "geojson";
+  }
   if (/^(integer|long|float|double|decimal)$/i.test(baseType)) {
     return "quantitative";
   }
@@ -106,6 +112,13 @@ export function buildVegaChartAgentPayload(
       `Object type: ${input.objectTypeApiName?.trim() || "not specified"}`,
       `Data input name: ${primaryDataName}`,
       `Available injected row fields: ${availableFields.join(", ") || "not specified"}`,
+      ...(isAggregation
+        ? [
+            `Object properties available for configuring aggregation: ${
+              rawFields.join(", ") || "not specified"
+            }`,
+          ]
+        : []),
     ].join(". "),
     ...(input.currentSpec?.trim() ? { current_json: input.currentSpec } : {}),
     ...(input.model?.trim() ? { model: input.model.trim() } : {}),

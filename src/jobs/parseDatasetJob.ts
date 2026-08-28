@@ -80,6 +80,21 @@ export async function runParseJob(datasetId: string): Promise<void> {
       );
     }
 
+    // Production hardening: validate content_hash fits the column before
+    // attempting the UPDATE. The 71-char `sha256:<hex>` value previously
+    // overflowed VARCHAR(64) with a raw Postgres 22001, which rolled back
+    // the entire parse transaction and left the dataset in `error` with a
+    // cryptic “value too long” ingestionValidation. Fail fast with an
+    // actionable message instead.
+    const CONTENT_HASH_LIMIT = 128;
+    if (result.contentHash.length > CONTENT_HASH_LIMIT) {
+      throw new Error(
+        `[parseDatasetJob] content_hash length ${result.contentHash.length} exceeds column limit ${CONTENT_HASH_LIMIT}. ` +
+          `Hash prefix: ${result.contentHash.slice(0, 20)}… ` +
+          `Run migration 177_widen_content_hash or widen foundry_datasets.content_hash.`,
+      );
+    }
+
     await foundryDb.transaction(async (trx) => {
       await trx('foundry_datasets').where({ id: datasetId }).update({
         status: 'ready',

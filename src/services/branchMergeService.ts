@@ -17,6 +17,7 @@ import { getClient, query } from "../db";
 import type { PoolClient } from "pg";
 import { createHash } from "node:crypto";
 import { deriveMainBranchId } from "./branchContext";
+import { applySavedBranchChangesWithClient } from "./ontologyWorkingStateService";
 
 /**
  * Canonicalize a value using the audit-chain's canonicalJson (F-P3-14 BM-4
@@ -491,6 +492,15 @@ export async function mergeThreeWay(
         mergedCount++;
       }
     }
+
+    // Apply schema change sets saved to this branch inside the same database
+    // transaction as object-edit replay and proposal finalization.
+    await applySavedBranchChangesWithClient(
+      pgClient,
+      ontologyId,
+      branchId,
+      mergedBy ?? "system",
+    );
 
     // Update branch status to MERGED
     await pgClient.query(

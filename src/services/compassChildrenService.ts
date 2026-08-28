@@ -212,6 +212,11 @@ async function queryDatasets(a: QueryArgs): Promise<ResourceChild[]> {
 async function queryPipelines(a: QueryArgs): Promise<ResourceChild[]> {
   const params: unknown[] = [a.projectId];
   let where = "p.project_id = $1";
+  where += ` AND NOT EXISTS (
+    SELECT 1 FROM resources pipeline_resource
+     WHERE pipeline_resource.rid = '${PIPELINE_RID_PREFIX}' || p.id::text
+       AND pipeline_resource.trash_status <> 'NOT_TRASHED'
+  )`;
   if (a.folderId === null) where += " AND p.folder_id IS NULL";
   else { params.push(a.folderId); where += ` AND p.folder_id = $${params.length}`; }
   if (a.search) {

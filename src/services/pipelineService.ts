@@ -110,7 +110,15 @@ export class PipelineService {
    */
   async listPipelines(projectId: string, folderId?: string | null) {
     const query = this.knex('pipelines')
-      .where({ project_id: projectId });
+      .where({ project_id: projectId })
+      .whereNotExists(function () {
+        this.select('*')
+          .from('resources as pipeline_resource')
+          .whereRaw(
+            "pipeline_resource.rid = 'ri.foundry.main.pipeline.' || pipelines.id::text",
+          )
+          .whereNot('pipeline_resource.trash_status', 'NOT_TRASHED');
+      });
 
     if (folderId === null) {
       query.whereNull('folder_id');
@@ -127,6 +135,14 @@ export class PipelineService {
   async getPipelineById(projectId: string, pipelineId: string) {
     const pipeline = await this.knex('pipelines')
       .where({ id: pipelineId, project_id: projectId })
+      .whereNotExists(function () {
+        this.select('*')
+          .from('resources as pipeline_resource')
+          .whereRaw(
+            "pipeline_resource.rid = 'ri.foundry.main.pipeline.' || pipelines.id::text",
+          )
+          .whereNot('pipeline_resource.trash_status', 'NOT_TRASHED');
+      })
       .first();
     return pipeline || null;
   }
@@ -166,20 +182,82 @@ export class PipelineService {
 
     const [updated] = await this.knex('pipelines')
       .where({ id: pipelineId, project_id: projectId })
+      .whereNotExists(function () {
+        this.select('*')
+          .from('resources as pipeline_resource')
+          .whereRaw(
+            "pipeline_resource.rid = 'ri.foundry.main.pipeline.' || pipelines.id::text",
+          )
+          .whereNot('pipeline_resource.trash_status', 'NOT_TRASHED');
+      })
       .update(updateData)
       .returning('*');
 
     return updated || null;
   }
 
-  /**
-   * Delete a pipeline. Returns true if a row was deleted.
-   */
-  async deletePipeline(projectId: string, pipelineId: string): Promise<boolean> {
-    const deleted = await this.knex('pipelines')
-      .where({ id: pipelineId, project_id: projectId })
-      .delete();
-    return deleted > 0;
+  /** Move a pipeline to Compass Trash without destroying its graph. */
+  async deletePipeline(
+    projectId: string,
+    pipelineId: string,
+    actorId: string,
+  ): Promise<boolean> {
+    return this.knex.transaction(async (trx) => {
+      const pipeline = await trx('pipelines')
+        .where({ id: pipelineId, project_id: projectId })
+        .first();
+      if (!pipeline) return false;
+
+      const pipelineRid = `ri.foundry.main.pipeline.${pipelineId}`;
+      const projectRid = `ri.compass.main.project.${projectId}`;
+      const parentRid = pipeline.folder_id
+        ? `ri.compass.main.compass-folder.${pipeline.folder_id}`
+        : projectRid;
+      const projectResource = await trx('resources')
+        .where({ rid: projectRid })
+        .select('space_rid')
+        .first();
+      if (!projectResource?.space_rid) {
+        throw new AppError('Project resource is missing', 409, 'RESOURCE_ORPHANED');
+      }
+
+      await trx.raw(
+        `INSERT INTO resources
+           (rid, service, type, display_name, description,
+            parent_folder_rid, project_rid, space_rid,
+            trash_status, trashed_at, trashed_by, retention_until,
+            created_by, created_at, updated_by, updated_at, legacy_uuid)
+         VALUES (?, 'foundry', 'PIPELINE', ?, ?, ?, ?, ?,
+                 'DIRECTLY_TRASHED', NOW(), ?, NOW() + interval '30 days',
+                 ?, ?, ?, NOW(), ?)
+         ON CONFLICT (rid) DO UPDATE SET
+           display_name = EXCLUDED.display_name,
+           description = EXCLUDED.description,
+           parent_folder_rid = EXCLUDED.parent_folder_rid,
+           project_rid = EXCLUDED.project_rid,
+           space_rid = EXCLUDED.space_rid,
+           trash_status = 'DIRECTLY_TRASHED',
+           trashed_at = NOW(),
+           trashed_by = EXCLUDED.trashed_by,
+           retention_until = NOW() + interval '30 days',
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()`,
+        [
+          pipelineRid,
+          pipeline.name,
+          pipeline.description ?? null,
+          parentRid,
+          projectRid,
+          projectResource.space_rid,
+          actorId,
+          pipeline.created_by ?? actorId,
+          pipeline.created_at,
+          actorId,
+          pipelineId,
+        ],
+      );
+      return true;
+    });
   }
 
   /* ======================================================================= */
@@ -193,6 +271,14 @@ export class PipelineService {
   private async ensurePipelineExists(projectId: string, pipelineId: string) {
     const pipeline = await this.knex('pipelines')
       .where({ id: pipelineId, project_id: projectId })
+      .whereNotExists(function () {
+        this.select('*')
+          .from('resources as pipeline_resource')
+          .whereRaw(
+            "pipeline_resource.rid = 'ri.foundry.main.pipeline.' || pipelines.id::text",
+          )
+          .whereNot('pipeline_resource.trash_status', 'NOT_TRASHED');
+      })
       .first();
     if (!pipeline) {
       throw new AppError('Pipeline not found', 404, 'NOT_FOUND');

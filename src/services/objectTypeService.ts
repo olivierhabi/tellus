@@ -602,6 +602,169 @@ async function changeStatus(
 }
 
 // ---------------------------------------------------------------------------
+// Method 6b: batchModify — bulk metadata modification
+// ---------------------------------------------------------------------------
+
+/** Statuses accepted for bulk modification. Kept in sync with the FE enum. */
+const BATCH_MODIFY_VALID_STATUSES = [
+  "active",
+  "experimental",
+  "endorsed",
+  "deprecated",
+];
+
+interface BatchModifyFields {
+  displayName?: string;
+  description?: string | null;
+  aliases?: string[];
+  pointOfContact?: string | null;
+  contributors?: string[];
+  visibility?: "prominent" | "normal" | "hidden";
+  editsViaActionsOnly?: boolean;
+  icon?: string;
+  iconColor?: string;
+  status?: string;
+}
+
+export interface BatchModifyModification {
+  apiName: string;
+  fields: BatchModifyFields;
+}
+
+export interface BatchModifyItemResult {
+  index: number;
+  apiName: string;
+  success: boolean;
+  updatedFields?: string[];
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface BatchModifyOutcome {
+  results: BatchModifyItemResult[];
+  successCount: number;
+  failedCount: number;
+}
+
+const BATCH_MODIFY_SUPPORTED_FIELDS = new Set([
+  "displayName",
+  "description",
+  "aliases",
+  "pointOfContact",
+  "contributors",
+  "visibility",
+  "editsViaActionsOnly",
+  "icon",
+  "iconColor",
+  "status",
+]);
+
+/**
+ * Validate a single modification entry. Returns the list of validation
+ * error messages (empty when valid) so the route can reject invalid
+ * batches up-front instead of failing per-item at write time.
+ */
+function validateBatchModifyItem(
+  mod: BatchModifyModification,
+): string[] {
+  const errors: string[] = [];
+  if (
+    !mod ||
+    typeof mod !== "object" ||
+    typeof mod.apiName !== "string" ||
+    mod.apiName.trim().length === 0
+  ) {
+    return ["Each modification must include a non-empty 'apiName'."];
+  }
+  if (!mod.fields || typeof mod.fields !== "object") {
+    return [`Modification '${mod.apiName}' must include a 'fields' object.`];
+  }
+  const fieldNames = Object.keys(mod.fields);
+  if (fieldNames.length === 0) {
+    errors.push(`Modification '${mod.apiName}' must specify at least one field.`);
+  }
+  for (const name of fieldNames) {
+    if (!BATCH_MODIFY_SUPPORTED_FIELDS.has(name)) {
+      errors.push(
+        `Modification '${mod.apiName}' contains unsupported field '${name}'. Supported fields: ${[...BATCH_MODIFY_SUPPORTED_FIELDS].join(", ")}.`,
+      );
+    }
+  }
+  if (mod.fields.status !== undefined && !BATCH_MODIFY_VALID_STATUSES.includes(mod.fields.status)) {
+    errors.push(
+      `Invalid status '${mod.fields.status}' for '${mod.apiName}'. Must be one of: ${BATCH_MODIFY_VALID_STATUSES.join(", ")}.`,
+    );
+  }
+  if (
+    mod.fields.visibility !== undefined &&
+    !["prominent", "normal", "hidden"].includes(mod.fields.visibility)
+  ) {
+    errors.push(
+      `Invalid visibility '${mod.fields.visibility}' for '${mod.apiName}'. Must be one of: prominent, normal, hidden.`,
+    );
+  }
+  if (mod.fields.displayName !== undefined && String(mod.fields.displayName).trim().length === 0) {
+    errors.push(`'displayName' for '${mod.apiName}' cannot be empty.`);
+  }
+  return errors;
+}
+
+/**
+ * Apply metadata modifications to many object types.
+ *
+ * Mirrors Foundry's Ontology Manager "modify object types" behaviour:
+ * each item is applied independently and sequentially, so a failure on
+ * one type never blocks or rolls back the others. Callers receive a
+ * per-item result array so the UI can render partial-failure detail.
+ */
+async function batchModify(
+  ontologyId: string,
+  modifications: BatchModifyModification[],
+): Promise<BatchModifyOutcome> {
+  // Up-front validation pass — an entire malformed batch is rejected
+  // before any write happens (fail-fast, no partial application).
+  const validationErrors = modifications.flatMap((mod, index) =>
+    validateBatchModifyItem(mod).map((message) => ({ index, message })),
+  );
+  if (validationErrors.length > 0) {
+    throw appError("VALIDATION_FAILED", "Batch modify request is invalid.", {
+      errors: validationErrors,
+    });
+  }
+
+  const results: BatchModifyItemResult[] = [];
+  for (let index = 0; index < modifications.length; index += 1) {
+    const { apiName, fields } = modifications[index];
+    try {
+      await update(ontologyId, apiName, fields as UpdateInput);
+      results.push({
+        index,
+        apiName,
+        success: true,
+        updatedFields: Object.keys(fields),
+      });
+    } catch (err: any) {
+      results.push({
+        index,
+        apiName,
+        success: false,
+        errorCode:
+          typeof err?.code === "string" ? err.code : "INTERNAL_ERROR",
+        errorMessage:
+          err instanceof Error ? err.message : "Unknown failure while modifying object type.",
+      });
+    }
+  }
+
+  const successCount = results.filter((r) => r.success).length;
+  return {
+    results,
+    successCount,
+    failedCount: results.length - successCount,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Method 7: clone
 // ---------------------------------------------------------------------------
 
@@ -1620,6 +1783,7 @@ const objectTypeService = {
   getById,
   listByOntology,
   update,
+  batchModify,
   delete: remove,
   changeStatus,
   clone,

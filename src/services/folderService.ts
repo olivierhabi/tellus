@@ -189,6 +189,14 @@ export class FolderService {
         .select('id', 'name', 'description', 'pipeline_type', 'compute_type',
                 'status', 'created_by', 'created_at', 'updated_at')
         .where({ folder_id: folderId, project_id: projectId })
+        .whereNotExists(function () {
+          this.select('*')
+            .from('resources as pipeline_resource')
+            .whereRaw(
+              "pipeline_resource.rid = 'ri.foundry.main.pipeline.' || pipelines.id::text",
+            )
+            .whereNot('pipeline_resource.trash_status', 'NOT_TRASHED');
+        })
         .orderBy('name', 'asc'),
     ]);
 

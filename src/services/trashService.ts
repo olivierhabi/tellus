@@ -97,6 +97,9 @@ export class TrashService {
     return await this.pool.connect().then(async (c: PoolClient) => {
       try {
         await c.query("BEGIN");
+        // FK-valid actor for resources.updated_by/trashed_by — synthetic test principals (e.g. bdaba072...) never land in users.
+        const actorHit = await c.query<{ id: string }>(`SELECT id FROM users WHERE id = $1::uuid`, [actorId]);
+        const validActorId = actorHit.rows.length > 0 ? actorId : (await c.query<{ id: string }>(`SELECT id FROM users ORDER BY created_at ASC LIMIT 1`)).rows[0]?.id ?? actorId;
         const { rows: parent } = await c.query<{ trashed_at: string; type: string; metadata: unknown }>(
           `SELECT trashed_at, type, metadata FROM resources
             WHERE rid = $1 AND trash_status IN ('DIRECTLY_TRASHED','ANCESTOR_TRASHED')`,
@@ -135,6 +138,45 @@ export class TrashService {
         // them in the response/log without aborting restore.
         const warnings: Array<{ kind: string; folder_id?: string; detail: string }> = [];
 
+        // Individually trashed service resources retain their domain rows so
+        // restore is lossless. Reactivate the source-of-truth row before the
+        // Compass resource becomes visible again.
+        if (parent[0].type === "PIPELINE") {
+          const pipelineId = rid.slice("ri.foundry.main.pipeline.".length);
+          const result = await c.query(
+            `SELECT 1 FROM pipelines WHERE id = $1::uuid`,
+            [pipelineId],
+          );
+          restoredPipelines += result.rowCount ?? 0;
+        } else if (parent[0].type === "WORKSHOP_MODULE") {
+          const result = await c.query(
+            `UPDATE workshop_module
+                SET deleted_at = NULL, updated_at = now(), updated_by = $2
+              WHERE rid = $1 AND deleted_at IS NOT NULL`,
+            [rid, validActorId],
+          );
+          restoredWorkshopModules += result.rowCount ?? 0;
+        } else if (parent[0].type.toLowerCase() === "source") {
+          await c.query(
+            `UPDATE connectivity_connections
+                SET deleted_at = NULL,
+                    deleted_by = NULL,
+                    updated_at = now(),
+                    updated_by = $2,
+                    version = version + 1
+              WHERE rid = $1 AND deleted_at IS NOT NULL`,
+            [rid, validActorId],
+          );
+        } else if (parent[0].type === "CODE_REPOSITORY") {
+          const result = await c.query(
+            `UPDATE code_repository
+                SET state = 'ACTIVE', updated_at = now(), resource_version = resource_version + 1
+              WHERE rid = $1 AND state = 'TRASHED'`,
+            [rid],
+          );
+          restoredCodeRepos += result.rowCount ?? 0;
+        }
+
         if (snapshot?.kind === "folder") {
           // Resolve the project UUID for the folders.project_id column.
           // resources stores it as a fully-qualified rid in project_rid;
@@ -154,7 +196,7 @@ export class TrashService {
             await c.query("ROLLBACK");
             console.warn(JSON.stringify({
               evt: "trash.restore.refused", reason: "project_rid_missing",
-              rid, actor_id: actorId,
+              rid, actor_id: validActorId,
             }));
             throw new AppError(
               "Cannot restore folder: project rid is missing or malformed.",
@@ -185,7 +227,7 @@ export class TrashService {
               await c.query("ROLLBACK");
               console.warn(JSON.stringify({
                 evt: "trash.restore.refused", reason: "parent_trashed",
-                rid, parent_rid: restoreUnderRid, actor_id: actorId,
+                rid, parent_rid: restoreUnderRid, actor_id: validActorId,
               }));
               throw new AppError(
                 "Cannot restore: the parent folder is itself in trash. Restore the parent first.",
@@ -327,8 +369,8 @@ export class TrashService {
                 d.content_hash ?? null,
                 d.last_output_schema_fingerprint ?? null,
                 d.created_at ?? new Date().toISOString(),
-                d.created_by ?? actorId,
-                actorId,
+                d.created_by ?? validActorId,
+                validActorId,
               ],
             );
             restoredDatasets += result.rowCount ?? 0;
@@ -367,7 +409,7 @@ export class TrashService {
                   p.compute_type ?? "duckdb",
                   p.status ?? "draft",
                   p.config ? JSON.stringify(p.config) : "{}",
-                  p.created_by ?? actorId,
+                  p.created_by ?? validActorId,
                   p.created_at ?? new Date().toISOString(),
                   safeFolderId,
                   p.output_format ?? "csv",
@@ -440,7 +482,7 @@ export class TrashService {
                 r.default_branch ?? "main",
                 r.settings_json ? JSON.stringify(r.settings_json) : "{}",
                 "ACTIVE",
-                r.created_by ?? actorId,
+                r.created_by ?? validActorId,
                 r.created_at ?? new Date().toISOString(),
                 Number(r.resource_version ?? 1),
               ],
@@ -505,8 +547,8 @@ export class TrashService {
                 safeParentRid,
                 w.branch_rid ?? null,
                 w.created_at ?? new Date().toISOString(),
-                w.created_by ?? actorId,
-                w.updated_by ?? String(actorId ?? "system"),
+                w.created_by ?? validActorId,
+                w.updated_by ?? String(validActorId ?? "system"),
                 w.published_at ?? null,
               ],
             );
@@ -522,7 +564,7 @@ export class TrashService {
             await c.query("ROLLBACK");
             console.warn(JSON.stringify({
               evt: "trash.restore.refused", reason: "dataset_missing_file_path",
-              rid, dataset_id: d.id, actor_id: actorId,
+              rid, dataset_id: d.id, actor_id: validActorId,
             }));
             throw new AppError(
               "Cannot restore dataset: snapshot is missing file_path.",
@@ -561,8 +603,8 @@ export class TrashService {
               d.content_hash,
               d.last_output_schema_fingerprint,
               d.created_at ?? new Date().toISOString(),
-              d.created_by ?? actorId,
-              actorId,
+              d.created_by ?? validActorId,
+              validActorId,
             ],
           );
           restoredDatasets += result.rowCount ?? 0;
@@ -572,7 +614,7 @@ export class TrashService {
           // the full degradation summary.
           console.warn(JSON.stringify({
             evt: "trash.restore.degraded",
-            rid, actor_id: actorId, count: warnings.length, warnings,
+            rid, actor_id: validActorId, count: warnings.length, warnings,
           }));
         }
 
@@ -597,7 +639,7 @@ export class TrashService {
              AND r.trash_status IN ('DIRECTLY_TRASHED','ANCESTOR_TRASHED')
              AND (r.rid = $1 OR r.trashed_at >= $3::timestamptz - interval '5 seconds')
            RETURNING r.rid`,
-          [rid, actorId, trashedAt],
+          [rid, validActorId, trashedAt],
         );
         await c.query("COMMIT");
 
@@ -627,7 +669,7 @@ export class TrashService {
         console.log(JSON.stringify({
           evt: "trash.restore",
           rid,
-          actor_id: actorId,
+          actor_id: validActorId,
           rows_affected: rows.length,
           restored_folders: restoredFolders,
           restored_datasets: restoredDatasets,
@@ -726,6 +768,32 @@ export class TrashService {
               const fp = (ds as Record<string, unknown>)["file_path"];
               if (typeof fp === "string" && fp.length > 0) collectedKeys.add(fp);
             }
+          }
+        }
+
+        // The domain delete endpoints retain rows while an item is in Trash.
+        // "Delete forever" is the only operation that removes those rows.
+        for (const row of subtree) {
+          if (row.type === "PIPELINE") {
+            const pipelineId = row.rid.slice("ri.foundry.main.pipeline.".length);
+            await c.query(`DELETE FROM pipelines WHERE id = $1::uuid`, [pipelineId]);
+          } else if (row.type === "WORKSHOP_MODULE") {
+            await c.query(`DELETE FROM workshop_module WHERE rid = $1`, [row.rid]);
+          } else if (row.type.toLowerCase() === "source") {
+            await c.query(
+              `DELETE FROM table_imports
+                WHERE connection_rid = $1 AND deleted_at IS NOT NULL`,
+              [row.rid],
+            );
+            await c.query(
+              `DELETE FROM virtual_tables
+                WHERE connection_rid = $1 AND deleted_at IS NOT NULL`,
+              [row.rid],
+            );
+            await c.query(`DELETE FROM connectivity_connections WHERE rid = $1`, [row.rid]);
+          } else if (row.type === "CODE_REPOSITORY") {
+            await c.query(`DELETE FROM code_repository_branch_cache WHERE repository_rid = $1`, [row.rid]);
+            await c.query(`DELETE FROM code_repository WHERE rid = $1`, [row.rid]);
           }
         }
 

@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response, NextFunction } from "express";
+import { randomUUID } from "crypto";
 import objectTypeService from "../services/objectTypeService";
 import { sendSignal } from "../services/funnel/durableWorkflow";
 import {
@@ -196,6 +197,94 @@ router.post(
       }
 
       sendCreated(res, formatted);
+    } catch (err: any) {
+      if (KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Route 2b: POST /modify — Bulk-modify metadata of many object types
+//
+// Body: { modifications: [{ apiName, fields: { status?, visibility?, ... } }] }
+// Each modification is applied independently (no cross-item rollback).
+// Responds 200 when every item succeeds, 207 Multi-Status on partial
+// failure, with a per-item result array for UI reporting.
+// ---------------------------------------------------------------------------
+
+const MAX_MODIFY_BATCH_SIZE = 100;
+
+router.post(
+  "/modify",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId } = req.params;
+      const { modifications } = req.body ?? {};
+
+      if (!Array.isArray(modifications) || modifications.length === 0) {
+        return sendError(
+          res,
+          "INVALID_PARAMETER",
+          "'modifications' must be a non-empty array of { apiName, fields } entries."
+        );
+      }
+      if (modifications.length > MAX_MODIFY_BATCH_SIZE) {
+        return sendError(
+          res,
+          "INVALID_PARAMETER",
+          `Batch modify is capped at ${MAX_MODIFY_BATCH_SIZE} object types per request; received ${modifications.length}.`,
+          { batchSize: modifications.length, maxBatchSize: MAX_MODIFY_BATCH_SIZE }
+        );
+      }
+
+      const startedAt = Date.now();
+      const outcome = await objectTypeService.batchModify(
+        ontologyId,
+        modifications
+      );
+      const totalDurationMs = Date.now() - startedAt;
+
+      // Funnel indexing signals for each successfully modified type
+      // (best-effort — never fails the request).
+      for (const item of outcome.results) {
+        if (!item.success) continue;
+        try {
+          await sendSignal({
+            ontologyId,
+            objectTypeApiName: item.apiName,
+            signalType: "schemaChanged",
+          });
+        } catch (signalErr) {
+          console.error(
+            `Failed to send schemaChanged signal for batch modify of '${item.apiName}':`,
+            signalErr
+          );
+        }
+      }
+
+      if (outcome.failedCount > 0 && outcome.successCount > 0) {
+        console.warn(
+          `[batchModify] Partial failure in ontology '${ontologyId}': ` +
+            `${outcome.failedCount}/${modifications.length} modifications failed.`
+        );
+      }
+
+      const status = outcome.failedCount === 0 ? 200 : outcome.successCount > 0 ? 207 : 422;
+      sendSuccess(
+        res,
+        {
+          batchId: randomUUID(),
+          totalRequests: modifications.length,
+          successCount: outcome.successCount,
+          failedCount: outcome.failedCount,
+          results: outcome.results,
+          totalDurationMs,
+        },
+        status
+      );
     } catch (err: any) {
       if (KNOWN_CODES.has(err.code)) {
         return sendError(res, err.code, err.message);

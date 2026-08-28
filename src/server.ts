@@ -55,6 +55,7 @@ import ontologyRouter from "./routes/ontology";
 import objectTypeRouter from "./routes/objectTypes";
 import propertyRouter from "./routes/properties";
 import branchesRouter from "./routes/branches";
+import ontologyWorkingStateRouter from "./routes/ontologyWorkingState";
 import groupsRouter from "./routes/groups";
 import functionsRouter from "./routes/functions";
 import favoritesRouter from "./routes/favorites";
@@ -1289,6 +1290,7 @@ app.use(healthRouter);
 // saved explorations, exports, summary, geo, comparisons, schema migrations.
 // ---------------------------------------------------------------------------
 app.use("/api/v1/ontology/:ontologyId/branches", branchesRouter);
+app.use("/api/v1/ontology/:ontologyId/working-state", ontologyWorkingStateRouter);
 app.use("/api/v1/ontology/:ontologyId/groups", groupsRouter);
 app.use("/api/v1/ontology/:ontologyId/functions", functionsRouter);
 app.use("/api/v1/ontology/:ontologyId/explorations", explorationsRouter);

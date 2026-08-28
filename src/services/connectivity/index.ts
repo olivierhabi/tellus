@@ -326,20 +326,43 @@ export function createConnectivityRouter(): Router {
 
 /**
  * Start background work:
- *   - B1: Compass outbox poller.
+ *   - B1: Compass outbox poller (with self-heal for FK dead-letters & missing resources).
  *   - B2: credential rotation worker.
  *   - B3: connection health prober.
  *   - B5: table-import scheduler.
  *   - F2: webhook execution reaper (orphan recovery).
  * Safe to call multiple times.
  */
-export function initConnectivity(): void {
+export async function initConnectivity(): Promise<void> {
   // Fail closed BEFORE any worker starts or any socket can be opened: a dev
   // CONNECTIVITY_EGRESS_ALLOW_RESERVED that reached production has disabled the
   // SSRF boundary, and every probe would still look healthy. Throws.
   assertConnectivityPosture();
 
   if (process.env.TELLUS_DISABLE_CONNECTIVITY_POLLER !== "1") {
+    // Senior-grade self-heal: reset FK dead-letters and backfill missing
+    // `resources` rows (the `testing-01` trash bug).  Fire-and-forget
+    // before the poller starts so the first tick sees a clean queue.
+    // Failures are logged, never block the poller.
+    try {
+      const { pool: dbPool } = await import("../../db");
+      const client = await dbPool.connect();
+      try {
+        const compassClient = await import("./clients/compass.client");
+        await compassClient.ensureSystemUser(client);
+        await compassClient.repairMissingResources(client);
+      } finally {
+        client.release();
+      }
+      await outbox.resetDeadLetters();
+    } catch (e) {
+      console.warn(
+        JSON.stringify({
+          evt: "connectivity.init.self_heal_failed",
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
     outbox.startPoller();
   }
   // Focused, isolated QA browser campaigns exercise the request-serving

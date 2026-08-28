@@ -249,6 +249,37 @@ export function stopPoller(): void {
   }
 }
 
+/**
+ * Self-heal dead-letter outbox rows that hit MAX_ATTEMPTS due to
+ * FK violations (the `resources_created_by_fkey` bug before the
+ * compass.client.ts fallback).  Resetting them to attempts=0 makes
+ * the poller retry with the fixed code.  Idempotent and safe to run
+ * on every boot.
+ */
+export async function resetDeadLetters(): Promise<number> {
+  const result = await pool.query(
+    `UPDATE connectivity_outbox
+        SET attempts = 0,
+            last_error = NULL,
+            claimed_at = NULL,
+            claimed_by = NULL
+      WHERE delivered_at IS NULL
+        AND attempts >= $1
+      RETURNING id`,
+    [MAX_ATTEMPTS],
+  );
+  const count = result.rowCount ?? 0;
+  if (count > 0) {
+    console.warn(
+      JSON.stringify({
+        evt: "connectivity_outbox.reset_dead_letters",
+        count,
+      }),
+    );
+  }
+  return count;
+}
+
 /** Test helper — drains all pending rows synchronously. */
 export async function drainForTest(
   workerId: string = "test-drain",

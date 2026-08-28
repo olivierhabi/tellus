@@ -431,6 +431,64 @@ export async function deleteModule(
         WHERE rid = $1`,
       [rid, actor.userId],
     );
+
+    // Mirror the soft-deleted module into Compass Trash. Workshop stores
+    // legacy `ri.compass.main.folder.*` parents, while Compass resources use
+    // `compass-folder`; resolve through the folders table to keep both root
+    // and nested modules recoverable.
+    const parentSegments = current.parent_folder_rid.split('.');
+    const parentUuid = parentSegments[parentSegments.length - 1] ?? '';
+    const folderResult = await client.query<{ project_id: string }>(
+      `SELECT project_id FROM folders WHERE id = $1::uuid`,
+      [parentUuid],
+    );
+    const projectId = folderResult.rows[0]?.project_id ?? parentUuid;
+    const projectRid = `ri.compass.main.project.${projectId}`;
+    const canonicalParentRid = folderResult.rows.length > 0
+      ? `ri.compass.main.compass-folder.${parentUuid}`
+      : projectRid;
+    const projectResource = await client.query<{ space_rid: string }>(
+      `SELECT space_rid FROM resources WHERE rid = $1`,
+      [projectRid],
+    );
+    // Standalone Workshop installations/tests may not have Compass enabled.
+    // In a project workspace the project resource always exists, and the
+    // module is mirrored into its Trash atomically with the soft delete.
+    if (projectResource.rows[0]?.space_rid) {
+      await client.query(
+        `INSERT INTO resources
+           (rid, service, type, display_name, description,
+            parent_folder_rid, project_rid, space_rid,
+            trash_status, trashed_at, trashed_by, retention_until,
+            created_by, created_at, updated_by, updated_at)
+         VALUES ($1, 'workshop', 'WORKSHOP_MODULE', $2, $3,
+                 $4, $5, $6,
+                 'DIRECTLY_TRASHED', now(), $7::uuid, now() + interval '30 days',
+                 $7::uuid, $8, $7::uuid, now())
+         ON CONFLICT (rid) DO UPDATE SET
+           display_name = EXCLUDED.display_name,
+           description = EXCLUDED.description,
+           parent_folder_rid = EXCLUDED.parent_folder_rid,
+           project_rid = EXCLUDED.project_rid,
+           space_rid = EXCLUDED.space_rid,
+           trash_status = 'DIRECTLY_TRASHED',
+           trashed_at = now(),
+           trashed_by = EXCLUDED.trashed_by,
+           retention_until = now() + interval '30 days',
+           updated_by = EXCLUDED.updated_by,
+           updated_at = now()`,
+        [
+          rid,
+          current.display_name,
+          current.description,
+          canonicalParentRid,
+          projectRid,
+          projectResource.rows[0].space_rid,
+          actor.userId,
+          current.created_at,
+        ],
+      );
+    }
     return { deleted: true };
     });
     stopDelete("success");

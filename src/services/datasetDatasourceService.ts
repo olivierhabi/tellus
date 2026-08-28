@@ -474,7 +474,7 @@ export async function registerWithFoundryDataset(
   // writes to, so any file the user has uploaded through tellus-fe is
   // a valid candidate.
   const fdResult = await query(
-    "SELECT id, name, file_path, original_filename, row_count FROM foundry_datasets WHERE id = $1",
+    "SELECT id, name, file_path, original_filename, row_count, status, schema_info FROM foundry_datasets WHERE id = $1",
     [foundryDatasetId],
   );
   if (fdResult.rows.length === 0) {
@@ -483,18 +483,114 @@ export async function registerWithFoundryDataset(
       `Foundry dataset '${foundryDatasetId}' was not found.`,
     );
   }
-  const fd = fdResult.rows[0];
+  const fd = fdResult.rows[0] as {
+    id: string;
+    name: string;
+    file_path: string | null;
+    original_filename: string | null;
+    row_count: number | null;
+    status: string;
+    schema_info: any;
+  };
+
+  // Production hardening: never write a UUID-only backing_datasource that
+  // can never HEAD-resolve. The 22001 content_hash bug previously left
+  // datasets in `error` with a valid S3 object but a truncated row, and
+  // the fallback `tag`-only path silently created a corrupt mapping that
+  // turned a schema error into a funnel HEAD failure. Fail loudly instead.
+  if (fd.status !== "ready") {
+    const detail =
+      (fd.schema_info as any)?.error ??
+      (fd.schema_info as any)?.ingestionValidation?.message ??
+      (fd.schema_info as any)?.ingestionValidation?.errorCode ??
+      "unknown";
+    throw appError(
+      "DATASET_NOT_READY",
+      `Foundry dataset '${foundryDatasetId}' is not ready (status=${fd.status}). ` +
+        `Fix ingestion first (detail: ${detail}). Refusing to create backing_datasource with an unready source.`,
+    );
+  }
+  if (!fd.file_path || typeof fd.file_path !== "string" || fd.file_path.trim().length === 0) {
+    throw appError(
+      "DATASET_FILE_PATH_MISSING",
+      `Foundry dataset '${foundryDatasetId}' has no file_path — cannot build backing_datasource key. Re-ingest the dataset.`,
+    );
+  }
+  // A valid S3 key always contains a '/' (project/folder/object). A bare
+  // UUID (e.g. `effc028c-…`) is the pre-fix fallback and must never be
+  // persisted again.
+  if (!fd.file_path.includes("/")) {
+    throw appError(
+      "DATASET_FILE_PATH_INVALID",
+      `Foundry dataset '${foundryDatasetId}' file_path '${fd.file_path}' is not a valid S3 key (missing '/'). ` +
+        `Refusing to write UUID-only backing_datasource that would fail HEAD. Fix the dataset's file_path.`,
+    );
+  }
 
   // ----- Foundry columns ----------------------------------------------
-  const fcResult = await query(
+  let fcResult = await query(
     "SELECT column_name FROM dataset_columns WHERE dataset_id = $1 ORDER BY ordinal_position ASC",
     [foundryDatasetId],
   );
+
+  // ----- Iceberg fallback ---------------------------------------------
+  // Iceberg sync outputs historically had no persisted schema scan: their
+  // registry row is created by the table-import flow and nothing populated
+  // `dataset_columns` (the CSV parse worker only handles uploaded S3
+  // objects). Meanwhile the wizard's datasource picker reads through the
+  // live-preview fallback, so users SAW columns and legitimately selected
+  // this dataset — then registration failed with "has no columns yet",
+  // pointing at a scan worker that would never run.
+  //
+  // Before giving up on an iceberg-backed dataset, locate its producing
+  // table-import and run the same bounded schema scan the Dataset Preview
+  // uses, persisting the result so this (and any later consumer) finds a
+  // real schema. Only a genuinely unbuilt/unreadable table still errors.
+  if (
+    fcResult.rows.length === 0 &&
+    typeof fd.file_path === "string" &&
+    fd.file_path.startsWith("iceberg://")
+  ) {
+    const imp = await query(
+      `SELECT ti.config AS import_config, COALESCE(c.tenant, 'default') AS tenant
+         FROM table_imports ti
+         LEFT JOIN connectivity_connections c ON c.rid = ti.connection_rid
+        WHERE ti.dataset_rid = $1 AND ti.deleted_at IS NULL
+        ORDER BY ti.created_at DESC
+        LIMIT 1`,
+      [`ri.foundry.main.dataset.${foundryDatasetId}`],
+    );
+    const cfg = imp.rows[0]?.import_config;
+    if (cfg && cfg.schema && (cfg.targetTable || cfg.table)) {
+      const { persistSyncedSchema } = await import(
+        "./datasets/synced-dataset-registry"
+      );
+      const persisted = await persistSyncedSchema(
+        foundryDatasetId,
+        {
+          schema: String(cfg.schema),
+          table: String(cfg.targetTable ?? cfg.table),
+          warehouseRoot: cfg.warehouseRoot ? String(cfg.warehouseRoot) : undefined,
+        },
+        imp.rows[0].tenant ?? "default",
+      );
+      if (persisted > 0) {
+        fcResult = await query(
+          "SELECT column_name FROM dataset_columns WHERE dataset_id = $1 ORDER BY ordinal_position ASC",
+          [foundryDatasetId],
+        );
+      }
+    }
+  }
+
   if (fcResult.rows.length === 0) {
+    const iceberg = typeof fd.file_path === "string" && fd.file_path.startsWith("iceberg://");
     throw appError(
       "DATASET_EMPTY",
-      `Foundry dataset '${foundryDatasetId}' has no columns yet. ` +
-        `Wait for the scan worker to finish and try again.`,
+      iceberg
+        ? `Foundry dataset '${fd.name || foundryDatasetId}' has not been built yet — it has no data or columns. Run its producing sync first.`
+        : `Foundry dataset '${foundryDatasetId}' has no columns yet. ` +
+            `Wait for the scan worker to finish and try again.`,
     );
   }
   // Normalise BOM (U+FEFF) on both sides before comparison. Older
@@ -555,9 +651,9 @@ export async function registerWithFoundryDataset(
   // re-running the wizard after any partial failure never collides
   // with a dead row from a previous attempt.
   const tag = `foundry-dataset:${foundryDatasetId}#object-type:${objectTypeId}`;
-  const filePathValue = fd.file_path
-    ? `${fd.file_path}#${tag}`
-    : tag;
+  // Hardened: fd.file_path is now guaranteed valid (status=ready + contains '/');
+  // never fall back to bare UUID tag.
+  const filePathValue = `${fd.file_path}#${tag}`;
   const fileFormat = inferFoundryFileFormat(fd.original_filename || fd.file_path || "");
 
   let insertResult;

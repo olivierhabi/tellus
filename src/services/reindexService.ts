@@ -130,6 +130,56 @@ async function readFoundryBridgedFile(
     );
   }
 
+  // Foundry-bridged ICEBERG dataset: the "S3 key" is a synthetic
+  // `iceberg://<warehouse>/<namespace>/<table>` URI, not a MinIO object.
+  // Stream every row of the table's current snapshot through
+  // `iterSyncedSnapshotRows` instead of object storage. Config resolution
+  // prefers the producing `table_imports` row; falls back to parsing the
+  // URI so reindexing survives a deleted sync record.
+  if (s3Key.startsWith("iceberg://")) {
+    const uuidMatch = rawFilePath.match(/#foundry-dataset:([0-9a-f-]{36})/i);
+    let config: { schema: string; table: string; warehouseRoot?: string } | null = null;
+    let tenant = "default";
+    if (uuidMatch) {
+      try {
+        const imp = await query(
+          `SELECT ti.config AS import_config, COALESCE(c.tenant, 'default') AS tenant
+             FROM table_imports ti
+             LEFT JOIN connectivity_connections c ON c.rid = ti.connection_rid
+            WHERE ti.dataset_rid = $1 AND ti.deleted_at IS NULL
+            ORDER BY ti.created_at DESC
+            LIMIT 1`,
+          [`ri.foundry.main.dataset.${uuidMatch[1]}`],
+        );
+        const cfg = imp.rows[0]?.import_config;
+        if (cfg && cfg.schema && (cfg.targetTable ?? cfg.table)) {
+          config = {
+            schema: String(cfg.schema),
+            table: String(cfg.targetTable ?? cfg.table),
+            warehouseRoot: cfg.warehouseRoot ? String(cfg.warehouseRoot) : undefined,
+          };
+          tenant = imp.rows[0].tenant ?? "default";
+        }
+      } catch {
+        /* fall through to URI parsing */
+      }
+    }
+    if (!config) {
+      const parts = s3Key.replace(/^iceberg:\/\//, "").replace(/\/+$/, "").split("/").filter(Boolean);
+      if (parts.length >= 3) {
+        config = { schema: parts[parts.length - 2], table: parts[parts.length - 1] };
+        tenant = parts[0];
+      } else {
+        throw new Error(
+          `Foundry-bridged iceberg source '${s3Key}' could not be resolved to a ` +
+            `(warehouse, namespace, table) identity`,
+        );
+      }
+    }
+    const { iterSyncedSnapshotRows } = await import("./datasets/synced-dataset-reader");
+    return { rows: iterSyncedSnapshotRows(config, tenant) };
+  }
+
   if (format === "csv" || format === "tsv") {
     // Stream the S3 object straight through csv-parse — never
     // materializing the whole file as a Buffer/string. The legacy path

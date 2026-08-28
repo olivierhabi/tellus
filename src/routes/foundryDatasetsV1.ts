@@ -46,6 +46,37 @@ import {
 import { readSyncedPreview } from "../services/datasets/synced-dataset-reader";
 import { readUploadedPreview } from "../services/datasets/uploaded-dataset-reader";
 import { resolveDatasetColumns } from "../services/datasets/datasetColumns";
+import { pool } from "../db";
+
+/** Bare registry UUID form of a dataset reference (no RID wrapper). */
+const BARE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Claim rule for the preview route.
+ *
+ * Canonical Foundry RIDs are always claimed. A bare UUID is claimed ONLY
+ * when it resolves to an Iceberg-backed `foundry_datasets` row: those
+ * datasets have a synthetic `iceberg://…` file_path that the legacy
+ * object-storage preview (the fall-through handler) cannot read — it
+ * fails with DATASOURCE_FILE_NOT_FOUND. Upload-backed bare UUIDs keep
+ * falling through to the legacy preview so its established response
+ * shape is preserved for existing consumers (pipeline builder, object
+ * explorer).
+ */
+async function claimPreviewTarget(rawId: string): Promise<string | null> {
+  if (isFoundryDatasetRid(rawId)) return rawId;
+  if (!BARE_UUID_RE.test(rawId)) return null;
+  const r = await pool.query<{ format: string | null; file_path: string | null }>(
+    "SELECT format, file_path FROM foundry_datasets WHERE id = $1",
+    [rawId],
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  const icebergBacked =
+    row.format === "iceberg" ||
+    (typeof row.file_path === "string" && row.file_path.startsWith("iceberg://"));
+  return icebergBacked ? `ri.foundry.main.dataset.${rawId}` : null;
+}
 
 export const foundryDatasetsV1Router = Router();
 
@@ -255,8 +286,16 @@ foundryDatasetsV1Router.get(
 foundryDatasetsV1Router.get(
   "/:datasetRid/preview",
   async (req: Request, res: Response, next: NextFunction) => {
-    const datasetRid = decodeURIComponent(req.params.datasetRid);
-    if (!isFoundryDatasetRid(datasetRid)) {
+    const rawId = decodeURIComponent(req.params.datasetRid);
+    // Canonical RIDs always claim the route; bare UUIDs only when they
+    // point at an Iceberg-backed dataset (see claimPreviewTarget).
+    let datasetRid: string | null = null;
+    try {
+      datasetRid = await claimPreviewTarget(rawId);
+    } catch {
+      datasetRid = null; // registry probe failed — let legacy handlers try
+    }
+    if (!datasetRid) {
       next();
       return;
     }

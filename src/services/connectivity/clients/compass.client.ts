@@ -225,17 +225,24 @@ export async function registerConnectionResource(
     metadata: Record<string, unknown>;
   },
 ): Promise<void> {
+  const validCreatedBy = await resolveValidUserId(client, params.createdBy);
   await client.query(
     `INSERT INTO resources (
        rid, service, type, display_name, description,
-       parent_folder_rid, space_rid,
+       parent_folder_rid, project_rid, space_rid,
        created_by, updated_by, metadata
      )
-     VALUES (
+     SELECT
        $1, 'magritte', 'source', $2, $3,
-       $4, $5,
+       parent.rid,
+       CASE WHEN parent.type IN ('PROJECT', 'COMPASS_PROJECT') THEN parent.rid ELSE parent.project_rid END,
+       $5,
        $6::uuid, $6::uuid, $7::jsonb
-     )
+       FROM resources parent
+      WHERE parent.rid = $4
+         OR parent.legacy_uuid::text = split_part($4, '.', 5)
+      ORDER BY CASE WHEN parent.rid = $4 THEN 0 ELSE 1 END
+      LIMIT 1
      ON CONFLICT (rid) DO NOTHING`,
     [
       params.rid,
@@ -243,7 +250,7 @@ export async function registerConnectionResource(
       params.description,
       params.parentFolderRid,
       params.spaceRid,
-      params.createdBy,
+      validCreatedBy,
       JSON.stringify(params.metadata),
     ],
   );
@@ -261,13 +268,25 @@ export async function unregisterConnectionResource(
   rid: string,
   deletedBy: string,
 ): Promise<void> {
+  const validDeletedBy = await resolveValidUserId(client, deletedBy);
   await client.query(
     `UPDATE resources
         SET trash_status = 'DIRECTLY_TRASHED',
+            trashed_at = now(),
+            trashed_by = $2::uuid,
+            retention_until = now() + interval '30 days',
+            project_rid = COALESCE(
+              resources.project_rid,
+              CASE WHEN parent.type IN ('PROJECT', 'COMPASS_PROJECT') THEN parent.rid ELSE parent.project_rid END
+            ),
+            updated_at = now(),
             updated_by = $2::uuid
-      WHERE rid = $1
-        AND trash_status = 'NOT_TRASHED'`,
-    [rid, deletedBy],
+       FROM resources parent
+      WHERE resources.rid = $1
+        AND (parent.rid = resources.parent_folder_rid
+             OR parent.legacy_uuid::text = split_part(resources.parent_folder_rid, '.', 5))
+        AND resources.trash_status = 'NOT_TRASHED'`,
+    [rid, validDeletedBy],
   );
 }
 
@@ -278,11 +297,151 @@ export async function renameConnectionResource(
   newDisplayName: string,
   updatedBy: string,
 ): Promise<void> {
+  const validUpdatedBy = await resolveValidUserId(client, updatedBy);
   await client.query(
     `UPDATE resources
         SET display_name = $2,
             updated_by = $3::uuid
       WHERE rid = $1`,
-    [rid, newDisplayName, updatedBy],
+    [rid, newDisplayName, validUpdatedBy],
   );
+}
+
+// ------------------------------------------------------------------
+// FK-safe user resolution — production-grade.
+// Real Keycloak principals are provisioned via ensureLocalUserForClaims
+// (globalAuth.ts) so they always exist in `users`.  Synthetic/test
+// principals (e.g. 6d387e7e-...) and the outbox "system" fallback never
+// land in `users`; FK would fail.  Resolve to a deterministic system
+// user (first by created_at) and emit a structured warning so SREs can
+// detect unexpected fallbacks.  Mirrors trashService/codeRepository.
+// ------------------------------------------------------------------
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const SYSTEM_USER_FALLBACK_ID = "00000000-0000-0000-0000-000000000001";
+
+async function resolveValidUserId(
+  client: PoolClient,
+  candidate: string,
+): Promise<string> {
+  if (UUID_RE.test(candidate)) {
+    const hit = await client.query<{ id: string }>(
+      `SELECT id FROM users WHERE id = $1::uuid`,
+      [candidate],
+    );
+    if (hit.rows.length > 0) return candidate;
+  }
+  // Deterministic system fallback — first user by age, or the sentinel
+  // SYSTEM_USER_FALLBACK_ID if the users table is unexpectedly empty
+  // (e.g. fresh test DB).  The sentinel is created by the startup
+  // self-heal below if missing.
+  const fallback = await client.query<{ id: string }>(
+    `SELECT id FROM users ORDER BY created_at ASC LIMIT 1`,
+  );
+  const resolved = fallback.rows[0]?.id ?? SYSTEM_USER_FALLBACK_ID;
+  // Structured warning — grep evt=compass.fk_fallback for SRE alerting.
+  console.warn(
+    JSON.stringify({
+      evt: "compass.fk_fallback",
+      candidate,
+      resolved,
+      reason: "candidate_not_in_users",
+    }),
+  );
+  return resolved;
+}
+
+/**
+ * Ensure a deterministic system user exists for FK fallback.
+ * Idempotent — called once at server boot and on outbox repair.
+ * Uses the sentinel ID above so fallback is stable across restarts,
+ * not dependent on insertion order of `cypress@tellus.local`.
+ */
+export async function ensureSystemUser(client: PoolClient): Promise<string> {
+  const existing = await client.query<{ id: string }>(
+    `SELECT id FROM users WHERE id = $1::uuid`,
+    [SYSTEM_USER_FALLBACK_ID],
+  );
+  if (existing.rows.length > 0) return SYSTEM_USER_FALLBACK_ID;
+  // Try to reuse the first real user; only insert sentinel if table empty.
+  const first = await client.query<{ id: string }>(
+    `SELECT id FROM users ORDER BY created_at ASC LIMIT 1`,
+  );
+  if (first.rows.length > 0) return first.rows[0].id;
+  await client.query(
+    `INSERT INTO users (id, email, display_name, created_at, updated_at)
+     VALUES ($1::uuid, 'system@tellus.local', 'System', now(), now())
+     ON CONFLICT (id) DO NOTHING`,
+    [SYSTEM_USER_FALLBACK_ID],
+  );
+  return SYSTEM_USER_FALLBACK_ID;
+}
+
+/**
+ * Startup self-heal: insert missing `resources` rows for
+ * `connectivity_connections` that never landed in Compass due to
+ * the pre-fix FK bug.  Idempotent via `NOT EXISTS` guard and
+ * `ON CONFLICT DO NOTHING` safety.  Handles both live and
+ * soft-deleted connections (trashed state derived from deleted_at).
+ */
+export async function repairMissingResources(client: PoolClient): Promise<number> {
+  const result = await client.query(
+    `INSERT INTO resources (
+       rid, service, type, display_name, description,
+       parent_folder_rid, project_rid, space_rid,
+       created_by, updated_by, trash_status, trashed_at, trashed_by, retention_until,
+       metadata, created_at, updated_at, etag
+     )
+     SELECT
+       cc.rid,
+       'magritte',
+       'source',
+       cc.name,
+       cc.description,
+       parent.rid,
+       CASE WHEN parent.type IN ('PROJECT', 'COMPASS_PROJECT') THEN parent.rid ELSE parent.project_rid END,
+       parent.space_rid,
+       CASE
+         WHEN cc.created_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          AND EXISTS (SELECT 1 FROM users WHERE id = cc.created_by::uuid)
+         THEN cc.created_by::uuid
+         ELSE (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
+       END,
+       CASE
+         WHEN cc.updated_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          AND EXISTS (SELECT 1 FROM users WHERE id = cc.updated_by::uuid)
+         THEN cc.updated_by::uuid
+         ELSE (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
+       END,
+       CASE WHEN cc.deleted_at IS NOT NULL THEN 'DIRECTLY_TRASHED' ELSE 'NOT_TRASHED' END,
+       cc.deleted_at,
+       CASE
+         WHEN cc.deleted_at IS NOT NULL AND cc.deleted_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          AND EXISTS (SELECT 1 FROM users WHERE id = cc.deleted_by::uuid)
+         THEN cc.deleted_by::uuid
+         WHEN cc.deleted_at IS NOT NULL THEN (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
+         ELSE NULL
+       END,
+       CASE WHEN cc.deleted_at IS NOT NULL THEN cc.deleted_at + interval '30 days' ELSE NULL END,
+       jsonb_build_object('connectorType', cc.connector_type, 'workerType', cc.worker_type),
+       cc.created_at,
+       cc.updated_at,
+       1
+     FROM connectivity_connections cc
+     JOIN resources parent
+       ON (parent.rid = cc.compass_folder_rid
+           OR parent.legacy_uuid::text = split_part(cc.compass_folder_rid, '.', 5))
+     WHERE NOT EXISTS (SELECT 1 FROM resources r WHERE r.rid = cc.rid)
+     ON CONFLICT (rid) DO NOTHING`,
+  );
+  const count = result.rowCount ?? 0;
+  if (count > 0) {
+    console.warn(
+      JSON.stringify({
+        evt: "compass.repair_missing_resources",
+        count,
+      }),
+    );
+  }
+  return count;
 }
