@@ -78,6 +78,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { pipeline } from "stream/promises";
+import { assertFunnelReadablePath } from "../../datasourcePathValidation";
 
 // Heartbeat + stage-duration helper. Every long-running activity wraps
 // its body in `withStageInstrumentation(stage, obj, async () => ...)`.
@@ -284,7 +285,16 @@ async function runChangelogActivityImpl(
       // itself fails (object missing / MinIO down), fail fast too — that's
       // "stream setup can't be established", surfaced as a real message.
       const guardKey = stripFoundryTags(foundry.filePath);
-      if (guardKey) {
+      assertFunnelReadablePath(guardKey);
+      if (isIcebergBridgedPath(guardKey)) {
+        // Foundry-bridged ICEBERG dataset — the "file" is a synthetic
+        // `iceberg://<warehouse>/<ns>/<table>` URI, not a MinIO object, so
+        // the S3 HEAD guard below can never succeed (it was failing the
+        // changelog stage with "stream setup could not be established").
+        // Read the table's current snapshot through the synced-dataset
+        // reader instead — the same path the Dataset Preview page uses.
+        reader = await buildIcebergBridgedReader(foundry);
+      } else {
         let foundryHead: { contentLength: number } | null = null;
         try {
           foundryHead = await headObject(guardKey);
@@ -304,8 +314,8 @@ async function runChangelogActivityImpl(
               `parts or raise the ceiling.`,
           );
         }
+        reader = await buildFoundryBridgedReader(foundry);
       }
-      reader = await buildFoundryBridgedReader(foundry);
     } else {
       const pending = await getPendingMergeEdits(input.objectTypeApiName);
       // FUNN-ISO-4 observability: a funnel pass with NO backing datasource
@@ -954,6 +964,103 @@ function stripFoundryTags(filePath: string): string {
 function extractFoundryDatasetUuid(filePath: string): string | null {
   const m = filePath.match(/#foundry-dataset:([0-9a-f-]{36})/i);
   return m ? m[1] : null;
+}
+
+/** True when the stripped path is a synthetic `iceberg://` URI — a
+ *  foundry-bridged dataset whose bytes live in a local Iceberg table,
+ *  NOT a MinIO object. The S3 HEAD guard can never succeed for these. */
+function isIcebergBridgedPath(strippedPath: string): boolean {
+  return strippedPath.startsWith("iceberg://");
+}
+
+/**
+ * Resolve the read config + tenant for a foundry-bridged Iceberg dataset.
+ * Prefers the producing `table_imports` row (authoritative schema/table);
+ * falls back to parsing `iceberg://<warehouse>/<namespace>/<table>` so the
+ * funnel keeps working even if the import record was deleted.
+ */
+async function loadIcebergBridgedConfig(
+  foundryDatasetUuid: string
+): Promise<{ config: { schema: string; table: string; warehouseRoot?: string }; tenant: string } | null> {
+  try {
+    const imp = await query(
+      `SELECT ti.config AS import_config, COALESCE(c.tenant, 'default') AS tenant
+         FROM table_imports ti
+         LEFT JOIN connectivity_connections c ON c.rid = ti.connection_rid
+        WHERE ti.dataset_rid = $1 AND ti.deleted_at IS NULL
+        ORDER BY ti.created_at DESC
+        LIMIT 1`,
+      [`ri.foundry.main.dataset.${foundryDatasetUuid}`]
+    );
+    const cfg = imp.rows[0]?.import_config;
+    if (cfg && cfg.schema && (cfg.targetTable ?? cfg.table)) {
+      return {
+        config: {
+          schema: String(cfg.schema),
+          table: String(cfg.targetTable ?? cfg.table),
+          warehouseRoot: cfg.warehouseRoot ? String(cfg.warehouseRoot) : undefined,
+        },
+        tenant: imp.rows[0].tenant ?? "default",
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function parseIcebergUri(
+  uri: string
+): { config: { schema: string; table: string; warehouseRoot?: string }; tenant: string } | null {
+  const rest = uri.replace(/^iceberg:\/\//, "").replace(/\/+$/, "");
+  const parts = rest.split("/").filter(Boolean);
+  // `<warehouse>/<namespace>/<table>` — namespace may be dotted but stays one segment.
+  if (parts.length >= 3) {
+    return {
+      config: { schema: parts[parts.length - 2], table: parts[parts.length - 1] },
+      tenant: parts[0],
+    };
+  }
+  return null;
+}
+
+/**
+ * SnapshotDiffReader over a foundry-bridged ICEBERG datasource. Streams every
+ * row of the table's current snapshot (via `iterSyncedSnapshotRows`) as INSERT
+ * changes keyed on the OT's primary-key column — mirroring the contract of
+ * `buildFoundryBridgedReader` for CSV uploads.
+ */
+async function buildIcebergBridgedReader(
+  ds: FoundryBridgedDatasource
+): Promise<SnapshotDiffReader> {
+  const stripped = stripFoundryTags(ds.filePath);
+  const uuid = extractFoundryDatasetUuid(ds.filePath);
+  const pkCol = ds.primaryKeyColumn ?? "primary_key";
+  const txnId = uuid ?? ZERO_UUID;
+  const ts = new Date().toISOString();
+  const resolved =
+    (uuid ? await loadIcebergBridgedConfig(uuid) : null) ??
+    parseIcebergUri(stripped);
+  if (!resolved) {
+    throw new Error(
+      `foundry-bridged iceberg source '${stripped}' could not be resolved to a ` +
+        `(warehouse, namespace, table) identity — no producing sync found`
+    );
+  }
+  const { iterSyncedSnapshotRows } = await import("../../datasets/synced-dataset-reader");
+  return {
+    async *read() {
+      // Synced tables routinely contain repeated PKs (re-uploads / appends),
+        // and computeChangelog rejects duplicate keys within one transaction.
+        // Reuse the same disk-spilled last-wins dedup as the CSV reader.
+      yield* dedupFoundryRows(
+        iterSyncedSnapshotRows(resolved.config, resolved.tenant),
+        pkCol,
+        txnId,
+        ts,
+      );
+    },
+  };
 }
 
 /** Exported for the streaming-dedup unit test (scripts/test-foundry-dedup.ts);

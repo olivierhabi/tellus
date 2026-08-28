@@ -554,39 +554,126 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
         }));
       }
 
-      const r = await pool.query(
-        `UPDATE code_repository
-            SET state = 'TRASHED', updated_at = now(), resource_version = resource_version + 1
-          WHERE rid = $1 AND resource_version = $2 AND state = 'ACTIVE'`,
-        [rid, ifMatchVersion],
-      );
-      if (r.rowCount === 0) {
-        const ex = await pool.query(
-          `SELECT state, resource_version FROM code_repository WHERE rid = $1`,
-          [rid],
-        );
-        if (ex.rowCount === 0 || ex.rows[0].state === "TRASHED") {
-          return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
-        }
-        // Row exists & ACTIVE but version mismatch → 412 (RFC 7232). (Fix CR-11b.)
-        return sendError(res, codeReposError("CodeRepos:PreconditionFailed", {
-          reason: "If-Match resource version does not match current version",
-          currentVersion: ex.rows[0].resource_version,
-        }));
-      }
-
-      // GC: free Stemma content (branches + blobs) now that metadata is TRASHED.
-      // Best-effort; a failure here must not undo the trash. tombstone() deletes
-      // branch rows, which ON DELETE CASCADE the blobs (migration 086). Without
-      // this the coderepo_stemma_* content lingers forever (unbounded growth).
+      const client = await pool.connect();
       try {
-        await deps.stemma.tombstone({ repositoryRid: rid });
-      } catch (e) {
-        console.error(
-          `code-repos.delete.tombstone-failed rid=${rid} err=${e instanceof Error ? e.message : String(e)}`,
+        await client.query("BEGIN");
+        const r = await client.query(
+          `UPDATE code_repository
+              SET state = 'TRASHED', updated_at = now(), resource_version = resource_version + 1
+            WHERE rid = $1 AND resource_version = $2 AND state = 'ACTIVE'
+            RETURNING display_name, parent_folder_rid, project_rid, created_by, created_at`,
+          [rid, ifMatchVersion],
         );
+        if (r.rowCount === 0) {
+          const ex = await client.query(
+            `SELECT state, resource_version FROM code_repository WHERE rid = $1`,
+            [rid],
+          );
+          await client.query("ROLLBACK");
+          if (ex.rowCount === 0 || ex.rows[0].state === "TRASHED") {
+            return sendError(res, codeReposError("CodeRepos:RepositoryNotFound", { rid }));
+          }
+          // Row exists & ACTIVE but version mismatch → 412 (RFC 7232). (Fix CR-11b.)
+          return sendError(res, codeReposError("CodeRepos:PreconditionFailed", {
+            reason: "If-Match resource version does not match current version",
+            currentVersion: ex.rows[0].resource_version,
+          }));
+        }
+
+        const row = r.rows[0] as {
+          display_name: string;
+          parent_folder_rid: string;
+          project_rid: string;
+          created_by: string;
+          created_at: string;
+        };
+
+        // Mirror into resources so the unified Trash (/trashed) lists the repo —
+        // same pattern as pipelines (PIPELINE) and workshops (WORKSHOP_MODULE).
+        // Resolve the canonical Compass RIDs (workshop does the same). The
+        // stored `parent_folder_rid` uses legacy `ri.compass.main.folder.*`
+        // while Folder Trash expects `ri.compass.main.compass-folder.*`; we
+        // canonicalize and also fix the buggy `project_rid = parentFolderRid`
+        // that the saga wrote for subfolder repos.
+        const principal = (req as unknown as { codeReposPrincipal?: { userId: string } }).codeReposPrincipal;
+        const rawPrincipalId = principal?.userId ?? row.created_by;
+        const principalSub = isUuidV4(rawPrincipalId)
+          ? rawPrincipalId
+          : derivePrincipalSubUuid(rawPrincipalId);
+        // Resolve FK-valid user IDs for resources (created_by/trashed_by must exist in users).
+        // The repo's created_by (53cf9bcf...) is a synthetic test principal that
+        // never lands in users, so the FK would fail. Fall back to an existing user.
+        const resolveValidUserId = async (candidate: string): Promise<string> => {
+          const hit = await client.query<{ id: string }>(`SELECT id FROM users WHERE id = $1::uuid`, [candidate]);
+          if (hit.rows.length > 0) return candidate;
+          const fallback = await client.query<{ id: string }>(`SELECT id FROM users ORDER BY created_at ASC LIMIT 1`);
+          return fallback.rows[0]?.id ?? candidate;
+        };
+        const validTrashedBy = await resolveValidUserId(principalSub);
+        const validCreatedBy = await resolveValidUserId(row.created_by);
+        const parentSegments = row.parent_folder_rid.split(".");
+        const parentUuid = parentSegments[parentSegments.length - 1] ?? "";
+        const folderRes = await client.query<{ project_id: string }>(
+          `SELECT project_id FROM folders WHERE id = $1::uuid`,
+          [parentUuid],
+        );
+        const projectId = folderRes.rows[0]?.project_id ?? parentUuid;
+        const projectRid = `ri.compass.main.project.${projectId}`;
+        const canonicalParentRid = folderRes.rows.length > 0
+          ? `ri.compass.main.compass-folder.${parentUuid}`
+          : projectRid;
+
+        const projRes = await client.query<{ space_rid: string }>(
+          `SELECT space_rid FROM resources WHERE rid = $1`,
+          [projectRid],
+        );
+        const spaceRid = projRes.rows[0]?.space_rid ?? null;
+        if (spaceRid) {
+          await client.query(
+            `INSERT INTO resources
+               (rid, service, type, display_name,
+                parent_folder_rid, project_rid, space_rid,
+                trash_status, trashed_at, trashed_by, retention_until,
+                created_by, created_at, updated_by, updated_at)
+             VALUES ($1, 'code-repository', 'CODE_REPOSITORY', $2,
+                     $3, $4, $5,
+                     'DIRECTLY_TRASHED', now(), $6::uuid, now() + interval '30 days',
+                     $7::uuid, $8::timestamptz, $6::uuid, now())
+             ON CONFLICT (rid) DO UPDATE SET
+               display_name = EXCLUDED.display_name,
+               parent_folder_rid = EXCLUDED.parent_folder_rid,
+                project_rid = EXCLUDED.project_rid,
+                space_rid = EXCLUDED.space_rid,
+                trash_status = 'DIRECTLY_TRASHED',
+                trashed_at = now(),
+                trashed_by = EXCLUDED.trashed_by,
+                retention_until = now() + interval '30 days',
+                 updated_by = EXCLUDED.updated_by,
+                updated_at = now()`,
+            [rid, row.display_name, canonicalParentRid, projectRid, spaceRid, validTrashedBy, validCreatedBy, row.created_at],
+          );
+        }
+
+        await client.query("COMMIT");
+
+        // GC: free Stemma content (branches + blobs) now that metadata is TRASHED.
+        // Best-effort; a failure here must not undo the trash. tombstone() deletes
+        // branch rows, which ON DELETE CASCADE the blobs (migration 086). Without
+        // this the coderepo_stemma_* content lingers forever (unbounded growth).
+        try {
+          await deps.stemma.tombstone({ repositoryRid: rid });
+        } catch (e) {
+          console.error(
+            `code-repos.delete.tombstone-failed rid=${rid} err=${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+        res.status(204).end();
+      } catch (txErr) {
+        try { await client.query("ROLLBACK"); } catch { /* ignore */ }
+        throw txErr;
+      } finally {
+        client.release();
       }
-      res.status(204).end();
     } catch (err) {
       next(err);
     }

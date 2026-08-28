@@ -72,7 +72,11 @@ import type { NextFunction, Request, Response } from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import jwksClient, { type JwksClient } from "jwks-rsa";
+import type { Knex } from "knex";
 import { getKeycloakRealm } from "../auth/keycloakConfig"; // F-P4-26
+import foundryDb from "../config/foundryDb";
+import { ensureLocalUserForClaims } from "../services/userProvisioning";
+import type { TellusClaims } from "../services/tellusAuthService";
 
 const KC_URL = process.env.KEYCLOAK_URL || "http://localhost:8086";
 const KC_REALM = getKeycloakRealm();
@@ -412,7 +416,13 @@ export function globalAuth() {
     // Shared per-request mutable surface — declared early so the test-auth
     // bypass (below) and the JWT path (further down) both populate it.
     const reqAny = req as Request & {
-      tellusPrincipal?: { userId: string; source?: string };
+      tellusPrincipal?: {
+        userId: string;
+        keycloakSub?: string;
+        source?: string;
+        roles?: string[];
+        scopes?: string[];
+      };
       user?: unknown;
       auth?: unknown;
       keycloakUser?: unknown;
@@ -562,7 +572,7 @@ export function globalAuth() {
         algorithms: ["RS256"],
         issuer: [KC_ISSUER, `http://localhost:8086/realms/${KC_REALM}`, `http://keycloak:8086/realms/${KC_REALM}`],
       },
-      (err, decoded) => {
+      async (err, decoded) => {
         if (err || !decoded || typeof decoded !== "object") {
           return authError(
             req,
@@ -575,6 +585,25 @@ export function globalAuth() {
         const claims = decoded as Record<string, unknown>;
         const principal = normalizeClaims(claims);
 
+        let localUserId: string;
+        try {
+          // Keycloak `sub` and the UUID used by local domain-table foreign
+          // keys are different identities. Resolve/provision the local row
+          // before exposing req.user to routes such as Workshop and Compass.
+          localUserId = await ensureLocalUserForClaims(
+            foundryDb as unknown as Knex,
+            claims as unknown as TellusClaims,
+          );
+        } catch {
+          return authError(
+            req,
+            res,
+            "AUTHENTICATION_FAILED",
+            "Unable to provision the authenticated user.",
+            500,
+          );
+        }
+
         // Populate the three surfaces downstream middleware reads.
         // - `req.user` is the convenience surface (securityContext,
         //   foundry routes).
@@ -584,10 +613,17 @@ export function globalAuth() {
         //   from middleware/keycloakAuth.ts so the two auth surfaces
         //   remain interchangeable.
         reqAny.user = {
-          id: principal.id,
+          id: localUserId,
           email: principal.email,
           displayName: principal.displayName,
           roles: principal.roles,
+        };
+        reqAny.tellusPrincipal = {
+          userId: localUserId,
+          keycloakSub: principal.id,
+          source: m ? "bearer-jwt" : "cookie",
+          roles: principal.roles,
+          scopes: [],
         };
         reqAny.auth = claims;
         reqAny.keycloakUser = claims as unknown as import('./keycloakAuth').KeycloakClaims;

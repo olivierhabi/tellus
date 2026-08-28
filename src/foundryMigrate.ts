@@ -107,13 +107,43 @@ async function migrateFoundry(): Promise<void> {
         schema_info       JSONB,
         status            VARCHAR(50) DEFAULT 'pending'
                           CHECK (status IN ('pending', 'processing', 'ready', 'error')),
-        content_hash      VARCHAR(64),
+        content_hash      VARCHAR(128),
         created_at        TIMESTAMPTZ DEFAULT NOW(),
         updated_at        TIMESTAMPTZ DEFAULT NOW(),
         search_vector     TSVECTOR
       )
     `);
     console.log("  [5/8] foundry_datasets table created");
+
+    // 5b. Schema evolution — widen content_hash from 64 → 128 (177_widen_content_hash)
+    // csvParsingService emits `sha256:<64hex>` = 71 chars, which overflows VARCHAR(64)
+    // and leaves datasets in `error` with 22001. Idempotent: only alters when <128.
+    await client.query(`
+      DO $$
+      DECLARE max_len int;
+      BEGIN
+        SELECT character_maximum_length INTO max_len
+        FROM information_schema.columns
+        WHERE table_name='foundry_datasets' AND column_name='content_hash';
+        IF max_len IS NOT NULL AND max_len < 128 THEN
+          ALTER TABLE foundry_datasets ALTER COLUMN content_hash TYPE VARCHAR(128);
+          RAISE NOTICE '  [schema] foundry_datasets.content_hash widened to VARCHAR(128)';
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      DO $$
+      DECLARE max_len int;
+      BEGIN
+        SELECT character_maximum_length INTO max_len
+        FROM information_schema.columns
+        WHERE table_name='dataset_versions' AND column_name='content_hash';
+        IF max_len IS NOT NULL AND max_len < 128 THEN
+          ALTER TABLE dataset_versions ALTER COLUMN content_hash TYPE VARCHAR(128);
+          RAISE NOTICE '  [schema] dataset_versions.content_hash widened to VARCHAR(128)';
+        END IF;
+      END $$;
+    `);
 
     // 6. Dataset columns table
     await client.query(`
@@ -172,7 +202,7 @@ async function migrateFoundry(): Promise<void> {
         file_size_bytes BIGINT,
         row_count INTEGER,
         column_count INTEGER,
-        content_hash VARCHAR(64),
+        content_hash VARCHAR(128),
         schema_snapshot JSONB,
         change_summary TEXT,
         created_by UUID,

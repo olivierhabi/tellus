@@ -187,6 +187,82 @@ async function readDataFile(
   return readJsonlRows(path, remaining);
 }
 
+// --- full-snapshot streaming -------------------------------------------------
+
+/** Yield every row of a Parquet file via its streaming cursor. */
+async function* iterParquetFile(
+  path: string,
+): AsyncGenerator<Record<string, unknown>> {
+  const parquet: any = await import("parquetjs-lite");
+  const reader = await parquet.ParquetReader.openFile(path);
+  try {
+    const cursor = reader.getCursor();
+    let rec: Record<string, unknown> | null;
+    while ((rec = await cursor.next())) {
+      if (Object.keys(rec).length === 0) break;
+      yield rec;
+    }
+  } finally {
+    await reader.close();
+  }
+}
+
+/** Yield every JSON row of a JSONL file, skipping malformed lines. */
+async function* iterJsonlFile(
+  path: string,
+): AsyncGenerator<Record<string, unknown>> {
+  const raw = await fs.readFile(path, "utf8");
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      yield JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      /* skip malformed line — best-effort */
+    }
+  }
+}
+
+/**
+ * Stream EVERY row of a synced dataset's current Iceberg snapshot — the
+ * unbounded counterpart to `readSyncedPreview`. Rows are yielded one at a
+ * time (per data file) so the Funnel changelog stage never materialises the
+ * full table in memory. A recorded `.parquet` file whose bytes landed in a
+ * JSONL sibling (writer fallback) is transparently substituted, mirroring
+ * `resolveDataFile`. Yields nothing when the table has never been built.
+ */
+export async function* iterSyncedSnapshotRows(
+  config: ImportConfigForRead,
+  tenant: string,
+): AsyncGenerator<Record<string, unknown>> {
+  const adapter = await loadCatalogAdapter();
+  const id = syncTableIdentity(config, tenant);
+  const meta = await adapter.resolve(id);
+  if (!meta || meta.currentSnapshotId == null) return;
+  const snap = meta.snapshots.find((s) => s.snapshotId === meta.currentSnapshotId);
+  if (!snap) return;
+
+  for (const recorded of snap.dataFiles ?? []) {
+    const file = await resolveDataFile(recorded);
+    if (!file) continue;
+    if (/\.parquet$/i.test(file)) {
+      try {
+        // Open first so a missing/corrupt parquet falls back to the JSONL
+        // sibling BEFORE any rows are yielded (no duplicate-row risk).
+        yield* iterParquetFile(file);
+        continue;
+      } catch (err) {
+        const jsonl = file.replace(/\.parquet$/i, ".jsonl");
+        const st = await fs.stat(jsonl).then(() => true, () => false);
+        if (!st) throw err; // no fallback — surface the real read error
+        yield* iterJsonlFile(jsonl);
+        continue;
+      }
+    }
+    yield* iterJsonlFile(file);
+  }
+}
+
 // --- column inference --------------------------------------------------------
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

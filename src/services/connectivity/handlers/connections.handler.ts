@@ -598,6 +598,13 @@ export const deleteConnection = instrument(
       expected,
       user.id,
     );
+    // Make the Trash entry visible in the same commit as the domain soft
+    // delete. Keep the outbox event below as an idempotent recovery path.
+    await compassClient.unregisterConnectionResource(
+      client,
+      req.params.rid,
+      user.id,
+    );
     await outbox.enqueue(client, {
       connectionRid: req.params.rid,
       folderRid: current.compassFolderRid,

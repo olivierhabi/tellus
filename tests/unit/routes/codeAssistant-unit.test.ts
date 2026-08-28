@@ -225,11 +225,34 @@ describe("createCodeAssistantRouter", () => {
     expect(vegaCalls[0].payload.user_request).toContain(
       'output field "state_bucket" from property "status"',
     );
+    expect(vegaCalls[0].payload.data_fields).toContain(
+      "Object properties available for configuring aggregation",
+    );
     expect(vegaCalls[0].payload.current_json).toBe('{"mark":"point"}');
     const spec = JSON.parse(res.body.data.spec);
     expect(spec.data).toEqual({ name: "order_metrics" });
     expect(spec).not.toHaveProperty("_metadata");
     expect(res.body.data._metadata.model).toBe("fake-vega");
+  });
+
+  it("POST /vega-chart describes geoshape properties as GeoJSON", async () => {
+    const { port, vegaCalls } = makeFakeEngine();
+    const res = await request(buildApp(port))
+      .post("/api/v1/code-assistant/vega-chart")
+      .send({
+        prompt: "population choropleth",
+        objectTypeApiName: "District",
+        dataName: "districts",
+        dataSource: "object-set",
+        properties: [
+          { apiName: "district", baseType: "string" },
+          { apiName: "boundary", baseType: "geoshape" },
+          { apiName: "population", baseType: "long" },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(vegaCalls[0].payload.data_fields).toContain("boundary (geojson)");
   });
 
   it("POST /vega-chart rejects an empty Data Input Name", async () => {

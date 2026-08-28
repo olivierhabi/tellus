@@ -288,6 +288,7 @@ export class PipelineController {
       const deleted = await this.pipelineService.deletePipeline(
         projectId,
         pipelineParsed.data.pipelineId,
+        this.getUserId(req),
       );
       if (!deleted) {
         throw new AppError('Pipeline not found', 404, 'NOT_FOUND');
