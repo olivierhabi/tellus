@@ -5,6 +5,7 @@ import {
   objectTypeCreateConflict,
   hasCompanionDatasourceBinding,
   resolveCompositeIssues,
+  resolveDraftActionTypeId,
   orderWorkingChanges,
   stableOntologyValue,
   validateDraftObjectTypeId,
@@ -76,6 +77,20 @@ describe("Ontology Manager working-state domain", () => {
     expect(validateDraftObjectTypeId(undefined)).toBeNull();
     expect(validateDraftObjectTypeId("9ed8aefe-c62c-4aac-a05f-982ea6bc0dd7")).toBeNull();
     expect(validateDraftObjectTypeId("shared-route-id")).toMatch(/valid UUID/);
+  });
+
+  it("preserves a staged action-type UUID so its editor URL survives commit", () => {
+    const draftRid = "6464fa0c-1bb5-429b-950b-8e04e1a1e387";
+    expect(resolveDraftActionTypeId({
+      resourceId: draftRid,
+      proposedValue: { rid: draftRid },
+    })).toBe(draftRid);
+    // Legacy drafts used API names rather than UUIDs and must continue to
+    // receive the database-generated identifier instead of failing a cast.
+    expect(resolveDraftActionTypeId({
+      resourceId: "createLegacyOrder",
+      proposedValue: { apiName: "createLegacyOrder" },
+    })).toBeNull();
   });
 
   it("maps object-type UUID and API-name races to precise domain conflicts", () => {

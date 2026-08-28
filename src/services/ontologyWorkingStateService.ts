@@ -91,6 +91,19 @@ const OBJECT_API_NAME = /^[A-Z][A-Za-z0-9]{0,99}$/;
 const LOWER_API_NAME = /^[a-z][A-Za-z0-9]{0,99}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Resource URLs are assigned before publication, so a staged action create
+ * must retain its client-generated UUID at commit.  Older drafts used an API
+ * name as `resourceId`; retain the database default for those only.
+ */
+export function resolveDraftActionTypeId(
+  change: Pick<WorkingChange, "resourceId" | "proposedValue">,
+): string | null {
+  const proposed = change.proposedValue as Record<string, unknown> | undefined;
+  const candidate = String(proposed?.rid ?? change.resourceId ?? "").trim();
+  return UUID.test(candidate) ? candidate : null;
+}
+
 type CanonicalFoundryDatasource = {
   id: string;
   name: string;
@@ -771,9 +784,9 @@ async function applyChange(client: PoolClient, ontologyId: string, commitId: str
   } else if (change.resourceKind === "actionType") {
     if (change.operation === "delete") await client.query(`DELETE FROM action_type WHERE ontology_id=$1 AND (api_name=$2 OR action_type_id::text=$2)`,[ontologyId,change.resourceId]);
     else if (change.operation === "create") await client.query(`INSERT INTO action_type
-      (ontology_id,api_name,display_name,description,icon_name,icon_color,save_location_rid,parameters,rules,submission_criteria,side_effects,
+      (action_type_id,ontology_id,api_name,display_name,description,icon_name,icon_color,save_location_rid,parameters,rules,submission_criteria,side_effects,
        writeback_config,security_settings,semantics_version,execution_mode,function_config,delete_policy,is_enabled,created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'ontology-working-state')`,[ontologyId,value.apiName,value.displayName,
+      VALUES (COALESCE($1::uuid,gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'ontology-working-state')`,[resolveDraftActionTypeId(change),ontologyId,value.apiName,value.displayName,
       value.description ?? "",value.icon ?? value.iconName ?? "manually-entered-data",value.iconColor ?? "#1A2230",
       value.saveLocationRid ?? null,JSON.stringify(value.parameters ?? []),JSON.stringify(value.rules ?? []),value.submissionCriteria ? JSON.stringify(value.submissionCriteria):null,
       value.sideEffects ? JSON.stringify(value.sideEffects):null,value.writebackConfig ? JSON.stringify(value.writebackConfig):null,
