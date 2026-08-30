@@ -188,7 +188,10 @@ export function normalizeVegaChartAgentResult(
     const safeDefinitions = definitions.map((definition) => {
       if (definition.name !== configuredDataName) return { ...definition };
       foundConfiguredDataset = true;
-      const safeDefinition = { ...definition, name: configuredDataName };
+      const safeDefinition: Record<string, unknown> = {
+        ...definition,
+        name: configuredDataName,
+      };
       // Workshop injects these rows at render time. Prevent the agent from
       // smuggling inline/remote data while retaining every derived dataset,
       // transform, signal, and source relationship in the Vega graph.

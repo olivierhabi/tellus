@@ -7,14 +7,17 @@
 // `resetWorkshopDb()` in `afterAll`. This keeps the production surface
 // unchanged while making services testable without HTTP fixtures.
 
-import type { PoolClient, QueryResult } from "pg";
+import type { PoolClient, QueryResult, QueryResultRow } from "pg";
 import {
   query as defaultQuery,
   withTransaction as defaultWithTransaction,
 } from "../../db";
 
 export interface WorkshopDb {
-  query(sql: string, params?: unknown[]): Promise<QueryResult>;
+  query<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<QueryResult<T>>;
   withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T>;
 }
 

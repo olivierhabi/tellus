@@ -565,7 +565,13 @@ export async function listVersions(
   );
   if (moduleResult.rows.length === 0) throw moduleNotFound(rid);
 
-  const result = await db.query(
+  const result = await db.query<{
+    rid: string;
+    semver: string;
+    schema_version: number;
+    published_at: string;
+    published_by: string;
+  }>(
     `SELECT rid, semver, schema_version,
             published_at::text, published_by
        FROM (
@@ -580,13 +586,7 @@ export async function listVersions(
     [rid],
   );
 
-  return result.rows.map((row: {
-    rid: string;
-    semver: string;
-    schema_version: number;
-    published_at: string;
-    published_by: string;
-  }) => ({
+  return result.rows.map((row) => ({
     rid: row.rid,
     semver: row.semver,
     schemaVersion: row.schema_version,
