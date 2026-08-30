@@ -25,6 +25,11 @@ RUN --mount=type=cache,id=tellus-pnpm-store,target=/root/.local/share/pnpm/store
 
 COPY src/ src/
 COPY scripts/ scripts/
+# Root-level JSON schemas loaded at runtime via readFileSync (e.g. the
+# workshop module validator resolves ../schemas/workshop-module-v4.json from
+# dist/services/workshop → /app/schemas). tsc/copy-assets only handle src/**,
+# so schemas must be copied explicitly in BOTH stages.
+COPY schemas/ schemas/
 # tsc emits only .js; build:copy-assets ships the runtime non-TS assets — crucially
 # src/migrations/*.sql (the migration ledger + forward SQL) and src/templates. Without this
 # the prod image has ZERO .sql migrations and the migration gate fails at boot.
@@ -57,6 +62,8 @@ RUN --mount=type=cache,id=tellus-pnpm-store,target=/root/.local/share/pnpm/store
     && pnpm install --frozen-lockfile --prod --ignore-scripts && pnpm rebuild duckdb
 
 COPY --from=builder /app/dist/ dist/
+# Runtime JSON schemas (e.g. workshop-module-v4.json for the module validator).
+COPY --from=builder /app/schemas/ schemas/
 
 # Create data directories for datasource files and DuckDB's extension/cache
 # home. `appdata` is the persistent application volume in Compose.

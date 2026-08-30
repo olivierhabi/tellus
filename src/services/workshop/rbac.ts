@@ -163,7 +163,7 @@ export function requireModuleRole(minRole: "viewer" | "editor") {
         return;
       }
 
-      (req as Record<string, unknown>).workshopModuleRole = role;
+      (req as unknown as Record<string, unknown>).workshopModuleRole = role;
 
       if (minRole === "editor" && role !== "editor") {
         next(
