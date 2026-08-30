@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import type { Pool, PoolClient } from "pg";
 import { getOverlayStore } from "../overlay/getOverlayStore";
 import { writeOverlay } from "../overlay/writebackOverlay";
@@ -46,12 +47,61 @@ export type OntologyEdit =
   | { readonly op: "link"; readonly linkType: string; readonly sourcePrimaryKey: string; readonly targetPrimaryKey: string }
   | { readonly op: "unlink"; readonly linkType: string; readonly sourcePrimaryKey: string; readonly targetPrimaryKey: string };
 
+// ---------------------------------------------------------------------------
+// Link graph — parity with Foundry's generated Link Type accessors
+// (docs/foundry/functions/api-objects-links §"Link types").
+//
+// Foundry converts every imported link type into fields on the generated
+// object interfaces:
+//   • `SingleLink` on the 1 side     — `object.parentLink.get()` → T | undefined
+//   • `MultiLink`  on the many side  — `object.childLinks.all()` → T[]
+//   • `ObjectSet.searchAroundTo<Link>()` — set-level pivot without loading
+//     linked objects into memory (docs §"search around").
+//
+// The sandbox cannot ship generated TypeScript — it is a runtime, dynamic
+// surface — so the equivalent surface is built in `buildOntologySdk` from this
+// data model, attached lazily (non-enumerable getters) so plain-JSON object
+// handling everywhere else is untouched.
+// ---------------------------------------------------------------------------
+
+export type LinkCardinality =
+  | "ONE_TO_ONE"
+  | "ONE_TO_MANY"
+  | "MANY_TO_ONE"
+  | "MANY_TO_MANY";
+
+/**
+ * One materialised link type: its metadata plus the resolved edge index.
+ *
+ * `forward` maps SOURCE primary keys → TARGET primary keys; `reverse` is the
+ * mirror. Both directions are indexed so traverse-from-either-side stays
+ * O(1)-per-edge at accessor time (Foundry link fields are bidirectional).
+ */
+export interface LinkSnapshotDef {
+  readonly apiName: string;
+  readonly reverseApiName: string | null;
+  readonly cardinality: LinkCardinality;
+  readonly sourceType: string;
+  readonly targetType: string;
+  /** sourcePk → targetPks (deduped; only edges whose SOURCE object loaded). */
+  readonly forward: ReadonlyMap<string, readonly string[]>;
+  /** targetPk → sourcePks (deduped). */
+  readonly reverse: ReadonlyMap<string, readonly string[]>;
+}
+
 export interface OntologySnapshot {
   /** objectTypeApiName → (primaryKey → object). */
   readonly byType: Map<string, Map<string, OntologyObject>>;
   readonly ontologyId: string;
   readonly objectCount: number;
   readonly objectTypes: readonly string[];
+  /**
+   * Link types materialised for traversal, keyed by link apiName. Optional
+   * for backward compatibility with callers that construct snapshots inline
+   * (a snapshot without `links` simply exposes no link accessors — the
+   * pre-feature behaviour, fail-silent).
+   */
+  readonly links?: ReadonlyMap<string, LinkSnapshotDef>;
   /**
    * The object types the code repository DECLARES as imports
    * (`code_repository_resource_imports`, `kind='object_type'`) — sourced from
@@ -63,6 +113,8 @@ export interface OntologySnapshot {
    * `SomeType.apiName` always resolves regardless of instance count.
    */
   readonly importedTypes?: readonly string[];
+  /** Mirror of `importedTypes` for `kind='link_type'` imports. */
+  readonly importedLinkTypes?: readonly string[];
 }
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -77,6 +129,15 @@ export interface LoadSnapshotArgs {
   readonly ontologyId: string;
   /** Restrict to these object types (the repo's imported types). Empty = all. */
   readonly objectTypes?: readonly string[];
+  /**
+   * The repo's DECLARED link-type imports (`kind='link_type'`). When defined
+   * (even as `[]`), ONLY these link types are materialised — Foundry parity:
+   * a link you did not import is not traversable. When undefined, every link
+   * type whose endpoint types are both loaded is derived (used by execution
+   * paths that do not track resource imports, e.g. function-backed Actions
+   * with an unimport-filtered snapshot).
+   */
+  readonly linkTypes?: readonly string[];
   /** Hard cap on rows materialised, to bound memory. */
   readonly limit?: number;
   /**
@@ -146,6 +207,12 @@ export async function loadOntologySnapshot(
     });
     count += 1;
   }
+  // Link graph: derive edges for every imported link type whose endpoint
+  // types both loaded. Runs AFTER the object pass so FK edges can be
+  // resolved in memory (no extra queries for FK-backed links; one bounded
+  // JOIN query for the type/property metadata and, when present, the M2M
+  // projections in `link_instances` / CSV join tables).
+  const links = await loadLinkGraph(pool, args.ontologyId, byType, args.linkTypes, args.signal);
   // `importedTypes` mirrors the caller's `objectTypes` filter (the repo's
   // declared imports) so `buildOntologySdk` can build `objectTypeDescriptors`
   // from DECLARED imports — not just types that happen to have rows. Undefined
@@ -157,22 +224,468 @@ export async function loadOntologySnapshot(
     objectCount: count,
     objectTypes: [...byType.keys()],
     importedTypes: args.objectTypes,
+    importedLinkTypes: args.linkTypes,
+    links,
   };
 }
 
 // ---------------------------------------------------------------------------
+// loadLinkGraph — materialise the traversable edge index a function sees.
+//
+// Edge derivation mirrors linkResolverService.resolveLinks EXACTLY so the
+// sandbox graph is identical to the REST search-around graph:
+//
+//   ONE_TO_MANY  target object's `target_property` FK column == source pk
+//   MANY_TO_ONE  source object's `source_property` FK column == target pk
+//   ONE_TO_ONE   source FK when defined, otherwise the target FK
+//   MANY_TO_MANY CSV join table when configured, else the target FK; plus a
+//                union with the `link_instances` projection (edit-applicator
+//                edges created via Edits / createEditBatch().link).
+//
+// Cost: FK edges are derived in memory from the already-loaded objects
+// (one pass per link type — no per-edge queries). M2M projections are a
+// single bounded SELECT (guard: table presence via to_regclass) and one
+// best-effort fs read per CSV join table. Total work is
+// O(Σ rows of touched types + M2M edges) — dwarfed by the object SELECT.
+// ---------------------------------------------------------------------------
+
+interface LinkTypeRow {
+  readonly api_name: string;
+  readonly reverse_api_name: string | null;
+  readonly reverse_visible: boolean | null;
+  readonly cardinality: LinkCardinality;
+  readonly source_type: string;
+  readonly target_type: string;
+  readonly source_prop: string | null;
+  readonly target_prop: string | null;
+  readonly join_table_file_path: string | null;
+}
+
+/** Cap on M2M edges materialised from projections/CSV — bounds memory. */
+const MAX_M2M_EDGES_PER_LINK = 100_000;
+
+function isFkValue(v: unknown): v is string | number {
+  return (
+    v !== null &&
+    v !== undefined &&
+    v !== "" &&
+    (typeof v === "string" || (typeof v === "number" && Number.isFinite(v)))
+  );
+}
+
+function pushEdge(
+  forward: Map<string, string[]>,
+  reverse: Map<string, string[]>,
+  sourcePk: string,
+  targetPk: string,
+): void {
+  const f = forward.get(sourcePk);
+  if (f) { if (!f.includes(targetPk)) f.push(targetPk); } else forward.set(sourcePk, [targetPk]);
+  const r = reverse.get(targetPk);
+  if (r) { if (!r.includes(sourcePk)) r.push(sourcePk); } else reverse.set(targetPk, [sourcePk]);
+}
+
+/**
+ * Read a legacy CSV join table (same convention as
+ * linkResolverService.parseJoinTableCSV: header row + `<source>,<target>`
+ * lines). Best-effort: a missing/unreadable file yields no edges rather than
+ * failing the whole snapshot load (the REST resolver behaves the same).
+ */
+function readJoinTableCsv(
+  filePath: string,
+): Array<{ source: string; target: string }> {
+  try {
+    if (!existsSync(filePath)) return [];
+    const content = readFileSync(filePath, "utf-8");
+    const lines = content.trim().split("\n");
+    if (lines.length < 2) return [];
+    const rows: Array<{ source: string; target: string }> = [];
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(",").map((c) => c.trim());
+      if (cols.length >= 2 && cols[0] && cols[1]) {
+        rows.push({ source: cols[0], target: cols[1] });
+        if (rows.length >= MAX_M2M_EDGES_PER_LINK) break;
+      }
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+async function loadLinkGraph(
+  pool: Pool,
+  ontologyId: string,
+  byType: ReadonlyMap<string, Map<string, OntologyObject>>,
+  importedLinkTypes: readonly string[] | undefined,
+  signal?: AbortSignal,
+): Promise<Map<string, LinkSnapshotDef>> {
+  const out = new Map<string, LinkSnapshotDef>();
+  // One query resolves link types + endpoint type apiNames + FK property
+  // apiNames (link_type stores object_type/property UUIDs — mirroring how
+  // linkResolverService resolves them row-by-row).
+  let rows: LinkTypeRow[];
+  try {
+    const res = await pool.query<LinkTypeRow>({
+      text: `SELECT lt.api_name,
+                    lt.reverse_api_name,
+                    lt.reverse_visible,
+                    lt.cardinality,
+                    so.api_name AS source_type,
+                    to_ot.api_name AS target_type,
+                    sp.api_name AS source_prop,
+                    tp.api_name AS target_prop,
+                    lt.join_table_file_path
+               FROM link_type lt
+               JOIN object_type so ON so.object_type_id = lt.source_object_type
+               JOIN object_type to_ot ON to_ot.object_type_id = lt.target_object_type
+               LEFT JOIN property sp ON sp.property_id = lt.source_property_id
+               LEFT JOIN property tp ON tp.property_id = lt.target_property_id
+              WHERE lt.ontology_id = $1::uuid`,
+      values: [ontologyId],
+      signal,
+    } as unknown as Parameters<typeof pool.query>[0]);
+    rows = res.rows;
+  } catch {
+    // The link_type table was introduced after the earliest deployments; a
+    // schema without it simply exposes no links (fail-silent, pre-feature
+    // behaviour — object reads are unaffected).
+    return out;
+  }
+
+  // M2M projections: edges persisted by the edit applicator (optionally
+  // absent on older schemas — guarded like link_edit is in applyEdits).
+  let instanceEdges: Array<{
+    link_type_api_name: string;
+    source_primary_key: string;
+    target_primary_key: string;
+  }> = [];
+  try {
+    const present = await pool.query<{ exists: boolean }>(
+      `SELECT to_regclass('link_instances') IS NOT NULL AS exists`,
+    );
+    if (present.rows[0]?.exists === true) {
+      const res = await pool.query<{
+        link_type_api_name: string;
+        source_primary_key: string;
+        target_primary_key: string;
+      }>(
+        `SELECT link_type_api_name, source_primary_key, target_primary_key
+           FROM link_instances
+          WHERE ontology_id = $1::uuid`,
+        [ontologyId],
+      );
+      instanceEdges = res.rows;
+    }
+  } catch {
+    instanceEdges = [];
+  }
+
+  const importFilter = importedLinkTypes ? new Set(importedLinkTypes) : null;
+
+  for (const def of rows) {
+    // Only materialise links whose endpoint types are BOTH in the snapshot —
+    // a link whose far side wasn't imported cannot yield traversable objects.
+    const sourceBucket = byType.get(def.source_type);
+    const targetBucket = byType.get(def.target_type);
+    if (!sourceBucket || !targetBucket) continue;
+    // Resource-import scoping: only DECLARED link types are traversable.
+    if (
+      importFilter !== null &&
+      !importFilter.has(def.api_name) &&
+      !(def.reverse_api_name !== null && importFilter.has(def.reverse_api_name))
+    ) {
+      continue;
+    }
+
+    const forward = new Map<string, string[]>();
+    const reverse = new Map<string, string[]>();
+
+    switch (def.cardinality) {
+      case "ONE_TO_MANY": {
+        if (def.target_prop) {
+          for (const t of targetBucket.values()) {
+            const fk = t[def.target_prop];
+            if (isFkValue(fk)) pushEdge(forward, reverse, String(fk), t.$primaryKey);
+          }
+        }
+        break;
+      }
+      case "MANY_TO_ONE": {
+        if (def.source_prop) {
+          for (const s of sourceBucket.values()) {
+            const fk = s[def.source_prop];
+            if (isFkValue(fk)) pushEdge(forward, reverse, s.$primaryKey, String(fk));
+          }
+        }
+        break;
+      }
+      case "ONE_TO_ONE": {
+        if (def.source_prop) {
+          for (const s of sourceBucket.values()) {
+            const fk = s[def.source_prop];
+            if (isFkValue(fk)) pushEdge(forward, reverse, s.$primaryKey, String(fk));
+          }
+        } else if (def.target_prop) {
+          for (const t of targetBucket.values()) {
+            const fk = t[def.target_prop];
+            if (isFkValue(fk)) pushEdge(forward, reverse, String(fk), t.$primaryKey);
+          }
+        }
+        break;
+      }
+      case "MANY_TO_MANY": {
+        if (def.join_table_file_path) {
+          for (const e of readJoinTableCsv(def.join_table_file_path)) {
+            pushEdge(forward, reverse, e.source, e.target);
+          }
+        } else if (def.target_prop) {
+          for (const t of targetBucket.values()) {
+            const fk = t[def.target_prop];
+            if (isFkValue(fk)) pushEdge(forward, reverse, String(fk), t.$primaryKey);
+          }
+        }
+        break;
+      }
+      default:
+        continue;
+    }
+
+    // Union in the persisted M2M projection (edit-applicator edges).
+    for (const e of instanceEdges) {
+      if (e.link_type_api_name === def.api_name) {
+        pushEdge(forward, reverse, e.source_primary_key, e.target_primary_key);
+      }
+    }
+
+    out.set(def.api_name, {
+      apiName: def.api_name,
+      reverseApiName: def.reverse_visible === false ? null : def.reverse_api_name,
+      cardinality: def.cardinality,
+      sourceType: def.source_type,
+      targetType: def.target_type,
+      forward,
+      reverse,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Link accessors — Foundry's SingleLink / MultiLink surface, built by
+// buildOntologySdk and attached to snapshot objects as NON-ENUMERABLE
+// getters (so spreads / JSON.stringify / existing object handling are
+// untouched and the accessors never leak over the wire).
+// ---------------------------------------------------------------------------
+
+/** The `1` side of a link: `employee.manager.get()` → Employee | undefined. */
+export interface SingleLink<T = OntologyObject> {
+  get(): T | undefined;
+  getAsync(): Promise<T | undefined>;
+}
+
+/** The `many` side of a link: `employee.reports.all()` → Employee[]. */
+export interface MultiLink<T = OntologyObject> {
+  all(): T[];
+  allAsync(): Promise<T[]>;
+  count(): number;
+  /**
+   * Filtered access — Foundry surfaces the search API on large collections
+   * so child sets can be narrowed without loading everything into memory.
+   * Accepts a predicate or an equality `where` map; returns a chainable
+   * ObjectSet (so `.filter()/.orderBy()/.sum()` and further
+   * search-arounds compose).
+   */
+  search(where?: Record<string, unknown> | ((o: T) => unknown)): ObjectSet;
+}
+
+function matchesWhere(obj: OntologyObject, where: Record<string, unknown>): boolean {
+  for (const [k, v] of Object.entries(where)) {
+    const key = k.startsWith("$") ? k : k;
+    if (obj[key] !== v) return false;
+  }
+  return true;
+}
+
+interface LinkAccessorSpec {
+  readonly name: string;
+  readonly multi: boolean;
+  readonly edges: ReadonlyMap<string, readonly string[]>;
+  readonly targetType: string;
+}
+
+/** True when the given SIDE of the link resolves to many objects. */
+function isManySide(cardinality: LinkCardinality, side: "source" | "target"): boolean {
+  return side === "source"
+    ? cardinality === "ONE_TO_MANY" || cardinality === "MANY_TO_MANY"
+    : cardinality === "MANY_TO_ONE" || cardinality === "MANY_TO_MANY";
+}
+
+/**
+ * Attach the generated link properties to every object of a type a link
+ * touches. Called ONCE per `buildOntologySdk` (i.e. per worker execution —
+ * accessors are functions and cannot cross `postMessage`). Idempotent:
+ * already-decorated objects are skipped, so the in-process (non-worker) sync
+ * fallback can decorate a cache-shared snapshot repeatedly.
+ */
+function attachLinkAccessors(
+  snapshot: OntologySnapshot,
+  recordLoad: (objectType: string, startAt: number, durationMs: number) => void,
+): void {
+  const links = snapshot.links;
+  if (!links || links.size === 0) return;
+
+  const specsByType = new Map<string, LinkAccessorSpec[]>();
+  const push = (type: string, spec: LinkAccessorSpec): void => {
+    const arr = specsByType.get(type);
+    if (arr) arr.push(spec);
+    else specsByType.set(type, [spec]);
+  };
+  for (const def of links.values()) {
+    push(def.sourceType, {
+      name: def.apiName,
+      multi: isManySide(def.cardinality, "source"),
+      edges: def.forward,
+      targetType: def.targetType,
+    });
+    if (def.reverseApiName) {
+      push(def.targetType, {
+        name: def.reverseApiName,
+        multi: isManySide(def.cardinality, "target"),
+        edges: def.reverse,
+        targetType: def.sourceType,
+      });
+    }
+  }
+
+  for (const [objectType, bucket] of snapshot.byType.entries()) {
+    const specs = specsByType.get(objectType);
+    if (!specs || specs.length === 0) continue;
+    for (const obj of bucket.values()) {
+      for (const spec of specs) {
+        // Never shadow a real property; never throw on repeated decoration
+        // of the same instance (configurable + skip-if-present).
+        if (Object.prototype.hasOwnProperty.call(obj, spec.name)) continue;
+        const accessor = spec.multi
+          ? buildMultiLink(snapshot, spec, obj.$primaryKey, recordLoad)
+          : buildSingleLink(snapshot, spec, obj.$primaryKey, recordLoad);
+        Object.defineProperty(obj, spec.name, {
+          value: accessor,
+          writable: false,
+          enumerable: false,
+          configurable: true,
+        });
+      }
+    }
+  }
+}
+
+function buildSingleLink(
+  snapshot: OntologySnapshot,
+  spec: LinkAccessorSpec,
+  ownerPk: string,
+  recordLoad: (objectType: string, startAt: number, durationMs: number) => void,
+): SingleLink {
+  let cached: OntologyObject | undefined;
+  let resolved = false;
+  const resolve = (): OntologyObject | undefined => {
+    if (!resolved) {
+      const t0 = Date.now();
+      const pks = spec.edges.get(ownerPk);
+      const pk = pks && pks.length > 0 ? pks[0] : undefined;
+      cached = pk === undefined
+        ? undefined
+        : snapshot.byType.get(spec.targetType)?.get(String(pk));
+      recordLoad(spec.targetType, t0, Date.now() - t0);
+      resolved = true;
+    }
+    return cached;
+  };
+  return { get: resolve, getAsync: () => Promise.resolve(resolve()) };
+}
+
+function buildMultiLink(
+  snapshot: OntologySnapshot,
+  spec: LinkAccessorSpec,
+  ownerPk: string,
+  recordLoad: (objectType: string, startAt: number, durationMs: number) => void,
+): MultiLink {
+  let cached: OntologyObject[] | undefined;
+  const resolveAll = (): OntologyObject[] => {
+    if (cached) return cached;
+    const t0 = Date.now();
+    const pks = spec.edges.get(ownerPk) ?? [];
+    const bucket = snapshot.byType.get(spec.targetType);
+    cached = pks
+      .map((pk) => bucket?.get(String(pk)))
+      .filter((o): o is OntologyObject => o !== undefined);
+    recordLoad(spec.targetType, t0, Date.now() - t0);
+    return cached;
+  };
+  return {
+    all: () => resolveAll().slice(),
+    allAsync: () => Promise.resolve(resolveAll().slice()),
+    count: () => resolveAll().length,
+    search: (where?: Record<string, unknown> | ((o: OntologyObject) => unknown)) => {
+      const rows = resolveAll();
+      const filtered =
+        where === undefined || where === null
+          ? rows
+          : typeof where === "function"
+            ? rows.filter((o) => Boolean(where(o)))
+            : rows.filter((o) => matchesWhere(o, where));
+      return asSearchable(new ObjectSet(filtered, spec.targetType, snapshot, recordLoad));
+    },
+  };
+}
+
+/**
+ * Wrap an ObjectSet so generated `searchAroundTo<LinkName>()` pivots are
+ * callable in addition to the generic `searchAround(linkApiName)`. Generated
+ * names use the ontology's link API names with an upper-cased first letter —
+ * `searchAroundToQARwandaBkloanapplications2()` etc. — matching how Foundry
+ * generates `ObjectSet.searchAroundToXxx()` from link API names.
+ */
+function asSearchable(set: ObjectSet): ObjectSet {
+  return new Proxy(set, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && prop.startsWith("searchAroundTo")) {
+        const wanted = prop.slice("searchAroundTo".length);
+        const apiName = target.resolveSearchAroundName(wanted);
+        if (apiName !== undefined) {
+          return () => target.searchAround(apiName);
+        }
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
+function upperFirst(s: string): string {
+  return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
+}
+
+// ---------------------------------------------------------------------------
 // ObjectSet — a lazy-ish, chainable, synchronous query surface over a snapshot
-// bucket. Mirrors the Foundry Functions read API (search / filter / aggregate).
+// bucket. Mirrors the Foundry Functions read API (search / filter / aggregate)
+// PLUS the link pivot ("search around") — Foundry docs §API: Objects and
+// links: "You can traverse links as an ObjectSet to avoid loading linked
+// object instances in the memory."
 // ---------------------------------------------------------------------------
 class ObjectSet {
-  constructor(private readonly rows: OntologyObject[]) {}
+  constructor(
+    private readonly rows: OntologyObject[],
+    private readonly objectType?: string,
+    private readonly snapshot?: OntologySnapshot,
+    private readonly recordLoad?: (objectType: string, startAt: number, durationMs: number) => void,
+  ) {}
   all(): OntologyObject[] { return this.rows.slice(); }
   count(): number { return this.rows.length; }
   isEmpty(): boolean { return this.rows.length === 0; }
   first(): OntologyObject | undefined { return this.rows[0]; }
-  take(n: number): ObjectSet { return new ObjectSet(this.rows.slice(0, Math.max(0, n | 0))); }
+  take(n: number): ObjectSet { return asSearchable(new ObjectSet(this.rows.slice(0, Math.max(0, n | 0)), this.objectType, this.snapshot, this.recordLoad)); }
   filter(pred: (o: OntologyObject) => unknown): ObjectSet {
-    return new ObjectSet(this.rows.filter((o) => Boolean(pred(o))));
+    return asSearchable(new ObjectSet(this.rows.filter((o) => Boolean(pred(o))), this.objectType, this.snapshot, this.recordLoad));
   }
   map<T>(fn: (o: OntologyObject) => T): T[] { return this.rows.map(fn); }
   orderBy(key: (o: OntologyObject) => number | string, dir: "asc" | "desc" = "asc"): ObjectSet {
@@ -181,7 +694,7 @@ class ObjectSet {
       const cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
       return dir === "desc" ? -cmp : cmp;
     });
-    return new ObjectSet(sorted);
+    return asSearchable(new ObjectSet(sorted, this.objectType, this.snapshot, this.recordLoad));
   }
   sum(field: string): number {
     return this.rows.reduce((acc, o) => acc + toNumber(o[field]), 0);
@@ -214,6 +727,79 @@ class ObjectSet {
       out[k] = (out[k] ?? 0) + toNumber(o[field]);
     }
     return out;
+  }
+
+  /**
+   * Pivot this set across a link type WITHOUT loading the linked instances
+   * into memory first — Foundry parity for `objectSet.searchAroundToX()`.
+   * `linkApiName` is the link's generated field name FROM this set's type:
+   * the forward apiName when this set is the link's source type, the reverse
+   * apiName when it is the target type.
+   */
+  searchAround(linkApiName: string): ObjectSet {
+    const snapshot = this.snapshot;
+    if (!snapshot?.links || !this.objectType) {
+      return asSearchable(new ObjectSet([], undefined, snapshot, this.recordLoad));
+    }
+    let edges: ReadonlyMap<string, readonly string[]> | undefined;
+    let targetType: string | undefined;
+    for (const def of snapshot.links.values()) {
+      if (def.sourceType === this.objectType && def.apiName === linkApiName) {
+        edges = def.forward;
+        targetType = def.targetType;
+        break;
+      }
+      if (def.targetType === this.objectType && def.reverseApiName === linkApiName) {
+        edges = def.reverse;
+        targetType = def.sourceType;
+        break;
+      }
+    }
+    if (!edges || !targetType) {
+      // Unknown link from this type — fail-silent (empty set), consistent
+      // with the runtime's handling of non-imported object types.
+      return asSearchable(new ObjectSet([], undefined, snapshot, this.recordLoad));
+    }
+    const t0 = Date.now();
+    const bucket = snapshot.byType.get(targetType);
+    const seen = new Set<string>();
+    const out: OntologyObject[] = [];
+    for (const o of this.rows) {
+      const pks = edges.get(o.$primaryKey);
+      if (!pks) continue;
+      for (const pk of pks) {
+        const key = String(pk);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const target = bucket?.get(key);
+        if (target) out.push(target);
+      }
+    }
+    this.recordLoad?.(targetType, t0, Date.now() - t0);
+    return asSearchable(new ObjectSet(out, targetType, snapshot, this.recordLoad));
+  }
+
+  /**
+   * Resolve a generated `searchAroundTo<Name>` method name back to the link
+   * apiName it was generated from (for this set's object type), or undefined
+   * when no imported link matches.
+   */
+  resolveSearchAroundName(generatedName: string): string | undefined {
+    const snapshot = this.snapshot;
+    if (!snapshot?.links || !this.objectType) return undefined;
+    for (const def of snapshot.links.values()) {
+      if (def.sourceType === this.objectType && upperFirst(def.apiName) === generatedName) {
+        return def.apiName;
+      }
+      if (
+        def.reverseApiName !== null &&
+        def.targetType === this.objectType &&
+        upperFirst(def.reverseApiName) === generatedName
+      ) {
+        return def.reverseApiName;
+      }
+    }
+    return undefined;
   }
 }
 
@@ -450,13 +1036,30 @@ export function buildOntologySdk(snapshot: OntologySnapshot): BuiltSdk {
       objectLoads.set(objectType, { calls: 1, firstStartAt: startAt, lastStartAt: startAt, totalDurationMs: durationMs });
     }
   };
+  // Attach generated Link Type accessors (SingleLink `.get()` on the `1`
+  // side, MultiLink `.all()` on the `many` side) to every snapshot object
+  // the imported link types touch — ONCE per execution. This runs inside the
+  // worker (accessors are functions and cannot cross postMessage with the
+  // snapshot), and decorates the SAME object instances that argument
+  // hydration returns, so link traversal works identically on function
+  // parameters, `Objects.get` results, search results, and nested hops.
+  attachLinkAccessors(snapshot, recordLoad);
   const sdk: OntologySdk = {
     Objects: {
       search(objectType: string): ObjectSet {
         const startAt = Date.now();
         requestedTypes.add(String(objectType));
         const bucket = snapshot.byType.get(objectType);
-        const out = new ObjectSet(bucket ? [...bucket.values()] : []);
+        // asSearchable: generated `searchAroundToX()` alongside the generic
+        // `searchAround(link)` — Foundry's ObjectSet link-pivot surface.
+        const out = asSearchable(
+          new ObjectSet(
+            bucket ? [...bucket.values()] : [],
+            String(objectType),
+            snapshot,
+            recordLoad,
+          ),
+        );
         recordLoad(String(objectType), startAt, Date.now() - startAt);
         return out;
       },

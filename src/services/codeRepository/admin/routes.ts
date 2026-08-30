@@ -3129,17 +3129,19 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // object types and inject `Objects`/`Edits` so the function can read and
       // express edits exactly like a Foundry TS Function v2. The snapshot is
       // built BEFORE the sandbox runs (the sandbox is synchronous).
-      const imports = await deps.pool.query<{ ontology_id: string; api_name: string }>(
-        `SELECT ontology_id, api_name FROM code_repository_resource_imports
-          WHERE repository_rid = $1 AND kind = 'object_type'`,
+      const imports = await deps.pool.query<{ ontology_id: string; api_name: string; kind: string }>(
+        `SELECT ontology_id, api_name, kind FROM code_repository_resource_imports
+          WHERE repository_rid = $1 AND kind IN ('object_type', 'link_type')`,
         [rid],
       );
       let ontologyId: string | null = null;
       const importedTypes: string[] = [];
+      const importedLinkTypes: string[] = [];
       for (const row of imports.rows) {
         const norm = normalizeOntologyId(row.ontology_id);
         if (norm) ontologyId = norm;
-        importedTypes.push(row.api_name);
+        if (row.kind === "link_type") importedLinkTypes.push(row.api_name);
+        else importedTypes.push(row.api_name);
       }
       // Snapshot load is the single most expensive step on this path (up to a
       // 200k-row SELECT). Cache it per (ontology, imported types) with a short
@@ -3147,7 +3149,7 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
       // The request's abort signal cancels the SELECT if the budget is
       // exceeded, instead of letting it run to completion after we 504.
       const snapshotKey = ontologyId
-        ? `${ontologyId}:${[...importedTypes].sort().join(",")}`
+        ? `${ontologyId}:${[...importedTypes].sort().join(",")}|links:${[...importedLinkTypes].sort().join(",")}`
         : "";
       const snapshotStartAt = Date.now();
       let snapshot: OntologySnapshot | undefined =
@@ -3158,6 +3160,10 @@ export function codeRepositoryRouter(deps: CodeRepositoryRoutesDeps): Router {
           loaded = await loadOntologySnapshot(deps.pool, {
             ontologyId,
             objectTypes: importedTypes,
+            // Foundry parity: only DECLARED link-type imports are traversable.
+            // A repo with zero link imports gets no link accessors — link
+            // graph work is skipped entirely (zero added load cost).
+            linkTypes: importedLinkTypes,
             signal: (req as unknown as { timeoutSignal?: AbortSignal }).timeoutSignal,
           });
         } catch (err) {

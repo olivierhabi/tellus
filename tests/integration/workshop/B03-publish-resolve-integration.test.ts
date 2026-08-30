@@ -82,6 +82,12 @@ beforeAll(async () => {
     await ctx.applyMigration(
       "src/migrations/060_b3_workshop_module_version.sql",
     );
+    await ctx.applyMigration(
+      "src/migrations/180_b3_workshop_version_unique_semver.sql",
+    );
+    await ctx.applyMigration(
+      "src/migrations/181_workshop_module_grants.sql",
+    );
   } catch (err) {
     pgAvailable = false;
     // eslint-disable-next-line no-console
@@ -134,12 +140,8 @@ beforeEach(async () => {
   audit = [];
   cacheStore.reset();
   if (ctx) {
-    await ctx.pool.query("TRUNCATE TABLE workshop_module RESTART IDENTITY");
     await ctx.pool.query(
-      "TRUNCATE TABLE workshop_module_version RESTART IDENTITY",
-    );
-    await ctx.pool.query(
-      "TRUNCATE TABLE workshop_idempotency_record RESTART IDENTITY",
+      "TRUNCATE TABLE workshop_module, workshop_module_version, workshop_module_grants, workshop_idempotency_record RESTART IDENTITY CASCADE",
     );
   }
 });
@@ -231,10 +233,10 @@ describe("B03 — publish + resolve", () => {
         result.body.versions.map(
           (version: { semver: string }) => version.semver,
         ),
-      ).toEqual(["1.0.0", "1.1.0"]);
+      ).toEqual(["1.1.0", "1.0.0"]);
       expect(result.body.versions[0]).toMatchObject({
         rid,
-        semver: "1.0.0",
+        semver: "1.1.0",
         schemaVersion: 4,
         publishedBy: "u-publish",
       });
@@ -266,6 +268,128 @@ describe("B03 — publish + resolve", () => {
         [rid],
       );
       expect(head.rows[0].published_semver).toBe("1.0.0");
+    },
+  );
+
+  itp(
+    "B03 C-03a: rollback restores the original definition (content-level correctness)",
+    async () => {
+      const rid = await createOne("RollbackContent");
+      // Publish 1.0.0 with the default empty definition (A).
+      await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.0.0" });
+
+      // Snapshot definition A from the version row.
+      const v10 = await request(app).get(
+        `/api/v1/workshop/modules/${rid}/versions/1.0.0`,
+      );
+      expect(v10.status).toBe(200);
+      const defA = v10.body.definition;
+
+      // Edit the mutable head to definition B (add a widget).
+      const headModule = await request(app).get(
+        `/api/v1/workshop/modules/${rid}`,
+      );
+      const defB = {
+        ...defA,
+        widgets: [
+          {
+            id: "w_changed",
+            type: "text",
+            config: { text: "B" },
+          },
+        ],
+        sections: [
+          {
+            id: "s_root",
+            layout: "rows",
+            children: [{ kind: "widget", ref: "w_changed" }],
+          },
+        ],
+      };
+      const putR = await request(app)
+        .put(`/api/v1/workshop/modules/${rid}`)
+        .set("If-Match", headModule.headers.etag)
+        .send({ definition: defB });
+      expect(putR.status).toBe(200);
+
+      // Publish 1.1.0 (snapshots B).
+      await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.1.0" });
+
+      // Rollback to 1.0.0.
+      const rb = await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/actions/rollback`)
+        .send({ semver: "1.0.0" });
+      expect(rb.status).toBe(200);
+
+      // Resolve latest => definition deep-equals A.
+      const latest = await request(app).get(
+        `/api/v1/workshop/resolve/latest?rid=${encodeURIComponent(rid)}`,
+      );
+      expect(latest.status).toBe(200);
+      expect(latest.body.definition).toEqual(defA);
+
+      // Mutable head still equals B.
+      const dev = await request(app).get(
+        `/api/v1/workshop/resolve/dev?rid=${encodeURIComponent(rid)}`,
+      );
+      expect(dev.status).toBe(200);
+      expect(dev.body.definition).toEqual(defB);
+
+      // Version 1.0.0 snapshot is still retrievable and matches A.
+      const v10after = await request(app).get(
+        `/api/v1/workshop/modules/${rid}/versions/1.0.0`,
+      );
+      expect(v10after.status).toBe(200);
+      expect(v10after.body.definition).toEqual(defA);
+
+      // Only one row per (rid, semver) — the unique index.
+      const count = await ctx!.pool.query(
+        `SELECT count(*)::int AS n FROM workshop_module_version
+          WHERE rid = $1 AND semver = '1.0.0'`,
+        [rid],
+      );
+      expect(count.rows[0].n).toBe(1);
+    },
+  );
+
+  itp(
+    "B03 C-03b: re-publishing same semver with different content → 409 SemverTagImmutable",
+    async () => {
+      const rid = await createOne();
+      await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.0.0" });
+
+      // Edit the mutable head.
+      const headModule = await request(app).get(
+        `/api/v1/workshop/modules/${rid}`,
+      );
+      const defB = {
+        ...headModule.body.definition,
+        widgets: [{ id: "w_test_b", type: "text", config: { text: "B" } }],
+        sections: [
+          {
+            id: "s_root",
+            layout: "rows",
+            children: [{ kind: "widget", ref: "w_test_b" }],
+          },
+        ],
+      };
+      await request(app)
+        .put(`/api/v1/workshop/modules/${rid}`)
+        .set("If-Match", headModule.headers.etag)
+        .send({ definition: defB });
+
+      // Try to publish 1.0.0 with different content → 409.
+      const r = await request(app)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.0.0" });
+      expect(r.status).toBe(409);
+      expect(r.body.errorName).toBe("Tellus:Workshop:SemverTagImmutable");
     },
   );
 

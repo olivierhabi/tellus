@@ -214,7 +214,12 @@ const VegaChartBodySchema = z.object({
   aggregationProperty: z.string().max(200).nullable().optional(),
   aggregationName: z.string().max(200).optional(),
   specLanguage: z.enum(["vega-lite", "vega"]).optional(),
-  currentSpec: z.string().max(10000).optional(),
+  // Core Vega specifications can legitimately be much larger than
+  // Vega-Lite because signal-driven layouts declare their full dataflow
+  // graph (the /test16 labelled donut is already >10 KiB). Keep this bounded,
+  // but large enough that regenerating an existing production Vega chart does
+  // not fail request validation before reaching the agent.
+  currentSpec: z.string().max(200000).optional(),
   model: z.string().max(50).optional(),
 });
 

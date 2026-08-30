@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS uq_workshop_module_version_rid_semver;

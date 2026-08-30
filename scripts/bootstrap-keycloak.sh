@@ -44,6 +44,13 @@ TEST_USER="${KC_TEST_USER:-cypress@tellus.local}"
 TEST_PASS="${KC_TEST_PASS:-Password123!}"
 ADMIN_TEST_USER="${KC_ADMIN_TEST_USER:-cypress-admin@tellus.local}"
 VIEWER_TEST_USER="${KC_VIEWER_TEST_USER:-cypress-viewer@tellus.local}"
+# Workshop browser-test accounts. These are deliberately separate from the
+# CBAC Cypress archetypes above: the Workshop acceptance flow needs a stable
+# editor and a stable viewer whose roles match the product documentation.
+WORKSHOP_EDITOR_USER="${KC_WORKSHOP_EDITOR_USER:-alice@tellus.dev}"
+WORKSHOP_EDITOR_PASS="${KC_WORKSHOP_EDITOR_PASS:-Alice123!Tellus}"
+WORKSHOP_VIEWER_USER="${KC_WORKSHOP_VIEWER_USER:-bob@tellus.dev}"
+WORKSHOP_VIEWER_PASS="${KC_WORKSHOP_VIEWER_PASS:-Bob123!Tellus}"
 # Fail-closed archetype ("dave") — user exists and can log in, but has NO
 # realm roles, NO groups, NO attributes. Used by Phase A3 CBAC tests to
 # assert that a valid JWT with zero clearance is rejected by the security
@@ -165,6 +172,7 @@ ok "realm '$REALM' hardened to spec (brute-force, 16h session, WebAuthn, passwor
 # fresh realm had no `marking:*` roles at all and every human user saw
 # "No objects found" in Workshop.
 for role in ontology-editor ontology-viewer ontology-admin audit-viewer \
+            workshop-editor workshop-viewer \
             credit-analyst \
             "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET" "marking:TOP_SECRET" \
             "marking:PII_ID" "marking:CREDIT_RISK" "marking:FINANCIAL_DETAIL" "marking:PCI_PAN_MASKED"; do
@@ -408,7 +416,8 @@ fi
 # duplicate assignments.
 create_user() {
   local uname="$1"
-  shift
+  local password="$2"
+  shift 2
   local roles=("$@")
   local uid
   uid=$(ADMIN "$KC/admin/realms/$REALM/users?username=$uname" | jq -r '.[0].id // empty')
@@ -418,12 +427,15 @@ create_user() {
       -d "{\"username\":\"$uname\",\"email\":\"$uname\",\"enabled\":true,\"emailVerified\":true,\"firstName\":\"Cypress\",\"lastName\":\"User\"}" \
       -o /dev/null
     uid=$(ADMIN "$KC/admin/realms/$REALM/users?username=$uname" | jq -r '.[0].id')
-    ADMIN -X PUT "$KC/admin/realms/$REALM/users/$uid/reset-password" \
-      -H "Content-Type: application/json" \
-      -d "{\"type\":\"password\",\"value\":\"$TEST_PASS\",\"temporary\":false}" \
-      -o /dev/null
     ok "user '$uname' created"
   fi
+  # Keep the seed credentials deterministic on every bootstrap. This also
+  # repairs a user that was created by an older bootstrap with a password that
+  # later became invalid under the realm password policy.
+  ADMIN -X PUT "$KC/admin/realms/$REALM/users/$uid/reset-password" \
+    -H "Content-Type: application/json" \
+    -d "{\"type\":\"password\",\"value\":\"$password\",\"temporary\":false}" \
+    -o /dev/null
   # Assign (or re-assign — idempotent) each role to the user. We POST one
   # role at a time because jq's interpolation of role JSON into an array
   # body is fragile across bash versions.
@@ -453,10 +465,10 @@ create_user() {
     -o /dev/null
 }
 
-create_user "$TEST_USER" \
+create_user "$TEST_USER" "$TEST_PASS" \
   ontology-editor \
   "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET"
-create_user "$NOGROUPS_TEST_USER"
+create_user "$NOGROUPS_TEST_USER" "$TEST_PASS"
 # dave must stay genuinely zero-clearance: `default-roles-$REALM` now inherits
 # `marking:PUBLIC` (see §2b), so it is explicitly unmapped from him. Without
 # this, markings-cbac-integration.test.ts ("dave cannot read ANY document")
@@ -471,12 +483,16 @@ if [[ -n "$dave_uid" ]]; then
     ok "user '$NOGROUPS_TEST_USER' unmapped from default-roles-$REALM (zero-clearance archetype)"
   fi
 fi
-create_user "$ADMIN_TEST_USER" \
+create_user "$ADMIN_TEST_USER" "$TEST_PASS" \
   ontology-admin \
   "marking:PUBLIC" "marking:CONFIDENTIAL" "marking:SECRET" "marking:TOP_SECRET"
-create_user "$VIEWER_TEST_USER" \
+create_user "$VIEWER_TEST_USER" "$TEST_PASS" \
   ontology-viewer \
   "marking:PUBLIC"
+create_user "$WORKSHOP_EDITOR_USER" "$WORKSHOP_EDITOR_PASS" \
+  workshop-editor ontology-editor "marking:PUBLIC"
+create_user "$WORKSHOP_VIEWER_USER" "$WORKSHOP_VIEWER_PASS" \
+  workshop-viewer "marking:PUBLIC"
 
 # --- 7. Smoke test -----------------------------------------------------------
 USER_TOKEN_RESP=$(curl -sf -X POST \

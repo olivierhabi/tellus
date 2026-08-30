@@ -22,6 +22,12 @@ export interface OssRequestContext {
   branchRid: string | null;
   /** Stable user RID for audit + idempotency keying. */
   userRid: string;
+  /** Markings the principal holds (from req.security). Undefined = no
+   *  security context available (legacy / test). When present, row-level
+   *  marking enforcement is active. */
+  markings?: string[];
+  /** True when the principal bypasses marking filtering. */
+  markingBypass?: boolean;
 }
 
 export interface OssLoadRequest {

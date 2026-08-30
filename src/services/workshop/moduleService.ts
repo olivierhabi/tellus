@@ -236,6 +236,34 @@ export async function createModule(
       throw err;
     }
 
+    // Auto-grant creator editor on the module — makes per-module model
+    // work for users without global workshop roles. Best-effort: silently
+    // skip if the grants migration hasn't been applied yet (42P01).
+    try {
+      await client.query(
+        `INSERT INTO workshop_module_grants
+           (module_rid, principal_type, principal_id, role, granted_by)
+         VALUES ($1, 'user', $2, 'editor', $2)
+         ON CONFLICT (module_rid, principal_type, principal_id) DO NOTHING`,
+        [rid, actor.userId],
+      );
+    } catch (_e) {
+      // 42P01 = table missing → migration not yet applied. Log a warning
+      // in non-test environments so the operator notices the gap.
+      const e = _e as { code?: string };
+      if (e.code === "42P01") {
+        // eslint-disable-next-line no-console
+        if (process.env.NODE_ENV !== "test" && process.env.VITEST !== "true") {
+          console.warn(
+            "[workshop:create] workshop_module_grants table missing — " +
+              "migration 181 may not have been applied. Creator grant skipped.",
+          );
+        }
+      } else {
+        throw _e;
+      }
+    }
+
     const response = rowToResponse(row);
     if (idemCtx) {
       await recordResponse(idemCtx, 201, response, etag, client);

@@ -228,7 +228,7 @@ describe("createCodeAssistantRouter", () => {
     expect(vegaCalls[0].payload.data_fields).toContain(
       "Object properties available for configuring aggregation",
     );
-    expect(vegaCalls[0].payload.current_json).toBe('{"mark":"point"}');
+    expect(vegaCalls[0].payload.current_json).toEqual({ mark: "point" });
     const spec = JSON.parse(res.body.data.spec);
     expect(spec.data).toEqual({ name: "order_metrics" });
     expect(spec).not.toHaveProperty("_metadata");
@@ -262,6 +262,33 @@ describe("createCodeAssistantRouter", () => {
       .send({ prompt: "bar chart", dataName: "" });
     expect(res.status).toBe(400);
     expect(res.body.errorCode).toBe("AI_ENGINE_BAD_REQUEST");
+  });
+
+  it("POST /vega-chart accepts a full core-Vega current specification", async () => {
+    const { port, vegaCalls } = makeFakeEngine();
+    const app = buildApp(port);
+    const currentSpec = JSON.stringify({
+      $schema: "https://vega.github.io/schema/vega/v6.json",
+      signals: Array.from({ length: 500 }, (_, index) => ({
+        name: `layoutSignal${index}`,
+        update: "datum.value == null ? [] : pluck(data('labels'), 'shift')",
+      })),
+      data: [{ name: "status" }, { name: "table", source: "status" }],
+      marks: [{ type: "arc", from: { data: "table" } }],
+    });
+    expect(currentSpec.length).toBeGreaterThan(10_000);
+
+    const response = await request(app)
+      .post("/api/v1/code-assistant/vega-chart")
+      .send({
+        prompt: "Create Donut Labelled",
+        dataName: "status",
+        currentSpec,
+      });
+
+    expect(response.status).toBe(200);
+    expect(vegaCalls).toHaveLength(1);
+    expect(vegaCalls[0].payload.current_json).toEqual(JSON.parse(currentSpec));
   });
 
   it("propagates AppError from the client as the engine error code", async () => {

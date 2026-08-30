@@ -224,6 +224,9 @@ export async function executeFunctionAction(
   const snapshot = await loadOntologySnapshot(db, {
     ontologyId: options.ontologyId,
     objectTypes: importedTypes,
+    // Parity with the code-repository invoke path: only the repo's declared
+    // link-type imports become traversable accessors in the sandbox.
+    linkTypes: importedLinkTypes,
   });
   const args = hydrateArguments(options.parameters, options.parameterDefinitions, snapshot);
   // Phase 4: the pinned version's published signature (written by the
