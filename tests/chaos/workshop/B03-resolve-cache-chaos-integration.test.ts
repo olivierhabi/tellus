@@ -77,6 +77,12 @@ beforeAll(async () => {
     await ctx.applyMigration(
       "src/migrations/060_b3_workshop_module_version.sql",
     );
+    await ctx.applyMigration(
+      "src/migrations/180_b3_workshop_version_unique_semver.sql",
+    );
+    await ctx.applyMigration(
+      "src/migrations/181_workshop_module_grants.sql",
+    );
   } catch (err) {
     pgAvailable = false;
     // eslint-disable-next-line no-console

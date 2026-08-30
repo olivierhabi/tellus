@@ -50,7 +50,20 @@ async function tableExists(
       WHERE table_schema = $1 AND table_name = $2`,
     [schema, table],
   );
-  return r.rowCount === 1;
+  return (r.rowCount ?? 0) > 0;
+}
+
+async function indexExists(
+  schema: string,
+  index: string,
+): Promise<boolean> {
+  const r = await ctx!.pool.query(
+    `SELECT 1
+       FROM pg_indexes
+      WHERE schemaname = $1 AND indexname = $2`,
+    [schema, index],
+  );
+  return (r.rowCount ?? 0) > 0;
 }
 
 describe("Workshop migrations — down/up reversibility", () => {
@@ -113,6 +126,54 @@ describe("Workshop migrations — down/up reversibility", () => {
       );
       expect(
         await tableExists(ctx!.schema, "workshop_module_version"),
+      ).toBe(true);
+    },
+  );
+
+  itp(
+    "180 unique semver index: up creates, down drops",
+    async () => {
+      await ctx!.applyMigration(
+        "src/migrations/060_b3_workshop_module_version.sql",
+      );
+      await ctx!.applyMigration(
+        "src/migrations/180_b3_workshop_version_unique_semver.sql",
+      );
+      expect(
+        await indexExists(ctx!.schema, "uq_workshop_module_version_rid_semver"),
+      ).toBe(true);
+
+      await ctx!.applyMigration(
+        "src/migrations/180_b3_workshop_version_unique_semver.down.sql",
+      );
+      expect(
+        await indexExists(ctx!.schema, "uq_workshop_module_version_rid_semver"),
+      ).toBe(false);
+    },
+  );
+
+  itp(
+    "181 grants: up creates, down drops, up recreates",
+    async () => {
+      await ctx!.applyMigration(
+        "src/migrations/181_workshop_module_grants.sql",
+      );
+      expect(
+        await tableExists(ctx!.schema, "workshop_module_grants"),
+      ).toBe(true);
+
+      await ctx!.applyMigration(
+        "src/migrations/181_workshop_module_grants.down.sql",
+      );
+      expect(
+        await tableExists(ctx!.schema, "workshop_module_grants"),
+      ).toBe(false);
+
+      await ctx!.applyMigration(
+        "src/migrations/181_workshop_module_grants.sql",
+      );
+      expect(
+        await tableExists(ctx!.schema, "workshop_module_grants"),
       ).toBe(true);
     },
   );

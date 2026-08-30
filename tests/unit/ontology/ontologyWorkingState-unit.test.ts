@@ -3,6 +3,10 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   objectTypeCreateConflict,
+  hasCompanionDatasourceBinding,
+  resolveCompositeIssues,
+  resolveDraftActionTypeId,
+  resolveDraftLinkTypeId,
   orderWorkingChanges,
   stableOntologyValue,
   validateDraftObjectTypeId,
@@ -27,6 +31,22 @@ function change(changeId: string, operation: WorkingChange["operation"], depende
 }
 
 describe("Ontology Manager working-state domain", () => {
+  const objectCreate = (id = "object-1", dataset = "dataset-1"): WorkingChange => ({ ...change(`objectType:${id}:create`, "create"), resourceId: id,
+    proposedValue: { objectTypeId: id, requiredDatasourceId: dataset }, issues: [{ key: `objectType:${id}:create:datasource`, severity: "error", code: "REQUIRED_FIELD_MISSING", message: "A backing datasource or explicit unbacked location is required.", resourceKind: "objectType", resourceId: id }] });
+  const datasourceBind = (id = "object-1", dataset = "dataset-1"): WorkingChange => ({ ...change(`datasource:${id}:binding`, "bind"), resourceKind: "datasource", resourceId: id, proposedValue: { foundryDatasetId: dataset } });
+
+  it("resolves the datasource requirement only from the matching composite binding", () => {
+    const create = objectCreate(); const bind = datasourceBind();
+    expect(hasCompanionDatasourceBinding(create, [bind, create])).toBe(true);
+    expect(resolveCompositeIssues(create, create.issues, [bind, create])).toEqual([]);
+    expect(hasCompanionDatasourceBinding(create, [datasourceBind("other-object")])).toBe(false);
+    expect(hasCompanionDatasourceBinding(create, [datasourceBind("object-1", "other-dataset")])).toBe(false);
+  });
+
+  it("restores the datasource error when the dependent binding is removed", () => {
+    const create = objectCreate();
+    expect(resolveCompositeIssues(create, create.issues, [create])).toEqual(create.issues);
+  });
   it("orders composite changes deterministically while honoring dependencies", () => {
     const ordered = orderWorkingChanges([
       change("delete-old", "delete", ["bind-datasource"]),
@@ -58,6 +78,32 @@ describe("Ontology Manager working-state domain", () => {
     expect(validateDraftObjectTypeId(undefined)).toBeNull();
     expect(validateDraftObjectTypeId("9ed8aefe-c62c-4aac-a05f-982ea6bc0dd7")).toBeNull();
     expect(validateDraftObjectTypeId("shared-route-id")).toMatch(/valid UUID/);
+  });
+
+  it("preserves a staged action-type UUID so its editor URL survives commit", () => {
+    const draftRid = "6464fa0c-1bb5-429b-950b-8e04e1a1e387";
+    expect(resolveDraftActionTypeId({
+      resourceId: draftRid,
+      proposedValue: { rid: draftRid },
+    })).toBe(draftRid);
+    // Legacy drafts used API names rather than UUIDs and must continue to
+    // receive the database-generated identifier instead of failing a cast.
+    expect(resolveDraftActionTypeId({
+      resourceId: "createLegacyOrder",
+      proposedValue: { apiName: "createLegacyOrder" },
+    })).toBeNull();
+  });
+
+  it("preserves a staged link-type UUID so Review edits and Save use one identity", () => {
+    const draftRid = "a68537c7-98bc-4ba0-919d-489227251e19";
+    expect(resolveDraftLinkTypeId({
+      resourceId: draftRid,
+      proposedValue: { linkTypeId: draftRid },
+    })).toBe(draftRid);
+    expect(resolveDraftLinkTypeId({
+      resourceId: "ordersToCustomer",
+      proposedValue: { apiName: "ordersToCustomer" },
+    })).toBeNull();
   });
 
   it("maps object-type UUID and API-name races to precise domain conflicts", () => {

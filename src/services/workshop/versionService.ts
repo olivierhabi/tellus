@@ -52,6 +52,7 @@ import {
   moduleNotFound,
   moduleNotPublished,
   moduleVersionNotFound,
+  semverTagImmutable,
 } from "./errors";
 import { validateModule } from "./validator";
 import { hashBody, recordResponse, lookupIdempotency } from "./idempotency";
@@ -165,12 +166,11 @@ export async function publishVersion(
   request: PublishRequest,
   actor: Actor,
   idempotency: IdempotencyOptions,
-  options: { isRollback?: boolean } = {},
 ): Promise<PublishedModule> {
   const t0 = process.hrtime.bigint();
   let metricResult: "success" | "error" = "success";
   try {
-    return await _publishVersionInner(rid, request, actor, idempotency, options);
+    return await _publishVersionInner(rid, request, actor, idempotency);
   } catch (e) {
     metricResult = "error";
     throw e;
@@ -185,11 +185,9 @@ async function _publishVersionInner(
   request: PublishRequest,
   actor: Actor,
   idempotency: IdempotencyOptions,
-  options: { isRollback?: boolean } = {},
 ): Promise<PublishedModule> {
   assertSemver(request.semver);
 
-  const isRollback = options.isRollback ?? false;
   const route = idempotency.route;
   const bodyHash = hashBody(idempotency.body);
 
@@ -224,27 +222,51 @@ async function _publishVersionInner(
       // PUT, but the spec is explicit: publish revalidates).
       const compileResult = validateModule(head.definition);
 
-      // Step 4 — insert immutable version row. Re-publishing the same
-      // (rid, semver) produces a NEW row (rollback timeline) per the
-      // composite PK on (rid, published_at).
-      const inserted = await client.query<{
+      // Step 4 — check for existing (rid, semver); the unique index
+      // (180_b3) guarantees at most one. Same definition → idempotent
+      // return (200). Different definition → 409 (immutable snapshot
+      // must not be overwritten).
+      const existing = await client.query<{
+        matches: boolean;
         published_at: string;
         published_by: string;
       }>(
-        `INSERT INTO workshop_module_version
-           (rid, semver, schema_version, definition, compiled, published_by)
-         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
-         RETURNING published_at::text, published_by`,
-        [
-          rid,
-          request.semver,
-          head.schema_version,
-          JSON.stringify(head.definition),
-          JSON.stringify(compileResult.compiled),
-          actor.userId,
-        ],
+        `SELECT (definition = $3::jsonb) AS matches,
+                published_at::text, published_by
+           FROM workshop_module_version
+          WHERE rid = $1 AND semver = $2
+          LIMIT 1`,
+        [rid, request.semver, JSON.stringify(head.definition)],
       );
-      const publishedAt = inserted.rows[0].published_at;
+
+      let publishedAt: string;
+      let publishedBy: string;
+      if (existing.rows.length > 0) {
+        if (!existing.rows[0].matches) throw semverTagImmutable(rid, request.semver);
+        publishedAt = existing.rows[0].published_at;
+        publishedBy = existing.rows[0].published_by;
+      } else {
+        // Insert immutable version row.
+        const inserted = await client.query<{
+          published_at: string;
+          published_by: string;
+        }>(
+          `INSERT INTO workshop_module_version
+             (rid, semver, schema_version, definition, compiled, published_by)
+           VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
+           RETURNING published_at::text, published_by`,
+          [
+            rid,
+            request.semver,
+            head.schema_version,
+            JSON.stringify(head.definition),
+            JSON.stringify(compileResult.compiled),
+            actor.userId,
+          ],
+        );
+        publishedAt = inserted.rows[0].published_at;
+        publishedBy = inserted.rows[0].published_by;
+      }
 
       // Step 5 — flip workshop_module.published_semver to point at this
       // tag (whether forward-publish or rollback).
@@ -314,7 +336,7 @@ async function _publishVersionInner(
         definition: head.definition,
         compiled: compileResult.compiled,
         publishedAt,
-        publishedBy: actor.userId,
+        publishedBy,
         etag: versionEtag,
       };
       return response;
@@ -340,9 +362,7 @@ async function _publishVersionInner(
   // Step 7 — audit.
   await emitWorkshopAudit({
     actorSubject: actor.userId,
-    action: isRollback
-      ? "WORKSHOP_MODULE_ROLLED_BACK"
-      : "WORKSHOP_MODULE_PUBLISHED",
+    action: "WORKSHOP_MODULE_PUBLISHED",
     rid,
     result: "SUCCESS",
     details: {
@@ -359,9 +379,32 @@ async function _publishVersionInner(
 }
 
 /**
- * Rollback is a publish with `isRollback: true`. Server emits
- * WORKSHOP_MODULE_ROLLED_BACK rather than _PUBLISHED so the audit log
- * preserves the operator intent.
+ * Rollback the published pointer to an existing immutable version row.
+ *
+ * Prior behavior (bug): called `publishVersion` which read the CURRENT
+ * mutable head and snapshotted it under the old semver — producing a
+ * duplicate row with newer content and permanently shadowing the original
+ * snapshot. getVersion() returned the newest row per semver, so the true
+ * old definition became unreachable.
+ *
+ * Fix (pointer-repoint strategy):
+ *   1. Load the target version row from workshop_module_version.
+ *      V must exist — 404 otherwise.
+ *   2. Update workshop_module.published_semver AND published_at to point
+ *      at that existing row. resolveLatest joins on BOTH columns so the
+ *      repointed pointer is authoritative.
+ *   3. No new version row is created. The original snapshot stays
+ *      accessible and unmodified. The builder's mutable head survives
+ *      untouched — no snapshot, no revalidation, no mutation.
+ *   4. Audit WORKSHOP_MODULE_ROLLED_BACK.
+ *
+ * Why pointer-repoint over re-publish-with-higher-semver?
+ *   - Less work for the DB (no jsonb COPY, no validateModule re-run).
+ *   - No risk of semver collision (the module workspace has limited
+ *     semver head-room from sequential publishes).
+ *   - The `published_at` join in resolveLatest makes the relationship
+ *     deterministic without changing version lookup semantics.
+ *   - Immutable snapshot rows NEVER updated — the pointer alone flips.
  */
 export async function rollback(
   rid: string,
@@ -369,9 +412,132 @@ export async function rollback(
   actor: Actor,
   idempotency: IdempotencyOptions,
 ): Promise<PublishedModule> {
-  return publishVersion(rid, { semver: toSemver }, actor, idempotency, {
-    isRollback: true,
+  assertSemver(toSemver);
+
+  const t0 = process.hrtime.bigint();
+  let metricResult: "success" | "error" = "success";
+  try {
+    return await _rollbackInner(rid, toSemver, actor, idempotency);
+  } catch (e) {
+    metricResult = "error";
+    throw e;
+  } finally {
+    const ns = Number(process.hrtime.bigint() - t0);
+    histPublish.observe({ result: metricResult }, ns / 1e9);
+  }
+}
+
+async function _rollbackInner(
+  rid: string,
+  toSemver: string,
+  actor: Actor,
+  idempotency: IdempotencyOptions,
+): Promise<PublishedModule> {
+  const route = idempotency.route;
+  const bodyHash = hashBody(idempotency.body);
+
+  if (idempotency.key) {
+    const hit = await lookupIdempotency({
+      key: idempotency.key,
+      userId: actor.userId,
+      route,
+      bodySha256: bodyHash,
+    });
+    if (hit) {
+      return {
+        version: hit.responseBody as unknown as ModuleVersionResponse,
+        fromCache: true,
+      };
+    }
+  }
+
+  const result = await getWorkshopDb().withTransaction(
+    async (client: PoolClient) => {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [rid]);
+
+      // Verify module exists (not deleted).
+      await loadHead(client, rid);
+
+      // Load the target immutable version row.
+      const target = await client.query<{
+        semver: string;
+        schema_version: number;
+        definition: unknown;
+        compiled: unknown;
+        published_at: string;
+        published_by: string;
+      }>(
+        `SELECT semver, schema_version, definition, compiled,
+                published_at::text, published_by
+           FROM workshop_module_version
+          WHERE rid = $1 AND semver = $2
+          LIMIT 1`,
+        [rid, toSemver],
+      );
+      if (target.rows.length === 0) {
+        throw moduleVersionNotFound(rid, toSemver);
+      }
+      const t = target.rows[0];
+
+      // Repoint the published pointer to the existing immutable row.
+      await client.query(
+        `UPDATE workshop_module
+            SET published_semver = $2,
+                published_at     = $3::timestamptz
+          WHERE rid = $1`,
+        [rid, t.semver, t.published_at],
+      );
+
+      await client.query(
+        `SELECT pg_notify('workshop_module_published', $1)`,
+        [JSON.stringify({ rid, semver: t.semver })],
+      );
+
+      // No autosave snapshot capture — rollback does not mutate the
+      // mutable head. The builder's draft survives untouched.
+
+      const versionEtag = computeEtag(t.definition, 0);
+      const response: ModuleVersionResponse = {
+        rid,
+        semver: t.semver,
+        schemaVersion: t.schema_version,
+        definition: t.definition,
+        compiled: t.compiled,
+        publishedAt: t.published_at,
+        publishedBy: t.published_by,
+        etag: versionEtag,
+      };
+      return response;
+    },
+  );
+
+  if (idempotency.key) {
+    await recordResponse(
+      {
+        key: idempotency.key,
+        userId: actor.userId,
+        route,
+        bodySha256: bodyHash,
+      },
+      200,
+      result as unknown as Record<string, unknown>,
+      result.etag,
+    );
+  }
+
+  await emitWorkshopAudit({
+    actorSubject: actor.userId,
+    action: "WORKSHOP_MODULE_ROLLED_BACK",
+    rid,
+    result: "SUCCESS",
+    details: {
+      semver: toSemver,
+      branchRid: actor.branchRid ?? null,
+    },
   });
+
+  cacheStore.invalidate(rid);
+  return { version: result, fromCache: false };
 }
 
 // ---------------------------------------------------------------------------

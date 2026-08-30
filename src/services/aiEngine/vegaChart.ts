@@ -96,6 +96,18 @@ export function buildVegaChartAgentPayload(
         input.aggregationProperty ? ` of "${input.aggregationProperty}"` : ""
       }, exposed as "${aggregationName}" and canonical "value"`
     : "not applicable";
+  let currentJson: Record<string, unknown> | undefined;
+  if (input.currentSpec?.trim()) {
+    try {
+      const parsed = JSON.parse(input.currentSpec) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        currentJson = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // An invalid editor draft should not prevent AIP from creating a fresh
+      // valid chart. The agent receives no modify-context in that case.
+    }
+  }
 
   return {
     user_request: [
@@ -120,7 +132,7 @@ export function buildVegaChartAgentPayload(
           ]
         : []),
     ].join(". "),
-    ...(input.currentSpec?.trim() ? { current_json: input.currentSpec } : {}),
+    ...(currentJson ? { current_json: currentJson } : {}),
     ...(input.model?.trim() ? { model: input.model.trim() } : {}),
   };
 }
@@ -130,7 +142,14 @@ export interface VegaChartGenerationResult {
   _metadata?: Record<string, unknown>;
 }
 
-/** Validate the model response and enforce the configured named dataset. */
+/** Validate the model response and enforce the configured named dataset.
+ *
+ * Vega-Lite and core Vega have different top-level data contracts:
+ * Vega-Lite uses `data: {name}`, while Vega uses `data: [{name}, ...]` and may
+ * define derived datasets consumed by marks. Never coerce one into the other;
+ * doing so deletes core Vega's transform graph and leaves every `from.data`
+ * reference unresolved.
+ */
 export function normalizeVegaChartAgentResult(
   result: VegaChartAgentResult,
   dataName: string,
@@ -154,14 +173,42 @@ export function normalizeVegaChartAgentResult(
   const spec = { ...(raw as Record<string, unknown>) };
   const embeddedMetadata = spec._metadata;
   delete spec._metadata;
-  const currentData =
-    spec.data && typeof spec.data === "object" && !Array.isArray(spec.data)
-      ? (spec.data as Record<string, unknown>)
-      : {};
-  const safeData = { ...currentData };
-  delete safeData.values;
-  delete safeData.url;
-  spec.data = { ...safeData, name: dataName.trim() };
+  const configuredDataName = dataName.trim() || "objects";
+  const schema = typeof spec.$schema === "string" ? spec.$schema : "";
+  const isCoreVega = /\/vega\/v\d+\.json(?:$|[?#])/i.test(schema);
+
+  if (isCoreVega) {
+    const definitions = Array.isArray(spec.data)
+      ? spec.data.filter(
+          (entry): entry is Record<string, unknown> =>
+            !!entry && typeof entry === "object" && !Array.isArray(entry),
+        )
+      : [];
+    let foundConfiguredDataset = false;
+    const safeDefinitions = definitions.map((definition) => {
+      if (definition.name !== configuredDataName) return { ...definition };
+      foundConfiguredDataset = true;
+      const safeDefinition = { ...definition, name: configuredDataName };
+      // Workshop injects these rows at render time. Prevent the agent from
+      // smuggling inline/remote data while retaining every derived dataset,
+      // transform, signal, and source relationship in the Vega graph.
+      delete safeDefinition.values;
+      delete safeDefinition.url;
+      return safeDefinition;
+    });
+    spec.data = foundConfiguredDataset
+      ? safeDefinitions
+      : [{ name: configuredDataName }, ...safeDefinitions];
+  } else {
+    const currentData =
+      spec.data && typeof spec.data === "object" && !Array.isArray(spec.data)
+        ? (spec.data as Record<string, unknown>)
+        : {};
+    const safeData = { ...currentData };
+    delete safeData.values;
+    delete safeData.url;
+    spec.data = { ...safeData, name: configuredDataName };
+  }
   if (typeof spec.$schema !== "string") {
     spec.$schema = "https://vega.github.io/schema/vega-lite/v6.json";
   }

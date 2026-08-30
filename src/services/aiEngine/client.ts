@@ -38,7 +38,7 @@ export interface AiEngineResult {
 export interface VegaChartAgentPayload {
   user_request: string;
   data_fields: string;
-  current_json?: string;
+  current_json?: string | Record<string, unknown>;
   model?: string;
 }
 

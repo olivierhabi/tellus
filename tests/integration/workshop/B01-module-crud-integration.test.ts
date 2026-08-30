@@ -106,6 +106,9 @@ beforeAll(async () => {
     await ctx.applyMigration(
       "src/migrations/059_b1_workshop_idempotency.sql",
     );
+    await ctx.applyMigration(
+      "src/migrations/181_workshop_module_grants.sql",
+    );
   } catch (err) {
     pgAvailable = false;
     // eslint-disable-next-line no-console
@@ -492,6 +495,9 @@ describe("B01 C-25: migration reversibility", () => {
       if (!ctx) return;
       // The harness already applied UP in beforeAll. Apply DOWN, then UP
       // again, and confirm the table is operational.
+      await ctx.applyMigration(
+        "src/migrations/181_workshop_module_grants.down.sql",
+      );
       await ctx.applyMigration("src/migrations/058_b1_workshop_module.down.sql");
       await ctx.applyMigration(
         "src/migrations/059_b1_workshop_idempotency.down.sql",

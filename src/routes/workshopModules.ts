@@ -32,7 +32,7 @@ import {
 } from "../services/workshop/types";
 import { validateModule } from "../services/workshop/validator";
 import { workshopRateLimitMiddleware } from "../services/workshop/rateLimit";
-import { requireRole } from "../services/workshop/rbac";
+import { requireRole, requireModuleRole } from "../services/workshop/rbac";
 
 const router: Router = Router();
 
@@ -199,6 +199,7 @@ router.get(
 
 router.get(
   "/modules/:rid",
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const module = await getModule(req.params.rid);
@@ -225,7 +226,7 @@ async function persistedEtag(rid: string): Promise<string> {
 
 router.put(
   "/modules/:rid",
-  requireRole("editor"),
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = updateModuleRequestSchema.safeParse(req.body);
@@ -255,7 +256,7 @@ router.put(
 
 router.delete(
   "/modules/:rid",
-  requireRole("editor"),
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const actor = actorFromRequest(req);
@@ -277,7 +278,7 @@ const publishBodySchema = z
 
 router.post(
   "/modules/:rid/versions:publish",
-  requireRole("editor"),
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = publishBodySchema.safeParse(req.body);
@@ -313,6 +314,7 @@ router.post(
 
 router.post(
   "/modules/:rid/actions/rollback",
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = publishBodySchema.safeParse(req.body);
@@ -348,6 +350,7 @@ router.post(
 
 router.get(
   "/modules/:rid/versions",
+  requireModuleRole("viewer"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { listVersions } = await import(
@@ -363,6 +366,7 @@ router.get(
 
 router.get(
   "/modules/:rid/versions/:semver",
+  requireModuleRole("viewer"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { getVersion } = await import(
@@ -371,6 +375,155 @@ router.get(
       const v = await getVersion(req.params.rid, req.params.semver);
       res.setHeader("ETag", v.etag);
       res.status(200).json(v);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---- P1: GET /api/v1/workshop/modules/{rid}/published — viewer-safe ----
+//
+// Returns the published snapshot definition + metadata. Does NOT expose
+// the mutable head. Viewers use this instead of GET /modules/:rid to avoid
+// receiving draft definitions.
+
+router.get(
+  "/modules/:rid/published",
+  requireModuleRole("viewer"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { resolveLatest } = await import(
+        "../services/workshop/versionService"
+      );
+      const { getModule } = await import(
+        "../services/workshop/moduleService"
+      );
+      const mod = await getModule(req.params.rid);
+      const resolved = await resolveLatest(req.params.rid);
+      res.status(200).json({
+        rid: mod.rid,
+        displayName: mod.displayName,
+        description: mod.description,
+        ontologyRid: mod.ontologyRid,
+        branchRid: mod.branchRid,
+        semver: resolved.semver,
+        publishedAt: resolved.asOf,
+        schemaVersion: resolved.schemaVersion,
+        definition: resolved.definition,
+        compiled: resolved.compiled,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---- P1: GET /api/v1/workshop/modules/{rid}/effectiveRole ----------------
+//
+// Lightweight endpoint for the editor UI to determine whether the current
+// user should be redirected to view mode.
+
+router.get(
+  "/modules/:rid/effectiveRole",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const userId = currentUser(req);
+      const { getModuleEffectiveRole } = await import(
+        "../services/workshop/grantService"
+      );
+      const user = (req as unknown as { user?: { roles?: unknown; groups?: unknown } }).user ?? {};
+      const role = await getModuleEffectiveRole(req.params.rid, {
+        userId,
+        roles: Array.isArray(user.roles) ? user.roles as string[] : [],
+        groups: Array.isArray(user.groups) ? user.groups as string[] : [],
+      });
+      res.status(200).json({ rid: req.params.rid, role });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---- P1: GET /api/v1/workshop/modules/{rid}/grants — list grants ---------
+
+router.get(
+  "/modules/:rid/grants",
+  requireRole("editor"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { listModuleGrants } = await import(
+        "../services/workshop/grantService"
+      );
+      const grants = await listModuleGrants(req.params.rid);
+      res.status(200).json({ grants });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---- P1: POST /api/v1/workshop/modules/{rid}/grants — upsert grant ------
+
+const grantBodySchema = z
+  .object({
+    principalType: z.enum(["user", "group"]),
+    principalId: z.string().min(1),
+    role: z.enum(["viewer", "editor"]),
+  })
+  .strict();
+
+router.post(
+  "/modules/:rid/grants",
+  requireRole("editor"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const parsed = grantBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw invalidModuleSchema("grant body did not validate", {
+          issues: parsed.error.issues,
+        });
+      }
+      const { upsertModuleGrant } = await import(
+        "../services/workshop/grantService"
+      );
+      const actor = actorFromRequest(req);
+      const grant = await upsertModuleGrant(
+        req.params.rid,
+        parsed.data.principalType,
+        parsed.data.principalId,
+        parsed.data.role,
+        actor.userId,
+      );
+      res.status(200).json(grant);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---- P1: DELETE /api/v1/workshop/modules/{rid}/grants/:principalType/:principalId
+
+router.delete(
+  "/modules/:rid/grants/:principalType/:principalId",
+  requireRole("editor"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { removeModuleGrant } = await import(
+        "../services/workshop/grantService"
+      );
+      const deleted = await removeModuleGrant(
+        req.params.rid,
+        req.params.principalType as "user" | "group",
+        req.params.principalId,
+      );
+      if (!deleted) {
+        throw new WorkshopError("NOT_FOUND", "Tellus:Workshop:GrantNotFound", {
+          rid: req.params.rid,
+          principalType: req.params.principalType,
+          principalId: req.params.principalId,
+        });
+      }
+      res.status(204).send();
     } catch (err) {
       next(err);
     }
@@ -388,6 +541,7 @@ const resolveQuerySchema = z
 
 router.get(
   "/resolve/latest",
+  requireModuleRole("viewer"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = resolveQuerySchema.safeParse(req.query);
@@ -409,6 +563,7 @@ router.get(
 
 router.get(
   "/resolve/dev",
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = resolveQuerySchema.safeParse(req.query);
@@ -605,7 +760,12 @@ router.post(
       const branchRid = actorFromRequest(req).branchRid ?? null;
       const jwt =
         ((req as unknown as { user?: { token?: string } }).user?.token ?? "");
-      const ctx = { jwt, branchRid, userRid: userId };
+      const security = (req as unknown as { security?: { markings?: string[]; markingBypass?: boolean } }).security;
+      const ctx = {
+        jwt, branchRid, userRid: userId,
+        markings: security?.markings,
+        markingBypass: security?.markingBypass,
+      };
       const out = await loadObjectSet(
         {
           ontologyRid: parsed.data.ontologyRid,
@@ -690,7 +850,12 @@ router.post(
       const branchRid = actorFromRequest(req).branchRid ?? null;
       const jwt =
         ((req as unknown as { user?: { token?: string } }).user?.token ?? "");
-      const ctx = { jwt, branchRid, userRid: userId };
+      const security = (req as unknown as { security?: { markings?: string[]; markingBypass?: boolean } }).security;
+      const ctx = {
+        jwt, branchRid, userRid: userId,
+        markings: security?.markings,
+        markingBypass: security?.markingBypass,
+      };
       const out = await aggregate(
         {
           ontologyRid: parsed.data.ontologyRid,

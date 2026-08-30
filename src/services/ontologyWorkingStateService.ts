@@ -91,6 +91,28 @@ const OBJECT_API_NAME = /^[A-Z][A-Za-z0-9]{0,99}$/;
 const LOWER_API_NAME = /^[a-z][A-Za-z0-9]{0,99}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Resource URLs are assigned before publication, so a staged action create
+ * must retain its client-generated UUID at commit.  Older drafts used an API
+ * name as `resourceId`; retain the database default for those only.
+ */
+export function resolveDraftActionTypeId(
+  change: Pick<WorkingChange, "resourceId" | "proposedValue">,
+): string | null {
+  const proposed = change.proposedValue as Record<string, unknown> | undefined;
+  const candidate = String(proposed?.rid ?? change.resourceId ?? "").trim();
+  return UUID.test(candidate) ? candidate : null;
+}
+
+/** Link-type drafts use the same stable-ID contract as action-type drafts. */
+export function resolveDraftLinkTypeId(
+  change: Pick<WorkingChange, "resourceId" | "proposedValue">,
+): string | null {
+  const proposed = change.proposedValue as Record<string, unknown> | undefined;
+  const candidate = String(proposed?.linkTypeId ?? change.resourceId ?? "").trim();
+  return UUID.test(candidate) ? candidate : null;
+}
+
 type CanonicalFoundryDatasource = {
   id: string;
   name: string;
@@ -365,6 +387,29 @@ function validateShape(input: WorkingChangeInput, effective: Record<string, unkn
   return issues;
 }
 
+/** A create wizard stages the object and its datasource as dependent changes.
+ * Validation is therefore evaluated against the complete change set, not each
+ * row in isolation. Otherwise a valid composite create is permanently blocked
+ * by the object row's earlier, single-row datasource issue. */
+export function hasCompanionDatasourceBinding(change: Pick<WorkingChange, "resourceKind" | "resourceId" | "proposedValue">, changes: ReadonlyArray<WorkingChange>) {
+  const createValue = change.proposedValue as Record<string, unknown> | null;
+  // New drafts carry an explicit expected datasource identity. Legacy drafts
+  // predate that field, so retain a narrow RID-only compatibility path until
+  // they are committed or discarded.
+  const expectedDatasourceId = String(createValue?.requiredDatasourceId ?? createValue?.datasourceRid ?? createValue?.foundryDatasetId ?? "");
+  return changes.some((candidate) => {
+    if (candidate.resourceKind !== "datasource" || candidate.operation !== "bind" || candidate.resourceId !== change.resourceId) return false;
+    const value = candidate.proposedValue as Record<string, unknown> | null;
+    const datasourceId = String(value?.foundryDatasetId ?? value?.datasourceRid ?? "");
+    return Boolean(datasourceId) && (!expectedDatasourceId || datasourceId === expectedDatasourceId);
+  });
+}
+
+export function resolveCompositeIssues(change: WorkingChange, issues: ValidationIssue[], changes: ReadonlyArray<WorkingChange>) {
+  if (change.resourceKind !== "objectType" || change.operation !== "create" || !hasCompanionDatasourceBinding(change, changes)) return issues;
+  return issues.filter((value) => !(value.code === "REQUIRED_FIELD_MISSING" && value.key === `${change.changeId}:datasource`));
+}
+
 async function ensureUnique(client: PoolClient, ontologyId: string, input: WorkingChangeInput, effective: Record<string, unknown>) {
   // A delete can never introduce a name conflict, and its resource id is
   // frequently the apiName of the very row being removed — checking would
@@ -424,7 +469,8 @@ async function reviewWithClient(client: PoolClient, ontologyId: string, principa
   const rows = ws.rowCount ? await client.query(
     `SELECT * FROM ontology_working_change WHERE working_state_id=$1 ORDER BY created_at, change_id`, [ws.rows[0].working_state_id],
   ) : { rows: [] as Record<string, unknown>[] };
-  const changes = rows.rows.map((row) => rowToChange(row as Record<string, unknown>));
+  const storedChanges = rows.rows.map((row) => rowToChange(row as Record<string, unknown>));
+  const changes = storedChanges.map((change) => ({ ...change, issues: resolveCompositeIssues(change, change.issues, storedChanges) }));
   const uniqueIssues = new Map<string, ValidationIssue>();
   for (const change of changes) for (const value of change.issues) uniqueIssues.set(value.key, value);
   const resourceKeys = new Set(changes.map((change) => `${change.resourceKind}:${change.resourceId}`));
@@ -747,9 +793,9 @@ async function applyChange(client: PoolClient, ontologyId: string, commitId: str
   } else if (change.resourceKind === "actionType") {
     if (change.operation === "delete") await client.query(`DELETE FROM action_type WHERE ontology_id=$1 AND (api_name=$2 OR action_type_id::text=$2)`,[ontologyId,change.resourceId]);
     else if (change.operation === "create") await client.query(`INSERT INTO action_type
-      (ontology_id,api_name,display_name,description,icon_name,icon_color,save_location_rid,parameters,rules,submission_criteria,side_effects,
+      (action_type_id,ontology_id,api_name,display_name,description,icon_name,icon_color,save_location_rid,parameters,rules,submission_criteria,side_effects,
        writeback_config,security_settings,semantics_version,execution_mode,function_config,delete_policy,is_enabled,created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'ontology-working-state')`,[ontologyId,value.apiName,value.displayName,
+      VALUES (COALESCE($1::uuid,gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'ontology-working-state')`,[resolveDraftActionTypeId(change),ontologyId,value.apiName,value.displayName,
       value.description ?? "",value.icon ?? value.iconName ?? "manually-entered-data",value.iconColor ?? "#1A2230",
       value.saveLocationRid ?? null,JSON.stringify(value.parameters ?? []),JSON.stringify(value.rules ?? []),value.submissionCriteria ? JSON.stringify(value.submissionCriteria):null,
       value.sideEffects ? JSON.stringify(value.sideEffects):null,value.writebackConfig ? JSON.stringify(value.writebackConfig):null,
@@ -773,12 +819,12 @@ async function applyChange(client: PoolClient, ontologyId: string, commitId: str
       const sourcePropertyId=await resolveProperty(source.object_type_id,value.sourcePropertyId,value.sourcePropertyApiName);
       const targetPropertyId=await resolveProperty(target.object_type_id,value.targetPropertyId,value.targetPropertyApiName);
       await client.query(`INSERT INTO link_type
-        (ontology_id,api_name,display_name,description,cardinality,source_object_type,target_object_type,source_property_id,target_property_id,
+        (link_type_id,ontology_id,api_name,display_name,description,cardinality,source_object_type,target_object_type,source_property_id,target_property_id,
          join_table_file_path,join_table_source_column,join_table_target_column,is_bidirectional,storage_backend,violation_policy,
          reverse_api_name,reverse_display_name,reverse_description,reverse_visible,reverse_property_projection,reverse_actions_enabled,
          mandatory_control_property_id,mcp_propagation_mode,mcp_required_count)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
-        [ontologyId,value.apiName,value.displayName,value.description ?? null,value.cardinality,source.object_type_id,target.object_type_id,sourcePropertyId,targetPropertyId,
+        VALUES (COALESCE($1::uuid,gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
+        [resolveDraftLinkTypeId(change),ontologyId,value.apiName,value.displayName,value.description ?? null,value.cardinality,source.object_type_id,target.object_type_id,sourcePropertyId,targetPropertyId,
         value.joinTableFilePath ?? null,value.joinTableSourceColumn ?? null,value.joinTableTargetColumn ?? null,value.isBidirectional ?? false,
         value.storageBackend ?? "csv_legacy",value.violationPolicy ?? "warn",value.reverseApiName ?? null,value.reverseDisplayName ?? null,
         value.reverseDescription ?? null,value.reverseVisible ?? true,value.reversePropertyProjection ? JSON.stringify(value.reversePropertyProjection):null,
@@ -884,7 +930,7 @@ export async function commitWorkingState(ontologyId: string, principalId: string
       }
       const proposed=change.proposedValue&&typeof change.proposedValue==="object"?change.proposedValue as Record<string,unknown>:{};
       const effective={...(latest&&typeof latest==="object"?latest as Record<string,unknown>:{}),...proposed,...(change.patch??{})};
-      const currentIssues=[...validateShape(change,effective),...await ensureUnique(client,ontologyId,change,effective)];
+      const currentIssues=resolveCompositeIssues(change,[...validateShape(change,effective),...await ensureUnique(client,ontologyId,change,effective)],review.changes);
       freshErrors.push(...currentIssues.filter(value=>value.severity==="error").map(value=>value.message));
     }
     // Blocking decisions use freshly computed issues only — persisted

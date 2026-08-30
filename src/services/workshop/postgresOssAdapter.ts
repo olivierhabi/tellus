@@ -21,6 +21,14 @@
 // §0.5 + §0.6: ctx.branchRid + ctx.jwt are accepted but unused here — the
 // demo + object_instances reads are single-branch. The contract still passes
 // them through so a future multi-branch wiring is mechanical.
+//
+// P1: per-user row-level marking filtering on the generic object_instances
+// path. When ctx.markings is present and markingBypass is not true, every
+// query appends a predicate that requires the user to hold each row marking
+// (empty-marking rows and 'PUBLIC' markings are visible to all). This
+// mirrors the OpenSearch _security.markings filter from buildSecurityFilter.
+// The demo order path is a non-production table without security markings
+// and remains unfiltered.
 // =============================================================================
 
 import { getWorkshopDb } from "./db.js";
@@ -219,20 +227,50 @@ function isMissingTable(err: unknown): boolean {
   return Boolean(err && typeof err === "object" && (err as { code?: string }).code === "42P01");
 }
 
+/**
+ * Build a SQL predicate suffix for row-level marking enforcement.
+ * When ctx.markings is absent or markingBypass is true, returns "" (no-op).
+ * Otherwise, filters rows whose markings subset is wholly contained in the
+ * user's marking set, after normalising `{}` (empty) → `{PUBLIC}` (visible
+ * to all).
+ *
+ * Security invariants:
+ *   - Rows with `markings = '{}'` are visible to everyone (legacy data).
+ *   - Rows whose markings ALL appear in the user's set are visible.
+ *   - A row with `{SECRET}` is invisible to a user without `SECRET`.
+ *   - `PUBLIC` is explicitly allowed for everyone.
+ */
+function markingFilterClause(
+  ctx: OssRequestContext,
+  params: unknown[],
+): string {
+  if (!ctx.markings || ctx.markingBypass || ctx.markings.length === 0) {
+    return "";
+  }
+  params.push(ctx.markings);
+  return ` AND (
+    markings = '{}'::text[] OR
+    NOT EXISTS (
+      SELECT 1 FROM unnest(COALESCE(NULLIF(markings, '{}'::text[]), ARRAY['PUBLIC'])) m
+      WHERE m <> 'PUBLIC' AND NOT (m = ANY($${params.length}::text[]))
+    )
+  )`;
+}
+
 export class PostgresOssAdapter implements WorkshopOssAdapter {
-  async load(req: OssLoadRequest, _ctx: OssRequestContext): Promise<OssLoadResponse> {
+  async load(req: OssLoadRequest, ctx: OssRequestContext): Promise<OssLoadResponse> {
     return req.objectTypeApiName === DEMO_ORDER_TYPE
       ? this.loadDemoOrder(req)
-      : this.loadGeneric(req);
+      : this.loadGeneric(req, ctx);
   }
 
   async aggregate(
     req: OssAggregateRequest,
-    _ctx: OssRequestContext,
+    ctx: OssRequestContext,
   ): Promise<OssAggregateResponse> {
     return req.objectTypeApiName === DEMO_ORDER_TYPE
       ? this.aggregateDemoOrder(req)
-      : this.aggregateGeneric(req);
+      : this.aggregateGeneric(req, ctx);
   }
 
   // ---- Demo `order` table -------------------------------------------------
@@ -340,10 +378,10 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
 
   // ---- Generic `object_instances` table -----------------------------------
 
-  private async loadGeneric(req: OssLoadRequest): Promise<OssLoadResponse> {
-    // params: $1 ontology uuid, $2 object type api name, then predicate, then orderBy.
+  private async loadGeneric(req: OssLoadRequest, ctx: OssRequestContext): Promise<OssLoadResponse> {
     const params: unknown[] = [ontologyUuid(req.ontologyRid), req.objectTypeApiName];
     const where = compileJsonbPredicate(req.predicate, params);
+    const markingClause = markingFilterClause(ctx, params);
     const orderBy =
       req.orderBy && req.orderBy.length > 0
         ? "ORDER BY " +
@@ -362,7 +400,7 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
            FROM object_instances
           WHERE ontology_id = $1::uuid
             AND object_type_api_name = $2
-            AND ${where}
+            AND ${where}${markingClause}
           ${orderBy}
           LIMIT ${limit + 1}`,
         params,
@@ -390,12 +428,13 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
         req.objectTypeApiName,
       ];
       const countWhere = compileJsonbPredicate(req.predicate, countParams);
+      const countMarkingClause = markingFilterClause(ctx, countParams);
       const tot = await getWorkshopDb().query(
         `SELECT count(*)::int AS c
            FROM object_instances
           WHERE ontology_id = $1::uuid
             AND object_type_api_name = $2
-            AND ${countWhere}`,
+            AND ${countWhere}${countMarkingClause}`,
         countParams,
       );
       return {
@@ -413,6 +452,7 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
 
   private async aggregateGeneric(
     req: OssAggregateRequest,
+    ctx: OssRequestContext,
   ): Promise<OssAggregateResponse> {
     const out: {
       name: string;
@@ -426,6 +466,7 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
         req.objectTypeApiName,
       ];
       const where = compileJsonbPredicate(req.predicate, params);
+      const markingClause = markingFilterClause(ctx, params);
       const limitClause =
         agg.groupBy?.kind === "topN"
           ? `LIMIT ${Math.max(1, Math.min(agg.groupBy.n, 100))}`
@@ -436,7 +477,7 @@ export class PostgresOssAdapter implements WorkshopOssAdapter {
              FROM object_instances
             WHERE ontology_id = $2::uuid
               AND object_type_api_name = $3
-              AND ${where}
+              AND ${where}${markingClause}
             GROUP BY (properties ->> $1)
             ORDER BY c DESC
             ${limitClause}`,

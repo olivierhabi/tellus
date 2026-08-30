@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS workshop_module_grants;

@@ -47,6 +47,9 @@ beforeAll(async () => {
     ctx = await openTestSchema("workshop_b04");
     await ctx.applyMigration("src/migrations/058_b1_workshop_module.sql");
     await ctx.applyMigration("src/migrations/059_b1_workshop_idempotency.sql");
+    await ctx.applyMigration(
+      "src/migrations/181_workshop_module_grants.sql",
+    );
     // Object type fixture (B04 calls B06 for the seed lookup).
     await ctx.exec(`
       CREATE TABLE object_type (

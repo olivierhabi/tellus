@@ -78,6 +78,9 @@ beforeAll(async () => {
     await ctx.applyMigration(
       "src/migrations/059_b1_workshop_idempotency.sql",
     );
+    await ctx.applyMigration(
+      "src/migrations/181_workshop_module_grants.sql",
+    );
   } catch (err) {
     pgAvailable = false;
     // eslint-disable-next-line no-console

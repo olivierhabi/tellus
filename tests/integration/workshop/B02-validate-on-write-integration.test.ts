@@ -63,6 +63,9 @@ beforeAll(async () => {
     ctx = await openTestSchema("workshop_b02_route");
     await ctx.applyMigration("src/migrations/058_b1_workshop_module.sql");
     await ctx.applyMigration("src/migrations/059_b1_workshop_idempotency.sql");
+    await ctx.applyMigration(
+      "src/migrations/181_workshop_module_grants.sql",
+    );
   } catch (err) {
     pgAvailable = false;
     // eslint-disable-next-line no-console
@@ -111,9 +114,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   if (ctx) {
-    await ctx.pool.query("TRUNCATE TABLE workshop_module RESTART IDENTITY");
     await ctx.pool.query(
-      "TRUNCATE TABLE workshop_idempotency_record RESTART IDENTITY",
+      "TRUNCATE TABLE workshop_module, workshop_module_grants, workshop_idempotency_record RESTART IDENTITY CASCADE",
     );
   }
 });
