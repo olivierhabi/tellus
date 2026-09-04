@@ -150,6 +150,64 @@ export interface LoadSnapshotArgs {
 }
 
 /**
+ * Property-name translation for instance-store rows.
+ *
+ * `object_instances.properties` is populated by datasource adoption/merge
+ * with RAW backing-datasource column names (e.g. `claim_id`, `signal_type`),
+ * while the OpenSearch index (written by the reindex path's rowTransformer)
+ * uses object-type property API names (`claimId`, `signalType`). Function
+ * executions therefore saw a different object shape than REST search — the
+ * same demo's `calculateClaimRiskScore` matched in OS-shaped data but found
+ * zero rows against the instance store.
+ *
+ * `backing_datasource.column_mapping` ({ propertyApiName → sourceColumn })
+ * is the authoritative contract between the two. We translate each loaded
+ * row into API-name space ADDITIVELY: a camelCase key already present (e.g.
+ * written by the Edits writeback) always wins over its raw-column sibling.
+ */
+async function loadColumnMappings(
+  pool: Pool,
+  ontologyId: string,
+): Promise<Map<string, Record<string, string>>> {
+  const result = await pool.query<{
+    api_name: string;
+    column_mapping: Record<string, string> | string | null;
+  }>({
+    text: `SELECT t.api_name, ds.column_mapping
+            FROM backing_datasource ds
+            JOIN object_type t ON t.object_type_id = ds.object_type_id
+           WHERE t.ontology_id = $1::uuid`,
+    values: [ontologyId],
+  } as unknown as Parameters<typeof pool.query>[0]);
+  const byType = new Map<string, Record<string, string>>();
+  for (const row of result.rows) {
+    const mapping =
+      typeof row.column_mapping === "string"
+        ? (JSON.parse(row.column_mapping) as Record<string, string>)
+        : row.column_mapping;
+    if (mapping && typeof mapping === "object") byType.set(row.api_name, mapping);
+  }
+  return byType;
+}
+
+function translatePropertiesToApiNames(
+  props: Record<string, unknown>,
+  mapping: Record<string, string> | undefined,
+): Record<string, unknown> {
+  if (!mapping) return props;
+  let translated: Record<string, unknown> | null = null;
+  for (const [apiName, sourceColumn] of Object.entries(mapping)) {
+    if (apiName === sourceColumn) continue;
+    // Existing API-name value (e.g. from an Action edit) always wins.
+    if (props[apiName] !== undefined) continue;
+    if (props[sourceColumn] === undefined) continue;
+    if (!translated) translated = { ...props };
+    translated[apiName] = props[sourceColumn];
+  }
+  return translated ?? props;
+}
+
+/**
  * Materialise a consistent in-memory view of the Ontology for one function
  * execution. Reads the latest row per (object_type, primary_key).
  */
@@ -183,6 +241,8 @@ export async function loadOntologySnapshot(
   } as unknown as Parameters<typeof pool.query>[0]);
   const { rows } = result;
 
+  const columnMappings = await loadColumnMappings(pool, args.ontologyId);
+
   const byType = new Map<string, Map<string, OntologyObject>>();
   let count = 0;
   for (const r of rows) {
@@ -193,7 +253,10 @@ export async function loadOntologySnapshot(
     }
     // ORDER BY last_modified_at DESC → first row per pk wins (latest).
     if (bucket.has(r.primary_key)) continue;
-    const props = r.properties ?? {};
+    const props = translatePropertiesToApiNames(
+      r.properties ?? {},
+      columnMappings.get(r.object_type_api_name),
+    );
     const title =
       (typeof props.title === "string" && props.title) ||
       (typeof props.name === "string" && props.name) ||
@@ -1135,13 +1198,21 @@ function cryptoRandomId(): string {
 
 // ---------------------------------------------------------------------------
 // applyEdits — persist a collected edit batch (simulating a function-backed
-// Action). Writes the system-of-record `object_instances` and, for property
-// updates, an audit row in `object_edits`. Idempotent-ish and transactional.
+// Action). Writes the system-of-record `object_instances`, the Funnel edit
+// store `ontology_edit` (the rows every reindex/funnel pass replays — without
+// them a force reindex silently reverts function-applied properties to the
+// datasource baseline), and, for property updates, an audit row in
+// `object_edits`. Idempotent-ish and transactional.
 // ---------------------------------------------------------------------------
 export interface ApplyEditsArgs {
   readonly ontologyId: string;
   readonly edits: readonly OntologyEdit[];
   readonly actorUserId?: string | null;
+  /** Action context for edit-store provenance (`ontology_edit.action_type_api_name`).
+   * Optional: function-preview/invoke callers omit it. */
+  readonly actionTypeApiName?: string | null;
+  /** Execution uuid for edit-store provenance (`ontology_edit.execution_id`). */
+  readonly executionId?: string | null;
   /** Function-backed Actions use this to append their audit row in the same
    * transaction as the ontology mutations. Preview/invoke callers omit it. */
   readonly preCommitHook?: (client: PoolClient) => Promise<void>;
@@ -1188,6 +1259,45 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
       `SELECT to_regclass('object_edits') IS NOT NULL AS exists`,
     );
     const canAudit = auditTablePresent.rows[0]?.exists === true;
+    // The Funnel edit store: pending + persistent rows here are what the
+    // reindex/funnel pipeline replays over datasource snapshots. Function
+    // edits MUST land here or they are silently reverted on the next reindex
+    // (parity with editApplicator's B1 contract for declarative Actions).
+    const editStorePresent = await client.query<{ exists: boolean }>(
+      `SELECT to_regclass('ontology_edit') IS NOT NULL AS exists`,
+    );
+    const canEditStore = editStorePresent.rows[0]?.exists === true;
+    // One edit-store row per create/update/delete edit (NOT per property):
+    // property_values carries the same payload a declarative wiring writes —
+    // the full document for creates, the patch subset for updates, `{}` for
+    // deletes — so replay engines overlay per property uniformly.
+    const insertEditStoreRow = async (
+      e: Extract<OntologyEdit, { op: "create" | "update" | "delete" }>,
+    ): Promise<void> => {
+      if (!canEditStore) return;
+      const properties =
+        e.op === "create" ? (e.properties ?? {}) :
+        e.op === "update" ? (e.patch ?? {}) :
+        {};
+      await client.query(
+        `INSERT INTO ontology_edit
+           (object_type_api_name, primary_key, operation, property_values,
+            action_type_api_name, execution_id, executed_by, edit_strategy,
+            ontology_id, branch_id)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'user_edit_wins', $8::uuid, $9::uuid)`,
+        [
+          e.objectType,
+          e.primaryKey,
+          e.op,
+          JSON.stringify(properties),
+          args.actionTypeApiName ?? null,
+          args.executionId && UUID_RE.test(args.executionId) ? args.executionId : null,
+          args.actorUserId ?? "system",
+          args.ontologyId,
+          branchId,
+        ],
+      );
+    };
 
     for (const e of args.edits) {
       if (e.op === "create") {

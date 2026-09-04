@@ -135,6 +135,7 @@ import {
   stopPipelineDispatcher,
   sweepOrphanPipelineDeployments,
 } from "./services/pipelines/pipelineDispatcher";
+import { startPipelineBuildScheduler } from "./services/pipelines/buildScheduler";
 import {
   startIcebergMaintenance,
   stopIcebergMaintenance,
@@ -454,6 +455,11 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 app.use(
   createInputSanitizer({
     shouldSkipBody: (req) => (req.path || "").startsWith("/api/v1/workshop"),
+    // Workshop module documents are managed, schema-validated documents that
+    // legitimately nest deeper than the generic API default (widget configs
+    // with linked-filter chains, selection-event payloads, etc.).
+    maxDepthForRoute: (req) =>
+      (req.path || "").startsWith("/api/v1/workshop") ? 24 : undefined,
   }),
 );
 
@@ -1171,6 +1177,12 @@ app.use("/api/v1", pipelinesActivityRouter);
 import workshopModulesRouter from "./routes/workshopModules";
 app.use("/api/v1/workshop", workshopModulesRouter);
 
+// Workshop Comments widget (docs: workshop/widgets-comments). Same mount
+// prefix as modules; every handler re-verifies parent-object read access
+// through the security-filtered object fetch before serving a thread.
+import workshopCommentsRouter from "./routes/workshopComments";
+app.use("/api/v1/workshop", workshopCommentsRouter);
+
 // Quiver B1 — analysis CRUD (Phase 1).
 // Spec: tasks/quiver/quiver-tasks.md §B1. Phase-flagged via TELLUS_QUIVER_PHASE.
 // Mounted at /quiver/api/v1 to mirror the spec's base-path verbatim.
@@ -1702,6 +1714,17 @@ async function start(): Promise<void> {
     } catch (err) {
       console.warn(
         `WARNING: could not start Pipeline dispatcher: ${(err as Error).message}`
+      );
+    }
+
+    // Foundry build schedules — pipelines with schedule_enabled=true are
+    // rebuilt every interval through the regular deploy path.
+    try {
+      startPipelineBuildScheduler();
+      console.log("Pipeline build scheduler started");
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start Pipeline build scheduler: ${(err as Error).message}`
       );
     }
 

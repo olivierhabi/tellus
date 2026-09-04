@@ -148,8 +148,17 @@ async function resolveLinkedWhere(
     throw appError("INVALID_ARGUMENT", `Linked filter target '${linked.targetObjectTypeApiName}' is incompatible with '${linked.linkTypeApiName}'.`);
   }
 
-  if (linked.targetWhere) {
-    await validateSearchQuery({ where: linked.targetWhere, $pageSize: 1 }, targetType);
+  // Multi-hop linked filters (Workshop Filter List chained linked-object
+  // properties, e.g. Fraud Signal → Claim → Provider.province): the nested
+  // targetWhere may itself contain `linked` predicates anchored on the
+  // TARGET type. Resolve them recursively first so the validator + link
+  // service only ever see plain property predicates.
+  const resolvedTargetWhere = linked.targetWhere
+    ? await resolveLinkedWhere(linked.targetWhere, targetType, securityFilter, branchId)
+    : undefined;
+
+  if (resolvedTargetWhere) {
+    await validateSearchQuery({ where: resolvedTargetWhere, $pageSize: 1 }, targetType);
   }
   const sourcePks = new Set<string>();
   let pageToken: string | undefined;
@@ -157,7 +166,7 @@ async function resolveLinkedWhere(
     const resolved = await searchAround(linkType, direction, {
       pageSize: 1000,
       ...(pageToken ? { pageToken } : {}),
-      ...(linked.targetWhere ? { sourceWhere: linked.targetWhere } : {}),
+      ...(resolvedTargetWhere ? { sourceWhere: resolvedTargetWhere } : {}),
     }, securityFilter, branchId);
     for (const object of resolved.linkedObjects) if (object.__pk != null) sourcePks.add(String(object.__pk));
     pageToken = resolved.nextPageToken ?? undefined;
@@ -824,8 +833,39 @@ router.post(
         branchId
       );
 
+      // Foundry parity: every linked row must carry the target object's
+      // primary key under `__pk`/`__primaryKey` so clients can chain
+      // further traversals and correlate rows. Some index projections
+      // (dataset-backed object types) store the PK only under its property
+      // apiName; normalize here rather than forcing every consumer to know
+      // each type's PK property.
+      const targetObjectTypeId =
+        direction === "forward"
+          ? linkType.target_object_type
+          : linkType.source_object_type;
+      const pkResult = await query(
+        `SELECT p.api_name
+           FROM object_type ot
+           JOIN property p ON p.property_id = ot.primary_key_property_id
+          WHERE ot.object_type_id = $1`,
+        [targetObjectTypeId]
+      );
+      const pkApiName: string | undefined = pkResult.rows[0]?.api_name;
+      const linkedObjects = pkApiName
+        ? result.linkedObjects.map((o) => {
+            if (o.__pk != null && o.__primaryKey != null) return o;
+            const pk = o.__pk ?? o.__primaryKey ?? o[pkApiName];
+            if (pk == null) return o;
+            return {
+              ...o,
+              __pk: o.__pk ?? String(pk),
+              __primaryKey: o.__primaryKey ?? String(pk),
+            };
+          })
+        : result.linkedObjects;
+
       return sendSuccess(res, {
-        data: result.linkedObjects,
+        data: linkedObjects,
         nextPageToken: result.nextPageToken,
         totalCount: result.totalCount,
       });

@@ -60,6 +60,16 @@ router.delete('/:pipelineId/acl/:principalId', authenticate, owner, pipelineCont
 router.put('/:pipelineId/viewport', authenticate, editor, pipelineController.saveViewport);
 router.get('/:pipelineId/viewport', authenticate, viewer, pipelineController.getViewport);
 
+// Foundry build schedule — editor-configured; the pipeline build scheduler
+// rebuilds the pipeline every interval while enabled.
+router.get('/:pipelineId/schedule', authenticate, viewer, pipelineController.getBuildSchedule);
+router.put('/:pipelineId/schedule', authenticate, editor, pipelineController.updateBuildSchedule);
+
+// Foundry data expectations — declarative data-quality gates on builds.
+router.get('/:pipelineId/expectations', authenticate, viewer, pipelineController.listExpectations);
+router.post('/:pipelineId/expectations', authenticate, editor, pipelineController.addExpectation);
+router.delete('/:pipelineId/expectations/:expectationId', authenticate, editor, pipelineController.removeExpectation);
+
 // Pipeline node routes — node CRUD is PUT/POST/DELETE on pipeline state → editor.
 router.post('/:pipelineId/nodes', authenticate, editor, pipelineController.addNode);
 router.post('/:pipelineId/nodes/bulk', authenticate, editor, pipelineController.addNodesBulk);
@@ -67,6 +77,9 @@ router.post('/:pipelineId/nodes/bulk', authenticate, editor, pipelineController.
 router.post('/:pipelineId/nodes/kafka-source', authenticate, editor, pipelineController.addKafkaStreamSource);
 router.get('/:pipelineId/nodes', authenticate, viewer, pipelineController.listNodes);
 router.put('/:pipelineId/nodes/:nodeId', authenticate, editor, pipelineController.updateNode);
+// Foundry "Overwrite dataset": one-time ownership grant of an existing
+// dataset to an output node. Editor role, explicit confirm required.
+router.post('/:pipelineId/nodes/:nodeId/adopt-output', authenticate, editor, pipelineController.adoptOutputDataset);
 router.delete('/:pipelineId/nodes/:nodeId', authenticate, editor, pipelineController.deleteNode);
 router.delete('/:pipelineId/nodes', authenticate, editor, pipelineController.deleteAllNodes);
 router.patch('/:pipelineId/nodes/positions', authenticate, editor, pipelineController.batchUpdatePositions);
@@ -111,6 +124,12 @@ router.post('/:pipelineId/nodes/:nodeId/transforms/row-size/preview', authentica
 router.post('/:pipelineId/nodes/:nodeId/transforms/row-size/apply', authenticate, editor, pipelineController.rowSizeApply);
 router.post('/:pipelineId/nodes/:nodeId/transforms/apply-expression/preview', authenticate, viewer, pipelineController.applyExpressionPreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/apply-expression/apply', authenticate, editor, pipelineController.applyExpressionApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/case-expression/preview', authenticate, viewer, pipelineController.caseExpressionPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/case-expression/apply', authenticate, editor, pipelineController.caseExpressionApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/concatenate-strings/preview', authenticate, viewer, pipelineController.concatenateStringsPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/concatenate-strings/apply', authenticate, editor, pipelineController.concatenateStringsApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/format-string/preview', authenticate, viewer, pipelineController.formatStringPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/format-string/apply', authenticate, editor, pipelineController.formatStringApply);
 router.post('/:pipelineId/nodes/:nodeId/transforms/apply-multiple-expressions/preview', authenticate, viewer, pipelineController.applyMultipleExpressionsPreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/apply-multiple-expressions/apply', authenticate, editor, pipelineController.applyMultipleExpressionsApply);
 router.post('/:pipelineId/nodes/:nodeId/transforms/apply-to-multiple-columns/preview', authenticate, viewer, pipelineController.applyToMultipleColumnsPreview);

@@ -67,6 +67,8 @@ export type TransformStep =
   | UppercaseColumnNamesStep
   | RowSizeStep
   | ApplyExpressionStep
+  | CaseExpressionStep
+  | ConcatenateStringsStep
   | ApplyMultipleExpressionsStep
   | ApplyToMultipleColumnsStep
   | ComputeIfExpressionAbsentStep
@@ -77,7 +79,8 @@ export type TransformStep =
   | TopRowsStep
   | PivotStep
   | UnpivotStep
-  | KeepDuplicatesStep;
+  | KeepDuplicatesStep
+  | CurrentTimestampStep;
 
 export interface CastStep {
   function: "Cast";
@@ -96,6 +99,10 @@ export interface FilterCondition {
   operator:
     | "eq"
     | "neq"
+    | "lt"
+    | "lte"
+    | "gt"
+    | "gte"
     | "starts_with"
     | "ends_with"
     | "contains"
@@ -210,6 +217,23 @@ export interface ApplyExpressionStep {
   function: "ApplyExpression";
   expression: ExpressionItemShape;
 }
+export interface CaseExpressionStep {
+  function: "CaseExpression";
+  branches: Array<{
+    condition: Omit<ExpressionItemShape, "outputColumn" | "outputType">;
+    value: OperandShape;
+  }>;
+  defaultValue: OperandShape | null;
+  outputColumn: string;
+  outputType?: "string" | "integer" | "numeric" | "boolean" | "date" | "timestamp";
+}
+export interface ConcatenateStringsStep {
+  function: "ConcatenateStrings";
+  expressions: OperandShape[];
+  separator: string;
+  nullOutputIfAnyInputIsNull?: boolean;
+  outputColumn: string;
+}
 export interface ApplyMultipleExpressionsStep {
   function: "ApplyMultipleExpressions";
   expressions: ExpressionItemShape[];
@@ -301,6 +325,18 @@ export interface KeepDuplicatesStep {
   columns?: string[];
 }
 
+/**
+ * Palantir currentTimestampV1 parity: stamps every row of the chain with the
+ * build time. Overwriting a column of the same name is supported so a chain
+ * can replace a previously-authored constant (e.g. detection timestamps).
+ * The value is captured ONCE per build execution so every row of a build
+ * carries the identical build timestamp.
+ */
+export interface CurrentTimestampStep {
+  function: "CurrentTimestamp";
+  outputColumn: string;
+}
+
 export interface CompileOptions {
   /** Input CSV file path as consumed by DuckDB's read_csv_auto / httpfs. */
   inputPath: string;
@@ -387,6 +423,12 @@ export function compileTransformChain(
         ctes.push(`${next} AS (${compileExpressions(all, current)})`);
         break;
       }
+      case "CaseExpression":
+        ctes.push(`${next} AS (${compileCaseExpression(step, current)})`);
+        break;
+      case "ConcatenateStrings":
+        ctes.push(`${next} AS (${compileConcatenateStrings(step, current)})`);
+        break;
       case "ApplyToMultipleColumns":
         ctes.push(`${next} AS (${compileApplyToMultipleColumns(step, current)})`);
         break;
@@ -396,6 +438,11 @@ export function compileTransformChain(
       case "TextBlock":
         // Pure annotation — identity pass-through.
         ctes.push(`${next} AS (SELECT * FROM ${current})`);
+        break;
+      case "CurrentTimestamp":
+        ctes.push(
+          `${next} AS (${compileCurrentTimestamp(step, current, options.sourceColumns)})`,
+        );
         break;
       // --- Tier B aggregate-family (PB-B2.follow-2) ---
       case "Aggregate":
@@ -622,6 +669,13 @@ function mapTargetType(t: CastStep["targetType"]): string {
   }
 }
 
+const FILTER_ORD_SQL: Record<string, string> = {
+  lt: "<",
+  lte: "<=",
+  gt: ">",
+  gte: ">=",
+};
+
 function compileFilter(step: FilterStep, from: string): string {
   const mode = step.mode ?? "keep";
   const match = step.match ?? "all";
@@ -653,6 +707,29 @@ function compileCondition(c: FilterCondition): string {
       return `${s} = ${rhs}`;
     case "neq":
       return `${s} IS NULL OR ${s} <> ${rhs}`;
+    // Ordering comparators (Palantir filterV1 parity with the legacy TS
+    // engine's compareOrd): numerics compare numerically, everything else
+    // lexicographically (ISO dates/timestamps then sort chronologically);
+    // a null on EITHER side is false ("nulls are treated as false").
+    case "lt":
+    case "lte":
+    case "gt":
+    case "gte": {
+      if (!c.valueIsColumn && (v === "" || v.toLowerCase() === "null")) {
+        return "FALSE";
+      }
+      const sOrd = s;
+      const rhsOrd = c.valueIsColumn
+        ? `NULLIF(NULLIF(CAST(${quoteIdent(c.value ?? "")} AS VARCHAR), ''), 'null')`
+        : `'${v}'`;
+      const sqlOp = FILTER_ORD_SQL[c.operator];
+      return (
+        `${sOrd} IS NOT NULL AND ${rhsOrd} IS NOT NULL AND ` +
+        `CASE WHEN TRY_CAST(${sOrd} AS DOUBLE) IS NOT NULL AND TRY_CAST(${rhsOrd} AS DOUBLE) IS NOT NULL ` +
+        `THEN TRY_CAST(${sOrd} AS DOUBLE) ${sqlOp} TRY_CAST(${rhsOrd} AS DOUBLE) ` +
+        `ELSE ${sOrd} ${sqlOp} ${rhsOrd} END`
+      );
+    }
     case "starts_with":
       return c.valueIsColumn
         ? `${s} IS NOT NULL AND starts_with(${s}, ${rhs})`
@@ -917,13 +994,13 @@ function renderOperand(op: OperandShape): string {
   }
 }
 
-/** Map our binary operators to the SQL operator (= for ==, <> for !=). */
+/** Equality is null-safe, matching Pipeline Builder's "is equal to". */
 function sqlOp(op: BinaryOp): string {
   switch (op) {
     case "==":
-      return "=";
+      return "IS NOT DISTINCT FROM";
     case "!=":
-      return "<>";
+      return "IS DISTINCT FROM";
     default:
       return op;
   }
@@ -931,6 +1008,41 @@ function sqlOp(op: BinaryOp): string {
 
 function renderExpression(e: ExpressionItemShape): string {
   return `(${renderOperand(e.left)} ${sqlOp(e.operator)} ${renderOperand(e.right)})`;
+}
+
+function quoteSqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+export function renderConcatenateStringsExpression(step: ConcatenateStringsStep): string {
+  const operands = step.expressions.map((operand) => `CAST(${renderOperand(operand)} AS VARCHAR)`);
+  const joined = `concat_ws(${quoteSqlString(step.separator ?? "")}, ${operands.join(", ")})`;
+  if (!step.nullOutputIfAnyInputIsNull) return joined;
+  return `CASE WHEN ${operands.map((operand) => `${operand} IS NULL`).join(" OR ")} THEN NULL ELSE ${joined} END`;
+}
+
+function compileConcatenateStrings(step: ConcatenateStringsStep, from: string): string {
+  return `SELECT *, ${renderConcatenateStringsExpression(step)} AS ${quoteIdent(step.outputColumn)} FROM ${from}`;
+}
+
+/**
+ * currentTimestampV1 parity. One `CURRENT_TIMESTAMP(6)` reference per chain
+ * step — DuckDB evaluates it once per statement, so every row of a build
+ * shares the build-start timestamp. Overwrites an existing input column via
+ * `* REPLACE` when the source schema already carries the name; a collision
+ * with a column produced by an EARLIER step of the same chain is a DuckDB
+ * duplicate-alias error by design (author must not stamp twice).
+ */
+function compileCurrentTimestamp(
+  step: CurrentTimestampStep,
+  from: string,
+  sourceColumns?: string[],
+): string {
+  const col = quoteIdent(step.outputColumn);
+  if (sourceColumns?.includes(step.outputColumn)) {
+    return `SELECT * REPLACE (CURRENT_TIMESTAMP(6) AS ${col}) FROM ${from}`;
+  }
+  return `SELECT *, CURRENT_TIMESTAMP(6) AS ${col} FROM ${from}`;
 }
 
 function castForResult(
@@ -969,6 +1081,19 @@ function compileExpressions(
   // trust the user to pick non-conflicting output column names. Edge case
   // collisions will surface a DuckDB error at runtime.
   return `SELECT *, ${computedParts.join(", ")} FROM ${from}`;
+}
+
+function renderOperandValue(operand: OperandShape | null): string {
+  if (operand === null) return "NULL";
+  return renderOperand(operand);
+}
+
+function compileCaseExpression(step: CaseExpressionStep, from: string): string {
+  const branches = step.branches
+    .map((branch) => `WHEN ${renderExpression({ ...branch.condition, outputColumn: "_case" })} THEN ${renderOperandValue(branch.value)}`)
+    .join(" ");
+  const expression = `CASE ${branches} ELSE ${renderOperandValue(step.defaultValue)} END`;
+  return `SELECT *, ${castForResult(expression, step.outputType)} AS ${quoteIdent(step.outputColumn)} FROM ${from}`;
 }
 
 function compileApplyToMultipleColumns(

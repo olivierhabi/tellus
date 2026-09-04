@@ -119,15 +119,30 @@ export function requireTellusAuth(opts: { allowPat?: boolean } = {}) {
       const roles = rolePart
         ? rolePart.split(',').map((r) => r.trim()).filter(Boolean)
         : ['ontology-editor', 'default-roles-tellus'];
+      // globalAuth runs before this route-level compatibility middleware and
+      // has already translated the external test subject to a FK-valid local
+      // users.id. Preserve that identity instead of overwriting it with the
+      // Keycloak subject (which breaks projects.owner_id/resources.created_by).
+      // Standalone uses of requireTellusAuth still provision the same kind of
+      // local shadow user, matching the verified-JWT branch below.
+      const existingUser = (req as Request & { user?: { id?: string } }).user;
+      const localUserId = existingUser?.id && existingUser.id !== userId
+        ? existingUser.id
+        : await ensureLocalUserForClaims(foundryDb as unknown as Knex, {
+            sub: userId,
+            email: `test-${userId.slice(0, 8)}@tellus.local`,
+            preferred_username: `test-${userId.slice(0, 8)}@tellus.local`,
+            name: 'Test User',
+          } as TellusClaims);
       req.tellusPrincipal = {
-        userId,
+        userId: localUserId,
         keycloakSub: userId,
         source: extracted.source === 'cookie' ? 'cookie' : 'bearer-jwt',
         roles,
         scopes: [],
       };
       (req as Request & { user?: unknown }).user = {
-        id: userId,
+        id: localUserId,
         email: `test-${userId.slice(0, 8)}@tellus.local`,
         displayName: 'Test User',
         roles,

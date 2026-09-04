@@ -317,13 +317,16 @@ export default function errorHandler(
     typeof (err as any).code === "string" &&
     typeof (err as any).isOperational === "boolean"
   ) {
-    const fErr = err as { statusCode: number; code: string; message: string; isOperational: boolean };
+    const fErr = err as { statusCode: number; code: string; message: string; isOperational: boolean; parameters?: Record<string, unknown>; errorName?: string };
     const instanceId = crypto.randomUUID();
     console.error(`[${fErr.code}] ${fErr.message} (${instanceId}) [requestId=${requestId}]`);
 
     return void res.status(fErr.statusCode).json({
       errorCode: fErr.code,
-      errorName: "AuthenticationError",
+      // Errors that know their SPEC errorName (e.g. ResourceNameAlreadyExists)
+      // emit it; everything else keeps the historical default.
+      errorName: fErr.errorName ?? "AuthenticationError",
+      parameters: fErr.parameters ?? {},
       message: fErr.message,
       statusCode: fErr.statusCode,
       requestId,

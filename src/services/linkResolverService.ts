@@ -75,6 +75,17 @@ export interface LinkAnalysis {
   totalLinkCount: number;
   totalLinkCountExact?: number;
   totalLinkCountMethod?: "exact" | "approximate";
+  /**
+   * Populated foreign keys whose value does NOT match any indexed target
+   * object's primary key. These are edges that would inflate a naive
+   * "populated FK" count but never resolve at traversal time. Foundry
+   * semantics: link analysis counts resolved edges against indexed
+   * target objects, not merely populated foreign keys; dangling edges
+   * are reported separately. Invariant: `totalLinkCount > 0` implies
+   * `totalTargetObjects > 0` (a resolved edge requires a target).
+   */
+  danglingEdges: number;
+  danglingEdgesExact?: number;
   sourcesWithNoLinks: number;
   sourcesWithNoLinksEstimate?: number;
   targetsWithNoLinks: number;
@@ -1101,6 +1112,78 @@ async function collectCompositeCounts(
   return counts.sort((a, b) => a - b);
 }
 
+/**
+ * Composite-aggregation that retains both the bucket KEY and its
+ * doc_count (unlike `collectCompositeCounts` which discards the key).
+ * Used to compute resolved-vs-dangling edges: the bucket key is a
+ * foreign-key value that must be intersected with the target index's
+ * `__pk` set.
+ */
+async function collectCompositeTerms(
+  indexName: string,
+  field: string,
+  maxBuckets: number,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
+): Promise<Array<{ value: string; count: number }>> {
+  const out: Array<{ value: string; count: number }> = [];
+  let afterKey: Record<string, unknown> | undefined;
+  while (out.length < maxBuckets) {
+    const aggBody: Record<string, unknown> = {
+      size: 0,
+      query: { exists: { field } },
+      aggs: {
+        fk_buckets: {
+          composite: {
+            size: 1000,
+            sources: [{ fk: { terms: { field: termField(field) } } }],
+            ...(afterKey ? { after: afterKey } : {}),
+          },
+        },
+      },
+    };
+    let resp: any;
+    try {
+      // F-P3-13: composite aggregation scoped to branch.
+      const { body } = await client.search({
+        index: indexName,
+        body: injectSecurityFilter(aggBody, securityFilter, branchId),
+      });
+      resp = body;
+    } catch {
+      break;
+    }
+    const agg = resp?.aggregations?.fk_buckets;
+    const buckets = (agg?.buckets ?? []) as Array<{
+      key: { fk: string | number };
+      doc_count: number;
+    }>;
+    if (buckets.length === 0) break;
+    for (const b of buckets) out.push({ value: String(b.key.fk), count: b.doc_count });
+    afterKey = agg?.after_key;
+    if (!afterKey) break;
+  }
+  return out;
+}
+
+/**
+ * Returns the set of primary-key (`__pk`) values present in an index.
+ * Capped at `maxBuckets` distinct keys. A populated FK whose value is
+ * absent from this set is a dangling edge (no indexed target to resolve
+ * against). When the target index is empty/stale this set is empty and
+ * EVERY populated FK is dangling — which is the exact root cause of the
+ * historical "links > 0 / targets = 0" contradiction.
+ */
+async function collectPkSet(
+  indexName: string,
+  maxBuckets: number,
+  securityFilter: Record<string, unknown> | null | undefined,
+  branchId: string | null,
+): Promise<Set<string>> {
+  const terms = await collectCompositeTerms(indexName, "__pk", maxBuckets, securityFilter, branchId);
+  return new Set(terms.map((t) => t.value));
+}
+
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const idx = Math.min(Math.floor(sorted.length * p), sorted.length - 1);
@@ -1123,6 +1206,7 @@ export async function analyzeLinkType(
   const totalTargetObjects = await countIndex(targetIndex, { match_all: {} }, securityFilter, branchId);
 
   let totalLinkCount = 0;
+  let danglingEdges = 0;
   let sourcesWithNoLinks = 0;
   let distribution = { min: 0, max: 0, avg: 0, p50: 0, p90: 0, p99: 0 };
 
@@ -1148,6 +1232,25 @@ export async function analyzeLinkType(
     if (counts.length > 0) {
       distribution = computeDistribution(counts);
     }
+
+    // M2M dangling edges: rows whose target (or source) PK is absent
+    // from the indexed object sets. A row pointing at a non-indexed
+    // target never resolves at traversal time — report it as dangling
+    // rather than inflating totalLinkCount.
+    const precisionM2M: AnalysisPrecision = opts.precision ?? "sampled";
+    const maxBucketsM2M =
+      opts.maxBuckets ??
+      (precisionM2M === "exact" ? 100_000 : precisionM2M === "sampled" ? 10_000 : 1);
+    if (precisionM2M !== "fast") {
+      const targetPkSet = await collectPkSet(targetIndex, maxBucketsM2M, securityFilter, branchId);
+      let danglingRows = 0;
+      for (const row of rows) {
+        if (!targetPkSet.has(row.target)) danglingRows += 1;
+      }
+      const resolvedRows = rows.length - danglingRows;
+      danglingEdges = danglingRows;
+      totalLinkCount = resolvedRows;
+    }
   } else {
     // FK-based analysis
     let fkField: string | null = null;
@@ -1170,70 +1273,90 @@ export async function analyzeLinkType(
     }
 
     if (fkField) {
-      // Count objects with non-null FK
-      totalLinkCount = await countIndex(fkIndex, { exists: { field: fkField } }, securityFilter, branchId);
+      // Foundry semantics — link analysis counts RESOLVED edges against
+      // indexed target objects, not merely populated foreign keys. A
+      // populated FK whose value matches no indexed target `__pk` is a
+      // DANGLING edge: it would inflate a naive "populated FK" count but
+      // never resolves at traversal time. We therefore intersect the
+      // distinct FK values present in the FK-side index against the
+      // `__pk` set of the joined side. `totalLinkCount` is the resolved
+      // edge count; `danglingEdges` is populated-FK-minus-resolved.
+      //
+      // This eliminates the historical contradiction
+      // "links > 0 with targets = 0": if the joined-side index is
+      // empty/stale its `__pk` set is empty, so EVERY populated FK is
+      // dangling and `totalLinkCount` is 0 — consistent with
+      // `totalTargetObjects === 0`, and the invariant
+      // `totalLinkCount > 0 ⇒ totalTargetObjects > 0` holds by
+      // construction.
 
-      // Count objects without the FK field (sources with no links)
+      // The joined side is the side whose `__pk` the FK resolves to.
+      const pkSetIndex = fkIndex === sourceIndex ? targetIndex : sourceIndex;
+
+      // Objects with the FK field populated at all (resolved + dangling).
       const totalInFkIndex = await countIndex(fkIndex, { match_all: {} }, securityFilter, branchId);
       const withFk = await countIndex(fkIndex, { exists: { field: fkField } }, securityFilter, branchId);
+      // Objects on the FK side with no FK populated at all = unlinked.
       sourcesWithNoLinks = totalInFkIndex - withFk;
 
-      // Compute targetsWithNoLinks: objects on the non-FK side that nobody points to
-      // For ONE_TO_MANY: fkIndex=target, "other side" = source. Count sources not referenced.
-      // For MANY_TO_ONE: fkIndex=source, "other side" = target. Count targets not referenced.
-      try {
-        if (cardinality === "ONE_TO_MANY") {
-          // FK is on target side; sources with no links = sources not referenced by any target FK value
-          // Use terms agg on FK field to find unique FK values (= unique source PKs referenced)
-          const aggBody: Record<string, unknown> = {
-            size: 0,
-            aggs: {
-              unique_refs: { cardinality: { field: termField(fkField) } },
-            },
-            query: { exists: { field: fkField } },
-          };
-          // F-P3-13: unique-refs aggregation scoped to branch.
-          const { body: aggResp } = await client.search({ index: fkIndex, body: injectSecurityFilter(aggBody, securityFilter, branchId) });
-          const uniqueRefs = (aggResp as any).aggregations?.unique_refs?.value ?? 0;
-          // Sources that no target points to
-          sourcesWithNoLinks = Math.max(0, totalSourceObjects - uniqueRefs);
-          // Targets that have no FK value
-          targetsWithNoLinks = totalInFkIndex - withFk;
-        } else if (cardinality === "MANY_TO_ONE") {
-          // FK is on source side; targets with no links = targets not referenced by any source FK value
-          const aggBody: Record<string, unknown> = {
-            size: 0,
-            aggs: {
-              unique_refs: { cardinality: { field: termField(fkField) } },
-            },
-            query: { exists: { field: fkField } },
-          };
-          // F-P3-13: unique-refs aggregation scoped to branch.
-          const { body: aggResp } = await client.search({ index: fkIndex, body: injectSecurityFilter(aggBody, securityFilter, branchId) });
-          const uniqueRefs = (aggResp as any).aggregations?.unique_refs?.value ?? 0;
-          targetsWithNoLinks = Math.max(0, totalTargetObjects - uniqueRefs);
-        } else {
-          // ONE_TO_ONE or fallback
-          targetsWithNoLinks = Math.max(0, totalTargetObjects - totalLinkCount);
-        }
-      } catch {
-        targetsWithNoLinks = Math.max(0, totalTargetObjects - totalLinkCount);
-      }
-
-      // LT-B10 — composite aggregation paginated to completion.
-      // `precision=fast` short-circuits with metadata-only stats;
-      // `precision=exact` pages to maxBuckets (default 100k);
-      // `precision=sampled` uses a capped 10k window and flags the result.
       const precision: AnalysisPrecision = opts.precision ?? "sampled";
       const maxBuckets =
         opts.maxBuckets ??
         (precision === "exact" ? 100_000 : precision === "sampled" ? 10_000 : 1);
-      try {
-        const counts =
-          precision === "fast"
-            ? []
-            : await collectCompositeCounts(fkIndex, fkField, maxBuckets, securityFilter, branchId);
 
+      // Distinct FK values + per-value counts in the FK-side index.
+      const terms =
+        precision === "fast"
+          ? []
+          : await collectCompositeTerms(fkIndex, fkField, maxBuckets, securityFilter, branchId);
+      // Set of primary keys present in the joined side (capped).
+      const pkSet = await collectPkSet(pkSetIndex, maxBuckets, securityFilter, branchId);
+
+      let resolvedLinkCount = 0;
+      let distinctResolvedKeys = 0;
+      const resolvedFanout: number[] = [];
+      for (const t of terms) {
+        if (pkSet.has(t.value)) {
+          resolvedLinkCount += t.count;
+          distinctResolvedKeys += 1;
+          resolvedFanout.push(t.count);
+        }
+      }
+      const populatedButUnresolved = Math.max(0, withFk - resolvedLinkCount);
+
+      // `totalLinkCount` is now RESOLVED edges only.
+      totalLinkCount = resolvedLinkCount;
+      danglingEdges = populatedButUnresolved;
+      // For precision=fast we did not page terms; fall back to the
+      // populated-FK count for totalLinkCount so the cheap path stays
+      // meaningful, but DO NOT claim resolution the cheap path cannot
+      // prove — leave danglingEdges at 0 only when we genuinely could
+      // not compute it.
+      if (precision === "fast") {
+        totalLinkCount = withFk;
+        // fast cannot prove resolution; report populated as the link
+        // count and surface 0 dangling only if the joined index is
+        // demonstrably empty (no targets at all).
+        danglingEdges = totalTargetObjects === 0 ? withFk : 0;
+      }
+
+      // targetsWithNoLinks / sourcesWithNoLinks on the non-FK side:
+      // objects that no RESOLVED edge points at.
+      if (cardinality === "ONE_TO_MANY") {
+        // FK on target; sources with no links = sources no target resolves to.
+        sourcesWithNoLinks = Math.max(0, totalSourceObjects - distinctResolvedKeys);
+        targetsWithNoLinks = totalInFkIndex - withFk;
+      } else if (cardinality === "MANY_TO_ONE") {
+        // FK on source; targets with no links = targets no source resolves to.
+        targetsWithNoLinks = Math.max(0, totalTargetObjects - distinctResolvedKeys);
+      } else {
+        // ONE_TO_ONE or fallback.
+        targetsWithNoLinks = Math.max(0, totalTargetObjects - totalLinkCount);
+      }
+
+      // Distribution over RESOLVED-edge fanout only.
+      try {
+        const counts = resolvedFanout.slice().sort((a, b) => a - b);
         if (counts.length > 0) {
           distribution = computeDistribution(counts);
           (distribution as any).p95 = percentile(counts, 0.95);
@@ -1271,6 +1394,8 @@ export async function analyzeLinkType(
     totalLinkCount,
     totalLinkCountExact: precisionOut === "exact" ? totalLinkCount : undefined,
     totalLinkCountMethod: precisionOut === "exact" ? "exact" : "approximate",
+    danglingEdges,
+    danglingEdgesExact: precisionOut === "exact" ? danglingEdges : undefined,
     sourcesWithNoLinks,
     sourcesWithNoLinksEstimate:
       precisionOut === "sampled" ? sourcesWithNoLinks : undefined,

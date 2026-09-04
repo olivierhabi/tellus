@@ -120,11 +120,20 @@ describe("both INSERT sites inherit, both UPDATE sites do not", () => {
     // 1 declaration + 2 call sites.
     expect(calls).toHaveLength(3);
     expect(source).toMatch(
-      /folder_id:\s*await this\.resolveOutputFolderId\(\s*args\.pipelineId,\s*args\.projectId,?\s*\)/s,
+      /const outputFolderId = await this\.resolveOutputFolderId\(\s*args\.pipelineId,\s*args\.projectId,?\s*\)/s,
     );
     expect(source).toMatch(
-      /folder_id:\s*await this\.resolveOutputFolderId\(pipelineId,\s*projectId\)/,
+      /const outputFolderId = await this\.resolveOutputFolderId\(pipelineId, projectId\)/,
     );
+    // Both INSERT sites place the dataset in the resolved folder.
+    for (const m of source.matchAll(
+      /\.insert\(\{[\s\S]{0,1400}?folder_id: outputFolderId[\s\S]{0,200}?\}\)/g,
+    )) {
+      expect(m[0]).toMatch(/foundry_datasets|datasetPatch|project_id/);
+    }
+    expect(
+      source.match(/folder_id: outputFolderId/g) ?? [],
+    ).toHaveLength(2);
   });
 
   it("leaves folder_id out of the existing-dataset UPDATE patches", () => {

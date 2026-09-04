@@ -37,6 +37,12 @@ import {
   RowSizeApplySchema,
   ApplyExpressionPreviewSchema,
   ApplyExpressionApplySchema,
+  CaseExpressionPreviewSchema,
+  CaseExpressionApplySchema,
+  ConcatenateStringsPreviewSchema,
+  FormatStringApplySchema,
+  FormatStringPreviewSchema,
+  ConcatenateStringsApplySchema,
   ApplyMultipleExpressionsPreviewSchema,
   ApplyMultipleExpressionsApplySchema,
   ApplyToMultipleColumnsPreviewSchema,
@@ -62,6 +68,8 @@ import {
   SavePreviewSnapshotSchema,
   SavePipelineProgressSchema,
   DeployPipelineSchema,
+  UpdateBuildScheduleSchema,
+  CreateExpectationSchema,
 } from '../types/pipeline';
 import { AppError } from '../utils/foundryAppError';
 import { DeploymentService } from '../services/deploymentService';
@@ -329,6 +337,119 @@ export class PipelineController {
 
       const node = await this.pipelineService.addNode(projectId, pipelineId, parsed.data);
       res.status(201).json({ success: true, data: node });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * Foundry parity — "Overwrite dataset": a one-time action that grants
+   * ownership of an existing dataset to an output node. Requires
+   * `{ datasetId, confirm: true }`.
+   */
+  adoptOutputDataset = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeId = req.params.nodeId as string;
+      const userId = this.getUserId(req);
+
+      const datasetId = req.body?.datasetId;
+      if (typeof datasetId !== 'string' || !datasetId) {
+        throw new AppError('datasetId is required', 400, 'VALIDATION_ERROR');
+      }
+
+      const result = await this.pipelineService.adoptOutputDataset(
+        projectId,
+        pipelineId,
+        nodeId,
+        { datasetId, confirm: req.body?.confirm === true },
+        userId,
+      );
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * GET/PUT /projects/:projectId/pipelines/:pipelineId/schedule
+   * Foundry build schedule: the pipeline build scheduler rebuilds the
+   * pipeline every intervalMinutes while enabled, through the regular
+   * deploy path (transaction log / ontology signals identical to manual).
+   */
+  /**
+   * GET/POST/DELETE /projects/:projectId/pipelines/:pipelineId/expectations
+   * Foundry data expectations on pipeline builds (fail → build is gated
+   * before any transaction commits).
+   */
+  listExpectations = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await this.pipelineService.listExpectations(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+      );
+      res.json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  addExpectation = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const parsed = CreateExpectationSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const data = await this.pipelineService.addExpectation(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+        parsed.data,
+        this.getUserId(req),
+      );
+      res.status(201).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  removeExpectation = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await this.pipelineService.removeExpectation(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+        req.params.expectationId,
+      );
+      res.json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  getBuildSchedule = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schedule = await this.pipelineService.getBuildSchedule(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+      );
+      res.json({ success: true, data: schedule });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  updateBuildSchedule = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const parsed = UpdateBuildScheduleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const schedule = await this.pipelineService.updateBuildSchedule(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+        parsed.data,
+      );
+      res.json({ success: true, data: schedule });
     } catch (error) {
       next(error);
     }
@@ -987,6 +1108,85 @@ export class PipelineController {
     } catch (error) { next(error); }
   };
 
+  caseExpressionPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = CaseExpressionPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.caseExpressionPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  caseExpressionApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = CaseExpressionApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.caseExpressionApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  concatenateStringsPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ConcatenateStringsPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.concatenateStringsPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  concatenateStringsApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = ConcatenateStringsApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.concatenateStringsApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Format String (Palantir formatStringV1) --------------------------
+  formatStringPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = FormatStringPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.formatStringPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  formatStringApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = FormatStringApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.formatStringApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
   // ---- Apply Multiple Expressions --------------------------------------
   applyMultipleExpressionsPreview = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -1404,6 +1604,9 @@ export class PipelineController {
       const dryRun = truthy(req.query.dryRun);
       const forceSchemaMigration = truthy(req.query.force_schema_migration);
       const acceptDataLoss = truthy(req.query.accept_data_loss);
+      // Foundry — `?replay=true` (incremental pipelines: reprocess the
+      // entire input; produces a SNAPSHOT transaction on the output).
+      const replay = truthy(req.query.replay);
       const result = await this.deploymentService.startDeployment(
         projectId, pipelineId, userId, parsed.data,
         {
@@ -1412,6 +1615,7 @@ export class PipelineController {
           dryRun,
           forceSchemaMigration,
           acceptDataLoss,
+          replay,
         },
       );
       // PB-B10 — dry-run response: no deployment is created, so we

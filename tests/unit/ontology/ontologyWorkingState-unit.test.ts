@@ -7,6 +7,7 @@ import {
   resolveCompositeIssues,
   resolveDraftActionTypeId,
   resolveDraftLinkTypeId,
+  camelSnapshot,
   orderWorkingChanges,
   stableOntologyValue,
   validateDraftObjectTypeId,
@@ -104,6 +105,25 @@ describe("Ontology Manager working-state domain", () => {
       resourceId: "ordersToCustomer",
       proposedValue: { apiName: "ordersToCustomer" },
     })).toBeNull();
+  });
+
+  it("uses the same canonical link-type snapshot before and after JSON persistence", () => {
+    const snapshot = camelSnapshot("linkType", {
+      link_type_id: "a68537c7-98bc-4ba0-919d-489227251e19",
+      api_name: "ordersToCustomer",
+      display_name: "Orders to customer",
+      description: null,
+      cardinality: "MANY_TO_ONE",
+      source_object_type: "source-id",
+      target_object_type: "target-id",
+      source_property_id: "source-property-id",
+      target_property_id: null,
+      resolver_config: null,
+    });
+
+    expect(stableOntologyValue(snapshot)).toBe(stableOntologyValue(JSON.parse(JSON.stringify(snapshot))));
+    expect(snapshot).not.toHaveProperty("status");
+    expect(snapshot).not.toHaveProperty("visibility");
   });
 
   it("maps object-type UUID and API-name races to precise domain conflicts", () => {

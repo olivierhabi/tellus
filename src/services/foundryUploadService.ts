@@ -4,6 +4,7 @@ import { scheduleParseJob } from '../jobs/parseDatasetJob';
 import { buildObjectKey, uploadObject, deleteObject } from './storageService';
 import { recordProgress } from './uploadProgress';
 import { ROOT_SPACE_RID } from '../lib/rid';
+import { assertFolderNameAvailable } from './datasets/folderNameGuard';
 
 /**
  * Format a byte count into a human-readable size using base-1024 (IEC).
@@ -139,6 +140,13 @@ export class UploadService {
 
       await this.knex.transaction(async (trx) => {
         for (const file of files) {
+          // Foundry parity — ResourceNameAlreadyExists (409): a dataset may
+          // not share a name with any resource in the target folder.
+          await assertFolderNameAvailable(trx, {
+            name: file.originalname,
+            folderId,
+            projectId,
+          });
           const [dataset] = await trx('foundry_datasets')
             .insert({
               name: file.originalname,

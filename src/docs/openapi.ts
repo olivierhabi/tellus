@@ -1715,7 +1715,7 @@ const baseSpec = {
         summary: 'Preview a Filter transform',
         description:
           'Evaluates filter conditions against the node\'s dataset rows and returns matching/non-matching rows. ' +
-          'Supports 9 operators: is_null, is_not_null, eq, neq, starts_with, ends_with, contains, regex_find, regex_match. ' +
+          'Supports 13 operators: is_null, is_not_null, eq, neq, lt, lte, gt, gte, starts_with, ends_with, contains, regex_find, regex_match. ' +
           'Conditions can be combined with AND (all) or OR (any) logic. Mode controls keep vs remove.',
         parameters: [
           { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
@@ -1752,7 +1752,7 @@ const baseSpec = {
                         column: { type: 'string' as const, description: 'Column name to filter on.' },
                         operator: {
                           type: 'string' as const,
-                          enum: ['is_null', 'is_not_null', 'eq', 'neq', 'starts_with', 'ends_with', 'contains', 'regex_find', 'regex_match'],
+                          enum: ['is_null', 'is_not_null', 'eq', 'neq', 'lt', 'lte', 'gt', 'gte', 'starts_with', 'ends_with', 'contains', 'regex_find', 'regex_match'],
                         },
                         value: { type: 'string' as const, description: 'Comparison value (required for binary operators).' },
                         treatEmptyAsNull: { type: 'boolean' as const, description: 'When true, treat empty string as null (for is_not_null).' },
@@ -1823,7 +1823,7 @@ const baseSpec = {
                       required: ['column', 'operator'],
                       properties: {
                         column: { type: 'string' as const },
-                        operator: { type: 'string' as const, enum: ['is_null', 'is_not_null', 'eq', 'neq', 'starts_with', 'ends_with', 'contains', 'regex_find', 'regex_match'] },
+                        operator: { type: 'string' as const, enum: ['is_null', 'is_not_null', 'eq', 'neq', 'lt', 'lte', 'gt', 'gte', 'starts_with', 'ends_with', 'contains', 'regex_find', 'regex_match'] },
                         value: { type: 'string' as const },
                         treatEmptyAsNull: { type: 'boolean' as const },
                       },
@@ -2166,6 +2166,52 @@ const baseSpec = {
         ],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, properties: {
           removeSpecialCharacters: { type: 'boolean' as const, default: false },
+        } } } } },
+        responses: {
+          '200': { description: 'Updated node', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { $ref: '#/components/schemas/PipelineNode' } } } } } },
+          '404': { description: 'Node not found' },
+        },
+      },
+    },
+    /* ── Format String ─────────────────────────────────────────────── */
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/format-string/preview': {
+      post: {
+        tags: ['Transforms'],
+        summary: 'Preview a Format String transform',
+        description: 'Formats ordered column or literal arguments with printf-style placeholders. An empty arguments list produces a constant string column. Reference: https://www.palantir.com/docs/foundry/pb-functions-expression/formatStringV1',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'pipelineId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'nodeId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, required: ['format', 'arguments', 'outputColumn'], properties: {
+          format: { type: 'string' as const, example: 'Hello %s, my name is %s' },
+          arguments: { type: 'array' as const, items: { type: 'object' as const, required: ['kind', 'value'], properties: { kind: { type: 'string' as const, enum: ['column', 'literal'] }, value: { type: 'string' as const } } } },
+          outputColumn: { type: 'string' as const, example: 'greeting' },
+          limit: { type: 'integer' as const, default: 500 },
+          priorTransforms: { type: 'array' as const, items: { type: 'object' as const } },
+        } } } } },
+        responses: {
+          '200': { description: 'Format string preview', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { type: 'object' as const } } } } } },
+          '400': { description: 'Invalid format arguments or referenced column' },
+          '404': { description: 'Node or dataset not found' },
+        },
+      },
+    },
+    '/v1/projects/{projectId}/pipelines/{pipelineId}/nodes/{nodeId}/transforms/format-string/apply': {
+      post: {
+        tags: ['Transforms'],
+        summary: 'Apply (persist) a Format String transform',
+        description: 'Adds a printf-style FormatString transform to the pipeline node.',
+        parameters: [
+          { name: 'projectId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'pipelineId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+          { name: 'nodeId', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } },
+        ],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' as const, required: ['format', 'arguments', 'outputColumn'], properties: {
+          format: { type: 'string' as const },
+          arguments: { type: 'array' as const, items: { type: 'object' as const } },
+          outputColumn: { type: 'string' as const },
         } } } } },
         responses: {
           '200': { description: 'Updated node', content: { 'application/json': { schema: { type: 'object' as const, properties: { success: { type: 'boolean' as const }, data: { $ref: '#/components/schemas/PipelineNode' } } } } } },

@@ -5,6 +5,7 @@ import { convertValue, inferDateFormat } from '../utils/typeConverter';
 import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { findNearNameMatches, unionSideLabels } from '../utils/columnNameReconciler';
 import { getObjectStream, toDuckDbReadUri } from './storageService';
+import { readUploadedPreview } from './datasets/uploaded-dataset-reader';
 import { validateUdfSpec } from './pipelines/udfTransform';
 import { runUdfTransform } from './pipelines/udfRunner';
 import {
@@ -51,6 +52,12 @@ import type {
   RowSizeApplyInput,
   ApplyExpressionPreviewInput,
   ApplyExpressionApplyInput,
+  CaseExpressionPreviewInput,
+  CaseExpressionApplyInput,
+  ConcatenateStringsPreviewInput,
+  ConcatenateStringsApplyInput,
+  FormatStringPreviewInput,
+  FormatStringApplyInput,
   ApplyMultipleExpressionsPreviewInput,
   ApplyMultipleExpressionsApplyInput,
   ApplyToMultipleColumnsPreviewInput,
@@ -79,6 +86,7 @@ import type {
   Operand,
   BinaryOperator,
   ExpressionItem,
+  StringOperand,
 } from '../types/pipeline';
 
 // ---------------------------------------------------------------------------
@@ -199,6 +207,104 @@ function evaluateExpression(
     default:
       return null;
   }
+}
+
+
+/**
+ * Palantir formatStringV1 (https://www.palantir.com/docs/foundry/pb-functions-expression/formatStringV1):
+ * "Formats string printf style."
+ *
+ * Supported subset of Java's Formatter mini-language:
+ *   %[flags][width][.precision]conversion
+ * conversions: s/S d x/X e/E f g/G %% %n
+ * flags: '-'  left-justify, '+'  force sign, '0' zero-pad, space pad-positive
+ *
+ * Behaviours beyond the doc examples that are pinned here:
+ *  - null/undefined arguments format as the literal text "null" (Example 4
+ *    in the docs);
+ *  - MORE %conversions than arguments → the missing argument formats as
+ *    "null" (lenient; Java would throw — a template with a typo must not
+ *    kill a preview);
+ *  - FEWER %conversions than arguments → extra arguments are ignored;
+ *  - %% → "%", %n → newline, unknown conversions are copied verbatim.
+ * %s precision truncates the text (Java semantics).
+ */
+export function formatStringValue(format: string, args: unknown[]): string {
+  let argIndex = 0;
+  return format.replace(
+    /%([-+ 0]*)(\d+)?(?:\.(\d+))?([a-zA-Z%])/g,
+    (_m: string, flags: string, widthStr: string | undefined, precStr: string | undefined, conv: string): string => {
+      if (conv === '%') return '%';
+      if (conv === 'n') return '\n';
+      const width = widthStr ? parseInt(widthStr, 10) : 0;
+      const precision = precStr !== undefined ? parseInt(precStr, 10) : undefined;
+      const raw = argIndex < args.length ? args[argIndex++] : null;
+
+      const c = conv.toLowerCase();
+      let text: string;
+      if (raw === null || raw === undefined) {
+        text = 'null';
+      } else if (c === 's') {
+        text = String(raw);
+        if (precision !== undefined) text = text.slice(0, precision);
+        // Uppercase %S uppercases the VALUE (after truncation)
+        if (conv === 'S') text = text.toUpperCase();
+      } else {
+        const num = coerceNumeric(raw);
+        const value = num === null ? NaN : num;
+        if (Number.isNaN(value)) {
+          // Non-numeric input for a numeric conversion — format like Java's
+          // Formatter on a type mismatch would throw; lenient render.
+          text = String(raw);
+        } else if (c === 'd') {
+          text = String(Math.trunc(value));
+        } else if (c === 'x') {
+          text = Math.trunc(value).toString(16);
+        } else if (c === 'e') {
+          text = value.toExponential(precision ?? 6);
+        } else if (c === 'g') {
+          text = value.toPrecision(precision ?? 6);
+        } else if (c === 'f') {
+          text = value.toFixed(precision ?? 6);
+        } else {
+          return `%${flags}${widthStr ?? ''}${precStr !== undefined ? '.' + precStr : ''}${conv}`;
+        }
+        if (conv !== c) text = text.toUpperCase();
+        // Sign flags
+        if (!Number.isNaN(value) && value >= 0) {
+          if (flags.includes('+')) text = '+' + text;
+          else if (flags.includes(' ')) text = ' ' + text;
+        }
+      }
+
+      if (!width) return text;
+      if (text.length >= width) return text;
+      const pad = width - text.length;
+      if (flags.includes('-')) return text + ' '.repeat(pad);
+      if (flags.includes('0')) {
+        // Zero-pad AFTER an explicit sign, like printf.
+        const sign = /^[+-]/.test(text) ? text.slice(0, 1) : '';
+        return sign + '0'.repeat(pad) + text.slice(sign.length);
+      }
+      return ' '.repeat(pad) + text;
+    },
+  );
+}
+
+export function concatenateStringValues(
+  row: Record<string, unknown>,
+  expressions: StringOperand[],
+  separator: string,
+  nullOutputIfAnyInputIsNull: boolean,
+): string | null {
+  const values = expressions.map((expression) =>
+    expression.kind === 'column' ? row[expression.value] : expression.value,
+  );
+  if (nullOutputIfAnyInputIsNull && values.some((value) => value === null || value === undefined)) return null;
+  return values
+    .filter((value) => value !== null && value !== undefined)
+    .map(String)
+    .join(separator);
 }
 
 function compareEq(a: unknown, b: unknown): boolean {
@@ -457,7 +563,7 @@ export class TransformService {
     nodeId: string,
     input: CastPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
       projectId,
       pipelineId,
       nodeId,
@@ -482,7 +588,6 @@ export class TransformService {
     }
 
     // Read CSV rows from S3, then replay prior transforms in the chain
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms)
       .slice(0, input.limit);
 
@@ -625,7 +730,7 @@ export class TransformService {
     nodeId: string,
     input: FilterPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
       projectId,
       pipelineId,
       nodeId,
@@ -661,7 +766,6 @@ export class TransformService {
     }
 
     // Read CSV rows, then replay prior transforms in the chain
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const allRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Apply filter — convert rows to string for comparison
@@ -766,7 +870,7 @@ export class TransformService {
     nodeId: string,
     input: DropPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
       projectId,
       pipelineId,
       nodeId,
@@ -794,7 +898,6 @@ export class TransformService {
     }
 
     // Read and replay prior transforms
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Drop columns from each row
@@ -881,7 +984,7 @@ export class TransformService {
     nodeId: string,
     input: RenamePreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
       projectId, pipelineId, nodeId,
     );
 
@@ -903,7 +1006,6 @@ export class TransformService {
     }
 
     // Read and replay prior transforms
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Apply renames to rows
@@ -990,7 +1092,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: NormalizePreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
 
@@ -1010,7 +1112,6 @@ export class TransformService {
     }
 
     // Read and replay prior transforms
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Apply normalization to rows
@@ -1084,7 +1185,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: SelectPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const want = new Set(input.columns.map(stripBom));
@@ -1097,7 +1198,6 @@ export class TransformService {
       );
     }
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     // Preserve order to user's listed order.
@@ -1150,7 +1250,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: SortPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     for (const k of input.sorts) {
@@ -1164,7 +1264,6 @@ export class TransformService {
       }
     }
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     const sorted = this.applySort(rows, input.sorts);
@@ -1207,7 +1306,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: DropDuplicatesPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const keyCols = input.columns?.map(stripBom) ?? null;
@@ -1223,7 +1322,6 @@ export class TransformService {
       }
     }
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
     const seen = new Set<string>();
     const deduped = rows.filter((row) => {
@@ -1275,10 +1373,9 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: UppercaseColumnNamesPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
 
     const transformed = rows.map((row) => {
@@ -1324,11 +1421,10 @@ export class TransformService {
     input: RowSizePreviewInput,
   ) {
     const outCol = input.outputColumn?.trim() || 'row_size';
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
     const transformed = rows
       .map((row) => ({ ...row, [outCol]: Buffer.byteLength(JSON.stringify(row), 'utf8') }))
@@ -1385,12 +1481,11 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyExpressionPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     validateExpressionColumns(input.expression, effectiveCols);
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
     const outCol = input.expression.outputColumn;
     const transformed = this.applyExpressionToRows(rows, input.expression).slice(0, input.limit);
@@ -1426,6 +1521,152 @@ export class TransformService {
     return this.saveNodeConfig(nodeId, pipelineId, node.config);
   }
 
+  private applyCaseExpressionToRows(
+    rows: Array<Record<string, unknown>>,
+    input: CaseExpressionApplyInput,
+  ): Array<Record<string, unknown>> {
+    const resolve = (row: Record<string, unknown>, operand: Operand | null): unknown => {
+      if (operand === null) return null;
+      return operand.kind === 'column' ? row[operand.value] : parseLiteral(operand);
+    };
+    return rows.map((row) => {
+      const matched = input.branches.find((branch) => evaluateExpression(row, branch.condition) === true);
+      const value = resolve(row, matched?.value ?? input.defaultValue);
+      return { ...row, [input.outputColumn]: castExpressionResult(value, input.outputType) };
+    });
+  }
+
+  async caseExpressionPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: CaseExpressionPreviewInput,
+  ) {
+    const { sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    for (const branch of input.branches) {
+      validateExpressionColumns(branch.condition as ExpressionItem, effectiveCols);
+      if (branch.value.kind === 'column') validateExpressionColumns({ left: branch.value, right: branch.value } as ExpressionItem, effectiveCols);
+    }
+    if (input.defaultValue?.kind === 'column') validateExpressionColumns({ left: input.defaultValue, right: input.defaultValue } as ExpressionItem, effectiveCols);
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const transformed = this.applyCaseExpressionToRows(rows, input).slice(0, input.limit);
+    const outputColumns = effectiveCols.some((column) => column.name === input.outputColumn)
+      ? effectiveCols.map((column) => column.name === input.outputColumn ? { ...column, type: input.outputType ?? 'string' } : column)
+      : [...effectiveCols, { name: input.outputColumn, type: input.outputType ?? 'string', isNew: true }];
+    return { columns: outputColumns, rows: transformed, rowCount: transformed.length, ...sampleInfo(rawRows.length), expressionSummary: `Applied Case expression to column "${input.outputColumn}"` };
+  }
+
+  async caseExpressionApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: CaseExpressionApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({ function: 'CaseExpression', ...input, createdAt: new Date().toISOString() });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  async concatenateStringsPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ConcatenateStringsPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    for (const expression of input.expressions) {
+      if (expression.kind === 'column' && !effectiveCols.some((column) => stripBom(column.name) === stripBom(expression.value))) {
+        throw new AppError(`Expression references column "${expression.value}" which does not exist.`, 400, 'VALIDATION_ERROR');
+      }
+    }
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const transformed = rows.slice(0, input.limit).map((row) => ({
+      ...row,
+      [input.outputColumn]: concatenateStringValues(row, input.expressions, input.separator, input.nullOutputIfAnyInputIsNull),
+    }));
+    const exists = effectiveCols.some((column) => column.name === input.outputColumn);
+    const columns = exists
+      ? effectiveCols.map((column) => column.name === input.outputColumn ? { ...column, type: 'string' } : column)
+      : [...effectiveCols, { name: input.outputColumn, type: 'string', isNew: true }];
+    return {
+      columns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      expressionSummary: `Concatenated ${input.expressions.length} string expression(s) into "${input.outputColumn}"`,
+    };
+  }
+
+  async concatenateStringsApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: ConcatenateStringsApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({ function: 'ConcatenateStrings', ...input, createdAt: new Date().toISOString() });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
+  // =========================================================================
+  // Format string — Preview / Apply
+  //
+  // Palantir formatStringV1 — a printf-style template over an ordered arg
+  // list producing a String column. With an empty argument list this
+  // produces a constant column (the PB tutorial pattern: "Format string" =
+  // 'INACTIVE_COVERAGE' + Output column = signal_type).
+  // =========================================================================
+
+  async formatStringPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: FormatStringPreviewInput,
+  ) {
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
+    const chainTransforms = input.priorTransforms ?? existingTransforms;
+    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
+    for (const a of input.arguments) {
+      if (a.kind === 'column' && !effectiveCols.some((c) => stripBom(c.name) === stripBom(a.value))) {
+        throw new AppError(
+          `Format argument references column "${a.value}" which does not exist. Available: ${effectiveCols.map((c) => c.name).join(', ')}`,
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+    }
+
+    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
+    const transformed = rows.slice(0, input.limit).map((row) => ({
+      ...row,
+      [input.outputColumn]: formatStringValue(
+        input.format,
+        input.arguments.map((a) => (a.kind === 'column' ? row[a.value] : a.value)),
+      ),
+    }));
+
+    const exists = effectiveCols.some((c) => c.name === input.outputColumn);
+    const columns = exists
+      ? effectiveCols.map((c) => (c.name === input.outputColumn ? { ...c, type: 'string' } : c))
+      : [...effectiveCols, { name: input.outputColumn, type: 'string', isNew: true }];
+    return {
+      columns,
+      rows: transformed,
+      rowCount: transformed.length,
+      ...sampleInfo(rawRows.length),
+      expressionSummary: `Formatted "${input.outputColumn}" with formatStringV1 (${input.arguments.length} argument(s))`,
+    };
+  }
+
+  async formatStringApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: FormatStringApplyInput,
+  ) {
+    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
+    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
+    transforms.push({ function: 'FormatString', ...input, createdAt: new Date().toISOString() });
+    node.config.transforms = transforms;
+    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+  }
+
   // =========================================================================
   // Apply Multiple Expressions — Preview / Apply
   //
@@ -1436,12 +1677,11 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyMultipleExpressionsPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     for (const e of input.expressions) validateExpressionColumns(e, effectiveCols);
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     let rows = this.applyExistingTransforms(rawRows, chainTransforms);
     for (const e of input.expressions) rows = this.applyExpressionToRows(rows, e);
     const transformed = rows.slice(0, input.limit);
@@ -1490,7 +1730,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyToMultipleColumnsPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const cols = input.columns.map(stripBom);
@@ -1523,7 +1763,6 @@ export class TransformService {
     const suffix = input.outputSuffix ?? '_calc';
     const outNames = input.outputColumns ?? cols.map((c) => `${c}${suffix}`);
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
     const transformed = rows.map((row) => {
       const out: Record<string, unknown> = { ...row };
@@ -1594,13 +1833,12 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: ComputeIfExpressionAbsentPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     validateExpressionColumns(input.expression, effectiveCols);
 
     const outCol = input.outputColumn;
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms);
     const transformed = rows.map((row) => {
       const current = row[outCol];
@@ -1656,11 +1894,10 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: TextBlockPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, chainTransforms).slice(0, input.limit);
 
     return {
@@ -1856,7 +2093,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: AggregatePreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
@@ -1871,7 +2108,6 @@ export class TransformService {
       })),
     ];
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chained = this.applyExistingTransforms(rawRows, chainTransforms);
     const rows = this.computeAggregations(chained, input.groupBy, input.aggregations).slice(0, input.limit);
 
@@ -1910,7 +2146,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: RollupPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
@@ -1928,7 +2164,6 @@ export class TransformService {
       })),
     ];
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chained = this.applyExistingTransforms(rawRows, chainTransforms);
     const rows = this.computeRollup(chained, input.rollupColumns, input.aggregations).slice(0, input.limit);
 
@@ -1987,7 +2222,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: AggregateOnConditionPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const targets = this.resolveOnConditionTargets(input.predicate, effectiveColumns);
@@ -2005,7 +2240,6 @@ export class TransformService {
       })),
     ];
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chained = this.applyExistingTransforms(rawRows, chainTransforms);
     const rows = this.computeAggregations(chained, input.groupBy, aggregations).slice(0, input.limit);
 
@@ -2074,7 +2308,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: TopRowsPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
@@ -2083,7 +2317,6 @@ export class TransformService {
     }
     this.assertColumnsExist(effectiveNames, [...input.partitionBy, ...input.sorts.map((s) => s.column)], 'TopRows');
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chained = this.applyExistingTransforms(rawRows, chainTransforms);
     const rows = this.computeTopRows(chained, input.partitionBy, input.sorts, input.topN).slice(0, input.limit);
 
@@ -2178,7 +2411,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: PivotPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
@@ -2187,7 +2420,6 @@ export class TransformService {
       throw new AppError('Pivot aggregations require a column (count(*) pivot is not supported).', 400, 'VALIDATION_ERROR');
     }
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chained = this.applyExistingTransforms(rawRows, chainTransforms);
     const { rows: allRows, valueColumns } = this.computePivot(
       chained, input.groupBy, input.pivotColumn, input.pivotValues, input.aggregations, input.aliasPosition,
@@ -2269,7 +2501,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: UnpivotPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
@@ -2286,7 +2518,6 @@ export class TransformService {
       ...keptColumns.map((c) => ({ name: c.name, type: c.type })),
     ];
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chained = this.applyExistingTransforms(rawRows, chainTransforms);
     const rows = this.computeUnpivot(chained, input.columns, input.nameColumn, input.valueColumn, keptColumns.map((c) => c.name)).slice(0, input.limit);
 
@@ -2343,7 +2574,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: KeepDuplicatesPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
     const chainTransforms = input.priorTransforms ?? existingTransforms;
     const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
     const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
@@ -2351,7 +2582,6 @@ export class TransformService {
     const subset = input.columns ?? [];
     this.assertColumnsExist(effectiveNames, subset, 'KeepDuplicates');
 
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const chained = this.applyExistingTransforms(rawRows, chainTransforms);
     const allNames = effectiveColumns.map((c) => c.name);
     const rows = this.computeKeepDuplicates(chained, subset, allNames).slice(0, input.limit);
@@ -2483,9 +2713,28 @@ export class TransformService {
     // Collect non-fatal warnings to return alongside results
     const warnings: Array<{ code: string; message: string }> = [];
 
-    // ── Resolve left dataset ────────────────────────────────────────
-    const { dataset: leftDataset, sourceColumns: leftCols, existingTransforms } =
-      await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    // ── Resolve the complete left input ──────────────────────────────
+    // A join's left input is its source node, not the join node itself.
+    // Resolving it through resolveNodeDataset() worked only for a raw
+    // dataset/linear-transform chain: when the source was a join or union it
+    // silently fell back to the leftmost CSV. That made the join editor reject
+    // valid downstream columns (for example coverage_id on a claim-line →
+    // claim join) and prevented temporal anti-joins from being configured.
+    const targetNode = await this.knex('pipeline_nodes as pn')
+      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
+      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
+      .select('pn.id', 'pn.config')
+      .first();
+    if (!targetNode) {
+      throw new AppError('Pipeline node not found. It may have been deleted.', 404, 'NOT_FOUND');
+    }
+    const targetConfig = typeof targetNode.config === 'string'
+      ? JSON.parse(targetNode.config)
+      : (targetNode.config ?? {});
+    const leftSourceNodeId = targetConfig.sourceNodeId as string | undefined;
+    const leftData = leftSourceNodeId
+      ? await this.resolveNodeData(projectId, pipelineId, leftSourceNodeId, input.priorTransforms)
+      : null;
 
     // ── Resolve right dataset ───────────────────────────────────────
     const rightNode = await this.knex('pipeline_nodes as pn')
@@ -2502,41 +2751,17 @@ export class TransformService {
       throw new AppError('Cannot join a node with itself. Select a different right input.', 400, 'SELF_JOIN');
     }
 
-    let rightDatasetId = rightNode.dataset_id;
-    if (!rightDatasetId) {
-      const cfg = typeof rightNode.config === 'string' ? JSON.parse(rightNode.config) : (rightNode.config ?? {});
-      if (cfg.sourceNodeId) {
-        const src = await this.knex('pipeline_nodes').where({ id: cfg.sourceNodeId, pipeline_id: pipelineId }).select('dataset_id').first();
-        rightDatasetId = src?.dataset_id;
-      }
-    }
-    if (!rightDatasetId) {
-      throw new AppError('Right input has no associated dataset. Ensure it is connected to a dataset node.', 400, 'RIGHT_NO_DATASET');
-    }
-
-    const rightDataset = await this.knex('foundry_datasets').where({ id: rightDatasetId }).select('id', 'file_path', 'status').first();
-    if (!rightDataset) {
-      throw new AppError('Right dataset not found. It may have been deleted.', 404, 'RIGHT_DATASET_NOT_FOUND');
-    }
-    if (rightDataset.status !== 'ready') {
-      throw new AppError(`Right dataset is not ready (status: ${rightDataset.status}). Wait for ingestion to complete.`, 400, 'RIGHT_DATASET_NOT_READY');
-    }
-    if (!rightDataset.file_path) {
-      throw new AppError('Right dataset has no data file. Re-upload or re-ingest the dataset.', 400, 'RIGHT_NO_DATA');
-    }
-
-    const rightColsRaw = await this.knex('dataset_columns').where({ dataset_id: rightDatasetId }).select('column_name', 'column_type').orderBy('ordinal_position', 'asc');
-    const rightCols = rightColsRaw.map((c: { column_name: string; column_type: string }) => ({ name: stripBom(c.column_name), type: c.column_type }));
-
-    if (rightCols.length === 0) {
-      throw new AppError('Right dataset has no columns. Re-upload or re-ingest the dataset.', 400, 'RIGHT_NO_COLUMNS');
-    }
-
-    // ── Read data ───────────────────────────────────────────────────
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const leftRaw = await this.readCsvRows(leftDataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
-    const leftRows = this.applyExistingTransforms(leftRaw, chainTransforms);
-    const rightRows = await this.readCsvRows(rightDataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    // Both arms use the same resolver as output previews. This honors the
+    // pinned snapshot of an upstream join/union instead of flattening it to a
+    // raw dataset and makes the canvas schema match what deploy will execute.
+    const rightData = await this.resolveNodeData(projectId, pipelineId, input.rightNodeId);
+    const fallbackLeft = leftData ?? await this.resolveNodeData(
+      projectId, pipelineId, nodeId, input.priorTransforms,
+    );
+    const leftRows = fallbackLeft.rows;
+    const rightRows = rightData.rows;
+    const effectiveLeftCols = fallbackLeft.columns;
+    const rightCols = rightData.columns;
 
     if (leftRows.length === 0) {
       throw new AppError('Left input contains no rows. Apply transforms or check the source dataset.', 400, 'LEFT_EMPTY');
@@ -2544,8 +2769,6 @@ export class TransformService {
     if (rightRows.length === 0) {
       throw new AppError('Right input contains no rows. Check the source dataset.', 400, 'RIGHT_EMPTY');
     }
-
-    const effectiveLeftCols = this.applyExistingTransformColumns(leftCols, chainTransforms);
 
     // ── Validate conditions ─────────────────────────────────────────
     if (input.joinType !== 'cross' && input.conditions.length === 0) {
@@ -2683,6 +2906,13 @@ export class TransformService {
       return out;
     });
 
+    // Atomic schema persistence — when the caller persists, the snapshot is
+    // written from THIS preview's output in the same request, so a join node
+    // can never carry a schema that diverges from what was just computed.
+    if (input.persist) {
+      await this.persistExecutionSnapshot(projectId, pipelineId, nodeId, outputCols, filteredRows);
+    }
+
     return {
       columns: outputCols,
       rows: filteredRows,
@@ -2693,7 +2923,7 @@ export class TransformService {
       // Two bounded reads, so either side can be the truncated one — a join
       // preview whose left input was clipped is missing matches, not merely
       // showing fewer rows.
-      ...sampleInfo(Math.max(leftRaw.length, rightRows.length)),
+      ...sampleInfo(Math.max(leftRows.length, rightRows.length)),
       joinType: input.joinType,
       warnings,
     };
@@ -3080,7 +3310,15 @@ export class TransformService {
             'JOIN_UNWIRED',
           );
         }
-        if (!joinType || !Array.isArray(conditions) || conditions.length === 0) {
+        // Cross joins legitimately carry no conditions (Cartesian product) —
+        // the preview schema allows an empty condition list for them, so the
+        // deploy materialiser must too, or a cross join that previews fine is
+        // undeployable (preview/deploy semantics must not diverge).
+        if (
+          !joinType ||
+          !Array.isArray(conditions) ||
+          (conditions.length === 0 && joinType !== 'cross')
+        ) {
           throw new AppError(
             `Join node ${nodeId} is missing joinType or conditions.`,
             400,
@@ -3529,6 +3767,39 @@ export class TransformService {
     // deploy materialization agree with the canvas preview. Absent = wide.
     if (input.mode) config.mode = input.mode;
 
+    // Atomic schema persistence: the union is recomputed here against the
+    // current inputs and its result is written TOGETHER with the wiring in
+    // a single UPDATE. The legacy flow (client saves config, then separately
+    // POSTs /preview-snapshot) left a failure window in which a union node
+    // existed with wiring but no previewSnapshot, rendering "0 columns" on
+    // the canvas and breaking every downstream node with SNAPSHOT_REQUIRED.
+    // If this compute throws (e.g. an upstream input has no snapshot yet),
+    // nothing is persisted — config and snapshot can never diverge.
+    const sourceNodeId = typeof config.sourceNodeId === 'string' ? config.sourceNodeId : null;
+    if (!sourceNodeId) {
+      throw new AppError(
+        'Union node has no sourceNodeId — wire the first input before applying.',
+        400,
+        'UNION_NO_SOURCE',
+      );
+    }
+    const unionResult = await this.unionPreview(projectId, pipelineId, sourceNodeId, {
+      rightNodeIds: inputIds,
+      mode: config.mode as UnionPreviewInput['mode'],
+      limit: 500,
+    });
+    config.previewSnapshot = {
+      columns: unionResult.columns,
+      rows: unionResult.rows,
+      rowCount: unionResult.rows.length,
+      transforms: [],
+      chainHash: hashTransformChain([]),
+      schemaFingerprint: fingerprintSchema(unionResult.columns),
+      nodeId,
+      transitiveInputSnapshots: await this.walkTransitiveInputs(pipelineId, nodeId),
+      savedAt: new Date().toISOString(),
+    };
+
     const [updated] = await this.knex('pipeline_nodes')
       .where({ id: nodeId, pipeline_id: pipelineId })
       .update({ config: JSON.stringify(config) }).returning('*');
@@ -3584,10 +3855,9 @@ export class TransformService {
     limit = 100,
   ) {
     const spec = validateUdfSpec(input);
-    const { dataset, existingTransforms } = await this.resolveNodeDataset(
+    const { dataset, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
       projectId, pipelineId, nodeId,
     );
-    const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
     const rows = this.applyExistingTransforms(rawRows, existingTransforms)
       .slice(0, limit);
 
@@ -3762,11 +4032,88 @@ export class TransformService {
    * source dataset. This is called when the user clicks "Apply All".
    *
    * Returns the complete transformed dataset (all rows, all columns after
-   * transforms). The frontend saves this as the preview snapshot.
+   * transforms). The result (first 500 rows) is ALSO persisted as the
+   * node's previewSnapshot here — the legacy flow had the client save the
+   * snapshot in a second request, so a failed/interrupted follow-up left
+   * a node whose config and saved schema diverged ("0 columns" forever).
    */
   async executeChain(
     projectId: string, pipelineId: string, nodeId: string,
   ) {
+    const result = await this.executeChainInternal(projectId, pipelineId, nodeId);
+    await this.persistExecutionSnapshot(projectId, pipelineId, nodeId, result.columns, result.rows);
+    return result;
+  }
+
+  /**
+   * Write the outcome of a successful full-chain execution as the node's
+   * previewSnapshot, merging into the existing config so unrelated keys
+   * (wiring, labels) are preserved. The transforms recorded are the node's
+   * OWN persisted chain — the same source the deploy stale-check hashes —
+   * so snapshot and config can never disagree about which chain produced
+   * the saved rows.
+   */
+  private async persistExecutionSnapshot(
+    projectId: string, pipelineId: string, nodeId: string,
+    columns: Array<{ name: string; type: string }>,
+    rows: Array<Record<string, unknown>>,
+  ) {
+    const node = await this.knex('pipeline_nodes as pn')
+      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
+      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
+      .select('pn.id', 'pn.config').first();
+    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
+
+    const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    const transforms: unknown[] = Array.isArray(config.transforms) ? config.transforms : [];
+    const snapshotRows = rows.slice(0, 500);
+    config.previewSnapshot = {
+      ...(config.previewSnapshot ?? {}),
+      columns,
+      rows: snapshotRows,
+      rowCount: snapshotRows.length,
+      transforms,
+      chainHash: hashTransformChain(transforms),
+      schemaFingerprint: fingerprintSchema(columns),
+      nodeId,
+      transitiveInputSnapshots: await this.walkTransitiveInputs(pipelineId, nodeId),
+      savedAt: new Date().toISOString(),
+    };
+    await this.knex('pipeline_nodes')
+      .where({ id: nodeId, pipeline_id: pipelineId })
+      .update({ config: JSON.stringify(config) });
+  }
+
+  private async executeChainInternal(
+    projectId: string, pipelineId: string, nodeId: string,
+  ) {
+    // Join/union chains: never replay the left CSV — rebuild the full graph
+    // input (unbounded, exactly like deploy) and apply this node's own
+    // transforms on top. This is what lets "Apply All" on a transform node
+    // hanging off a join pin the correct filtered/joined snapshot instead of
+    // silently capturing the join's left branch.
+    const graph = await this.detectGraphTarget(projectId, pipelineId, nodeId);
+    if (graph) {
+      const up = await this.materializeForDeploy(projectId, pipelineId, graph.targetId);
+      const transforms = graph.ownTransforms;
+      const transformedRows = transforms.length > 0
+        ? this.applyExistingTransforms(up.rows, transforms)
+        : up.rows;
+      const effectiveColumns = transforms.length > 0
+        ? this.applyExistingTransformColumns(up.columns, transforms)
+        : up.columns;
+      return {
+        columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
+        rows: transformedRows,
+        rowCount: transformedRows.length,
+        transformCount: transforms.length,
+        engine: 'legacy_nodejs' as const,
+        sampledSourceRows: transformedRows.length,
+        sourceRowLimit: EXECUTE_SOURCE_ROW_LIMIT,
+        truncated: false,
+      };
+    }
+
     const { dataset, sourceColumns, existingTransforms } = await this.resolveNodeDataset(
       projectId, pipelineId, nodeId,
     );
@@ -3800,7 +4147,10 @@ export class TransformService {
     // broken SQL statement we route around it so the user's request
     // still completes with matching semantics.
     const computeType = await this.getComputeType(pipelineId);
-    const needsLegacy = new Set(['Normalize', 'UppercaseColumnNames', 'RowSize']);
+    // FormatString stays legacy too: printf-style templating (%+.4f etc.) has no
+    // portable DuckDB translation, and preview/deploy already agree on the TS
+    // engine for it.
+    const needsLegacy = new Set(['Normalize', 'UppercaseColumnNames', 'RowSize', 'FormatString']);
     const hasLegacyOnly = existingTransforms.some((t) =>
       needsLegacy.has((t as { function?: string })?.function ?? ''),
     );
@@ -4160,6 +4510,25 @@ export class TransformService {
           else cols.push({ name: e.outputColumn, type: t });
         }
       }
+      if (fn === 'CaseExpression') {
+        const out = tx.outputColumn as string;
+        const type = (tx.outputType as string | undefined) ?? 'string';
+        const idx = cols.findIndex((column) => column.name === out);
+        if (idx >= 0) cols[idx] = { ...cols[idx], type };
+        else cols.push({ name: out, type });
+      }
+      if (fn === 'ConcatenateStrings') {
+        const out = tx.outputColumn as string;
+        const idx = cols.findIndex((column) => column.name === out);
+        if (idx >= 0) cols[idx] = { ...cols[idx], type: 'string' };
+        else cols.push({ name: out, type: 'string' });
+      }
+      if (fn === 'FormatString') {
+        const out = tx.outputColumn as string;
+        const idx = cols.findIndex((column) => column.name === out);
+        if (idx >= 0) cols[idx] = { ...cols[idx], type: 'string' };
+        else cols.push({ name: out, type: 'string' });
+      }
       if (fn === 'Aggregate') {
         const groupBy = (tx.groupBy ?? []) as string[];
         const aggs = (tx.aggregations ?? []) as AggregationItem[];
@@ -4233,6 +4602,16 @@ export class TransformService {
           { name: valueColumn, type: 'string' },
           ...cols.filter((c) => !unpivotSet.has(c.name)),
         ];
+      }
+      if (fn === 'CurrentTimestamp') {
+        // Palantir currentTimestampV1: the build-time column the row-path
+        // stamps; metadata must declare it so the CSV/Parquet writers keep
+        // the column (otherwise the value computed per row is dropped from
+        // the published schema).
+        const outputCol = tx.outputColumn as string;
+        if (!cols.some((c) => c.name === outputCol)) {
+          cols.push({ name: outputCol, type: 'timestamp' });
+        }
       }
       // Sort, DropDuplicates, TopRows, KeepDuplicates, TextBlock don't
       // change column metadata — skip
@@ -4378,6 +4757,28 @@ export class TransformService {
       } else if (fn === 'ApplyExpression') {
         const exprs = collectExpressionItems(tx);
         for (const e of exprs) result = this.applyExpressionToRows(result, e);
+      } else if (fn === 'CaseExpression') {
+        result = this.applyCaseExpressionToRows(result, tx as unknown as CaseExpressionApplyInput);
+      } else if (fn === 'ConcatenateStrings') {
+        const expressions = (tx.expressions ?? []) as StringOperand[];
+        const separator = (tx.separator ?? '') as string;
+        const strict = (tx.nullOutputIfAnyInputIsNull ?? false) as boolean;
+        const out = tx.outputColumn as string;
+        result = result.map((row) => ({ ...row, [out]: concatenateStringValues(row, expressions, separator, strict) }));
+      } else if (fn === 'FormatString') {
+        // Palantir formatStringV1 — printf-style template over ordered args.
+        // Same operand semantics as ConcatenateStrings: kind=column resolves
+        // from the row, kind=literal uses the value verbatim.
+        const fmtArgs = (tx.arguments ?? []) as StringOperand[];
+        const fmt = (tx.format ?? '') as string;
+        const out = tx.outputColumn as string;
+        result = result.map((row) => ({
+          ...row,
+          [out]: formatStringValue(
+            fmt,
+            fmtArgs.map((a) => (a.kind === 'column' ? row[a.value] : a.value)),
+          ),
+        }));
       } else if (fn === 'ApplyMultipleExpressions') {
         const exprs = collectExpressionItems(tx);
         for (const e of exprs) result = this.applyExpressionToRows(result, e);
@@ -4461,6 +4862,13 @@ export class TransformService {
         const subset = ((tx.columns ?? []) as string[]);
         const all = result.length ? Object.keys(result[0]) : [];
         result = this.computeKeepDuplicates(result, subset, all);
+      } else if (fn === 'CurrentTimestamp') {
+        // Palantir currentTimestampV1 parity: one build-time value for every
+        // row of the chain — captured once per chain execution so a deploy
+        // stamps all rows with the same detection timestamp.
+        const outputCol = tx.outputColumn as string;
+        const buildTime = new Date().toISOString();
+        result = result.map((row) => ({ ...row, [outputCol]: buildTime }));
       }
     }
 
@@ -4505,6 +4913,13 @@ export class TransformService {
     // right-hand column compares as empty string (never matches eq).
     const rhs = cond.valueIsColumn ? (row[cond.value ?? ''] ?? '') : (cond.value ?? '');
 
+    // Palantir filterV1: "Values that return true are kept, others are
+    // removed. Nulls are treated as false." An ordering comparison against a
+    // null literal / null right-hand column is therefore false.
+    const rhsIsNull =
+      cond.value === undefined || cond.value === null ||
+      rhs === '' || rhs.toLowerCase() === 'null';
+
     switch (op) {
       case 'is_null':
         // is_null always treats empty string as null (CSV semantics)
@@ -4518,6 +4933,22 @@ export class TransformService {
 
       case 'neq':
         return isNullValue || raw !== rhs;
+
+      // Ordering operators — column-to-column via valueIsColumn, or against a
+      // literal. compareOrd coerces numerics first, then falls back to string
+      // order; ISO-8601 dates/timestamps sort chronologically under string
+      // order, which is what CSV replay gives us here.
+      case 'lt':
+        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) < 0;
+
+      case 'lte':
+        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) <= 0;
+
+      case 'gt':
+        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) > 0;
+
+      case 'gte':
+        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) >= 0;
 
       case 'starts_with':
         return !isNullValue && raw.startsWith(rhs);
@@ -4668,10 +5099,23 @@ export class TransformService {
       .select('column_name', 'column_type')
       .orderBy('ordinal_position', 'asc');
 
-    const columns = rawColumns.map((c: { column_name: string; column_type: string }) => ({
+    let columns = rawColumns.map((c: { column_name: string; column_type: string }) => ({
       name: stripBom(c.column_name),
       type: c.column_type,
     }));
+
+    // Fallback: the upload-time schema scan persisted nothing (failed scan,
+    // legacy dataset, status error) — derive the schema from the live data
+    // instead of silently returning an empty column list, which previously
+    // produced 200 previews with `columns: []` and union/transform nodes that
+    // appeared to have "0 columns". Mirrors resolveDatasetColumns in
+    // datasets/datasetColumns.ts (the datasets page behaviour) so both
+    // surfaces see the same schema. readUploadedPreview never throws: on an
+    // unreadable object it returns an empty, well-formed preview.
+    if (columns.length === 0 && dataset.file_path && !dataset.file_path.startsWith('iceberg://')) {
+      const preview = await readUploadedPreview(dataset.file_path, 50);
+      columns = preview.columns.map((c) => ({ name: stripBom(c.name), type: c.type }));
+    }
 
     // Merge all collected transforms in chain order (reverse because we
     // walked from the outermost node inward — transforms closer to the
@@ -4679,6 +5123,162 @@ export class TransformService {
     const existingTransforms: unknown[] = chainTransformSets.reverse().flat();
 
     return { dataset, sourceColumns: columns, existingTransforms };
+  }
+
+  // =========================================================================
+  // Graph-aware preview/execute input resolution (join / union chains)
+  // =========================================================================
+  //
+  // resolveNodeDataset answers "which CSV do the transforms replay over" —
+  // the right question for dataset-anchored chains, but the wrong one once a
+  // join or union sits in the graph: its sourceNodeId walk lands on the first
+  // raw dataset upstream (e.g. a join's LEFT input). Before this helper
+  // existed, a transform preview on a 15-column join evaluated against the
+  // left CSV's 9 columns, so filters/expressions referencing join-only
+  // columns (e.g. `valid_from`) failed validation with "column does not
+  // exist" — and worse, filters on left-side columns silently returned
+  // un-joined rows.
+  //
+  // The JOIN design contract (see materializeForDeploy): canvas convention
+  // stores transforms on a TRANSFORM node whose `sourceNodeId` is the join
+  // node; the join node's own config carries the join spec, not a transforms
+  // array. So for graph inputs:
+  //   - sourceColumns = the materialised upstream's columns (what the canvas
+  //     node card already shows via previewSnapshot),
+  //   - existingTransforms = only the edited node's own transforms (the
+  //     upstream materialisation already folds in every upstream transform).
+  //
+  // Note: replay rows come from the upstream node's pinned previewSnapshot
+  // when available (consistent with resolveNodeData semantics) and fall back
+  // to a live materializeForDeploy recomputation when no snapshot exists yet
+  // (join never Applied), so previews work in either state.
+
+  /**
+   * Detect whether `nodeId`'s transformed input passes through a join/union.
+   * Returns the graph target to materialise and the transforms that belong
+   * to the edited node itself — or null for CSV-anchored chains, which must
+   * keep the resolveNodeDataset fast path (pin-cache parity).
+   */
+  private async detectGraphTarget(
+    projectId: string,
+    pipelineId: string,
+    nodeId: string,
+  ): Promise<{ targetId: string; ownTransforms: unknown[] } | null> {
+    const node = await this.knex('pipeline_nodes as pn')
+      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
+      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
+      .select('pn.id', 'pn.node_type', 'pn.config')
+      .first();
+    if (!node) {
+      throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
+    }
+    const cfg = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    const ownTransforms: unknown[] = Array.isArray(cfg.transforms) ? cfg.transforms : [];
+
+    // Transforms may also be persisted directly onto a join/union node
+    // (e.g. a Filter saved via nodeId of the join itself), so treat the
+    // node as its own target and let the caller apply ownTransforms on top.
+    if (node.node_type === 'join' || node.node_type === 'union') {
+      return { targetId: nodeId, ownTransforms };
+    }
+    if (node.node_type !== 'transform') {
+      return null;
+    }
+
+    let cursor = typeof cfg.sourceNodeId === 'string' ? cfg.sourceNodeId : undefined;
+    if (!cursor) return null;
+    const visited = new Set<string>([nodeId]);
+    while (cursor && !visited.has(cursor)) {
+      visited.add(cursor);
+      const src = await this.knex('pipeline_nodes')
+        .where({ id: cursor, pipeline_id: pipelineId })
+        .select('node_type', 'dataset_id', 'config')
+        .first();
+      if (!src) return null;
+      if (src.node_type === 'join' || src.node_type === 'union') {
+        // Materialise the node's IMMEDIATE source; nested joins beneath it
+        // are rebuilt recursively by the materialiser itself.
+        return { targetId: cfg.sourceNodeId, ownTransforms };
+      }
+      if (src.node_type === 'dataset' || typeof src.dataset_id === 'string' && src.dataset_id) {
+        return null; // dataset-anchored chain — CSV fast path
+      }
+      const srcCfg = typeof src.config === 'string' ? JSON.parse(src.config) : (src.config ?? {});
+      cursor = srcCfg.sourceNodeId as string | undefined;
+    }
+    return null;
+  }
+
+  /** Fetch the materialised input table for a graph target (join/union +
+   *  anything downstream of one). Pinned snapshot first; live recompute as
+   *  fallback. Rows are capped at the preview cap, matching the CSV path's
+   *  PREVIEW_SOURCE_ROW_LIMIT contract that feeds sampleInfo(). */
+  private async resolveGraphInput(
+    projectId: string,
+    pipelineId: string,
+    targetId: string,
+  ): Promise<{
+    columns: Array<{ name: string; type: string }>;
+    rows: Array<Record<string, unknown>>;
+  }> {
+    const node = await this.knex('pipeline_nodes')
+      .where({ id: targetId, pipeline_id: pipelineId })
+      .select('node_type', 'config')
+      .first();
+    if (!node) {
+      throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
+    }
+    const cfg = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    const snap = cfg.previewSnapshot as
+      | { columns?: Array<{ name: string; type: string }>; rows?: Array<Record<string, unknown>> }
+      | undefined;
+    if (Array.isArray(snap?.columns) && snap.columns.length > 0 && Array.isArray(snap?.rows)) {
+      return { columns: snap.columns, rows: snap.rows.slice(0, PREVIEW_SOURCE_ROW_LIMIT) };
+    }
+    // No snapshot yet (join never Applied) — rebuild live, capped for preview.
+    const up = await this.materializeForDeploy(projectId, pipelineId, targetId);
+    return { columns: up.columns, rows: up.rows.slice(0, PREVIEW_SOURCE_ROW_LIMIT) };
+  }
+
+  /**
+   * Preview-time input resolution for ALL single-input transform previews.
+   *
+   * Drop-in upgrade of the historical pattern used by every preview method:
+   *     const { dataset, sourceColumns, existingTransforms } =
+   *       await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+   *     const rawRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+   * becomes:
+   *     const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } =
+   *       await this.resolvePreviewInput(projectId, pipelineId, nodeId);
+   *
+   * dataset is null when the input is graph-materialised (join/union chain)
+   * — preview methods must not touch dataset.file_path in that case (they
+   * already only used it for the readCsvRows call this helper performs).
+   */
+  private async resolvePreviewInput(
+    projectId: string,
+    pipelineId: string,
+    nodeId: string,
+  ): Promise<{
+    dataset: { id: string; file_path: string; status: string } | null;
+    sourceColumns: Array<{ name: string; type: string }>;
+    existingTransforms: unknown[];
+    baseRows: Array<Record<string, unknown>>;
+  }> {
+    const graph = await this.detectGraphTarget(projectId, pipelineId, nodeId);
+    if (graph) {
+      const up = await this.resolveGraphInput(projectId, pipelineId, graph.targetId);
+      return {
+        dataset: null,
+        sourceColumns: up.columns,
+        existingTransforms: graph.ownTransforms,
+        baseRows: up.rows,
+      };
+    }
+    const { dataset, sourceColumns, existingTransforms } =
+      await this.resolveNodeDataset(projectId, pipelineId, nodeId);
+    const baseRows = await this.readCsvRows(dataset.file_path, PREVIEW_SOURCE_ROW_LIMIT);
+    return { dataset, sourceColumns, existingTransforms, baseRows };
   }
 
   /**

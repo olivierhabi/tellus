@@ -38,6 +38,15 @@ export interface SanitizerOptions {
    * Query and route params are always sanitized.
    */
   shouldSkipBody?: (req: Request) => boolean;
+  /**
+   * Optional per-route depth-guard override. Workshop module definitions are
+   * managed, schema-validated documents that legitimately nest deeper than
+   * the generic API default (widget configs carrying linked-filter chains,
+   * event payloads, etc.) — Palantir module documents have no equivalent
+   * shallow cap. When provided and the predicate matches, this depth is used
+   * instead of `maxDepth` (still a hard DoS guard, just a realistic one).
+   */
+  maxDepthForRoute?: (req: Request) => number | undefined;
 }
 
 const DEFAULT_MAX_STRING_LENGTH = 10000;
@@ -181,6 +190,7 @@ export function createInputSanitizer(options: SanitizerOptions = {}) {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
   const stripScriptTags = options.stripScriptTags ?? true;
   const shouldSkipBody = options.shouldSkipBody;
+  const maxDepthForRoute = options.maxDepthForRoute;
 
   return function inputSanitizer(
     req: Request,
@@ -188,12 +198,13 @@ export function createInputSanitizer(options: SanitizerOptions = {}) {
     next: NextFunction
   ): void {
     // Check nesting depth on body
+    const bodyMaxDepth = maxDepthForRoute?.(req) ?? maxDepth;
     if (req.body && typeof req.body === "object") {
-      if (exceedsDepth(req.body, maxDepth)) {
+      if (exceedsDepth(req.body, bodyMaxDepth)) {
         res.status(400).json({
           error: {
             code: "VALIDATION_FAILED",
-            message: `Request body exceeds maximum nesting depth of ${maxDepth} levels.`,
+            message: `Request body exceeds maximum nesting depth of ${bodyMaxDepth} levels.`,
             timestamp: new Date().toISOString(),
           },
         });

@@ -42,13 +42,19 @@ function svcWith(rowsAvailable: number) {
   const svc = new TransformService(undefined as unknown as Knex);
   const priv = svc as unknown as {
     resolveNodeDataset: () => Promise<unknown>;
+    resolvePreviewInput: () => Promise<unknown>;
+    detectGraphTarget: () => Promise<null>;
     readCsvRows: (path: string, limit: number) => Promise<Row[]>;
+    persistExecutionSnapshot: () => Promise<void>;
   };
   priv.resolveNodeDataset = async () => ({
     dataset: { id: "d1", file_path: "k.csv", status: "ready" },
     sourceColumns: COLUMNS,
     existingTransforms: [],
   });
+  // Snapshot persistence is a DB write; the assertions here are about what
+  // the execution reports, not where the snapshot lands, so stub it out.
+  priv.persistExecutionSnapshot = async () => {};
   priv.readCsvRows = async (_path: string, limit: number) => {
     const n = Math.min(rowsAvailable, limit);
     return Array.from({ length: n }, (_v, i) => ({
@@ -56,6 +62,17 @@ function svcWith(rowsAvailable: number) {
       qty: String(i % 7),
     }));
   };
+  // New seams (join/union graph-aware input resolution): stub them as the
+  // CSV fast path — this fixture is dataset-anchored, exactly the chains
+  // detectGraphTarget returns null for. resolvePreviewInput composes the two
+  // stubs above the same way the real CSV branch does.
+  priv.detectGraphTarget = async () => null;
+  priv.resolvePreviewInput = async () => ({
+    dataset: { id: "d1", file_path: "k.csv", status: "ready" },
+    sourceColumns: COLUMNS,
+    existingTransforms: [],
+    baseRows: await priv.readCsvRows("k.csv", PREVIEW_SOURCE_ROW_LIMIT),
+  });
   return svc;
 }
 

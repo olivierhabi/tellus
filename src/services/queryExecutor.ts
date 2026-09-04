@@ -10,7 +10,7 @@
 import { client, injectSecurityFilter } from "./opensearch/client";
 import { getIndexName } from "./opensearch/indexLifecycleManager";
 import { translateFilter, buildSortClause } from "./queryTranslator";
-import { resolveAllProperties } from "./propertyResolver";
+import { resolveAllProperties, resolveProperty } from "./propertyResolver";
 import { MAX_TERMS_BUCKET_SIZE } from "../utils/constants";
 import {
   createPageToken,
@@ -69,6 +69,11 @@ export interface AggregateParams {
     groupBy?: { field: string; size?: number };
   }>;
 }
+
+/** Resolve an ontology property API name to the OpenSearch field used for
+ * exact-value operations. Text properties resolve to their keyword
+ * multi-field; all other supported property types resolve to themselves. */
+export type ExactValueFieldResolver = (propertyApiName: string) => string;
 
 // ---------------------------------------------------------------------------
 // executeSearch
@@ -219,10 +224,44 @@ export async function executeAggregate(
   // Translate filter
   const osQuery = await translateFilter(params.where, objectTypeApiName);
 
+  // Exact-value aggregations must use the ontology property's keyword field.
+  // For strings that is `<field>.keyword`; numeric/date/boolean properties
+  // resolve to their base field unchanged.
+  const aggregationFields = new Set<string>();
+  for (const def of params.aggregations) {
+    if ((def.type === "terms" || def.type === "cardinality") && def.field) {
+      aggregationFields.add(def.field);
+    }
+    if (def.metric?.type === "cardinality" && def.metric.field) {
+      aggregationFields.add(def.metric.field);
+    }
+    if (def.groupBy?.field) aggregationFields.add(def.groupBy.field);
+  }
+  const exactValueFieldByApiName = new Map(
+    await Promise.all(
+      [...aggregationFields].map(async (field) => {
+        const meta = await resolveProperty(objectTypeApiName, field);
+        return [field, meta.opensearchKeywordField] as const;
+      }),
+    ),
+  );
+  const resolveExactValueField: ExactValueFieldResolver = (field) => {
+    const resolved = exactValueFieldByApiName.get(field);
+    if (!resolved) {
+      // This indicates a programming error: every field is collected above
+      // before clauses are built. Fail closed instead of emitting invalid DSL.
+      throw appError(
+        "INTERNAL_ERROR",
+        `Aggregation field '${field}' was not resolved for '${objectTypeApiName}'.`,
+      );
+    }
+    return resolved;
+  };
+
   // Build aggregation clauses
   const aggs: Record<string, unknown> = {};
   for (const def of params.aggregations) {
-    aggs[def.name] = buildAggClause(def);
+    aggs[def.name] = buildAggClause(def, resolveExactValueField);
   }
 
   const body: Record<string, unknown> = {
@@ -261,7 +300,10 @@ export async function executeAggregate(
  * `count` returns a `value_count` on `__pk` so the value matches the
  * bucket's own `doc_count`; everything else aggregates over `metric.field`.
  */
-function buildMetricClause(metric: { type: string; field?: string }): Record<string, unknown> {
+function buildMetricClause(
+  metric: { type: string; field?: string },
+  resolveExactValueField: ExactValueFieldResolver,
+): Record<string, unknown> {
   const f = metric.field;
   switch (metric.type) {
     case "sum":
@@ -273,21 +315,24 @@ function buildMetricClause(metric: { type: string; field?: string }): Record<str
     case "max":
       return { max: { field: f } };
     case "cardinality":
-      return { cardinality: { field: f } };
+      return { cardinality: { field: resolveExactValueField(f!) } };
     case "count":
     default:
       return { value_count: { field: "__pk" } };
   }
 }
 
-export function buildAggClause(def: AggregateParams["aggregations"][0]): Record<string, unknown> {
+export function buildAggClause(
+  def: AggregateParams["aggregations"][0],
+  resolveExactValueField: ExactValueFieldResolver,
+): Record<string, unknown> {
   const fieldName = def.field || "__pk";
 
   switch (def.type) {
     case "count":
       return { value_count: { field: "__pk" } };
     case "cardinality":
-      return { cardinality: { field: fieldName } };
+      return { cardinality: { field: resolveExactValueField(fieldName) } };
     case "avg":
       return { avg: { field: fieldName } };
     case "sum":
@@ -298,7 +343,10 @@ export function buildAggClause(def: AggregateParams["aggregations"][0]): Record<
       return { max: { field: fieldName } };
     case "terms": {
       const clause: Record<string, unknown> = {
-        terms: { field: `${fieldName}.keyword`, size: Math.min(def.size || 100, MAX_TERMS_BUCKET_SIZE) },
+        terms: {
+          field: resolveExactValueField(fieldName),
+          size: Math.min(def.size || 100, MAX_TERMS_BUCKET_SIZE),
+        },
       };
       const hasMetric = !!def.metric && def.metric.type !== "count";
       const sub: Record<string, unknown> = {};
@@ -308,16 +356,18 @@ export function buildAggClause(def: AggregateParams["aggregations"][0]): Record<
         // returns the full X × series × Y matrix.
         const seriesAgg: Record<string, unknown> = {
           terms: {
-            field: `${def.groupBy.field}.keyword`,
+            field: resolveExactValueField(def.groupBy.field),
             size: Math.min(def.groupBy.size || 50, MAX_TERMS_BUCKET_SIZE),
           },
         };
-        if (hasMetric) seriesAgg.aggs = { metric: buildMetricClause(def.metric!) };
+        if (hasMetric) {
+          seriesAgg.aggs = { metric: buildMetricClause(def.metric!, resolveExactValueField) };
+        }
         sub.series = seriesAgg;
       } else if (hasMetric) {
         // Nested per-bucket metric (Pie Chart aggregation method). `count`
         // is a no-op — the bucket's `doc_count` already carries it.
-        sub.metric = buildMetricClause(def.metric!);
+        sub.metric = buildMetricClause(def.metric!, resolveExactValueField);
       }
       if (Object.keys(sub).length > 0) clause.aggs = sub;
       return clause;

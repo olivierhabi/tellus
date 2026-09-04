@@ -213,7 +213,7 @@ function parseJson<T>(value: T | string | null | undefined, fallback: T): T {
   try { return JSON.parse(value) as T; } catch { return fallback; }
 }
 
-function camelSnapshot(kind: OntologyResourceKind, row: Record<string, unknown> | null): unknown {
+export function camelSnapshot(kind: OntologyResourceKind, row: Record<string, unknown> | null): unknown {
   if (!row) return null;
   if (kind === "objectType") return {
     objectTypeId: row.object_type_id, apiName: row.api_name, displayName: row.display_name,
@@ -240,7 +240,11 @@ function camelSnapshot(kind: OntologyResourceKind, row: Record<string, unknown> 
     description: row.description, cardinality: row.cardinality,
     sourceObjectTypeId: row.source_object_type, targetObjectTypeId: row.target_object_type,
     sourcePropertyId: row.source_property_id, targetPropertyId: row.target_property_id,
-    resolverConfig: row.resolver_config ?? null, status: row.status, visibility: row.visibility,
+    // `link_type` has no status or visibility columns. Including their
+    // undefined values made the in-memory commit snapshot differ from the
+    // JSON-persisted draft snapshot (where JSON drops undefined properties),
+    // causing every staged link-type delete to fail as falsely stale.
+    resolverConfig: row.resolver_config ?? null,
   };
   return row;
 }

@@ -14,6 +14,7 @@ import {
   listRefs,
   type DatasetRowLike,
 } from '../services/pipelines/datasetBranches';
+import { DatasetTransactionService } from '../services/datasets/transactionService';
 
 const datasetService = new DatasetService(foundryDb);
 const datasetController = new DatasetController(datasetService);
@@ -154,6 +155,72 @@ datasetRouter.get(
   },
 );
 
+// ---------------------------------------------------------------------------
+// Datasets v2 storage model (foundry_datasets, any format):
+// every build commits a transaction on a branch (default `master`).
+//   GET  /:datasetId/transactions              — branch history, newest first
+//   GET  /:datasetId/transactions/:transactionId — 404 TransactionNotFound
+//   GET  /:datasetId/branches                  — branch registry
+//   POST /:datasetId/branches                  — 409 BranchAlreadyExists
+// Iceberg formats keep their ref-based branches (see below); the PG branch
+// registry serves csv/parquet/stream datasets.
+// ---------------------------------------------------------------------------
+const txService = new DatasetTransactionService(foundryDb);
+
+datasetRouter.get(
+  '/:datasetId/transactions',
+  authenticate,
+  requireDatasetRole('viewer'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const branch =
+        typeof req.query.branch === 'string' ? req.query.branch : undefined;
+      const limit =
+        typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
+      const rows = await txService.listTransactions(req.params.datasetId as string, {
+        branch: branch || undefined,
+        limit: Number.isFinite(limit) ? limit : undefined,
+      });
+      res.json({ success: true, data: rows });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+datasetRouter.get(
+  '/:datasetId/transactions/:transactionId',
+  authenticate,
+  requireDatasetRole('viewer'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const row = await txService.getTransaction(
+        req.params.datasetId as string,
+        req.params.transactionId as string,
+      );
+      res.json({ success: true, data: row });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+datasetRouter.get(
+  '/:datasetId/branches',
+  authenticate,
+  requireDatasetRole('viewer'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.json({
+        success: true,
+        data: await txService.listBranches(req.params.datasetId as string),
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 datasetRouter.post(
   '/:datasetId/branches',
   authenticate,
@@ -165,6 +232,12 @@ datasetRouter.post(
         name?: unknown;
         fromSnapshotId?: number | string;
       };
+      if ((dataset.format ?? '').toLowerCase() !== 'iceberg') {
+        // PG branch registry — Foundry's BranchAlreadyExists (409) contract.
+        const row = await txService.createBranch(dataset.id, name as string);
+        res.status(201).json({ success: true, data: row });
+        return;
+      }
       const result = await createBranch(dataset, name as string, fromSnapshotId);
       res.status(201).json({ success: true, data: result });
     } catch (error) {

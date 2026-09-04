@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { Knex } from "knex";
-import { TransformService } from "../../../src/services/transformService";
+import { concatenateStringValues, TransformService } from "../../../src/services/transformService";
 import type { AggregationItem } from "../../../src/types/pipeline";
 
 type Row = Record<string, unknown>;
@@ -71,6 +71,17 @@ const ROWS: Row[] = [
 ];
 
 describe("TransformService — aggregation cores", () => {
+  it("matches Palantir Concatenate strings base and null examples", () => {
+    const expressions = [
+      { kind: "column" as const, value: "hello" },
+      { kind: "column" as const, value: "missing" },
+      { kind: "literal" as const, value: "world" },
+      { kind: "literal" as const, value: "!" },
+    ];
+    const row = { hello: "hello", missing: null };
+    expect(concatenateStringValues(row, expressions, "--", false)).toBe("hello--world--!");
+    expect(concatenateStringValues(row, expressions, "--", true)).toBeNull();
+  });
   it("sum/avg/min/max skip nulls and coerce numerics (CSV strings)", () => {
     const out = svc().computeAggregations(ROWS, ["c"], [
       { column: "a", function: "sum", outputColumn: "s" },

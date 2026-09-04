@@ -14,7 +14,8 @@
 //   1. Load metadata (object type, properties, datasource, dataset)
 //   2. Determine transaction files to process
 //   3. Read & merge all transaction files (Map keyed by PK, latest wins)
-//   4. Apply user edits (ontology_edit table: create/update/delete)
+//   4. Apply user edits (ontology_edit table: pending + persistent —
+//      pinned create/update/delete edits survive every reindex)
 //   5. Build OpenSearch bulk request
 //   6. Delete/recreate index
 //   7. Execute bulk index
@@ -108,7 +109,9 @@ async function setPipelineStage(
 // types reindex without needing a parallel "Ontology dataset" row.
 // ---------------------------------------------------------------------------
 
-function isFoundryBridgedPath(filePath: string | null | undefined): boolean {
+// Exported for the legacy 7-stage indexer (indexing/indexingOrchestrator.ts),
+// which must resolve the same synthetic URIs at its Stage 3.
+export function isFoundryBridgedPath(filePath: string | null | undefined): boolean {
   return typeof filePath === "string" && filePath.includes("#foundry-dataset:");
 }
 
@@ -119,7 +122,8 @@ function stripFoundryTags(filePath: string): string {
   return idx >= 0 ? filePath.slice(0, idx) : filePath;
 }
 
-async function readFoundryBridgedFile(
+// Exported for the legacy 7-stage indexer (indexing/indexingOrchestrator.ts).
+export async function readFoundryBridgedFile(
   rawFilePath: string,
   format: string,
 ): Promise<{ rows: AsyncIterable<Record<string, unknown>> }> {
@@ -273,6 +277,132 @@ interface ReindexStats {
   createCount: number;
   updateCount: number;
   deleteCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Step 6 helper: replay user edits over the rebuilt datasource map
+// ---------------------------------------------------------------------------
+
+/** Minimal shape of an `ontology_edit` row needed for replay. */
+export interface ReplayedEdit {
+  edit_id: string;
+  primary_key: string;
+  operation: string | null;
+  property_values: Record<string, unknown> | null;
+  executed_at: string;
+  indexed: boolean | null;
+}
+
+/** Result of replayUserEditsOnObjectMap(). */
+export interface ReplayResult {
+  /** Edits that actually changed (or removed) a row in the map. */
+  creates: number;
+  updates: number;
+  deletes: number;
+  /** Update/delete edits whose PK had no row in the rebuilt map. */
+  skippedUpdates: number;
+  skippedDeletes: number;
+  /**
+   * edit_ids of edits that were `indexed = false` entering the replay.
+   * Hydration stamps exactly these — persistent edits keep graduation
+   * idempotent (`indexed = true` rows must never be re-stamped as fresh).
+   */
+  pendingEditIds: string[];
+}
+
+/**
+ * Overlay semantics shared with editMerger.mergeEditsWithDatasource
+ * (indexingOrchestrator Stage 6): user edits win PER PROPERTY over
+ * datasource values, and — critically — they are PINNED. Because a force
+ * reindex rebuilds `objectMap` from the datasource SNAPSHOT and then
+ * re-upserts every row wholesale, edits that a previous pass already marked
+ * `indexed = true` MUST be replayed again, or every reindex silently reverts
+ * user-editable properties to the datasource baseline (observed 2026-09-02:
+ * Action-updated `RssbFraudSignal.signalStatus` wiped back to null by
+ * `POST /objectTypes/:api/reindex?force=true`, reporting `editsApplied.updates: 0`).
+ *
+ * Ordering: edits replay in `executed_at` ASC order, so the natural event
+ * semantics hold — a newer `delete` beats an older `update`, a newer `update`
+ * beats an older `delete` (which then re-defers, never resurrecting a stub
+ * row for a PK the datasource does not carry), and an earlier-but-still-live
+ * `create`/`update` keeps pinning its properties against source refreshes.
+ *
+ * Parity notes vs editMerger: a `create` edit whose PK already has a row is
+ * an overlay (its property values win per property, never clobbering
+ * properties the create edit does not carry); a `delete` for a PK absent
+ * from the map is a no-op ("ghost delete"); an `update` for an absent PK is
+ * left pinned for a future reindex where the row reappears — both engines
+ * retain it because the persistent query re-selects every historical
+ * create/update edit.
+ */
+export function replayUserEditsOnObjectMap(
+  objectMap: Map<string, Record<string, unknown>>,
+  edits: ReplayedEdit[],
+): ReplayResult {
+  const stats: ReplayResult = {
+    creates: 0,
+    updates: 0,
+    deletes: 0,
+    skippedUpdates: 0,
+    skippedDeletes: 0,
+    pendingEditIds: [],
+  };
+
+  const ordered = [...edits].sort(
+    (a, b) =>
+      new Date(a.executed_at).getTime() - new Date(b.executed_at).getTime() ||
+      String(a.edit_id).localeCompare(String(b.edit_id)),
+  );
+
+  for (const edit of ordered) {
+    if (edit.indexed === false) stats.pendingEditIds.push(edit.edit_id);
+
+    const pk = edit.primary_key;
+    const existingRow = objectMap.get(pk);
+    const editValues = edit.property_values ?? {};
+
+    switch (edit.operation) {
+      case "create":
+        if (existingRow) {
+          // Create colliding with a datasource row — behave like an update
+          // (editMerger Test 8): the edit's property values win, the row's
+          // other properties survive.
+          objectMap.set(pk, { ...existingRow, ...editValues });
+          stats.updates++;
+        } else {
+          objectMap.set(pk, { ...editValues });
+          stats.creates++;
+        }
+        break;
+
+      case "update":
+        if (existingRow) {
+          objectMap.set(pk, { ...existingRow, ...editValues });
+          stats.updates++;
+        } else {
+          // Never materialize a stub row from an update edit: the PK is
+          // simply not in this datasource generation. The edit stays in
+          // the persistent query set and re-applies if the PK returns.
+          stats.skippedUpdates++;
+        }
+        break;
+
+      case "delete":
+        if (existingRow) {
+          objectMap.delete(pk);
+          stats.deletes++;
+        } else {
+          stats.skippedDeletes++;
+        }
+        break;
+
+      default:
+        // Unknown operation — leave the map untouched.
+        break;
+    }
+  }
+
+  return stats;
 }
 
 // ---------------------------------------------------------------------------
@@ -828,52 +958,47 @@ export async function reindexObjectType(
 
     // =================================================================
     // Step 6: Apply user edits (edit preservation)
+    //
+    // Replays BOTH pending edits (`indexed = false`) and PERSISTENT edits —
+    // every historical create/update plus deletes already consumed by an
+    // earlier run. This run rebuilds the map from the datasource SNAPSHOT,
+    // so without the persistent half, any edit that a previous pass stamped
+    // `indexed` would be silently reverted on this pass (the Action's
+    // OpenSearch projection marks edits indexed immediately, so every
+    // post-edit reindex used to wipe user-editable properties back to the
+    // datasource baseline while reporting `updates: 0`). The predicate
+    // mirrors editMerger.mergeEditsWithDatasource's `persistentResult`
+    // exactly — see its header for the Palantir "user edits survive
+    // reindexes" contract this implements.
     // =================================================================
 
     const editsResult = await query(
-      `SELECT * FROM ontology_edit
-       WHERE object_type_api_name = $1 AND indexed = false
-       ORDER BY executed_at ASC`,
+      `SELECT edit_id, primary_key, operation, property_values, executed_at, indexed
+         FROM ontology_edit
+        WHERE object_type_api_name = $1
+          AND (
+            indexed = false
+            OR operation IN ('update', 'create')
+            OR (operation = 'delete' AND indexed = true)
+          )
+        ORDER BY executed_at ASC, edit_id ASC`,
       [objectTypeApiName]
     );
-    const pendingEdits = editsResult.rows;
-    const editIds: string[] = [];
+    const replay = replayUserEditsOnObjectMap(objectMap, editsResult.rows as ReplayedEdit[]);
 
-    for (const edit of pendingEdits) {
-      editIds.push(edit.edit_id);
-
-      switch (edit.operation) {
-        case "create":
-          // User created an object not in the datasource
-          objectMap.set(
-            edit.primary_key,
-            edit.property_values || {}
-          );
-          stats.createCount++;
-          break;
-
-        case "update": {
-          // User modified properties — merge with existing, user values win
-          const existing = objectMap.get(edit.primary_key) || {};
-          objectMap.set(edit.primary_key, {
-            ...existing,
-            ...(edit.property_values || {}),
-          });
-          stats.updateCount++;
-          break;
-        }
-
-        case "delete":
-          // User deleted an object — remove from map
-          objectMap.delete(edit.primary_key);
-          stats.deleteCount++;
-          break;
-      }
-    }
+    // Only edits that were pending ENTERING the replay graduate here;
+    // stamping is done in Stage 4 (Hydration) after the cutover —
+    // `applied_to_index` semantics: the rebuild carried their values.
+    const editIds = replay.pendingEditIds;
+    stats.createCount = replay.creates;
+    stats.updateCount = replay.updates;
+    stats.deleteCount = replay.deletes;
 
     console.log(
-      `[Reindex] Step 6: Applied ${pendingEdits.length} user edits ` +
-        `(${stats.createCount} creates, ${stats.updateCount} updates, ${stats.deleteCount} deletes)`
+      `[Reindex] Step 6: Replayed ${editsResult.rows.length} user edits ` +
+        `(${replay.creates} creates, ${replay.updates} updates, ${replay.deletes} deletes; ` +
+        `${replay.skippedUpdates} updates / ${replay.skippedDeletes} deletes deferred — PK not in datasource, edit stays pinned) ` +
+        `— ${editIds.length} newly indexed`
     );
 
     // =================================================================
@@ -1371,7 +1496,9 @@ export async function reindexObjectType(
         durationMs,
         transactions.length,
         objectsFromDatasource,
-        pendingEdits.length,
+        // Honest ledger: the total replay workload (applied + deferred),
+        // not just the newly indexed fraction.
+        stats.createCount + stats.updateCount + stats.deleteCount,
         indexedCount,
         JSON.stringify({
           lastTransactionId,

@@ -1,6 +1,7 @@
 import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { AppError, NotFoundError, ConflictError } from '../utils/foundryAppError';
+import { assertFolderNameAvailable } from './datasets/folderNameGuard';
 import { DatasetListQuery } from '../types/dataset';
 import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { getObjectStream } from './storageService';
@@ -251,17 +252,31 @@ export class DatasetService {
     if (!dataset) throw NotFoundError('Dataset not found');
 
     const updateData: any = { updated_at: new Date(), updated_by: userId ?? null };
-    if (updates.name !== undefined) {
-      // Check for duplicate name in same folder
-      const existing = await this.knex('foundry_datasets')
-        .where({ folder_id: updates.folderId ?? dataset.folder_id, name: updates.name })
-        .whereNot({ id: datasetId })
-        .first();
-      if (existing) throw ConflictError('A dataset with this name already exists in this folder');
-      updateData.name = updates.name;
-    }
-    if (updates.folderId !== undefined) {
-      updateData.folder_id = updates.folderId;
+    if (updates.name !== undefined || updates.folderId !== undefined) {
+      // Foundry parity — ResourceNameAlreadyExists (409). Applies to
+      // renames AND moves into a folder where the name is taken; the
+      // guard also resolves root-level siblings via project_id, which a
+      // naive folder_id equality check (folder_id IS NULL never matches)
+      // would miss.
+      let projectId: string | null = (dataset.project_id as string | null) ?? null;
+      const targetFolderId =
+        updates.folderId !== undefined ? updates.folderId : (dataset.folder_id as string | null);
+      if (!projectId && targetFolderId) {
+        const folder = await this.knex('folders')
+          .where({ id: targetFolderId })
+          .first('project_id') as { project_id?: string } | undefined;
+        projectId = folder?.project_id ?? null;
+      }
+      if (projectId) {
+        await assertFolderNameAvailable(this.knex, {
+          name: updates.name ?? dataset.name,
+          folderId: targetFolderId,
+          projectId,
+          excludeDatasetId: datasetId,
+        });
+      }
+      if (updates.name !== undefined) updateData.name = updates.name;
+      if (updates.folderId !== undefined) updateData.folder_id = updates.folderId;
     }
 
     const [updated] = await this.knex('foundry_datasets').where({ id: datasetId }).update(updateData).returning('*');
@@ -512,6 +527,13 @@ export class DatasetService {
     }
 
     const newName = dataset.name.replace(/(\.[^.]+)$/, ' (copy)$1');
+    // Foundry parity — the copy lands in the same folder; block with 409
+    // if a sibling already holds the derived name.
+    await assertFolderNameAvailable(this.knex, {
+      name: newName,
+      folderId: dataset.folder_id ?? null,
+      projectId,
+    });
     // NOTE: file_path and content_hash are copied verbatim — the
     // duplicate references the same S3 object as the source. Hard-delete
     // of either row deliberately leaves the object in place; physical
