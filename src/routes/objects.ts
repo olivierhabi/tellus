@@ -39,6 +39,13 @@ import {
   readOverlay,
 } from "../services/overlay/writebackOverlay";
 import { getOverlayStore, markOverlayDegraded } from "../services/overlay/getOverlayStore";
+import {
+  hasServingPendingEdits,
+  recomputeAggregationsOverRows,
+  refilterMergedRows,
+  RECONCILE_MAX_CANDIDATES,
+} from "../services/effectiveObjects";
+import { collectWhereFields } from "../services/security/propertyMarkingGuard";
 import { recordShadowDiff } from "../services/funnel/shadowDiffHook";
 import { CellMarkingService, redactCells } from "../services/security/cellMarkingService";
 import {
@@ -156,9 +163,10 @@ async function resolveLinkedWhere(
   const resolvedTargetWhere = linked.targetWhere
     ? await resolveLinkedWhere(linked.targetWhere, targetType, securityFilter, branchId)
     : undefined;
+  const targetWhere = resolvedTargetWhere as Record<string, unknown> | undefined;
 
-  if (resolvedTargetWhere) {
-    await validateSearchQuery({ where: resolvedTargetWhere, $pageSize: 1 }, targetType);
+  if (targetWhere) {
+    await validateSearchQuery({ where: targetWhere, $pageSize: 1 }, targetType);
   }
   const sourcePks = new Set<string>();
   let pageToken: string | undefined;
@@ -166,7 +174,7 @@ async function resolveLinkedWhere(
     const resolved = await searchAround(linkType, direction, {
       pageSize: 1000,
       ...(pageToken ? { pageToken } : {}),
-      ...(resolvedTargetWhere ? { sourceWhere: resolvedTargetWhere } : {}),
+      ...(targetWhere ? { sourceWhere: targetWhere } : {}),
     }, securityFilter, branchId);
     for (const object of resolved.linkedObjects) if (object.__pk != null) sourcePks.add(String(object.__pk));
     pageToken = resolved.nextPageToken ?? undefined;
@@ -335,34 +343,116 @@ async function hydrateStaleIndexedRows<R extends { data: unknown[] }>(
 }
 
 /**
- * B7 SCAN discovery: build a minimal filter predicate from the search
- * `where` clause so `collectFilterMatchingOverlays` can include
- * overlay-only hits (rows edited within the last overlay TTL that the
- * index hasn't absorbed yet).
+ * B7 SCAN discovery: build a filter predicate from the search `where`
+ * clause so `collectFilterMatchingOverlays` can include overlay-only hits
+ * (rows edited within the last overlay TTL that the index hasn't absorbed
+ * yet).
  *
- * Deliberately small: we only support equality on top-level properties
- * which is what the dominant Query API path produces. Unknown or
- * nested filters fall back to matching everything, which is still
- * correct — dedup by PK in mergeOverlayIntoSearch keeps the Quickwit
- * hit authoritative if it exists.
+ * Contract:
+ *  - UNFILTERED search (`where == null`) → match-all: every recent overlay
+ *    edit for the type is merged (read-your-writes for Action-created
+ *    objects inside the projection-lag window).
+ *  - Supported shapes (eq / in / gt / gte / lt / lte / contains /
+ *    startsWith / isNull / isNotNull + and / or / not) → precise predicate,
+ *    evaluated against the EMITTED overlay doc (which carries `__pk`,
+ *    `__primaryKey` and `__objectType` like an indexed hit).
+ *  - Unsupported shapes → `undefined` (no extras). Conservative: the
+ *    overlay REPLACEMENT path still upgrades edited rows already in the
+ *    result, and dedup by PK in mergeOverlayIntoSearch keeps the index
+ *    authoritative when it has caught up.
  */
 function buildOverlayFilter(where: unknown): ((doc: Record<string, unknown>) => boolean) | undefined {
-  if (!where || typeof where !== "object") return undefined;
+  // Unfiltered search: EVERY recent overlay edit for the type is a candidate
+  // — this is the read-your-writes bridge that makes an Action-created object
+  // visible in unfiltered object tables inside the projection-lag window
+  // (OSv2 semantics), before the serving projector absorbs the edit WAL.
+  if (where == null) return () => true;
+  if (typeof where !== "object") return undefined;
   const w = where as Record<string, unknown>;
-  if (w.type === "eq" && typeof w.field === "string") {
-    const field = w.field;
+  const field = typeof w.field === "string" ? w.field : null;
+
+  const coerceCompare = (docValue: unknown, filterValue: unknown): number | null => {
+    // Numeric first; fall back to Date; else lexicographic string compare.
+    const nA = typeof docValue === "number" ? docValue : Number(docValue);
+    const nB = typeof filterValue === "number" ? filterValue : Number(filterValue);
+    if (Number.isFinite(nA) && Number.isFinite(nB)) return nA - nB;
+    const dA = Date.parse(String(docValue));
+    const dB = Date.parse(String(filterValue));
+    if (Number.isFinite(dA) && Number.isFinite(dB)) return dA - dB;
+    if (docValue == null || filterValue == null) return null;
+    const sA = String(docValue);
+    const sB = String(filterValue);
+    return sA < sB ? -1 : sA > sB ? 1 : 0;
+  };
+
+  if (field) {
     const value = w.value;
-    return (doc) => {
-      const dv = doc[field];
-      return dv === value || String(dv) === String(value);
-    };
+    switch (w.type) {
+      case "eq":
+        return (doc) => {
+          const dv = doc[field];
+          return dv === value || String(dv) === String(value);
+        };
+      case "in": {
+        if (!Array.isArray(value)) return undefined;
+        return (doc) =>
+          value.some((v) => doc[field] === v || String(doc[field]) === String(v));
+      }
+      case "gt":
+        return (doc) => {
+          const c = coerceCompare(doc[field], value);
+          return c !== null && c > 0;
+        };
+      case "gte":
+        return (doc) => {
+          const c = coerceCompare(doc[field], value);
+          return c !== null && c >= 0;
+        };
+      case "lt":
+        return (doc) => {
+          const c = coerceCompare(doc[field], value);
+          return c !== null && c < 0;
+        };
+      case "lte":
+        return (doc) => {
+          const c = coerceCompare(doc[field], value);
+          return c !== null && c <= 0;
+        };
+      case "contains":
+        return (doc) =>
+          doc[field] != null &&
+          String(doc[field]).toLowerCase().includes(String(value ?? "").toLowerCase());
+      case "startsWith":
+        return (doc) =>
+          doc[field] != null &&
+          String(doc[field]).toLowerCase().startsWith(String(value ?? "").toLowerCase());
+      case "isNull":
+        return (doc) => doc[field] == null;
+      case "isNotNull":
+        return (doc) => doc[field] != null;
+      default:
+        break;
+    }
   }
   if (w.type === "and" && Array.isArray(w.filters)) {
-    const sub = w.filters
-      .map(buildOverlayFilter)
-      .filter((f): f is (doc: Record<string, unknown>) => boolean => typeof f === "function");
-    if (sub.length === 0) return undefined;
-    return (doc) => sub.every((f) => f(doc));
+    const sub = w.filters.map(buildOverlayFilter);
+    // Any unsupported branch → no extras (precise-conservative: the overlay
+    // REPLACEMENT path still covers edits to rows already in the result).
+    if (sub.some((f) => f === undefined)) return undefined;
+    const fns = sub as Array<(doc: Record<string, unknown>) => boolean>;
+    if (fns.length === 0) return () => true;
+    return (doc) => fns.every((f) => f(doc));
+  }
+  if (w.type === "or" && Array.isArray(w.filters)) {
+    const sub = w.filters.map(buildOverlayFilter);
+    if (sub.some((f) => f === undefined)) return undefined;
+    const fns = sub as Array<(doc: Record<string, unknown>) => boolean>;
+    if (fns.length === 0) return () => true;
+    return (doc) => fns.some((f) => f(doc));
+  }
+  if (w.type === "not") {
+    const sub = buildOverlayFilter(w.filter ?? w.value);
+    return sub ? ((doc) => !sub(doc)) : undefined;
   }
   return undefined;
 }
@@ -423,7 +513,7 @@ async function ensureObjectTypeExists(objectType: string): Promise<void> {
 // direct unit test without spinning up an Express app. The seam exposes
 // the helper without changing its production call surface — the route
 // handlers continue to use the unexported reference.
-export const __internals = { ensureObjectTypeExists };
+export const __internals = { ensureObjectTypeExists, buildOverlayFilter };
 
 function handleError(err: any, res: Response, next: NextFunction) {
   if (err.code && KNOWN_CODES.has(err.code)) {
@@ -505,19 +595,43 @@ router.post(
         orderBy: validated.$orderBy,
         security: req.security,
       });
+      // EFFECTIVE-STATE FILTER prerequisite: the post-hydration re-filter
+      // below evaluates the where's property leaves against the merged rows,
+      // so every field the where references must survive the `_source`
+      // projection. Union the where's fields into $select (the response
+      // contract is unchanged — the formatter only emits the caller's
+      // requested properties).
+      const selectWithWhereFields =
+        validated.$select && validated.$select.length > 0
+          ? [...new Set([...validated.$select, ...collectWhereFields(validated.where)])]
+          : validated.$select;
       const rawResult = await executeSearch(objectType, {
         where: validated.where,
         $orderBy: validated.$orderBy,
         $pageSize: validated.$pageSize,
         $pageToken: validated.$pageToken,
-        $select: validated.$select,
+        $select: selectWithWhereFields,
       }, secFilter, branchId);
 
       // B7: merge the writeback overlay so recent edits are visible
       // before Quickwit/OpenSearch catches up. Overlay hits REPLACE
       // the index document for matching PKs; misses pass through.
       const overlayMerged = await mergeWithOverlay(objectType, rawResult, (body as Record<string, unknown>).where, branchId);
-      const result = await hydrateStaleIndexedRows(objectType, overlayMerged, branchId);
+      const hydrated = await hydrateStaleIndexedRows(objectType, overlayMerged, branchId);
+      // EFFECTIVE-STATE FILTER: the index-side `where` ran against the
+      // lagging projection. A row whose committed edits no longer satisfy
+      // the predicate must not survive into the Object Set merely because
+      // its STALE index document matched (e.g. an OPEN-only queue keeping a
+      // CONFIRMED signal whose status edit has not been projected yet).
+      // The reverse direction (newly-matching edited rows) is covered by
+      // the serving projector's drain + the overlay extras merge above.
+      const result = {
+        ...hydrated,
+        data: refilterMergedRows(
+          hydrated.data as Array<Record<string, unknown>>,
+          validated.where,
+        ),
+      };
       stripRestrictedRows(result.data as Array<Record<string, unknown>>, req.security, restricted);
 
       // B9: shadow-diff during soak. Fire-and-forget — hurts neither
@@ -622,10 +736,47 @@ router.post(
         aggregations: validated.aggregations,
         security: req.security,
       });
-      const result = await executeAggregate(objectType, {
-        where: validated.where,
-        aggregations: validated.aggregations,
-      }, secFilter, branchId);
+      // EFFECTIVE-STATE AGGREGATION: when the type has committed edits the
+      // serving projector has not drained yet, index buckets reflect the
+      // lagging projection (e.g. a KPI counting OPEN signals still includes
+      // a just-CONFIRMED one). Recompute over the authoritative store so the
+      // response matches the same effective objects search returns. Bounded:
+      // beyond RECONCILE_MAX_CANDIDATES the (seconds-to-converge) index
+      // answer is returned instead of materializing the set.
+      let result: Record<string, unknown>;
+      if (await hasServingPendingEdits(objectType)) {
+        result = await executeAggregate(objectType, {
+          where: validated.where,
+          aggregations: validated.aggregations,
+        }, secFilter, branchId);
+        try {
+          const candidates = await executeSearch(objectType, {
+            where: validated.where,
+            $pageSize: RECONCILE_MAX_CANDIDATES,
+          }, secFilter, branchId);
+          const total = typeof candidates.totalCount === "number" ? candidates.totalCount : candidates.data.length;
+          if (total <= RECONCILE_MAX_CANDIDATES) {
+            const hydrated = await hydrateStaleIndexedRows(objectType, candidates, branchId);
+            const effectiveRows = refilterMergedRows(
+              hydrated.data as Array<Record<string, unknown>>,
+              validated.where,
+            );
+            result = recomputeAggregationsOverRows(
+              effectiveRows,
+              validated.aggregations,
+            );
+          }
+        } catch (reconcileErr) {
+          console.warn(
+            `[AGGREGATE] effective-state reconcile skipped for ${objectType}: ${(reconcileErr as Error).message}`,
+          );
+        }
+      } else {
+        result = await executeAggregate(objectType, {
+          where: validated.where,
+          aggregations: validated.aggregations,
+        }, secFilter, branchId);
+      }
 
       const elapsed = Date.now() - start;
       console.log(

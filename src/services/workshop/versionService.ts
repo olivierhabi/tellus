@@ -52,6 +52,7 @@ import {
   moduleNotFound,
   moduleNotPublished,
   moduleVersionNotFound,
+  semverNotMonotonic,
   semverTagImmutable,
 } from "./errors";
 import { validateModule } from "./validator";
@@ -127,6 +128,18 @@ const SEMVER_REGEX = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 function assertSemver(semver: string): void {
   if (!SEMVER_REGEX.test(semver)) throw invalidSemver(semver);
+}
+
+/** Compare the restricted MAJOR.MINOR.PATCH tags accepted by Workshop. */
+export function compareStableSemver(left: string, right: string): number {
+  assertSemver(left);
+  assertSemver(right);
+  const a = left.split(".").map(Number);
+  const b = right.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +230,27 @@ async function _publishVersionInner(
       // publishes of the same (rid, semver) to be idempotent.
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [rid]);
       const head = await loadHead(client, rid);
+
+      // Rollback is an explicit pointer operation. A normal publication must
+      // never make an older semantic version the newest release.
+      const versionRows = await client.query<{ semver: string }>(
+        `SELECT semver FROM workshop_module_version WHERE rid = $1`,
+        [rid],
+      );
+      const orderedSemvers = versionRows.rows
+        .map((row) => row.semver)
+        .sort(compareStableSemver);
+      const highestPublishedSemver = orderedSemvers[orderedSemvers.length - 1];
+      if (
+        highestPublishedSemver &&
+        compareStableSemver(request.semver, highestPublishedSemver) < 0
+      ) {
+        throw semverNotMonotonic(
+          rid,
+          request.semver,
+          highestPublishedSemver,
+        );
+      }
 
       // Step 3 — recompile (defense-in-depth; B01 already validated on
       // PUT, but the spec is explicit: publish revalidates).

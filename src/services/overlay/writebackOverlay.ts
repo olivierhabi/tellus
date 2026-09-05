@@ -470,6 +470,12 @@ export async function applyOverlayToResults(
     out.push({
       ...overlay.doc,
       __pk: overlay.primaryKey,
+      // Canonical identity fields: the object-serving contract serializes the
+      // primary key as `__primaryKey` (OpenSearch hits carry `__pk`). Overlay
+      // replacements must expose BOTH so downstream consumers (Workshop object
+      // tables, action-output hydration) never see a null identity.
+      __primaryKey: overlay.primaryKey,
+      __objectType: hit.__objectType ?? objectType,
       __version: overlay.version,
       __overlay_source: "writeback",
     });
@@ -514,13 +520,21 @@ export async function collectFilterMatchingOverlays(
     } else if (recBranch !== slot) {
       continue;
     }
-    if (!filter(r.doc)) continue;
-    out.push({
+    // Canonical identity fields on the EMITTED document — both the OpenSearch
+    // `__pk` shape and the object-serving `__primaryKey` shape — so a
+    // freshly-created object never surfaces with a null primary key, and
+    // caller filter predicates can reference `__pk`/`__primaryKey`/
+    // `__objectType` like they do on indexed hits.
+    const emitted = {
       ...r.doc,
       __pk: r.primaryKey,
+      __primaryKey: r.primaryKey,
+      __objectType: objectType,
       __version: r.version,
       __overlay_source: "writeback",
-    });
+    };
+    if (!filter(emitted)) continue;
+    out.push(emitted);
   }
   return out;
 }

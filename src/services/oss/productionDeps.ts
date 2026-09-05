@@ -16,6 +16,7 @@ import { getIndexName } from "../opensearch/indexLifecycleManager";
 import { translateFilter } from "../queryTranslator";
 import { resolveProperty } from "../propertyResolver";
 import { mergeOverlayIntoSearch, readOverlay } from "../overlay/writebackOverlay";
+import { matchesWhere } from "./subscriptionRegistry";
 import { getOverlayStore } from "../overlay/getOverlayStore";
 import { MAIN_BRANCH_SENTINEL } from "../overlay/overlayStore";
 import { query } from "../../db";
@@ -868,7 +869,11 @@ export function makeProductionExecutorDeps(
         const merged = await mergeOverlayIntoSearch({
           objectType,
           hits: hits as Array<Record<string, unknown>>,
-          filter: undefined,
+          // NEW objects (not yet in the serving index) must be injected
+          // from the overlay, not just merged over existing hits. The
+          // membership predicate is the same in-memory where-DSL matcher
+          // the change-subscription registry uses.
+          filter: (doc) => matchesWhere(doc, where),
           store,
           branchId: sec.branchId,
         });

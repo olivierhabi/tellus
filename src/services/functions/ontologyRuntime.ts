@@ -1323,6 +1323,9 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
           editId: randomUUID(),
           actorUserId: args.actorUserId ?? null,
         });
+        // Persist the edit WAL row so the serving projector / funnel / reindex
+        // replay see function-created objects (parity with editApplicator B1).
+        await insertEditStoreRow(e);
         created += 1;
       } else if (e.op === "update") {
         const r = await client.query<{ properties: Record<string, unknown>; version: number; rid: string | null }>(
@@ -1335,6 +1338,7 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
           [args.ontologyId, branchId, e.objectType, e.primaryKey, JSON.stringify(e.patch)],
         );
         updated += r.rowCount ?? 0;
+        await insertEditStoreRow(e);
         const row = r.rows[0];
         if (row) committedOverlays.push({
           branchId: "_main",
@@ -1367,6 +1371,7 @@ export async function applyEdits(pool: Pool, args: ApplyEditsArgs): Promise<Appl
           [args.ontologyId, branchId, e.objectType, e.primaryKey],
         );
         deleted += r.rowCount ?? 0;
+        if ((r.rowCount ?? 0) > 0) await insertEditStoreRow(e);
         const row = r.rows[0];
         if (row) committedOverlays.push({
           branchId: "_main",

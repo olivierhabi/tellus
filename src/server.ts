@@ -141,6 +141,7 @@ import {
   stopIcebergMaintenance,
 } from "./services/pipelines/icebergMaintenance";
 import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
+import { startServingProjector, stopServingProjector } from "./services/serving/editProjector";
 import { stopHealthProber } from "./services/connectivity/health/prober";
 import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
 import {
@@ -1864,6 +1865,22 @@ async function start(): Promise<void> {
       );
     }
 
+    // Serving edit projector: drains the ontology_edit WAL into the
+    // OpenSearch serving indexes so Action-created/-modified objects become
+    // queryable within seconds (the writeback overlay only covers the
+    // read-your-writes window). Without it, Action commits were durably
+    // stored but never reached object serving in this topology.
+    try {
+      if (process.env.SERVING_PROJECTOR_DISABLED !== "true") {
+        startServingProjector();
+        console.log("Serving edit projector started");
+      }
+    } catch (err) {
+      console.warn(
+        `WARNING: could not start serving projector: ${(err as Error).message}`
+      );
+    }
+
     // B9: start the replacement pipeline scheduler. Every 60s it
     // evaluates SOAK gates and fires cutover when eligible, plus drops
     // the old index after its 48h retention window. Without this, the
@@ -2123,6 +2140,7 @@ async function shutdown(signal: string): Promise<void> {
     ["funnelDispatcher", stopFunnelDispatcher],
     ["pipelineDispatcher", stopPipelineDispatcher],
     ["overlaySweeper", stopOverlaySweeper],
+    ["servingProjector", stopServingProjector],
     ["linkCdcDrainer", () => stopLinkCdcDrainer?.()],
     ["replacementScheduler", stopReplacementScheduler],
     ["icebergMaintenance", stopIcebergMaintenance],

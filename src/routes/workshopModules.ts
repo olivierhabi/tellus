@@ -444,6 +444,59 @@ router.get(
   },
 );
 
+// ---- P1: GET /api/v1/workshop/modules/{rid}/access-check/{userId} --------
+//
+// Foundry "Check access" backend: evaluates ANOTHER principal's effective
+// module role (editors only). Resolves the target user's realm roles and
+// Keycloak groups through the admin service, then replays the grant
+// resolution order with provenance so the panel can show WHY access holds
+// (direct grant / group grant / global role / platform super role).
+
+router.get(
+  "/modules/:rid/access-check/:userId",
+  requireRole("editor"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { getModuleAccessDecision } = await import(
+        "../services/workshop/grantService"
+      );
+      const { getKeycloakAdminService } = await import(
+        "../services/keycloakAdminService"
+      );
+      const targetId = req.params.userId;
+      const kc = getKeycloakAdminService();
+      const target = await kc.getUserById(targetId);
+      if (!target?.enabled) {
+        res.status(404).json({
+          errorCode: "NOT_FOUND",
+          errorName: "Tellus:Workshop:UserNotFound",
+          errorInstanceId: `access-check-${Date.now()}`,
+          parameters: { userId: targetId },
+        });
+        return;
+      }
+      const [roles, groups] = await Promise.all([
+        kc.listUserRealmRoles(targetId).catch(() => [] as string[]),
+        kc.listUserGroups(targetId).catch(() => [] as string[]),
+      ]);
+      const decision = await getModuleAccessDecision(req.params.rid, {
+        userId: targetId,
+        roles,
+        groups,
+      });
+      res.status(200).json({
+        rid: req.params.rid,
+        userId: targetId,
+        role: decision.role,
+        via: decision.via,
+        detail: decision.detail,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 // ---- P1: GET /api/v1/workshop/modules/{rid}/grants — list grants ---------
 
 router.get(

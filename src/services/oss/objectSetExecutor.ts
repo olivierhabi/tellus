@@ -280,20 +280,43 @@ async function fulfilPlans(
           "Link traversal is not configured.",
         );
       }
-      const hop = plan.searchAround;
-      const result = await deps.traverse({
-        fromObjectType: hop.fromObjectType,
-        link: hop.link,
-        anchorWhere: plan.searchAroundSourceWhere ?? null,
-        interfaceLink: hop.interfaceLink,
-      });
-      const traversals = Array.isArray(result) ? result : [result];
+      const chain = plan.searchAroundChain ?? [plan.searchAround];
+      let traversals: Array<{ targetObjectType: string; targetPks: string[] }> = [];
+      for (let hopIndex = 0; hopIndex < chain.length; hopIndex += 1) {
+        const hop = chain[hopIndex]!;
+        const anchors = hopIndex === 0
+          ? [{
+              objectType: hop.fromObjectType,
+              where: plan.searchAroundSourceWhere ?? null,
+            }]
+          : traversals.map((traversal) => ({
+              objectType: traversal.targetObjectType,
+              where: { type: "in", field: "__pk", value: traversal.targetPks },
+            }));
+        const next: Array<{ targetObjectType: string; targetPks: string[] }> = [];
+        for (const anchor of anchors) {
+          if (
+            typeof (anchor.where as { value?: unknown[] } | null)?.value !== "undefined" &&
+            (anchor.where as { value: unknown[] }).value.length === 0
+          ) continue;
+          const result = await deps.traverse({
+            fromObjectType: anchor.objectType,
+            link: hop.link,
+            anchorWhere: anchor.where,
+            interfaceLink: hop.interfaceLink,
+          });
+          next.push(...(Array.isArray(result) ? result : [result]));
+        }
+        traversals = next;
+        if (traversals.length === 0) break;
+      }
       for (const traversal of traversals) {
         if (traversal.targetPks.length === 0) continue;
         out.push({
           ...plan,
           objectType: traversal.targetObjectType,
           searchAround: undefined,
+          searchAroundChain: undefined,
           searchAroundSourceWhere: undefined,
           where: {
             type: "in",

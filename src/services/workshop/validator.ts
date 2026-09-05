@@ -342,6 +342,11 @@ interface ModuleDoc {
   sections?: Section[];
   pages?: Array<{ id: string; displayName: string; rootSection: string; navigation?: "primary" | "context" }>;
   defaultPageId?: string;
+  overlays?: Array<{
+    id: string;
+    kind: "drawer" | "modal";
+    rootSection?: string;
+  }>;
   moduleInterface?: {
     variables?: Array<{
       externalId: string;
