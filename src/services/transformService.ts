@@ -5,8 +5,6 @@ import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { findNearNameMatches, unionSideLabels } from '../utils/columnNameReconciler';
 import { getObjectStream, toDuckDbReadUri } from './storageService';
 import { readUploadedPreview } from './datasets/uploaded-dataset-reader';
-import { validateUdfSpec } from './pipelines/udfTransform';
-import { runUdfTransform } from './pipelines/udfRunner';
 import {
   buildJoinMatchWarnings,
   coalescedJoinKeyNames,
@@ -210,6 +208,10 @@ import {
   unionApply as unionApplyOp,
   unionPreview as unionPreviewOp,
 } from './pipelines/ops/unionOps';
+import {
+  udfApply as udfApplyOp,
+  udfPreview as udfPreviewOp,
+} from './pipelines/ops/udfOps';
 
 
 // ---------------------------------------------------------------------------
@@ -1538,20 +1540,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: unknown,
   ) {
-    const spec = validateUdfSpec(input);
-    const node = await this.knex('pipeline_nodes as pn')
-      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
-      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
-      .select('pn.id', 'pn.config').first();
-    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
-
-    const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
-    config.udfTransform = { ...spec, createdAt: new Date().toISOString() };
-
-    const [updated] = await this.knex('pipeline_nodes')
-      .where({ id: nodeId, pipeline_id: pipelineId })
-      .update({ config: JSON.stringify(config) }).returning('*');
-    return updated;
+    return udfApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   /**
@@ -1566,29 +1555,7 @@ export class TransformService {
     input: unknown,
     limit = 100,
   ) {
-    const spec = validateUdfSpec(input);
-    const { dataset, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
-      projectId, pipelineId, nodeId,
-    );
-    const rows = this.applyExistingTransforms(rawRows, existingTransforms)
-      .slice(0, limit);
-
-    const out = await runUdfTransform({
-      buildRid: `udf-preview-${pipelineId}-${nodeId}`,
-      tenant: projectId,
-      spec,
-      rows,
-    });
-
-    const columns = spec.outputColumns.length
-      ? spec.outputColumns
-      : Object.keys(out[0] ?? {}).map((name) => ({ name, type: 'string' }));
-    return {
-      columns,
-      rows: out,
-      rowCount: out.length,
-      ...sampleInfo(rawRows.length),
-    };
+    return udfPreviewOp(this, projectId, pipelineId, nodeId, input, limit);
   }
 
   // =========================================================================
