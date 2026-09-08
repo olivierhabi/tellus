@@ -148,6 +148,14 @@
           },
           "width": {
             "type": "number"
+          },
+          "closeOnBackdrop": {
+            "type": "boolean",
+            "description": "Backdrop click closes the overlay. Defaults to true (Foundry 'Close overlay on backdrop click')."
+          },
+          "visibilityVariableId": {
+            "type": "string",
+            "description": "Boolean variable driving the overlay's visibility; open/close events write back to it (Foundry 'Variable based visibility')."
           }
         }
       }
@@ -674,6 +682,12 @@
           "properties": {
             "selectedTabVariableId": {
               "$ref": "#/$defs/variableId"
+            },
+            "tabIds": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
             }
           }
         },

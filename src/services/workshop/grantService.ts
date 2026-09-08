@@ -301,6 +301,39 @@ export interface ModuleAccessDecision {
   readonly detail: string | null;
 }
 
+export interface WorkshopDependencyAccess {
+  readonly objectTypes: boolean;
+  readonly linkTypes: boolean;
+  readonly actionTypes: boolean;
+  readonly functions: boolean;
+  readonly reason: string;
+}
+
+/**
+ * Evaluate the ontology catalogue access used by Workshop dependencies for
+ * a directory principal. This deliberately stays separate from module
+ * grants: being able to open a module does not grant access to its data or
+ * executable resources.
+ *
+ * Tellus currently authorizes reads for these four catalogue/resource
+ * families through the ontology read roles. Keep this helper aligned with
+ * TellusAuthService ROLE_OP_MAP until resource-specific ACLs are introduced.
+ */
+export function getWorkshopDependencyAccess(
+  roles: readonly string[],
+): WorkshopDependencyAccess {
+  const readRole = ["ontology-admin", "ontology-editor", "ontology-viewer"]
+    .find((role) => roles.includes(role));
+  const allowed = readRole != null;
+  return {
+    objectTypes: allowed,
+    linkTypes: allowed,
+    actionTypes: allowed,
+    functions: allowed,
+    reason: allowed ? `User has ${readRole} role` : "INSUFFICIENT_ONTOLOGY_READ_ROLE",
+  };
+}
+
 export async function getModuleAccessDecision(
   moduleRid: string,
   input: EffectiveRoleInput,

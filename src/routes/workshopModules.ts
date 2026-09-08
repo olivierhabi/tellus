@@ -457,7 +457,7 @@ router.get(
   requireRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { getModuleAccessDecision } = await import(
+      const { getModuleAccessDecision, getWorkshopDependencyAccess } = await import(
         "../services/workshop/grantService"
       );
       const { getKeycloakAdminService } = await import(
@@ -484,12 +484,14 @@ router.get(
         roles,
         groups,
       });
+      const dependencies = getWorkshopDependencyAccess(roles);
       res.status(200).json({
         rid: req.params.rid,
         userId: targetId,
         role: decision.role,
         via: decision.via,
         detail: decision.detail,
+        dependencies,
       });
     } catch (err) {
       next(err);

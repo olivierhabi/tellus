@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 import {
   effectiveRoleFromInputs,
+  getWorkshopDependencyAccess,
   type ModuleGrant,
 } from "../../../src/services/workshop/grantService";
 
@@ -27,6 +28,30 @@ const grant = (
   role,
   grantedBy: "test",
   grantedAt: new Date().toISOString(),
+});
+
+describe("getWorkshopDependencyAccess — module access stays independent", () => {
+  it("allows ontology catalogue dependencies for an ontology reader", () => {
+    expect(getWorkshopDependencyAccess(["ontology-viewer"])).toEqual({
+      objectTypes: true,
+      linkTypes: true,
+      actionTypes: true,
+      functions: true,
+      reason: "User has ontology-viewer role",
+    });
+  });
+
+  it("does not infer dependency access from a Workshop or business role", () => {
+    expect(
+      getWorkshopDependencyAccess(["workshop-viewer", "fraud-investigator"]),
+    ).toEqual({
+      objectTypes: false,
+      linkTypes: false,
+      actionTypes: false,
+      functions: false,
+      reason: "INSUFFICIENT_ONTOLOGY_READ_ROLE",
+    });
+  });
 });
 
 describe("effectiveRoleFromInputs — Phase K regression", () => {
