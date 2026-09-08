@@ -193,6 +193,14 @@ import {
   rollupApply as rollupApplyOp,
   rollupPreview as rollupPreviewOp,
 } from './pipelines/ops/aggregateOps';
+import {
+  computePivot as computePivotOp,
+  computeUnpivot as computeUnpivotOp,
+  pivotApply as pivotApplyOp,
+  pivotPreview as pivotPreviewOp,
+  unpivotApply as unpivotApplyOp,
+  unpivotPreview as unpivotPreviewOp,
+} from './pipelines/ops/pivotOps';
 
 
 // ---------------------------------------------------------------------------
@@ -808,12 +816,9 @@ export class TransformService {
   // =========================================================================
 
   /**
-   * PivotV1 core. Mirrors the DuckDB emitter: one column per
-   * (pivotValue × aggregation), valued by a filtered aggregate over the
-   * rows where `pivotColumn = value`; output name is
-   * `prefix` → `<alias>_<outputColumn>` / `suffix` → `<outputColumn>_<alias>`.
-   * Values outside `pivotValues` contribute no columns or groups; groups
-   * with no matching rows produce SQL-consistent cells (count=0, sum=null).
+   * PivotV1 core. Implementation lives in pipelines/ops/pivotOps; the
+   * delegate remains because existing unit tests exercise it through the
+   * service.
    */
   private computePivot(
     rows: Array<Record<string, unknown>>,
@@ -823,105 +828,21 @@ export class TransformService {
     aggregations: AggregationItem[],
     aliasPosition: 'prefix' | 'suffix',
   ): { rows: Array<Record<string, unknown>>; valueColumns: string[] } {
-    const nameFor = (alias: string, agg: AggregationItem) =>
-      aliasPosition === 'prefix'
-        ? `${alias}_${agg.outputColumn}`
-        : `${agg.outputColumn}_${alias}`;
-    const valueColumns = pivotValues.flatMap((pv) =>
-      aggregations.map((agg) => nameFor(pv.alias, agg)),
-    );
-    // Group rows by the groupBy key (nulls form their own group, first
-    // appearance order — same as computeAggregations).
-    const groups = new Map<string, Array<Record<string, unknown>>>();
-    const order: string[] = [];
-    for (const row of rows) {
-      const key = JSON.stringify(groupBy.map((c) => row[c] ?? null));
-      if (!groups.has(key)) {
-        groups.set(key, []);
-        order.push(key);
-      }
-      const bucket = groups.get(key);
-      if (bucket) bucket.push(row);
-    }
-    const rowsOut = order.map((key) => {
-      const keyVals = JSON.parse(key) as unknown[];
-      const groupRows = groups.get(key) ?? [];
-      const outRow: Record<string, unknown> = {};
-      groupBy.forEach((c, i) => { outRow[c] = keyVals[i]; });
-      for (const pv of pivotValues) {
-        const cellRows = groupRows.filter((r) => {
-          const v = r[pivotColumn];
-          return v !== null && v !== undefined && String(v) === pv.value;
-        });
-        for (const agg of aggregations) {
-          outRow[nameFor(pv.alias, agg)] = this.evalAggregation(agg, cellRows);
-        }
-      }
-      return outRow;
-    });
-    return { rows: rowsOut, valueColumns };
+    return computePivotOp(rows, groupBy, pivotColumn, pivotValues, aggregations, aliasPosition);
   }
 
   async pivotPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: PivotPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
-    this.assertColumnsExist(effectiveNames, [input.pivotColumn, ...input.groupBy, ...input.aggregations.map((a) => a.column).filter((c): c is string => Boolean(c))], 'Pivot');
-    if (input.aggregations.some((a) => !a.column)) {
-      throw new AppError('Pivot aggregations require a column (count(*) pivot is not supported).', 400, 'VALIDATION_ERROR');
-    }
-
-    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
-    const { rows: allRows, valueColumns } = this.computePivot(
-      chained, input.groupBy, input.pivotColumn, input.pivotValues, input.aggregations, input.aliasPosition,
-    );
-
-    const typeOf = (c: string) => effectiveColumns.find((col) => col.name === c)?.type ?? 'string';
-    const typesByName = new Map(input.aggregations.map((item) => [
-      item.outputColumn,
-      this.aggregationOutputType(item, item.column ? typeOf(item.column) : 'string'),
-    ]));
-    const outColumns = [
-      ...input.groupBy.map((g) => ({ name: g, type: typeOf(g) })),
-      ...valueColumns.map((vc) => {
-        const aggName = input.aggregations
-          .map((a) => a.outputColumn)
-          .find((n) => vc.endsWith(`_${n}`) || vc.startsWith(`${n}_`));
-        return { name: vc, type: aggName ? (typesByName.get(aggName) ?? 'string') : 'string' };
-      }),
-    ];
-
-    const rows = allRows.slice(0, input.limit);
-    return {
-      columns: outColumns,
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      pivotSummary: `Pivot "${input.pivotColumn}" → ${valueColumns.length} output column(s)`,
-    };
+    return pivotPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async pivotApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: PivotApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'Pivot',
-      groupBy: input.groupBy,
-      pivotColumn: input.pivotColumn,
-      pivotValues: input.pivotValues,
-      aggregations: input.aggregations,
-      aliasPosition: input.aliasPosition,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return pivotApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -930,7 +851,9 @@ export class TransformService {
   // Palantir unpivotV1: wide → long; keeps NULL values.
   // =========================================================================
 
-  /** unpivotV1 core: one row per (keat key, unpivoted column). */
+  /** unpivotV1 core: one row per (kept key, unpivoted column).
+   * Implementation lives in pipelines/ops/pivotOps; the delegate remains
+   * because existing unit tests exercise it through the service. */
   private computeUnpivot(
     rows: Array<Record<string, unknown>>,
     columnsToUnpivot: string[],
@@ -938,68 +861,21 @@ export class TransformService {
     valueColumn: string,
     keptColumns: string[],
   ): Array<Record<string, unknown>> {
-    const out: Array<Record<string, unknown>> = [];
-    for (const row of rows) {
-      for (const c of columnsToUnpivot) {
-        const outRow: Record<string, unknown> = {
-          [nameColumn]: c,
-          [valueColumn]: row[c] ?? null,
-        };
-        for (const k of keptColumns) outRow[k] = row[k] ?? null;
-        out.push(outRow);
-      }
-    }
-    return out;
+    return computeUnpivotOp(rows, columnsToUnpivot, nameColumn, valueColumn, keptColumns);
   }
 
   async unpivotPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: UnpivotPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
-    this.assertColumnsExist(effectiveNames, input.columns, 'Unpivot');
-    if (effectiveNames.has(input.nameColumn) || effectiveNames.has(input.valueColumn)) {
-      throw new AppError('Unpivot name/value column names must not collide with existing columns', 400, 'VALIDATION_ERROR');
-    }
-
-    const unpivotSet = new Set(input.columns);
-    const keptColumns = effectiveColumns.filter((c) => !unpivotSet.has(c.name));
-    const outColumns = [
-      { name: input.nameColumn, type: 'string' },
-      { name: input.valueColumn, type: 'string' },
-      ...keptColumns.map((c) => ({ name: c.name, type: c.type })),
-    ];
-
-    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
-    const rows = this.computeUnpivot(chained, input.columns, input.nameColumn, input.valueColumn, keptColumns.map((c) => c.name)).slice(0, input.limit);
-
-    return {
-      columns: outColumns,
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      unpivotSummary: `Unpivot ${input.columns.length} column(s) → "${input.nameColumn}" / "${input.valueColumn}"`,
-    };
+    return unpivotPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async unpivotApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: UnpivotApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'Unpivot',
-      columns: input.columns,
-      nameColumn: input.nameColumn,
-      valueColumn: input.valueColumn,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return unpivotApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
