@@ -158,6 +158,27 @@ import {
   uppercaseColumnNamesApply as uppercaseColumnNamesApplyOp,
   uppercaseColumnNamesPreview as uppercaseColumnNamesPreviewOp,
 } from './pipelines/ops/columnOps';
+import {
+  applyCaseExpressionToRows,
+  applyComputeIfAbsentRows,
+  applyExpressionApply as applyExpressionApplyOp,
+  applyExpressionPreview as applyExpressionPreviewOp,
+  applyExpressionToRows,
+  applyMultipleExpressionsApply as applyMultipleExpressionsApplyOp,
+  applyMultipleExpressionsPreview as applyMultipleExpressionsPreviewOp,
+  applyToMultipleColumnsApply as applyToMultipleColumnsApplyOp,
+  applyToMultipleColumnsPreview as applyToMultipleColumnsPreviewOp,
+  caseExpressionApply as caseExpressionApplyOp,
+  caseExpressionPreview as caseExpressionPreviewOp,
+  computeIfExpressionAbsentApply as computeIfExpressionAbsentApplyOp,
+  computeIfExpressionAbsentPreview as computeIfExpressionAbsentPreviewOp,
+  concatenateStringsApply as concatenateStringsApplyOp,
+  concatenateStringsPreview as concatenateStringsPreviewOp,
+  formatStringApply as formatStringApplyOp,
+  formatStringPreview as formatStringPreviewOp,
+  textBlockApply as textBlockApplyOp,
+  textBlockPreview as textBlockPreviewOp,
+} from './pipelines/ops/expressionOps';
 
 
 // ---------------------------------------------------------------------------
@@ -470,146 +491,46 @@ export class TransformService {
   // Palantir applyExpressionV1 — single binary expression producing a column.
   // =========================================================================
 
-  private applyExpressionToRows(
-    rows: Array<Record<string, unknown>>,
-    expr: ExpressionItem,
-  ): Array<Record<string, unknown>> {
-    return rows.map((row) => {
-      const result = evaluateExpression(row, expr);
-      const cast = castExpressionResult(result, expr.outputType);
-      return { ...row, [expr.outputColumn]: cast };
-    });
-  }
-
   async applyExpressionPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyExpressionPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    validateExpressionColumns(input.expression, effectiveCols);
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const outCol = input.expression.outputColumn;
-    const transformed = this.applyExpressionToRows(rows, input.expression).slice(0, input.limit);
-
-    const baseCols = effectiveCols.map((c) => ({ name: c.name, type: c.type }));
-    const resultType = input.expression.outputType ?? 'string';
-    const exists = baseCols.some((c) => c.name === outCol);
-    const outputColumns = exists
-      ? baseCols.map((c) => (c.name === outCol ? { ...c, type: resultType } : c))
-      : [...baseCols, { name: outCol, type: resultType, isNew: true }];
-
-    return {
-      columns: outputColumns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      expressionSummary: `Applied expression to column "${outCol}"`,
-    };
+    return applyExpressionPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async applyExpressionApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyExpressionApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'ApplyExpression',
-      expression: input.expression,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
-  }
-
-  private applyCaseExpressionToRows(
-    rows: Array<Record<string, unknown>>,
-    input: CaseExpressionApplyInput,
-  ): Array<Record<string, unknown>> {
-    const resolve = (row: Record<string, unknown>, operand: Operand | null): unknown => {
-      if (operand === null) return null;
-      return operand.kind === 'column' ? row[operand.value] : parseLiteral(operand);
-    };
-    return rows.map((row) => {
-      const matched = input.branches.find((branch) => evaluateExpression(row, branch.condition) === true);
-      const value = resolve(row, matched?.value ?? input.defaultValue);
-      return { ...row, [input.outputColumn]: castExpressionResult(value, input.outputType) };
-    });
+    return applyExpressionApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async caseExpressionPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: CaseExpressionPreviewInput,
   ) {
-    const { sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    for (const branch of input.branches) {
-      validateExpressionColumns(branch.condition as ExpressionItem, effectiveCols);
-      if (branch.value.kind === 'column') validateExpressionColumns({ left: branch.value, right: branch.value } as ExpressionItem, effectiveCols);
-    }
-    if (input.defaultValue?.kind === 'column') validateExpressionColumns({ left: input.defaultValue, right: input.defaultValue } as ExpressionItem, effectiveCols);
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const transformed = this.applyCaseExpressionToRows(rows, input).slice(0, input.limit);
-    const outputColumns = effectiveCols.some((column) => column.name === input.outputColumn)
-      ? effectiveCols.map((column) => column.name === input.outputColumn ? { ...column, type: input.outputType ?? 'string' } : column)
-      : [...effectiveCols, { name: input.outputColumn, type: input.outputType ?? 'string', isNew: true }];
-    return { columns: outputColumns, rows: transformed, rowCount: transformed.length, ...sampleInfo(rawRows.length), expressionSummary: `Applied Case expression to column "${input.outputColumn}"` };
+    return caseExpressionPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async caseExpressionApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: CaseExpressionApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({ function: 'CaseExpression', ...input, createdAt: new Date().toISOString() });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return caseExpressionApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async concatenateStringsPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: ConcatenateStringsPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    for (const expression of input.expressions) {
-      if (expression.kind === 'column' && !effectiveCols.some((column) => stripBom(column.name) === stripBom(expression.value))) {
-        throw new AppError(`Expression references column "${expression.value}" which does not exist.`, 400, 'VALIDATION_ERROR');
-      }
-    }
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const transformed = rows.slice(0, input.limit).map((row) => ({
-      ...row,
-      [input.outputColumn]: concatenateStringValues(row, input.expressions, input.separator, input.nullOutputIfAnyInputIsNull),
-    }));
-    const exists = effectiveCols.some((column) => column.name === input.outputColumn);
-    const columns = exists
-      ? effectiveCols.map((column) => column.name === input.outputColumn ? { ...column, type: 'string' } : column)
-      : [...effectiveCols, { name: input.outputColumn, type: 'string', isNew: true }];
-    return {
-      columns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      expressionSummary: `Concatenated ${input.expressions.length} string expression(s) into "${input.outputColumn}"`,
-    };
+    return concatenateStringsPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async concatenateStringsApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: ConcatenateStringsApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({ function: 'ConcatenateStrings', ...input, createdAt: new Date().toISOString() });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return concatenateStringsApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -625,50 +546,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: FormatStringPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    for (const a of input.arguments) {
-      if (a.kind === 'column' && !effectiveCols.some((c) => stripBom(c.name) === stripBom(a.value))) {
-        throw new AppError(
-          `Format argument references column "${a.value}" which does not exist. Available: ${effectiveCols.map((c) => c.name).join(', ')}`,
-          400,
-          'VALIDATION_ERROR',
-        );
-      }
-    }
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const transformed = rows.slice(0, input.limit).map((row) => ({
-      ...row,
-      [input.outputColumn]: formatStringValue(
-        input.format,
-        input.arguments.map((a) => (a.kind === 'column' ? row[a.value] : a.value)),
-      ),
-    }));
-
-    const exists = effectiveCols.some((c) => c.name === input.outputColumn);
-    const columns = exists
-      ? effectiveCols.map((c) => (c.name === input.outputColumn ? { ...c, type: 'string' } : c))
-      : [...effectiveCols, { name: input.outputColumn, type: 'string', isNew: true }];
-    return {
-      columns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      expressionSummary: `Formatted "${input.outputColumn}" with formatStringV1 (${input.arguments.length} argument(s))`,
-    };
+    return formatStringPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async formatStringApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: FormatStringApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({ function: 'FormatString', ...input, createdAt: new Date().toISOString() });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return formatStringApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -681,46 +566,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyMultipleExpressionsPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    for (const e of input.expressions) validateExpressionColumns(e, effectiveCols);
-
-    let rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    for (const e of input.expressions) rows = this.applyExpressionToRows(rows, e);
-    const transformed = rows.slice(0, input.limit);
-
-    let outputColumns: Array<{ name: string; type: string; isNew?: boolean }> =
-      effectiveCols.map((c) => ({ name: c.name, type: c.type }));
-    for (const e of input.expressions) {
-      const t = e.outputType ?? 'string';
-      const idx = outputColumns.findIndex((c) => c.name === e.outputColumn);
-      if (idx >= 0) outputColumns[idx] = { ...outputColumns[idx], type: t };
-      else outputColumns.push({ name: e.outputColumn, type: t, isNew: true });
-    }
-
-    return {
-      columns: outputColumns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      expressionSummary: `Applied ${input.expressions.length} expression(s)`,
-    };
+    return applyMultipleExpressionsPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async applyMultipleExpressionsApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyMultipleExpressionsApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'ApplyMultipleExpressions',
-      expressions: input.expressions,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return applyMultipleExpressionsApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -734,92 +587,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyToMultipleColumnsPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    const cols = input.columns.map(stripBom);
-    for (const c of cols) {
-      if (!effectiveCols.some((ec) => stripBom(ec.name) === c)) {
-        throw new AppError(
-          `Column "${c}" does not exist. Available: ${effectiveCols.map((ec) => ec.name).join(', ')}`,
-          400,
-          'VALIDATION_ERROR',
-        );
-      }
-    }
-    if (input.right.kind === 'column') {
-      const r = stripBom(input.right.value);
-      if (!effectiveCols.some((ec) => stripBom(ec.name) === r)) {
-        throw new AppError(
-          `Right-operand column "${r}" does not exist. Available: ${effectiveCols.map((ec) => ec.name).join(', ')}`,
-          400,
-          'VALIDATION_ERROR',
-        );
-      }
-    }
-    if (input.outputColumns && input.outputColumns.length !== cols.length) {
-      throw new AppError(
-        `outputColumns length (${input.outputColumns.length}) must match columns length (${cols.length}).`,
-        400,
-        'VALIDATION_ERROR',
-      );
-    }
-    const suffix = input.outputSuffix ?? '_calc';
-    const outNames = input.outputColumns ?? cols.map((c) => `${c}${suffix}`);
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const transformed = rows.map((row) => {
-      const out: Record<string, unknown> = { ...row };
-      for (let i = 0; i < cols.length; i++) {
-        const expr: ExpressionItem = {
-          left: { kind: 'column', value: cols[i] },
-          operator: input.operator,
-          right: input.right,
-          outputColumn: outNames[i],
-          outputType: input.outputType,
-        };
-        const v = evaluateExpression(row, expr);
-        out[outNames[i]] = castExpressionResult(v, input.outputType);
-      }
-      return out;
-    }).slice(0, input.limit);
-
-    let outputColumns: Array<{ name: string; type: string; isNew?: boolean }> =
-      effectiveCols.map((c) => ({ name: c.name, type: c.type }));
-    const t = input.outputType ?? 'string';
-    for (const n of outNames) {
-      const idx = outputColumns.findIndex((c) => c.name === n);
-      if (idx >= 0) outputColumns[idx] = { ...outputColumns[idx], type: t, isNew: false };
-      else outputColumns.push({ name: n, type: t, isNew: true });
-    }
-
-    return {
-      columns: outputColumns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      expressionSummary: `Applied "${input.operator}" to ${cols.length} column(s) → ${outNames.join(', ')}`,
-    };
+    return applyToMultipleColumnsPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async applyToMultipleColumnsApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: ApplyToMultipleColumnsApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'ApplyToMultipleColumns',
-      columns: input.columns,
-      operator: input.operator,
-      right: input.right,
-      outputSuffix: input.outputSuffix,
-      outputColumns: input.outputColumns,
-      outputType: input.outputType,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return applyToMultipleColumnsApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -829,62 +604,18 @@ export class TransformService {
   // target column is null / empty-string / missing.
   // =========================================================================
 
-  private isValueAbsent(v: unknown): boolean {
-    return v === undefined || v === null || v === '' || (typeof v === 'string' && v.toLowerCase() === 'null');
-  }
-
   async computeIfExpressionAbsentPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: ComputeIfExpressionAbsentPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    validateExpressionColumns(input.expression, effectiveCols);
-
-    const outCol = input.outputColumn;
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const transformed = rows.map((row) => {
-      const current = row[outCol];
-      if (!this.isValueAbsent(current)) return row;
-      const result = evaluateExpression(row, input.expression);
-      const cast = castExpressionResult(
-        result,
-        (input.expression as { outputType?: CastTargetType }).outputType,
-      );
-      return { ...row, [outCol]: cast };
-    }).slice(0, input.limit);
-
-    const baseCols = effectiveCols.map((c) => ({ name: c.name, type: c.type }));
-    const resultType = (input.expression as { outputType?: CastTargetType }).outputType ?? 'string';
-    const exists = baseCols.some((c) => c.name === outCol);
-    const outputColumns = exists
-      ? baseCols.map((c) => (c.name === outCol ? { ...c, type: resultType } : c))
-      : [...baseCols, { name: outCol, type: resultType, isNew: true }];
-
-    return {
-      columns: outputColumns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      expressionSummary: `Filled "${outCol}" when absent`,
-    };
+    return computeIfExpressionAbsentPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async computeIfExpressionAbsentApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: ComputeIfExpressionAbsentApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'ComputeIfExpressionAbsent',
-      outputColumn: input.outputColumn,
-      expression: input.expression,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return computeIfExpressionAbsentApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -898,35 +629,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: TextBlockPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms).slice(0, input.limit);
-
-    return {
-      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      textBlockSummary: input.title ? `Annotation: ${input.title}` : 'Annotation',
-    };
+    return textBlockPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async textBlockApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: TextBlockApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'TextBlock',
-      text: input.text,
-      title: input.title,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return textBlockApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -3572,6 +3282,56 @@ export class TransformService {
       } else if (fn === 'RowSize') {
         const out = (tx.outputColumn ?? 'row_size') as string;
         result = applyRowSizeRows(result, out);
+      } else if (fn === 'ApplyExpression') {
+        const exprs = collectExpressionItems(tx);
+        for (const e of exprs) result = applyExpressionToRows(result, e);
+      } else if (fn === 'CaseExpression') {
+        result = applyCaseExpressionToRows(result, tx as unknown as CaseExpressionApplyInput);
+      } else if (fn === 'ConcatenateStrings') {
+        const expressions = (tx.expressions ?? []) as StringOperand[];
+        const separator = (tx.separator ?? '') as string;
+        const strict = (tx.nullOutputIfAnyInputIsNull ?? false) as boolean;
+        const out = tx.outputColumn as string;
+        result = result.map((row) => ({ ...row, [out]: concatenateStringValues(row, expressions, separator, strict) }));
+      } else if (fn === 'FormatString') {
+        // Palantir formatStringV1 — printf-style template over ordered args.
+        // Same operand semantics as ConcatenateStrings: kind=column resolves
+        // from the row, kind=literal uses the value verbatim.
+        const fmtArgs = (tx.arguments ?? []) as StringOperand[];
+        const fmt = (tx.format ?? '') as string;
+        const out = tx.outputColumn as string;
+        result = result.map((row) => ({
+          ...row,
+          [out]: formatStringValue(
+            fmt,
+            fmtArgs.map((a) => (a.kind === 'column' ? row[a.value] : a.value)),
+          ),
+        }));
+      } else if (fn === 'ApplyMultipleExpressions') {
+        const exprs = collectExpressionItems(tx);
+        for (const e of exprs) result = applyExpressionToRows(result, e);
+      } else if (fn === 'ApplyToMultipleColumns') {
+        const cols = ((tx.columns ?? []) as string[]).map(stripBom);
+        const op = tx.operator as BinaryOperator;
+        const right = tx.right as Operand;
+        const suffix = (tx.outputSuffix ?? '_calc') as string;
+        const outNames = (tx.outputColumns as string[] | undefined) ?? cols.map((c) => `${c}${suffix}`);
+        const outType = tx.outputType as CastTargetType | undefined;
+        for (let i = 0; i < cols.length; i++) {
+          const e: ExpressionItem = {
+            left: { kind: 'column', value: cols[i] },
+            operator: op,
+            right,
+            outputColumn: outNames[i],
+            outputType: outType,
+          };
+          result = applyExpressionToRows(result, e);
+        }
+      } else if (fn === 'ComputeIfExpressionAbsent') {
+        const out = tx.outputColumn as string;
+        const exprs = collectExpressionItems(tx);
+        const e = exprs[0];
+        result = applyComputeIfAbsentRows(result, out, e);
       } else if (fn === 'TextBlock') {
         // Text block is pure annotation — pass rows through unchanged.
       } else if (fn === 'Aggregate') {
