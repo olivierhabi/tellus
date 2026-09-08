@@ -7,25 +7,27 @@
 import { describe, it, expect } from "vitest";
 import {
   applyDropColumnsRows,
-  applyNormalizeRows,
-  applyRenameRows,
   applyRowSizeRows,
   applySelectRows,
-  applyUppercaseRows,
-  buildNormalizeMap,
   dropApply,
   dropPreview,
-  normalizeApply,
-  normalizePreview,
-  renameApply,
-  renamePreview,
   rowSizeApply,
   rowSizePreview,
   selectApply,
   selectPreview,
+} from "../../../src/services/pipelines/ops/columnOps";
+import {
+  applyNormalizeRows,
+  applyRenameRows,
+  applyUppercaseRows,
+  buildNormalizeMap,
+  normalizeApply,
+  normalizePreview,
+  renameApply,
+  renamePreview,
   uppercaseColumnNamesApply,
   uppercaseColumnNamesPreview,
-} from "../../../src/services/pipelines/ops/columnOps";
+} from "../../../src/services/pipelines/ops/columnNameOps";
 import type { TransformOpsContext } from "../../../src/services/pipelines/ops/transformOpsContext";
 
 describe("columnOps — pure row transforms", () => {

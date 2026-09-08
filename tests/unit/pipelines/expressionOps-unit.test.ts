@@ -13,14 +13,16 @@ import {
   applyToMultipleColumnsPreview,
   caseExpressionApply,
   computeIfExpressionAbsentApply,
-  concatenateStringsApply,
-  concatenateStringsPreview,
-  formatStringApply,
-  formatStringPreview,
   isValueAbsent,
   textBlockApply,
   textBlockPreview,
 } from "../../../src/services/pipelines/ops/expressionOps";
+import {
+  concatenateStringsApply,
+  concatenateStringsPreview,
+  formatStringApply,
+  formatStringPreview,
+} from "../../../src/services/pipelines/ops/stringOps";
 import type { ExpressionItem } from "../../../src/types/pipeline";
 import type { TransformOpsContext } from "../../../src/services/pipelines/ops/transformOpsContext";
 

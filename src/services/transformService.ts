@@ -138,24 +138,26 @@ import {
 } from './pipelines/ops/dedupeOps';
 import {
   applyDropColumnsRows,
-  applyNormalizeRows,
-  applyRenameRows,
   applyRowSizeRows,
   applySelectRows,
-  applyUppercaseRows,
   dropApply as dropApplyOp,
   dropPreview as dropPreviewOp,
-  normalizeApply as normalizeApplyOp,
-  normalizePreview as normalizePreviewOp,
-  renameApply as renameApplyOp,
-  renamePreview as renamePreviewOp,
   rowSizeApply as rowSizeApplyOp,
   rowSizePreview as rowSizePreviewOp,
   selectApply as selectApplyOp,
   selectPreview as selectPreviewOp,
+} from './pipelines/ops/columnOps';
+import {
+  applyNormalizeRows,
+  applyRenameRows,
+  applyUppercaseRows,
+  normalizeApply as normalizeApplyOp,
+  normalizePreview as normalizePreviewOp,
+  renameApply as renameApplyOp,
+  renamePreview as renamePreviewOp,
   uppercaseColumnNamesApply as uppercaseColumnNamesApplyOp,
   uppercaseColumnNamesPreview as uppercaseColumnNamesPreviewOp,
-} from './pipelines/ops/columnOps';
+} from './pipelines/ops/columnNameOps';
 import {
   applyCaseExpressionToRows,
   applyComputeIfAbsentRows,
@@ -170,13 +172,15 @@ import {
   caseExpressionPreview as caseExpressionPreviewOp,
   computeIfExpressionAbsentApply as computeIfExpressionAbsentApplyOp,
   computeIfExpressionAbsentPreview as computeIfExpressionAbsentPreviewOp,
+  textBlockApply as textBlockApplyOp,
+  textBlockPreview as textBlockPreviewOp,
+} from './pipelines/ops/expressionOps';
+import {
   concatenateStringsApply as concatenateStringsApplyOp,
   concatenateStringsPreview as concatenateStringsPreviewOp,
   formatStringApply as formatStringApplyOp,
   formatStringPreview as formatStringPreviewOp,
-  textBlockApply as textBlockApplyOp,
-  textBlockPreview as textBlockPreviewOp,
-} from './pipelines/ops/expressionOps';
+} from './pipelines/ops/stringOps';
 import {
   aggregateApply as aggregateApplyOp,
   aggregateOnConditionApply as aggregateOnConditionApplyOp,
