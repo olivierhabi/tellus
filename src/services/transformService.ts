@@ -138,6 +138,26 @@ import {
   keepDuplicatesApply as keepDuplicatesApplyOp,
   keepDuplicatesPreview as keepDuplicatesPreviewOp,
 } from './pipelines/ops/dedupeOps';
+import {
+  applyDropColumnsRows,
+  applyNormalizeRows,
+  applyRenameRows,
+  applyRowSizeRows,
+  applySelectRows,
+  applyUppercaseRows,
+  dropApply as dropApplyOp,
+  dropPreview as dropPreviewOp,
+  normalizeApply as normalizeApplyOp,
+  normalizePreview as normalizePreviewOp,
+  renameApply as renameApplyOp,
+  renamePreview as renamePreviewOp,
+  rowSizeApply as rowSizeApplyOp,
+  rowSizePreview as rowSizePreviewOp,
+  selectApply as selectApplyOp,
+  selectPreview as selectPreviewOp,
+  uppercaseColumnNamesApply as uppercaseColumnNamesApplyOp,
+  uppercaseColumnNamesPreview as uppercaseColumnNamesPreviewOp,
+} from './pipelines/ops/columnOps';
 
 
 // ---------------------------------------------------------------------------
@@ -278,60 +298,7 @@ export class TransformService {
     nodeId: string,
     input: DropPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
-      projectId,
-      pipelineId,
-      nodeId,
-    );
-
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const colsToDrop = new Set(input.columns.map(stripBom));
-
-    // Validate columns exist
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    for (const col of colsToDrop) {
-      if (!effectiveCols.some((c) => stripBom(c.name) === col)) {
-        throw new AppError(
-          `Column "${col}" does not exist. Available: ${effectiveCols.map((c) => stripBom(c.name)).join(', ')}`,
-          400,
-          'VALIDATION_ERROR',
-        );
-      }
-    }
-
-    // Refuse to drop every column — the DuckDB build compiler enforces the
-    // same rule ("Drop removed every column.").
-    if (colsToDrop.size >= effectiveCols.length) {
-      throw new AppError('Drop removed every column.', 400, 'DROP_ALL_COLUMNS');
-    }
-
-    // Read and replay prior transforms
-    const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
-
-    // Drop columns from each row
-    const droppedRows = chainedRows.map((row) => {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(row)) {
-        if (!colsToDrop.has(stripBom(k))) out[k] = v;
-      }
-      return out;
-    });
-
-    const rows = droppedRows.slice(0, input.limit);
-
-    // Build output columns (prior chain columns minus dropped)
-    const outputColumns = effectiveCols
-      .filter((c) => !colsToDrop.has(stripBom(c.name)))
-      .map((c) => ({ name: c.name, type: c.type }));
-
-    return {
-      columns: outputColumns,
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      totalRows: chainedRows.length,
-      droppedColumns: [...colsToDrop],
-    };
+    return dropPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -344,42 +311,7 @@ export class TransformService {
     nodeId: string,
     input: DropApplyInput,
   ) {
-    const node = await this.knex('pipeline_nodes as pn')
-      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
-      .where({
-        'pn.id': nodeId,
-        'pn.pipeline_id': pipelineId,
-        'p.project_id': projectId,
-      })
-      .select('pn.id', 'pn.config')
-      .first();
-
-    if (!node) {
-      throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
-    }
-
-    const config = typeof node.config === 'string'
-      ? JSON.parse(node.config)
-      : (node.config ?? {});
-
-    const transforms: unknown[] = Array.isArray(config.transforms)
-      ? config.transforms
-      : [];
-
-    transforms.push({
-      function: 'Drop',
-      columns: input.columns.map(stripBom),
-      createdAt: new Date().toISOString(),
-    });
-
-    config.transforms = transforms;
-
-    const [updated] = await this.knex('pipeline_nodes')
-      .where({ id: nodeId, pipeline_id: pipelineId })
-      .update({ config: JSON.stringify(config) })
-      .returning('*');
-
-    return updated;
+    return dropApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -392,63 +324,7 @@ export class TransformService {
     nodeId: string,
     input: RenamePreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
-      projectId, pipelineId, nodeId,
-    );
-
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-
-    // Build rename map { from → to }
-    const renameMap = new Map<string, string>();
-    for (const r of input.renames) {
-      const from = stripBom(r.from);
-      if (!effectiveCols.some((c) => stripBom(c.name) === from)) {
-        throw new AppError(
-          `Column "${from}" does not exist. Available: ${effectiveCols.map((c) => stripBom(c.name)).join(', ')}`,
-          400,
-          'VALIDATION_ERROR',
-        );
-      }
-      renameMap.set(from, r.to);
-    }
-
-    // Read and replay prior transforms
-    const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
-
-    // Apply renames to rows
-    const renamedRows = chainedRows.map((row) => {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(row)) {
-        const cleanK = stripBom(k);
-        const newName = renameMap.get(cleanK) ?? k;
-        out[newName] = v;
-      }
-      return out;
-    });
-
-    const rows = renamedRows.slice(0, input.limit);
-
-    // Build output columns with renames applied
-    const outputColumns = effectiveCols.map((c) => {
-      const cleanName = stripBom(c.name);
-      const newName = renameMap.get(cleanName);
-      return {
-        name: newName ?? c.name,
-        type: c.type,
-        renamed: !!newName,
-        originalName: newName ? c.name : undefined,
-      };
-    });
-
-    return {
-      columns: outputColumns,
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      totalRows: chainedRows.length,
-      renames: input.renames,
-    };
+    return renamePreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -461,35 +337,7 @@ export class TransformService {
     nodeId: string,
     input: RenameApplyInput,
   ) {
-    const node = await this.knex('pipeline_nodes as pn')
-      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
-      .where({
-        'pn.id': nodeId,
-        'pn.pipeline_id': pipelineId,
-        'p.project_id': projectId,
-      })
-      .select('pn.id', 'pn.config')
-      .first();
-
-    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
-
-    const config = typeof node.config === 'string'
-      ? JSON.parse(node.config) : (node.config ?? {});
-
-    const transforms: unknown[] = Array.isArray(config.transforms) ? config.transforms : [];
-    transforms.push({
-      function: 'Rename',
-      renames: input.renames.map((r) => ({ from: stripBom(r.from), to: r.to })),
-      createdAt: new Date().toISOString(),
-    });
-    config.transforms = transforms;
-
-    const [updated] = await this.knex('pipeline_nodes')
-      .where({ id: nodeId, pipeline_id: pipelineId })
-      .update({ config: JSON.stringify(config) })
-      .returning('*');
-
-    return updated;
+    return renameApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -500,57 +348,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: NormalizePreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-
-    // Build normalize map { oldName → newName }
-    const normalizeMap = new Map<string, string>();
-    const usedNames = new Set<string>();
-    for (const col of effectiveCols) {
-      let newName = normalizeColumnName(col.name, input.removeSpecialCharacters);
-      // Handle duplicates by appending _1, _2, etc.
-      if (usedNames.has(newName)) {
-        let i = 1;
-        while (usedNames.has(`${newName}_${i}`)) i++;
-        newName = `${newName}_${i}`;
-      }
-      usedNames.add(newName);
-      normalizeMap.set(stripBom(col.name), newName);
-    }
-
-    // Read and replay prior transforms
-    const chainedRows = this.applyExistingTransforms(rawRows, chainTransforms);
-
-    // Apply normalization to rows
-    const normalizedRows = chainedRows.map((row) => {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(row)) {
-        out[normalizeMap.get(stripBom(k)) ?? k] = v;
-      }
-      return out;
-    });
-
-    const rows = normalizedRows.slice(0, input.limit);
-
-    const outputColumns = effectiveCols.map((c) => {
-      const newName = normalizeMap.get(stripBom(c.name));
-      return {
-        name: newName ?? c.name,
-        type: c.type,
-        normalized: newName !== c.name,
-        originalName: newName !== c.name ? c.name : undefined,
-      };
-    });
-
-    return {
-      columns: outputColumns,
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      totalRows: chainedRows.length,
-      removeSpecialCharacters: input.removeSpecialCharacters,
-    };
+    return normalizePreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -561,25 +359,7 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: NormalizeApplyInput,
   ) {
-    const node = await this.knex('pipeline_nodes as pn')
-      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
-      .where({ 'pn.id': nodeId, 'pn.pipeline_id': pipelineId, 'p.project_id': projectId })
-      .select('pn.id', 'pn.config').first();
-    if (!node) throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
-
-    const config = typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
-    const transforms: unknown[] = Array.isArray(config.transforms) ? config.transforms : [];
-    transforms.push({
-      function: 'Normalize',
-      removeSpecialCharacters: input.removeSpecialCharacters,
-      createdAt: new Date().toISOString(),
-    });
-    config.transforms = transforms;
-
-    const [updated] = await this.knex('pipeline_nodes')
-      .where({ id: nodeId, pipeline_id: pipelineId })
-      .update({ config: JSON.stringify(config) }).returning('*');
-    return updated;
+    return normalizeApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -593,59 +373,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: SelectPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    const want = new Set(input.columns.map(stripBom));
-    const unknown = input.columns.filter((c) => !effectiveCols.some((ec) => stripBom(ec.name) === stripBom(c)));
-    if (unknown.length > 0) {
-      throw new AppError(
-        `Columns not found: ${unknown.join(', ')}. Available: ${effectiveCols.map((c) => c.name).join(', ')}`,
-        400,
-        'VALIDATION_ERROR',
-      );
-    }
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-
-    // Preserve order to user's listed order.
-    const ordered = input.columns.map(stripBom);
-    const transformed = rows
-      .map((row) => {
-        const out: Record<string, unknown> = {};
-        for (const k of ordered) out[k] = row[k] ?? null;
-        return out;
-      })
-      .slice(0, input.limit);
-
-    const outputColumns = ordered.map((name) => {
-      const found = effectiveCols.find((c) => stripBom(c.name) === name);
-      return { name, type: found?.type ?? 'string' };
-    });
-
-    return {
-      columns: outputColumns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      totalRows: rows.length,
-      selectSummary: `Keep ${ordered.length} of ${effectiveCols.length} columns`,
-    };
+    return selectPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async selectApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: SelectApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'Select',
-      columns: input.columns,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return selectApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -699,41 +434,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: UppercaseColumnNamesPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-
-    const transformed = rows.map((row) => {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(row)) out[k.toUpperCase()] = v;
-      return out;
-    }).slice(0, input.limit);
-
-    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms)
-      .map((c) => ({ name: c.name.toUpperCase(), type: c.type, normalized: true }));
-
-    return {
-      columns: effectiveColumns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      renameSummary: `Uppercased ${effectiveColumns.length} column names`,
-    };
+    return uppercaseColumnNamesPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async uppercaseColumnNamesApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: UppercaseColumnNamesApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'UppercaseColumnNames',
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return uppercaseColumnNamesApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -746,44 +454,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: RowSizePreviewInput,
   ) {
-    const outCol = input.outputColumn?.trim() || 'row_size';
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const transformed = rows
-      .map((row) => ({ ...row, [outCol]: Buffer.byteLength(JSON.stringify(row), 'utf8') }))
-      .slice(0, input.limit);
-
-    const baseCols = effectiveCols.map((c) => ({ name: c.name, type: c.type }));
-    const exists = baseCols.some((c) => c.name === outCol);
-    const outputColumns = exists
-      ? baseCols.map((c) => (c.name === outCol ? { ...c, type: 'integer' } : c))
-      : [...baseCols, { name: outCol, type: 'integer', isNew: true }];
-
-    return {
-      columns: outputColumns,
-      rows: transformed,
-      rowCount: transformed.length,
-      ...sampleInfo(rawRows.length),
-      rowSizeSummary: `Added column "${outCol}" with row byte size`,
-    };
+    return rowSizePreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async rowSizeApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: RowSizeApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'RowSize',
-      outputColumn: input.outputColumn?.trim() || 'row_size',
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return rowSizeApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -3873,58 +3551,14 @@ export class TransformService {
         const conditions = (tx.conditions ?? []) as FilterCondition[];
         result = applyFilterRows(result, mode, match, conditions);
       } else if (fn === 'Drop') {
-        const dropCols = new Set(
-          ((tx.columns ?? []) as string[]).map(stripBom),
-        );
-        result = result.map((row) => {
-          const out: Record<string, unknown> = {};
-          for (const [k, v] of Object.entries(row)) {
-            if (!dropCols.has(stripBom(k))) out[k] = v;
-          }
-          return out;
-        });
-        if (result.length > 0 && Object.keys(result[0]).length === 0) {
-          throw new AppError('Drop removed every column.', 400, 'DROP_ALL_COLUMNS');
-        }
+        result = applyDropColumnsRows(result, (tx.columns ?? []) as string[]);
       } else if (fn === 'Rename') {
-        const renames = (tx.renames ?? []) as Array<{ from: string; to: string }>;
-        const map = new Map(renames.map((r) => [stripBom(r.from), r.to]));
-        result = result.map((row) => {
-          const out: Record<string, unknown> = {};
-          for (const [k, v] of Object.entries(row)) {
-            out[map.get(stripBom(k)) ?? k] = v;
-          }
-          return out;
-        });
+        result = applyRenameRows(result, (tx.renames ?? []) as Array<{ from: string; to: string }>);
       } else if (fn === 'Normalize') {
         const removeSpecial = (tx.removeSpecialCharacters ?? false) as boolean;
-        // Build normalize map from current row keys
-        if (result.length > 0) {
-          const keys = Object.keys(result[0]);
-          const usedNames = new Set<string>();
-          const nMap = new Map<string, string>();
-          for (const k of keys) {
-            let newName = normalizeColumnName(k, removeSpecial);
-            if (usedNames.has(newName)) { let i = 1; while (usedNames.has(`${newName}_${i}`)) i++; newName = `${newName}_${i}`; }
-            usedNames.add(newName);
-            nMap.set(k, newName);
-          }
-          result = result.map((row) => {
-            const out: Record<string, unknown> = {};
-            for (const [k, v] of Object.entries(row)) { out[nMap.get(k) ?? k] = v; }
-            return out;
-          });
-        }
+        result = applyNormalizeRows(result, removeSpecial);
       } else if (fn === 'Select') {
-        const keep = ((tx.columns ?? []) as string[]).map(stripBom);
-        result = result.map((row) => {
-          const out: Record<string, unknown> = {};
-          for (const k of keep) out[k] = row[k] ?? null;
-          return out;
-        });
-        if (result.length > 0 && Object.keys(result[0]).length === 0) {
-          throw new AppError('Select kept zero columns.', 400, 'VALIDATION_ERROR');
-        }
+        result = applySelectRows(result, (tx.columns ?? []) as string[]);
       } else if (fn === 'Sort') {
         const sorts = (tx.sorts ?? []) as Array<{
           column: string; direction: 'asc' | 'desc'; nulls?: 'first' | 'last';
@@ -3934,69 +3568,10 @@ export class TransformService {
         const keyCols = ((tx.columns ?? null) as string[] | null)?.map(stripBom) ?? null;
         result = applyDropDuplicates(result, keyCols);
       } else if (fn === 'UppercaseColumnNames') {
-        result = result.map((row) => {
-          const out: Record<string, unknown> = {};
-          for (const [k, v] of Object.entries(row)) out[k.toUpperCase()] = v;
-          return out;
-        });
+        result = applyUppercaseRows(result);
       } else if (fn === 'RowSize') {
         const out = (tx.outputColumn ?? 'row_size') as string;
-        result = result.map((row) => ({ ...row, [out]: Buffer.byteLength(JSON.stringify(row), 'utf8') }));
-      } else if (fn === 'ApplyExpression') {
-        const exprs = collectExpressionItems(tx);
-        for (const e of exprs) result = this.applyExpressionToRows(result, e);
-      } else if (fn === 'CaseExpression') {
-        result = this.applyCaseExpressionToRows(result, tx as unknown as CaseExpressionApplyInput);
-      } else if (fn === 'ConcatenateStrings') {
-        const expressions = (tx.expressions ?? []) as StringOperand[];
-        const separator = (tx.separator ?? '') as string;
-        const strict = (tx.nullOutputIfAnyInputIsNull ?? false) as boolean;
-        const out = tx.outputColumn as string;
-        result = result.map((row) => ({ ...row, [out]: concatenateStringValues(row, expressions, separator, strict) }));
-      } else if (fn === 'FormatString') {
-        // Palantir formatStringV1 — printf-style template over ordered args.
-        // Same operand semantics as ConcatenateStrings: kind=column resolves
-        // from the row, kind=literal uses the value verbatim.
-        const fmtArgs = (tx.arguments ?? []) as StringOperand[];
-        const fmt = (tx.format ?? '') as string;
-        const out = tx.outputColumn as string;
-        result = result.map((row) => ({
-          ...row,
-          [out]: formatStringValue(
-            fmt,
-            fmtArgs.map((a) => (a.kind === 'column' ? row[a.value] : a.value)),
-          ),
-        }));
-      } else if (fn === 'ApplyMultipleExpressions') {
-        const exprs = collectExpressionItems(tx);
-        for (const e of exprs) result = this.applyExpressionToRows(result, e);
-      } else if (fn === 'ApplyToMultipleColumns') {
-        const cols = ((tx.columns ?? []) as string[]).map(stripBom);
-        const op = tx.operator as BinaryOperator;
-        const right = tx.right as Operand;
-        const suffix = (tx.outputSuffix ?? '_calc') as string;
-        const outNames = (tx.outputColumns as string[] | undefined) ?? cols.map((c) => `${c}${suffix}`);
-        const outType = tx.outputType as CastTargetType | undefined;
-        for (let i = 0; i < cols.length; i++) {
-          const e: ExpressionItem = {
-            left: { kind: 'column', value: cols[i] },
-            operator: op,
-            right,
-            outputColumn: outNames[i],
-            outputType: outType,
-          };
-          result = this.applyExpressionToRows(result, e);
-        }
-      } else if (fn === 'ComputeIfExpressionAbsent') {
-        const out = tx.outputColumn as string;
-        const exprs = collectExpressionItems(tx);
-        const e = exprs[0];
-        result = result.map((row) => {
-          const cur = row[out];
-          if (!this.isValueAbsent(cur)) return row;
-          const v = evaluateExpression(row, e);
-          return { ...row, [out]: castExpressionResult(v, e.outputType) };
-        });
+        result = applyRowSizeRows(result, out);
       } else if (fn === 'TextBlock') {
         // Text block is pure annotation — pass rows through unchanged.
       } else if (fn === 'Aggregate') {
