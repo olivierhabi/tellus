@@ -1,7 +1,6 @@
 import { Knex } from 'knex';
 import { parse } from 'csv-parse';
 import { AppError } from '../utils/foundryAppError';
-import { convertValue, inferDateFormat } from '../utils/typeConverter';
 import { sanitizeCsvHeader } from '../utils/csvHeader';
 import { findNearNameMatches, unionSideLabels } from '../utils/columnNameReconciler';
 import { getObjectStream, toDuckDbReadUri } from './storageService';
@@ -115,39 +114,11 @@ export {
   concatenateStringValues,
   formatStringValue,
 } from './pipelines/ops/shared';
-
-/**
- * Build the ConvertOptions for a Cast, inferring the day/month order from the
- * column's own values when casting to date/timestamp.
- *
- * convertValue defaults to "dmy" (Rwanda). Spreadsheet exports are very often
- * month-first, and under the dmy default an ambiguous "7/6/23" silently
- * becomes June 7 instead of July 6. Sniffing the column for a value that can
- * only be read one way ("7/30/23") fixes the whole column. When the sample
- * carries no decisive evidence, inferDateFormat returns null and the dmy
- * default stands.
- */
-function castOptionsForColumn(
-  rows: Array<Record<string, unknown>>,
-  sourceCol: string,
-  converterType: string,
-): { coerce: true; dateFormat?: 'dmy' | 'mdy' } {
-  if (converterType !== 'date' && converterType !== 'timestamp') {
-    return { coerce: true };
-  }
-  // Cap the sniff sample: one decisive value is enough, and columns can be
-  // large. 1000 rows is ample and bounded.
-  const samples: unknown[] = [];
-  for (const row of rows) {
-    samples.push(row[sourceCol]);
-    if (samples.length >= 1000) break;
-  }
-  const inferred = inferDateFormat(samples);
-  return inferred ? { coerce: true, dateFormat: inferred } : { coerce: true };
-}
-
-
-
+import {
+  applyCastToRows,
+  castApply as castApplyOp,
+  castPreview as castPreviewOp,
+} from './pipelines/ops/castOps';
 
 
 // ---------------------------------------------------------------------------
@@ -216,97 +187,7 @@ export class TransformService {
     nodeId: string,
     input: CastPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
-      projectId,
-      pipelineId,
-      nodeId,
-    );
-
-    // Prefer priorTransforms sent in the request body (the frontend knows
-    // the full panel chain) over the transforms persisted on the node.
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-
-    const sourceCol = stripBom(input.expression);
-    const outputCol = stripBom(input.outputColumn ?? sourceCol);
-    const converterType = CONVERTER_TYPE_MAP[input.targetType];
-
-    // Validate against effective columns (after prior transforms like Normalize/Rename)
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    if (!effectiveCols.some((c) => stripBom(c.name) === sourceCol)) {
-      throw new AppError(
-        `Column "${sourceCol}" does not exist. Available: ${effectiveCols.map((c) => c.name).join(', ')}`,
-        400,
-        'VALIDATION_ERROR',
-      );
-    }
-
-    // Read CSV rows from S3, then replay prior transforms in the chain
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms)
-      .slice(0, input.limit);
-
-    // Build effective column metadata reflecting any prior Cast transforms
-    const effectiveColumns = this.applyExistingTransformColumns(
-      sourceColumns,
-      chainTransforms,
-    );
-
-    // Apply the Cast transform
-    const castOptions = castOptionsForColumn(rows, sourceCol, converterType);
-    let castErrors = 0;
-    // Lenient mode nulls a failed cast, which is correct — but discarding *why*
-    // it failed makes "N of N values could not be cast" a dead end: the user
-    // cannot tell an unsupported input shape (a real bug, fix the converter)
-    // from a column that simply is not of that type (e.g. days_until_due holds
-    // '59', a day count, so no timestamp exists to cast it to). Keep the first
-    // reason and one offending sample so the message can say which it is.
-    let castErrorReason: string | undefined;
-    let castErrorSample: string | undefined;
-    const transformedRows = rows.map((row) => {
-      const rawValue = row[sourceCol];
-      let castValue: unknown;
-
-      try {
-        castValue = convertValue(rawValue, converterType, castOptions);
-      } catch (err) {
-        // Lenient mode: failed casts become null (matches Palantir behaviour)
-        castValue = null;
-        castErrors++;
-        if (castErrorReason === undefined) {
-          castErrorReason =
-            err instanceof Error ? err.message : String(err);
-          // Truncate: a sample is for recognising the shape, not dumping a cell.
-          const asText = rawValue === null || rawValue === undefined ? "" : String(rawValue);
-          castErrorSample = asText.length > 60 ? `${asText.slice(0, 60)}…` : asText;
-        }
-      }
-
-      // Build the output row
-      if (outputCol === sourceCol) {
-        // Replace in-place
-        return { ...row, [outputCol]: castValue };
-      }
-      // New column — append
-      return { ...row, [outputCol]: castValue };
-    });
-
-    // Build output column metadata using effective columns (which include
-    // type changes from prior Cast transforms in the chain)
-    const outputColumns = this.buildOutputColumns(
-      effectiveColumns,
-      outputCol,
-      input.targetType,
-    );
-
-    return {
-      columns: outputColumns,
-      rows: transformedRows,
-      rowCount: transformedRows.length,
-      ...sampleInfo(rawRows.length),
-      castErrors,
-      castErrorReason,
-      castErrorSample,
-      castExpression: `CAST("${sourceCol}" AS ${input.targetType.toUpperCase()})`,
-    };
+    return castPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -326,44 +207,7 @@ export class TransformService {
     nodeId: string,
     input: CastApplyInput,
   ) {
-    const node = await this.knex('pipeline_nodes as pn')
-      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
-      .where({
-        'pn.id': nodeId,
-        'pn.pipeline_id': pipelineId,
-        'p.project_id': projectId,
-      })
-      .select('pn.id', 'pn.config')
-      .first();
-
-    if (!node) {
-      throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
-    }
-
-    const config = typeof node.config === 'string'
-      ? JSON.parse(node.config)
-      : (node.config ?? {});
-
-    const transforms: unknown[] = Array.isArray(config.transforms)
-      ? config.transforms
-      : [];
-
-    transforms.push({
-      function: 'Cast',
-      expression: input.expression,
-      targetType: input.targetType,
-      outputColumn: input.outputColumn ?? input.expression,
-      createdAt: new Date().toISOString(),
-    });
-
-    config.transforms = transforms;
-
-    const [updated] = await this.knex('pipeline_nodes')
-      .where({ id: nodeId, pipeline_id: pipelineId })
-      .update({ config: JSON.stringify(config) })
-      .returning('*');
-
-    return updated;
+    return castApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -2268,7 +2112,7 @@ export class TransformService {
   // methods above; mirrors the inline pattern used by castApply et al).
   // =========================================================================
 
-  private async fetchNodeConfig(
+  public async fetchNodeConfig(
     projectId: string, pipelineId: string, nodeId: string,
   ): Promise<{ id: string; config: Record<string, unknown> }> {
     const node = await this.knex('pipeline_nodes as pn')
@@ -2280,7 +2124,7 @@ export class TransformService {
     return { id: node.id, config };
   }
 
-  private async saveNodeConfig(
+  public async saveNodeConfig(
     nodeId: string, pipelineId: string, config: Record<string, unknown>,
   ) {
     const [updated] = await this.knex('pipeline_nodes')
@@ -2293,7 +2137,7 @@ export class TransformService {
    * Shared column-existence validation for the aggregate-family previews.
    * Throws the same 400 shape used by the older preview methods.
    */
-  private assertColumnsExist(
+  public assertColumnsExist(
     effectiveNames: Set<string>,
     needed: string[],
     fnName: string,
@@ -2650,7 +2494,7 @@ export class TransformService {
    * dropping every join and union in the graph. The deployed dataset
    * ended up reflecting one branch instead of the union's output.
    */
-  private async resolveNodeData(
+  public async resolveNodeData(
     projectId: string, pipelineId: string, nodeId: string,
     priorTransforms?: unknown[],
     /** Internal guard: detect sourceNodeId cycles in malformed graphs. */
@@ -3706,7 +3550,7 @@ export class TransformService {
    * so snapshot and config can never disagree about which chain produced
    * the saved rows.
    */
-  private async persistExecutionSnapshot(
+  public async persistExecutionSnapshot(
     projectId: string, pipelineId: string, nodeId: string,
     columns: Array<{ name: string; type: string }>,
     rows: Array<Record<string, unknown>>,
@@ -3999,7 +3843,7 @@ export class TransformService {
    * Visited nodes are tracked so a malformed graph with a cycle
    * still terminates in O(nodes) work.
    */
-  private async walkTransitiveInputs(
+  public async walkTransitiveInputs(
     pipelineId: string,
     startNodeId: string,
   ): Promise<Array<{
@@ -4082,7 +3926,7 @@ export class TransformService {
    * responses return the correct column types even when earlier transforms
    * changed them (e.g. Cast before Filter).
    */
-  private applyExistingTransformColumns(
+  public applyExistingTransformColumns(
     sourceColumns: Array<{ name: string; type: string }>,
     transforms: unknown[],
   ): Array<{ name: string; type: string }> {
@@ -4285,7 +4129,7 @@ export class TransformService {
    * This ensures chained transforms work correctly:
    *   Cast(age→int) → Filter(age > 25) operates on casted integer values.
    */
-  private applyExistingTransforms(
+  public applyExistingTransforms(
     rows: Array<Record<string, unknown>>,
     transforms: unknown[],
   ): Array<Record<string, unknown>> {
@@ -4300,18 +4144,7 @@ export class TransformService {
         const outputCol = (tx.outputColumn ?? expr) as string;
         const targetType = tx.targetType as string;
         const converterType = CONVERTER_TYPE_MAP[targetType as CastTargetType] ?? 'string';
-        const castOptions = castOptionsForColumn(result, expr, converterType);
-
-        result = result.map((row) => {
-          const rawValue = row[expr];
-          let castValue: unknown;
-          try {
-            castValue = convertValue(rawValue, converterType, castOptions);
-          } catch {
-            castValue = null;
-          }
-          return { ...row, [outputCol]: castValue };
-        });
+        result = applyCastToRows(result, expr, outputCol, converterType);
       } else if (fn === 'Filter') {
         const mode = (tx.mode ?? 'keep') as string;
         const match = (tx.match ?? 'all') as string;
@@ -4908,7 +4741,7 @@ export class TransformService {
    * — preview methods must not touch dataset.file_path in that case (they
    * already only used it for the readCsvRows call this helper performs).
    */
-  private async resolvePreviewInput(
+  public async resolvePreviewInput(
     projectId: string,
     pipelineId: string,
     nodeId: string,
@@ -5011,31 +4844,4 @@ export class TransformService {
     });
   }
 
-  /**
-   * Build output column metadata.
-   *
-   * If the output column replaces an existing one, its type is updated.
-   * If it's a new column, it's appended with isNew: true.
-   */
-  private buildOutputColumns(
-    sourceColumns: Array<{ name: string; type: string }>,
-    outputCol: string,
-    targetType: CastTargetType,
-  ): Array<{ name: string; type: string; isNew: boolean }> {
-    const existing = sourceColumns.map((c) => ({
-      name: c.name,
-      type: c.type,
-      isNew: false,
-    }));
-
-    const alreadyExists = sourceColumns.some((c) => c.name === outputCol);
-
-    if (alreadyExists) {
-      return existing.map((c) =>
-        c.name === outputCol ? { ...c, type: targetType, isNew: false } : c,
-      );
-    }
-
-    return [...existing, { name: outputCol, type: targetType, isNew: true }];
-  }
 }
