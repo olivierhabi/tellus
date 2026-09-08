@@ -130,6 +130,14 @@ import {
   topRowsApply as topRowsApplyOp,
   topRowsPreview as topRowsPreviewOp,
 } from './pipelines/ops/sortOps';
+import {
+  applyDropDuplicates,
+  computeKeepDuplicates as computeKeepDuplicatesOp,
+  dropDuplicatesApply as dropDuplicatesApplyOp,
+  dropDuplicatesPreview as dropDuplicatesPreviewOp,
+  keepDuplicatesApply as keepDuplicatesApplyOp,
+  keepDuplicatesPreview as keepDuplicatesPreviewOp,
+} from './pipelines/ops/dedupeOps';
 
 
 // ---------------------------------------------------------------------------
@@ -671,61 +679,14 @@ export class TransformService {
     projectId: string, pipelineId: string, nodeId: string,
     input: DropDuplicatesPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    const keyCols = input.columns?.map(stripBom) ?? null;
-    if (keyCols) {
-      for (const c of keyCols) {
-        if (!effectiveCols.some((ec) => stripBom(ec.name) === c)) {
-          throw new AppError(
-            `Deduplicate key column "${c}" does not exist. Available: ${effectiveCols.map((ec) => ec.name).join(', ')}`,
-            400,
-            'VALIDATION_ERROR',
-          );
-        }
-      }
-    }
-
-    const rows = this.applyExistingTransforms(rawRows, chainTransforms);
-    const seen = new Set<string>();
-    const deduped = rows.filter((row) => {
-      let key: string;
-      if (keyCols) {
-        key = keyCols.map((c) => String(row[c] ?? '')).join('\u0001');
-      } else {
-        key = Object.keys(row).sort().map((k) => `${k}=${row[k] ?? ''}`).join('\u0001');
-      }
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    const sliced = deduped.slice(0, input.limit);
-    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    return {
-      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
-      rows: sliced,
-      rowCount: sliced.length,
-      ...sampleInfo(rawRows.length),
-      totalRows: rows.length,
-      duplicatesRemoved: rows.length - deduped.length,
-      dedupeSummary: keyCols ? `By ${keyCols.join(', ')}` : 'By all columns',
-    };
+    return dropDuplicatesPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async dropDuplicatesApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: DropDuplicatesApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'DropDuplicates',
-      columns: input.columns,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return dropDuplicatesApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -1875,60 +1836,29 @@ export class TransformService {
   // once (contrast dropDuplicates which keeps only one).
   // =========================================================================
 
-  /** keepDuplicatesV1 core: key-frequency filter, original order preserved. */
+  /** keepDuplicatesV1 core: key-frequency filter, original order preserved.
+   * Implementation lives in pipelines/ops/dedupeOps; the delegate remains
+   * because existing unit tests exercise it through the service. */
   private computeKeepDuplicates(
     rows: Array<Record<string, unknown>>,
     subset: string[],
     allColumns: string[],
   ): Array<Record<string, unknown>> {
-    const keys = subset.length ? subset : allColumns;
-    const keyOf = (row: Record<string, unknown>) => JSON.stringify(keys.map((c) => row[c] ?? null));
-    const counts = new Map<string, number>();
-    for (const row of rows) {
-      const key = keyOf(row);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    return rows.filter((row) => (counts.get(keyOf(row)) ?? 0) > 1);
+    return computeKeepDuplicatesOp(rows, subset, allColumns);
   }
 
   async keepDuplicatesPreview(
     projectId: string, pipelineId: string, nodeId: string,
     input: KeepDuplicatesPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(projectId, pipelineId, nodeId);
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-    const effectiveColumns = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    const effectiveNames = new Set(effectiveColumns.map((c) => c.name));
-    // Omitting `columns` = exact-duplicate mode (key = every column).
-    const subset = input.columns ?? [];
-    this.assertColumnsExist(effectiveNames, subset, 'KeepDuplicates');
-
-    const chained = this.applyExistingTransforms(rawRows, chainTransforms);
-    const allNames = effectiveColumns.map((c) => c.name);
-    const rows = this.computeKeepDuplicates(chained, subset, allNames).slice(0, input.limit);
-
-    return {
-      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      keepDuplicatesSummary: `Keeping rows where (${subset.join(', ') || 'all columns'}) appears > 1 time`,
-    };
+    return keepDuplicatesPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   async keepDuplicatesApply(
     projectId: string, pipelineId: string, nodeId: string,
     input: KeepDuplicatesApplyInput,
   ) {
-    const node = await this.fetchNodeConfig(projectId, pipelineId, nodeId);
-    const transforms: unknown[] = Array.isArray(node.config.transforms) ? node.config.transforms : [];
-    transforms.push({
-      function: 'KeepDuplicates',
-      columns: input.columns,
-      createdAt: new Date().toISOString(),
-    });
-    node.config.transforms = transforms;
-    return this.saveNodeConfig(nodeId, pipelineId, node.config);
+    return keepDuplicatesApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -4002,15 +3932,7 @@ export class TransformService {
         result = applySort(result, sorts);
       } else if (fn === 'DropDuplicates') {
         const keyCols = ((tx.columns ?? null) as string[] | null)?.map(stripBom) ?? null;
-        const seen = new Set<string>();
-        result = result.filter((row) => {
-          let key: string;
-          if (keyCols) key = keyCols.map((c) => String(row[c] ?? '')).join('\u0001');
-          else key = Object.keys(row).sort().map((k) => `${k}=${row[k] ?? ''}`).join('\u0001');
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
+        result = applyDropDuplicates(result, keyCols);
       } else if (fn === 'UppercaseColumnNames') {
         result = result.map((row) => {
           const out: Record<string, unknown> = {};
