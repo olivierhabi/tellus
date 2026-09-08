@@ -15,14 +15,16 @@ import { codeReposError } from "../../errors";
 import { isRid } from "../../../codeRepos/contracts/rid";
 import { insertCodeReposAuditEvent } from "../../../codeRepos/audit/auditEvents";
 import {
-  computeImportsEtag,
   derivePrincipalSubUuid,
   isUuidV4,
-  parseImportsEtag,
   parseVersionEtagOrNull,
   sendError,
-  validateImportsBody,
 } from "../routeHelpers";
+import {
+  computeImportsEtag,
+  parseImportsEtag,
+  validateImportsBody,
+} from "../importsValidators";
 import type { CodeRepositoryRouteContext } from "../routeContext";
 
 export function createSettingsRouter(ctx: CodeRepositoryRouteContext): Router {

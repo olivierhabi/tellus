@@ -9,20 +9,24 @@
 import { describe, it, expect } from "vitest";
 import {
   compareSemverLoose,
-  computeImportsEtag,
   derivePrincipalSubUuid,
   deriveSignatureFromSource,
   isLegalBranchName,
   isUuidV4,
-  parseImportsEtag,
-  parseShaIfMatch,
   parseVersionEtagOrNull,
   repoToResponse,
   toWireSignature,
-  validateCommitBody,
   validateCreateBody,
-  validateImportsBody,
 } from "../../../src/services/codeRepository/admin/routeHelpers";
+import {
+  computeImportsEtag,
+  parseImportsEtag,
+  validateImportsBody,
+} from "../../../src/services/codeRepository/admin/importsValidators";
+import {
+  parseShaIfMatch,
+  validateCommitBody,
+} from "../../../src/services/codeRepository/admin/commitValidators";
 
 describe("routeHelpers — isUuidV4 / derivePrincipalSubUuid", () => {
   it("accepts only v4 UUIDs", () => {

@@ -16,10 +16,12 @@ import {
   derivePrincipalSubUuid,
   isLegalBranchName,
   isUuidV4,
-  parseShaIfMatch,
   sendError,
-  validateCommitBody,
 } from "../routeHelpers";
+import {
+  parseShaIfMatch,
+  validateCommitBody,
+} from "../commitValidators";
 import type { CodeRepositoryRouteContext } from "../routeContext";
 
 export function createCommitsRouter(ctx: CodeRepositoryRouteContext): Router {
