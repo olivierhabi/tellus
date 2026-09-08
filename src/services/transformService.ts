@@ -25,7 +25,6 @@ import type {
   FilterPreviewInput,
   FilterApplyInput,
   FilterCondition,
-  FilterOperator,
   DropPreviewInput,
   DropApplyInput,
   RenamePreviewInput,
@@ -93,7 +92,6 @@ import {
   PREVIEW_SOURCE_ROW_LIMIT,
   castExpressionResult,
   collectExpressionItems,
-  compareOrd,
   concatenateStringValues,
   coerceNumeric,
   evaluateExpression,
@@ -119,6 +117,11 @@ import {
   castApply as castApplyOp,
   castPreview as castPreviewOp,
 } from './pipelines/ops/castOps';
+import {
+  applyFilterRows,
+  filterApply as filterApplyOp,
+  filterPreview as filterPreviewOp,
+} from './pipelines/ops/filterOps';
 
 
 // ---------------------------------------------------------------------------
@@ -227,78 +230,7 @@ export class TransformService {
     nodeId: string,
     input: FilterPreviewInput,
   ) {
-    const { dataset, sourceColumns, existingTransforms, baseRows: rawRows } = await this.resolvePreviewInput(
-      projectId,
-      pipelineId,
-      nodeId,
-    );
-
-    // Prefer priorTransforms sent in the request body (the frontend knows
-    // the full panel chain) over the transforms persisted on the node.
-    const chainTransforms = input.priorTransforms ?? existingTransforms;
-
-    // Validate against effective columns (after prior transforms like Normalize)
-    const effectiveCols = this.applyExistingTransformColumns(sourceColumns, chainTransforms);
-    for (const cond of input.conditions) {
-      const cleanCol = stripBom(cond.column);
-      if (!effectiveCols.some((c) => stripBom(c.name) === cleanCol)) {
-        throw new AppError(
-          `Column "${cleanCol}" does not exist. Available: ${effectiveCols.map((c) => stripBom(c.name)).join(', ')}`,
-          400,
-          'VALIDATION_ERROR',
-        );
-      }
-      cond.column = cleanCol;
-      if (cond.valueIsColumn && cond.value) {
-        const cleanValueCol = stripBom(cond.value);
-        if (!effectiveCols.some((c) => stripBom(c.name) === cleanValueCol)) {
-          throw new AppError(
-            `Comparison column "${cleanValueCol}" does not exist. Available: ${effectiveCols.map((c) => stripBom(c.name)).join(', ')}`,
-            400,
-            'VALIDATION_ERROR',
-          );
-        }
-        cond.value = cleanValueCol;
-      }
-    }
-
-    // Read CSV rows, then replay prior transforms in the chain
-    const allRows = this.applyExistingTransforms(rawRows, chainTransforms);
-
-    // Apply filter — convert rows to string for comparison
-    const filtered = allRows.filter((row) => {
-      const stringRow = Object.fromEntries(
-        Object.entries(row).map(([k, v]) => [k, v == null ? '' : String(v)]),
-      );
-      const results = input.conditions.map((cond) =>
-        this.evaluateCondition(stringRow, cond),
-      );
-      const matches =
-        input.match === 'all'
-          ? results.every(Boolean)
-          : results.some(Boolean);
-      return input.mode === 'keep' ? matches : !matches;
-    });
-
-    // Apply limit
-    const rows = filtered.slice(0, input.limit);
-
-    // Build column metadata that reflects any prior Cast transforms so the
-    // output table shows cumulative column types (e.g. Cast→Filter).
-    const effectiveColumns = this.applyExistingTransformColumns(
-      sourceColumns,
-      chainTransforms,
-    );
-
-    return {
-      columns: effectiveColumns.map((c) => ({ name: c.name, type: c.type })),
-      rows,
-      rowCount: rows.length,
-      ...sampleInfo(rawRows.length),
-      totalMatched: filtered.length,
-      totalRows: allRows.length,
-      filterSummary: `${input.mode === 'keep' ? 'Keep' : 'Remove'} rows where ${input.match} of ${input.conditions.length} condition(s) match`,
-    };
+    return filterPreviewOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -311,44 +243,7 @@ export class TransformService {
     nodeId: string,
     input: FilterApplyInput,
   ) {
-    const node = await this.knex('pipeline_nodes as pn')
-      .join('pipelines as p', 'pn.pipeline_id', 'p.id')
-      .where({
-        'pn.id': nodeId,
-        'pn.pipeline_id': pipelineId,
-        'p.project_id': projectId,
-      })
-      .select('pn.id', 'pn.config')
-      .first();
-
-    if (!node) {
-      throw new AppError('Pipeline node not found', 404, 'NOT_FOUND');
-    }
-
-    const config = typeof node.config === 'string'
-      ? JSON.parse(node.config)
-      : (node.config ?? {});
-
-    const transforms: unknown[] = Array.isArray(config.transforms)
-      ? config.transforms
-      : [];
-
-    transforms.push({
-      function: 'Filter',
-      mode: input.mode,
-      match: input.match,
-      conditions: input.conditions,
-      createdAt: new Date().toISOString(),
-    });
-
-    config.transforms = transforms;
-
-    const [updated] = await this.knex('pipeline_nodes')
-      .where({ id: nodeId, pipeline_id: pipelineId })
-      .update({ config: JSON.stringify(config) })
-      .returning('*');
-
-    return updated;
+    return filterApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -4146,22 +4041,10 @@ export class TransformService {
         const converterType = CONVERTER_TYPE_MAP[targetType as CastTargetType] ?? 'string';
         result = applyCastToRows(result, expr, outputCol, converterType);
       } else if (fn === 'Filter') {
-        const mode = (tx.mode ?? 'keep') as string;
-        const match = (tx.match ?? 'all') as string;
+        const mode = (tx.mode ?? 'keep') as 'keep' | 'remove';
+        const match = (tx.match ?? 'all') as 'all' | 'any';
         const conditions = (tx.conditions ?? []) as FilterCondition[];
-
-        result = result.filter((row) => {
-          const stringRow = Object.fromEntries(
-            Object.entries(row).map(([k, v]) => [k, v == null ? '' : String(v)]),
-          );
-          const results = conditions.map((cond) =>
-            this.evaluateCondition(stringRow, cond),
-          );
-          const matches = match === 'all'
-            ? results.every(Boolean)
-            : results.some(Boolean);
-          return mode === 'keep' ? matches : !matches;
-        });
+        result = applyFilterRows(result, mode, match, conditions);
       } else if (fn === 'Drop') {
         const dropCols = new Set(
           ((tx.columns ?? []) as string[]).map(stripBom),
@@ -4361,113 +4244,6 @@ export class TransformService {
     return result;
   }
 
-  // =========================================================================
-  // Private: condition evaluator
-  // =========================================================================
-
-  /**
-   * Evaluate a single filter condition against a row.
-   *
-   * All comparisons are string-based since CSV data is strings.
-   * Null = undefined, empty string, or literal "null"/"NULL".
-   */
-  private evaluateCondition(
-    row: Record<string, string>,
-    cond: FilterCondition,
-  ): boolean {
-    const raw = row[cond.column];
-
-    // In CSV, null = undefined, empty string, or literal "null"/"NULL"
-    const isNullValue =
-      raw === undefined ||
-      raw === null ||
-      raw === '' ||
-      raw.toLowerCase() === 'null';
-
-    // For is_not_null: treatEmptyAsNull controls whether "" counts as null.
-    // When false (default), only undefined/null/"null" are null — "" is a value.
-    // When true, "" is also treated as null.
-    const treatEmpty = cond.treatEmptyAsNull ?? false;
-    const isNotNullEffective = treatEmpty
-      ? !isNullValue
-      : !(raw === undefined || raw === null || raw.toLowerCase() === 'null');
-
-    const op = cond.operator as FilterOperator;
-
-    // Right-hand operand: literal by default; when valueIsColumn is set the
-    // value names another column, so resolve it from the row. A missing
-    // right-hand column compares as empty string (never matches eq).
-    const rhs = cond.valueIsColumn ? (row[cond.value ?? ''] ?? '') : (cond.value ?? '');
-
-    // Palantir filterV1: "Values that return true are kept, others are
-    // removed. Nulls are treated as false." An ordering comparison against a
-    // null literal / null right-hand column is therefore false.
-    const rhsIsNull =
-      cond.value === undefined || cond.value === null ||
-      rhs === '' || rhs.toLowerCase() === 'null';
-
-    switch (op) {
-      case 'is_null':
-        // is_null always treats empty string as null (CSV semantics)
-        return isNullValue;
-
-      case 'is_not_null':
-        return isNotNullEffective;
-
-      case 'eq':
-        return !isNullValue && raw === rhs;
-
-      case 'neq':
-        return isNullValue || raw !== rhs;
-
-      // Ordering operators — column-to-column via valueIsColumn, or against a
-      // literal. compareOrd coerces numerics first, then falls back to string
-      // order; ISO-8601 dates/timestamps sort chronologically under string
-      // order, which is what CSV replay gives us here.
-      case 'lt':
-        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) < 0;
-
-      case 'lte':
-        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) <= 0;
-
-      case 'gt':
-        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) > 0;
-
-      case 'gte':
-        return !isNullValue && !rhsIsNull && compareOrd(raw, rhs) >= 0;
-
-      case 'starts_with':
-        return !isNullValue && raw.startsWith(rhs);
-
-      case 'ends_with':
-        return !isNullValue && raw.endsWith(rhs);
-
-      case 'contains':
-        return !isNullValue && raw.includes(rhs);
-
-      case 'regex_find': {
-        if (isNullValue || !cond.value) return false;
-        try {
-          return new RegExp(rhs).test(raw);
-        } catch {
-          return false;
-        }
-      }
-
-      case 'regex_match': {
-        if (isNullValue || !cond.value) return false;
-        try {
-          const re = new RegExp(`^${rhs}$`);
-          return re.test(raw);
-        } catch {
-          return false;
-        }
-      }
-
-      default:
-        return true;
-    }
-  }
 
   // =========================================================================
   // Private helpers
