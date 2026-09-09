@@ -13,6 +13,8 @@
 // ---------------------------------------------------------------------------
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { logger } from "../utils/logger";
+
 const disabled =
   process.env.OTEL_SDK_DISABLED === "true" ||
   process.env.NODE_ENV === "test";
@@ -66,14 +68,14 @@ if (!disabled) {
     process.on("SIGTERM", () => void shutdown());
     process.on("SIGINT", () => void shutdown());
 
-    // eslint-disable-next-line no-console
-    console.log(
-      `[otel] NodeSDK started service=${serviceName} endpoint=${endpoint}`,
+    logger.info(
+      { service: serviceName, endpoint },
+      "[otel] NodeSDK started",
     );
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[otel] bootstrap failed (instrumentation disabled): ${(err as Error).message}`,
+    logger.warn(
+      { error: (err as Error).message },
+      "[otel] bootstrap failed (instrumentation disabled)",
     );
   }
 }
