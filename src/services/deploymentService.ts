@@ -75,6 +75,8 @@ import {
   listPipelineOutputSnapshots,
   readPipelineOutputAsOf,
 } from './deploy/icebergOutputReads';
+// Batch-engine selection gate extracted to ./deploy/batchEngineSelection.
+import { shouldAttemptEngineBuild } from './deploy/batchEngineSelection';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -2230,14 +2232,17 @@ export class DeploymentService {
     rowCount: number;
     columnCount: number;
   } | null> {
-    // Engine path is the default ("auto"): used wherever a real Trino
-    // coordinator is configured, else we fall through to the in-process +
-    // PyIceberg-sidecar path. Forced "in-process" opts out entirely; forced
-    // "trino" always attempts it (tests inject an in-memory engine).
-    const engineMode = selectedBatchEngine();
-    if (engineMode === 'in-process') return null;
-    if (engineMode === 'auto' && !trinoCoordinatorConfigured()) return null;
-    if ((args.pipeline.output_format ?? 'csv') !== 'iceberg') return null;
+    // Engine-selection gate extracted to ./deploy/batchEngineSelection
+    // (pure predicate; env reads stay here at the call site).
+    if (
+      !shouldAttemptEngineBuild({
+        engineMode: selectedBatchEngine(),
+        coordinatorConfigured: trinoCoordinatorConfigured(),
+        outputFormat: args.pipeline.output_format,
+      })
+    ) {
+      return null;
+    }
 
     try {
       // 1. Peek the output's source node to choose the plan shape.
