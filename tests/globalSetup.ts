@@ -30,6 +30,7 @@ import "./laneEnv";
 import { spawn, execSync, spawnSync, type ChildProcess } from "child_process";
 import path from "path";
 import { LANE } from "./laneEnv";
+import { requiredTestSecret } from "./testEnvFile";
 import { bootstrapTestStack } from "./testStackBootstrap";
 import { assertDestructiveTestEnvironment } from "../src/services/testing/destructiveTestGuard";
 
@@ -266,7 +267,9 @@ async function waitForPg(maxWaitMs = 30_000): Promise<void> {
       // property, not a lane-DB property.
       database: "postgres",
       user: process.env.PGUSER || "tellus",
-      password: process.env.PGPASSWORD || "tellus123",
+      // No baked-in literals: laneEnv already pinned process.env, but resolve
+      // through the same env > file chain for a single source of truth.
+      password: requiredTestSecret("PGPASSWORD"),
       connectionTimeoutMillis: 3000,
       max: 1,
     });

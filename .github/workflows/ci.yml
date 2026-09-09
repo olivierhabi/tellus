@@ -4,7 +4,8 @@
 # Runs the full test suite on every push and pull request:
 #   0. Lint + SAST      (eslint — fails the build on any violation)
 #   0b. Typecheck       (tsc --noEmit — required gate before all test jobs)
-#   1. Unit tests      (vitest, no services needed)
+#   1. Unit tests      (vitest.unit.config.ts — FIRST gate, zero Docker:
+#                        pnpm install && npm run test:unit, no compose up)
 #   2. Integration tests (requires PostgreSQL + OpenSearch + running server)
 #   3. E2E tests        (bash curl-based, requires PostgreSQL + OpenSearch + running server)
 #   4. Performance tests (benchmarks against running server)
@@ -128,10 +129,24 @@ jobs:
         run: npx tsc --noEmit
 
   # ===========================================================================
-  # Job 1: Unit Tests (no services needed)
+  # Job 1: Unit Tests — FIRST gate, ZERO external services (no Docker).
+  #
+  # Contributors run exactly this immediately after `pnpm install`, with no
+  # `docker compose up` and no exported secrets:
+  #
+  #   pnpm install && npm run test:unit
+  #
+  # Guarantees (enforced by vitest.unit.config.ts, not by convention):
+  #   - no globalSetup / setupFiles / server spawn (see the config header);
+  #   - PGPASSWORD falls back to a non-functional sentinel, so even a
+  #     latent live-DB connection attempt fails auth loudly instead of
+  #     touching a real database (the lane is proven green with a bogus
+  #     password);
+  #   - coverage floor enforced via coverage.thresholds (raise-only ratchet;
+  #     `npm run test:unit:coverage` exits non-zero on regression).
   # ===========================================================================
   unit:
-    name: Unit Tests
+    name: Unit Tests (no Docker)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: typecheck

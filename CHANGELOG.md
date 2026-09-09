@@ -5,6 +5,47 @@ All notable changes to the Ontology Engine project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-09 (Wednesday)
+
+### Added
+- **Error-tracking sink** (`src/services/errorTracking.ts`): `captureError()` forwards
+  5xx-class failures to Sentry when `SENTRY_DSN` is set; unset DSN is a hard no-op,
+  4xx client errors never forward, missing SDK degrades to structured logs. Wired
+  into every terminal branch of `src/middleware/errorHandler.ts` (response
+  envelopes unchanged) with `tests/unit/middleware/errorHandler-unit.test.ts`
+- **Structured logging**: `pino` (^10.3.1) + `pino-pretty` (dev) dependencies and
+  canonical `src/utils/logger.ts` over the PII-redacting `src/logging/pino.ts`;
+  `src/services/otelBootstrap.ts`, all 75 call sites in `src/server.ts`, and
+  `src/middleware/errorHandler.ts` now log structured JSON
+- **Test-lane secret resolution** (`tests/testEnvFile.ts`): `requiredTestSecret()`
+  chain (env > `.env.test` > `.env.test.example`, fail-fast) replaces the
+  `tellus123` / `tellus_ch_pw` literals in `tests/laneEnv.ts`,
+  `vitest.osv2-serving.config.ts`, lane bootstrap and lane configs
+
+### Changed
+- `.env.example`: audited gap-fill — all 272 `process.env.*` vars referenced in
+  `src/` now documented as commented placeholders with code defaults
+- `.env.test.example`: carries the lane container dev defaults (env still wins)
+- CI: unit lane documented as the first zero-Docker gate (`pnpm install &&
+  npm run test:unit`, no compose up); `vitest.unit.config.ts` drops the
+  `PGPASSWORD` fail-fast for a non-functional sentinel (lane proven green
+  with a bogus password) and enforces a raise-only coverage floor
+  (lines 37 / branches 30; 70/60 remains the tracked aspiration)
+
+## [0.3.1] - 2026-09-09 (Wednesday)
+
+### Changed
+- **God-file breakup, behavior-preserving (no logic changes)**:
+  - `src/routes/actionTypes.ts` (3926 LOC) → `src/routes/actionTypes/`
+    (`create`/`list`/`update`/`clone`/`impact`/`migrate`/`delete` + `shared`,
+    thin `index.ts` preserving route order and public API), guarded by
+    `tests/unit/routes/actionTypesRouter-unit.test.ts`
+  - `src/services/deploymentService.ts` → `src/services/deploy/`
+    (`csvSerialization`, `icebergOutputReads`, `batchEngineSelection`),
+    each with focused `tests/unit/services/deploy/*-unit.test.ts`
+- Each extraction landed as its own small commit with its spec; full unit
+  lane green (`test:unit` exit 0) after every commit
+
 ## [0.3.0] - 2026-03-15 (Sunday)
 
 ### Added

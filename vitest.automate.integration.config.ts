@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
+import { requiredTestSecret } from "./tests/testEnvFile";
 
 // Focused Automate integration tests use the real local PostgreSQL service
 // while isolating every record by generated automation IDs. They deliberately
@@ -18,7 +19,8 @@ export default defineConfig({
       PGPORT: process.env.PGPORT ?? "5432",
       PGDATABASE: process.env.PGDATABASE ?? "tellus_db",
       PGUSER: process.env.PGUSER ?? "tellus",
-      PGPASSWORD: process.env.PGPASSWORD ?? "tellus123",
+      // No baked-in literals: env first (CI), then .env.test / .env.test.example.
+      PGPASSWORD: requiredTestSecret("PGPASSWORD"),
       // Publish-author trust gate: exercised by dedicated tests; other lanes
       // opt out explicitly (never honored in production).
       FUNCTION_EXECUTION_TRUST_MODE: "open-development",

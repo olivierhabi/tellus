@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { afterAll, describe, expect, it } from "vitest";
+import { requiredTestSecret } from "../../testEnvFile";
 import {
   ensureLinkTable,
   insertLinkRows,
@@ -26,7 +27,8 @@ import {
 const ch = new ClickHouseClient({
   baseUrl: "http://localhost:8123",
   username: "tellus",
-  password: "tellus_ch_pw",
+  // No baked-in literals: env first (CI), then .env.test / .env.test.example.
+  password: requiredTestSecret("CLICKHOUSE_PASSWORD"),
 });
 
 const descriptor = {

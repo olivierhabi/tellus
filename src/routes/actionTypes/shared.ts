@@ -19,10 +19,10 @@
 
 import { randomUUID } from "node:crypto";
 import { Router, Request, Response, NextFunction } from "express";
-import { pool, query } from "../db";
-import { computeActionTypeBlastRadius } from "../services/automate/blastRadius";
-import { actionDefinitionInputFromRow } from "../actions/actionDefinitionCanonical";
-import { resolveFunctionSource } from "../services/functionsRegistry/artifactStore";
+import { pool, query } from "../../db";
+import { computeActionTypeBlastRadius } from "../../services/automate/blastRadius";
+import { actionDefinitionInputFromRow } from "../../actions/actionDefinitionCanonical";
+import { resolveFunctionSource } from "../../services/functionsRegistry/artifactStore";
 import {
   createActionType,
   getActionType,
@@ -34,21 +34,21 @@ import {
   migrateActionTypeSemantics,
   migrateActionTypeWithDefinition,
   rollbackActionTypeMigration,
-} from "../models/actionType";
-import type { UpdateActionTypeInput } from "../models/actionType";
+} from "../../models/actionType";
+import type { UpdateActionTypeInput } from "../../models/actionType";
 import {
   sendError,
   sendCreated,
   sendSuccess,
   sendNoContent,
-} from "../utils/responseFormatter";
-import { appError } from "../utils/appError";
-import { OntologyError } from "../utils/queryErrors";
+} from "../../utils/responseFormatter";
+import { appError } from "../../utils/appError";
+import { OntologyError } from "../../utils/queryErrors";
 import {
   validateSchemaMigration,
-} from "../actions/schemaMigrationValidator";
-import type { CurrentSchema, ProposedSchema, RecentExecutionStats } from "../actions/schemaMigrationValidator";
-import { dataPlaneGuard } from "../middleware/requireRole";
+} from "../../actions/schemaMigrationValidator";
+import type { CurrentSchema, ProposedSchema, RecentExecutionStats } from "../../actions/schemaMigrationValidator";
+import { dataPlaneGuard } from "../../middleware/requireRole";
 import {
   validateActionSemantics,
   V1_DEFAULT_SEMANTICS,
@@ -56,50 +56,50 @@ import {
   type ActionSemanticsVersion,
   type ActionExecutionMode,
   type DeletePolicy,
-} from "../actions/actionSemantics";
+} from "../../actions/actionSemantics";
 import {
   getActionSemanticsExecutionAvailability,
   isV2CreationEnabled,
-} from "../actions/actionSemanticsFlags";
+} from "../../actions/actionSemanticsFlags";
 import {
   analyzeActionTypeMigration,
   ACKNOWLEDGEMENT_REQUIRED_FINDING_CODES,
   type MigrationFinding,
   type MigrationReport,
   type ParameterMigration,
-} from "../actions/actionMigrationAnalysis";
-import { hashActionDefinition } from "../actions/actionDefinitionHash";
-import { validateSystemValueSourceForProperty } from "../actions/valueSourceCompatibility";
+} from "../../actions/actionMigrationAnalysis";
+import { hashActionDefinition } from "../../actions/actionDefinitionHash";
+import { validateSystemValueSourceForProperty } from "../../actions/valueSourceCompatibility";
 import {
   normalizeActionSecuritySettings,
   resolveActionSecuritySettings,
-} from "../actions/actionSecuritySettings";
-import { defaultSchemaLookup } from "../actions/objectReferenceResolver";
-import { recordMigration } from "../models/actionMigrationLog";
+} from "../../actions/actionSecuritySettings";
+import { defaultSchemaLookup } from "../../actions/objectReferenceResolver";
+import { recordMigration } from "../../models/actionMigrationLog";
 import {
   getByApiName as getLinkTypeByApiName,
   resolveObjectTypeApiName,
-} from "../models/linkType";
-import { getInterfaceLinkConstraintByApiName } from "../models/interfaceLinkConstraint";
-import { getWebhookByNameVersion } from "../models/webhookDefinition";
-import { getByRid as getConnectivityWebhookByRid } from "../services/connectivity/webhooks/repository";
-import type { WebhookParameterTypeValue } from "../services/connectivity/webhooks/contracts";
-import { CONNECTIVITY_WEBHOOK_RID_PREFIX } from "../actions/writebackExecutor";
-import { resolveRequestTenant } from "../utils/requestTenant";
-import { resolveSemanticsForRow } from "../models/actionType";
+} from "../../models/linkType";
+import { getInterfaceLinkConstraintByApiName } from "../../models/interfaceLinkConstraint";
+import { getWebhookByNameVersion } from "../../models/webhookDefinition";
+import { getByRid as getConnectivityWebhookByRid } from "../../services/connectivity/webhooks/repository";
+import type { WebhookParameterTypeValue } from "../../services/connectivity/webhooks/contracts";
+import { CONNECTIVITY_WEBHOOK_RID_PREFIX } from "../../actions/writebackExecutor";
+import { resolveRequestTenant } from "../../utils/requestTenant";
+import { resolveSemanticsForRow } from "../../models/actionType";
 import {
   validateConcreteLinkRuleShape,
   validateInterfaceLinkRuleShape,
-} from "../actions/ruleShapeValidator";
+} from "../../actions/ruleShapeValidator";
 import {
   isActionParameterCompatibleWithWebhook,
   isStaticWebhookValueCompatible,
-} from "../actions/webhookTypeCompatibility";
+} from "../../actions/webhookTypeCompatibility";
 import {
   parsePublishedFunctionType,
   validateFunctionWebhookContract,
   type PublishedFunctionSignature,
-} from "../actions/functionWebhookContract";
+} from "../../actions/functionWebhookContract";
 
 export const ACTION_PARAMETER_RID_PREFIX = "ri.actions.main.parameter.";
 export const ACTION_RULE_RID_PREFIX = "ri.actions.main.rule.";
@@ -189,25 +189,14 @@ export function ensureRuleRids(
 }
 
 // ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
-const router = Router({ mergeParams: true });
-
-// Function-level authorization: action-type create/update/clone require
-// ontology-editor, delete requires ontology-admin (PATs scope-gated upstream,
-// superadmin passes, reads open).
-router.use(dataPlaneGuard({ post: "write" }));
-
-// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 /** Pattern for valid action type API names. */
-const API_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,99}$/;
+export const API_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,99}$/;
 
 /** Valid parameter types. */
-const VALID_PARAM_TYPES = new Set([
+export const VALID_PARAM_TYPES = new Set([
   "string",
   "boolean",
   "integer",
@@ -239,7 +228,7 @@ const VALID_PARAM_TYPES = new Set([
 ]);
 
 /** Numeric parameter types (for min/max constraints). */
-const NUMERIC_PARAM_TYPES = new Set([
+export const NUMERIC_PARAM_TYPES = new Set([
   "integer",
   "long",
   "byte",
@@ -257,7 +246,7 @@ const NUMERIC_PARAM_TYPES = new Set([
  *  rule type" at compile time). The DB CHECK constraint (migration 127) is
  *  the structural backstop — the two layers agree on the same set.
  */
-const VALID_RULE_TYPES = new Set([
+export const VALID_RULE_TYPES = new Set([
   "createObject",
   "modifyObject",
   "modifyOrCreateObject",
@@ -274,7 +263,7 @@ const VALID_RULE_TYPES = new Set([
 ]);
 
 /** Valid property mapping source types. */
-const VALID_SOURCES = new Set([
+export const VALID_SOURCES = new Set([
   "parameter",
   "static",
   "currentTimestamp",
@@ -285,7 +274,7 @@ const VALID_SOURCES = new Set([
 ]);
 
 /** Error codes the route layer knows how to translate. */
-const KNOWN_CODES = new Set([
+export const KNOWN_CODES = new Set([
   "ACTION_TYPE_NOT_FOUND",
   "ACTION_TYPE_ALREADY_EXISTS",
   "ONTOLOGY_NOT_FOUND",
@@ -335,7 +324,7 @@ interface FunctionActionConfig {
   inputs?: Record<string, unknown>;
 }
 
-async function validateFunctionConfig(
+export async function validateFunctionConfig(
   raw: unknown,
   parameters: Array<Record<string, unknown>>,
 ): Promise<string[]> {
@@ -525,7 +514,7 @@ export function formatActionType(row: Record<string, any>): Record<string, unkno
  * Mirrors purposes.actorOf / branches createdBy: prefer local users.id
  * (globalAuth/tellusAuth), then email, then system.
  */
-function actorOf(req: Request): string {
+export function actorOf(req: Request): string {
   const anyReq = req as any;
   return (
     anyReq.tellusPrincipal?.userId ||
@@ -542,7 +531,7 @@ function actorOf(req: Request): string {
  * resolved semantics triple. Used by the /migrate legacy path to record the
  * optimistic-concurrency token + resulting hash in the audit ledger.
  */
-function currentDefinitionHashFor(
+export function currentDefinitionHashFor(
   row: { parameters?: unknown; rules?: unknown; function_config?: unknown },
   semantics: { semanticsVersion: number; executionMode: string; deletePolicy: string },
 ): string {
@@ -560,7 +549,7 @@ function currentDefinitionHashFor(
  * Resolve an object type API name to its object_type_id.
  * Returns { objectTypeId, properties } or throws VALIDATION_FAILED.
  */
-async function resolveObjectType(
+export async function resolveObjectType(
   ontologyId: string,
   objectTypeApiName: string,
   contextMsg: string
@@ -612,7 +601,7 @@ async function resolveObjectType(
   };
 }
 
-function validateOptionalMetadata(body: Record<string, unknown>): string[] {
+export function validateOptionalMetadata(body: Record<string, unknown>): string[] {
   const errors: string[] = [];
   if (body.icon !== undefined && body.icon !== null) {
     if (typeof body.icon !== "string" || !/^[a-z][a-z0-9-]{0,99}$/.test(body.icon)) {
@@ -635,7 +624,7 @@ function validateOptionalMetadata(body: Record<string, unknown>): string[] {
   return errors;
 }
 
-function validateValueSource(
+export function validateValueSource(
   value: unknown,
   path: string,
   paramNames: Set<string>,
@@ -686,7 +675,7 @@ function validateValueSource(
   return [];
 }
 
-function validateGeneratedSequenceSource(
+export function validateGeneratedSequenceSource(
   value: unknown,
   path: string,
   ruleType: string,
@@ -732,7 +721,7 @@ interface ValidationContext {
 /**
  * Validate parameters array. Returns an array of error messages (empty = valid).
  */
-async function validateParameters(
+export async function validateParameters(
   params: unknown[],
   ontologyId: string
 ): Promise<string[]> {
@@ -883,7 +872,7 @@ async function validateParameters(
 /**
  * Validate rules array. Returns an array of error messages (empty = valid).
  */
-async function validateRules(
+export async function validateRules(
   rules: unknown[],
   ontologyId: string,
   paramNames: Set<string>,
@@ -1374,7 +1363,7 @@ async function validateRules(
  * rules. The legacy "enabled actions must declare at least one rule" guard
  * therefore applies only when no webhook binding is present.
  */
-function hasWebhookBinding(writeback: unknown, sideEffects: unknown): boolean {
+export function hasWebhookBinding(writeback: unknown, sideEffects: unknown): boolean {
   const wb = (writeback ?? undefined) as Record<string, unknown> | undefined;
   const se = (sideEffects ?? undefined) as Record<string, unknown> | undefined;
   return (
@@ -1383,7 +1372,7 @@ function hasWebhookBinding(writeback: unknown, sideEffects: unknown): boolean {
   );
 }
 
-async function validateWritebackConfig(
+export async function validateWritebackConfig(
   wb: unknown,
   ontologyId: string,
   paramNames: Set<string>,
@@ -1514,7 +1503,7 @@ async function validateWritebackConfig(
  *      must have a mapping. This replaces the registry-era
  *      "at least one input" heuristic with the webhook's own contract.
  */
-async function validateConnectivityWebhookBinding(
+export async function validateConnectivityWebhookBinding(
   webhookRid: string,
   webhookVersion: number,
   inputs: Record<string, unknown>,
@@ -1696,7 +1685,7 @@ async function validateConnectivityWebhookBinding(
   return errors;
 }
 
-async function validateWebhookInputFunction(
+export async function validateWebhookInputFunction(
   raw: unknown,
   parameters: Array<Record<string, unknown>>,
   webhookInputs: ReadonlyArray<{
@@ -1881,7 +1870,7 @@ interface LocatedWritebackSource {
   pointer: string;
 }
 
-function collectWritebackSources(
+export function collectWritebackSources(
   value: unknown,
   path: string,
   found: LocatedWritebackSource[],
@@ -1910,7 +1899,7 @@ function collectWritebackSources(
   }
 }
 
-function decodeJsonPointer(pointer: string): string[] | null {
+export function decodeJsonPointer(pointer: string): string[] | null {
   if (pointer === "" || pointer === "/") return [];
   if (!pointer.startsWith("/")) return null;
   const parts = pointer.slice(1).split("/");
@@ -1949,7 +1938,7 @@ export function resolveWebhookOutputPath(
  * webhook version. This is deliberately independent of the editor: stale
  * output ids and nested paths are rejected again on save.
  */
-async function validateWritebackOutputReferences(
+export async function validateWritebackOutputReferences(
   rules: unknown[],
   writebackConfig: unknown,
   tenant: string,
@@ -2035,7 +2024,7 @@ async function validateWritebackOutputReferences(
  * supported; newly-authored UI bindings use the connectivity RID/version
  * form and share the same immutable-contract validation as writebacks.
  */
-async function validateSideEffectsConfig(
+export async function validateSideEffectsConfig(
   value: unknown,
   paramNames: Set<string>,
   parameters: Array<Record<string, unknown>>,
@@ -2118,7 +2107,7 @@ async function validateSideEffectsConfig(
 // is absent. New FE-authored rules MUST emit `linkType` only.
 // ---------------------------------------------------------------------------
 
-async function validateConcreteLinkRule(
+export async function validateConcreteLinkRule(
   rule: Record<string, unknown>,
   idx: string,
   paramNames: Set<string>,
@@ -2188,7 +2177,7 @@ async function validateConcreteLinkRule(
 // at execution time.
 // ---------------------------------------------------------------------------
 
-async function validateInterfaceLinkRule(
+export async function validateInterfaceLinkRule(
   rule: Record<string, unknown>,
   idx: string,
   paramNames: Set<string>,
@@ -2253,1674 +2242,3 @@ async function validateInterfaceLinkRule(
     errors.push(...validateValueSource(rule.target, `${idx}.target`, paramNames));
   }
 }
-
-// ---------------------------------------------------------------------------
-// Endpoint 1: POST / (Create Action Type)
-// ---------------------------------------------------------------------------
-
-router.post(
-  "/",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId } = req.params;
-      const body = req.body;
-
-      // --- Basic field validation ---
-
-      // apiName
-      if (!body.apiName || typeof body.apiName !== "string") {
-        sendError(res, "VALIDATION_FAILED", "apiName is required and must be a string.");
-        return;
-      }
-      if (!API_NAME_RE.test(body.apiName)) {
-        sendError(
-          res,
-          "VALIDATION_FAILED",
-          "apiName must start with a letter and contain only letters, numbers, and underscores (max 100 characters)"
-        );
-        return;
-      }
-
-      // displayName
-      if (!body.displayName || typeof body.displayName !== "string" || body.displayName.trim() === "") {
-        sendError(res, "VALIDATION_FAILED", "displayName is required and must be a non-empty string.");
-        return;
-      }
-      if (body.displayName.length > 200) {
-        sendError(res, "VALIDATION_FAILED", "displayName must be at most 200 characters.");
-        return;
-      }
-
-      // description
-      if (body.description !== undefined && typeof body.description !== "string") {
-        sendError(res, "VALIDATION_FAILED", "description must be a string.");
-        return;
-      }
-
-      const metadataErrors = validateOptionalMetadata(body);
-      if (metadataErrors.length > 0) {
-        sendError(res, "VALIDATION_FAILED", metadataErrors.join(" "), { validationErrors: metadataErrors });
-        return;
-      }
-
-      // maxAffectedObjects
-      const maxAffected = body.maxAffectedObjects ?? 10000;
-      if (typeof maxAffected !== "number" || !Number.isInteger(maxAffected) || maxAffected < 1 || maxAffected > 100000) {
-        sendError(
-          res,
-          "VALIDATION_FAILED",
-          "maxAffectedObjects must be a positive integer up to 100,000."
-        );
-        return;
-      }
-
-      // parameters
-      const params = body.parameters ?? [];
-      if (!Array.isArray(params)) {
-        sendError(res, "VALIDATION_FAILED", "parameters must be an array.");
-        return;
-      }
-
-      const paramErrors = await validateParameters(params, ontologyId);
-      if (paramErrors.length > 0) {
-        sendError(res, "VALIDATION_FAILED", paramErrors.join(" "), {
-          validationErrors: paramErrors,
-        });
-        return;
-      }
-      const persistedParams = ensureParameterRids(params);
-
-      // rules
-      const isFunctionAction = body.executionMode === "function";
-      const isDraft = body.isEnabled === false;
-      const rules = body.rules ?? [];
-      // Webhook-backed actions are meaningful with zero edit rules — the
-      // binding IS the action's logic (mappings completed in Logic).
-      if (
-        !Array.isArray(rules) ||
-        (!isFunctionAction &&
-          !isDraft &&
-          !hasWebhookBinding(body.writebackConfig, body.sideEffects) &&
-          rules.length === 0)
-      ) {
-        sendError(
-          res,
-          "VALIDATION_FAILED",
-          isFunctionAction
-            ? "rules must be an array."
-            : "rules must be a non-empty array (an action with no rules is meaningless)."
-        );
-        return;
-      }
-      if (isFunctionAction && rules.length > 0) {
-        sendError(
-          res,
-          "FUNCTION_CONFIG_INVALID",
-          "Function-backed Action Types cannot also declare declarative rules.",
-        );
-        return;
-      }
-
-      // Build parameter name set for rule validation
-      const paramNames = new Set<string>(
-        params.map((p: Record<string, unknown>) => p.apiName as string)
-      );
-
-      const ruleErrors = isFunctionAction || rules.length === 0
-        ? []
-        : await validateRules(rules, ontologyId, paramNames, params);
-      if (ruleErrors.length > 0) {
-        sendError(res, "VALIDATION_FAILED", ruleErrors.join(" "), {
-          validationErrors: ruleErrors,
-        });
-        return;
-      }
-      const persistedRules = ensureRuleRids(
-        rules.filter(
-          (rule: unknown): rule is Record<string, unknown> =>
-            !!rule && typeof rule === "object" && !Array.isArray(rule),
-        ),
-      );
-
-      if (isFunctionAction) {
-        const functionErrors = await validateFunctionConfig(body.functionConfig, params);
-        if (functionErrors.length > 0) {
-          sendError(res, "FUNCTION_CONFIG_INVALID", functionErrors.join(" "), {
-            validationErrors: functionErrors,
-          });
-          return;
-        }
-      } else if (body.functionConfig != null) {
-        sendError(
-          res,
-          "FUNCTION_CONFIG_INVALID",
-          "functionConfig is only valid when executionMode is 'function'.",
-        );
-        return;
-      }
-
-      // Phase 4 — writeback_config validation (one-writeback-per-action
-      // invariant is structural in DB migration 130; this validates the
-      // shape, the webhook reference, and the input-mapping's ValueSources).
-      // Creation is the authoring boundary: shape/status/membership of the
-      // webhook binding are validated here, but input-mapping COMPLETENESS
-      // (requireComplete) is not — the UI flow authors mappings in Logic
-      // after create. Completeness is enforced at the next checkpoint:
-      // PATCH on an enabled action re-validates with requireComplete=true.
-      const wbErrors = await validateWritebackConfig(
-        body.writebackConfig,
-        ontologyId,
-        paramNames,
-        params,
-        resolveRequestTenant(req),
-        false,
-      );
-      if (wbErrors.length > 0) {
-        sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
-          validationErrors: wbErrors,
-        });
-        return;
-      }
-      const writebackReferenceErrors =
-        await validateWritebackOutputReferences(
-          rules,
-          body.writebackConfig,
-          resolveRequestTenant(req),
-        );
-      if (writebackReferenceErrors.length > 0) {
-        sendError(
-          res,
-          "WRITEBACK_CONFIG_INVALID",
-          writebackReferenceErrors.join(" "),
-          { validationErrors: writebackReferenceErrors },
-        );
-        return;
-      }
-      const sideEffectErrors = await validateSideEffectsConfig(
-        body.sideEffects,
-        paramNames,
-        params,
-        ontologyId,
-        resolveRequestTenant(req),
-        false,
-      );
-      if (sideEffectErrors.length > 0) {
-        sendError(res, "SIDE_EFFECTS_INVALID", sideEffectErrors.join(" "), {
-          validationErrors: sideEffectErrors,
-        });
-        return;
-      }
-
-      // --- Action semantics validation (§1, §9, §10) ---
-      //
-      // Backward-compatible contract:
-      //   * Omitted semanticsVersion on the legacy create endpoint →
-      //     persisted as version 1 + legacy_unchecked + declarative, and a
-      //     deprecation telemetry counter is incremented (action_legacy_default_used_total).
-      //   * Explicit semanticsVersion: 2 → executionMode/deletePolicy are
-      //     defaulted server-side to v2 values when the caller omits them.
-      //   * Unknown semantics versions fail closed (never silently run as v1).
-      //   * Function executionMode is rejected until implemented.
-      //   * Changing semantics happens through the dedicated migration
-      //     endpoint, NOT a generic PATCH (§12) — so UpdateActionTypeInput
-      //     does not carry semantics fields.
-      const semanticsVersion = body.semanticsVersion;
-      let resolvedSemanticsVersion: ActionSemanticsVersion | undefined;
-      let resolvedExecutionMode: ActionExecutionMode | undefined;
-      let resolvedDeletePolicy: DeletePolicy | undefined;
-
-      if (semanticsVersion === undefined) {
-        // Legacy-omit path: persisted as version 1, deprecation telemetry.
-        resolvedSemanticsVersion = V1_DEFAULT_SEMANTICS.semanticsVersion;
-        resolvedExecutionMode = V1_DEFAULT_SEMANTICS.executionMode;
-        resolvedDeletePolicy = V1_DEFAULT_SEMANTICS.deletePolicy;
-        // Deprecation counter (best-effort; metrics must never block create).
-        try {
-          const { incCounter } = await import("../services/funnel/metrics");
-          incCounter("tellus_action_legacy_default_used_total", {
-            stage: "action_type_create",
-          });
-        } catch {
-          /* ignore — observability is non-blocking */
-        }
-      } else {
-        // Explicit version supplied — validate the combination.
-        const sv = validateActionSemantics({
-          semanticsVersion,
-          executionMode: body.executionMode,
-          deletePolicy: body.deletePolicy,
-        });
-        if (!sv.valid) {
-          const e = sv.error!;
-          sendError(res, e.code, e.message, { stage: "definition" });
-          return;
-        }
-        // Fail closed: v2 creation is gated behind the feature flag until DB
-        // verification (locking, concurrency, query plans, E2E) passes. We
-        // never silently persist a v2 action type whose behaviour isn't
-        // enforced. Compilation + unit tests are NOT sufficient to flip this.
-        if (semanticsVersion === 2 && !isV2CreationEnabled()) {
-          sendError(
-            res,
-            "UNSUPPORTED_SEMANTICS_VERSION",
-            "Version-2 action-type creation is not enabled on this deployment. Existing version-1 behaviour is unchanged. Set ACTION_SEMANTICS_V2_CREATION_ENABLED=1 after completing the v2 verification runbook.",
-            { requestedVersion: semanticsVersion, stage: "definition" },
-          );
-          return;
-        }
-        resolvedSemanticsVersion = semanticsVersion as ActionSemanticsVersion;
-        // Default omitted mode/policy according to the requested version.
-        const defaults = resolvedSemanticsVersion === 2 ? V2_DEFAULT_SEMANTICS : V1_DEFAULT_SEMANTICS;
-        resolvedExecutionMode = (body.executionMode as ActionExecutionMode) ?? defaults.executionMode;
-        resolvedDeletePolicy = (body.deletePolicy as DeletePolicy) ?? defaults.deletePolicy;
-      }
-
-      // --- Create the action type ---
-      const row = await createActionType(ontologyId, {
-        apiName: body.apiName,
-        displayName: body.displayName,
-        description: body.description,
-        iconName: body.icon ?? null,
-        iconColor: body.iconColor ?? null,
-        saveLocationRid: body.saveLocationRid ?? null,
-        parameters: persistedParams,
-        rules: persistedRules,
-        submissionCriteria: body.submissionCriteria ?? null,
-        sideEffects: body.sideEffects ?? null,
-        writebackConfig: body.writebackConfig ?? null,
-        functionConfig: body.functionConfig ?? null,
-        maxAffectedObjects: maxAffected,
-        isEnabled: body.isEnabled ?? true,
-        createdBy: actorOf(req),
-        semanticsVersion: resolvedSemanticsVersion,
-        executionMode: resolvedExecutionMode,
-        deletePolicy: resolvedDeletePolicy,
-      });
-
-      sendCreated(res, formatActionType(row));
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message, err.details);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint 2: GET / (List Action Types)
-// ---------------------------------------------------------------------------
-
-router.get(
-  "/",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId } = req.params;
-
-      const rows = await listActionTypes(ontologyId);
-      const data = rows.map((row) => formatActionType(row));
-
-      sendSuccess(res, { data });
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint 3: GET /by-rid/:rid (Get Action Type by RID)
-// ---------------------------------------------------------------------------
-
-router.get(
-  "/by-rid/:rid",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { rid } = req.params;
-
-      if (!rid || typeof rid !== "string") {
-        sendError(res, "INVALID_PARAMETER", "rid is required and must be a string");
-        return;
-      }
-
-      const row = await getActionTypeByRid(rid);
-      if (!row) {
-        throw new OntologyError(
-          `Action type with RID '${rid}' not found`,
-          "ACTION_TYPE_NOT_FOUND",
-          undefined,
-          { rid }
-        );
-      }
-
-      sendSuccess(res, formatActionType(row));
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint 4: POST /by-rid/batch (Get Action Types by RIDs Batch)
-// ---------------------------------------------------------------------------
-
-router.post(
-  "/by-rid/batch",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const body = req.body;
-      const rids: string[] = body.rids ?? body;
-
-      if (!Array.isArray(rids)) {
-        sendError(res, "INVALID_PARAMETER", "rids must be an array of RID strings");
-        return;
-      }
-
-      if (rids.length === 0) {
-        sendSuccess(res, { data: [] });
-        return;
-      }
-
-      if (rids.length > 500) {
-        sendError(res, "INVALID_PARAMETER", "Maximum 500 RIDs allowed per batch request");
-        return;
-      }
-
-      const rows = await getActionTypesByRidBatch(rids);
-      const data = rows.map((row) => formatActionType(row));
-
-      sendSuccess(res, { data });
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint 5: GET /:actionApiName (Get Single Action Type)
-// ---------------------------------------------------------------------------
-
-router.get(
-  "/:actionApiName",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-
-      const row = await getActionType(ontologyId, actionApiName);
-      if (!row) {
-        throw new OntologyError(
-          `Action type '${actionApiName}' not found in ontology '${ontologyId}'`,
-          "ACTION_TYPE_NOT_FOUND",
-          undefined,
-          { actionTypeApiName: actionApiName, ontologyId }
-        );
-      }
-
-      // Phase 6.2 — ETag header so a client can stamp `If-Match: <Etag>`
-      // on its next PATCH for optimistic-concurrency enforcement. The
-      // ETag is the persisted `definition_version` (migration 132
-      // backfills to 1 + bumps on every structural change via the
-      // BEFORE-UPDATE trigger wrapped as a strong ETag.
-      const version = Number(row.definition_version ?? 1);
-      if (Number.isInteger(version)) {
-        res.set("ETag", `"${version}"`);
-      }
-      sendSuccess(res, formatActionType(row));
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint 6: PUT/PATCH /:actionApiName (Update Action Type)
-// ---------------------------------------------------------------------------
-
-const updateActionTypeHandler = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-      const body = req.body;
-
-      // Verify the action type exists first
-      const existing = await getActionType(ontologyId, actionApiName);
-      if (!existing) {
-        throw new OntologyError(
-          `Action type '${actionApiName}' not found in ontology '${ontologyId}'`,
-          "ACTION_TYPE_NOT_FOUND",
-          undefined,
-          { actionTypeApiName: actionApiName, ontologyId }
-        );
-      }
-      // --- Phase 6.2 — optimistic-concurrency If-Match guard ----------------
-      //
-      // Migration 132 (Phase 1) already stamps every row with
-      // `definition_version` + `definition_hash`. The route-layer PATCH
-      // surface here closes the wire-side contract: a client may stamp
-      // `If-Match: <version>` on its update request. The persisted version
-      // is the source of truth; on mismatch we 412 with structured details
-      // (expected vs forwarded + the new `definition_hash` for the
-      // operator to see what changed underneath them).
-      //
-      // Absence of If-Match is permitted (the action-type management route
-      // is only writable by editors today per `dataPlaneGuard`). Phase 6.6
-      // ships a forward-looking opt-in to make If-Match STRICT (env-gated).
-      const ifMatchHeader = req.get("If-Match");
-      if (ifMatchHeader !== undefined && ifMatchHeader !== null && ifMatchHeader !== "") {
-        // Strip weak-ETag wrapping (`W/"1"`, `"1"`, `1`) — Phase 6.2
-        // accepts the bare integer OR the ETag-wrapped form so the
-        // client can pass either the raw version or a quoted string.
-        const cleanedHeader = ifMatchHeader.replace(/^W\//, "").replace(/^"/, "").replace(/"$/, "").trim();
-        const expectedVersion = parseInt(cleanedHeader, 10);
-        const persistedVersion = Number(existing.definition_version ?? 1);
-        if (!Number.isInteger(expectedVersion) || expectedVersion !== persistedVersion) {
-          throw new OntologyError(
-            `If-Match version ${ifMatchHeader} does not match persisted version ${persistedVersion} of action type '${actionApiName}'.`,
-            "PRECONDITION_FAILED",
-            412,
-            {
-              actionTypeApiName: actionApiName,
-              ontologyId,
-              expectedVersion: ifMatchHeader,
-              persistedVersion,
-              definitionHash: existing.definition_hash ?? null,
-            },
-          );
-        }
-      }
-
-      // --- Validate updatable fields ---
-
-      // displayName
-      if (body.displayName !== undefined) {
-        if (typeof body.displayName !== "string" || body.displayName.trim() === "") {
-          sendError(res, "VALIDATION_FAILED", "displayName must be a non-empty string.");
-          return;
-        }
-        if (body.displayName.length > 200) {
-          sendError(res, "VALIDATION_FAILED", "displayName must be at most 200 characters.");
-          return;
-        }
-      }
-
-      // description
-      if (body.description !== undefined && typeof body.description !== "string") {
-        sendError(res, "VALIDATION_FAILED", "description must be a string.");
-        return;
-      }
-
-      const metadataErrors = validateOptionalMetadata(body);
-      if (metadataErrors.length > 0) {
-        sendError(res, "VALIDATION_FAILED", metadataErrors.join(" "), { validationErrors: metadataErrors });
-        return;
-      }
-
-      // maxAffectedObjects
-      if (body.maxAffectedObjects !== undefined) {
-        if (
-          typeof body.maxAffectedObjects !== "number" ||
-          !Number.isInteger(body.maxAffectedObjects) ||
-          body.maxAffectedObjects < 1 ||
-          body.maxAffectedObjects > 100000
-        ) {
-          sendError(
-            res,
-            "VALIDATION_FAILED",
-            "maxAffectedObjects must be a positive integer up to 100,000."
-          );
-          return;
-        }
-      }
-
-      // isEnabled
-      if (body.isEnabled !== undefined && typeof body.isEnabled !== "boolean") {
-        sendError(res, "VALIDATION_FAILED", "isEnabled must be a boolean.");
-        return;
-      }
-
-      // Determine the effective parameters and rules for cross-validation.
-      // If parameters or rules are being updated, use the new values;
-      // otherwise, use the existing values from the database.
-      const effectiveParams: unknown[] = body.parameters !== undefined
-        ? body.parameters
-        : (existing.parameters as unknown[]);
-      const effectiveRules: unknown[] = body.rules !== undefined
-        ? body.rules
-        : (existing.rules as unknown[]);
-      const effectiveWriteback =
-        body.writebackConfig !== undefined
-          ? body.writebackConfig
-          : existing.writeback_config;
-      const effectiveSideEffects =
-        body.sideEffects !== undefined
-          ? body.sideEffects
-          : existing.side_effects;
-      const resultingEnabled =
-        body.isEnabled !== undefined ? body.isEnabled : existing.is_enabled;
-
-      // --- Function-backed actions (Action Semantics v2) -------------------
-      //
-      // Mirror the POST create contract on partial updates: a Function-backed
-      // action carries NO declarative rules — its `functionConfig` is the
-      // action's logic — and every declared Function input must exist as an
-      // action parameter. `executionMode` may flip between "declarative" and
-      // "function"; persistence of either column is partial-update style.
-      if (
-        body.executionMode !== undefined &&
-        body.executionMode !== "declarative" &&
-        body.executionMode !== "function"
-      ) {
-        sendError(
-          res,
-          "VALIDATION_FAILED",
-          "executionMode must be 'declarative' or 'function'."
-        );
-        return;
-      }
-      const effectiveExecutionMode =
-        body.executionMode !== undefined
-          ? body.executionMode
-          : existing.execution_mode;
-      const isFunctionAction = effectiveExecutionMode === "function";
-
-      // Validate parameters if provided
-      if (body.parameters !== undefined) {
-        if (!Array.isArray(body.parameters)) {
-          sendError(res, "VALIDATION_FAILED", "parameters must be an array.");
-          return;
-        }
-        const paramErrors = await validateParameters(body.parameters, ontologyId);
-        if (paramErrors.length > 0) {
-          sendError(res, "VALIDATION_FAILED", paramErrors.join(" "), {
-            validationErrors: paramErrors,
-          });
-          return;
-        }
-      }
-
-      // Rule-validation errors: hard errors block; a required-property
-      // mapping gap on UPDATE is downgraded to a migration warning (see
-      // below). Both arrays accumulate across this request's single pass.
-      const ruleErrors: string[] = [];
-      const downgradedRuleWarnings: string[] = [];
-
-      // Validate rules if provided, or re-validate existing rules against new params
-      if (
-        body.rules !== undefined ||
-        body.parameters !== undefined ||
-        body.isEnabled === true
-      ) {
-        const rulesToValidate = effectiveRules;
-        if (!Array.isArray(rulesToValidate) || rulesToValidate.length === 0) {
-          // Webhook-backed AND Function-backed actions need no edit rules
-          // (see POST create): the binding/config IS the action's logic.
-          if (
-            resultingEnabled &&
-            !isFunctionAction &&
-            !hasWebhookBinding(effectiveWriteback, effectiveSideEffects)
-          ) {
-            sendError(
-              res,
-              "VALIDATION_FAILED",
-              "rules must be a non-empty array (an action with no rules is meaningless)."
-            );
-            return;
-          }
-        } else {
-          if (isFunctionAction) {
-            sendError(
-              res,
-              "FUNCTION_CONFIG_INVALID",
-              "Function-backed Action Types cannot also declare declarative rules."
-            );
-            return;
-          }
-          const paramNames = new Set<string>(
-            (effectiveParams as Array<Record<string, unknown>>).map(
-              (p) => p.apiName as string
-            )
-          );
-          const allRuleErrors = await validateRules(
-            rulesToValidate,
-            ontologyId,
-            paramNames,
-            effectiveParams as Array<Record<string, unknown>>,
-          );
-          // UPDATE semantics (Task 26): a breaking schema migration must
-          // persist with warnings rather than hard-fail. The canonical
-          // breaking-change class is a create/modifyOrCreate rule that no
-          // longer maps a required property (the object type may have
-          // gained a requirement, or the parameter backing the mapping was
-          // removed). Creation stays strict — this leniency is only for
-          // evolution of an existing definition, surfaced to the caller as
-          // migrationWarnings. Every other validation error remains fatal.
-          const REQUIRED_PROPERTY_MAPPING =
-            /^rules\[\d+\]\.properties must map required property /;
-          for (const e of allRuleErrors) {
-            if (REQUIRED_PROPERTY_MAPPING.test(e)) {
-              downgradedRuleWarnings.push(e);
-            } else {
-              ruleErrors.push(e);
-            }
-          }
-          if (ruleErrors.length > 0) {
-            sendError(res, "VALIDATION_FAILED", ruleErrors.join(" "), {
-              validationErrors: ruleErrors,
-            });
-            return;
-          }
-        }
-      }
-
-      // Phase 4 — validate writeback_config on PATCH (when provided).
-      // Use the EFFECTIVE parameter name set: if parameters are being
-      // updated, the new ones; otherwise the existing ones on disk so the
-      // value-source resolver can verify the new writeback_config's
-      // input mappings reference still-existing parameters.
-      if (body.writebackConfig !== undefined || body.isEnabled === true) {
-        const paramNames = new Set<string>(
-          (effectiveParams as Array<Record<string, unknown>>).map(
-            (p) => p.apiName as string
-          )
-        );
-        const wbErrors = await validateWritebackConfig(
-          effectiveWriteback,
-          ontologyId,
-          paramNames,
-          effectiveParams as Array<Record<string, unknown>>,
-          resolveRequestTenant(req),
-          resultingEnabled,
-        );
-        if (wbErrors.length > 0) {
-          sendError(res, "WRITEBACK_CONFIG_INVALID", wbErrors.join(" "), {
-            validationErrors: wbErrors,
-          });
-          return;
-        }
-      }
-      if (
-        body.rules !== undefined ||
-        body.writebackConfig !== undefined ||
-        body.isEnabled === true
-      ) {
-        const writebackReferenceErrors =
-          await validateWritebackOutputReferences(
-            effectiveRules,
-            effectiveWriteback,
-            resolveRequestTenant(req),
-          );
-        if (writebackReferenceErrors.length > 0) {
-          sendError(
-            res,
-            "WRITEBACK_CONFIG_INVALID",
-            writebackReferenceErrors.join(" "),
-            { validationErrors: writebackReferenceErrors },
-          );
-          return;
-        }
-      }
-      if (body.sideEffects !== undefined || body.parameters !== undefined || body.isEnabled === true) {
-        const paramNames = new Set<string>(
-          (effectiveParams as Array<Record<string, unknown>>).map(
-            (p) => p.apiName as string
-          )
-        );
-        const sideEffectErrors = await validateSideEffectsConfig(
-          effectiveSideEffects,
-          paramNames,
-          effectiveParams as Array<Record<string, unknown>>,
-          ontologyId,
-          resolveRequestTenant(req),
-          resultingEnabled,
-        );
-        if (sideEffectErrors.length > 0) {
-          sendError(res, "SIDE_EFFECTS_INVALID", sideEffectErrors.join(" "), {
-            validationErrors: sideEffectErrors,
-          });
-          return;
-        }
-      }
-
-      // --- Build the update payload (snake_case for the model) ---
-      const updates: UpdateActionTypeInput = {};
-
-      if (body.displayName !== undefined) updates.display_name = body.displayName;
-      if (body.description !== undefined) updates.description = body.description;
-      if (body.icon !== undefined) updates.icon_name = body.icon;
-      if (body.iconColor !== undefined) updates.icon_color = body.iconColor;
-      if (body.saveLocationRid !== undefined) updates.save_location_rid = body.saveLocationRid;
-      if (body.parameters !== undefined) {
-        updates.parameters = ensureParameterRids(
-          body.parameters as Array<Record<string, unknown>>,
-          Array.isArray(existing.parameters)
-            ? (existing.parameters as Array<Record<string, unknown>>)
-            : [],
-        );
-      }
-      if (body.rules !== undefined) {
-        updates.rules = ensureRuleRids(
-          body.rules.filter(
-            (rule: unknown): rule is Record<string, unknown> =>
-              !!rule && typeof rule === "object" && !Array.isArray(rule),
-          ),
-          Array.isArray(existing.rules)
-            ? existing.rules.filter(
-                (rule: unknown): rule is Record<string, unknown> =>
-                  !!rule && typeof rule === "object" && !Array.isArray(rule),
-              )
-            : [],
-        );
-      }
-      // Function-backed action: validate the effective functionConfig
-      // against the effective action parameters (auto-created inputs)
-      // before persisting either — mirrors the POST create gate.
-      if (
-        isFunctionAction &&
-        (body.functionConfig !== undefined ||
-          body.executionMode !== undefined ||
-          body.parameters !== undefined)
-      ) {
-        const effectiveFunctionConfig =
-          body.functionConfig !== undefined
-            ? body.functionConfig
-            : existing.function_config;
-        const functionErrors = await validateFunctionConfig(
-          effectiveFunctionConfig,
-          effectiveParams as Array<Record<string, unknown>>,
-        );
-        if (functionErrors.length > 0) {
-          sendError(res, "FUNCTION_CONFIG_INVALID", functionErrors.join(" "), {
-            validationErrors: functionErrors,
-          });
-          return;
-        }
-      }
-      if (body.submissionCriteria !== undefined) updates.submission_criteria = body.submissionCriteria;
-      if (body.sideEffects !== undefined) updates.side_effects = body.sideEffects;
-      if (body.writebackConfig !== undefined) updates.writeback_config = body.writebackConfig;
-      if (body.functionConfig !== undefined) updates.function_config = body.functionConfig;
-      if (body.executionMode !== undefined) updates.execution_mode = body.executionMode;
-      // Migration 173 — normalized (unknown keys dropped, all-defaults → NULL)
-      // before it reaches a security-relevant column.
-      if (body.securitySettings !== undefined) {
-        updates.security_settings = normalizeActionSecuritySettings(
-          body.securitySettings,
-        );
-      }
-      if (body.maxAffectedObjects !== undefined) updates.max_affected_objects = body.maxAffectedObjects;
-      if (body.isEnabled !== undefined) updates.is_enabled = body.isEnabled;
-
-      if (Object.keys(updates).length === 0) {
-        sendError(
-          res,
-          "VALIDATION_FAILED",
-          "At least one updatable field must be provided."
-        );
-        return;
-      }
-
-      // -----------------------------------------------------------------
-      // Schema Migration Validation (Task 26)
-      //
-      // Before applying the update, validate backward-compatibility with
-      // existing audit log entries and historical usage. Warnings are
-      // included in the response for the UI to display.
-      // -----------------------------------------------------------------
-      const currentSchema: CurrentSchema = {
-        parameters: existing.parameters as any[],
-        rules: existing.rules as any[],
-        max_affected_objects: existing.max_affected_objects,
-      };
-
-      const proposedSchema: ProposedSchema = {};
-      if (body.parameters !== undefined) proposedSchema.parameters = body.parameters;
-      if (body.rules !== undefined) proposedSchema.rules = body.rules;
-      if (body.maxAffectedObjects !== undefined) proposedSchema.maxAffectedObjects = body.maxAffectedObjects;
-
-      // Query recent execution stats for detection #5 (maxAffectedObjects reduction)
-      let recentStats: RecentExecutionStats | null = null;
-      if (body.maxAffectedObjects !== undefined && body.maxAffectedObjects < existing.max_affected_objects) {
-        const statsResult = await query(
-          `SELECT COALESCE(MAX(affected_object_count), 0) AS max_count
-           FROM action_audit_log
-           WHERE action_type_api_name = $1
-             AND executed_at > NOW() - INTERVAL '30 days'`,
-          [actionApiName]
-        );
-        recentStats = {
-          maxAffectedCount: parseInt(statsResult.rows[0].max_count, 10),
-        };
-      }
-
-      const migration = validateSchemaMigration(currentSchema, proposedSchema, recentStats);
-
-      const updatedRow = await updateActionType(ontologyId, actionApiName, updates);
-
-      // Post-save blast radius: same classification the pre-save preview
-      // returned, recomputed against the now-persisted definition.
-      let postSaveBlastRadius: import("../services/automate/blastRadius").BlastRadiusResult | null = null;
-      try {
-        postSaveBlastRadius = await computeActionTypeBlastRadius(
-          pool,
-          resolveRequestTenant(req),
-          updatedRow.action_type_id,
-          actionDefinitionInputFromRow(updatedRow),
-          updatedRow.definition_version ?? 1,
-        );
-      } catch {
-        postSaveBlastRadius = null; // advisory only — never fails the save
-      }
-
-      // Build response — include migration warnings if any exist
-      const responseData: Record<string, unknown> = formatActionType(updatedRow);
-      if (downgradedRuleWarnings.length > 0 || !migration.safe) {
-        responseData.migrationWarnings = [
-          ...downgradedRuleWarnings,
-          ...migration.warnings,
-          ...migration.breakingChanges,
-        ];
-      }
-      if (postSaveBlastRadius && postSaveBlastRadius.total > 0) {
-        responseData.blastRadius = postSaveBlastRadius;
-      }
-
-      sendSuccess(res, responseData);
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message, err.details);
-      }
-      next(err);
-    }
-};
-
-// PUT is the established Tellus route. PATCH is intentionally supported as
-// an equivalent partial-update alias so clients that follow the OpenAPI-style
-// update convention do not fail at routing before validation/persistence.
-// ---------------------------------------------------------------------------
-// Pre-save blast radius preview. Body = the same partial-update payload as
-// PUT /:actionApiName. Returns the classifier-driven per-pin verdicts over
-// every automation (draft or active version) pinning this action type —
-// so UIs can warn BEFORE the save happens.
-// ---------------------------------------------------------------------------
-router.post(
-  "/:actionApiName/blastRadius",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-      const existing = await getActionType(ontologyId, actionApiName);
-      if (!existing) {
-        sendError(res, "ACTION_TYPE_NOT_FOUND", `Action type '${actionApiName}' not found.`);
-        return;
-      }
-      const body = req.body ?? {};
-      // Candidate = existing semantic columns with candidate payload merged
-      // (omitted fields stay) — mirrors updateActionType's merge semantics.
-      const candidate = actionDefinitionInputFromRow({
-        ...existing,
-        ...(body.parameters !== undefined ? { parameters: body.parameters } : {}),
-        ...(body.rules !== undefined ? { rules: body.rules } : {}),
-        ...(body.submissionCriteria !== undefined ? { submission_criteria: body.submissionCriteria } : {}),
-        ...(body.sideEffects !== undefined ? { side_effects: body.sideEffects } : {}),
-        ...(body.writebackConfig !== undefined ? { writeback_config: body.writebackConfig } : {}),
-        ...(body.functionConfig !== undefined ? { function_config: body.functionConfig } : {}),
-        ...(body.semanticsVersion !== undefined || body.executionMode !== undefined || body.deletePolicy !== undefined
-          ? {
-              semantics_version: body.semanticsVersion ?? existing.semantics_version,
-              execution_mode: body.executionMode ?? existing.execution_mode,
-              delete_policy: body.deletePolicy ?? existing.delete_policy,
-            }
-          : {}),
-      });
-      const blastRadius = await computeActionTypeBlastRadius(
-        pool,
-        resolveRequestTenant(req),
-        existing.action_type_id,
-        candidate,
-        // The bump trigger increments the version on semantic drift — the
-        // new version is what pins will eventually point at.
-        (existing.definition_version ?? 1) + 1,
-      );
-      res.status(200).json({ data: { actionTypeId: existing.action_type_id, actionApiName, blastRadius } });
-    } catch (err: any) {
-      next(err);
-    }
-  },
-);
-
-router
-  .route("/:actionApiName")
-  .put(updateActionTypeHandler)
-  .patch(updateActionTypeHandler);
-
-// ---------------------------------------------------------------------------
-// Endpoint 5: POST /:actionApiName/clone (Clone Action Type) — Task 23
-//
-// Creates a deep copy of an existing action type with a new API name. The
-// clone is completely independent — changes to either action type don't
-// affect the other. All JSONB fields (parameters, rules, submission_criteria,
-// side_effects) are deep-copied. is_enabled and max_affected_objects are
-// preserved from the source.
-// ---------------------------------------------------------------------------
-
-router.post(
-  "/:actionApiName/clone",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-      const body = req.body || {};
-
-      // 1. Fetch the source action type
-      const source = await getActionType(ontologyId, actionApiName);
-      if (!source) {
-        throw new OntologyError(
-          `Action type '${actionApiName}' not found in ontology '${ontologyId}'`,
-          "ACTION_TYPE_NOT_FOUND",
-          undefined,
-          { actionTypeApiName: actionApiName, ontologyId }
-        );
-      }
-
-      // 2. Validate newApiName
-      if (!body.newApiName || typeof body.newApiName !== "string") {
-        sendError(
-          res,
-          "VALIDATION_FAILED",
-          "newApiName is required and must be a non-empty string."
-        );
-        return;
-      }
-
-      if (!API_NAME_RE.test(body.newApiName)) {
-        sendError(
-          res,
-          "VALIDATION_FAILED",
-          "newApiName must start with a letter and contain only letters, numbers, and underscores (max 100 characters)"
-        );
-        return;
-      }
-
-      // 3. Determine newDisplayName
-      const newDisplayName =
-        body.newDisplayName && typeof body.newDisplayName === "string"
-          ? body.newDisplayName
-          : `Copy of ${source.display_name}`;
-      const sourceSemanticsVersion: ActionSemanticsVersion | undefined =
-        source.semantics_version === 1 || source.semantics_version === 2
-          ? source.semantics_version
-          : undefined;
-      const sourceExecutionMode: ActionExecutionMode | undefined =
-        source.execution_mode === "declarative" ||
-        source.execution_mode === "function"
-          ? source.execution_mode
-          : undefined;
-      const sourceDeletePolicy: DeletePolicy | undefined =
-        source.delete_policy === "legacy_unchecked" ||
-        source.delete_policy === "restrict"
-          ? source.delete_policy
-          : undefined;
-      if (
-        source.semantics_version != null &&
-        sourceSemanticsVersion === undefined
-      ) {
-        throw appError(
-          "VALIDATION_FAILED",
-          `Cannot clone action type with unsupported semantics version '${source.semantics_version}'.`,
-        );
-      }
-      if (source.execution_mode != null && sourceExecutionMode === undefined) {
-        throw appError(
-          "VALIDATION_FAILED",
-          `Cannot clone action type with unsupported execution mode '${source.execution_mode}'.`,
-        );
-      }
-      if (source.delete_policy != null && sourceDeletePolicy === undefined) {
-        throw appError(
-          "VALIDATION_FAILED",
-          `Cannot clone action type with unsupported delete policy '${source.delete_policy}'.`,
-        );
-      }
-
-      // 4. Create the clone using the existing createActionType model function.
-      //    This handles uniqueness checking (throws ACTION_TYPE_ALREADY_EXISTS
-      //    on PG unique constraint violation) and api_name format validation.
-      const clonedRow = await createActionType(ontologyId, {
-        apiName: body.newApiName,
-        displayName: newDisplayName,
-        description: source.description,
-        iconName: source.icon_name,
-        iconColor: source.icon_color,
-        saveLocationRid: source.save_location_rid,
-        parameters: ensureParameterRids(
-          JSON.parse(JSON.stringify(source.parameters)).map(
-            (parameter: Record<string, unknown>) => {
-              const { rid: _sourceRid, ...definition } = parameter;
-              return definition;
-            },
-          ),
-        ),
-        rules: ensureRuleRids(
-          JSON.parse(JSON.stringify(source.rules)).map(
-            (rule: Record<string, unknown>) => {
-              const {
-                ruleId: _sourceRuleId,
-                schemaVersion: _sourceSchemaVersion,
-                ...definition
-              } = rule;
-              return definition;
-            },
-          ),
-        ),
-        submissionCriteria: source.submission_criteria != null
-          ? JSON.parse(JSON.stringify(source.submission_criteria))
-          : null,
-        sideEffects: source.side_effects != null
-          ? JSON.parse(JSON.stringify(source.side_effects))
-          : null,
-        writebackConfig: source.writeback_config != null
-          ? JSON.parse(JSON.stringify(source.writeback_config))
-          : null,
-        functionConfig: source.function_config != null
-          ? JSON.parse(JSON.stringify(source.function_config))
-          : null,
-        maxAffectedObjects: source.max_affected_objects,
-        isEnabled: source.is_enabled,
-        createdBy: actorOf(req),
-        semanticsVersion: sourceSemanticsVersion,
-        executionMode: sourceExecutionMode,
-        deletePolicy: sourceDeletePolicy,
-      });
-
-      sendCreated(res, formatActionType(clonedRow));
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message, err.details);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint 6: GET /:actionApiName/impact (Action Type Impact Analysis) — Task 24
-//
-// Analyses an action type's impact by inspecting its rules to determine
-// which object types, properties, and link types it touches. Also returns
-// execution statistics from the audit log and warnings for any missing
-// references (e.g. a rule references a deleted object type).
-// ---------------------------------------------------------------------------
-
-router.get(
-  "/:actionApiName/impact",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-
-      // 1. Load the action type
-      const row = await getActionType(ontologyId, actionApiName);
-      if (!row) {
-        throw new OntologyError(
-          `Action type '${actionApiName}' not found in ontology '${ontologyId}'`,
-          "ACTION_TYPE_NOT_FOUND",
-          undefined,
-          { actionTypeApiName: actionApiName, ontologyId }
-        );
-      }
-
-      const rules = (row.rules ?? []) as Array<Record<string, unknown>>;
-      const warnings: string[] = [];
-
-      // 2. Parse rules to extract object types, properties, and link types
-      // Map: objectTypeApiName -> { operations: Set, properties: Set }
-      const objectTypeMap = new Map<
-        string,
-        { operations: Set<string>; properties: Set<string> }
-      >();
-      const linkTypeSet = new Map<string, Set<string>>(); // apiName -> Set<operation>
-
-      for (const rule of rules) {
-        const ruleType = rule.type as string;
-
-        if (
-          ruleType === "createObject" ||
-          ruleType === "modifyObject" ||
-          ruleType === "deleteObject"
-        ) {
-          const objType = rule.objectType as string;
-          if (!objType) continue;
-
-          if (!objectTypeMap.has(objType)) {
-            objectTypeMap.set(objType, {
-              operations: new Set(),
-              properties: new Set(),
-            });
-          }
-          const entry = objectTypeMap.get(objType)!;
-
-          // Map rule type to operation verb
-          if (ruleType === "createObject") entry.operations.add("create");
-          else if (ruleType === "modifyObject") entry.operations.add("modify");
-          else if (ruleType === "deleteObject") entry.operations.add("delete");
-
-          // Extract property names from create/modify rules
-          if (
-            (ruleType === "createObject" || ruleType === "modifyObject") &&
-            rule.properties &&
-            typeof rule.properties === "object"
-          ) {
-            for (const propName of Object.keys(
-              rule.properties as Record<string, unknown>
-            )) {
-              entry.properties.add(propName);
-            }
-          }
-        }
-
-        if (ruleType === "addLink" || ruleType === "removeLink") {
-          const linkApiName =
-            (rule.linkTypeApiName as string) || (rule.linkType as string);
-          if (!linkApiName) continue;
-
-          if (!linkTypeSet.has(linkApiName)) {
-            linkTypeSet.set(linkApiName, new Set());
-          }
-          linkTypeSet
-            .get(linkApiName)!
-            .add(ruleType === "addLink" ? "add" : "remove");
-        }
-      }
-
-      // 3. Verify each referenced object type exists and check properties
-      const affectedObjectTypes: Array<Record<string, unknown>> = [];
-
-      for (const [objApiName, info] of objectTypeMap) {
-        const otResult = await query(
-          "SELECT object_type_id FROM object_type WHERE ontology_id = $1 AND api_name = $2",
-          [ontologyId, objApiName]
-        );
-        const exists = otResult.rows.length > 0;
-
-        if (!exists) {
-          warnings.push(
-            `Object type '${objApiName}' referenced in rules does not exist in ontology.`
-          );
-        }
-
-        // Check properties exist on the object type
-        const propertiesModified = Array.from(info.properties);
-        if (exists && propertiesModified.length > 0) {
-          const objectTypeId = otResult.rows[0].object_type_id as string;
-          const propResult = await query(
-            "SELECT api_name FROM property WHERE object_type_id = $1",
-            [objectTypeId]
-          );
-          const existingProps = new Set<string>(
-            propResult.rows.map(
-              (r: Record<string, unknown>) => r.api_name as string
-            )
-          );
-          for (const propName of propertiesModified) {
-            if (!existingProps.has(propName)) {
-              warnings.push(
-                `Property '${propName}' on object type '${objApiName}' referenced in rules does not exist.`
-              );
-            }
-          }
-        }
-
-        affectedObjectTypes.push({
-          apiName: objApiName,
-          exists,
-          operations: Array.from(info.operations),
-          propertiesModified,
-        });
-      }
-
-      // 4. Verify each referenced link type exists
-      const affectedLinkTypes: Array<Record<string, unknown>> = [];
-
-      for (const [linkApiName, ops] of linkTypeSet) {
-        const ltResult = await query(
-          "SELECT link_type_id FROM link_type WHERE ontology_id = $1 AND api_name = $2",
-          [ontologyId, linkApiName]
-        );
-        const exists = ltResult.rows.length > 0;
-
-        if (!exists) {
-          warnings.push(
-            `Link type '${linkApiName}' referenced in rules does not exist in ontology.`
-          );
-        }
-
-        affectedLinkTypes.push({
-          apiName: linkApiName,
-          exists,
-          operations: Array.from(ops),
-        });
-      }
-
-      // 5. Query execution statistics from audit log
-      const statsResult = await query(
-        `SELECT COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE result = 'success') AS success_count,
-                MAX(executed_at) AS last_executed_at
-         FROM action_audit_log
-         WHERE action_type_api_name = $1`,
-        [actionApiName]
-      );
-
-      const last30Result = await query(
-        `SELECT COUNT(*) AS count
-         FROM action_audit_log
-         WHERE action_type_api_name = $1
-           AND executed_at > NOW() - INTERVAL '30 days'`,
-        [actionApiName]
-      );
-
-      const totalExecutions = parseInt(statsResult.rows[0].total, 10);
-      const successCount = parseInt(statsResult.rows[0].success_count, 10);
-      const last30DayExecutions = parseInt(last30Result.rows[0].count, 10);
-      const successRate =
-        totalExecutions > 0
-          ? Math.round((successCount / totalExecutions) * 100) / 100
-          : 0;
-      const lastExecutedAt = statsResult.rows[0].last_executed_at ?? null;
-
-      // 6. Build response
-      sendSuccess(res, {
-        actionTypeApiName: actionApiName,
-        affectedObjectTypes,
-        affectedLinkTypes,
-        executionStats: {
-          totalExecutions,
-          last30DayExecutions,
-          successRate,
-          lastExecutedAt,
-        },
-        warnings,
-      });
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint: GET /:actionApiName/migrationAnalysis (§12)
-//
-// Returns a v1→v2 migration analysis for the action type: classification,
-// proposed Assurf definition with typed object_reference parameters,
-// per-parameter migration details (primary-key base type loaded from the
-// object schema), wire compatibility, mixed-usage detection, delete-policy
-// impact, acknowledgement-required finding codes, and a definition hash the
-// client must echo back on /migrate for optimistic concurrency. Static
-// analysis only — never migrates.
-// ---------------------------------------------------------------------------
-router.get(
-  "/:actionApiName/migrationAnalysis",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-      const row = await getActionType(ontologyId, actionApiName);
-      if (!row) {
-        throw new OntologyError(
-          `Action type '${actionApiName}' not found in ontology '${ontologyId}'`,
-          "ACTION_TYPE_NOT_FOUND", undefined, { actionTypeApiName: actionApiName, ontologyId },
-        );
-      }
-      const semantics = resolveSemanticsForRow({
-        semantics_version: (row as any).semantics_version ?? null,
-        execution_mode: (row as any).execution_mode ?? null,
-        delete_policy: (row as any).delete_policy ?? null,
-      });
-      const report: MigrationReport = await analyzeActionTypeMigration(
-        {
-          rules: (row.rules ?? []) as any[],
-          parameters: (row.parameters ?? []) as any[],
-        },
-        { schemaLookup: defaultSchemaLookup, ontologyId },
-      );
-      const currentDefinitionHash = hashActionDefinition({
-        parameters: row.parameters,
-        rules: row.rules,
-        semanticsVersion: semantics.semanticsVersion,
-        executionMode: semantics.executionMode,
-        deletePolicy: semantics.deletePolicy,
-      });
-      const rolloutAvailability =
-        getActionSemanticsExecutionAvailability(2);
-      const migrationPermitted =
-        rolloutAvailability.available &&
-        semantics.semanticsVersion === 1 &&
-        (report.classification === "compatible" ||
-          report.classification === "requires_review") &&
-        !!report.proposedDefinition;
-      const acknowledgementRequired = report.findings
-        .filter((f) =>
-          ACKNOWLEDGEMENT_REQUIRED_FINDING_CODES.has(f.code as MigrationFinding["code"]),
-        )
-        .map((f) => f.code);
-      try {
-        const { incCounter } = await import("../services/funnel/metrics");
-        incCounter("tellus_action_migration_analysis_total", { classification: report.classification });
-      } catch { /* metrics non-blocking */ }
-      sendSuccess(res, {
-        currentSemanticsVersion: semantics.semanticsVersion,
-        proposedTargetVersion: 2,
-        classification: report.classification,
-        findings: report.findings,
-        parameterMigrations: report.parameterMigrations,
-        proposedDefinition: report.proposedDefinition,
-        schemaVerified: report.schemaVerified,
-        deletePolicyChange: report.deletePolicyChange ?? null,
-        deletePolicyImpact:
-          report.deletePolicyChange === "legacy_unchecked_to_restrict"
-            ? "Migration changes the delete policy from legacy_unchecked to restrict; any execution targeting an object with active relationships will be rejected."
-            : "No delete-policy change implied by this migration.",
-        currentDefinitionHash,
-        acknowledgementRequired,
-        migrationPermitted,
-        rolloutAvailability,
-      });
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) return sendError(res, err.code, err.message, err.details);
-      next(err);
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint: POST /:actionApiName/migrate (§12)
-//
-// Explicit v1→v2 migration. Two accepted request shapes:
-//
-//   1. Full schema-aware migration (recommended). The client echoes the
-//      `currentDefinitionHash` it received from /migrationAnalysis along
-//      with the acknowledged finding codes. The server re-derives the
-//      proposed definition, rejects stale hashes, requires acknowledgements
-//      for review-required findings, persists the new parameters + rules +
-//      semantics atomically inside a single transaction, and writes an
-//      immutable action_migration_log ledger row.
-//
-//   2. Legacy semantics-only migration. The client sends only
-//      `{ targetVersion: 2 }`. The server refuses unless the action is
-//      already classified `compatible` with NO proposed-definition change
-//      (i.e. all parameters were already typed object_reference). This
-//      preserves the original contract for already-typed actions.
-// ---------------------------------------------------------------------------
-router.post(
-  "/:actionApiName/migrate",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-      const body = req.body || {};
-      if (body.targetVersion !== 2) {
-        sendError(res, "VALIDATION_FAILED", "Migration requires targetVersion: 2 (explicit, no automatic downgrade).");
-        return;
-      }
-      const rolloutAvailability =
-        getActionSemanticsExecutionAvailability(2);
-      if (!rolloutAvailability.available) {
-        throw new OntologyError(
-          rolloutAvailability.message ??
-            "Version-2 action execution is not available for this deployment.",
-          rolloutAvailability.code ?? "UNSUPPORTED_SEMANTICS_VERSION",
-          422,
-          rolloutAvailability.details ?? { semanticsVersion: 2 },
-        );
-      }
-      const actor = actorOf(req);
-      const correlationId =
-        (req as any).correlationId ??
-        ((req as any).requestId ?? null) ??
-        null;
-
-      const row = await getActionType(ontologyId, actionApiName);
-      if (!row) {
-        throw new OntologyError(
-          `Action type '${actionApiName}' not found in ontology '${ontologyId}'`,
-          "ACTION_TYPE_NOT_FOUND", undefined, { actionTypeApiName: actionApiName, ontologyId },
-        );
-      }
-      const previous = resolveSemanticsForRow({
-        semantics_version: (row as any).semantics_version ?? null,
-        execution_mode: (row as any).execution_mode ?? null,
-        delete_policy: (row as any).delete_policy ?? null,
-      });
-      if (previous.semanticsVersion !== 1) {
-        sendError(res, "INCOMPATIBLE_ACTION_SEMANTICS",
-          `Action type is already semantics version ${previous.semanticsVersion}; migration is v1→v2 only.`,
-          { currentVersion: previous.semanticsVersion });
-        return;
-      }
-
-      // Full schema-aware migration path.
-      if (typeof body.expectedDefinitionHash === "string" && body.expectedDefinitionHash.length > 0) {
-        const result = await migrateActionTypeWithDefinition(ontologyId, actionApiName, {
-          expectedDefinitionHash: body.expectedDefinitionHash,
-          proposedDefinition: body.proposedDefinition ?? { parameters: row.parameters, rules: row.rules },
-          acknowledgedFindingCodes: Array.isArray(body.acknowledgedFindingCodes) ? body.acknowledgedFindingCodes : [],
-          adapterEnabled: !!body.adapterEnabled,
-          actor,
-          correlationId,
-        });
-        sendSuccess(res, {
-          ...formatActionType(result.migrated),
-          migrationRecord: {
-            actor,
-            migratedAt: new Date().toISOString(),
-            previousVersion: 1,
-            newVersion: 2,
-            migrationId: result.log.migration_id,
-            previousDefinitionHash: result.log.previous_definition_hash,
-            resultingDefinitionHash: result.log.resulting_definition_hash,
-            acknowledgedFindingCodes: result.log.acknowledged_finding_codes,
-            parameterMigrations: result.log.parameter_changes,
-            rollbackAvailable: true,
-          },
-        });
-        return;
-      }
-
-      // Legacy semantics-only path: refuse if any proposed-definition change
-      // was required (i.e. untyped parameters must be converted). The
-      // operator must use the full path.
-      const report = await analyzeActionTypeMigration(
-        { rules: (row.rules ?? []) as any[], parameters: (row.parameters ?? []) as any[] },
-        { schemaLookup: defaultSchemaLookup, ontologyId },
-      );
-      if (report.parameterMigrations.length > 0 || report.classification !== "compatible") {
-        sendError(res, "INCOMPATIBLE_ACTION_SEMANTICS",
-          `Migration rejected: this action requires the full migration workflow (expectedDefinitionHash + acknowledgements). Classification '${report.classification}' with ${report.parameterMigrations.length} parameter conversion(s).`,
-          { classification: report.classification, parameterMigrations: report.parameterMigrations, findings: report.findings });
-        return;
-      }
-      const migrated = await migrateActionTypeSemantics(ontologyId, actionApiName, 2);
-      if (!migrated) {
-        throw new OntologyError("Action type not found during migration", "ACTION_TYPE_NOT_FOUND", 404);
-      }
-      // Record an audit ledger row for the legacy path as well so every
-      // v1→v2 migration is tamper-evident and rollback is available. The
-      // parameters/rules did NOT change in this path (only the semantics
-      // triple), so the previous + resulting snapshots share the same
-      // parameters/rules and differ only by the semantics triple.
-      const resultingSemantics = resolveSemanticsForRow({
-        semantics_version: (migrated as any).semantics_version ?? null,
-        execution_mode: (migrated as any).execution_mode ?? null,
-        delete_policy: (migrated as any).delete_policy ?? null,
-      });
-      const previousHash = currentDefinitionHashFor(row, previous);
-      const resultingHash = hashActionDefinition({
-        parameters: migrated.parameters,
-        rules: migrated.rules,
-        semanticsVersion: resultingSemantics.semanticsVersion,
-        executionMode: resultingSemantics.executionMode,
-        deletePolicy: resultingSemantics.deletePolicy,
-      });
-      let legacyMigrationId: string | undefined;
-      try {
-        const audit = await recordMigration({
-          ontologyId,
-          actionApiName,
-          migrationKind: "migrate",
-          previousSemanticsVersion: 1,
-          resultingSemanticsVersion: 2,
-          previousDeletePolicy: previous.deletePolicy,
-          resultingDeletePolicy: resultingSemantics.deletePolicy,
-          previousDefinitionHash: previousHash,
-          resultingDefinitionHash: resultingHash,
-          previousDefinitionSnapshot: {
-            parameters: row.parameters,
-            rules: row.rules,
-            semanticsVersion: 1,
-            executionMode: previous.executionMode,
-            deletePolicy: previous.deletePolicy,
-          },
-          resultingDefinitionSnapshot: {
-            parameters: migrated.parameters,
-            rules: migrated.rules,
-            semanticsVersion: 2,
-            executionMode: resultingSemantics.executionMode,
-            deletePolicy: resultingSemantics.deletePolicy,
-          },
-          parameterChanges: [],
-          acknowledgedFindingCodes: [],
-          adapterEnabled: false,
-          actor,
-          correlationId,
-        });
-        legacyMigrationId = audit.migration_id;
-      } catch (auditErr: any) {
-        // The action_type migration already committed; the audit ledger
-        // insert failed. Surface the audit failure but DO NOT undo the
-        // committed migration.
-        console.error("legacy-migrate audit row write failed:", auditErr?.message);
-      }
-      sendSuccess(res, {
-        ...formatActionType(migrated),
-        migrationRecord: {
-          actor,
-          migratedAt: new Date().toISOString(),
-          previousVersion: 1,
-          newVersion: 2,
-          migrationId: legacyMigrationId,
-          previousDefinitionHash: previousHash,
-          resultingDefinitionHash: resultingHash,
-          rollbackAvailable: !!legacyMigrationId,
-        },
-      });
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) return sendError(res, err.code, err.message, err.details);
-      next(err);
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint: POST /:actionApiName/migrate/rollback (§12)
-//
-// Restores the previous v1 definition from the latest forward migration's
-// immutable `previous_definition_snapshot`. Append-only: writes a NEW
-// `rollback` ledger row inside the same transaction. The action_type UPDATE
-// goes through the same domain path (parameters/rules/semantics columns in
-// a single transactional UPDATE) — never a raw row patch.
-//
-// IMPORTANT: rolling back the definition does NOT reverse any object
-// mutations already produced by executions that ran under v2 semantics.
-// ---------------------------------------------------------------------------
-router.post(
-  "/:actionApiName/migrate/rollback",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-      const actor = actorOf(req);
-      const correlationId =
-        (req as any).correlationId ?? ((req as any).requestId ?? null) ?? null;
-      const result = await rollbackActionTypeMigration(
-        ontologyId,
-        actionApiName,
-        actor,
-        correlationId,
-      );
-      sendSuccess(res, {
-        ...formatActionType(result.rolledBack),
-        rollbackRecord: {
-          actor,
-          rolledBackAt: new Date().toISOString(),
-          previousVersion: 2,
-          newVersion: result.log.resulting_semantics_version,
-          restoredFromMigrationId: result.log.previous_definition_hash,
-          migrationLogId: result.log.migration_id,
-          note: "Definition rollback does not revert object mutations already produced by executions under v2 semantics.",
-        },
-      });
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) return sendError(res, err.code, err.message, err.details);
-      next(err);
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Endpoint 7: DELETE /:actionApiName (Delete Action Type)
-// ---------------------------------------------------------------------------
-
-router.delete(
-  "/:actionApiName",
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const { ontologyId, actionApiName } = req.params;
-
-      const deleted = await deleteActionType(ontologyId, actionApiName);
-      if (!deleted) {
-        throw new OntologyError(
-          `Action type '${actionApiName}' not found in ontology '${ontologyId}'`,
-          "ACTION_TYPE_NOT_FOUND",
-          undefined,
-          { actionTypeApiName: actionApiName, ontologyId }
-        );
-      }
-
-      sendNoContent(res);
-    } catch (err: any) {
-      if (err instanceof OntologyError) return next(err);
-      if (KNOWN_CODES.has(err.code)) {
-        return sendError(res, err.code, err.message);
-      }
-      next(err);
-    }
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Export
-// ---------------------------------------------------------------------------
-
-export default router;

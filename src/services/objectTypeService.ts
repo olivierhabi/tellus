@@ -116,6 +116,108 @@ async function create(ontologyId: string, data: CreateInput) {
 }
 
 /**
+ * Pure link-type entry mapping shared by the single-type (`getByApiName`)
+ * and batch (`getByApiNames`) detail paths. `targetObjectType` carries a
+ * placeholder for non-self links — callers fill it via
+ * `fillLinkTypeTargetNames` once the involved type names are resolved.
+ */
+function buildLinkTypeEntries(
+  ltRows: Array<any>,
+  objectTypeId: string,
+  selfApiName: string,
+  primaryKeyPropertyId: unknown,
+): Array<Record<string, unknown>> {
+  const invertCardinality = (c: string): string => {
+    switch (c) {
+      case "ONE_TO_MANY": return "MANY_TO_ONE";
+      case "MANY_TO_ONE": return "ONE_TO_MANY";
+      default: return c;
+    }
+  };
+  return ltRows
+    .map((lt: any) => {
+      const isSource = lt.source_object_type === objectTypeId;
+      const isTarget = lt.target_object_type === objectTypeId;
+      // A5/A6 — surface, at config time, whether this link's foreign-key
+      // property IS the primary key of the FK-bearing object type (the
+      // linked-type misconfiguration that would silently rename an object).
+      // For a forward link the FK sits on the SOURCE (this object); for a
+      // reverse/bidirectional link the FK sits on the TARGET (this object).
+      // Either way the FK-bearing object is THIS object type, so compare the
+      // relevant FK property id to this object's primary_key_property_id.
+      const fkPropertyId = isSource
+        ? lt.source_property_id
+        : lt.target_property_id;
+      const isFkPrimaryKey =
+        fkPropertyId != null &&
+        fkPropertyId === primaryKeyPropertyId;
+      if (isSource && isTarget) {
+        // Self-referential — show as forward
+        return {
+          apiName: lt.api_name,
+          displayName: lt.display_name,
+          targetObjectType: selfApiName, // self-ref points to itself
+          cardinality: lt.cardinality,
+          direction: "forward",
+          isFkPrimaryKey,
+        };
+      } else if (isSource) {
+        return {
+          apiName: lt.api_name,
+          displayName: lt.display_name,
+          targetObjectType: lt._targetApiName, // resolved below
+          cardinality: lt.cardinality,
+          direction: "forward",
+          isFkPrimaryKey,
+        };
+      } else if (isTarget && lt.is_bidirectional) {
+        return {
+          apiName: lt.api_name,
+          displayName: lt.display_name,
+          targetObjectType: lt._sourceApiName, // resolved below
+          cardinality: invertCardinality(lt.cardinality),
+          direction: "reverse",
+          isFkPrimaryKey,
+        };
+      }
+      // Non-bidirectional link where this object is the target — skip
+      return null;
+    })
+    .filter((item: any) => item !== null) as Array<Record<string, unknown>>;
+}
+
+/**
+ * Fill the `targetObjectType` placeholders left by `buildLinkTypeEntries`
+ * from a pre-resolved id→apiName map (one shared lookup for the batch
+ * path; the single-type path passes a one-entry map). Missing ids keep
+ * the legacy `"unknown"` placeholder.
+ */
+function fillLinkTypeTargetNames(
+  entries: Array<Record<string, unknown>>,
+  ltRows: Array<any>,
+  objectTypeId: string,
+  nameById: Map<string, string>,
+): void {
+  for (const lt of ltRows) {
+    const isSource = lt.source_object_type === objectTypeId;
+    const isTarget = lt.target_object_type === objectTypeId;
+    const isSelfRef = isSource && isTarget;
+
+    if (isSelfRef) continue; // already resolved
+
+    if (isSource) {
+      const targetApiName = nameById.get(lt.target_object_type) || "unknown";
+      const match = entries.find((l: any) => l.apiName === lt.api_name && l.direction === "forward");
+      if (match) (match as any).targetObjectType = targetApiName;
+    } else if (isTarget && lt.is_bidirectional) {
+      const sourceApiName = nameById.get(lt.source_object_type) || "unknown";
+      const match = entries.find((l: any) => l.apiName === lt.api_name && l.direction === "reverse");
+      if (match) (match as any).targetObjectType = sourceApiName;
+    }
+  }
+}
+
+/**
  * Get an object type by API name, including properties, datasource, and
  * funnel state.
  */
@@ -174,94 +276,33 @@ async function getByApiName(ontologyId: string, apiName: string) {
   let linkTypes: Array<Record<string, unknown>> = [];
   try {
     const ltRows = await linkTypeModel.listByObjectType(ontologyId, objectType.object_type_id);
-    const invertCardinality = (c: string): string => {
-      switch (c) {
-        case "ONE_TO_MANY": return "MANY_TO_ONE";
-        case "MANY_TO_ONE": return "ONE_TO_MANY";
-        default: return c;
+    linkTypes = buildLinkTypeEntries(
+      ltRows,
+      objectType.object_type_id,
+      apiName,
+      objectType.primary_key_property_id,
+    );
+
+    // Resolve object type API names for forward/reverse links. One shared
+    // lookup for the (usually few) involved types instead of one query per
+    // link row — identical values to the former per-row selects.
+    try {
+      const involved = new Set<string>();
+      for (const lt of ltRows) {
+        if (lt.source_object_type !== objectType.object_type_id) involved.add(lt.source_object_type);
+        if (lt.target_object_type !== objectType.object_type_id) involved.add(lt.target_object_type);
       }
-    };
-    linkTypes = ltRows
-      .map((lt: any) => {
-        const isSource = lt.source_object_type === objectType.object_type_id;
-        const isTarget = lt.target_object_type === objectType.object_type_id;
-        // A5/A6 — surface, at config time, whether this link's foreign-key
-        // property IS the primary key of the FK-bearing object type (the
-        // linked-type misconfiguration that would silently rename an object).
-        // For a forward link the FK sits on the SOURCE (this object); for a
-        // reverse/bidirectional link the FK sits on the TARGET (this object).
-        // Either way the FK-bearing object is THIS object type, so compare the
-        // relevant FK property id to this object's primary_key_property_id.
-        const fkPropertyId = isSource
-          ? lt.source_property_id
-          : lt.target_property_id;
-        const isFkPrimaryKey =
-          fkPropertyId != null &&
-          fkPropertyId === objectType.primary_key_property_id;
-        if (isSource && isTarget) {
-          // Self-referential — show as forward
-          return {
-            apiName: lt.api_name,
-            displayName: lt.display_name,
-            targetObjectType: apiName, // self-ref points to itself
-            cardinality: lt.cardinality,
-            direction: "forward",
-            isFkPrimaryKey,
-          };
-        } else if (isSource) {
-          return {
-            apiName: lt.api_name,
-            displayName: lt.display_name,
-            targetObjectType: lt._targetApiName, // resolved below
-            cardinality: lt.cardinality,
-            direction: "forward",
-            isFkPrimaryKey,
-          };
-        } else if (isTarget && lt.is_bidirectional) {
-          return {
-            apiName: lt.api_name,
-            displayName: lt.display_name,
-            targetObjectType: lt._sourceApiName, // resolved below
-            cardinality: invertCardinality(lt.cardinality),
-            direction: "reverse",
-            isFkPrimaryKey,
-          };
-        }
-        // Non-bidirectional link where this object is the target — skip
-        return null;
-      })
-      .filter((item: any) => item !== null) as Array<Record<string, unknown>>;
-
-    // Resolve object type API names for forward/reverse links
-    for (const lt of ltRows) {
-      const isSource = lt.source_object_type === objectType.object_type_id;
-      const isTarget = lt.target_object_type === objectType.object_type_id;
-      const isSelfRef = isSource && isTarget;
-
-      if (isSelfRef) continue; // already resolved
-
-      // Resolve target/source API names
-      try {
-        if (isSource) {
-          const tgtResult = await query(
-            "SELECT api_name FROM object_type WHERE object_type_id = $1",
-            [lt.target_object_type]
-          );
-          const targetApiName = tgtResult.rows[0]?.api_name || "unknown";
-          const match = linkTypes.find((l: any) => l.apiName === lt.api_name && l.direction === "forward");
-          if (match) (match as any).targetObjectType = targetApiName;
-        } else if (isTarget && lt.is_bidirectional) {
-          const srcResult = await query(
-            "SELECT api_name FROM object_type WHERE object_type_id = $1",
-            [lt.source_object_type]
-          );
-          const sourceApiName = srcResult.rows[0]?.api_name || "unknown";
-          const match = linkTypes.find((l: any) => l.apiName === lt.api_name && l.direction === "reverse");
-          if (match) (match as any).targetObjectType = sourceApiName;
-        }
-      } catch {
-        // If resolution fails, keep the placeholder
+      const nameById = new Map<string, string>();
+      if (involved.size > 0) {
+        const nameResult = await query(
+          "SELECT object_type_id, api_name FROM object_type WHERE object_type_id = ANY($1::uuid[])",
+          [[...involved]]
+        );
+        for (const row of nameResult.rows) nameById.set(row.object_type_id, row.api_name);
       }
+      fillLinkTypeTargetNames(linkTypes, ltRows, objectType.object_type_id, nameById);
+    } catch {
+      // If resolution fails, keep the placeholder
     }
   } catch {
     // link_type table may not exist yet — return empty array
@@ -275,6 +316,134 @@ async function getByApiName(ontologyId: string, apiName: string) {
     funnelState: fsResult.rows[0] || null,
     linkTypes,
   };
+}
+
+/**
+ * Batch multi-get: full detail rows for N object types with a FIXED small
+ * query count (5 shared queries + 1 name lookup) instead of N × the
+ * single-type path's 5+N queries. Powers the Workshop view-mode metadata
+ * fan-out (`GET /batch-get`): one HTTP round trip replaces N detail GETs
+ * and ~6×N Postgres queries.
+ *
+ * Returns one entry per FOUND type (canonical apiName from the DB);
+ * unknown names are absent — callers fall back to the single-type path
+ * for 404 semantics.
+ */
+async function getByApiNames(ontologyId: string, apiNames: string[]) {
+  const lowered = [...new Set(apiNames.map((n) => n.toLowerCase()))].slice(0, 100);
+  if (lowered.length === 0) return [];
+
+  // 1. Types (one query)
+  const otResult = await query(
+    "SELECT * FROM object_type WHERE ontology_id = $1 AND LOWER(api_name) = ANY($2)",
+    [ontologyId, lowered]
+  );
+  const types = otResult.rows;
+  if (types.length === 0) return [];
+  const ids = types.map((t: any) => t.object_type_id);
+
+  // 2. Properties (one query)
+  const propsResult = await query(
+    "SELECT * FROM property WHERE object_type_id = ANY($1::uuid[]) ORDER BY object_type_id, ordinal, api_name",
+    [ids]
+  );
+  const propsByType = new Map<string, typeof propsResult.rows>();
+  for (const row of propsResult.rows) {
+    const arr = propsByType.get(row.object_type_id) ?? [];
+    arr.push(row);
+    propsByType.set(row.object_type_id, arr);
+  }
+
+  // 3. Backing datasources with project/folder enrichment (one query —
+  // same JOIN body as the single-type path, ANY instead of =).
+  const dsResult = await query(
+    `SELECT bd.*,
+            fd.original_filename AS _original_filename,
+            o.display_name AS _ontology_name,
+            p.name         AS _project_name,
+            f.name         AS _folder_name,
+            f.path::text   AS _folder_path
+     FROM backing_datasource bd
+     LEFT JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+     LEFT JOIN ontology    o  ON o.ontology_id = ot.ontology_id
+     LEFT JOIN LATERAL (
+       SELECT id, project_id, folder_id, original_filename
+       FROM foundry_datasets
+       WHERE id::text = (
+         SELECT (regexp_matches(bd.file_path, '#foundry-dataset:([0-9a-f-]{36})', 'i'))[1]
+       )
+       LIMIT 1
+     ) fd ON true
+     LEFT JOIN projects p ON p.id = fd.project_id
+     LEFT JOIN folders  f ON f.id = fd.folder_id
+     WHERE bd.object_type_id = ANY($1::uuid[])`,
+    [ids]
+  );
+  const dsByType = new Map<string, (typeof dsResult.rows)[number]>();
+  for (const row of dsResult.rows) dsByType.set(row.object_type_id, row);
+
+  // 4. Funnel states (one query)
+  const fsResult = await query(
+    "SELECT * FROM funnel_state WHERE object_type_id = ANY($1::uuid[])",
+    [ids]
+  );
+  const fsByType = new Map<string, (typeof fsResult.rows)[number]>();
+  for (const row of fsResult.rows) fsByType.set(row.object_type_id, row);
+
+  // 5. Link types touching any of the requested types (one query)
+  let ltRows: Array<any> = [];
+  try {
+    const ltResult = await query(
+      `SELECT * FROM link_type WHERE ontology_id = $1
+       AND (source_object_type = ANY($2::uuid[]) OR target_object_type = ANY($2::uuid[]))
+       ORDER BY created_at`,
+      [ontologyId, ids]
+    );
+    ltRows = ltResult.rows;
+  } catch {
+    // link_type table may not exist yet — per-type arrays stay empty
+  }
+
+  // 6. Canonical names for every involved type (one query)
+  const involved = new Set<string>(ids);
+  for (const lt of ltRows) {
+    involved.add(lt.source_object_type);
+    involved.add(lt.target_object_type);
+  }
+  const nameById = new Map<string, string>();
+  try {
+    const nameResult = await query(
+      "SELECT object_type_id, api_name FROM object_type WHERE object_type_id = ANY($1::uuid[])",
+      [[...involved]]
+    );
+    for (const row of nameResult.rows) nameById.set(row.object_type_id, row.api_name);
+  } catch {
+    // keep entries' placeholders on failure (legacy "unknown" behavior)
+  }
+
+  return types.map((objectType: any) => {
+    const typeId = objectType.object_type_id;
+    const relevantLt = ltRows.filter(
+      (lt: any) => lt.source_object_type === typeId || lt.target_object_type === typeId
+    );
+    const entries = buildLinkTypeEntries(
+      relevantLt,
+      typeId,
+      objectType.api_name,
+      objectType.primary_key_property_id,
+    );
+    fillLinkTypeTargetNames(entries, relevantLt, typeId, nameById);
+    return {
+      apiName: objectType.api_name,
+      result: {
+        objectType,
+        properties: propsByType.get(typeId) ?? [],
+        datasource: dsByType.get(typeId) ?? null,
+        funnelState: fsByType.get(typeId) ?? null,
+        linkTypes: entries,
+      },
+    };
+  });
 }
 
 /**
@@ -1780,6 +1949,7 @@ async function listDatasources(objectTypeRid: string) {
 const objectTypeService = {
   create,
   getByApiName,
+  getByApiNames,
   getById,
   listByOntology,
   update,

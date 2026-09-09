@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { logger } from "./utils/logger";
 // Dev-only runtime CA injection. NODE_EXTRA_CA_CERTS is a Node-native
 // bootstrap env var read before any JS executes, so dotenv can't set it in
 // time. Instead we expose TELLUS_DEV_EXTRA_CA_CERTS (loaded by dotenv above)
@@ -18,10 +19,10 @@ if (process.env.NODE_ENV === "development" && process.env.TELLUS_DEV_EXTRA_CA_CE
       // (no custom `agent` option in requestPinnedDestination), so injecting
       // the CA here makes all dev HTTPS egress trust the sandbox cert.
       https.globalAgent.options.ca = [ca];
-      console.log(`[dev-ca] Loaded extra CA from ${caPath}`);
+      logger.info({ caPath }, "[dev-ca] Loaded extra CA");
     }
   } catch (e) {
-    console.warn(`[dev-ca] Failed to load extra CA:`, (e as Error).message);
+    logger.warn({ error: (e as Error).message }, "[dev-ca] Failed to load extra CA");
   }
 }
 // PB-B9: bootstrap OTel BEFORE any instrumented library (pg, express,
@@ -220,7 +221,7 @@ const REQUIRED_ENV_VARS = ["PGHOST", "PGDATABASE", "PGUSER", "PGPASSWORD"];
 
 for (const key of REQUIRED_ENV_VARS) {
   if (!process.env[key]) {
-    console.error(
+    logger.error(
       `FATAL: Required environment variable ${key} is not set. ` +
         "See .env.example for the full list."
     );
@@ -238,7 +239,7 @@ try {
   // code-assistant bypass previously had NO boot guard).
   assertNoTestAuthInProduction(TEST_AUTH_FLAGS);
 } catch (err) {
-  console.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+  logger.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 }
 
@@ -582,8 +583,7 @@ app.use(requestTimeoutMiddleware({
   const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
   const mounted = stack.some((layer) => layer.name === "requestTimeoutMw");
   if (!mounted) {
-    // eslint-disable-next-line no-console
-    console.error("[boot] FATAL: requestTimeoutMiddleware is not mounted — data-plane requests would have no wall-clock budget");
+    logger.error("[boot] FATAL: requestTimeoutMiddleware is not mounted — data-plane requests would have no wall-clock budget");
     throw new Error("requestTimeoutMiddleware is not registered on the Express app");
   }
 }
@@ -612,8 +612,7 @@ app.use("/api", patSecurityGate);
   const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
   const mounted = stack.some((layer) => layer.handle === patSecurityGate || layer.name === "patSecurityGate");
   if (!mounted) {
-    // eslint-disable-next-line no-console
-    console.error("[boot] FATAL: patSecurityGate is not mounted — PAT scope enforcement would be disabled");
+    logger.error("[boot] FATAL: patSecurityGate is not mounted — PAT scope enforcement would be disabled");
     throw new Error("patSecurityGate middleware is not registered on the Express app");
   }
 }
@@ -638,8 +637,7 @@ app.use(globalAuth());
   const stack = (app as unknown as { _router?: { stack: Array<{ handle?: unknown; name?: string }> } })._router?.stack || [];
   const mounted = stack.some((layer) => layer.name === "globalAuthMiddleware");
   if (!mounted) {
-    // eslint-disable-next-line no-console
-    console.error("[boot] FATAL: globalAuth middleware is not mounted — data-plane routes would be unauthenticated (F-01 regression)");
+    logger.error("[boot] FATAL: globalAuth middleware is not mounted — data-plane routes would be unauthenticated (F-01 regression)");
     throw new Error("globalAuth middleware is not registered on the Express app");
   }
 }
@@ -774,7 +772,7 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
       res.status(204).end();
     },
   );
-  console.log(
+  logger.info(
     "[test-hooks] Mounted /api/v1/_test/rate-limiter/reset (TELLUS_TEST_HOOKS=1)",
   );
 
@@ -788,7 +786,7 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
   app.post(RWANDA_QA_RESET_ROUTE, (req: Request, res: Response) => {
     void resetRwandaQaNamespace(req, res);
   });
-  console.log(
+  logger.info(
     `[test-hooks] Mounted ${RWANDA_QA_RESET_ROUTE} (TELLUS_TEST_HOOKS=1)`,
   );
 
@@ -802,7 +800,7 @@ if (process.env.TELLUS_TEST_HOOKS === "1") {
   app.post(RWANDA_PINDO_EVALUATE_ROUTE, (req: Request, res: Response) => {
     void evaluateRwandaPindoOnce(req, res);
   });
-  console.log(
+  logger.info(
     `[test-hooks] Mounted ${RWANDA_PINDO_EVALUATE_ROUTE} (TELLUS_TEST_HOOKS=1)`,
   );
 }
@@ -1092,11 +1090,11 @@ void (async () => {
   try {
     if (isShuttingDown) return;
     const swept = await sweepStaleTransformBuilds();
-    if (swept > 0) console.log(`[transforms] crash-recovery sweeper: marked ${swept} stale 'running' build(s) failed (lost on restart).`);
+    if (swept > 0) logger.info(`[transforms] crash-recovery sweeper: marked ${swept} stale 'running' build(s) failed (lost on restart).`);
     const requeued = await requeueQueuedBuilds({ stemma: transformsStemma });
-    if (requeued > 0) console.log(`[transforms] crash-recovery: re-queued ${requeued} 'queued' build(s) (idempotent recovery).`);
+    if (requeued > 0) logger.info(`[transforms] crash-recovery: re-queued ${requeued} 'queued' build(s) (idempotent recovery).`);
   } catch (e) {
-    console.error("[transforms] crash-recovery failed:", String(e));
+    logger.error({ error: String(e) }, "[transforms] crash-recovery failed");
   }
 })();
 
@@ -1118,26 +1116,22 @@ void (async () => {
       // renders blank for every repo created before the current process boot.
       template: codeRepoMount.adapters.template,
       logger: (event, meta) =>
-        console.log(JSON.stringify({ event, ...(meta ?? {}) })),
+        logger.info({ event, ...(meta ?? {}) }),
     });
     if (r.applied && (r.rehydrated > 0 || r.failed > 0)) {
-      console.log(
-        JSON.stringify({
+      logger.info({
           event: "code-repos.rehydrate.summary",
           rehydrated: r.rehydrated,
           skipped: r.skipped,
           failed: r.failed,
           total: r.total,
-        }),
-      );
+        });
     }
   } catch (err) {
-    console.error(
-      JSON.stringify({
+    logger.error({
         event: "code-repos.rehydrate.fatal",
         message: (err as Error).message,
-      }),
-    );
+      });
   }
 })();
 
@@ -1418,29 +1412,29 @@ const authMaintenanceSweeper = setInterval(async () => {
   try {
     await purgeExpiredAuthChallenges(foundryDb as never);
   } catch (err) {
-    console.error(JSON.stringify({
+    logger.error({
       type: "auth_challenge_sweep_error",
       timestamp: new Date().toISOString(),
       error: err instanceof Error ? err.message : String(err),
-    }));
+    });
   }
   try {
     await purgeExpiredReauthTokens();
   } catch (err) {
-    console.error(JSON.stringify({
+    logger.error({
       type: "reauth_sweep_error",
       timestamp: new Date().toISOString(),
       error: err instanceof Error ? err.message : String(err),
-    }));
+    });
   }
   try {
     await flushEmailOutbox();
   } catch (err) {
-    console.error(JSON.stringify({
+    logger.error({
       type: "email_flush_error",
       timestamp: new Date().toISOString(),
       error: err instanceof Error ? err.message : String(err),
-    }));
+    });
   }
   try {
     // Drop expired + consumed passkey enrollment rows so a leaked
@@ -1449,11 +1443,11 @@ const authMaintenanceSweeper = setInterval(async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await getPasskeyEnrollmentService(foundryDb as any).purgeExpired();
   } catch (err) {
-    console.error(JSON.stringify({
+    logger.error({
       type: "passkey_enrollment_sweep_error",
       timestamp: new Date().toISOString(),
       error: err instanceof Error ? err.message : String(err),
-    }));
+    });
   }
 }, 60_000);
 if (typeof authMaintenanceSweeper.unref === "function") authMaintenanceSweeper.unref();
@@ -1463,22 +1457,22 @@ if (typeof authMaintenanceSweeper.unref === "function") authMaintenanceSweeper.u
 // ---------------------------------------------------------------------------
 
 process.on("unhandledRejection", (reason: unknown) => {
-  console.error(JSON.stringify({
+  logger.error({
     type: "unhandled_rejection",
     timestamp: new Date().toISOString(),
     reason: reason instanceof Error ? reason.message : String(reason),
     stack: reason instanceof Error ? reason.stack : undefined,
-  }));
+  });
   // Do NOT shutdown for unhandled rejections — log and continue
 });
 
 process.on("uncaughtException", (err: Error) => {
-  console.error(JSON.stringify({
+  logger.error({
     type: "uncaught_exception",
     timestamp: new Date().toISOString(),
     error: err.message,
     stack: err.stack,
-  }));
+  });
   shutdown("uncaughtException");
 });
 
@@ -1504,31 +1498,25 @@ async function start(): Promise<void> {
     // D-2026-05-04-008-boot-migration-gate.md.
     try {
       const gateResult = await enforceMigrationGate({ pool });
-      console.log(
-        JSON.stringify({
+      logger.info({
           type: "migration_gate.ok",
           mode: gateResult.mode,
           appliedDuringRun: gateResult.appliedDuringRun.length,
           pendingBefore: gateResult.pending.length,
           durationMs: gateResult.durationMs,
-        }),
-      );
+        });
     } catch (gateErr) {
       if (gateErr instanceof MigrationDriftError) {
-        console.error(
-          JSON.stringify({
+        logger.error({
             type: "migration_gate.drift",
             pending: gateErr.pending,
             message: gateErr.message,
-          }),
-        );
+          });
       } else {
-        console.error(
-          JSON.stringify({
+        logger.error({
             type: "migration_gate.error",
             error: gateErr instanceof Error ? gateErr.message : String(gateErr),
-          }),
-        );
+          });
       }
       // Refusing to start the server — drift / apply failure must
       // be treated as a deploy bug, not a soft warning.
@@ -1547,23 +1535,19 @@ async function start(): Promise<void> {
       await enforceSchemaContract(pool);
     } catch (contractErr) {
       if (contractErr instanceof SchemaContractError) {
-        console.error(
-          JSON.stringify({
+        logger.error({
             type: "schema_contract.refused",
             violations: contractErr.violations,
             message: contractErr.message,
-          }),
-        );
+          });
       } else {
-        console.error(
-          JSON.stringify({
+        logger.error({
             type: "schema_contract.error",
             error:
               contractErr instanceof Error
                 ? contractErr.message
                 : String(contractErr),
-          }),
-        );
+          });
       }
       await pool.end().catch(() => {
         /* ignored — already shutting down */
@@ -1579,7 +1563,7 @@ async function start(): Promise<void> {
       await ensureIndexTemplate();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(
+      logger.warn(
         `WARNING: Could not ensure OpenSearch index template: ${msg}`
       );
     }
@@ -1590,7 +1574,7 @@ async function start(): Promise<void> {
       await ensureBucket();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(
+      logger.warn(
         `WARNING: Could not ensure S3/MinIO bucket: ${msg}`
       );
     }
@@ -1604,13 +1588,13 @@ async function start(): Promise<void> {
       const { bootstrapK8sInfra } = await import("./boot/cacheAndRateLimit");
       await bootstrapK8sInfra();
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: K8s infra bootstrap failed (degraded mode): ${(err as Error).message}`,
       );
     }
 
     server = app.listen(PORT, () => {
-      console.log(
+      logger.info(
         `Ontology Engine started on port ${PORT} | PostgreSQL connected`
       );
       // Operator visibility into the Function publish authorization policy:
@@ -1623,7 +1607,7 @@ async function start(): Promise<void> {
     }
     if (process.env.AUTOMATE_RUNTIME_DISABLED !== "true") {
       startAutomateRuntime();
-      console.log("Automate durable scheduler and worker started");
+      logger.info("Automate durable scheduler and worker started");
     }
     // Rwanda QA §7.3: independent one-minute, durable policy evaluator.
     // It is independently switchable for focused clean browser suites, whose
@@ -1631,12 +1615,12 @@ async function start(): Promise<void> {
     // test starts. Production keeps this enabled by default.
     if (process.env.PINDO_AUTOMATION_DISABLED !== "true") {
       const runPindo = () => void runRwandaPindoAutomationOnce().catch((error) =>
-        console.error("rwanda-pindo-automation failed", error),
+        logger.error({ err: error }, "rwanda-pindo-automation failed"),
       );
       runPindo();
       const pindoTimer = setInterval(runPindo, 60_000);
       pindoTimer.unref();
-      console.log("Rwanda Pindo automation scheduler started");
+      logger.info("Rwanda Pindo automation scheduler started");
     }
 
     if (process.env.DEVELOPER_CONSOLE_WORKERS_DISABLED !== "true") {
@@ -1655,10 +1639,10 @@ async function start(): Promise<void> {
     try {
       if (process.env.FUNNEL_DISPATCHER_DISABLED !== "true") {
         startFunnelDispatcher();
-        console.log("Funnel dispatcher started");
+        logger.info("Funnel dispatcher started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start Funnel dispatcher: ${(err as Error).message}`
       );
     }
@@ -1669,10 +1653,10 @@ async function start(): Promise<void> {
     try {
       if (process.env.LINK_CDC_DRAINER_DISABLED !== "true") {
         stopLinkCdcDrainer = startLinkCdcDrainer();
-        console.log("Link CDC outbox drainer started");
+        logger.info("Link CDC outbox drainer started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start link CDC drainer: ${(err as Error).message}`
       );
     }
@@ -1682,10 +1666,10 @@ async function start(): Promise<void> {
       if (process.env.DATASOURCE_COMPILER_CONSUMER_DISABLED !== "true") {
         const { startDatasourceCompilerConsumer } = require("./services/orchestration/datasource-compiler-consumer");
         startDatasourceCompilerConsumer();
-        console.log("Multi-Source Compilation Worker started");
+        logger.info("Multi-Source Compilation Worker started");
       }
     } catch (err) {
-      console.warn(`WARNING: could not start Multi-Source Compilation Worker: ${(err as Error).message}`);
+      logger.warn(`WARNING: could not start Multi-Source Compilation Worker: ${(err as Error).message}`);
     }
 
     // PB-B1: Pipeline dispatcher + one-shot orphan sweep.
@@ -1698,22 +1682,22 @@ async function start(): Promise<void> {
     try {
       const orphans = await sweepOrphanPipelineDeployments();
       if (orphans.sweptIds.length > 0) {
-        console.log(
+        logger.info(
           `Swept ${orphans.sweptIds.length} orphan pipeline_deployment(s) from prior restart`
         );
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: pipeline orphan sweep failed: ${(err as Error).message}`
       );
     }
     try {
       if (process.env.PIPELINE_DISPATCHER_DISABLED !== "true") {
         startPipelineDispatcher();
-        console.log("Pipeline dispatcher started");
+        logger.info("Pipeline dispatcher started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start Pipeline dispatcher: ${(err as Error).message}`
       );
     }
@@ -1722,9 +1706,9 @@ async function start(): Promise<void> {
     // rebuilt every interval through the regular deploy path.
     try {
       startPipelineBuildScheduler();
-      console.log("Pipeline build scheduler started");
+      logger.info("Pipeline build scheduler started");
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start Pipeline build scheduler: ${(err as Error).message}`
       );
     }
@@ -1734,10 +1718,10 @@ async function start(): Promise<void> {
     try {
       if (process.env.PIPELINE_ICEBERG_MAINTENANCE_DISABLED !== "true") {
         startIcebergMaintenance();
-        console.log("Iceberg maintenance loop started");
+        logger.info("Iceberg maintenance loop started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start Iceberg maintenance: ${(err as Error).message}`
       );
     }
@@ -1753,12 +1737,12 @@ async function start(): Promise<void> {
       );
       const resumed = await resumeOrphanedOsReindexRuns();
       if (resumed > 0) {
-        console.log(
+        logger.info(
           `Resumed ${resumed} orphaned opensearch_reindex_run row(s) from last checkpoint`
         );
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: orphaned opensearch_reindex_run resume failed: ${(err as Error).message}`
       );
     }
@@ -1782,7 +1766,7 @@ async function start(): Promise<void> {
             "./services/funnel/temporal/worker"
           );
           const diag = getWorkerDiagnostics();
-          console.log(
+          logger.info(
             `Temporal worker registered on ${diag.identity?.temporalNamespace}/${diag.identity?.temporalTaskQueue} ` +
               `(env=${diag.identity?.environmentId} db=${diag.dbEnvironmentId} build=${diag.identity?.workerBuildId})`,
           );
@@ -1796,21 +1780,21 @@ async function start(): Promise<void> {
               "./services/pipelines/temporal/schedule"
             );
             const r = await ensureIcebergMaintenanceSchedule();
-            console.log(
+            logger.info(
               `PB-B4 iceberg maintenance schedule: scheduled=${r.scheduled}${
                 r.reason ? ` (${r.reason})` : ""
               }`,
             );
           } catch (err) {
-            console.warn(
+            logger.warn(
               `WARNING: could not ensure PB-B4 maintenance schedule: ${(err as Error).message}`,
             );
           }
         } else {
-          console.log("Temporal unreachable — PG-backed dispatcher remains primary");
+          logger.info("Temporal unreachable — PG-backed dispatcher remains primary");
         }
       } catch (err) {
-        console.warn(
+        logger.warn(
           `WARNING: Temporal worker failed to start: ${(err as Error).message}`
         );
       }
@@ -1844,12 +1828,12 @@ async function start(): Promise<void> {
         );
         const swept = await sweepOrphanedFunnelRuns();
         if (swept.sweptRunIds.length > 0) {
-          console.log(
+          logger.info(
             `Swept ${swept.sweptRunIds.length} orphaned funnel_run row(s) + ${swept.sweptStageRuns} stage(s) from prior worker restart`
           );
         }
       } catch (err) {
-        console.warn(
+        logger.warn(
           `WARNING: orphaned funnel_run sweep failed: ${(err as Error).message}`
         );
       }
@@ -1857,10 +1841,10 @@ async function start(): Promise<void> {
     try {
       if (process.env.OVERLAY_SWEEPER_DISABLED !== "true") {
         startOverlaySweeper();
-        console.log("Overlay sweeper started");
+        logger.info("Overlay sweeper started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start overlay sweeper: ${(err as Error).message}`
       );
     }
@@ -1873,10 +1857,10 @@ async function start(): Promise<void> {
     try {
       if (process.env.SERVING_PROJECTOR_DISABLED !== "true") {
         startServingProjector();
-        console.log("Serving edit projector started");
+        logger.info("Serving edit projector started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start serving projector: ${(err as Error).message}`
       );
     }
@@ -1888,10 +1872,10 @@ async function start(): Promise<void> {
     try {
       if (process.env.REPLACEMENT_SCHEDULER_DISABLED !== "true") {
         startReplacementScheduler();
-        console.log("Replacement scheduler started");
+        logger.info("Replacement scheduler started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start replacement scheduler: ${(err as Error).message}`
       );
     }
@@ -1912,10 +1896,10 @@ async function start(): Promise<void> {
           limit: parseInt(process.env.ACTION_SIDE_EFFECT_WORKER_BATCH ?? "16", 10),
           signal: controller.signal,
         });
-        console.log("Side-effect outbox worker started");
+        logger.info("Side-effect outbox worker started");
       }
     } catch (err) {
-      console.warn(
+      logger.warn(
         `WARNING: could not start side-effect outbox worker: ${(err as Error).message}`,
       );
     }
@@ -1928,9 +1912,9 @@ async function start(): Promise<void> {
       try {
         const lk = await bootstrapLakekeeper();
         if (!lk.reachable) {
-          console.warn("Lakekeeper unreachable — Iceberg catalog falls back to PG shim");
+          logger.warn("Lakekeeper unreachable — Iceberg catalog falls back to PG shim");
         } else {
-          console.log(
+          logger.info(
             `Lakekeeper bootstrap: warehouse=${lk.warehouseId} funnel_namespaces=${lk.namespacesCreated}/${lk.objectTypesConsidered * 4} pipeline_namespaces=${lk.pipelineNamespacesCreated}/${lk.pipelinesConsidered}`
           );
           // PB-B4 — ensure the `tellus-pipeline` warehouse exists as
@@ -1940,15 +1924,15 @@ async function start(): Promise<void> {
           // lakekeeperClient via pipelines/lakekeeperBootstrap.
           try {
             const pw = await ensurePipelineWarehouse();
-            console.log(`Lakekeeper pipeline bootstrap: warehouse=${pw}`);
+            logger.info(`Lakekeeper pipeline bootstrap: warehouse=${pw}`);
           } catch (err) {
-            console.warn(
+            logger.warn(
               `WARNING: Lakekeeper pipeline warehouse bootstrap failed: ${(err as Error).message}`,
             );
           }
         }
       } catch (err) {
-        console.warn(`WARNING: Lakekeeper bootstrap failed: ${(err as Error).message}`);
+        logger.warn(`WARNING: Lakekeeper bootstrap failed: ${(err as Error).message}`);
       }
     });
 
@@ -1959,14 +1943,14 @@ async function start(): Promise<void> {
       try {
         const result = await ensureLinkTablesForAllLinkTypes();
         if (result.skippedUnreachable) {
-          console.warn("ClickHouse unreachable — link tables not bootstrapped");
+          logger.warn("ClickHouse unreachable — link tables not bootstrapped");
         } else {
-          console.log(
+          logger.info(
             `ClickHouse link tables ensured: ${result.tablesEnsured}/${result.linkTypesFound}`
           );
         }
       } catch (err) {
-        console.warn(
+        logger.warn(
           `WARNING: ClickHouse bootstrap failed: ${(err as Error).message}`
         );
       }
@@ -1990,7 +1974,7 @@ async function start(): Promise<void> {
       const email = process.env.TELLUS_SUPERADMIN_EMAIL;
       const password = process.env.TELLUS_SUPERADMIN_PASSWORD;
       if (!email || !password) {
-        console.warn(
+        logger.warn(
           "[bootstrap] TELLUS_SUPERADMIN_EMAIL and TELLUS_SUPERADMIN_PASSWORD must both be set; skipping superadmin bootstrap"
         );
         return;
@@ -2014,7 +1998,7 @@ async function start(): Promise<void> {
         let user = await kc.findUserByEmail(email);
         if (!user) {
           if (!autoCreate) {
-            console.warn(
+            logger.warn(
               `[bootstrap] superadmin email ${email} not found in Keycloak; skipping role grant (set NODE_ENV!=production to auto-create)`
             );
             return;
@@ -2034,7 +2018,7 @@ async function start(): Promise<void> {
             emailVerified: true,
           });
           user = { id: userId, email, username: email };
-          console.log(`[bootstrap] created superadmin user ${email}`);
+          logger.info(`[bootstrap] created superadmin user ${email}`);
         } else if (autoCreate) {
           // Existing account: reconcile its Keycloak password with the
           // current TELLUS_SUPERADMIN_PASSWORD. The create-time password is
@@ -2044,15 +2028,15 @@ async function start(): Promise<void> {
           // overwrite an operator-managed credential (autoCreate is false
           // there), so this is gated behind the same NODE_ENV check.
           await kc.resetPassword(user.id, password);
-          console.log(`[bootstrap] reconciled superadmin password for ${email}`);
+          logger.info(`[bootstrap] reconciled superadmin password for ${email}`);
         }
         await kc.assignRealmRoleToUser(user.id, TELLUS_SUPERADMIN_ROLE);
-        console.log(
+        logger.info(
           `[bootstrap] tellus-superadmin role ensured + granted to ${email}`
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[bootstrap] superadmin role bootstrap failed: ${msg}`);
+        logger.warn(`[bootstrap] superadmin role bootstrap failed: ${msg}`);
       }
     })();
 
@@ -2067,16 +2051,16 @@ async function start(): Promise<void> {
       try {
         const deleted = await cleanupExpiredKeys();
         if (deleted > 0) {
-          console.log(`Idempotency cleanup: removed ${deleted} expired keys`);
+          logger.info(`Idempotency cleanup: removed ${deleted} expired keys`);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`Idempotency cleanup error: ${msg}`);
+        logger.warn(`Idempotency cleanup error: ${msg}`);
       }
     }, SIX_HOURS_MS);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`FATAL: Cannot connect to PostgreSQL: ${message}`);
+    logger.error(`FATAL: Cannot connect to PostgreSQL: ${message}`);
     process.exit(1);
   }
 }
@@ -2087,22 +2071,22 @@ async function start(): Promise<void> {
  */
 async function shutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
-    console.log(`${signal} received again — shutdown already in progress`);
+    logger.info(`${signal} received again — shutdown already in progress`);
     return;
   }
 
   isShuttingDown = true;
 
-  console.log(JSON.stringify({
+  logger.info({
     type: "shutdown_initiated",
     timestamp: new Date().toISOString(),
     signal,
     activeRequests,
-  }));
+  });
 
   if (server) {
     server.close(() => {
-      console.log(JSON.stringify({ type: "server_closed", timestamp: new Date().toISOString() }));
+      logger.info({ type: "server_closed", timestamp: new Date().toISOString() });
     });
   }
 
@@ -2111,11 +2095,11 @@ async function shutdown(signal: string): Promise<void> {
   const startWait = Date.now();
   while (activeRequests > 0 && (Date.now() - startWait) < maxWait) {
     await new Promise((resolve) => setTimeout(resolve, 500));
-    console.log(JSON.stringify({ type: "shutdown_waiting", activeRequests, elapsed: Date.now() - startWait }));
+    logger.info({ type: "shutdown_waiting", activeRequests, elapsed: Date.now() - startWait });
   }
 
   if (activeRequests > 0) {
-    console.warn(JSON.stringify({ type: "shutdown_forced", activeRequests, message: "Forcing shutdown with active requests" }));
+    logger.warn({ type: "shutdown_forced", activeRequests, message: "Forcing shutdown with active requests" });
   }
 
   // Destroy the action rate limiter to prevent dangling setInterval
@@ -2151,11 +2135,11 @@ async function shutdown(signal: string): Promise<void> {
     try {
       await Promise.resolve(stop());
     } catch (err) {
-      console.error(JSON.stringify({
+      logger.error({
         type: "worker_stop_error",
         worker: name,
         error: err instanceof Error ? err.message : String(err),
-      }));
+      });
     }
   }
 
@@ -2165,18 +2149,18 @@ async function shutdown(signal: string): Promise<void> {
     const { shutdownK8sInfra } = await import("./boot/cacheAndRateLimit");
     await shutdownK8sInfra();
   } catch (err) {
-    console.error(JSON.stringify({ type: "k8s_infra_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+    logger.error({ type: "k8s_infra_shutdown_error", error: err instanceof Error ? err.message : String(err) });
   }
   try {
     await shutdownKafka();
   } catch (err) {
-    console.error(JSON.stringify({ type: "kafka_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+    logger.error({ type: "kafka_shutdown_error", error: err instanceof Error ? err.message : String(err) });
   }
 
   // Close foundry WebSocket connections
   const wss = getWss();
   if (wss) {
-    console.log(JSON.stringify({ type: "foundry_ws_closing" }));
+    logger.info({ type: "foundry_ws_closing" });
     for (const client of wss.clients) {
       if (client.readyState === 1 /* WebSocket.OPEN */) {
         client.close(1001, 'Server shutting down');
@@ -2190,26 +2174,26 @@ async function shutdown(signal: string): Promise<void> {
       .where({ status: 'processing' })
       .update({ status: 'pending' });
     if (resetCount > 0) {
-      console.log(JSON.stringify({ type: "foundry_datasets_reset", count: resetCount }));
+      logger.info({ type: "foundry_datasets_reset", count: resetCount });
     }
   } catch (err) {
-    console.error(JSON.stringify({ type: "foundry_datasets_reset_error", error: err instanceof Error ? err.message : String(err) }));
+    logger.error({ type: "foundry_datasets_reset_error", error: err instanceof Error ? err.message : String(err) });
   }
 
   // Destroy S3/MinIO client
   try {
     destroyStorageClient();
-    console.log(JSON.stringify({ type: "s3_client_destroyed" }));
+    logger.info({ type: "s3_client_destroyed" });
   } catch (err) {
-    console.error(JSON.stringify({ type: "s3_client_destroy_error", error: err instanceof Error ? err.message : String(err) }));
+    logger.error({ type: "s3_client_destroy_error", error: err instanceof Error ? err.message : String(err) });
   }
 
   // Drain foundry database connection pool
   try {
     await foundryDb.destroy();
-    console.log(JSON.stringify({ type: "foundry_db_disconnected" }));
+    logger.info({ type: "foundry_db_disconnected" });
   } catch (err) {
-    console.error(JSON.stringify({ type: "foundry_db_disconnect_error", error: err instanceof Error ? err.message : String(err) }));
+    logger.error({ type: "foundry_db_disconnect_error", error: err instanceof Error ? err.message : String(err) });
   }
 
   // Stop connectivity background workers (outbox poller, credential rotation,
@@ -2219,9 +2203,9 @@ async function shutdown(signal: string): Promise<void> {
   // produces "Cannot use a pool after calling end" noise on every shutdown.
   try {
     await shutdownConnectivity();
-    console.log(JSON.stringify({ type: "connectivity_shutdown" }));
+    logger.info({ type: "connectivity_shutdown" });
   } catch (err) {
-    console.error(JSON.stringify({ type: "connectivity_shutdown_error", error: err instanceof Error ? err.message : String(err) }));
+    logger.error({ type: "connectivity_shutdown_error", error: err instanceof Error ? err.message : String(err) });
   }
 
   // Give any still-running boot tasks (Lakekeeper / ClickHouse / seed
@@ -2236,12 +2220,12 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     await pool.end();
-    console.log(JSON.stringify({ type: "postgresql_disconnected" }));
+    logger.info({ type: "postgresql_disconnected" });
   } catch (err) {
-    console.error(JSON.stringify({ type: "postgresql_disconnect_error", error: err instanceof Error ? err.message : String(err) }));
+    logger.error({ type: "postgresql_disconnect_error", error: err instanceof Error ? err.message : String(err) });
   }
 
-  console.log(JSON.stringify({ type: "shutdown_complete", timestamp: new Date().toISOString() }));
+  logger.info({ type: "shutdown_complete", timestamp: new Date().toISOString() });
   process.exit(0);
 }
 

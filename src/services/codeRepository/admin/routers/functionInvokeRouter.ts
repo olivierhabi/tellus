@@ -84,6 +84,7 @@ export function createFunctionInvokeRouter(ctx: CodeRepositoryRouteContext): Rou
         source: body.source,
         inlineSource: body.inlineSource,
         inlineSourcePath: body.inlineSourcePath,
+        semver: body.semver,
       });
       if (resolved.kind === 'error') {
         return sendError(res, codeReposError(resolved.errorName, resolved.parameters));

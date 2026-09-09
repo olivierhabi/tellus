@@ -66,30 +66,17 @@ import {
   addInputRowsProcessed,
 } from './pipelines/metrics';
 
-// ─── CSV Serialization (RFC 4180) ───────────────────────────────────────────
-
-function escapeCsvField(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (value instanceof Date) return value.toISOString();
-  const str = String(value);
-  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
-
-function rowsToCsvBuffer(
-  columns: Array<{ name: string; type: string }>,
-  rows: Array<Record<string, unknown>>,
-): Buffer {
-  const header = columns.map((c) => escapeCsvField(c.name)).join(',');
-  const lines = [header];
-  for (const row of rows) {
-    const line = columns.map((c) => escapeCsvField(row[c.name])).join(',');
-    lines.push(line);
-  }
-  return Buffer.from(lines.join('\n') + '\n', 'utf-8');
-}
+// CSV serialization (RFC 4180) lives in ./deploy/csvSerialization (extracted
+// during the god-file breakup; behavior identical, unit-tested in isolation).
+import { rowsToCsvBuffer } from './deploy/csvSerialization';
+// Iceberg sidecar output reads (snapshots / time-travel scan) extracted to
+// ./deploy/icebergOutputReads — same pipeline-load + format-gate semantics.
+import {
+  listPipelineOutputSnapshots,
+  readPipelineOutputAsOf,
+} from './deploy/icebergOutputReads';
+// Batch-engine selection gate extracted to ./deploy/batchEngineSelection.
+import { shouldAttemptEngineBuild } from './deploy/batchEngineSelection';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -1328,29 +1315,7 @@ export class DeploymentService {
     projectId: string,
     pipelineId: string,
   ): Promise<{ snapshots: Array<Record<string, unknown>> }> {
-    const pipeline = await this.knex('pipelines')
-      .where({ id: pipelineId, project_id: projectId })
-      .first();
-    if (!pipeline) throw new AppError('Pipeline not found', 404, 'NOT_FOUND');
-    if (pipeline.output_format !== 'iceberg') {
-      return { snapshots: [] };
-    }
-    const warehouse =
-      process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ?? 'tellus-pipeline';
-    const projectSlug = slugForNamespace(
-      `proj_${projectId.replace(/-/g, '').slice(0, 12)}`,
-    );
-    const pipelineSlug = slugForNamespace(
-      `${(pipeline.name ?? 'pipe').toString()}_${pipelineId.replace(/-/g, '').slice(0, 8)}`,
-    );
-    const namespace = pipelineNamespace(projectSlug, pipelineSlug);
-    const { icebergSnapshots } = await import('./pipelines/icebergSidecar');
-    const { snapshots } = await icebergSnapshots({
-      warehouse,
-      namespace,
-      table: PIPELINE_LEAF_TABLE,
-    });
-    return { snapshots: snapshots as unknown as Array<Record<string, unknown>> };
+    return listPipelineOutputSnapshots(this.knex, projectId, pipelineId);
   }
 
   /**
@@ -1365,39 +1330,7 @@ export class DeploymentService {
     pipelineId: string,
     opts: { snapshotId?: number | string; limit?: number } = {},
   ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>>; rowCount: number }> {
-    const pipeline = await this.knex('pipelines')
-      .where({ id: pipelineId, project_id: projectId })
-      .first();
-    if (!pipeline) throw new AppError('Pipeline not found', 404, 'NOT_FOUND');
-    if (pipeline.output_format !== 'iceberg') {
-      throw new AppError(
-        "Time-travel scans are only supported on Iceberg-backed pipelines.",
-        400,
-        'OUTPUT_NOT_ICEBERG',
-      );
-    }
-    const warehouse =
-      process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ?? 'tellus-pipeline';
-    const projectSlug = slugForNamespace(
-      `proj_${projectId.replace(/-/g, '').slice(0, 12)}`,
-    );
-    const pipelineSlug = slugForNamespace(
-      `${(pipeline.name ?? 'pipe').toString()}_${pipelineId.replace(/-/g, '').slice(0, 8)}`,
-    );
-    const namespace = pipelineNamespace(projectSlug, pipelineSlug);
-    const { icebergScanAsOf } = await import('./pipelines/icebergSidecar');
-    const res = await icebergScanAsOf({
-      warehouse,
-      namespace,
-      table: PIPELINE_LEAF_TABLE,
-      snapshotId: opts.snapshotId,
-      limit: opts.limit,
-    });
-    return {
-      columns: res.columns,
-      rows: res.rows,
-      rowCount: res.row_count,
-    };
+    return readPipelineOutputAsOf(this.knex, projectId, pipelineId, opts);
   }
 
   /**
@@ -2299,14 +2232,17 @@ export class DeploymentService {
     rowCount: number;
     columnCount: number;
   } | null> {
-    // Engine path is the default ("auto"): used wherever a real Trino
-    // coordinator is configured, else we fall through to the in-process +
-    // PyIceberg-sidecar path. Forced "in-process" opts out entirely; forced
-    // "trino" always attempts it (tests inject an in-memory engine).
-    const engineMode = selectedBatchEngine();
-    if (engineMode === 'in-process') return null;
-    if (engineMode === 'auto' && !trinoCoordinatorConfigured()) return null;
-    if ((args.pipeline.output_format ?? 'csv') !== 'iceberg') return null;
+    // Engine-selection gate extracted to ./deploy/batchEngineSelection
+    // (pure predicate; env reads stay here at the call site).
+    if (
+      !shouldAttemptEngineBuild({
+        engineMode: selectedBatchEngine(),
+        coordinatorConfigured: trinoCoordinatorConfigured(),
+        outputFormat: args.pipeline.output_format,
+      })
+    ) {
+      return null;
+    }
 
     try {
       // 1. Peek the output's source node to choose the plan shape.

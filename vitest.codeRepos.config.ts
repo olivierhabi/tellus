@@ -18,6 +18,7 @@
 
 import { defineConfig } from "vitest/config";
 import path from "path";
+import { requiredTestSecret } from "./tests/testEnvFile";
 
 export default defineConfig({
   test: {
@@ -38,7 +39,8 @@ export default defineConfig({
       PGPORT: process.env.PGPORT ?? "5432",
       PGDATABASE: process.env.PGDATABASE ?? "tellus_db",
       PGUSER: process.env.PGUSER ?? "tellus",
-      PGPASSWORD: process.env.PGPASSWORD ?? "tellus123",
+      // No baked-in literals: env first (CI), then .env.test / .env.test.example.
+      PGPASSWORD: requiredTestSecret("PGPASSWORD"),
       // Enable the test-mode principal opt-in so integration tests can drive
       // routes via the X-Tellus-Test-Principal header without standing up a
       // Keycloak realm. requireCodeReposAuth() ignores this header unless

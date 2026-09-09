@@ -12,19 +12,14 @@
 // ---------------------------------------------------------------------------
 
 import { defineConfig } from "vitest/config";
+import { requiredTestSecret } from "./tests/testEnvFile";
 
-// Test credentials are never baked into the repo. PGPASSWORD must come from
-// the environment (CI secret or a local export — see .env.test.example) and
-// the config fails fast when it is missing instead of falling back to an
-// inline literal.
+// Test credentials are never baked into the repo. Secrets resolve env-first
+// (CI secret or a local export) with a fallback to .env.test /
+// .env.test.example (see tests/testEnvFile.ts), and fail fast when no
+// source has a value — instead of falling back to an inline literal.
 function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `${name} is not set. Export it before running this suite (see .env.test.example).`,
-    );
-  }
-  return value;
+  return requiredTestSecret(name);
 }
 
 export default defineConfig({
@@ -45,7 +40,7 @@ export default defineConfig({
       TELLUS_CDC_TOPIC_PREFIX: "osv2.cdc",
       CLICKHOUSE_URL: "http://localhost:8123",
       CLICKHOUSE_USER: "tellus",
-      CLICKHOUSE_PASSWORD: "tellus_ch_pw",
+      CLICKHOUSE_PASSWORD: requiredEnv("CLICKHOUSE_PASSWORD"),
       CLICKHOUSE_DATABASE: "osv2_serving",
       // The Kafka-engine DDL emitted by the lane must use the INTERNAL
       // broker alias — the engine connects from inside the CH container.

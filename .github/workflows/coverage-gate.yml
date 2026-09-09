@@ -40,6 +40,10 @@ jobs:
         with: { node-version: 24.12.0, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - name: Unit coverage (critical path)
+        # Global floor enforced by coverage.thresholds in
+        # vitest.unit.config.ts (lines 37 / branches 30, raise-only ratchet):
+        # vitest exits non-zero here when the lane regresses below it, so no
+        # separate --coverage.thresholds.* flags are needed to fail this step.
         run: pnpm vitest run --config vitest.unit.config.ts --coverage --coverage.reporter=json-summary --coverage.reporter=text --coverage.reportsDirectory=coverage
       - name: Enforce branch coverage on critical-path modules
         run: |
