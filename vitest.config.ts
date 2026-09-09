@@ -235,6 +235,17 @@ export default defineConfig({
       ],
       reporter: ["text", "text-summary", "lcov", "json"],
       reportsDirectory: "coverage",
+      // Enforcement floor for the integration lane. The unit lane
+      // (vitest.unit.config.ts: lines 37 / branches 30, raise-only ratchet)
+      // is the authoritative gate; this floor sits deliberately lower as a
+      // tripwire so the default `vitest run --coverage` lane cannot regress
+      // to zero unnoticed. Raise-only — never lower these numbers.
+      thresholds: {
+        lines: 25,
+        branches: 20,
+        functions: 0,
+        statements: 0,
+      },
     },
   },
 });

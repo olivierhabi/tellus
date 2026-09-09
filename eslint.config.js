@@ -23,6 +23,13 @@ module.exports = [
       security,
     },
     rules: {
+      // Growth guards (warn-only so the existing tree stays green): new
+      // god-files should be split at review time following the 0.3.1
+      // extraction pattern (one module per commit with its spec). Warnings
+      // are visible in `pnpm run lint` output and in IDEs; only `error`
+      // level rules fail CI.
+      "max-lines": ["warn", { max: 800, skipBlankLines: true, skipComments: true }],
+      complexity: ["warn", 20],
       "security/detect-eval-with-expression": "error",
       "security/detect-non-literal-require": "warn",
       "security/detect-child-process": "warn",

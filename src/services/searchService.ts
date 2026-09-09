@@ -125,7 +125,9 @@ export class SearchService {
     // Collect SQL fragments (with ? placeholders) and their bindings separately,
     // then pass everything to a single knex.raw() call.
     const sqlParts: string[] = [];
-    const allBindings: unknown[] = [];
+    // Knex 3.3 types raw bindings as scalar values; every placeholder in
+    // these search fragments is a string or pagination number.
+    const allBindings: Array<string | number> = [];
 
     if (!type || type === 'project') {
       sqlParts.push(`(SELECT id, name, 'project' AS "resourceType", updated_at FROM projects WHERE owner_id = ? AND name ILIKE ? ESCAPE '\\')`);

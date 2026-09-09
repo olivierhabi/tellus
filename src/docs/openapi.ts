@@ -2881,73 +2881,9 @@ export const openApiSpec = {
 // live route set.
 // ---------------------------------------------------------------------------
 
-/** Collapse param segments so curated `{ontologyId}` / `:id` match live `{x}`. */
-function normShape(path: string): string {
-  return path.replace(/\{[^}]+\}/g, '{}').replace(/:[^/]+/g, '{}');
-}
-
-function areaTag(path: string): string {
-  if (path.startsWith('/health')) return 'Health';
-  if (path.startsWith('/api/docs') || path.startsWith('/api/metrics')) return 'Meta';
-  if (path.startsWith('/quiver')) return 'Quiver';
-  const segs = path.split('/').filter(Boolean); // [api, v1, ontology, ...]
-  const a = (segs[2] || segs[1] || 'root').toLowerCase();
-  const map: Record<string, string> = {
-    connectivity: 'Connectivity', ontology: 'Ontology', funnel: 'Funnel',
-    workshop: 'Workshop', auth: 'Auth', 'code-repositories': 'Code Repositories',
-    projects: 'Projects', datasets: 'Datasets', objects: 'Objects',
-    functions: 'Functions', templates: 'Templates', actions: 'Actions',
-    search: 'Search', dev: 'Dev', resources: 'Foundry', system: 'System',
-    compass: 'Foundry', users: 'Users', scaffold: 'Templates', charts: 'Objects',
-    status: 'System', breadcrumb: 'Foundry',
-  };
-  return map[a] || a.charAt(0).toUpperCase() + a.slice(1);
-}
-
-function pathParameters(path: string): Array<Record<string, unknown>> {
-  return [...path.matchAll(/\{([^}]+)\}/g)].map((m) => ({
-    name: m[1], in: 'path', required: true,
-    schema: { type: 'string' }, description: `${m[1]} path parameter`,
-  }));
-}
-
-function isPublicPath(path: string): boolean {
-  return (
-    path.startsWith('/health') ||
-    path.startsWith('/api/docs') ||
-    path === '/api/metrics' ||
-    path === '/api/v1/auth/health' ||
-    /^\/api\/v1\/auth\/(login|oidc|refresh|logout|register|pat-scopes|password)/.test(path)
-  );
-}
-
-function autoStub(method: string, path: string): Record<string, unknown> {
-  const op: Record<string, unknown> = {
-    tags: [areaTag(path)],
-    summary: `${method} ${path}`,
-    description:
-      'Auto-generated from the live route table. Not yet hand-documented with ' +
-      'full request/response schemas — see docs/openapi.ts to enrich.',
-    'x-auto-generated': true,
-    parameters: pathParameters(path),
-    responses: {
-      '200': { description: 'Successful response' },
-      '400': { description: 'Bad request' },
-      '401': { description: 'Unauthorized' },
-      '403': { description: 'Forbidden' },
-      '404': { description: 'Not found' },
-      '500': { description: 'Server error' },
-    },
-    security: isPublicPath(path) ? [] : [{ bearerAuth: [] }],
-  };
-  if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
-    op.requestBody = {
-      required: false,
-      content: { 'application/json': { schema: { type: 'object' } } },
-    };
-  }
-  return op;
-}
+// Served-spec auto-stub machinery (shape normalisation, area tags, stub
+// builder) extracted to ./openapiAutoStub — behavior-preserving move.
+import { areaTag, autoStub, normShape } from './openapiAutoStub';
 
 /** Index curated operations by `${method} ${normShape}` (with and without /api). */
 function curatedLookup(): Map<string, Record<string, unknown>> {
