@@ -69,6 +69,12 @@ import {
 // CSV serialization (RFC 4180) lives in ./deploy/csvSerialization (extracted
 // during the god-file breakup; behavior identical, unit-tested in isolation).
 import { rowsToCsvBuffer } from './deploy/csvSerialization';
+// Iceberg sidecar output reads (snapshots / time-travel scan) extracted to
+// ./deploy/icebergOutputReads — same pipeline-load + format-gate semantics.
+import {
+  listPipelineOutputSnapshots,
+  readPipelineOutputAsOf,
+} from './deploy/icebergOutputReads';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -1307,29 +1313,7 @@ export class DeploymentService {
     projectId: string,
     pipelineId: string,
   ): Promise<{ snapshots: Array<Record<string, unknown>> }> {
-    const pipeline = await this.knex('pipelines')
-      .where({ id: pipelineId, project_id: projectId })
-      .first();
-    if (!pipeline) throw new AppError('Pipeline not found', 404, 'NOT_FOUND');
-    if (pipeline.output_format !== 'iceberg') {
-      return { snapshots: [] };
-    }
-    const warehouse =
-      process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ?? 'tellus-pipeline';
-    const projectSlug = slugForNamespace(
-      `proj_${projectId.replace(/-/g, '').slice(0, 12)}`,
-    );
-    const pipelineSlug = slugForNamespace(
-      `${(pipeline.name ?? 'pipe').toString()}_${pipelineId.replace(/-/g, '').slice(0, 8)}`,
-    );
-    const namespace = pipelineNamespace(projectSlug, pipelineSlug);
-    const { icebergSnapshots } = await import('./pipelines/icebergSidecar');
-    const { snapshots } = await icebergSnapshots({
-      warehouse,
-      namespace,
-      table: PIPELINE_LEAF_TABLE,
-    });
-    return { snapshots: snapshots as unknown as Array<Record<string, unknown>> };
+    return listPipelineOutputSnapshots(this.knex, projectId, pipelineId);
   }
 
   /**
@@ -1344,39 +1328,7 @@ export class DeploymentService {
     pipelineId: string,
     opts: { snapshotId?: number | string; limit?: number } = {},
   ): Promise<{ columns: string[]; rows: Array<Record<string, unknown>>; rowCount: number }> {
-    const pipeline = await this.knex('pipelines')
-      .where({ id: pipelineId, project_id: projectId })
-      .first();
-    if (!pipeline) throw new AppError('Pipeline not found', 404, 'NOT_FOUND');
-    if (pipeline.output_format !== 'iceberg') {
-      throw new AppError(
-        "Time-travel scans are only supported on Iceberg-backed pipelines.",
-        400,
-        'OUTPUT_NOT_ICEBERG',
-      );
-    }
-    const warehouse =
-      process.env.LAKEKEEPER_PIPELINE_WAREHOUSE ?? 'tellus-pipeline';
-    const projectSlug = slugForNamespace(
-      `proj_${projectId.replace(/-/g, '').slice(0, 12)}`,
-    );
-    const pipelineSlug = slugForNamespace(
-      `${(pipeline.name ?? 'pipe').toString()}_${pipelineId.replace(/-/g, '').slice(0, 8)}`,
-    );
-    const namespace = pipelineNamespace(projectSlug, pipelineSlug);
-    const { icebergScanAsOf } = await import('./pipelines/icebergSidecar');
-    const res = await icebergScanAsOf({
-      warehouse,
-      namespace,
-      table: PIPELINE_LEAF_TABLE,
-      snapshotId: opts.snapshotId,
-      limit: opts.limit,
-    });
-    return {
-      columns: res.columns,
-      rows: res.rows,
-      rowCount: res.row_count,
-    };
+    return readPipelineOutputAsOf(this.knex, projectId, pipelineId, opts);
   }
 
   /**
