@@ -35,7 +35,7 @@ jobs:
       S3_ENDPOINT: http://localhost:9000
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with: { node-version: 24.12.0, cache: pnpm }
       - run: pnpm install --frozen-lockfile
@@ -142,7 +142,7 @@ jobs:
             }
             console.log("coverage gate OK" + (debt.length ? " (with tracked debt — see warnings above)" : ""));
           '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: coverage-report, path: coverage/ }
   ghost-pass-gate:
     runs-on: ubuntu-latest
