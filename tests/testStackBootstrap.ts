@@ -18,6 +18,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import pg from "pg";
 
+import { requiredTestSecret } from "./testEnvFile";
 import { resolveEnvironmentIdentity } from "../src/config/environmentIdentity";
 import {
   sealTestDatabaseEnvironment,
@@ -34,7 +35,8 @@ function sh(cmd: string, args: string[], label: string): void {
       PGHOST: "localhost",
       PGPORT: "5432",
       PGUSER: "tellus",
-      PGPASSWORD: "tellus123",
+      // No baked-in literals: env first (CI), then .env.test / .env.test.example.
+      PGPASSWORD: requiredTestSecret("PGPASSWORD"),
       ...process.env,
     },
     encoding: "utf8",
@@ -58,7 +60,7 @@ async function ensureDatabase(): Promise<void> {
     host: process.env.PGHOST || "localhost",
     port: Number(process.env.PGPORT || 5432),
     user: process.env.PGUSER || "tellus",
-    password: process.env.PGPASSWORD || "tellus123",
+    password: requiredTestSecret("PGPASSWORD"),
     database: "postgres",
     max: 1,
     connectionTimeoutMillis: 5000,
