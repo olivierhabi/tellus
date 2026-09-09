@@ -402,7 +402,7 @@ jobs:
 
       - name: Upload server log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-server-log
           path: /tmp/tellus-integration-server.log
@@ -558,7 +558,7 @@ jobs:
 
       - name: Upload server log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-server-log
           path: /tmp/tellus-e2e-server.log
@@ -740,7 +740,7 @@ jobs:
 
       - name: Upload server log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: perf-server-log
           path: /tmp/tellus-server.log
@@ -941,7 +941,7 @@ jobs:
 
       - name: Upload server log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-all-server-log
           path: /tmp/tellus-server.log
@@ -949,7 +949,7 @@ jobs:
 
       - name: Upload test:all console log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-all-console-log
           path: /tmp/test-all.log
