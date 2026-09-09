@@ -22,16 +22,12 @@
 // by default because tests should see raw console output.
 // ---------------------------------------------------------------------------
 
-// Pino is dynamically required so the module compiles even when pino is
-// not installed in minimal environments (tests, CI without the optional
-// transport deps). When pino is unavailable we fall through to a
-// console-backed shim that emits the same structured shape. Install pino
-// via `pnpm add pino pino-pretty` to switch to real Pino output.
-//
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Logger = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type LoggerOptions = any;
+// pino is a hard dependency (package.json) and imported statically so that
+// structured logging is visible to static analysis, bundlers, and auditors.
+// If construction ever fails (e.g. an unsupported transport in a minimal
+// environment) makeLogger() falls through to a console-backed shim that
+// emits the same structured shape.
+import pino, { type Logger, type LoggerOptions } from "pino";
 
 /** PII paths scrubbed everywhere in logs. Pino's redaction engine walks
  * every emitted object and replaces matching keys with "[REDACTED]". */
@@ -56,7 +52,7 @@ const PII_PATHS: string[] = [
   "ssn", "*.ssn",
 ];
 
-function defaultOptions(pinoMod: any): LoggerOptions {
+function defaultOptions(): LoggerOptions {
   const level = process.env.LOG_LEVEL ?? "info";
   return {
     level,
@@ -65,7 +61,7 @@ function defaultOptions(pinoMod: any): LoggerOptions {
       env: process.env.NODE_ENV ?? "development",
       version: process.env.TELLUS_VERSION ?? "unknown",
     },
-    timestamp: pinoMod?.stdTimeFunctions?.isoTime,
+    timestamp: pino.stdTimeFunctions.isoTime,
     redact: {
       paths: PII_PATHS,
       censor: "[REDACTED]",
@@ -122,10 +118,7 @@ function makeConsoleShim(level: string): Logger {
 
 function makeLogger(): Logger {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pinoMod = require("pino");
-    const pinoFn = (pinoMod.default ?? pinoMod) as (opts: LoggerOptions) => Logger;
-    return pinoFn(defaultOptions(pinoMod));
+    return pino(defaultOptions());
   } catch {
     return makeConsoleShim(process.env.LOG_LEVEL ?? "info");
   }

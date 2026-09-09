@@ -5,6 +5,60 @@ All notable changes to the Ontology Engine project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **God-file breakup, second wave (behavior-preserving, no logic changes)**:
+  - `src/services/transformService.ts` (2726 LOC) → chain replay
+    (`applyExistingTransforms` / `applyExistingTransformColumns`, ~340 lines)
+    extracted to `src/services/transform/applyExisting.ts`, service keeps
+    thin wrappers (public API + `TransformOpsContext` seam unchanged),
+    guarded by `tests/unit/services/transform/applyExisting-unit.test.ts`
+    (14 tests) with the legacy
+    `tests/foundry/unit/transform-service-aggregate-family-unit.test.ts`
+    suite green through the wrappers
+  - `src/services/deploymentService.ts` (3557 LOC) → PB-B6 preview-snapshot
+    pinning (`collectPreviewPinning`, ~120 lines) extracted to
+    `src/services/deploy/previewPinning.ts`, guarded by
+    `tests/unit/services/deploy/previewPinning-unit.test.ts` (6 tests:
+    empty envelope, digest stability, PREVIEW_STALE + details, force and
+    ignore-preview overrides)
+  - `src/docs/openapi.ts` (3299 LOC) → served-spec auto-stub machinery
+    (`normShape`/`areaTag`/`pathParameters`/`isPublicPath`/`autoStub`)
+    extracted to `src/docs/openapiAutoStub.ts`, guarded by
+    `tests/unit/docs/openapiAutoStub-unit.test.ts` (8 tests)
+- **Pipeline orchestration & lineage docs** (`docs/operations/pipeline-orchestration.md`):
+  Temporal as the orchestrator, `datasetLineage` edges, immutable
+  `funnel_run` definition snapshots, and the layered data-quality gates —
+  closes the "no orchestrator / no lineage docs" finding against existing code
+- **IaC direction ADR** (`decisions/infrastructure/D-2026-09-09-001-iac-direction.md`):
+  Helm-first, Terraform deferred until a cloud-provisioned dependency lands
+- **Contributing guide** (`CONTRIBUTING.md`, linked from `README.md` §10):
+  setup, test lanes, raise-only coverage ratchet, CI gates, commit/release
+  conventions, and contributor security rules
+- **Deploy pipeline** (`.github/workflows/deploy.yml`): tag-gated Docker image
+  build, Helm lint for `deploy/substrate/charts/tellus-tenant`, and
+  manifest validation for `k8s/` + `infra/k8s/`
+- **Coverage enforcement**: `vitest.config.ts` now carries `coverage.thresholds`
+  (integration lane floor; the unit lane in `vitest.unit.config.ts` remains
+  authoritative) and the Codecov **patch** gate is enforcing (80% target)
+- **Secret-scan precision** (`.gitleaks.toml`): scoped allowlists for CI/test-only
+  fallback credentials (`ci.yml`, `coverage-gate.yml`, compose files,
+  `.env.test.example`) so new real secrets still fail the build
+- **Growth guards** (`eslint.config.js`): `max-lines` + `complexity` warnings
+  flag god-file growth without failing the build
+
+### Changed
+- **Structured logging** (`src/logging/pino.ts`): static `pino` import — `pino`
+  is a hard dependency (`package.json`), so the stale dynamic-require fallback
+  comment is retired; the console-backed shim remains for minimal environments
+- **Dependency prune**: removed 6 unused runtime deps (`adm-zip`, `bcrypt`,
+  `http-proxy-middleware`, `nodejs-polars`, `otplib`, `swagger-ui-express`)
+  and 3 orphaned `@types` packages — verified unreferenced across `src/`,
+  `scripts/`, `tests/` and configs (docs are CDN-served, TOTP uses `qrcode`
+  directly, polars references were Python-side); `@temporalio/common` kept
+  as an SDK peer despite no direct import
+
 ## [0.4.0] - 2026-09-09 (Wednesday)
 
 ### Added

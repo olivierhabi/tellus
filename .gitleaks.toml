@@ -33,3 +33,23 @@ description = "Secret-scanner unit test contains deliberately planted, non-live 
 paths = [
   '''(^|/)tests/unit/evidence/evidenceAudit-unit\.test\.ts$''',
 ]
+
+[[allowlists]]
+description = "CI/test-only fallback credentials (ephemeral container defaults, never production). Each is either overridden by GitHub secrets in CI (secrets.CI_* with a local-only fallback) or matches the checked-in docker-compose-test.yml service password. Scoped to workflow/compose/test-example files so the same literal in src/ or a real config still fails the build."
+paths = [
+  '''(^|/)\.github/workflows/ci\.yml$''',
+  '''(^|/)\.github/workflows/coverage-gate\.yml$''',
+  '''(^|/)docker-compose.*\.yml$''',
+  '''(^|/)\.env\.test\.example$''',
+  '''(^|/)tests/laneEnv\.ts$''',
+]
+regexTarget = "secret"
+regexes = [
+  '''^"?tellus123"?$''',
+  '''^"?tellus_ch_pw"?$''',
+  '''^"?minioadmin"?$''',
+  '''^"?Password123!"?$''',
+  '''^"?tellus-confidential-secret-change-me"?$''',
+  '''^"?temporal_pw"?$''',
+  '''^"?admin"?$''',
+]

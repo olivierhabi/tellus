@@ -138,3 +138,5 @@ Deeper design docs live in [`docs/`](docs/) (operations runbooks, the function i
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) gates every PR: **lint** (`npm run lint`, fails the build), **typecheck** (`tsc --noEmit`), unit, integration, e2e, perf, and a secret scan.
 - Dependency updates are automated via Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml), weekly npm).
 - Releases follow semver tags (`v0.3.0` …) with a corresponding [CHANGELOG.md](CHANGELOG.md) entry. Fixes and features land as small commits that include their tests together.
+
+New contributor? Start with [CONTRIBUTING.md](CONTRIBUTING.md) — setup, test lanes, coverage ratchet, and PR gates.

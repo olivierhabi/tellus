@@ -3,10 +3,9 @@
 //
 // F-P4-13 observability — event-loop lag gauge.
 //
-// Tellus runs DuckDB and nodejs-polars as in-process native bindings
-// that block the Node event loop during execution. A 200 ms polars
-// aggregation freezes every other in-flight request for 200 ms,
-// shifting p99 latency above the 250 ms SLO.
+// Tellus runs DuckDB as an in-process native binding that blocks the Node
+// event loop during execution. A 200 ms aggregation freezes every other
+// in-flight request for 200 ms, shifting p99 latency above the 250 ms SLO.
 //
 // This module measures event-loop lag and emits:
 //   - tellus_event_loop_lag_ms (gauge) — current sample
@@ -15,8 +14,8 @@
 // Technique: setInterval at 1 s cadence. When the callback fires, we
 // compare `actual elapsed` (process.hrtime) against `scheduled elapsed`
 // (1000 ms). The difference IS the event-loop lag at that moment.
-// Healthy systems see < 10 ms. A polars freeze shows as a multi-hundred
-// ms spike at the end of the freeze.
+// Healthy systems see < 10 ms. A native-module freeze shows as a
+// multi-hundred ms spike at the end of the freeze.
 //
 // Alert rule in ops/prometheus/alerts/:
 //   - warning if p99 > 50 ms over 5 minutes

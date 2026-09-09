@@ -21,7 +21,7 @@ coverage:
       default:
         target: 80%
         threshold: 1%
-        informational: true
+        informational: false
         if_ci_failed: error
 
 comment:
