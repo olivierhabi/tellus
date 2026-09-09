@@ -17,6 +17,8 @@
 // two injection points, zero drift.
 // ---------------------------------------------------------------------------
 
+import { requiredTestSecret } from "./testEnvFile";
+
 export interface LaneEnv {
   PGHOST: string;
   PGPORT: string;
@@ -44,7 +46,11 @@ export const LANE: LaneEnv = {
   PGHOST: "localhost",
   PGPORT: "5432",
   PGUSER: "tellus",
-  PGPASSWORD: "tellus123",
+  // No baked-in literals: env first (CI provisions lane containers with
+  // secret passwords that must win), then .env.test / .env.test.example
+  // (local-dev defaults matching docker-compose-test.yml). Fail fast when
+  // neither source has a value.
+  PGPASSWORD: requiredTestSecret("PGPASSWORD"),
   PGDATABASE: "tellus_tests",
   TELLUS_ENVIRONMENT_ID: "tellus-tests-main",
   TEMPORAL_NAMESPACE: "tellus-funnel-tellus-tests-main",
@@ -62,7 +68,7 @@ export const LANE: LaneEnv = {
   // anonymous is denied → the lane must pin these or no CH test can pass.
   CLICKHOUSE_URL: "http://localhost:8123",
   CLICKHOUSE_USER: "tellus",
-  CLICKHOUSE_PASSWORD: "tellus_ch_pw",
+  CLICKHOUSE_PASSWORD: requiredTestSecret("CLICKHOUSE_PASSWORD"),
 };
 
 /**
