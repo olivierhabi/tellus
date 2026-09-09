@@ -6,7 +6,13 @@ set -euo pipefail
 
 # Test configuration
 BASE_URL="${BASE_URL:-http://localhost:3000}"
-API_KEY="${API_KEY:-test-api-key}"
+
+# API_KEY must be provided by the caller — no baked-in default credential.
+# See .env.test.example.
+if [ -z "${API_KEY:-}" ]; then
+    echo "ERROR: API_KEY is not set. Export it before running this script (see .env.test.example)." >&2
+    exit 1
+fi
 TEST_ONTOLOGY_ID="${TEST_ONTOLOGY_ID:-}"
 TEST_OBJECT_TYPE_RID="${TEST_OBJECT_TYPE_RID:-}"
 

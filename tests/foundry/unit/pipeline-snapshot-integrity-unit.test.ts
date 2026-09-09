@@ -73,6 +73,10 @@ function fakeKnex(opts: {
     if (table === "pipeline_nodes") {
       return {
         where: () => ({
+          // updateNode re-reads the persisted config so a client config
+          // replace can never wipe the snapshot owned by the snapshot
+          // endpoints — the stub answers that read with the fixed nodeRow.
+          first: async () => ({ config: nodeRow.config }),
           update: (payload: Record<string, unknown>) => {
             captured.push({ table, payload });
             return { returning: async () => [{ id: NODE_ID }] };
@@ -101,7 +105,9 @@ describe("updateNode — previewSnapshot is write-protected", () => {
 
     expect(captured).toHaveLength(1);
     const written = JSON.parse(String(captured[0].payload.config));
-    expect(written.previewSnapshot).toBeUndefined();
+    // The incoming replace carries no snapshot; the PERSISTED one is
+    // re-attached from the current row so it can never be wiped.
+    expect(written.previewSnapshot).toEqual({ columns: [{ name: "a", type: "text" }] });
     expect(written.transforms).toEqual([{ function: "Filter" }]);
     expect(written.sourceNodeId).toBe(SOURCE_ID);
   });
@@ -274,13 +280,14 @@ describe("joinPreview — persist flag saves the preview atomically", () => {
     const svc = new TransformService(knex);
     const persisted: { columns: unknown; rows: unknown }[] = [];
     const priv = svc as unknown as Record<string, unknown>;
-    priv.resolveNodeDataset = async () => ({
-      dataset: { id: "left-d", file_path: "left.csv", status: "ready" },
-      sourceColumns: [{ name: "id", type: "string" }],
-      existingTransforms: [],
-    });
-    priv.readCsvRows = async (path: string) =>
-      path === "left.csv" ? [{ id: "1" }] : [{ rid: "9" }];
+    // Current seams: joinOps resolves both arms through fetchNodeConfig +
+    // resolveNodeData (the same resolver output previews use) instead of the
+    // old resolveNodeDataset/readCsvRows pair.
+    priv.fetchNodeConfig = async (_p: string, _pl: string, id: string) => ({ id, config: {} });
+    priv.resolveNodeData = async (_p: string, _pl: string, id: string) =>
+      id === RIGHT_ID
+        ? { columns: [{ name: "rid", type: "string" }], rows: [{ rid: "9" }] }
+        : { columns: [{ name: "id", type: "string" }], rows: [{ id: "1" }] };
     priv.persistExecutionSnapshot = async (
       _p: string, _pl: string, nodeId: string,
       columns: unknown, rows: unknown,
@@ -340,12 +347,11 @@ describe("joinPreview — persist flag saves the preview atomically", () => {
     const svc = new TransformService(knex);
     const persisted: unknown[] = [];
     const priv = svc as unknown as Record<string, unknown>;
-    priv.resolveNodeDataset = async () => ({
-      dataset: { id: "left-d", file_path: "left.csv", status: "ready" },
-      sourceColumns: [{ name: "id", type: "string" }],
-      existingTransforms: [],
+    priv.fetchNodeConfig = async (_p: string, _pl: string, id: string) => ({ id, config: {} });
+    priv.resolveNodeData = async () => ({
+      columns: [{ name: "id", type: "string" }],
+      rows: [{ id: "1" }],
     });
-    priv.readCsvRows = async () => [{ id: "1" }];
     priv.persistExecutionSnapshot = async (...a: unknown[]) => { persisted.push(a); };
 
     await svc.joinPreview(PROJECT_ID, PIPELINE_ID, NODE_ID, {
