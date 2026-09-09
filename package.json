@@ -85,7 +85,7 @@
     "@opentelemetry/auto-instrumentations-node": "^0.76.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
     "@opentelemetry/sdk-node": "^0.218.0",
-    "@simplewebauthn/server": "^13.3.0",
+    "@simplewebauthn/server": "^14.0.1",
     "@smithy/node-http-handler": "^4.5.0",
     "@temporalio/activity": "1.16.0",
     "@temporalio/client": "1.16.0",
