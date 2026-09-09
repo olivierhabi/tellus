@@ -129,7 +129,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@testcontainers/postgresql": "^10.13.0",
+    "@testcontainers/postgresql": "^12.1.0",
     "@types/adm-zip": "^0.5.7",
     "@types/bcrypt": "^6.0.0",
     "@types/compression": "^1.8.1",
