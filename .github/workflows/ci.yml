@@ -175,7 +175,9 @@ jobs:
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 25 min was marginal: the last green main run took 24m48s and the
+    # 2026-08-28 run was cancelled at the timeout. 40 gives headroom.
+    timeout-minutes: 40
     needs: typecheck
 
     services:
