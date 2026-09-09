@@ -21,7 +21,7 @@ jobs:
           K6_PROFILE: ${{ inputs.profile }}
           STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
           STAGING_TOKEN: ${{ secrets.STAGING_TOKEN }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: "k6-summary-${{ inputs.profile }}"
           path: k6-summary.json

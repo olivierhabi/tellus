@@ -142,7 +142,7 @@ jobs:
             }
             console.log("coverage gate OK" + (debt.length ? " (with tracked debt — see warnings above)" : ""));
           '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: coverage-report, path: coverage/ }
   ghost-pass-gate:
     runs-on: ubuntu-latest
