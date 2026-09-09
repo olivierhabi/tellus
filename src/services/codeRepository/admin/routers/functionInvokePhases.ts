@@ -20,7 +20,7 @@ import {
   FunctionArtifactError,
   resolveFunctionSource,
 } from "../../../functionsRegistry/artifactStore";
-import { listVersions } from "../../../functionsRegistry/store";
+import { getVersion, listVersions } from "../../../functionsRegistry/store";
 import { loadOntologySnapshot } from "../../../functions/ontologyRuntime";
 import type { OntologySnapshot } from "../../../functions/ontologyRuntime";
 import type { StemmaAdapter } from "../../adapters/types";
@@ -54,6 +54,9 @@ export interface ValidInvokeBody {
   readonly source: unknown;
   readonly inlineSource: string | null;
   readonly inlineSourcePath: string | null;
+  /** Exact published version to run (Path B-pinned) — resolved
+   *  server-side so callers never ship the source inline. */
+  readonly semver: string | null;
   readonly applyEdits: unknown;
 }
 
@@ -79,6 +82,7 @@ export function parseInvokeBody(raw: unknown): ParsedInvokeBody {
     source?: unknown;
     inlineSource?: unknown;
     inlineSourcePath?: unknown;
+    semver?: unknown;
     applyEdits?: unknown;
   };
   const apiName = typeof body.apiName === "string" ? body.apiName : "";
@@ -158,6 +162,32 @@ export function parseInvokeBody(raw: unknown): ParsedInvokeBody {
     inlineSourcePath = body.inlineSourcePath;
   }
 
+  // Pinned-release invoke: run an exact published version's artifact
+  // without the caller shipping the source (kills the
+  // list-versions-then-inlineSource round trips — the FE's Workshop
+  // variable path downloaded 500KB+ of version manifests just to echo one
+  // function's source back). Validated as a SemVer-shaped token; the
+  // resolution below 404s unknown versions.
+  let semver: string | null = null;
+  if (body.semver !== undefined && body.semver !== null) {
+    if (
+      typeof body.semver !== "string" ||
+      body.semver.length === 0 ||
+      body.semver.length > 64 ||
+      !/^[0-9A-Za-z.\-+]+$/.test(body.semver)
+    ) {
+      return {
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidArgumentBody",
+        parameters: {
+          field: "semver",
+          reason: "must be a SemVer-shaped version token ≤ 64 chars",
+        },
+      };
+    }
+    semver = body.semver;
+  }
+
   return {
     kind: "ok",
     body: {
@@ -167,6 +197,7 @@ export function parseInvokeBody(raw: unknown): ParsedInvokeBody {
       source: body.source,
       inlineSource,
       inlineSourcePath,
+      semver,
       applyEdits: body.applyEdits,
     },
   };
@@ -207,6 +238,7 @@ export async function resolveInvokeSource(
     source: unknown;
     inlineSource: string | null;
     inlineSourcePath: string | null;
+    semver?: string | null;
   },
 ): Promise<ResolvedInvokeSource> {
   const { rid, apiName } = opts;
@@ -241,6 +273,54 @@ export async function resolveInvokeSource(
     // the function's source through resolveFunctionSource: compact
     // bundle manifests read from the artifact store, historical inline
     // manifests (manifest.sources) keep working.
+    //
+    // Path B-pinned — `semver` selects ONE exact version server-side (one
+    // indexed row lookup + one artifact resolution) so callers never need
+    // to download the version list and echo the source back inline.
+    if (opts.semver) {
+      const pinned = await getVersion(deps.pool, rid, opts.semver, branch);
+      if (!pinned || pinned.state !== "AVAILABLE") {
+        return {
+          kind: "error",
+          errorName: "CodeRepos:FunctionNotFound",
+          parameters: { apiName, source: "published", semver: opts.semver },
+        };
+      }
+      let pinnedSource: string | null;
+      try {
+        pinnedSource = await resolveFunctionSource(
+          { manifest_json: pinned.manifest as { sources?: Record<string, unknown> } | null, artifact_blob_id: pinned.artifactBlobId },
+          apiName,
+        );
+      } catch (e) {
+        if (e instanceof FunctionArtifactError) {
+          return {
+            kind: "error",
+            errorName: "CodeRepos:PublishedArtifactMissing",
+            parameters: {
+              apiName,
+              branch,
+              semver: opts.semver,
+              artifactErrorCode: e.code,
+              reason:
+                `Published artifact for "${apiName}" (${opts.semver}) ` +
+                `is missing from object storage — try republishing the release.`,
+            },
+          };
+        }
+        throw e;
+      }
+      if (pinnedSource === null) {
+        return {
+          kind: "error",
+          errorName: "CodeRepos:FunctionNotFound",
+          parameters: { apiName, source: "published", semver: opts.semver },
+        };
+      }
+      source = pinnedSource;
+      runtime = "NODE_20";
+      resolvedPath = `published:${opts.semver}`;
+    } else {
     const versions = await listVersions(deps.pool, rid, { branch, includeYanked: false });
     let chosen: { semver: string; source: string } | null = null;
     // One version whose content-addressed bundle is gone (object store
@@ -294,6 +374,7 @@ export async function resolveInvokeSource(
     source = chosen.source;
     runtime = "NODE_20";
     resolvedPath = `published:${chosen.semver}`;
+    } // end unpinned highest-semver Path B
   } else {
     const tree = await deps.stemma.listTree({
       repositoryRid: rid,

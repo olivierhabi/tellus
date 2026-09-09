@@ -554,6 +554,53 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// Route 3.4: GET /batch-get?apiName=A&apiName=B — batch full details.
+//
+// One HTTP round trip + a FIXED ~6 Postgres queries for N types, replacing
+// N × `GET /:apiName` (each 5+N queries). Powers the Workshop view-mode
+// metadata fan-out. Declared BEFORE `/by-id/` and `/:apiName` so
+// first-match routing can't swallow it.
+//
+// GET (not POST) deliberately: the router's dataPlaneGuard requires the
+// write role for POST, while GET detail is readable by viewers — the batch
+// read must keep the same access as the single-type GET.
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/batch-get",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { ontologyId } = req.params;
+      const raw = req.query.apiName;
+      const names = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw])
+        .filter((n): n is string => typeof n === "string" && n.length > 0)
+        .slice(0, 100);
+      if (names.length === 0) {
+        return sendSuccess(res, { types: [] });
+      }
+      const results = await objectTypeService.getByApiNames(ontologyId, names);
+      sendSuccess(res, {
+        types: results.map(({ apiName, result }) => ({
+          apiName,
+          objectType: formatObjectType(
+            result.objectType,
+            result.properties,
+            result.datasource,
+            result.funnelState,
+            result.linkTypes || []
+          ).objectType,
+        })),
+      });
+    } catch (err: any) {
+      if (KNOWN_CODES.has(err.code)) {
+        return sendError(res, err.code, err.message);
+      }
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Route 3.5: GET /by-id/:objectTypeId — Get a single object type by UUID
 //
 // Must be declared BEFORE the `/:apiName` route below so that Express's

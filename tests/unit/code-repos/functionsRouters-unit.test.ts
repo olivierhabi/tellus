@@ -69,9 +69,25 @@ describe("invokePhases — parseInvokeBody", () => {
         source: undefined,
         inlineSource: null,
         inlineSourcePath: null,
+        semver: null,
         applyEdits: undefined,
       },
     });
+  });
+
+  it("accepts a pinned semver and rejects malformed ones", () => {
+    const r = parseInvokeBody({ apiName: "calc", source: "published", semver: "0.0.25" });
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") expect(r.body.semver).toBe("0.0.25");
+    for (const bad of [42, "", "x".repeat(65), "../../etc", "1.0;DROP", "v1 beta"]) {
+      expect(
+        parseInvokeBody({ apiName: "calc", semver: bad }),
+      ).toMatchObject({
+        kind: "invalid",
+        errorName: "CodeRepos:InvalidArgumentBody",
+        parameters: { field: "semver" },
+      });
+    }
   });
 
   it("accepts nested function identities", () => {
@@ -139,6 +155,51 @@ describe("invokePhases — resolveInvokeSource", () => {
       { rid: "missing", bodyBranch: null, apiName: "f", source: undefined, inlineSource: null, inlineSourcePath: null },
     );
     expect(r).toMatchObject({ kind: "error", errorName: "CodeRepos:RepositoryNotFound" });
+  });
+
+  it("pinned semver resolves the exact version server-side", async () => {
+    const versionRow = {
+      rid: "v1", repository_rid: "r1", branch: "main", is_preview: false,
+      semver: "0.0.25", commit_sha: "abc", runtime: "NODE_20",
+      artifact_blob_id: null, artifact_sha256: "", artifact_bytes: 10,
+      manifest_json: { sources: { f: "pinned-code" } },
+      published_at: new Date(), state: "AVAILABLE",
+    };
+    const pool2 = {
+      query: async (sql: string) => {
+        if (sql.includes("FROM code_repository")) {
+          return { rows: [{ rid: "r1", default_branch: "main", state: "ACTIVE" }] };
+        }
+        return { rows: [versionRow], rowCount: 1 };
+      },
+    } as never;
+    const r = await resolveInvokeSource(
+      { pool: pool2, stemma: {} as never },
+      { rid: "r1", bodyBranch: null, apiName: "f", source: "published", inlineSource: null, inlineSourcePath: null, semver: "0.0.25" },
+    );
+    expect(r).toMatchObject({
+      kind: "ok", source: "pinned-code", runtime: "NODE_20", resolvedPath: "published:0.0.25",
+    });
+  });
+
+  it("pinned semver to a missing version → FunctionNotFound", async () => {
+    const pool2 = {
+      query: async (sql: string) => {
+        if (sql.includes("FROM code_repository")) {
+          return { rows: [{ rid: "r1", default_branch: "main", state: "ACTIVE" }] };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    } as never;
+    const r = await resolveInvokeSource(
+      { pool: pool2, stemma: {} as never },
+      { rid: "r1", bodyBranch: null, apiName: "f", source: "published", inlineSource: null, inlineSourcePath: null, semver: "9.9.99" },
+    );
+    expect(r).toMatchObject({
+      kind: "error",
+      errorName: "CodeRepos:FunctionNotFound",
+      parameters: { semver: "9.9.99" },
+    });
   });
 
   it("inline source shortcuts Stemma and infers python from the path", async () => {
