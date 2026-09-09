@@ -521,12 +521,29 @@ router.get("/:apiName", async (req: Request, res: Response, next: NextFunction) 
     }
 
     // Enrich with metadata
-    const sourceApiName = await resolveObjectTypeApiName(linkType.source_object_type).catch(() => null);
-    const targetApiName = await resolveObjectTypeApiName(linkType.target_object_type).catch(() => null);
+    const [
+      sourceApiName,
+      targetApiName,
+      sourcePropertyApiName,
+      targetPropertyApiName,
+    ] = await Promise.all([
+      resolveObjectTypeApiName(linkType.source_object_type).catch(() => null),
+      resolveObjectTypeApiName(linkType.target_object_type).catch(() => null),
+      linkType.source_property_id
+        ? resolvePropertyApiName(linkType.source_property_id).catch(() => null)
+        : Promise.resolve(null),
+      linkType.target_property_id
+        ? resolvePropertyApiName(linkType.target_property_id).catch(() => null)
+        : Promise.resolve(null),
+    ]);
 
     const formatted = formatLinkType(linkType);
     (formatted as any).sourceObjectTypeApiName = sourceApiName;
     (formatted as any).targetObjectTypeApiName = targetApiName;
+    // Legacy link rows store property UUIDs. Return API names for readable
+    // foreign-key labels on the detail page and API clients.
+    (formatted as any).sourcePropertyApiName = sourcePropertyApiName;
+    (formatted as any).targetPropertyApiName = targetPropertyApiName;
 
     return sendSuccess(res, formatted);
   } catch (err: any) {

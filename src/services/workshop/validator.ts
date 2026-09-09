@@ -227,11 +227,30 @@ function _validateModuleInner(definition: unknown): ValidationResult {
     }
   }
 
-  // B02 C-06: orphan widget references (every widget id must be referenced
-  // by some section.children).
-  const widgetTree = buildWidgetTree(def);
+  // A module may expose several page roots. The compiled tree remains the
+  // default page for compatibility with consumers of the original v4
+  // artifact, while validation and orphan detection cover *every* page.
+  const pageRoots = resolvePageRoots(def);
+  const widgetTree = pageRoots.length
+    ? buildWidgetTree(def, pageRoots[0])
+    : buildWidgetTree(def);
   const referencedWidgets = new Set<string>();
-  collectReferencedWidgets(widgetTree, referencedWidgets);
+  for (const rootSection of pageRoots) {
+    collectReferencedWidgets(buildWidgetTree(def, rootSection), referencedWidgets);
+  }
+  // Overlays own their own section trees (Foundry: drawer/modal overlays are
+  // authored like pages). Widgets referenced only from an overlay's
+  // rootSection are NOT orphans.
+  for (const overlay of def.overlays ?? []) {
+    if (overlay?.rootSection) {
+      collectReferencedWidgets(
+        buildWidgetTree(def, overlay.rootSection),
+        referencedWidgets,
+      );
+    }
+  }
+  // Legacy documents without pages still have one root.
+  if (pageRoots.length === 0) collectReferencedWidgets(widgetTree, referencedWidgets);
   if (def.layout?.header?.widgetId) {
     referencedWidgets.add(def.layout.header.widgetId);
   }
@@ -321,6 +340,13 @@ interface ModuleDoc {
   variables?: Variable[];
   widgets?: Widget[];
   sections?: Section[];
+  pages?: Array<{ id: string; displayName: string; rootSection: string; navigation?: "primary" | "context" }>;
+  defaultPageId?: string;
+  overlays?: Array<{
+    id: string;
+    kind: "drawer" | "modal";
+    rootSection?: string;
+  }>;
   moduleInterface?: {
     variables?: Array<{
       externalId: string;
@@ -360,11 +386,11 @@ function checkWidgetOutputInvariant(
   slot: string,
   variable: Variable,
 ): void {
-  const expected = WIDGET_OUTPUT_TYPES.get(`${w.type}:${slot}`);
-  if (!expected) return;
-  if (variable.type !== expected) {
+  const accepted = WIDGET_OUTPUT_TYPES.get(`${w.type}:${slot}`);
+  if (!accepted) return;
+  if (!accepted.includes(variable.type)) {
     throw variableTypeMismatch(
-      expected,
+      accepted.join(" | "),
       variable.type,
       `widgets[${w.id}].outputs.${slot}`,
     );
@@ -392,25 +418,55 @@ const WIDGET_INPUT_TYPES = new Map<string, string>([
   ["vegaChart:objectSet", "objectSet"],
   ["objectSetTitle:object", "object"],
   ["objectSetTitle:objectSet", "objectSet"],
+  // Comments widget binds the parent object as an object set (cardinality
+  // 0..1 from an Active object output); the thread follows the first object.
+  ["comments:objectSet", "objectSet"],
 ]);
 
-const WIDGET_OUTPUT_TYPES = new Map<string, string>([
-  ["objectTable:activeObject", "object"],
-  ["objectTable:selectedObjects", "objectSet"],
+const WIDGET_OUTPUT_TYPES = new Map<string, string[]>([
+  // Active object is documented as an Object Set containing the currently
+  // active/highlighted object (cardinality 0..1). Legacy documents persist
+  // type:"object"; both validate.
+  ["objectTable:activeObject", ["object", "objectSet"]],
+  ["objectTable:selectedObjects", ["objectSet"]],
   // Object List emits the same selection outputs as the Object Table: a single
   // active object and (with multi-select) the set of selected objects.
-  ["objectList:activeObject", "object"],
-  ["objectList:selectedObjects", "objectSet"],
-  ["filterList:filter", "objectSetFilter"],
-  ["chartPie:selectionFilter", "objectSetFilter"],
-  ["chartXY:selectionFilter", "objectSetFilter"],
+  ["objectList:activeObject", ["object", "objectSet"]],
+  ["objectList:selectedObjects", ["objectSet"]],
+  ["filterList:filter", ["objectSetFilter"]],
+  ["chartPie:selectionFilter", ["objectSetFilter"]],
+  ["chartXY:selectionFilter", ["objectSetFilter"]],
   // Vega Chart forwards a Vega-Lite selection parameter as an object-set
   // filter ("selection as filter"); see widgets-vega-chart docs.
-  ["vegaChart:selectionFilter", "objectSetFilter"],
+  ["vegaChart:selectionFilter", ["objectSetFilter"]],
 ]);
 
-function buildWidgetTree(def: ModuleDoc): CompiledWidgetTreeNode | null {
-  if (!def.layout?.rootSection) return null;
+function resolvePageRoots(def: ModuleDoc): string[] {
+  const pages = def.pages ?? [];
+  if (pages.length === 0) return def.layout?.rootSection ? [def.layout.rootSection] : [];
+
+  const ids = new Set<string>();
+  for (const page of pages) {
+    if (ids.has(page.id)) {
+      throw invalidModuleSchema(`duplicate page id "${page.id}"`, { pageId: page.id });
+    }
+    ids.add(page.id);
+  }
+  const defaultId = def.defaultPageId ?? pages[0].id;
+  const defaultPage = pages.find((page) => page.id === defaultId);
+  if (!defaultPage) {
+    throw invalidModuleSchema(`defaultPageId references unknown page "${defaultId}"`, { defaultPageId: defaultId });
+  }
+  // Compile the default page first so downstream consumers get deterministic
+  // legacy behaviour, then validate the remaining page roots as well.
+  return [defaultPage.rootSection, ...pages.filter((page) => page.id !== defaultId).map((page) => page.rootSection)];
+}
+
+function buildWidgetTree(
+  def: ModuleDoc,
+  rootSection = def.layout?.rootSection,
+): CompiledWidgetTreeNode | null {
+  if (!rootSection) return null;
   const sectionMap = new Map<string, Section>();
   for (const s of def.sections ?? []) sectionMap.set(s.id, s);
   const visit = (
@@ -440,7 +496,7 @@ function buildWidgetTree(def: ModuleDoc): CompiledWidgetTreeNode | null {
     }
     return { kind: "section", ref: s.id, children };
   };
-  return visit(def.layout.rootSection, new Set());
+  return visit(rootSection, new Set());
 }
 
 function collectReferencedWidgets(

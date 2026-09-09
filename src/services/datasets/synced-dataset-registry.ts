@@ -106,6 +106,24 @@ export async function registerSyncedDataset(
     const { projectId, folderId } = await resolveProjectFolder(input.compassFolderRid);
     if (!projectId) return { ok: false, reason: "unresolved output folder" };
 
+    // Foundry parity — ResourceNameAlreadyExists: a different dataset in
+    // the same folder already holding `input.name` must not be shadowed.
+    // This registry is contractually non-throwing, so the conflict is
+    // surfaced as a loud log + `{ok:false}` instead of an HTTP 409.
+    const conflict = await pool.query<{ id: string }>(
+      folderId
+        ? `SELECT id FROM foundry_datasets WHERE name = $1 AND folder_id = $2 AND id <> $3 LIMIT 1`
+        : `SELECT id FROM foundry_datasets WHERE name = $1 AND folder_id IS NULL AND project_id = $2 AND id <> $3 LIMIT 1`,
+      [input.name, folderId ?? projectId, id],
+    );
+    if (conflict.rowCount) {
+      console.warn(
+        `[synced-dataset-registry] refusing to register ${input.datasetRid}: ` +
+          `name "${input.name}" already used by dataset ${conflict.rows[0]!.id} in folder ${folderId ?? "<root>"}`,
+      );
+      return { ok: false, reason: "name_conflict" };
+    }
+
     const filePath = `iceberg://${input.warehouse}/${input.schema}/${input.table}`;
     await pool.query(
       `INSERT INTO foundry_datasets

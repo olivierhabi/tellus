@@ -765,6 +765,8 @@ export async function executeAction(
           actionType.parameters as FunctionActionParameterDefinition[],
         executedBy: context.executedBy || "system",
         maxAffectedObjects: actionType.max_affected_objects,
+        actionTypeApiName,
+        executionId,
         preCommitHook: async (client, affectedObjects) => {
           result.success = true;
           result.result = "success";

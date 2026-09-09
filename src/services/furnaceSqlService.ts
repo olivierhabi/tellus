@@ -151,6 +151,33 @@ function runDuck(db: DuckDatabase, sql: string): Promise<void> {
  * timeout the timer fires `db.interrupt()` (best-effort) and we throw a
  * canonical `SQL_STATEMENT_TIMEOUT` error.
  */
+/** JSON-sanitize one result row: DuckDB aggregates (COUNT/SUM/…) surface
+ *  BigInt cells, which `JSON.stringify` cannot serialize (the route then
+ *  500s with "Do not know how to serialize a BigInt" instead of returning
+ *  the row set). BigInt → Number (precision-safe at SQL row scales);
+ *  nested values recurse so struct/array cells stay intact. */
+function sanitizeCell(value: unknown): unknown {
+  if (typeof value === "bigint") return Number(value);
+  if (Array.isArray(value)) return value.map(sanitizeCell);
+  if (value !== null && typeof value === "object") {
+    if (value instanceof Date) return value.toISOString();
+    if (value instanceof Uint8Array) return Buffer.from(value).toString("base64");
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, sanitizeCell(v)]),
+    );
+  }
+  return value;
+}
+
+function sanitizeRow(row: unknown): Record<string, unknown> {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) {
+    return { value: sanitizeCell(row) };
+  }
+  return Object.fromEntries(
+    Object.entries(row as Record<string, unknown>).map(([k, v]) => [k, sanitizeCell(v)]),
+  );
+}
+
 async function runUserSql(
   db: DuckDatabase,
   sql: string,
@@ -203,17 +230,28 @@ async function runUserSql(
 async function listObjectTypes(
   ontologyId: string,
 ): Promise<Array<{ apiName: string; primaryKeyApiName: string }>> {
+  // NB: the object_type table carries `primary_key_property_id` (a property
+  // FK), not `primary_key_api_name` — selecting the latter fails the whole
+  // query, and the previous blanket catch silently built an EMPTY snapshot
+  // (every user query then failed with "table does not exist"). Log the
+  // failure instead of swallowing it so the misconfiguration surfaces.
   const result = await pool
     .query(
-      `SELECT api_name, primary_key_api_name
+      `SELECT api_name
          FROM object_type
         WHERE ontology_id = $1`,
       [ontologyId],
     )
-    .catch(() => ({ rows: [] as Array<Record<string, unknown>> }));
+    .catch((err) => {
+      console.error(
+        `[furnace-sql] listObjectTypes failed for ${ontologyId}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return { rows: [] as Array<Record<string, unknown>> };
+    });
   return result.rows.map((r) => ({
     apiName: String(r.api_name ?? ''),
-    primaryKeyApiName: String(r.primary_key_api_name ?? 'pk'),
+    primaryKeyApiName: 'pk',
   }));
 }
 
@@ -468,7 +506,7 @@ export async function executeFurnaceSql(
   let outcome: 'ok' | 'timeout' | 'execution_error' | 'rejected' = 'ok';
   try {
     const db = await getDb(ontologyId, ctx, branchId);
-    const rows = await runUserSql(db, limited);
+    const rows = (await runUserSql(db, limited)).map(sanitizeRow);
     const columns = rows[0]
       ? Object.keys(rows[0] as Record<string, unknown>)
       : [];

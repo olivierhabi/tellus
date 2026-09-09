@@ -111,6 +111,12 @@ export async function executeFunctionAction(
     parameterDefinitions: FunctionActionParameterDefinition[];
     executedBy: string;
     maxAffectedObjects: number;
+    /** Action provenance written into the ontology_edit WAL so the
+     * function's edits are indistinguishable from declarative-Action edits
+     * downstream (serving projector, Action Log feeds). Optional for
+     * preview/invoke callers; Action execution MUST supply both. */
+    actionTypeApiName?: string;
+    executionId?: string;
     preCommitHook?: (
       client: PoolClient,
       affectedObjects: FunctionActionAffectedObject[],
@@ -403,6 +409,8 @@ export async function executeFunctionAction(
     ontologyId: options.ontologyId,
     edits,
     actorUserId: options.executedBy,
+    actionTypeApiName: options.actionTypeApiName ?? null,
+    executionId: options.executionId ?? null,
     ...(options.preCommitHook
       ? {
           preCommitHook: (client) =>

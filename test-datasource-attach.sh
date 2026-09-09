@@ -11,7 +11,13 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
-API_KEY="${API_KEY:-test-api-key}"
+
+# API_KEY must be provided by the caller — no baked-in default credential.
+# See .env.test.example.
+if [ -z "${API_KEY:-}" ]; then
+    echo "ERROR: API_KEY is not set. Export it before running this script (see .env.test.example)." >&2
+    exit 1
+fi
 
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <object_type_rid> <datasource_rid>"

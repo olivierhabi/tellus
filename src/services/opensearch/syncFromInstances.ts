@@ -353,67 +353,10 @@ export async function syncObjectInstancesToOpenSearch(
   // `customer_id` + `customerId`) are resolved by preferring the
   // canonical apiName slot — anything else would let stale source-shape
   // data shadow a current canonical value.
-  const propsRes = await query(
-    `SELECT p.api_name
-       FROM property p
-       JOIN object_type ot ON ot.object_type_id = p.object_type_id
-      WHERE ot.api_name = $1 AND ot.ontology_id = $2`,
-    [objectTypeApiName, resolvedOntologyId]
+  const propertyAliases = await buildPropertyAliasMap(
+    objectTypeApiName,
+    resolvedOntologyId
   );
-  const canonicalApiNames: string[] = propsRes.rows.map(
-    (r) => r.api_name as string
-  );
-  // Map every plausible source key shape → canonical apiName so a
-  // single `propertyAliases.get(srcKey)` resolves the lookup. We seed
-  // the identity mapping first (so already-canonical writers keep
-  // working) then layer the snake-case + case-insensitive variants.
-  const propertyAliases = new Map<string, string>();
-  for (const apiName of canonicalApiNames) {
-    propertyAliases.set(apiName, apiName);
-    const snake = camelToSnake(apiName);
-    if (snake !== apiName && !propertyAliases.has(snake)) {
-      propertyAliases.set(snake, apiName);
-    }
-    const lower = apiName.toLowerCase();
-    if (lower !== apiName && !propertyAliases.has(lower)) {
-      propertyAliases.set(lower, apiName);
-    }
-  }
-
-  // 1c. Seed the backing-datasource column_mapping (raw CSV column ->
-  // property api_name). object_instances.properties for a foundry/CSV
-  // backed OT is keyed by the RAW source column headers (e.g. order_id,
-  // customer_id), NOT by property api_name - the funnel merge stage
-  // writes the source row bag verbatim and never renames via the mapping.
-  // The api-name/snake/lower aliases above do NOT cover a raw column like
-  // order_id (it is neither customerName, customer_name, nor
-  // customername), so without this block toCanonicalProperties treats
-  // it as "unmapped - preserve verbatim" and the OS doc keeps order_id
-  // while the FE asks for customerName -> "No value" in the Object Table.
-  // column_mapping is stored as { propApiName: sourceColumn }; we invert
-  // it to { sourceColumn: propApiName } and seed each entry. When several
-  // properties map to the same source column (e.g. all four OliverOrder
-  // properties -> order_id) every property resolves to the same value.
-  const colMapRes = await query(
-    `SELECT column_mapping
-       FROM backing_datasource
-      WHERE object_type_id = (
-        SELECT object_type_id
-          FROM object_type
-         WHERE api_name = $1 AND ontology_id = $2
-      )`,
-    [objectTypeApiName, resolvedOntologyId]
-  );
-  if (colMapRes.rows.length > 0) {
-    const raw = colMapRes.rows[0].column_mapping;
-    const colMapping: Record<string, string> =
-      typeof raw === "string" ? JSON.parse(raw) : raw || {};
-    for (const [propApiName, sourceColumn] of Object.entries(colMapping)) {
-      if (sourceColumn && !propertyAliases.has(sourceColumn)) {
-        propertyAliases.set(sourceColumn, propApiName);
-      }
-    }
-  }
 
   // ---- 2. Keyset-page through `object_instances` and bounded-bulk-index --
   //
@@ -516,9 +459,11 @@ export async function syncObjectInstancesToOpenSearch(
 
     const docs = page.rows.map((row) => {
       livePks.add(String(row.primary_key));
-      const canonical = toCanonicalProperties(
-        row.properties as Record<string, unknown>,
-        propertyAliases,
+      const canonical = toIndexableProperties(
+        toCanonicalProperties(
+          row.properties as Record<string, unknown>,
+          propertyAliases,
+        ),
       );
       return {
         __pk: row.primary_key,
@@ -870,7 +815,92 @@ function camelToSnake(s: string): string {
  *   4. Unmapped keys are preserved verbatim so unknown columns stay
  *      visible during schema drift.
  */
-function toCanonicalProperties(
+/**
+ * Build the source-key → canonical `property.api_name` alias map for an
+ * Object Type: identity for canonical keys, snake_case and case-insensitive
+ * variants, plus the backing datasource's column_mapping (raw CSV column →
+ * property apiName). Shared by the full sync and the serving edit projector
+ * so both write identically-shaped documents.
+ */
+export async function buildPropertyAliasMap(
+  objectTypeApiName: string,
+  ontologyId: string
+): Promise<Map<string, string>> {
+  const propsRes = await query(
+    `SELECT p.api_name
+       FROM property p
+       JOIN object_type ot ON ot.object_type_id = p.object_type_id
+      WHERE ot.api_name = $1 AND ot.ontology_id = $2`,
+    [objectTypeApiName, ontologyId]
+  );
+  const canonicalApiNames: string[] = propsRes.rows.map(
+    (r) => r.api_name as string
+  );
+  const propertyAliases = new Map<string, string>();
+  for (const apiName of canonicalApiNames) {
+    propertyAliases.set(apiName, apiName);
+    const snake = camelToSnake(apiName);
+    if (snake !== apiName && !propertyAliases.has(snake)) {
+      propertyAliases.set(snake, apiName);
+    }
+    const lower = apiName.toLowerCase();
+    if (lower !== apiName && !propertyAliases.has(lower)) {
+      propertyAliases.set(lower, apiName);
+    }
+  }
+
+  const colMapRes = await query(
+    `SELECT column_mapping
+       FROM backing_datasource
+      WHERE object_type_id = (
+        SELECT object_type_id
+          FROM object_type
+         WHERE api_name = $1 AND ontology_id = $2
+      )`,
+    [objectTypeApiName, ontologyId]
+  );
+  if (colMapRes.rows.length > 0) {
+    const raw = colMapRes.rows[0].column_mapping;
+    const colMapping: Record<string, string> =
+      typeof raw === "string" ? JSON.parse(raw) : raw || {};
+    for (const [propApiName, sourceColumn] of Object.entries(colMapping)) {
+      if (sourceColumn && !propertyAliases.has(sourceColumn)) {
+        propertyAliases.set(sourceColumn, propApiName);
+      }
+    }
+  }
+  return propertyAliases;
+}
+
+/**
+ * Coerce a property value into an OpenSearch-indexable shape. The funnel
+ * merge stores PG-timestamp-shaped strings ('2026-02-24 10:30:00') in
+ * object_instances.properties while date-mapped index fields require
+ * ISO 8601 — uncoerced values are rejected by the date mapper (observed:
+ * 278/449 RssbFraudSignal docs failing a full sync). Shared by the full
+ * sync and the serving edit projector so both write identical documents.
+ */
+export function toIndexablePropertyValue(value: unknown): unknown {
+  if (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(value)
+  ) {
+    const iso = new Date(value.replace(" ", "T") + "Z");
+    return Number.isNaN(iso.getTime()) ? value : iso.toISOString();
+  }
+  return value;
+}
+
+/** Apply {@link toIndexablePropertyValue} across a property bag. */
+export function toIndexableProperties(
+  props: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(props).map(([k, v]) => [k, toIndexablePropertyValue(v)]),
+  );
+}
+
+export function toCanonicalProperties(
   raw: Record<string, unknown> | null | undefined,
   aliases: Map<string, string>
 ): Record<string, unknown> {

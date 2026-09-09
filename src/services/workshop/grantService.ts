@@ -122,7 +122,16 @@ export async function getModuleEffectiveRole(
   if (cached && cached.expiresAt > Date.now()) return cached.role;
 
   const db = getWorkshopDb();
-  const normalizedGroups = (input.groups ?? []).map(normalizeGroupName);
+  // Platform pseudo-group convention (pipelineRbac/datasetRbac
+  // `extractGroupIds`): Keycloak realm roles double as group identifiers
+  // for ACL matching, since the realm models authorization groups
+  // (fraud-analyst, fraud-investigator, …) as realm roles rather than
+  // Keycloak groups.
+  const effectiveInput: EffectiveRoleInput = {
+    ...input,
+    groups: [...(input.groups ?? []), ...input.roles],
+  };
+  const normalizedGroups = effectiveInput.groups!.map(normalizeGroupName);
 
   // Fetch direct + group grants.
   const grants = await db.query<{
@@ -176,7 +185,7 @@ export async function getModuleEffectiveRole(
     }),
   );
 
-  const result = effectiveRoleFromInputs(input, allGrants);
+  const result = effectiveRoleFromInputs(effectiveInput, allGrants);
   roleCache.set(cacheKey, { role: result, expiresAt: Date.now() + ROLE_CACHE_TTL_MS });
   return result;
 }
@@ -216,6 +225,12 @@ export async function upsertModuleGrant(
   grantedBy: string,
 ): Promise<ModuleGrant> {
   const db = getWorkshopDb();
+  // Group principals are stored in normalized form — the effective-role
+  // lookup compares caller group/role identifiers after the same
+  // normalization (`normalizeGroupName`), so persisting the canonical form
+  // keeps writes and reads symmetric ("Fraud-Analyst" ≡ "fraud analyst").
+  const storedPrincipalId =
+    principalType === "group" ? normalizeGroupName(principalId) : principalId;
   const row = await db.query<{
     principal_type: PrincipalType;
     principal_id: string;
@@ -231,7 +246,7 @@ export async function upsertModuleGrant(
                    granted_at = now()
      RETURNING principal_type, principal_id, role,
                granted_by, granted_at::text`,
-    [moduleRid, principalType, principalId, role, grantedBy],
+    [moduleRid, principalType, storedPrincipalId, role, grantedBy],
   );
   const r = row.rows[0];
   invalidateRoleCache(moduleRid);
@@ -251,15 +266,131 @@ export async function removeModuleGrant(
   principalId: string,
 ): Promise<boolean> {
   const db = getWorkshopDb();
+  const storedPrincipalId =
+    principalType === "group" ? normalizeGroupName(principalId) : principalId;
   const result = await db.query(
     `DELETE FROM workshop_module_grants
       WHERE module_rid = $1 AND principal_type = $2 AND principal_id = $3
       RETURNING 1`,
-    [moduleRid, principalType, principalId],
+    [moduleRid, principalType, storedPrincipalId],
   );
   const deleted = (result.rowCount ?? 0) > 0;
   if (deleted) invalidateRoleCache(moduleRid);
   return deleted;
+}
+
+// ---------------------------------------------------------------------------
+// Access decision with provenance — backs Workshop's "Check access" surface.
+// Foundry shows WHY a principal has access (direct grant vs group vs global
+// role); the bare effective-role endpoint cannot reconstruct that, so the
+// resolution order is replayed here with the matched path recorded.
+// ---------------------------------------------------------------------------
+
+export type AccessDecisionVia =
+  | "super-role"
+  | "global-role"
+  | "direct-grant"
+  | "group-grant"
+  | "default-group"
+  | "none";
+
+export interface ModuleAccessDecision {
+  readonly role: GrantRole | null;
+  readonly via: AccessDecisionVia;
+  /** The matched role name / grant principal id (when applicable). */
+  readonly detail: string | null;
+}
+
+export interface WorkshopDependencyAccess {
+  readonly objectTypes: boolean;
+  readonly linkTypes: boolean;
+  readonly actionTypes: boolean;
+  readonly functions: boolean;
+  readonly reason: string;
+}
+
+/**
+ * Evaluate the ontology catalogue access used by Workshop dependencies for
+ * a directory principal. This deliberately stays separate from module
+ * grants: being able to open a module does not grant access to its data or
+ * executable resources.
+ *
+ * Tellus currently authorizes reads for these four catalogue/resource
+ * families through the ontology read roles. Keep this helper aligned with
+ * TellusAuthService ROLE_OP_MAP until resource-specific ACLs are introduced.
+ */
+export function getWorkshopDependencyAccess(
+  roles: readonly string[],
+): WorkshopDependencyAccess {
+  const readRole = ["ontology-admin", "ontology-editor", "ontology-viewer"]
+    .find((role) => roles.includes(role));
+  const allowed = readRole != null;
+  return {
+    objectTypes: allowed,
+    linkTypes: allowed,
+    actionTypes: allowed,
+    functions: allowed,
+    reason: allowed ? `User has ${readRole} role` : "INSUFFICIENT_ONTOLOGY_READ_ROLE",
+  };
+}
+
+export async function getModuleAccessDecision(
+  moduleRid: string,
+  input: EffectiveRoleInput,
+): Promise<ModuleAccessDecision> {
+  const superRole = SUPER_EDITOR_ROLES.find((r) => input.roles.includes(r));
+  if (superRole) return { role: "editor", via: "super-role", detail: superRole };
+  if (input.roles.includes(ROLE_EDITOR)) {
+    return { role: "editor", via: "global-role", detail: ROLE_EDITOR };
+  }
+  if (input.roles.includes(ROLE_VIEWER)) {
+    return { role: "viewer", via: "global-role", detail: ROLE_VIEWER };
+  }
+
+  const db = getWorkshopDb();
+  const rows = await db.query<{
+    principal_type: PrincipalType;
+    principal_id: string;
+    role: GrantRole;
+  }>(
+    `SELECT principal_type, principal_id, role
+       FROM workshop_module_grants
+      WHERE module_rid = $1`,
+    [moduleRid],
+  );
+
+  const userGrant = rows.rows.find(
+    (r) => r.principal_type === "user" && r.principal_id === input.userId,
+  );
+  if (userGrant) {
+    return { role: userGrant.role, via: "direct-grant", detail: input.userId };
+  }
+
+  // Pseudo-group convention: realm roles are valid group identifiers.
+  const normalizedIds = new Set(
+    [...(input.groups ?? []), ...input.roles].map(normalizeGroupName),
+  );
+  const groupGrant = rows.rows
+    .filter(
+      (r) =>
+        r.principal_type === "group" && normalizedIds.has(r.principal_id),
+    )
+    .sort((a, b) => (a.role === "editor" ? -1 : 0) - (b.role === "editor" ? -1 : 0))[0];
+  if (groupGrant) {
+    return {
+      role: groupGrant.role,
+      via: "group-grant",
+      detail: groupGrant.principal_id,
+    };
+  }
+
+  for (const [groupName, role] of Object.entries(DEFAULT_GROUP_GRANTS)) {
+    if (normalizedIds.has(groupName)) {
+      return { role, via: "default-group", detail: groupName };
+    }
+  }
+
+  return { role: null, via: "none", detail: null };
 }
 
 /**

@@ -44,6 +44,8 @@ import { checkAndTriggerAutoIndex, AutoIndexResult } from "../services/autoIndex
 import { dataPlaneGuard } from "../middleware/requireRole";
 import { resolveDataset } from "../services/datasets/dataset-resolver";
 import { resolveDatasetColumns } from "../services/datasets/datasetColumns";
+import { uploadObject } from "../services/storageService";
+import { scheduleParseJob } from "../jobs/parseDatasetJob";
 
 const router = Router();
 
@@ -801,12 +803,95 @@ router.post(
         [datasetId]
       );
       if (dsResult.rows.length === 0) {
-        cleanupTempFile(uploadedFile.path);
-        return sendError(
-          res,
-          "DATASET_NOT_FOUND",
-          `Dataset with ID '${datasetId}' was not found.`
+        // Modern Compass uploads are registered in `foundry_datasets`, not
+        // the legacy ontology-engine `dataset` table. Preserve the public
+        // transaction route and snapshot semantics for both stores so the
+        // Dataset Preview UI can replace an upload without changing its RID
+        // or forking lineage.
+        const modern = await query(
+          "SELECT * FROM foundry_datasets WHERE id = $1",
+          [datasetId]
         );
+        if (modern.rows.length === 0) {
+          cleanupTempFile(uploadedFile.path);
+          return sendError(
+            res,
+            "DATASET_NOT_FOUND",
+            `Dataset with ID '${datasetId}' was not found.`
+          );
+        }
+        if (transactionType !== "SNAPSHOT") {
+          cleanupTempFile(uploadedFile.path);
+          return sendError(
+            res,
+            "INVALID_TRANSACTION_TYPE",
+            "Foundry datasets currently support SNAPSHOT replacement only."
+          );
+        }
+
+        const dataset = modern.rows[0];
+        const uploadedFormat = detectFormat(uploadedFile.originalname);
+        const datasetFormat = String(dataset.format ?? path.extname(dataset.original_filename ?? dataset.name).slice(1) ?? "csv").toLowerCase();
+        if ((uploadedFormat === "jsonl" ? "json" : uploadedFormat) !== (datasetFormat === "jsonl" ? "json" : datasetFormat)) {
+          cleanupTempFile(uploadedFile.path);
+          return sendError(res, "FORMAT_MISMATCH", `This dataset uses '${datasetFormat}' format but the uploaded file is '${uploadedFormat}'.`);
+        }
+
+        const existingColumns = Array.isArray(dataset.schema_info?.columns)
+          ? dataset.schema_info.columns.map((column: any) => typeof column === "string" ? column : column.name).filter(Boolean)
+          : [];
+        const uploadedColumns = await extractSchemaColumns(uploadedFile.path, uploadedFormat === "jsonl" ? "json" : uploadedFormat);
+        const missingColumns = existingColumns.filter((column: string) => !uploadedColumns.includes(column));
+        if (missingColumns.length > 0) {
+          cleanupTempFile(uploadedFile.path);
+          return sendError(res, "SCHEMA_MISMATCH", `The uploaded file is missing existing columns: [${missingColumns.join(", ")}].`);
+        }
+
+        const rowCount = await countRows(uploadedFile.path, uploadedFormat === "jsonl" ? "json" : uploadedFormat).catch(() => 0);
+        const safeName = uploadedFile.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const objectKey = `${path.posix.dirname(dataset.file_path)}/${crypto.randomUUID()}_${safeName}`;
+        await uploadObject(objectKey, fs.createReadStream(uploadedFile.path), uploadedFile.mimetype, {
+          "original-filename": uploadedFile.originalname,
+          "dataset-id": datasetId,
+          "transaction-type": "SNAPSHOT",
+        }, uploadedFile.size);
+
+        const client = await getClient();
+        try {
+          await client.query("BEGIN");
+          const versionResult = await client.query(
+            "SELECT COALESCE(MAX(version_number), 0) + 1 AS next FROM dataset_versions WHERE dataset_id = $1",
+            [datasetId]
+          );
+          const version = Number(versionResult.rows[0]?.next ?? 1);
+          await client.query(
+            `INSERT INTO dataset_versions
+               (dataset_id, version_number, file_path, file_size_bytes, row_count,
+                column_count, schema_snapshot, change_summary, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'SNAPSHOT replacement',$8)`,
+            [datasetId, version, objectKey, uploadedFile.size, rowCount, uploadedColumns.length, dataset.schema_info, (req as any).user?.id ?? null]
+          );
+          await client.query(
+            `UPDATE foundry_datasets
+             SET file_path=$1, original_filename=$2, mime_type=$3,
+                 file_size_bytes=$4, row_count=$5, column_count=$6,
+                 status='pending', updated_by=$7, updated_at=NOW()
+             WHERE id=$8`,
+            [objectKey, uploadedFile.originalname, uploadedFile.mimetype, uploadedFile.size, rowCount, uploadedColumns.length, (req as any).user?.id ?? null, datasetId]
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        } finally {
+          client.release();
+          cleanupTempFile(uploadedFile.path);
+        }
+        scheduleParseJob(datasetId);
+        return sendCreated(res, {
+          datasetId,
+          transaction: { type: "SNAPSHOT", rowCount, fileName: uploadedFile.originalname },
+        });
       }
       const dataset = dsResult.rows[0];
 

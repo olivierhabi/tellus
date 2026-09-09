@@ -408,11 +408,11 @@ function buildTestPrincipal(
 // ---------------------------------------------------------------------------
 
 export function globalAuth() {
-  return function globalAuthMiddleware(
+  return async function globalAuthMiddleware(
     req: Request,
     res: Response,
     next: NextFunction,
-  ): void {
+  ): Promise<void> {
     // Shared per-request mutable surface — declared early so the test-auth
     // bypass (below) and the JWT path (further down) both populate it.
     const reqAny = req as Request & {
@@ -459,8 +459,29 @@ export function globalAuth() {
         : undefined;
       const principal = buildTestPrincipal(userId, overrideRoles);
       if (principal) {
+        let localUserId: string;
+        try {
+          // Keep the dev-only bypass on the same identity boundary as a
+          // verified Keycloak JWT: domain/resource tables reference the
+          // local users.id, never the external Keycloak subject. Without
+          // this JIT mapping, browser-created Compass resources fail their
+          // created_by FK even though authentication succeeded.
+          localUserId = await ensureLocalUserForClaims(
+            foundryDb as unknown as Knex,
+            principal.claims as unknown as TellusClaims,
+          );
+        } catch {
+          authError(
+            req,
+            res,
+            "AUTHENTICATION_FAILED",
+            "Unable to provision the authenticated test user.",
+            500,
+          );
+          return;
+        }
         reqAny.user = {
-          id: principal.id,
+          id: localUserId,
           email: principal.email,
           displayName: principal.displayName,
           roles: principal.roles,
@@ -468,7 +489,8 @@ export function globalAuth() {
         } as unknown as NonNullable<typeof reqAny.user>;
         reqAny.auth = principal.claims;
         reqAny.keycloakUser = principal.claims as unknown as import("./keycloakAuth").KeycloakClaims;
-        return next();
+        next();
+        return;
       }
       return authError(
         req,
@@ -521,8 +543,24 @@ export function globalAuth() {
         : undefined;
       const principal = buildTestPrincipal(userId, overrideRoles);
       if (principal) {
+        let localUserId: string;
+        try {
+          localUserId = await ensureLocalUserForClaims(
+            foundryDb as unknown as Knex,
+            principal.claims as unknown as TellusClaims,
+          );
+        } catch {
+          authError(
+            req,
+            res,
+            "AUTHENTICATION_FAILED",
+            "Unable to provision the authenticated test user.",
+            500,
+          );
+          return;
+        }
         reqAny.user = {
-          id: principal.id,
+          id: localUserId,
           email: principal.email,
           displayName: principal.displayName,
           roles: principal.roles,
@@ -530,7 +568,8 @@ export function globalAuth() {
         } as unknown as NonNullable<typeof reqAny.user>;
         reqAny.auth = principal.claims;
         reqAny.keycloakUser = principal.claims as unknown as import("./keycloakAuth").KeycloakClaims;
-        return next();
+        next();
+        return;
       }
       return authError(
         req, res, "UNAUTHORIZED",

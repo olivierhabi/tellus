@@ -354,12 +354,36 @@ async function updateMapping(
     index: indexName,
   });
 
-  // Extract existing properties — the response is keyed by index name
+  // Extract existing properties — normally the response is keyed by the
+  // requested index name
   const existingMapping = existingMappingResponse as unknown as Record<
     string,
     Record<string, unknown>
   >;
-  const indexMapping = existingMapping[indexName] as Record<string, unknown>;
+  // Blue-green reindexes (POST …/reindex) replace the concrete index with an
+  // ALIAS of the same name pointing at a '-replacement-*' generation. The
+  // getMapping response is then keyed by the CONCRETE name, so a bare lookup
+  // by `indexName` misses and crashed the legacy POST …/index flow with
+  // "Cannot read properties of undefined (reading 'mappings')". Fall back to
+  // the single concrete entry; a multi-index alias is ambiguous and must be
+  // surfaced explicitly.
+  let indexMapping = existingMapping[indexName] as
+    | Record<string, unknown>
+    | undefined;
+  if (!indexMapping) {
+    const concreteEntries = Object.values(existingMapping);
+    if (concreteEntries.length === 0) {
+      throw new Error(
+        `getMapping for '${indexName}' returned no entries — cannot compare mappings.`
+      );
+    }
+    if (concreteEntries.length > 1) {
+      throw new Error(
+        `'${indexName}' resolves to ${concreteEntries.length} concrete indices — mapping comparison is ambiguous. Resolve the alias to a single index before updateMapping().`
+      );
+    }
+    indexMapping = concreteEntries[0];
+  }
   const mappingsBlock = (indexMapping.mappings ?? {}) as Record<
     string,
     unknown

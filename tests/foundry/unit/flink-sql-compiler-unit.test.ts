@@ -44,6 +44,27 @@ const ICEBERG = {
 };
 
 describe("compileStreamingJob", () => {
+  it("compiles ConcatenateStrings with separator and strict-null semantics", () => {
+    const plan = compileStreamingJob({
+      jobName: "orders",
+      inputs: [ORDERS_TOPIC],
+      transforms: [{
+        function: "ConcatenateStrings",
+        expressions: [
+          { kind: "column", value: "status" },
+          { kind: "literal", value: "tail", literalType: "string" },
+        ],
+        separator: "--",
+        nullOutputIfAnyInputIsNull: true,
+        outputColumn: "joined",
+      }],
+      outputSchema: [...ORDERS_TOPIC.columns, { name: "joined", type: "string" }],
+      outputIceberg: ICEBERG,
+    });
+    const dml = plan.statements.find((statement) => statement.startsWith("INSERT INTO"));
+    expect(dml).toContain("CONCAT_WS('--', CAST(`status` AS STRING), CAST('tail' AS STRING))");
+    expect(dml).toContain("CASE WHEN CAST(`status` AS STRING) IS NULL OR");
+  });
   it("emits a Kafka CREATE TABLE for stream sources", () => {
     const plan = compileStreamingJob({
       jobName: "orders",

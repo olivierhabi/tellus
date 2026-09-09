@@ -191,6 +191,10 @@ export function compileBatchJob(input: CompileBatchInput): CompiledBatchJob {
         pushExpressionToColumns(columns, step.expression);
         break;
       }
+      case "ConcatenateStrings": {
+        pushConcatenateStringsToColumns(columns, step);
+        break;
+      }
       case "ApplyMultipleExpressions": {
         for (const e of step.expressions ?? []) {
           pushExpressionToColumns(columns, e);
@@ -496,6 +500,10 @@ export function foldLinearArm(
       }
       case "ApplyExpression": {
         pushExpressionToColumns(columns, step.expression);
+        break;
+      }
+      case "ConcatenateStrings": {
+        pushConcatenateStringsToColumns(columns, step);
         break;
       }
       case "ApplyMultipleExpressions": {
@@ -851,6 +859,22 @@ function sqlOpTrino(op: BinaryOp): string {
 
 function renderExpressionTrino(e: ExpressionItemShape): string {
   return `(${renderOperandTrino(e.left)} ${sqlOpTrino(e.operator)} ${renderOperandTrino(e.right)})`;
+}
+
+function pushConcatenateStringsToColumns(
+  columns: Array<{ expr: string; name: string; type: string }>,
+  step: Extract<TransformStep, { function: "ConcatenateStrings" }>,
+): void {
+  const operands = step.expressions.map((operand) => `CAST(${renderOperandTrino(operand)} AS VARCHAR)`);
+  const separator = `'${escapeSql(step.separator ?? "")}'`;
+  const joined = `concat_ws(${separator}, ${operands.join(", ")})`;
+  const expr = step.nullOutputIfAnyInputIsNull
+    ? `CASE WHEN ${operands.map((operand) => `${operand} IS NULL`).join(" OR ")} THEN NULL ELSE ${joined} END`
+    : joined;
+  const idx = columns.findIndex((column) => column.name === step.outputColumn);
+  const output = { expr, name: step.outputColumn, type: "string" };
+  if (idx >= 0) columns[idx] = output;
+  else columns.push(output);
 }
 
 function castForResultTrino(

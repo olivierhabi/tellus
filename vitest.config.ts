@@ -5,6 +5,20 @@ import path from "path";
 // the module's import side effect; workers need them here (fresh process).
 import { LANE } from "./tests/laneEnv";
 
+// Test credentials are never baked into the repo. PGPASSWORD must come from
+// the environment (CI secret or a local export — see .env.test.example) and
+// the config fails fast when it is missing instead of falling back to an
+// inline literal.
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `${name} is not set. Export it before running this suite (see .env.test.example).`,
+    );
+  }
+  return value;
+}
+
 export default defineConfig({
   test: {
     // ---------------------------------------------------------------------------
@@ -80,7 +94,7 @@ export default defineConfig({
       ...LANE,
       PGHOST: "localhost",
       PGUSER: "tellus",
-      PGPASSWORD: "tellus123",
+      PGPASSWORD: requiredEnv("PGPASSWORD"),
       // F-09: Disable rate limiter during tests to prevent cross-run
       // 429 failures when vitest restarts within the same 60s window.
       RATE_LIMIT_MAX: "999999",

@@ -58,6 +58,25 @@ const columnWidthsSchema = z
   .record(z.string(), sectionWidthSpecSchema)
   .optional();
 
+// Module overlays — Foundry Layout panel "drawer"/"modal" surfaces. Authored
+// like pages (each owns a root section tree) but rendered transiently:
+// drawers slide over the right edge at `width` px, modals are centered.
+// Opened/closed at runtime through Workshop events (openDrawer/closeDrawer
+// with the overlay id as target). Optional + backward compatible — modules
+// authored without overlays behave exactly as before. Mirrors
+// `schemas/workshop-module-v4.json#/properties/overlays`.
+const moduleOverlaySchema = z
+  .object({
+    id: z.string().min(1).max(128),
+    displayName: z.string().min(1).max(200),
+    kind: z.enum(["drawer", "modal"]),
+    rootSection: z.string().min(1),
+    width: z.number().min(240).max(1200).optional(),
+    closeOnBackdrop: z.boolean().optional(),
+    visibilityVariableId: z.string().min(1).optional(),
+  })
+  .strict();
+
 export const moduleDefinitionSchema = z
   .object({
     schemaVersion: z.literal(4),
@@ -68,6 +87,30 @@ export const moduleDefinitionSchema = z
     variables: z.array(z.unknown()).default([]),
     widgets: z.array(z.unknown()).default([]),
     sections: z.array(z.unknown()).optional(),
+    // Multi-page modules are backward compatible with the original v4
+    // single-root document: `layout.rootSection` remains mandatory and is
+    // treated as the legacy/default page when `pages` is absent.
+    pages: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(128),
+            displayName: z.string().min(1).max(200),
+            rootSection: z.string().min(1),
+            navigation: z.enum(["primary", "context"]).optional(),
+          })
+          .strict(),
+      )
+      .optional(),
+    defaultPageId: z.string().min(1).max(128).optional(),
+    // Variable-backed layouts (Foundry docs): a string variable's value
+    // drives — and is driven by — the active page. Mirrors
+    // `schemas/workshop-module-v4.json#/properties/activePageVariableId`.
+    activePageVariableId: z
+      .string()
+      .regex(/^v_[a-zA-Z0-9_]{1,128}$/)
+      .optional(),
+    overlays: z.array(moduleOverlaySchema).optional(),
     // E29/E30 — module-level event definitions referenced by button widgets.
     // Optional + backward compatible; a button whose `config.buttonGroup
     // .buttons[].events[].id` matches one of these dispatches it on click and

@@ -2,17 +2,28 @@ export class AppError extends Error {
   public readonly statusCode: number;
   public readonly code: string;
   public readonly isOperational: boolean;
+  /**
+   * Foundry error-envelope parameters (SPEC §2.1 `parameters` map), e.g.
+   * `ResourceNameAlreadyExists` carries `{ parentFolderRid, displayName }`.
+   */
+  public readonly parameters: Record<string, unknown>;
+  /** SPEC errorName (e.g. `ResourceNameAlreadyExists`); defaults to undefined. */
+  public readonly errorName?: string;
 
   constructor(
     message: string,
     statusCode: number,
     code: string,
-    isOperational = true
+    isOperational = true,
+    parameters: Record<string, unknown> = {},
+    errorName?: string
   ) {
     super(message);
     this.statusCode = statusCode;
     this.code = code;
     this.isOperational = isOperational;
+    this.parameters = parameters;
+    this.errorName = errorName;
 
     // Ensure the name of this error is the same as the class name
     this.name = this.constructor.name;

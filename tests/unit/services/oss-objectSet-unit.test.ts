@@ -375,6 +375,26 @@ describe("compileObjectSet — set algebra", () => {
     expect(c.plans[0]!.searchAroundSourceWhere).toMatchObject({ type: "eq" });
   });
 
+  it("preserves every hop in a nested searchAround chain", async () => {
+    const c = await compileObjectSet(
+      {
+        type: "searchAround",
+        link: "claimToSignal",
+        objectSet: {
+          type: "searchAround",
+          link: "providerToClaim",
+          objectSet: filtered("Provider", 1),
+        },
+      } as never,
+      deps,
+    );
+    expect(c.plans[0]!.searchAroundChain).toEqual([
+      { link: "providerToClaim", fromObjectType: "Provider" },
+      { link: "claimToSignal", fromObjectType: "Provider" },
+    ]);
+    expect(c.plans[0]!.searchAroundSourceWhere).toMatchObject({ type: "eq" });
+  });
+
   it("nearestNeighbors attaches knn to the plan (a node, not a filter)", async () => {
     const c = await compileObjectSet(
       {

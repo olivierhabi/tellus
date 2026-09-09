@@ -214,6 +214,17 @@ export const semverTagImmutable = (rid: string, semver: string) =>
     semver,
   });
 
+export const semverNotMonotonic = (
+  rid: string,
+  semver: string,
+  highestPublishedSemver: string,
+) =>
+  new WorkshopError("CONFLICT", "Tellus:Workshop:SemverNotMonotonic", {
+    rid,
+    semver,
+    highestPublishedSemver,
+  });
+
 // ---- B07 — Workshop filter compiler ---------------------------------------
 
 export const unknownFilterProperty = (property: string, uiKind: string) =>

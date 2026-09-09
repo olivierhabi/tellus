@@ -352,6 +352,9 @@ describe("loadOntologySnapshot — link graph derivation", () => {
         ],
       },
       { match: /to_regclass/, rows: [{ exists: false }] },
+      // loadColumnMappings: no datasource mappings → properties pass through
+      // untranslated (same shape the assertions below assume).
+      { match: /FROM backing_datasource/, rows: [] },
     ]);
     const snap = await loadOntologySnapshot(pool as never, { ontologyId: "00000000-0000-0000-0000-000000000001" });
     expect(snap.links?.get("accounts")).toMatchObject({
@@ -393,6 +396,7 @@ describe("loadOntologySnapshot — link graph derivation", () => {
         ],
       },
       { match: /to_regclass/, rows: [{ exists: false }] },
+      { match: /FROM backing_datasource/, rows: [] },
     ]);
     const snap = await loadOntologySnapshot(pool as never, {
       ontologyId: "00000000-0000-0000-0000-000000000001",
@@ -429,6 +433,7 @@ describe("loadOntologySnapshot — link graph derivation", () => {
           { link_type_api_name: "reviewTeam", source_primary_key: "l1", target_primary_key: "t2" },
         ],
       },
+      { match: /FROM backing_datasource/, rows: [] },
     ]);
     const snap = await loadOntologySnapshot(pool as never, { ontologyId: "00000000-0000-0000-0000-000000000001" });
     const def = snap.links?.get("reviewTeam");
@@ -453,6 +458,7 @@ describe("loadOntologySnapshot — link graph derivation", () => {
         ],
       },
       { match: /to_regclass/, rows: [{ exists: false }] },
+      { match: /FROM backing_datasource/, rows: [] },
     ]);
     const snap = await loadOntologySnapshot(pool as never, { ontologyId: "00000000-0000-0000-0000-000000000001" });
     expect(snap.links?.size).toBe(0);

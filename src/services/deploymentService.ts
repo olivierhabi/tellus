@@ -1,8 +1,11 @@
 import { Knex } from 'knex';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
-import { uploadObject } from './storageService';
+import { uploadObject, getObjectStream } from './storageService';
 import { TransformService } from './transformService';
+import { assertFolderNameAvailable } from './datasets/folderNameGuard';
+import { DatasetTransactionService } from './datasets/transactionService';
+import { applyWriteMode, validateWriteModeConfig } from './pipelines/writeModes';
 import { AppError } from '../utils/foundryAppError';
 import {
   writeRowsToParquet,
@@ -154,6 +157,14 @@ export interface StartDeploymentOptions {
    * happen.
    */
   dryRun?: boolean;
+  /**
+   * Foundry — `?replay=true`. "Replaying on deploy will produce a
+   * `SNAPSHOT` transaction on the output dataset": incremental pipelines
+   * reprocess the entire input when logic changed and prior outputs are
+   * outdated.
+   * (building-pipelines/create-incremental-pipeline-pb)
+   */
+  replay?: boolean;
 }
 
 /** PB-B10 — returned from startDeployment in dry-run mode. */
@@ -228,6 +239,96 @@ export class DeploymentService {
     private knex: Knex,
     private transformService: TransformService,
   ) {}
+
+  /**
+   * Read the dataset's current view from the LATEST committed transaction
+   * on `master` (Datasets v2: the transaction log is authoritative).
+   * Returns [] when there is no committed build yet or the view is not
+   * CSV (write modes only merge CSV views; other formats treat the
+   * previous view as empty).
+   */
+  private async readLatestViewRows(
+    datasetId: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const tx = await this.knex('foundry_dataset_transactions')
+      .where({ dataset_id: datasetId, branch_name: 'master', status: 'committed' })
+      .orderBy('committed_at', 'desc')
+      .first('file_path');
+    // No committed transaction yet — first build of this dataset.
+    const filePath = (tx?.file_path as string | undefined) ??
+      (await this.knex('foundry_datasets').where({ id: datasetId }).first('file_path'))
+        ?.file_path;
+    if (!filePath || !String(filePath).endsWith('.csv')) return [];
+    const stream = await getObjectStream(String(filePath));
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    const text = Buffer.concat(chunks).toString('utf-8');
+    const { parse } = await import('csv-parse/sync');
+    return parse(text, { columns: true, skip_empty_lines: true, bom: true }) as Array<
+      Record<string, unknown>
+    >;
+  }
+
+  /**
+   * Foundry default write mode precondition: APPEND iff at least one
+   * input is incremental AND all incremental inputs saw only
+   * APPEND/additive UPDATE transactions. Our input datasets are
+   * file-upload/extract based, so `computation_mode='incremental'` on the
+   * input node's config is the marker the rule keys on.
+   */
+  private async isIncrementalAppendEligible(pipelineId: string): Promise<boolean> {
+    const inputs = await this.knex('pipeline_nodes')
+      .where({ pipeline_id: pipelineId, node_type: 'dataset' })
+      .select('config');
+    if (inputs.length === 0) return false;
+    let anyIncremental = false;
+    for (const n of inputs) {
+      const cfg = typeof n.config === 'string' ? JSON.parse(n.config) : (n.config ?? {});
+      if (cfg.computationMode !== 'incremental') return false;
+      anyIncremental = true;
+    }
+    return anyIncremental;
+  }
+
+  /**
+   * Foundry Datasets v2 storage model — every successful build commits a
+   * transaction on the output dataset's branch (default `master`). The
+   * dataset row's latest view is written from the same payload, so the
+   * current view always equals the last committed transaction.
+   */
+  private async recordOutputTransaction(args: {
+    datasetId: string;
+    deploymentId: string;
+    pipelineId: string;
+    outputNodeId: string;
+    filePath: string;
+    fileSizeBytes?: number | null;
+    rowCount?: number | null;
+    columnCount?: number | null;
+    createdBy?: string | null;
+    transactionType?: 'SNAPSHOT' | 'APPEND' | 'UPDATE';
+    writeMode?: string;
+    /** Replay on deploy — always commits SNAPSHOT (Foundry doc). */
+    replay?: boolean;
+  }): Promise<void> {
+    await new DatasetTransactionService(this.knex).recordBuild({
+      datasetId: args.datasetId,
+      branch: 'master',
+      transactionType: args.replay ? 'SNAPSHOT' : (args.transactionType ?? 'SNAPSHOT'),
+      deploymentId: args.deploymentId,
+      filePath: args.filePath,
+      fileSizeBytes: args.fileSizeBytes ?? null,
+      rowCount: args.rowCount ?? null,
+      columnCount: args.columnCount ?? null,
+      createdBy: args.createdBy ?? null,
+      metadata: {
+        pipelineId: args.pipelineId,
+        outputNodeId: args.outputNodeId,
+        writeMode: args.writeMode ?? 'default',
+        replayOnDeploy: args.replay === true || undefined,
+      },
+    });
+  }
 
   // ============================================================================
   // Output dataset name validation
@@ -524,6 +625,8 @@ export class DeploymentService {
         id: n.id,
         label: n.label,
       })),
+      // Foundry replay-on-deploy marker — executeBuild forces SNAPSHOT.
+      replay: opts.replay === true || undefined,
     });
 
     // Atomic idempotent insert. ON CONFLICT DO NOTHING returns an empty
@@ -1556,6 +1659,39 @@ export class DeploymentService {
     const { DatasetLineageService } = await import('./pipelines/datasetLineage');
     const lineage = new DatasetLineageService(this.knex);
 
+    // 0. Point every foundry-bridged backing_datasource at the file this
+    // deployment just published. The bridged file_path is synthetic:
+    // `<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>` — the pre-tag
+    // prefix is what reindex/merge actually READ, while the tags are the
+    // stable identity. Without this refresh the prefix keeps pointing at
+    // the file that existed when the binding was registered, so builds
+    // commit new data while the Ontology keeps materialising the old file
+    // — the pipeline looks healthy while Ontology objects stay stale.
+    try {
+      const current = await this.knex('foundry_datasets')
+        .where({ id: input.outputDatasetId })
+        .first('file_path');
+      if (current?.file_path) {
+        await this.knex('backing_datasource')
+          .where({ foundry_dataset_id: input.outputDatasetId })
+          .whereRaw("file_path LIKE '%#foundry-dataset:%'")
+          .update({
+            // Keep everything from the first tag onward (identity) and
+            // swap only the S3-key prefix (content pointer).
+            file_path: this.knex.raw(
+              "? || substr(file_path, strpos(file_path, '#foundry-dataset:'))",
+              [current.file_path],
+            ),
+          });
+      }
+    } catch (err) {
+      // Best-effort: a refresh failure must not fail the deployment; the
+      // signals below still fire and the binding can be repaired.
+      console.warn(
+        `[deploy] backing_datasource file_path refresh skipped: ${(err as Error).message}`,
+      );
+    }
+
     // 1. Insert pipeline_output edges for every dataset-bound input node.
     const inputDatasets = (await this.knex('pipeline_nodes')
       .where({ pipeline_id: input.pipelineId })
@@ -1586,13 +1722,17 @@ export class DeploymentService {
     }
 
     // 2. Walk downstream — for every OT whose backing_datasource is
-    // this output dataset, fire the Funnel signal with a deduping
-    // fingerprint. PB-B8 follow-fnl-h3 also fires a dedicated
-    // `pipelineDeployCompleted` signal so consumers that want pipeline-
-    // event semantics subscribe to it directly instead of filtering
-    // generic source-transaction signals. Both are fingerprinted on
-    // `${deploymentId}-${ontology}-${ot}` so replaying the deploy is
-    // a no-op at the Funnel boundary for either type.
+    // this output dataset, fire exactly one reindexing signal with a
+    // deduping fingerprint.
+    //
+    // Do not also enqueue `pipelineDeployCompleted` here. The Funnel
+    // dispatcher treats every signal as an indexing run, while the Temporal
+    // workflow intentionally has no handler for that notification-only
+    // signal. Emitting both therefore creates a second run which can remain
+    // `workflow_started` and overwrite the successful run's UI projection
+    // with a permanent `indexing` state. Pipeline completion notifications
+    // need a separate event/outbox consumer; they must not share the Object
+    // Type reindex queue.
     const ots = await lineage.findObjectTypesFor(input.outputDatasetId);
     if (ots.length === 0) return;
     const { sendSignal } = await import('./funnel/durableWorkflow');
@@ -1616,21 +1756,6 @@ export class DeploymentService {
       } catch (err) {
         console.warn(
           `[deploy] sendSignal(${ot.objectTypeApiName}, sourceTransactionCommitted) failed: ${(err as Error).message}`,
-        );
-      }
-      // PB-B8 follow-fnl-h3 — second signal, separate fingerprint so
-      // the two signal types don't collide on the partial-unique index.
-      try {
-        await sendSignal({
-          ontologyId: ot.ontologyId,
-          objectTypeApiName: ot.objectTypeApiName,
-          signalType: 'pipelineDeployCompleted',
-          payload: commonPayload,
-          fingerprint: `pdc:${fingerprint}`,
-        });
-      } catch (err) {
-        console.warn(
-          `[deploy] sendSignal(${ot.objectTypeApiName}, pipelineDeployCompleted) failed: ${(err as Error).message}`,
         );
       }
     }
@@ -2437,21 +2562,44 @@ export class DeploymentService {
       updated_by: args.triggeredBy,
     };
     if (existingDatasetId) {
+      // Foundry parity — ResourceNameAlreadyExists (409): the rename that
+      // keeps the dataset name in lock-step with the output-node label
+      // must not collide with a sibling resource in the same folder.
+      const current = (await this.knex('foundry_datasets')
+        .where({ id: existingDatasetId })
+        .first('name', 'folder_id', 'project_id')) as
+        | { name: string; folder_id: string | null; project_id: string | null }
+        | undefined;
+      if (current && current.name !== datasetPatch.name) {
+        await assertFolderNameAvailable(this.knex, {
+          name: datasetPatch.name,
+          folderId: current.folder_id ?? null,
+          projectId: current.project_id ?? args.projectId,
+          excludeDatasetId: existingDatasetId,
+        });
+      }
       await this.knex('foundry_datasets')
         .where({ id: existingDatasetId })
         .update(datasetPatch);
       datasetId = existingDatasetId;
       await this.knex('dataset_columns').where({ dataset_id: datasetId }).del();
     } else {
+      // Foundry parity — a new output lands in the pipeline's own folder,
+      // and its name must be unique among that folder's resources.
+      const outputFolderId = await this.resolveOutputFolderId(
+        args.pipelineId,
+        args.projectId,
+      );
+      await assertFolderNameAvailable(this.knex, {
+        name: datasetPatch.name,
+        folderId: outputFolderId,
+        projectId: args.projectId,
+      });
       const [newDataset] = await this.knex('foundry_datasets')
         .insert({
           ...datasetPatch,
           project_id: args.projectId,
-          // Foundry parity — a new output lands in the pipeline's own folder.
-          folder_id: await this.resolveOutputFolderId(
-            args.pipelineId,
-            args.projectId,
-          ),
+          folder_id: outputFolderId,
           created_by: args.triggeredBy,
         })
         .returning('*');
@@ -2485,6 +2633,17 @@ export class DeploymentService {
         .where({ id: datasetId })
         .update({ markings: unionOutput });
     }
+    await this.recordOutputTransaction({
+      datasetId,
+      deploymentId: args.deploymentId,
+      pipelineId: args.pipelineId,
+      outputNodeId: args.outputNode.id,
+      filePath,
+      fileSizeBytes: 0,
+      rowCount: result.rowCount,
+      columnCount: plan.outputSchema.length,
+      createdBy: args.triggeredBy,
+    });
     try {
       await this.applyDeployLineageAndSignals({
         pipelineId: args.pipelineId,
@@ -2736,6 +2895,133 @@ export class DeploymentService {
             `[deploy] schema invariant check failed (non-fatal): ` +
               `${(invariantErr as Error).message}`,
           );
+        }
+
+        // ── Foundry parity — required-column mapping is deploy-GATING ──
+        // "You will not be able to deploy your pipeline until the 2
+        //  missing columns are mapped."
+        // The output node's config declares the mapped schema
+        // (`expectedColumns`, one entry per required output column); any
+        // column the upstream chain does NOT produce blocks the deploy.
+        // Foundry itself tolerates ADDITIVE divergence (extra columns) —
+        // those flow through PB-B10's classifier / warnings, never here.
+        {
+          const expectedColumns: string[] = (
+            Array.isArray(cfg.expectedColumns) ? (cfg.expectedColumns as unknown[]) : []
+          )
+            .map((c: unknown) => (typeof c === 'string' ? c : (c as { name?: unknown })?.name))
+            .filter((n): n is string => typeof n === 'string' && n.length > 0);
+          if (expectedColumns.length > 0) {
+            const produced = new Set(data.columns.map((c) => c.name));
+            const missing = expectedColumns.filter((n) => !produced.has(n));
+            if (missing.length > 0) {
+              throw new AppError(
+                `Cannot deploy output "${outputNode.label}": the following ${missing.length} ` +
+                  `required column${missing.length === 1 ? ' is' : 's are'} not mapped: ` +
+                  missing.join(', ') +
+                  '. Map them in the output node before deploying.',
+                400,
+                'OUTPUT_COLUMNS_UNMAPPED',
+                true,
+                {
+                  nodeId: outputNode.id,
+                  missingColumns: missing,
+                  missingCount: missing.length,
+                  expectedCount: expectedColumns.length,
+                  producedColumns: data.columns.map((c) => c.name),
+                },
+                'OutputColumnsUnmapped',
+              );
+            }
+          }
+        }
+
+        // ── Foundry write modes + replay-on-deploy ───────────────────────
+        // The output node's config chooses one of the seven documented
+        // write modes; the transaction TYPE it produces is recorded with
+        // the build (see recordOutputTransaction below). Previous view
+        // rows come from the LATEST committed transaction on `master` —
+        // Foundry semantics, the transaction log is authoritative, not
+        // any denormalized cache of the dataset row.
+        const existingDatasetId = cfg.outputDatasetId as string | undefined;
+        const deployCfgRow = await this.knex('pipeline_deployments')
+          .where({ id: deploymentId })
+          .first('config');
+        const deployConfig =
+          typeof deployCfgRow?.config === 'string'
+            ? JSON.parse(deployCfgRow.config)
+            : (deployCfgRow?.config ?? {});
+        const replayOnDeploy = deployConfig.replay === true;
+        const writeModeConfig = {
+          writeMode: (cfg.writeMode as string | undefined) ?? 'default',
+          primaryKey: (cfg.primaryKey as string | undefined) ?? null,
+          postFilteringColumn: (cfg.postFilteringColumn as string | undefined) ?? null,
+        };
+        validateWriteModeConfig(writeModeConfig);
+        let buildTransactionType: 'SNAPSHOT' | 'APPEND' = 'SNAPSHOT';
+        {
+          let prevRows: Array<Record<string, unknown>> = [];
+          if (existingDatasetId && !replayOnDeploy) {
+            prevRows = await this.readLatestViewRows(existingDatasetId);
+          }
+          const applied = applyWriteMode({
+            config: writeModeConfig,
+            prevRows,
+            newRows: data.rows,
+            incrementalAppendEligible: await this.isIncrementalAppendEligible(pipelineId),
+            replay: replayOnDeploy,
+          });
+          data = { ...data, rows: applied.rows, totalRows: applied.rows.length };
+          buildTransactionType = applied.transactionType;
+          if (replayOnDeploy) {
+            console.log(
+              `[deploy] replay-on-deploy: output "${outputNode.label}" produces a SNAPSHOT transaction`,
+            );
+          }
+        }
+
+        // ── Foundry data expectations ────────────────────────────────
+        // Declarative data-quality rules evaluated against exactly the
+        // rows this build would publish. severity='fail' BLOCKS the build
+        // here — before any file/transaction commit — so a failing build
+        // leaves the previously-healthy dataset untouched ('warn' records
+        // but lets the build through).
+        {
+          const expRows = await this.knex('pipeline_expectations')
+            .where({ pipeline_id: pipelineId, active: true })
+            .where((q) =>
+              q.whereNull('node_id').orWhere('node_id', outputNode.id),
+            )
+            .select('*');
+          if (expRows.length > 0) {
+            const { evaluateExpectations, mapExpectationRow } =
+              await import('./pipelines/expectations');
+            const expectationResults = evaluateExpectations(
+              expRows.map(mapExpectationRow),
+              data.rows,
+            );
+            await this.knex('pipeline_deployments')
+              .where({ id: deploymentId })
+              .update({ expectation_results: JSON.stringify(expectationResults) });
+            const blocking = expectationResults.filter(
+              (r) => r.status === 'FAIL' && r.severity === 'fail',
+            );
+            if (blocking.length > 0) {
+              throw new AppError(
+                `Cannot deploy output "${outputNode.label}": ${blocking.length} ` +
+                  `data expectation${blocking.length === 1 ? '' : 's'} failed: ` +
+                  blocking.map((r) => `${r.name} (${r.detail})`).join('; '),
+                400,
+                'EXPECTATIONS_FAILED',
+                true,
+                {
+                  nodeId: outputNode.id,
+                  failures: blocking.map((r) => ({ name: r.name, detail: r.detail })),
+                },
+                'ExpectationsFailed',
+              );
+            }
+          }
         }
 
         // PB-B3 — branch on the pipeline's output_format. CSV path is
@@ -3015,9 +3301,9 @@ export class DeploymentService {
           });
         }
 
-        // Create or update output dataset
+        // Create or update output dataset (`existingDatasetId` resolved
+        // earlier for the write-mode application).
         let datasetId: string;
-        const existingDatasetId = cfg.outputDatasetId as string | undefined;
 
         const datasetFormat =
           outputFormat === 'iceberg'
@@ -3042,6 +3328,21 @@ export class DeploymentService {
           // `original_filename` is already refreshed from `safeName`
           // below; pairing `name` with it keeps the two columns in
           // a consistent state across renames.
+          // Foundry parity — the rename is subject to folder
+          // name-uniqueness (ResourceNameAlreadyExists → 409).
+          const currentDs = (await this.knex('foundry_datasets')
+            .where({ id: existingDatasetId })
+            .first('name', 'folder_id', 'project_id')) as
+            | { name: string; folder_id: string | null; project_id: string | null }
+            | undefined;
+          if (currentDs && currentDs.name !== outputNode.label) {
+            await assertFolderNameAvailable(this.knex, {
+              name: outputNode.label,
+              folderId: currentDs.folder_id ?? null,
+              projectId: currentDs.project_id ?? projectId,
+              excludeDatasetId: existingDatasetId,
+            });
+          }
           await this.knex('foundry_datasets')
             .where({ id: existingDatasetId })
             .update({
@@ -3060,12 +3361,20 @@ export class DeploymentService {
           datasetId = existingDatasetId;
           await this.knex('dataset_columns').where({ dataset_id: datasetId }).del();
         } else {
+          // Foundry parity — a new output lands in the pipeline's own
+          // folder; its name must be unique among that folder's resources
+          // (ResourceNameAlreadyExists → 409 otherwise).
+          const outputFolderId = await this.resolveOutputFolderId(pipelineId, projectId);
+          await assertFolderNameAvailable(this.knex, {
+            name: outputNode.label,
+            folderId: outputFolderId,
+            projectId,
+          });
           const [newDataset] = await this.knex('foundry_datasets')
             .insert({
               name: outputNode.label,
               project_id: projectId,
-              // Foundry parity — a new output lands in the pipeline's own folder.
-              folder_id: await this.resolveOutputFolderId(pipelineId, projectId),
+              folder_id: outputFolderId,
               file_path: s3Key,
               original_filename: originalFilename,
               mime_type: mimeType,
@@ -3105,6 +3414,24 @@ export class DeploymentService {
         if (columnRows.length > 0) {
           await this.knex('dataset_columns').insert(columnRows);
         }
+
+        // Foundry Datasets v2 — the build commits a transaction on the
+        // output dataset's `master` branch, typed by the write mode (and
+        // SNAPSHOT-forced when this deploy was a replay).
+        await this.recordOutputTransaction({
+          datasetId,
+          deploymentId,
+          pipelineId,
+          outputNodeId: outputNode.id,
+          filePath: s3Key,
+          fileSizeBytes,
+          rowCount: data.rows.length,
+          columnCount: data.columns.length,
+          createdBy: triggeredBy,
+          transactionType: buildTransactionType,
+          writeMode: writeModeConfig.writeMode ?? 'default',
+          replay: replayOnDeploy,
+        });
 
         // PB-B7 — stamp the output dataset with the union of input
         // markings captured at deploy-start. Union is already on the

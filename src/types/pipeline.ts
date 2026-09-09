@@ -225,12 +225,22 @@ export type CastApplyInput = z.infer<typeof CastApplySchema>;
 /**
  * Supported filter operators.
  * Covers all operators in the Pipeline Builder Filter UI.
+ *
+ * Ordering operators (lt/lte/gt/gte) support both literal and
+ * column-to-column comparison (valueIsColumn) — Palantir filterV1 parity:
+ * the condition is an Expression<Boolean>, so `service_at < valid_from`
+ * compares the two columns row-by-row. Numeric/date values are coerced
+ * before comparison (ISO date strings compare chronologically).
  */
 export const FILTER_OPERATORS = [
   'is_null',
   'is_not_null',
   'eq',
   'neq',
+  'lt',
+  'lte',
+  'gt',
+  'gte',
   'starts_with',
   'ends_with',
   'contains',
@@ -530,6 +540,13 @@ const OperandSchema = z.object({
 
 export type Operand = z.infer<typeof OperandSchema>;
 
+export const StringOperandSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('column'), value: z.string().trim().min(1) }),
+  z.object({ kind: z.literal('literal'), value: z.string(), literalType: z.literal('string').optional() }),
+]);
+
+export type StringOperand = z.infer<typeof StringOperandSchema>;
+
 export const ExpressionItemSchema = z.object({
   left: OperandSchema,
   operator: z.enum(BINARY_OPERATORS),
@@ -560,6 +577,69 @@ export const ApplyExpressionApplySchema = z.object({
 });
 
 export type ApplyExpressionApplyInput = z.infer<typeof ApplyExpressionApplySchema>;
+
+// Pipeline Builder Case expression. Conditions are evaluated in order and the
+// first true branch wins; false/null conditions fall through to `defaultValue`.
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-expression/caseV2
+export const CaseBranchSchema = z.object({
+  condition: ExpressionItemSchema.omit({ outputColumn: true, outputType: true }),
+  value: OperandSchema,
+});
+
+export const CaseExpressionBaseSchema = z.object({
+  branches: z.array(CaseBranchSchema).min(1).max(100),
+  defaultValue: OperandSchema.nullable().default(null),
+  outputColumn: z.string().trim().min(1, 'outputColumn is required').max(255),
+  outputType: z.enum(CAST_TARGET_TYPES).optional(),
+});
+
+export const CaseExpressionPreviewSchema = CaseExpressionBaseSchema.extend({
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+export type CaseExpressionPreviewInput = z.infer<typeof CaseExpressionPreviewSchema>;
+export const CaseExpressionApplySchema = CaseExpressionBaseSchema;
+export type CaseExpressionApplyInput = z.infer<typeof CaseExpressionApplySchema>;
+
+// Palantir concatStringsV1 — ordered string expressions joined by a literal
+// separator. Nulls are skipped by default; strict mode propagates any null.
+export const ConcatenateStringsBaseSchema = z.object({
+  expressions: z.array(StringOperandSchema).min(1, 'At least one expression is required').max(100),
+  separator: z.string().max(10_000).default(''),
+  nullOutputIfAnyInputIsNull: z.boolean().default(false),
+  outputColumn: z.string().trim().min(1, 'outputColumn is required').max(255),
+});
+
+export const ConcatenateStringsPreviewSchema = ConcatenateStringsBaseSchema.extend({
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+export type ConcatenateStringsPreviewInput = z.infer<typeof ConcatenateStringsPreviewSchema>;
+
+export const ConcatenateStringsApplySchema = ConcatenateStringsBaseSchema;
+export type ConcatenateStringsApplyInput = z.infer<typeof ConcatenateStringsApplySchema>;
+
+// Palantir formatStringV1 — printf-style template over an ordered argument
+// list. Frame: the PB UI exposes it as a transform panel (template + args +
+// output column), like the String.format / Java printf mini-language. Null
+// arguments format as the literal text "null".
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-expression/formatStringV1
+export const FormatStringBaseSchema = z.object({
+  /** printf-style template ("%s", "%d", "%+.4f", "%%"). Args consumed in order. */
+  format: z.string().max(10_000),
+  /** Ordered args inserted into the format string — columns or literals. */
+  arguments: z.array(OperandSchema).max(100).default([]),
+  outputColumn: z.string().trim().min(1, 'outputColumn is required').max(255),
+});
+
+export const FormatStringPreviewSchema = FormatStringBaseSchema.extend({
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+export type FormatStringPreviewInput = z.infer<typeof FormatStringPreviewSchema>;
+
+export const FormatStringApplySchema = FormatStringBaseSchema;
+export type FormatStringApplyInput = z.infer<typeof FormatStringApplySchema>;
 
 // ---------------------------------------------------------------------------
 // Apply multiple expressions transform
@@ -1007,6 +1087,14 @@ export const JoinPreviewSchema = z.object({
    * shared value to collapse to. Omitted = false (historical behaviour).
    */
   coalesceJoinKeys: z.boolean().optional(),
+  /**
+   * When true, the computed preview is also persisted as the node's
+   * previewSnapshot in the same request (union/apply-style atomicity) —
+   * closes the failure window between "preview computed" and a separate
+   * client-side snapshot save, which previously left join nodes
+   * wired-but-schemaless ("0 columns", downstream SNAPSHOT_REQUIRED).
+   */
+  persist: z.boolean().optional(),
 });
 
 export type JoinPreviewInput = z.infer<typeof JoinPreviewSchema>;
@@ -1171,6 +1259,50 @@ export type SavePipelineProgressInput = z.infer<typeof SavePipelineProgressSchem
 // ---------------------------------------------------------------------------
 // Deploy pipeline
 // ---------------------------------------------------------------------------
+
+/**
+ * Foundry Pipeline Builder parity — build schedule config. Enabling seeds
+ * `schedule_next_run_at = now() + interval`; the pipeline build scheduler
+ * (services/pipelines/buildScheduler.ts) then rebuilds every interval
+ * minutes through the regular deploy path.
+ */
+export const UpdateBuildScheduleSchema = z.object({
+  enabled: z.boolean({
+    message: 'enabled must be boolean',
+  }),
+  intervalMinutes: z
+    .number({
+      message: 'intervalMinutes must be a number',
+    })
+    .int('intervalMinutes must be an integer')
+    .min(1, 'intervalMinutes must be at least 1')
+    .max(43200, 'intervalMinutes must be at most 30 days')
+    .optional(),
+}).refine(
+  (d) => !d.enabled || (d.intervalMinutes !== undefined && d.intervalMinutes > 0),
+  { message: 'intervalMinutes is required when enabling the build schedule' },
+);
+
+export type UpdateBuildScheduleInput = z.infer<typeof UpdateBuildScheduleSchema>;
+
+/**
+ * Foundry data expectations on pipeline builds.
+ * Types: row_count_bounds {min?,max?} · not_null {columns: string[]} ·
+ * unique {columns: string[]}. severity 'fail' gates the build pre-commit.
+ */
+export const CreateExpectationSchema = z.object({
+  nodeId: z.string().uuid('Invalid node UUID').optional().nullable(),
+  name: z.string().trim().min(1, 'Expectation name is required').max(255),
+  type: z.enum(['row_count_bounds', 'not_null', 'unique'], {
+    message: "type must be one of: row_count_bounds, not_null, unique",
+  }),
+  config: z.record(z.string(), z.unknown()),
+  severity: z.enum(['fail', 'warn'], {
+    message: "severity must be 'fail' or 'warn'",
+  }).default('fail'),
+});
+
+export type CreateExpectationInput = z.infer<typeof CreateExpectationSchema>;
 
 export const DeployPipelineSchema = z.object({
   /** Which output node IDs to build. If empty/omitted, builds ALL output nodes. */

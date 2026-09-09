@@ -107,7 +107,8 @@ function checkTypeCompatibility(
   filterType: string,
   field: string,
   value: unknown,
-  meta: PropertyMeta
+  meta: PropertyMeta,
+  filterRef?: Record<string, unknown>
 ): void {
   const effective = getEffective(meta.baseType);
 
@@ -121,7 +122,7 @@ function checkTypeCompatibility(
     return;
   }
 
-  checkSingleValueCompat(filterType, field, value, effective, meta.baseType);
+  checkSingleValueCompat(filterType, field, value, effective, meta.baseType, filterRef);
 }
 
 function checkSingleValueCompat(
@@ -129,7 +130,8 @@ function checkSingleValueCompat(
   field: string,
   value: unknown,
   effective: string,
-  baseType: string
+  baseType: string,
+  filterRef?: Record<string, unknown>
 ): void {
   if (effective === "string") {
     if (typeof value !== "string") {
@@ -187,6 +189,20 @@ function checkSingleValueCompat(
   }
 
   if (effective === "timestamp") {
+    // Foundry parity: date-granularity values ("yyyy-MM-dd") are accepted for
+    // timestamp properties — Workshop date-range filters emit calendar days.
+    // Coerce to the inclusive ISO bound: lower operators cover the start of
+    // the day, upper operators the end of the day.
+    if (typeof value === "string" && DATE_RE.test(value) && !ISO_RE.test(value)) {
+      const isUpper = filterType === "lte" || filterType === "lt";
+      const coerced = isUpper
+        ? `${value}T23:59:59.999Z`
+        : `${value}T00:00:00.000Z`;
+      if (filterRef && typeof filterRef === "object") {
+        (filterRef as Record<string, unknown>).value = coerced;
+      }
+      return;
+    }
     if (typeof value !== "string" || !ISO_RE.test(value)) {
       throw validationError(
         "TYPE_MISMATCH",
@@ -341,7 +357,7 @@ async function validateWhereClause(
 
     // Type compatibility
     if (filter.value !== null) {
-      checkTypeCompatibility(filter.type, filter.field, filter.value, meta);
+      checkTypeCompatibility(filter.type, filter.field, filter.value, meta, filter);
     }
   }
 }

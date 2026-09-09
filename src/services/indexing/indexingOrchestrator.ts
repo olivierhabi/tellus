@@ -48,6 +48,10 @@ import {
 import type { ObjectTypeRecord, PropertyRecord, PropertyColumnMapping } from "./rowTransformer";
 import type { CSVRow } from "./csvReader";
 import type { QueryResult } from "pg";
+import {
+  isFoundryBridgedPath,
+  readFoundryBridgedFile,
+} from "../reindexService";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -477,7 +481,43 @@ export async function indexObjectType(
     // Stage 3: Read Datasource
     // =====================================================================
     const stage3Start = Date.now();
-    const csvResult = await deps.readCSV(filePath);
+    // Foundry-bridged datasources carry a synthetic
+    // '<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>' file_path that does
+    // not exist on the local filesystem (the legacy fs-based reader reported
+    // FILE_NOT_FOUND and 500'd POST …/objectTypes/:apiName/index). Resolve
+    // them through the same streaming bridge the /reindex pipeline uses and
+    // drain into rows — the legacy 7-stage flow is row-buffered end-to-end,
+    // so materializing the bridge here is semantically consistent.
+    let csvResult: ReadCSVResult;
+    if (isFoundryBridgedPath(filePath)) {
+      const bridgeStart = Date.now();
+      try {
+        const bridge = await readFoundryBridgedFile(filePath, "csv");
+        const bridgedRows: CSVRow[] = [];
+        let bridgeColumns: string[] = [];
+        for await (const row of bridge.rows) {
+          if (bridgeColumns.length === 0) bridgeColumns = Object.keys(row);
+          bridgedRows.push(row as CSVRow);
+        }
+        csvResult = {
+          success: true,
+          filePath,
+          columns: bridgeColumns,
+          rowCount: bridgedRows.length,
+          rows: bridgedRows,
+          parseWarnings: [],
+          parseDurationMs: Date.now() - bridgeStart,
+        };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        csvResult = {
+          success: false,
+          error: { code: "FILE_READ_ERROR", message, filePath },
+        };
+      }
+    } else {
+      csvResult = await deps.readCSV(filePath);
+    }
 
     if (!csvResult.success) {
       const failure = makeFailure(3, "Read Datasource", csvResult.error.message, {

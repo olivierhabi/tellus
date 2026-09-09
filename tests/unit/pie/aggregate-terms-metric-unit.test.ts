@@ -34,12 +34,88 @@ vi.mock("../../../src/db", () => ({
   withTransaction: vi.fn(),
 }));
 
-import { buildAggClause } from "../../../src/services/queryExecutor";
+vi.mock("../../../src/services/propertyResolver", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../src/services/propertyResolver")
+  >("../../../src/services/propertyResolver");
+  return {
+    ...actual,
+    resolveProperty: vi.fn(async (_objectType: string, field: string) => ({
+      apiName: field,
+      opensearchKeywordField:
+        field === "signalType" || field === "severity" ? `${field}.keyword` : field,
+    })),
+  };
+});
+
+import { client } from "../../../src/services/opensearch/client";
+import { buildAggClause, executeAggregate } from "../../../src/services/queryExecutor";
 import { formatAggregationResponse } from "../../../src/services/objectResponseFormatter";
 
+const keywordField = (field: string) => `${field}.keyword`;
+
+describe("executeAggregate — ontology-aware OpenSearch fields", () => {
+  it("emits signalType.keyword in the final OpenSearch cardinality request", async () => {
+    vi.mocked(client.search).mockResolvedValueOnce({
+      body: {
+        hits: { total: { value: 10 } },
+        aggregations: { categoryCount: { value: 3 } },
+      },
+    } as never);
+
+    await executeAggregate("RssbFraudSignal", {
+      aggregations: [{
+        name: "categoryCount",
+        type: "cardinality",
+        field: "signalType",
+      }],
+    }, null, null);
+
+    expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
+      index: expect.any(String),
+      body: expect.objectContaining({
+        aggs: {
+          categoryCount: { cardinality: { field: "signalType.keyword" } },
+        },
+      }),
+    }));
+  });
+
+  it("keeps numeric terms fields unsuffixed in the final OpenSearch request", async () => {
+    vi.mocked(client.search).mockResolvedValueOnce({
+      body: {
+        hits: { total: { value: 10 } },
+        aggregations: { byYear: { buckets: [] } },
+      },
+    } as never);
+
+    await executeAggregate("RssbFraudSignal", {
+      aggregations: [{ name: "byYear", type: "terms", field: "year" }],
+    }, null, null);
+
+    expect(client.search).toHaveBeenLastCalledWith(expect.objectContaining({
+      body: expect.objectContaining({
+        aggs: { byYear: { terms: { field: "year", size: 100 } } },
+      }),
+    }));
+  });
+});
+
 describe("buildAggClause — terms + nested metric", () => {
+  it("uses ontology-resolved exact fields for string cardinality and preserves numeric fields", () => {
+    expect(buildAggClause(
+      { name: "categoryCount", type: "cardinality", field: "signalType" },
+      keywordField,
+    )).toEqual({ cardinality: { field: "signalType.keyword" } });
+
+    expect(buildAggClause(
+      { name: "yearCount", type: "cardinality", field: "year" },
+      (field) => field,
+    )).toEqual({ cardinality: { field: "year" } });
+  });
+
   it("count (or no metric) emits a bare terms bucket — doc_count is the value", () => {
-    const noMetric = buildAggClause({ name: "byReason", type: "terms", field: "reason" });
+    const noMetric = buildAggClause({ name: "byReason", type: "terms", field: "reason" }, keywordField);
     expect(noMetric).toEqual({ terms: { field: "reason.keyword", size: 100 } });
 
     const countMetric = buildAggClause({
@@ -47,7 +123,7 @@ describe("buildAggClause — terms + nested metric", () => {
       type: "terms",
       field: "reason",
       metric: { type: "count" },
-    });
+    }, keywordField);
     // `count` is a no-op: no nested aggregation.
     expect(countMetric).toEqual({ terms: { field: "reason.keyword", size: 100 } });
   });
@@ -59,7 +135,7 @@ describe("buildAggClause — terms + nested metric", () => {
       type: "terms",
       field: "year",
       groupBy: { field: "aircraft", size: 12 },
-    });
+    }, keywordField);
     expect(countSeries).toEqual({
       terms: { field: "year.keyword", size: 100 },
       aggs: { series: { terms: { field: "aircraft.keyword", size: 12 } } },
@@ -73,7 +149,7 @@ describe("buildAggClause — terms + nested metric", () => {
       size: 20,
       groupBy: { field: "aircraft" },
       metric: { type: "sum", field: "delay" },
-    });
+    }, keywordField);
     expect(sumSeries).toEqual({
       terms: { field: "year.keyword", size: 20 },
       aggs: {
@@ -86,6 +162,7 @@ describe("buildAggClause — terms + nested metric", () => {
   });
 
   it("sum/avg/min/max/cardinality attach a nested metric sub-aggregation over metric.field", () => {
+    const resolveField = (field: string) => field === "reason" ? "reason.keyword" : field;
     const expectations: Array<[string, Record<string, unknown>]> = [
       ["sum", { sum: { field: "delay" } }],
       ["avg", { avg: { field: "delay" } }],
@@ -100,12 +177,26 @@ describe("buildAggClause — terms + nested metric", () => {
         field: "reason",
         size: 12,
         metric: { type, field: "delay" },
-      });
+      }, resolveField);
       expect(clause).toEqual({
         terms: { field: "reason.keyword", size: 12 },
         aggs: { metric: sub },
       });
     }
+  });
+
+  it("uses the keyword sub-field for a nested cardinality metric on a string", () => {
+    const clause = buildAggClause({
+      name: "bySeverity",
+      type: "terms",
+      field: "severity",
+      metric: { type: "cardinality", field: "signalType" },
+    }, keywordField);
+
+    expect(clause).toEqual({
+      terms: { field: "severity.keyword", size: 100 },
+      aggs: { metric: { cardinality: { field: "signalType.keyword" } } },
+    });
   });
 });
 

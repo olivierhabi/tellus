@@ -406,6 +406,78 @@ describe("B02 validateModule", () => {
     expect(err.parameters.path).toContain("definitionType");
   });
 
+  it("B02 C-11: active-object output as objectSet widgetOutput → VALID (docs-faithful singleton set)", () => {
+    const m = baseModule() as {
+      variables: Record<string, unknown>[];
+      widgets: Record<string, unknown>[];
+    };
+    m.variables.push({
+      id: "v_activeSet",
+      type: "objectSet",
+      definitionType: "widgetOutput",
+      definition: { startingObjectType: "Order" },
+    });
+    (m.widgets[0].outputs as Record<string, string>).activeObject = "v_activeSet";
+    const result = validateModule(m);
+    expect(result.valid).toBe(true);
+  });
+
+  it("B02 C-11: legacy active-object output as object widgetOutput → VALID (backward compat)", () => {
+    const m = baseModule() as {
+      variables: Record<string, unknown>[];
+      widgets: Record<string, unknown>[];
+    };
+    m.variables.push({
+      id: "v_activeLegacy",
+      type: "object",
+      definitionType: "widgetOutput",
+      definition: {},
+    });
+    (m.widgets[0].outputs as Record<string, string>).activeObject = "v_activeLegacy";
+    const result = validateModule(m);
+    expect(result.valid).toBe(true);
+  });
+
+  it("B02 C-11: active-object output as objectSet static → INVALID (widgetOutput required)", () => {
+    const m = baseModule() as {
+      variables: Record<string, unknown>[];
+      widgets: Record<string, unknown>[];
+    };
+    m.variables.push({
+      id: "v_activeBad",
+      type: "objectSet",
+      definitionType: "static",
+      definition: {},
+    });
+    (m.widgets[0].outputs as Record<string, string>).activeObject = "v_activeBad";
+    const err = expectThrowsWith(
+      () => validateModule(m),
+      "Tellus:Workshop:VariableTypeMismatch",
+    );
+    expect(err.parameters.expected).toBe("widgetOutput");
+    expect(err.parameters.path).toContain("definitionType");
+  });
+
+  it("B02 C-11: active-object output with incompatible type → INVALID (type gate intact)", () => {
+    const m = baseModule() as {
+      variables: Record<string, unknown>[];
+      widgets: Record<string, unknown>[];
+    };
+    m.variables.push({
+      id: "v_activeWrong",
+      type: "scalar",
+      definitionType: "widgetOutput",
+      definition: {},
+    });
+    (m.widgets[0].outputs as Record<string, string>).activeObject = "v_activeWrong";
+    const err = expectThrowsWith(
+      () => validateModule(m),
+      "Tellus:Workshop:VariableTypeMismatch",
+    );
+    expect(String(err.parameters.expected)).toContain("objectSet");
+    expect(err.parameters.actual).toBe("scalar");
+  });
+
   it("B02 C-12: events DO NOT participate in cycle detection (back-edges allowed)", () => {
     // Construct two variables linked by *events* (runtime back-edges) but
     // with no constraint cycle. The validator must accept this — the spec

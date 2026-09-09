@@ -79,19 +79,45 @@ export async function getDefaultOntologyId(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// OpenSearch helpers (duplicated from actionExecutor to keep this module
+// Object-state helpers (duplicated from actionExecutor to keep this module
 // independent — the spec requires a separate function, not reusing the
-// executor)
+// executor).
+//
+// LOCKSTEP INVARIANT: the READ STRATEGY must stay identical to
+// actionExecutor.ts — Postgres-first (`object_instances` is the
+// authoritative writeback store), OpenSearch only as the fallback for
+// objects that predate the writeback store. A serving-only read here makes
+// /validate approve submissions that /apply then rejects on live state
+// (observed: rssbOpenFraudCase validate=valid on a signal whose store
+// status was DISMISSED while the serving projection still read OPEN).
 // ---------------------------------------------------------------------------
 
 /**
- * Check if an object exists in OpenSearch. Used as the objectExistsChecker
- * for parameter validation (object_reference type parameters).
+ * Check if an object exists. Used as the objectExistsChecker for parameter
+ * validation (object_reference type parameters). PG-first so a
+ * freshly-created object (committed in the same or a preceding action txn)
+ * is visible without waiting for serving-index projection.
  */
 async function objectExists(
   objectType: string,
   primaryKey: string
 ): Promise<boolean> {
+  try {
+    const res = await query(
+      `SELECT 1 FROM object_instances
+        WHERE object_type_api_name = $1 AND primary_key = $2
+        LIMIT 1`,
+      [objectType, primaryKey]
+    );
+    if ((res.rowCount ?? 0) > 0) return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Tolerate missing B1 table in transitional deployments; fall through.
+    if (!/relation .*object_instances.* does not exist/i.test(msg)) {
+      console.warn(`[validate:objectExists] PG lookup failed: ${msg}`);
+    }
+  }
+
   try {
     const indexName = getIndexName(objectType);
     await opensearchClient.get({ index: indexName, id: primaryKey });
@@ -102,14 +128,35 @@ async function objectExists(
 }
 
 /**
- * Fetch an object from OpenSearch. Used as the objectFetcher for rule
- * compilation (modifyObject/deleteObject rules need the current state).
- * Returns the document _source, or null if not found.
+ * Fetch an object's CURRENT state. Used as the objectFetcher for rule
+ * compilation + submission-criteria live-object operands. PG-first for the
+ * same reason as objectExists — /validate must evaluate exactly the state
+ * /apply will enforce.
  */
 async function fetchObject(
   objectType: string,
   primaryKey: string
 ): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await query(
+      `SELECT properties FROM object_instances
+        WHERE object_type_api_name = $1 AND primary_key = $2
+        LIMIT 1`,
+      [objectType, primaryKey]
+    );
+    if ((res.rowCount ?? 0) > 0) {
+      const row = res.rows[0] as { properties: unknown };
+      if (row.properties && typeof row.properties === "object") {
+        return row.properties as Record<string, unknown>;
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/relation .*object_instances.* does not exist/i.test(msg)) {
+      console.warn(`[validate:fetchObject] PG lookup failed: ${msg}`);
+    }
+  }
+
   try {
     const indexName = getIndexName(objectType);
     const { body } = await opensearchClient.get({

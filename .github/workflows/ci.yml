@@ -2,6 +2,8 @@
 # Ontology Engine — CI Pipeline
 #
 # Runs the full test suite on every push and pull request:
+#   0. Lint + SAST      (eslint — fails the build on any violation)
+#   0b. Typecheck       (tsc --noEmit — required gate before all test jobs)
 #   1. Unit tests      (vitest, no services needed)
 #   2. Integration tests (requires PostgreSQL + OpenSearch + running server)
 #   3. E2E tests        (bash curl-based, requires PostgreSQL + OpenSearch + running server)
@@ -94,7 +96,36 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run ESLint (TypeScript + security)
+        # No continue-on-error: a lint failure exits non-zero and fails the
+        # workflow, gating the PR.
         run: pnpm run lint
+
+  # ===========================================================================
+  # Job 0b: Typecheck (tsc --noEmit) — required gate before any test job runs
+  # ===========================================================================
+  typecheck:
+    name: TypeScript Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (tsc --noEmit)
+        run: npx tsc --noEmit
 
   # ===========================================================================
   # Job 1: Unit Tests (no services needed)
@@ -103,6 +134,7 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: typecheck
 
     steps:
       - name: Checkout code
@@ -143,7 +175,10 @@ jobs:
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 25 min was marginal: the last green main run took 24m48s and the
+    # 2026-08-28 run was cancelled at the timeout. 40 gives headroom.
+    timeout-minutes: 40
+    needs: typecheck
 
     services:
       clickhouse:
@@ -380,6 +415,7 @@ jobs:
     name: E2E Tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    needs: typecheck
 
     # FUNN-ISO-1 lane identity: src/seed.ts → resetEnterpriseOntologyForSeed
     # runs the destructive-test guard, which DENIES dev-shaped identity
@@ -535,6 +571,7 @@ jobs:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: typecheck
 
     # FUNN-ISO-1 lane identity: src/seed.ts resets the enterprise ontology,
     # which the destructive-test guard only allows for a provably-test lane
@@ -716,6 +753,7 @@ jobs:
     name: Full Test Suite (test:all)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: typecheck
 
     # FUNN-ISO-1 lane identity: tests/runAll.ts manages its own backend on
     # :3000 and expects a seeded ontology, so this job runs its explicit

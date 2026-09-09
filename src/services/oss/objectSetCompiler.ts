@@ -48,6 +48,8 @@ export interface CompiledPlan {
   where: unknown;
   /** Pending search-around hop to fulfil before querying. */
   searchAround?: SearchAroundHop;
+  /** Complete inner-to-outer traversal chain for nested Search Around sets. */
+  searchAroundChain?: SearchAroundHop[];
   /** Filter applied to the ANCHOR set before traversal. */
   searchAroundSourceWhere?: unknown;
   /** Nearest-neighbors node annotation (knn query). */
@@ -467,17 +469,26 @@ async function compileNode(
       );
       // The hop's target type is resolved at execution time via the
       // link registry; we attach the hop to every source plan.
-      return children.map((c) => ({
-        objectType: c.objectType,
-        where: null,
-        searchAround: {
+      return children.map((c) => {
+        const existingChain =
+          c.searchAroundChain ?? (c.searchAround ? [c.searchAround] : []);
+        const nextHop = {
           link: n.link as string,
           fromObjectType: c.objectType,
-        },
-        // Preserve the source filter: the hop filters the SOURCE set
-        // first (anchor), then traverses.
-        searchAroundSourceWhere: c.where,
-      }));
+        };
+        const chain = [...existingChain, nextHop];
+        return {
+          objectType: c.objectType,
+          where: null,
+          searchAround: chain[0],
+          searchAroundChain: chain,
+          // Preserve the source filter: the first hop filters the SOURCE set
+          // before the remaining hops traverse its resolved primary keys.
+          searchAroundSourceWhere: c.searchAround
+            ? c.searchAroundSourceWhere
+            : c.where,
+        };
+      });
     }
 
     case "interfaceLinkSearchAround": {
@@ -492,6 +503,14 @@ async function compileNode(
           fromObjectType: c.objectType,
           interfaceLink: true,
         },
+        searchAroundChain: [
+          {
+            link: n.interfaceLink as string,
+            fromObjectType: c.objectType,
+            interfaceLink: true,
+          },
+        ],
+        searchAroundSourceWhere: c.where,
       }));
     }
 

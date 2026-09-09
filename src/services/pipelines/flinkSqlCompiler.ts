@@ -106,6 +106,7 @@ function assertSubsetSupported(step: TransformStep): void {
     case "Drop":
     case "Rename":
     case "Union":
+    case "ConcatenateStrings":
       return;
     case "Filter":
       return;
@@ -247,6 +248,19 @@ function renderStreamingSelect(input: {
       case "Filter":
         ctes.push(`${next} AS (${compileFilterFlink(step, current)})`);
         break;
+      case "ConcatenateStrings": {
+        const renderOperand = (operand: (typeof step.expressions)[number]) => operand.kind === "column"
+          ? `CAST(${quoteIdent(operand.value)} AS STRING)`
+          : `CAST('${operand.value.replace(/'/g, "''")}' AS STRING)`;
+        const operands = step.expressions.map(renderOperand);
+        const separator = `'${(step.separator ?? "").replace(/'/g, "''")}'`;
+        const joined = `CONCAT_WS(${separator}, ${operands.join(", ")})`;
+        const expression = step.nullOutputIfAnyInputIsNull
+          ? `CASE WHEN ${operands.map((operand) => `${operand} IS NULL`).join(" OR ")} THEN NULL ELSE ${joined} END`
+          : joined;
+        ctes.push(`${next} AS (SELECT *, ${expression} AS ${quoteIdent(step.outputColumn)} FROM ${current})`);
+        break;
+      }
       case "Union": {
         // PB-B5 v1 supports UNION ALL against other source tables by
         // path — we resolve each to the nearest registered source. N inputs

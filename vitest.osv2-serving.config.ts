@@ -13,6 +13,20 @@
 
 import { defineConfig } from "vitest/config";
 
+// Test credentials are never baked into the repo. PGPASSWORD must come from
+// the environment (CI secret or a local export — see .env.test.example) and
+// the config fails fast when it is missing instead of falling back to an
+// inline literal.
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `${name} is not set. Export it before running this suite (see .env.test.example).`,
+    );
+  }
+  return value;
+}
+
 export default defineConfig({
   test: {
     include: ["tests/osv2-serving/**/*.test.ts"],
@@ -24,7 +38,7 @@ export default defineConfig({
       PGHOST: "localhost",
       PGPORT: "5432",
       PGUSER: "tellus",
-      PGPASSWORD: "tellus123",
+      PGPASSWORD: requiredEnv("PGPASSWORD"),
       PGDATABASE: "osv2_serving",
       KAFKA_BROKERS: "localhost:9092",
       // Isolated topic namespace: producers publish to osv2.cdc.<src>.<link>.

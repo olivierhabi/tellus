@@ -24,6 +24,33 @@ function compile(
 }
 
 describe("duckdbTransformEngine compiler", () => {
+  it("compiles Foundry Case with ordered branches and a null default", () => {
+    const sql = compile([{
+      function: "CaseExpression",
+      branches: [{
+        condition: {
+          left: { kind: "column", value: "claim_kind" },
+          operator: "==",
+          right: { kind: "literal", value: "HEALTH", literalType: "string" },
+        },
+        value: { kind: "column", value: "claim_id" },
+      }],
+      defaultValue: null,
+      outputColumn: "health_claim_id",
+      outputType: "string",
+    }]);
+    expect(sql).toContain(`CASE WHEN ("claim_kind" IS NOT DISTINCT FROM 'HEALTH') THEN "claim_id" ELSE NULL END`);
+    expect(sql).toContain(`AS "health_claim_id"`);
+  });
+
+  it("compiles ConcatenateStrings with separator and Palantir null modes", () => {
+    const base = { function: "ConcatenateStrings" as const, expressions: [
+      { kind: "column" as const, value: "first" },
+      { kind: "literal" as const, value: "world", literalType: "string" as const },
+    ], separator: "--", outputColumn: "joined" };
+    expect(compile([base])).toContain(`concat_ws('--', CAST("first" AS VARCHAR), CAST('world' AS VARCHAR)) AS "joined"`);
+    expect(compile([{ ...base, nullOutputIfAnyInputIsNull: true }])).toContain('CASE WHEN CAST("first" AS VARCHAR) IS NULL OR');
+  });
   it("empty chain emits a passthrough SELECT over read_csv_auto", () => {
     const sql = compile([]);
     expect(sql).toMatch(/WITH t0 AS \(SELECT \* FROM read_csv_auto\('\/tmp\/orders\.csv'\)\)/);
@@ -142,6 +169,48 @@ describe("duckdbTransformEngine compiler", () => {
       },
     ]);
     expect(sql).toMatch(/WHERE NOT \(/);
+  });
+
+  it("Filter lt column-to-column emits numeric-coercing comparison with null guards", () => {
+    const sql = compile([
+      {
+        function: "Filter",
+        mode: "keep",
+        match: "all",
+        conditions: [
+          { column: "service_at", operator: "lt", value: "valid_from", valueIsColumn: true },
+        ],
+      },
+    ]);
+    expect(sql).toContain('"valid_from"');
+    expect(sql).toMatch(/TRY_CAST\(.*AS DOUBLE\) IS NOT NULL AND/);
+    expect(sql).toMatch(/ELSE .* < .*/
+);
+  });
+
+  it("Filter gt against a numeric literal emits a double-typed comparison", () => {
+    const sql = compile([
+      {
+        function: "Filter",
+        mode: "keep",
+        match: "all",
+        conditions: [{ column: "amount", operator: "gt", value: "65000" }],
+      },
+    ]);
+    expect(sql).toContain("'65000'");
+    expect(sql).toMatch(/TRY_CAST\(.*AS DOUBLE\) >/);
+  });
+
+  it("Filter lt against an empty literal is always false (filterV1 null semantics)", () => {
+    const sql = compile([
+      {
+        function: "Filter",
+        mode: "keep",
+        match: "all",
+        conditions: [{ column: "amount", operator: "lt", value: "" }],
+      },
+    ]);
+    expect(sql).toMatch(/WHERE \(FALSE\)/);
   });
 
   it("Drop emits a SELECT * EXCLUDE listing the columns", () => {

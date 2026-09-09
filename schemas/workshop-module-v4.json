@@ -2,21 +2,40 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://tellus.example.com/schemas/workshop-module-v4.json",
   "title": "Tellus Workshop Module Document v4",
-  "description": "Source-of-truth JSON Schema for Workshop module documents. Referenced by B01 (CRUD) and B02 (validator). Derived from tasks/workshop/workshop-tasks.md and the Tellus Workshop architecture spec §3. Schema version 4 corresponds to workshop_module.schema_version = 4.",
+  "description": "Source-of-truth JSON Schema for Workshop module documents. Referenced by B01 (CRUD) and B02 (validator). Derived from tasks/workshop/workshop-tasks.md and the Tellus Workshop architecture spec \u00a73. Schema version 4 corresponds to workshop_module.schema_version = 4.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "variables", "widgets", "layout"],
+  "required": [
+    "schemaVersion",
+    "variables",
+    "widgets",
+    "layout"
+  ],
   "properties": {
-    "schemaVersion": { "const": 4 },
-    "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
-    "description": { "type": ["string", "null"], "maxLength": 2000 },
+    "schemaVersion": {
+      "const": 4
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2000
+    },
     "moduleInterface": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "variables": {
           "type": "array",
-          "items": { "$ref": "#/$defs/moduleInterfaceVariable" }
+          "items": {
+            "$ref": "#/$defs/moduleInterfaceVariable"
+          }
         }
       }
     },
@@ -26,34 +45,148 @@
       "properties": {
         "promotedExternalIds": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+          },
           "uniqueItems": true
         }
       }
     },
     "variables": {
       "type": "array",
-      "items": { "$ref": "#/$defs/variable" }
+      "items": {
+        "$ref": "#/$defs/variable"
+      }
     },
     "widgets": {
       "type": "array",
-      "items": { "$ref": "#/$defs/widget" }
+      "items": {
+        "$ref": "#/$defs/widget"
+      }
     },
     "sections": {
       "type": "array",
-      "items": { "$ref": "#/$defs/section" }
+      "items": {
+        "$ref": "#/$defs/section"
+      }
     },
-    "events": {
+    "pages": {
       "type": "array",
-      "description": "Module-level event definitions (E29/E30). A button whose `config.buttonGroup.buttons[].events[].id` references one of these ids dispatches it on click; the matching event sets `variableId` to `value`, populating Workshop variables that feed action-parameter defaults and conditional button state. Optional and backward compatible — modules authored without events behave exactly as before.",
+      "description": "Named module pages. `layout.rootSection` remains the legacy/default page root so documents authored before pages continue to load unchanged. `defaultPageId` designates the default page; the validator requires it to reference an existing page.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id"],
+        "required": [
+          "id",
+          "displayName",
+          "rootSection"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
-          "variableId": { "type": "string", "minLength": 1 },
-          "value": { "description": "Any JSON value assigned to the variable when the event fires." }
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "rootSection": {
+            "type": "string"
+          },
+          "navigation": {
+            "type": "string",
+            "enum": [
+              "primary",
+              "context"
+            ]
+          },
+          "header": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "widgetId": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "defaultPageId": {
+      "type": "string"
+    },
+    "overlays": {
+      "type": "array",
+      "description": "Module overlays \u2014 drawer/modal surfaces authored like pages (each owns a root section tree), opened transiently through Workshop events.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "rootSection"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+          },
+          "displayName": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "rootSection": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "drawer",
+              "modal"
+            ]
+          },
+          "width": {
+            "type": "number"
+          },
+          "closeOnBackdrop": {
+            "type": "boolean",
+            "description": "Backdrop click closes the overlay. Defaults to true (Foundry 'Close overlay on backdrop click')."
+          },
+          "visibilityVariableId": {
+            "type": "string",
+            "description": "Boolean variable driving the overlay's visibility; open/close events write back to it (Foundry 'Variable based visibility')."
+          }
+        }
+      }
+    },
+    "activePageVariableId": {
+      "type": "string"
+    },
+    "autoRefresh": {
+      "type": "boolean"
+    },
+    "events": {
+      "type": "array",
+      "description": "Module-level event definitions (E29/E30). A button whose `config.buttonGroup.buttons[].events[].id` references one of these ids dispatches it on click; the matching event sets `variableId` to `value`, populating Workshop variables that feed action-parameter defaults and conditional button state. Optional and backward compatible \u2014 modules authored without events behave exactly as before.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+          },
+          "variableId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value": {
+            "description": "Any JSON value assigned to the variable when the event fires."
+          }
         }
       }
     },
@@ -62,26 +195,51 @@
       "additionalProperties": false,
       "description": "Module-level page header. Rendered as the strip at the top of the canvas; configured via the editor's HeaderInspector. Distinct from `layout.header` (the header-widget slot pointer) and `sections[*].header` (section-strip titles).",
       "properties": {
-        "title": { "type": "string", "maxLength": 200 },
-        "icon": { "type": ["string", "null"], "maxLength": 100 },
-        "color": { "type": ["string", "null"], "maxLength": 100 }
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "icon": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 100
+        },
+        "color": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 100
+        }
       }
     },
     "layout": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rootSection"],
+      "required": [
+        "rootSection"
+      ],
       "properties": {
-        "rootSection": { "type": "string" },
+        "rootSection": {
+          "type": "string"
+        },
         "header": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "widgetId": { "type": "string" } }
+          "properties": {
+            "widgetId": {
+              "type": "string"
+            }
+          }
         },
         "columnWidths": {
           "type": "object",
           "description": "Per-section COLUMN WIDTH / RESIZABLE specs, keyed by section id. Covers the empty-shell editor's two fixed columns (\"section-box\"/\"section-page\") AND any section in the layout tree (split/added sections). Authored in the SectionInspector (Absolute px or Flex factor, optionally resizable); persisted so a reloaded module keeps the user's resized layout.",
-          "additionalProperties": { "$ref": "#/$defs/sectionWidthSpec" }
+          "additionalProperties": {
+            "$ref": "#/$defs/sectionWidthSpec"
+          }
         }
       }
     }
@@ -90,12 +248,28 @@
     "sectionWidthSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "pxWidth", "flexValue"],
+      "required": [
+        "mode",
+        "pxWidth",
+        "flexValue"
+      ],
       "properties": {
-        "mode": { "type": "string", "enum": ["absolute", "flex"] },
-        "pxWidth": { "type": "number" },
-        "flexValue": { "type": "number" },
-        "resizable": { "type": "boolean" }
+        "mode": {
+          "type": "string",
+          "enum": [
+            "absolute",
+            "flex"
+          ]
+        },
+        "pxWidth": {
+          "type": "number"
+        },
+        "flexValue": {
+          "type": "number"
+        },
+        "resizable": {
+          "type": "boolean"
+        }
       }
     },
     "variableId": {
@@ -131,30 +305,56 @@
         "objectSetDefinition",
         "variableTransformation",
         "widgetOutput",
-        "moduleInterface"
+        "moduleInterface",
+        "sqlQuery",
+        "objectSetFilter",
+        "objectSetAggregation"
       ]
     },
     "variable": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type", "definitionType"],
+      "required": [
+        "id",
+        "type",
+        "definitionType"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/variableId" },
-        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "type": { "$ref": "#/$defs/variableType" },
-        "definitionType": { "$ref": "#/$defs/definitionType" },
-        "definition": { "type": "object" },
+        "id": {
+          "$ref": "#/$defs/variableId"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "type": {
+          "$ref": "#/$defs/variableType"
+        },
+        "definitionType": {
+          "$ref": "#/$defs/definitionType"
+        },
+        "definition": {
+          "type": "object"
+        },
         "constraints": {
           "type": "array",
-          "items": { "$ref": "#/$defs/variableConstraint" }
+          "items": {
+            "$ref": "#/$defs/variableConstraint"
+          }
         },
         "events": {
           "type": "array",
-          "items": { "type": "object" }
+          "items": {
+            "type": "object"
+          }
         },
         "recomputeBehavior": {
           "type": "string",
-          "enum": ["automatic", "manual"]
+          "enum": [
+            "automatic",
+            "manual"
+          ]
         }
       }
     },
@@ -163,10 +363,17 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "required": ["kind", "filterVariableId"],
+          "required": [
+            "kind",
+            "filterVariableId"
+          ],
           "properties": {
-            "kind": { "const": "filterByVariable" },
-            "filterVariableId": { "$ref": "#/$defs/variableId" }
+            "kind": {
+              "const": "filterByVariable"
+            },
+            "filterVariableId": {
+              "$ref": "#/$defs/variableId"
+            }
           }
         }
       ]
@@ -174,41 +381,80 @@
     "moduleInterfaceVariable": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["externalId", "variableId", "required"],
+      "required": [
+        "externalId",
+        "variableId",
+        "required"
+      ],
       "properties": {
-        "externalId": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
-        "variableId": { "$ref": "#/$defs/variableId" },
-        "required": { "type": "boolean" }
+        "externalId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+        },
+        "variableId": {
+          "$ref": "#/$defs/variableId"
+        },
+        "required": {
+          "type": "boolean"
+        }
       }
     },
     "widget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type", "config"],
+      "required": [
+        "id",
+        "type",
+        "config"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/widgetId" },
-        "type": { "type": "string", "minLength": 1 },
-        "config": { "type": "object" },
+        "id": {
+          "$ref": "#/$defs/widgetId"
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config": {
+          "type": "object"
+        },
         "inputs": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/variableId" }
+          "additionalProperties": {
+            "$ref": "#/$defs/variableId"
+          }
         },
         "outputs": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/variableId" }
+          "additionalProperties": {
+            "$ref": "#/$defs/variableId"
+          }
         },
-        "events": { "type": "object" },
+        "events": {
+          "type": "object"
+        },
         "display": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "visibilityVariableId": { "$ref": "#/$defs/variableId" },
+            "visibilityVariableId": {
+              "$ref": "#/$defs/variableId"
+            },
             "size": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "mode": { "type": "string", "enum": ["auto", "absolute", "flex"] },
-                "value": { "type": "number" }
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "auto",
+                    "absolute",
+                    "flex"
+                  ]
+                },
+                "value": {
+                  "type": "number"
+                }
               }
             }
           }
@@ -218,46 +464,121 @@
     "section": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "layout", "children"],
+      "required": [
+        "id",
+        "layout",
+        "children"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/sectionId" },
+        "id": {
+          "$ref": "#/$defs/sectionId"
+        },
         "layout": {
           "type": "string",
-          "enum": ["rows", "columns", "tabs", "flow", "toolbar", "loop"]
+          "enum": [
+            "rows",
+            "columns",
+            "tabs",
+            "flow",
+            "toolbar",
+            "loop"
+          ]
         },
         "header": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "visible": { "type": "boolean" },
-            "title": { "type": "string", "maxLength": 200 },
-            "format": { "type": "string", "enum": ["block", "contained", "floating"] },
-            "collapsible": { "type": "boolean" },
-            "initiallyCollapsed": { "type": "boolean" },
-            "collapsedIcon": { "type": "string" },
-            "expandedIcon": { "type": "string" },
-            "description": { "type": ["string", "null"], "maxLength": 2000 },
-            "style": { "type": "string", "enum": ["default", "subheader"] },
-            "bold": { "type": "boolean" },
-            "align": { "type": "string", "enum": ["left", "distribute"] },
-            "titleVariableId": { "$ref": "#/$defs/variableId" },
-            "visibilityVariableId": { "$ref": "#/$defs/variableId" },
-            "collapsedVariableId": { "$ref": "#/$defs/variableId" },
+            "visible": {
+              "type": "boolean"
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "block",
+                "contained",
+                "floating"
+              ]
+            },
+            "collapsible": {
+              "type": "boolean"
+            },
+            "initiallyCollapsed": {
+              "type": "boolean"
+            },
+            "collapsedIcon": {
+              "type": "string"
+            },
+            "expandedIcon": {
+              "type": "string"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 2000
+            },
+            "style": {
+              "type": "string",
+              "enum": [
+                "default",
+                "subheader"
+              ]
+            },
+            "bold": {
+              "type": "boolean"
+            },
+            "align": {
+              "type": "string",
+              "enum": [
+                "left",
+                "distribute"
+              ]
+            },
+            "titleVariableId": {
+              "$ref": "#/$defs/variableId"
+            },
+            "visibilityVariableId": {
+              "$ref": "#/$defs/variableId"
+            },
+            "collapsedVariableId": {
+              "$ref": "#/$defs/variableId"
+            },
             "textMaxWidth": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "value": { "type": "number", "minimum": 0 },
-                "unit": { "type": "string", "enum": ["percent", "px"] }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "unit": {
+                  "type": "string",
+                  "enum": [
+                    "percent",
+                    "px"
+                  ]
+                }
               }
             },
             "customHeight": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "value": { "type": "number", "minimum": 0 }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                }
               }
             }
           }
@@ -265,22 +586,47 @@
         "sizing": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode"],
+          "required": [
+            "mode"
+          ],
           "properties": {
-            "mode": { "type": "string", "enum": ["auto", "absolute", "flex"] },
-            "value": { "type": "number" }
+            "mode": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "absolute",
+                "flex"
+              ]
+            },
+            "value": {
+              "type": "number"
+            }
           }
         },
         "padding": {
           "oneOf": [
-            { "type": "string", "enum": ["none", "compact", "comfortable"] },
+            {
+              "type": "string",
+              "enum": [
+                "none",
+                "compact",
+                "comfortable"
+              ]
+            },
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["h", "v"],
+              "required": [
+                "h",
+                "v"
+              ],
               "properties": {
-                "h": { "type": "number" },
-                "v": { "type": "number" }
+                "h": {
+                  "type": "number"
+                },
+                "v": {
+                  "type": "number"
+                }
               }
             }
           ]
@@ -289,30 +635,60 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "color": { "type": "string" },
-            "borderStyle": { "type": "string", "enum": ["none", "thin", "shadow", "innerShadow"] }
+            "color": {
+              "type": "string"
+            },
+            "borderStyle": {
+              "type": "string",
+              "enum": [
+                "none",
+                "thin",
+                "shadow",
+                "innerShadow"
+              ]
+            }
           }
         },
         "scrolling": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "enabled": { "type": "boolean" } }
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
         },
         "loopConfig": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "embeddedModuleRid": { "type": "string" },
-            "interfaceMapping": { "type": "object" },
-            "iterationVariableId": { "$ref": "#/$defs/variableId" }
+            "embeddedModuleRid": {
+              "type": "string"
+            },
+            "interfaceMapping": {
+              "type": "object"
+            },
+            "iterationVariableId": {
+              "$ref": "#/$defs/variableId"
+            }
           }
         },
-        "innerSectionStyle": { "type": "string" },
+        "innerSectionStyle": {
+          "type": "string"
+        },
         "tabs": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "selectedTabVariableId": { "$ref": "#/$defs/variableId" }
+            "selectedTabVariableId": {
+              "$ref": "#/$defs/variableId"
+            },
+            "tabIds": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
           }
         },
         "children": {
@@ -322,19 +698,33 @@
               {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["kind", "ref"],
+                "required": [
+                  "kind",
+                  "ref"
+                ],
                 "properties": {
-                  "kind": { "const": "section" },
-                  "ref": { "$ref": "#/$defs/sectionId" }
+                  "kind": {
+                    "const": "section"
+                  },
+                  "ref": {
+                    "$ref": "#/$defs/sectionId"
+                  }
                 }
               },
               {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["kind", "ref"],
+                "required": [
+                  "kind",
+                  "ref"
+                ],
                 "properties": {
-                  "kind": { "const": "widget" },
-                  "ref": { "$ref": "#/$defs/widgetId" }
+                  "kind": {
+                    "const": "widget"
+                  },
+                  "ref": {
+                    "$ref": "#/$defs/widgetId"
+                  }
                 }
               }
             ]

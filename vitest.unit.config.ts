@@ -13,6 +13,20 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
 
+// Test credentials are never baked into the repo. PGPASSWORD must come from
+// the environment (CI secret or a local export — see .env.test.example) and
+// the config fails fast when it is missing instead of falling back to an
+// inline literal.
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `${name} is not set. Export it before running this suite (see .env.test.example).`,
+    );
+  }
+  return value;
+}
+
 export default defineConfig({
   test: {
     root: path.resolve(__dirname),
@@ -24,9 +38,11 @@ export default defineConfig({
     // Test-only env defaults so pure-unit files whose imports "(throw at read
     // time if unset)" on DB config (e.g. foundryEnv) can import offline
     // without Docker. These only need the vars to EXIST; no live DB/Keycloak
-    // is contacted by the pure-unit lane. Values mirror the dev docker stack.
+    // is contacted by the pure-unit lane. Non-secret values mirror the dev
+    // docker stack; PGPASSWORD is read from the environment (fail-fast, no
+    // baked-in default — see .env.test.example).
     env: {
-      PGPASSWORD: "tellus123",
+      PGPASSWORD: requiredEnv("PGPASSWORD"),
       PGUSER: "tellus",
       PGHOST: "localhost",
       PGPORT: "5432",

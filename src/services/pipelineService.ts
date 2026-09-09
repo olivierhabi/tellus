@@ -1,5 +1,6 @@
 import { Knex } from 'knex';
 import { AppError } from '../utils/foundryAppError';
+import { assertFolderNameAvailable } from './datasets/folderNameGuard';
 import type {
   CreatePipelineInput,
   UpdatePipelineInput,
@@ -416,6 +417,13 @@ export class PipelineService {
     const label = input.label?.trim() || `kafka:${topic}`;
 
     return this.knex.transaction(async (trx) => {
+      // Foundry parity — stream source datasets land at the project root
+      // (folder_id NULL); the name must be unique there too.
+      await assertFolderNameAvailable(trx, {
+        name: label,
+        folderId: null,
+        projectId,
+      });
       const [dataset] = await trx('foundry_datasets')
         .insert({
           name: label,
@@ -499,7 +507,27 @@ export class PipelineService {
     if (input.nodeType !== undefined) updateData.node_type = input.nodeType;
     if (input.positionX !== undefined) updateData.position_x = input.positionX;
     if (input.positionY !== undefined) updateData.position_y = input.positionY;
-    if (input.config !== undefined) updateData.config = JSON.stringify(input.config);
+    if (input.config !== undefined) {
+      // previewSnapshot is owned exclusively by POST .../preview-snapshot
+      // (transformService.savePreviewSnapshot). The REST update above
+      // REPLACES the whole config column, so a client that echoes back its
+      // working copy without the snapshot would otherwise wipe the node's
+      // saved schema/rows — leaving the card stuck at "0 columns" after any
+      // failed re-apply. Strip it here so it can never be lost (or forged).
+      const sanitized = { ...(input.config as Record<string, unknown>) };
+      delete sanitized.previewSnapshot;
+      const current = await this.knex('pipeline_nodes')
+        .where({ id: nodeId, pipeline_id: pipelineId })
+        .first('config');
+      const currentConfig =
+        typeof current?.config === 'string'
+          ? JSON.parse(current.config)
+          : (current?.config ?? {});
+      if (currentConfig.previewSnapshot !== undefined) {
+        sanitized.previewSnapshot = currentConfig.previewSnapshot;
+      }
+      updateData.config = JSON.stringify(sanitized);
+    }
 
     const [updated] = await this.knex('pipeline_nodes')
       .where({ id: nodeId, pipeline_id: pipelineId })
@@ -523,6 +551,305 @@ export class PipelineService {
       .where({ id: nodeId, pipeline_id: pipelineId })
       .delete();
     return deleted > 0;
+  }
+
+  /**
+   * Foundry data expectations CRUD. Evaluation happens inside
+   * deploymentService's build path (services/pipelines/expectations.ts).
+   */
+  async listExpectations(projectId: string, pipelineId: string) {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    const rows = await this.knex('pipeline_expectations')
+      .where({ pipeline_id: pipelineId })
+      .orderBy('created_at', 'asc')
+      .select('*');
+    return rows.map((r: Record<string, unknown>) => ({
+      id: r.id,
+      pipelineId: r.pipeline_id,
+      nodeId: r.node_id,
+      name: r.name,
+      type: r.type,
+      config: typeof r.config === 'string' ? JSON.parse(r.config as string) : r.config,
+      severity: r.severity,
+      active: Boolean(r.active),
+      createdAt: r.created_at,
+    }));
+  }
+
+  async addExpectation(
+    projectId: string,
+    pipelineId: string,
+    input: {
+      nodeId?: string | null;
+      name: string;
+      type: 'row_count_bounds' | 'not_null' | 'unique';
+      config: Record<string, unknown>;
+      severity: 'fail' | 'warn';
+    },
+    actorId?: string,
+  ) {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    if (input.nodeId) {
+      const node = await this.knex('pipeline_nodes')
+        .where({ id: input.nodeId, pipeline_id: pipelineId })
+        .first('id', 'node_type');
+      if (!node) throw new AppError('Node not found in pipeline', 404, 'NOT_FOUND');
+      if (node.node_type !== 'output') {
+        throw new AppError(
+          'Expectations gate builds of OUTPUT nodes — nodeId must reference an output node.',
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+    }
+    const { randomUUID } = await import('node:crypto');
+    const id = randomUUID();
+    await this.knex('pipeline_expectations').insert({
+      id,
+      pipeline_id: pipelineId,
+      node_id: input.nodeId ?? null,
+      name: input.name,
+      type: input.type,
+      config: JSON.stringify(input.config ?? {}),
+      severity: input.severity ?? 'fail',
+      created_by: actorId ?? null,
+    });
+    return {
+      id,
+      pipelineId,
+      nodeId: input.nodeId ?? null,
+      name: input.name,
+      type: input.type,
+      config: input.config ?? {},
+      severity: input.severity ?? 'fail',
+      active: true,
+    };
+  }
+
+  async removeExpectation(projectId: string, pipelineId: string, expectationId: string) {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    const n = await this.knex('pipeline_expectations')
+      .where({ id: expectationId, pipeline_id: pipelineId })
+      .delete();
+    if (n === 0) throw new AppError('Expectation not found', 404, 'NOT_FOUND');
+    return { id: expectationId, deleted: true };
+  }
+
+  /**
+   * Foundry Pipeline Builder — build schedule CRUD. `GET` surfaces the
+   * schedule state; `PUT` enables/disables it and resets the next-run
+   * pointer (Foundry edits always re-anchor the window).
+   */
+  async getBuildSchedule(
+    projectId: string,
+    pipelineId: string,
+  ): Promise<{
+    enabled: boolean;
+    intervalMinutes: number | null;
+    nextRunAt: string | null;
+    lastRunAt: string | null;
+  }> {
+    const row = await this.knex('pipelines')
+      .where({ id: pipelineId, project_id: projectId })
+      .first(
+        'schedule_enabled',
+        'schedule_interval_minutes',
+        'schedule_next_run_at',
+        'schedule_last_run_at',
+      );
+    if (!row) throw new AppError('Pipeline not found', 404, 'NOT_FOUND');
+    // knex+pg may hand timestamptz back as either a Date or a string —
+    // normalise so the API always emits ISO timestamps.
+    const toIso = (v: unknown): string | null => {
+      if (v === null || v === undefined) return null;
+      if (v instanceof Date) return v.toISOString();
+      return new Date(String(v)).toISOString();
+    };
+    return {
+      enabled: Boolean(row.schedule_enabled),
+      intervalMinutes: (row.schedule_interval_minutes as number | null) ?? null,
+      nextRunAt: toIso(row.schedule_next_run_at),
+      lastRunAt: toIso(row.schedule_last_run_at),
+    };
+  }
+
+  async updateBuildSchedule(
+    projectId: string,
+    pipelineId: string,
+    input: { enabled: boolean; intervalMinutes?: number },
+  ): Promise<{
+    enabled: boolean;
+    intervalMinutes: number | null;
+    nextRunAt: string | null;
+    lastRunAt: string | null;
+  }> {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    if (!input.enabled) {
+      await this.knex('pipelines').where({ id: pipelineId }).update({
+        schedule_enabled: false,
+        schedule_next_run_at: null,
+        updated_at: new Date(),
+      });
+    } else {
+      if (!input.intervalMinutes || input.intervalMinutes < 1) {
+        throw new AppError(
+          'intervalMinutes is required (>= 1) when enabling the build schedule',
+          400,
+          'VALIDATION_ERROR',
+        );
+      }
+      await this.knex('pipelines').where({ id: pipelineId }).update({
+        schedule_enabled: true,
+        schedule_interval_minutes: input.intervalMinutes,
+        // Re-anchor: the next build runs one full interval from now, the
+        // Foundry behaviour on editing a schedule.
+        schedule_next_run_at: new Date(Date.now() + input.intervalMinutes * 60_000),
+        updated_at: new Date(),
+      });
+    }
+    return this.getBuildSchedule(projectId, pipelineId);
+  }
+
+  /**
+   * Foundry parity — "Overwrite dataset"
+   * (pipeline-builder/outputs-add-dataset-output):
+   *
+   *   "A one time action that grants ownership of an existing dataset to a
+   *    new output in Pipeline Builder."
+   *
+   * Grants the output node `nodeId` ownership of the existing dataset
+   * `datasetId`: subsequent deploys write to the adopted dataset's rows
+   * (its `outputDatasetId`) instead of forking a new one. The action is
+   * irreversible UX-wise, hence `confirm: true` is mandatory; ownership is
+   * exclusive, so a dataset owned by another active output is rejected with
+   * OUTPUT_OWNERSHIP_CONFLICT (409).
+   */
+  async adoptOutputDataset(
+    projectId: string,
+    pipelineId: string,
+    nodeId: string,
+    input: { datasetId: string; confirm: boolean },
+    actorId?: string,
+  ): Promise<{
+    nodeId: string;
+    datasetId: string;
+    adoptedAt: string;
+    previousOutputDatasetId: string | null;
+  }> {
+    if (!input.confirm) {
+      // One-time ownership action — Foundry warns it "may require
+      // additional actions outside of Pipeline Builder".
+      throw new AppError(
+        'Adopting an existing dataset grants this output ownership of it; ' +
+          'pass { confirm: true } to acknowledge.',
+        400,
+        'CONFIRMATION_REQUIRED',
+        true,
+        {},
+        'ConfirmationRequired',
+      );
+    }
+    await this.ensurePipelineExists(projectId, pipelineId);
+
+    const node = await this.knex('pipeline_nodes')
+      .where({ id: nodeId, pipeline_id: pipelineId })
+      .first();
+    if (!node) {
+      throw new AppError('Node not found', 404, 'NOT_FOUND');
+    }
+    if (node.node_type !== 'output') {
+      throw new AppError(
+        'Only output nodes can take ownership of a dataset',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+
+    const dataset = await this.knex('foundry_datasets')
+      .where({ id: input.datasetId })
+      .first();
+    if (!dataset) {
+      throw new AppError('Dataset not found', 404, 'NOT_FOUND', true, {}, 'DatasetNotFound');
+    }
+    // Same-project restriction — the grant must not reach across projects.
+    let datasetProjectId = (dataset.project_id as string | null) ?? null;
+    if (!datasetProjectId && dataset.folder_id) {
+      const folder = await this.knex('folders')
+        .where({ id: dataset.folder_id })
+        .first('project_id');
+      datasetProjectId = (folder?.project_id as string | undefined) ?? null;
+    }
+    if (datasetProjectId !== projectId) {
+      throw new AppError(
+        'Dataset belongs to a different project',
+        403,
+        'FORBIDDEN',
+      );
+    }
+
+    // Exclusive ownership — reject when any other active output owns it.
+    const owners = (await this.knex('pipeline_nodes')
+      .where({ dataset_id: input.datasetId })
+      .whereNot({ id: nodeId })
+      .select('id', 'pipeline_id')) as Array<{ id: string; pipeline_id: string }>;
+    if (owners.length > 0) {
+      throw new AppError(
+        `Dataset ${input.datasetId} is already owned by output node ${owners[0]!.id} ` +
+          `(pipeline ${owners[0]!.pipeline_id}); delete that output first or choose another dataset.`,
+        409,
+        'OUTPUT_OWNERSHIP_CONFLICT',
+        true,
+        {
+          datasetId: input.datasetId,
+          ownerNodeId: owners[0]!.id,
+          ownerPipelineId: owners[0]!.pipeline_id,
+        },
+        'OutputOwnershipConflict',
+      );
+    }
+
+    const cfg =
+      typeof node.config === 'string' ? JSON.parse(node.config) : (node.config ?? {});
+    const previousOutputDatasetId =
+      (node.dataset_id as string | null) ?? (cfg.outputDatasetId as string | undefined) ?? null;
+    const adoptedAt = new Date().toISOString();
+
+    await this.knex('pipeline_nodes')
+      .where({ id: nodeId, pipeline_id: pipelineId })
+      .update({
+        dataset_id: input.datasetId,
+        updated_at: new Date(),
+        config: JSON.stringify({
+          ...cfg,
+          outputDatasetId: input.datasetId,
+          adoptedAt,
+          adoptedBy: actorId ?? null,
+        }),
+      });
+
+    try {
+      const { auditWriter } = await import('./audit');
+      await auditWriter.write({
+        actorId: actorId ?? null,
+        operationId: 'pipeline.output.adopt_dataset',
+        resourceRid: `ri.compass.main.foundry-dataset.${input.datasetId}`,
+        decision: 'ALLOW',
+        reason: `Output node "${node.label ?? nodeId}" adopted dataset "${dataset.name ?? input.datasetId}"`,
+        metadata: {
+          projectId,
+          pipelineId,
+          nodeId,
+          datasetId: input.datasetId,
+          previousOutputDatasetId,
+        },
+      });
+    } catch (auditErr) {
+      // The adoption itself is committed; an audit hiccup must not roll
+      // it back, but it must not be silent either.
+      console.error('[adopt-output] audit write failed', auditErr);
+    }
+
+    return { nodeId, datasetId: input.datasetId, adoptedAt, previousOutputDatasetId };
   }
 
   /**

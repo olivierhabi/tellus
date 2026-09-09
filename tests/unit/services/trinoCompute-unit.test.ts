@@ -46,6 +46,25 @@ const SOURCE = {
 };
 
 describe("trinoSqlCompiler", () => {
+  it("compiles ConcatenateStrings into the Trino projection", () => {
+    const plan = compileBatchJob({
+      catalog: "iceberg",
+      inputs: [SOURCE],
+      transforms: [{
+        function: "ConcatenateStrings",
+        expressions: [
+          { kind: "column", value: "Order ID" },
+          { kind: "literal", value: "tail", literalType: "string" },
+        ],
+        separator: "--",
+        nullOutputIfAnyInputIsNull: false,
+        outputColumn: "joined",
+      }],
+      output: OUTPUT,
+    });
+    expect(plan.statements.at(-1)).toContain("concat_ws('--', CAST(\"Order ID\" AS VARCHAR), CAST('tail' AS VARCHAR)) AS \"joined\"");
+    expect(plan.outputSchema).toContainEqual({ name: "joined", type: "string" });
+  });
   it("compiles a plain projection into schema DDL + INSERT SELECT", () => {
     const plan = compileBatchJob({
       catalog: "iceberg",

@@ -546,6 +546,49 @@ describe("loadObjectSet", () => {
     expect(r.data[0].name).toBe("Acme");
   });
 
+  it("fulfils nested searchAround hops server-side", async () => {
+    const os = {
+      type: "searchAround",
+      link: "claimToSignal",
+      objectSet: {
+        type: "searchAround",
+        link: "providerToClaim",
+        objectSet: { type: "base", objectType: "Provider" },
+      },
+    } as const;
+    const compiled = await compileObjectSet(os as never, { now: () => NOW });
+    const calls: Array<{
+      fromObjectType: string;
+      link: string;
+      anchorWhere: unknown;
+    }> = [];
+    const deps: ExecutorDeps = {
+      ...baseDeps({ Signal: [{ __pk: "S-1", severity: "HIGH" }] }),
+      traverse: async (input) => {
+        calls.push(input);
+        if (input.link === "providerToClaim") {
+          return { targetObjectType: "Claim", targetPks: ["C-1", "C-2"] };
+        }
+        return { targetObjectType: "Signal", targetPks: ["S-1"] };
+      },
+    };
+    const result = await loadObjectSet(
+      compiled,
+      { objectSet: os as never, select: [] },
+      ctx,
+      deps,
+    );
+    expect(calls).toEqual([
+      { fromObjectType: "Provider", link: "providerToClaim", anchorWhere: null },
+      {
+        fromObjectType: "Claim",
+        link: "claimToSignal",
+        anchorWhere: { type: "in", field: "__pk", value: ["C-1", "C-2"] },
+      },
+    ]);
+    expect(result.data).toMatchObject([{ severity: "HIGH" }]);
+  });
+
   it("interfaceLinkSearchAround fans concrete targets into typed plans", async () => {
     const os = {
       type: "interfaceLinkSearchAround",
