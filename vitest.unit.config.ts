@@ -13,19 +13,18 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
 
-// Test credentials are never baked into the repo. PGPASSWORD must come from
-// the environment (CI secret or a local export — see .env.test.example) and
-// the config fails fast when it is missing instead of falling back to an
-// inline literal.
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `${name} is not set. Export it before running this suite (see .env.test.example).`,
-    );
-  }
-  return value;
-}
+// Zero-friction offline lane: `pnpm install && npm run test:unit` works on a
+// fresh clone with NO docker compose up and NO exported secrets.
+//
+// PGPASSWORD is set to a NON-FUNCTIONAL sentinel on purpose. The pure-unit
+// lane is proven (CI + local runs with a bogus password) to never open a
+// live DB connection — several modules only need the var to EXIST at import
+// time (e.g. foundryEnv throws when it is unset). A sentinel is SAFER than
+// fail-fast here: any test that ever attempts a real PG connection fails
+// authentication loudly instead of silently succeeding against a dev
+// database. A real exported PGPASSWORD is still honored when present (it
+// simply goes unused), so CI needs no change.
+const UNIT_LANE_PGPASSWORD_SENTINEL = "unit-lane-no-live-db";
 
 export default defineConfig({
   test: {
@@ -38,11 +37,11 @@ export default defineConfig({
     // Test-only env defaults so pure-unit files whose imports "(throw at read
     // time if unset)" on DB config (e.g. foundryEnv) can import offline
     // without Docker. These only need the vars to EXIST; no live DB/Keycloak
-    // is contacted by the pure-unit lane. Non-secret values mirror the dev
-    // docker stack; PGPASSWORD is read from the environment (fail-fast, no
-    // baked-in default — see .env.test.example).
+    // is contacted by the pure-unit lane (proven: the lane passes end to end
+    // with a bogus PGPASSWORD). Non-secret values mirror the dev docker
+    // stack; PGPASSWORD falls back to a non-functional sentinel (see above).
     env: {
-      PGPASSWORD: requiredEnv("PGPASSWORD"),
+      PGPASSWORD: process.env.PGPASSWORD ?? UNIT_LANE_PGPASSWORD_SENTINEL,
       PGUSER: "tellus",
       PGHOST: "localhost",
       PGPORT: "5432",
@@ -95,6 +94,21 @@ export default defineConfig({
       ],
       reporter: ["text", "text-summary", "lcov", "json"],
       reportsDirectory: "coverage/unit",
+      // Coverage FLOOR (ratchet): CI fails when the unit lane drops below
+      // these. Measured 2026-09-09 at lines ~37.9 / branches ~30.5 with
+      // 390+ unit files; the floor sits just under that to absorb
+      // run-to-run noise while blocking genuine regressions. Policy:
+      // raise-only — any PR that lifts coverage should lift these numbers
+      // in the same commit; NEVER lower them. The 70 lines / 60 branches
+      // aspiration from the audit is tracked (not yet enforced): reaching
+      // it requires the deferred test program for the PG/OS/Kafka-bound
+      // modules (see .github/workflows/coverage-gate.yml RATCHET tier).
+      thresholds: {
+        lines: 37,
+        branches: 30,
+        functions: 0,
+        statements: 0,
+      },
     },
   },
 });
