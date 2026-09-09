@@ -78,15 +78,23 @@ export function deriveSignatureFromSource(path: string, source: string): Listing
 /**
  * Unwrap a returned ObjectSet to its row array for the wire. Duck-typed (the
  * ObjectSet class is private to ontologyRuntime and worker results lose their
- * prototype crossing postMessage): the canonical serialized shape is exactly
- * `{ rows: Object[] }` — a genuine user value with that single-key shape is
- * not a supported return type risk (Palantir never uses `rows`; their object
- * collections are `data`-shaped).
+ * prototype crossing postMessage): the serialized shape is `{ rows: Object[] }`
+ * plus, since the link-pivot work widened the ObjectSet constructor, any of
+ * its metadata fields (`objectType`, `snapshot`, `recordLoad`) — a genuine
+ * user value carrying only those keys is not a supported return type risk
+ * (Palantir never uses `rows`; their object collections are `data`-shaped).
  */
+const OBJECT_SET_METADATA_KEYS = new Set(["rows", "objectType", "snapshot", "recordLoad"]);
+
 export function unwrapObjectSetRows(v: unknown): unknown {
   if (v && typeof v === "object" && !Array.isArray(v)) {
     const rec = v as Record<string, unknown>;
-    if (Object.keys(rec).length === 1 && Array.isArray(rec.rows)) return rec.rows;
+    if (
+      Array.isArray(rec.rows) &&
+      Object.keys(rec).every((k) => OBJECT_SET_METADATA_KEYS.has(k))
+    ) {
+      return rec.rows;
+    }
   }
   return v;
 }

@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 import {
   compareSemverLoose,
+  unwrapObjectSetRows,
   derivePrincipalSubUuid,
   deriveSignatureFromSource,
   isLegalBranchName,
@@ -287,5 +288,35 @@ describe("routeHelpers — toWireSignature / deriveSignatureFromSource", () => {
 
   it("deriveSignatureFromSource fail-opens to null on unparseable source", () => {
     expect(deriveSignatureFromSource("bad.ts", "this is not typescript {{{")).toBeNull();
+  });
+});
+
+describe("routeHelpers — unwrapObjectSetRows (ObjectSet wire shape)", () => {
+  it("unwraps the legacy single-key {rows} shape", () => {
+    expect(unwrapObjectSetRows({ rows: [{ id: "1" }] })).toEqual([{ id: "1" }]);
+  });
+
+  it("unwraps the widened ObjectSet shape (rows + objectType/snapshot/recordLoad)", () => {
+    // Since the link-pivot work, ObjectSet carries metadata fields alongside
+    // rows; the serialized result must still reach the wire as a bare array.
+    const snapshot = { objects: new Map() };
+    const recordLoad = () => undefined;
+    expect(
+      unwrapObjectSetRows({ rows: [], objectType: "AckManualSrc", snapshot, recordLoad }),
+    ).toEqual([]);
+  });
+
+  it("unwraps subsets of the metadata keys (structured clone drops functions)", () => {
+    expect(unwrapObjectSetRows({ rows: [{ id: "1" }], objectType: "T" })).toEqual([{ id: "1" }]);
+  });
+
+  it("leaves non-ObjectSet shapes untouched", () => {
+    expect(unwrapObjectSetRows({ rows: "not-an-array" })).toEqual({ rows: "not-an-array" });
+    expect(unwrapObjectSetRows({ rows: [], unexpected: 1 })).toEqual({ rows: [], unexpected: 1 });
+    expect(unwrapObjectSetRows({ data: [1, 2] })).toEqual({ data: [1, 2] });
+    expect(unwrapObjectSetRows([1, 2])).toEqual([1, 2]);
+    expect(unwrapObjectSetRows(null)).toBeNull();
+    expect(unwrapObjectSetRows("scalar")).toBe("scalar");
+    expect(unwrapObjectSetRows(undefined)).toBeUndefined();
   });
 });
