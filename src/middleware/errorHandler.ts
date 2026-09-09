@@ -28,6 +28,8 @@ import { Request, Response, NextFunction } from "express";
 import { ERROR_CODES, sendError } from "../utils/responseFormatter";
 import { AppError } from "../utils/appError";
 import { OntologyError, ObjectDatabaseUnavailableError, STANDARD_ERROR_CODES } from "../utils/queryErrors";
+import { logger } from "../utils/logger";
+import { captureError } from "../services/errorTracking";
 
 // ---------------------------------------------------------------------------
 // Environment detection
@@ -271,7 +273,11 @@ export default function errorHandler(
   // 1. OntologyError subclasses (Task 15 error hierarchy + Task 20 format)
   // -----------------------------------------------------------------
   if (err instanceof OntologyError) {
-    console.error(`[${err.code}] ${err.message} (${err.errorInstanceId}) [requestId=${requestId}]`);
+    logger.error(
+      { errorCode: err.code, errorInstanceId: err.errorInstanceId, requestId },
+      err.message,
+    );
+    captureError(err, { statusCode: err.statusCode, errorCode: err.code, requestId, route: req.path });
     const response = err.toResponse();
     (response as any).requestId = requestId;
     (response as any).timestamp = new Date().toISOString();
@@ -283,7 +289,11 @@ export default function errorHandler(
   // -----------------------------------------------------------------
   if (isAppErrorHierarchy(err)) {
     const instanceId = crypto.randomUUID();
-    console.error(`[${err.code}] ${err.message} (${instanceId}) [requestId=${requestId}]`);
+    logger.error(
+      { errorCode: err.code, errorInstanceId: instanceId, requestId },
+      err.message,
+    );
+    captureError(err, { statusCode: err.statusCode, errorCode: err.code, requestId, route: req.path });
     return void res.status(err.statusCode).json(
       buildErrorResponse(
         err.code,
@@ -319,7 +329,11 @@ export default function errorHandler(
   ) {
     const fErr = err as { statusCode: number; code: string; message: string; isOperational: boolean; parameters?: Record<string, unknown>; errorName?: string };
     const instanceId = crypto.randomUUID();
-    console.error(`[${fErr.code}] ${fErr.message} (${instanceId}) [requestId=${requestId}]`);
+    logger.error(
+      { errorCode: fErr.code, errorInstanceId: instanceId, requestId },
+      fErr.message,
+    );
+    captureError(err, { statusCode: fErr.statusCode, errorCode: fErr.code, requestId, route: req.path });
 
     return void res.status(fErr.statusCode).json({
       errorCode: fErr.code,
@@ -378,7 +392,11 @@ export default function errorHandler(
     const entry = STANDARD_ERROR_CODES[err.code];
     const httpStatus = entry?.status || ERROR_CODES[err.code] || 500;
     const errorName = entry?.name || "UnknownError";
-    console.error(`[${err.code}] ${err.message} (${instanceId}) [requestId=${requestId}]`);
+    logger.error(
+      { errorCode: err.code, errorInstanceId: instanceId, requestId },
+      err.message,
+    );
+    captureError(err, { statusCode: httpStatus, errorCode: String(err.code), requestId, route: req.path });
     return void res.status(httpStatus).json(
       buildErrorResponse(
         err.code,
@@ -428,7 +446,8 @@ export default function errorHandler(
 
     // Bad query
     if (osStatus === 400) {
-      console.error("OpenSearch 400 error:", JSON.stringify(osBody?.error));
+      logger.error({ osError: osBody?.error, requestId }, "OpenSearch 400 error");
+      captureError(err, { statusCode: 400, errorCode: "QUERY_VALIDATION_ERROR", requestId, route: req.path });
       const osErr = new OntologyError(
         osBody?.error?.reason || "Invalid OpenSearch query.",
         "QUERY_VALIDATION_ERROR"
@@ -445,6 +464,7 @@ export default function errorHandler(
       err.name === "TimeoutError" ||
       osStatus === 503
     ) {
+      captureError(err, { statusCode: 503, errorCode: "OBJECT_DATABASE_UNAVAILABLE", requestId, route: req.path });
       const osErr = new OntologyError(
         "OpenSearch is currently unavailable. Please try again.",
         "OBJECT_DATABASE_UNAVAILABLE"
@@ -456,6 +476,7 @@ export default function errorHandler(
     }
 
     // All other OpenSearch errors
+    captureError(err, { statusCode: 503, errorCode: "OBJECT_DATABASE_UNAVAILABLE", requestId, route: req.path });
     const osErr = new OntologyError(
       `OpenSearch error (status ${osStatus}).`,
       "OBJECT_DATABASE_UNAVAILABLE"
@@ -551,11 +572,12 @@ export default function errorHandler(
       }
 
       case "42P01": { // undefined_table
-        console.error("PostgreSQL undefined_table error:", {
+        logger.error({
           message: err.message,
           stack: IS_PRODUCTION ? undefined : err.stack,
           requestId,
-        });
+        }, "PostgreSQL undefined_table error");
+        captureError(err, { statusCode: 500, errorCode: "INTERNAL_ERROR", requestId, route: req.path });
         const pgErr = new OntologyError(
           "Database schema error. Please contact support.",
           "INTERNAL_ERROR"
@@ -567,12 +589,13 @@ export default function errorHandler(
       }
 
       default: {
-        console.error("Unhandled PostgreSQL error:", {
+        logger.error({
           code: pgCode,
           message: err.message,
           stack: IS_PRODUCTION ? undefined : err.stack,
           requestId,
-        });
+        }, "Unhandled PostgreSQL error");
+        captureError(err, { statusCode: 500, errorCode: "INTERNAL_ERROR", requestId, route: req.path });
         const pgErr = new OntologyError(
           "An unexpected database error occurred.",
           "INTERNAL_ERROR"
@@ -589,10 +612,16 @@ export default function errorHandler(
   // 6. All other errors — never expose internals to the client
   // -----------------------------------------------------------------
   const instanceId = crypto.randomUUID();
-  console.error(
-    `[INTERNAL_ERROR] Unhandled: ${err.message} (${instanceId}) [requestId=${requestId}]`,
-    IS_PRODUCTION ? "" : err.stack
+  logger.error(
+    {
+      errorCode: "INTERNAL_ERROR",
+      errorInstanceId: instanceId,
+      requestId,
+      ...(!IS_PRODUCTION && err?.stack ? { stack: err.stack } : {}),
+    },
+    `Unhandled: ${err?.message ?? String(err)}`,
   );
+  captureError(err, { statusCode: 500, errorCode: "INTERNAL_ERROR", requestId, route: req.path });
 
   return void res.status(500).json(
     buildErrorResponse(
