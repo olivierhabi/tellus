@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhanced error handler middleware to support structured JSON responses with requestId
 - Enhanced request logger to include timing, body size, and configurable skip paths
 
+### Security
+- Removed hardcoded test credentials: `vitest.config.ts`, `vitest.unit.config.ts`, and `vitest.osv2-serving.config.ts` now read `PGPASSWORD` from the environment and fail fast when it is unset — no inline literal defaults remain
+- `test-datasource-attach.sh` and `test-datasource-funnel-trigger.sh` now require `API_KEY` to be exported by the caller instead of defaulting to a baked-in value
+- Added `.env.test.example` documenting the required test-only variables (`PGPASSWORD`, `API_KEY`)
+
+### Added
+- Full contributor README: prerequisites, install, environment setup, docker-compose local stack (Postgres/OpenSearch/Keycloak/MinIO with ports), run/test instructions, one-command smoke test, and an architecture overview
+- CI `typecheck` job (`tsc --noEmit`) gating all test jobs; lint job confirmed to fail the workflow on violations
+- Dependabot configuration for weekly npm and GitHub Actions updates (`.github/dependabot.yml`)
+
 ## [0.2.0] - 2026-03-14 (Saturday)
 
 ### Added
