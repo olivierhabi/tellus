@@ -142,6 +142,53 @@ describe("sharedOps — evaluateExpression", () => {
   });
 });
 
+describe("sharedOps — evaluateExpression datetime operators (Palantir timestampDiffV1/timestampAddV1 parity)", () => {
+  const row = {
+    end: "2026-09-10T15:45:00.000Z",
+    start: "2026-09-10T15:44:42.000Z",
+    submitted: "2026-09-08T15:45:00.000Z",
+    n: null,
+    s: "not-a-date",
+  };
+  const col = (value: string) => ({ kind: "column" as const, value });
+
+  it("seconds_between returns the truncated Long difference (End - Start)", () => {
+    expect(evaluateExpression(row, { left: col("end"), operator: "seconds_between", right: col("start") })).toBe(18);
+    expect(evaluateExpression(row, { left: col("start"), operator: "seconds_between", right: col("end") })).toBe(-18);
+  });
+
+  it("minutes_between / hours_between / days_between use their units", () => {
+    expect(evaluateExpression(row, { left: col("end"), operator: "minutes_between", right: col("start") })).toBe(0); // 18s truncates to 0m
+    expect(evaluateExpression(row, { left: col("end"), operator: "hours_between", right: col("submitted") })).toBe(48);
+    expect(evaluateExpression(row, { left: col("end"), operator: "days_between", right: col("submitted") })).toBe(2);
+  });
+
+  it("add_* shifts the timestamp and returns ISO-8601", () => {
+    expect(evaluateExpression(row, {
+      left: col("submitted"), operator: "add_days", right: { kind: "literal", value: "2", literalType: "integer" },
+    })).toBe("2026-09-10T15:45:00.000Z");
+    expect(evaluateExpression(row, {
+      left: col("start"), operator: "add_seconds", right: { kind: "literal", value: "18", literalType: "integer" },
+    })).toBe("2026-09-10T15:45:00.000Z");
+    expect(evaluateExpression(row, {
+      left: col("submitted"), operator: "add_minutes", right: { kind: "literal", value: "1440", literalType: "integer" },
+    })).toBe("2026-09-09T15:45:00.000Z");
+  });
+
+  it("null/unparseable operands produce null (null-in/null-out)", () => {
+    expect(evaluateExpression(row, { left: col("n"), operator: "seconds_between", right: col("start") })).toBeNull();
+    expect(evaluateExpression(row, { left: col("end"), operator: "minutes_between", right: col("n") })).toBeNull();
+    expect(evaluateExpression(row, { left: col("s"), operator: "hours_between", right: col("start") })).toBeNull();
+    expect(evaluateExpression(row, { left: col("s"), operator: "add_days", right: { kind: "literal", value: "1", literalType: "integer" } })).toBeNull();
+    expect(evaluateExpression(row, { left: col("end"), operator: "add_minutes", right: col("n") })).toBeNull();
+  });
+
+  it("accepts epoch-millis values (13-digit strings and numbers)", () => {
+    const epochRow = { a: "1775653500000", b: 1775653500000 - 18000 };
+    expect(evaluateExpression(epochRow, { left: col("a"), operator: "seconds_between", right: col("b") })).toBe(18);
+  });
+});
+
 describe("sharedOps — formatStringValue", () => {
   it("formats %s/%d/%f with width, precision, and flags", () => {
     expect(formatStringValue("%s", ["hello"])).toBe("hello");

@@ -15,6 +15,7 @@ import {
   type OntologyObject,
 } from "../services/functions/ontologyRuntime";
 import { OntologyError } from "../utils/queryErrors";
+import type { ValueSource } from "./actionRules.types";
 
 export interface FunctionActionBinding {
   functionRid: string;
@@ -23,6 +24,7 @@ export interface FunctionActionBinding {
   branch: string;
   semver: string;
   autoUpgrade?: boolean;
+  inputs?: Record<string, ValueSource>;
 }
 
 export interface FunctionActionParameterDefinition {

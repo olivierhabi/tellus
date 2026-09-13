@@ -167,10 +167,19 @@ export interface ApplyExecutionContext {
    */
   v2RevalidateAfterLock?: (client: PoolClient) => Promise<ActionError[]>;
   /**
-   * Phase 6 — version-2 lock identities produced by the action planner.
-   * Advisory + row locks are acquired for these inside the transaction
-   * (deterministic order), before the reload/revalidate step. Only used
-   * when `semanticsVersion===2` and the v2 execution flag is on.
+   * Re-evaluate state-dependent Action submission criteria after the shared
+   * object locks have been acquired and before any edit is written. This is
+   * deliberately semantics-version agnostic: business preconditions such as
+   * `status=PENDING` must be race-safe for legacy and v2 Action definitions.
+   * Throwing aborts and rolls back the transaction.
+   */
+  revalidateSubmissionCriteriaAfterLock?: (client: PoolClient) => Promise<void>;
+  /**
+   * Object identities read or mutated by this action. Advisory + row locks
+   * are acquired for these inside the transaction in deterministic order.
+   * v2 actions add planner-derived relationship identities; legacy actions
+   * include their mutated object identities so submission criteria can be
+   * revalidated safely under the same lock.
    */
   plannedLockIdentities?: LockIdentity[];
 }
@@ -267,6 +276,17 @@ export async function applyEdits(
   const pgClient = executionContext.transactionClient ?? await getClient();
   try {
     if (ownsTransaction) await pgClient.query("BEGIN");
+
+    // Shared mutation-locking protocol. Acquire the deterministic advisory
+    // locks BEFORE any SELECT ... FOR UPDATE in this transaction so every
+    // action path observes one lock order and cannot deadlock by taking row
+    // and advisory locks in opposite order.
+    if (
+      executionContext.plannedLockIdentities &&
+      executionContext.plannedLockIdentities.length > 0
+    ) {
+      await acquireActionLocks(pgClient, executionContext.plannedLockIdentities);
+    }
 
     // F-05: Atomic optimistic concurrency check — inside the PG
     // transaction so no concurrent writer can slip between the read
@@ -365,6 +385,14 @@ export async function applyEdits(
       }
     }
 
+    // Business preconditions are authoritative at write time. Stage 3 gives
+    // callers fast validation feedback, but this second evaluation runs after
+    // serialization and therefore closes the TOCTOU window between validation
+    // and mutation (for example, two supervisors deciding one PENDING row).
+    if (executionContext.revalidateSubmissionCriteriaAfterLock) {
+      await executionContext.revalidateSubmissionCriteriaAfterLock(pgClient);
+    }
+
     // -----------------------------------------------------------------
     // Phase 6 — version-2 transaction invariants (advisory + row locks,
     // reload, revalidate final state). Gated on semanticsVersion===2 AND
@@ -376,9 +404,6 @@ export async function applyEdits(
     const runV2Invariants =
       executionContext.semanticsVersion === 2 && isV2ExecutionEnabled();
     if (runV2Invariants) {
-      if (executionContext.plannedLockIdentities && executionContext.plannedLockIdentities.length > 0) {
-        await acquireActionLocks(pgClient, executionContext.plannedLockIdentities);
-      }
       if (executionContext.v2RevalidateAfterLock) {
         const revalErrors = await executionContext.v2RevalidateAfterLock(pgClient);
         if (revalErrors.length > 0) {
@@ -1058,7 +1083,31 @@ async function writeOverlayForEditInTxn(
         FOR UPDATE`,
       [ontologyId, branchUuid, edit.objectType, edit.primaryKey],
     );
-    overlayDoc = { ...(existing.rows[0]?.properties ?? {}), ...(edit.propertyValues ?? {}) };
+    let base: Record<string, unknown> = existing.rows[0]?.properties ?? {};
+    if (Object.keys(base).length === 0) {
+      // No store row yet (e.g. a dataset-seeded object the store sync has
+      // not absorbed). Fall back to the indexed document so the overlay,
+      // the store UPSERT and the projector all project the FULL post-edit
+      // state instead of clobbering untouched properties with the delta.
+      // Same PG-first / index-fallback contract as fetchObject above.
+      try {
+        const { body } = await opensearchClient.get({
+          index: getIndexName(edit.objectType),
+          id: edit.primaryKey,
+        });
+        const source = (body as { _source?: unknown })?._source;
+        if (source && typeof source === "object" && !Array.isArray(source)) {
+          const { __pk, __rid, __objectType, __ontology, __version, __lastModified,
+            __editedBy, __branch, __primaryKey, __datasourceVersion, __overlay_source,
+            _security, ...rest } = source as Record<string, unknown>;
+          base = rest;
+        }
+      } catch {
+        // Document absent from the index too — overlay carries the delta
+        // only; the store INSERT creates the row and later edits merge.
+      }
+    }
+    overlayDoc = { ...base, ...(edit.propertyValues ?? {}) };
   } else {
     overlayDoc = edit.propertyValues ?? {};
   }

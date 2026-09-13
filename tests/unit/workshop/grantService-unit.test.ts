@@ -6,8 +6,8 @@
 //      ("fraud-analyst" ≡ "fraud analyst") — the platform's pseudo-group
 //      convention (realm roles double as group identifiers; the coalescing
 //      of roles into `groups` happens in getModuleEffectiveRole).
-//   2. Resolution precedence: super/global roles → direct user grant →
-//      group grant → default groups → null.
+//   2. Effective access is additive: the strongest applicable role wins
+//      across global, direct-user, group, and default-group sources.
 //   3. No grant + no roles ⇒ null (module concealed, 404 semantics).
 
 import { describe, expect, it } from "vitest";
@@ -55,19 +55,28 @@ describe("getWorkshopDependencyAccess — module access stays independent", () =
 });
 
 describe("effectiveRoleFromInputs — Phase K regression", () => {
-  it("super roles short-circuit to editor", () => {
+  it("platform super role short-circuits to editor", () => {
+    expect(
+      effectiveRoleFromInputs(
+        { userId: "u1", roles: ["tellus-superadmin"], groups: [] },
+        [],
+      ),
+    ).toBe("editor");
+  });
+
+  it("ontology roles do not elevate Workshop module access", () => {
     expect(
       effectiveRoleFromInputs(
         { userId: "u1", roles: ["ontology-admin"], groups: [] },
         [],
       ),
-    ).toBe("editor");
+    ).toBeNull();
     expect(
       effectiveRoleFromInputs(
         { userId: "u1", roles: ["ontology-editor"], groups: [] },
-        [],
+        [grant("user", "u1", "viewer")],
       ),
-    ).toBe("editor");
+    ).toBe("viewer");
   });
 
   it("legacy global workshop roles resolve without grants", () => {
@@ -102,7 +111,7 @@ describe("effectiveRoleFromInputs — Phase K regression", () => {
     ).toBeNull();
   });
 
-  it("direct user grant wins over group grant", () => {
+  it("a group Editor grant is not downgraded by a direct Viewer grant", () => {
     const grants = [
       grant("group", "fraud analyst", "editor"),
       grant("user", "u1", "viewer"),
@@ -112,7 +121,29 @@ describe("effectiveRoleFromInputs — Phase K regression", () => {
         { userId: "u1", roles: [], groups: ["fraud-analyst"] },
         grants,
       ),
-    ).toBe("viewer");
+    ).toBe("editor");
+  });
+
+  it("a global Viewer role is elevated by a module-specific Editor grant", () => {
+    expect(
+      effectiveRoleFromInputs(
+        { userId: "u1", roles: ["workshop-viewer"], groups: [] },
+        [grant("user", "u1", "editor")],
+      ),
+    ).toBe("editor");
+  });
+
+  it("a direct Editor grant is not downgraded by a Viewer group grant", () => {
+    const grants = [
+      grant("group", "fraud analyst", "viewer"),
+      grant("user", "u1", "editor"),
+    ];
+    expect(
+      effectiveRoleFromInputs(
+        { userId: "u1", roles: [], groups: ["fraud-analyst"] },
+        grants,
+      ),
+    ).toBe("editor");
   });
 
   it("editor group grant beats viewer group grant", () => {

@@ -1,42 +1,13 @@
 // Workshop per-module grants — effective role resolution for
 // module-scoped Viewer/Editor access.
 //
-// Resolution order (maximum role wins, editor > viewer):
-//  1. JWT realm super roles (tellus-superadmin, ontology-admin, ontology-editor)
-//     → editor.
-//  2. Legacy global workshop roles (workshop-editor, workshop-viewer) for
-//     backward compatibility during migration.
-//  3. Direct user grant (principal_type = 'user', principal_id = user local id).
-//  4. Group membership grants (principal_type = 'group',
-//     principal_id IN caller.normalizedGroups).
-//  5. Implicit default groups: "Workshop Builders" → editor,
-//     "Workshop Users" → viewer (Foundry spec).
-//  6. None of the above → no access (null).
+// Effective permissions are additive. The caller receives the strongest
+// role supplied by any applicable source (editor > viewer > no access):
+// platform super role, legacy global Workshop role, direct user grant,
+// explicit group grant, or the well-known default Workshop groups.
 
 import { getWorkshopDb } from "./db";
 import { SUPER_EDITOR_ROLES, ROLE_EDITOR, ROLE_VIEWER } from "./rbac";
-
-// Per-module effective role cache (30s TTL). Invalidated on grant mutation
-// so stale permissions clear within the TTL window.
-
-interface CachedRole {
-  role: GrantRole | null;
-  expiresAt: number;
-}
-
-const roleCache = new Map<string, CachedRole>();
-const ROLE_CACHE_TTL_MS = 30_000;
-
-function roleCacheKey(moduleRid: string, userId: string): string {
-  return `${moduleRid}:${userId}`;
-}
-
-function invalidateRoleCache(moduleRid: string): void {
-  const prefix = `${moduleRid}:`;
-  for (const key of roleCache.keys()) {
-    if (key.startsWith(prefix)) roleCache.delete(key);
-  }
-}
 
 export type GrantRole = "viewer" | "editor";
 export type PrincipalType = "user" | "group";
@@ -56,6 +27,21 @@ export interface EffectiveRoleInput {
   groups?: string[];
 }
 
+const ROLE_RANK: Readonly<Record<GrantRole, number>> = {
+  viewer: 1,
+  editor: 2,
+};
+
+function strongestRole(
+  ...roles: ReadonlyArray<GrantRole | null | undefined>
+): GrantRole | null {
+  let best: GrantRole | null = null;
+  for (const role of roles) {
+    if (role && (!best || ROLE_RANK[role] > ROLE_RANK[best])) best = role;
+  }
+  return best;
+}
+
 const DEFAULT_GROUP_GRANTS: Readonly<Record<string, GrantRole>> = {
   "workshop builders": "editor",
   "workshop users": "viewer",
@@ -70,8 +56,12 @@ export function effectiveRoleFromInputs(
   grants: ModuleGrant[],
 ): GrantRole | null {
   if (SUPER_EDITOR_ROLES.some((r) => input.roles.includes(r))) return "editor";
-  if (input.roles.includes(ROLE_EDITOR)) return "editor";
-  if (input.roles.includes(ROLE_VIEWER)) return "viewer";
+
+  const globalRole: GrantRole | null = input.roles.includes(ROLE_EDITOR)
+    ? "editor"
+    : input.roles.includes(ROLE_VIEWER)
+      ? "viewer"
+      : null;
 
   const normalizedGroups = new Set(
     (input.groups ?? []).map(normalizeGroupName),
@@ -105,21 +95,18 @@ export function effectiveRoleFromInputs(
       return "viewer";
     }, null);
 
-  return userRole ?? groupRole ?? defaultGroupRole ?? null;
+  return strongestRole(globalRole, userRole, groupRole, defaultGroupRole);
 }
 
 export async function getModuleEffectiveRole(
   moduleRid: string,
   input: EffectiveRoleInput,
 ): Promise<GrantRole | null> {
-  // Super/global roles don't need a DB roundtrip.
+  // Editor is the strongest possible role, so these two cases can safely
+  // short-circuit. A global Viewer cannot: a module/group grant may elevate
+  // the same caller to Editor.
   if (SUPER_EDITOR_ROLES.some((r) => input.roles.includes(r))) return "editor";
   if (input.roles.includes(ROLE_EDITOR)) return "editor";
-  if (input.roles.includes(ROLE_VIEWER)) return "viewer";
-
-  const cacheKey = roleCacheKey(moduleRid, input.userId);
-  const cached = roleCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return cached.role;
 
   const db = getWorkshopDb();
   // Platform pseudo-group convention (pipelineRbac/datasetRbac
@@ -151,43 +138,20 @@ export async function getModuleEffectiveRole(
     [moduleRid, input.userId, normalizedGroups],
   );
 
-  // Also fetch grants for default group names.
-  const defaultGroupNames = Object.keys(DEFAULT_GROUP_GRANTS).filter((gn) =>
-    normalizedGroups.includes(gn),
-  );
-  let defaultGroupGrants: typeof grants.rows = [];
-  if (defaultGroupNames.length > 0) {
-    const dg = await db.query<{
-      principal_type: PrincipalType;
-      principal_id: string;
-      role: GrantRole;
-      granted_by: string;
-      granted_at: string;
-    }>(
-      `SELECT principal_type, principal_id, role, granted_by, granted_at::text
-         FROM workshop_module_grants
-        WHERE module_rid = $1
-          AND principal_type = 'group'
-          AND principal_id = ANY ($2::text[])`,
-      [moduleRid, defaultGroupNames],
-    );
-    defaultGroupGrants = dg.rows;
-  }
-
-  const allGrants: ModuleGrant[] = [...grants.rows, ...defaultGroupGrants].map(
-    (r) => ({
+  const allGrants: ModuleGrant[] = grants.rows.map((r) => ({
       moduleRid,
       principalType: r.principal_type,
       principalId: r.principal_id,
       role: r.role,
       grantedBy: r.granted_by,
       grantedAt: r.granted_at,
-    }),
-  );
+    }));
 
-  const result = effectiveRoleFromInputs(effectiveInput, allGrants);
-  roleCache.set(cacheKey, { role: result, expiresAt: Date.now() + ROLE_CACHE_TTL_MS });
-  return result;
+  // Authorization is intentionally resolved from the shared database on
+  // every request. This makes role downgrade/revocation immediately visible
+  // across horizontally scaled API instances; an in-process TTL cache can
+  // otherwise preserve stale Editor privileges after a revoke.
+  return effectiveRoleFromInputs(effectiveInput, allGrants);
 }
 
 export async function listModuleGrants(
@@ -249,7 +213,6 @@ export async function upsertModuleGrant(
     [moduleRid, principalType, storedPrincipalId, role, grantedBy],
   );
   const r = row.rows[0];
-  invalidateRoleCache(moduleRid);
   return {
     moduleRid,
     principalType: r.principal_type,
@@ -274,9 +237,7 @@ export async function removeModuleGrant(
       RETURNING 1`,
     [moduleRid, principalType, storedPrincipalId],
   );
-  const deleted = (result.rowCount ?? 0) > 0;
-  if (deleted) invalidateRoleCache(moduleRid);
-  return deleted;
+  return (result.rowCount ?? 0) > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +268,159 @@ export interface WorkshopDependencyAccess {
   readonly actionTypes: boolean;
   readonly functions: boolean;
   readonly reason: string;
+}
+
+export interface WorkshopOrganizationRequirement {
+  readonly id: string;
+  readonly name: string;
+  readonly displayName: string;
+  readonly satisfied: boolean;
+}
+
+export interface WorkshopMarkingRequirement {
+  readonly id: string;
+  readonly displayName: string;
+  readonly satisfied: boolean;
+}
+
+export interface WorkshopFileAccessRequirements {
+  readonly organizations: {
+    readonly mode: "anyOf";
+    readonly required: readonly WorkshopOrganizationRequirement[];
+    readonly meets: boolean;
+  };
+  readonly markings: {
+    readonly required: readonly WorkshopMarkingRequirement[];
+    readonly meets: boolean;
+  };
+}
+
+async function resolveWorkshopProjectRid(moduleRid: string): Promise<string | null> {
+  const db = getWorkshopDb();
+  const moduleRow = await db.query<{ parent_folder_rid: string }>(
+    `SELECT parent_folder_rid
+       FROM workshop_module
+      WHERE rid = $1 AND deleted_at IS NULL
+      LIMIT 1`,
+    [moduleRid],
+  );
+  const parentRid = moduleRow.rows[0]?.parent_folder_rid;
+  if (!parentRid) return null;
+  if (parentRid.startsWith("ri.compass.main.project.")) return parentRid;
+
+  const parentSegments = parentRid.split(".");
+  const parentId = parentSegments[parentSegments.length - 1] ?? "";
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parentId)) {
+    const folder = await db.query<{ project_id: string }>(
+      `SELECT project_id::text AS project_id FROM folders WHERE id = $1::uuid LIMIT 1`,
+      [parentId],
+    );
+    if (folder.rows[0]?.project_id) {
+      return `ri.compass.main.project.${folder.rows[0].project_id}`;
+    }
+  }
+
+  const resource = await db.query<{ project_rid: string | null }>(
+    `SELECT project_rid FROM resources WHERE rid = $1 LIMIT 1`,
+    [parentRid],
+  );
+  return resource.rows[0]?.project_rid ?? null;
+}
+
+async function getWorkshopFileAccessRequirementsForLocalUser(
+  moduleRid: string,
+  localUserId: string | null,
+): Promise<WorkshopFileAccessRequirements> {
+  const db = getWorkshopDb();
+  const projectRid = await resolveWorkshopProjectRid(moduleRid);
+
+  const organizations = projectRid
+    ? await db.query<{ id: string; name: string; display_name: string | null }>(
+        `SELECT o.id::text AS id, o.name, o.display_name
+           FROM project_organizations po
+           JOIN organizations o ON o.id = po.org_id
+          WHERE po.project_rid = $1
+          ORDER BY COALESCE(o.display_name, o.name), o.id`,
+        [projectRid],
+      )
+    : { rows: [] as Array<{ id: string; name: string; display_name: string | null }> };
+
+  const userOrgIds = localUserId && organizations.rows.length > 0
+    ? await db.query<{ org_id: string }>(
+        `SELECT org_id::text AS org_id FROM user_organizations WHERE user_id = $1::uuid`,
+        [localUserId],
+      )
+    : { rows: [] as Array<{ org_id: string }> };
+  const orgMembership = new Set(userOrgIds.rows.map((row) => row.org_id));
+  const organizationRows: WorkshopOrganizationRequirement[] = organizations.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    displayName: row.display_name ?? row.name,
+    satisfied: orgMembership.has(row.id),
+  }));
+
+  const markingResourceRids = projectRid ? [moduleRid, projectRid] : [moduleRid];
+  const markings = await db.query<{ id: string; display_name: string }>(
+    `SELECT DISTINCT m.id, m.display_name
+       FROM resource_markings rm
+       JOIN markings m ON m.id = rm.marking_id
+      WHERE rm.resource_rid = ANY($1::text[])
+        AND rm.source IN ('DIRECT', 'INHERITED')
+      ORDER BY m.display_name, m.id`,
+    [markingResourceRids],
+  );
+  const userMarkings = localUserId && markings.rows.length > 0
+    ? await db.query<{ marking_id: string }>(
+        `SELECT marking_id FROM user_markings WHERE user_id = $1::uuid`,
+        [localUserId],
+      )
+    : { rows: [] as Array<{ marking_id: string }> };
+  const markingMembership = new Set(userMarkings.rows.map((row) => row.marking_id));
+  const markingRows: WorkshopMarkingRequirement[] = markings.rows.map((row) => ({
+    id: row.id,
+    displayName: row.display_name,
+    satisfied: markingMembership.has(row.id),
+  }));
+
+  return {
+    organizations: {
+      mode: "anyOf",
+      required: organizationRows,
+      meets: organizationRows.length === 0 || organizationRows.some((row) => row.satisfied),
+    },
+    markings: {
+      required: markingRows,
+      meets: markingRows.every((row) => row.satisfied),
+    },
+  };
+}
+
+export async function getWorkshopFileAccessRequirements(
+  moduleRid: string,
+  email: string | null,
+): Promise<WorkshopFileAccessRequirements> {
+  const db = getWorkshopDb();
+  const localUser = email
+    ? await db.query<{ id: string }>(
+        `SELECT id::text AS id FROM users WHERE lower(email) = lower($1) LIMIT 1`,
+        [email],
+      )
+    : { rows: [] as Array<{ id: string }> };
+  return getWorkshopFileAccessRequirementsForLocalUser(
+    moduleRid,
+    localUser.rows[0]?.id ?? null,
+  );
+}
+
+export async function meetsWorkshopFileAccessRequirements(
+  moduleRid: string,
+  localUserId: string | null,
+): Promise<boolean> {
+  const requirements = await getWorkshopFileAccessRequirementsForLocalUser(
+    moduleRid,
+    localUserId,
+  );
+  return requirements.organizations.meets && requirements.markings.meets;
 }
 
 /**
@@ -343,9 +457,6 @@ export async function getModuleAccessDecision(
   if (input.roles.includes(ROLE_EDITOR)) {
     return { role: "editor", via: "global-role", detail: ROLE_EDITOR };
   }
-  if (input.roles.includes(ROLE_VIEWER)) {
-    return { role: "viewer", via: "global-role", detail: ROLE_VIEWER };
-  }
 
   const db = getWorkshopDb();
   const rows = await db.query<{
@@ -359,11 +470,18 @@ export async function getModuleAccessDecision(
     [moduleRid],
   );
 
-  const userGrant = rows.rows.find(
-    (r) => r.principal_type === "user" && r.principal_id === input.userId,
-  );
+  const candidates: ModuleAccessDecision[] = [];
+  const userGrant = rows.rows
+    .filter(
+      (r) => r.principal_type === "user" && r.principal_id === input.userId,
+    )
+    .sort((a, b) => ROLE_RANK[b.role] - ROLE_RANK[a.role])[0];
   if (userGrant) {
-    return { role: userGrant.role, via: "direct-grant", detail: input.userId };
+    candidates.push({
+      role: userGrant.role,
+      via: "direct-grant",
+      detail: input.userId,
+    });
   }
 
   // Pseudo-group convention: realm roles are valid group identifiers.
@@ -375,20 +493,33 @@ export async function getModuleAccessDecision(
       (r) =>
         r.principal_type === "group" && normalizedIds.has(r.principal_id),
     )
-    .sort((a, b) => (a.role === "editor" ? -1 : 0) - (b.role === "editor" ? -1 : 0))[0];
+    .sort((a, b) => ROLE_RANK[b.role] - ROLE_RANK[a.role])[0];
   if (groupGrant) {
-    return {
+    candidates.push({
       role: groupGrant.role,
       via: "group-grant",
       detail: groupGrant.principal_id,
-    };
+    });
   }
 
   for (const [groupName, role] of Object.entries(DEFAULT_GROUP_GRANTS)) {
     if (normalizedIds.has(groupName)) {
-      return { role, via: "default-group", detail: groupName };
+      candidates.push({ role, via: "default-group", detail: groupName });
     }
   }
+
+  if (input.roles.includes(ROLE_VIEWER)) {
+    candidates.push({
+      role: "viewer",
+      via: "global-role",
+      detail: ROLE_VIEWER,
+    });
+  }
+
+  const editor = candidates.find((candidate) => candidate.role === "editor");
+  if (editor) return editor;
+  const viewer = candidates.find((candidate) => candidate.role === "viewer");
+  if (viewer) return viewer;
 
   return { role: null, via: "none", detail: null };
 }
@@ -399,7 +530,8 @@ export async function getModuleAccessDecision(
  */
 export async function insertCreatorGrant(
   moduleRid: string,
-  userId: string,
+  principalId: string,
+  grantedBy: string = principalId,
   client?: unknown,
 ): Promise<void> {
   try {
@@ -407,17 +539,17 @@ export async function insertCreatorGrant(
       await (client as { query: (sql: string, params: unknown[]) => Promise<unknown> }).query(
         `INSERT INTO workshop_module_grants
            (module_rid, principal_type, principal_id, role, granted_by)
-         VALUES ($1, 'user', $2, 'editor', $2)
+         VALUES ($1, 'user', $2, 'editor', $3)
          ON CONFLICT (module_rid, principal_type, principal_id) DO NOTHING`,
-        [moduleRid, userId],
+        [moduleRid, principalId, grantedBy],
       );
     } else {
       await getWorkshopDb().query(
         `INSERT INTO workshop_module_grants
            (module_rid, principal_type, principal_id, role, granted_by)
-         VALUES ($1, 'user', $2, 'editor', $2)
+         VALUES ($1, 'user', $2, 'editor', $3)
          ON CONFLICT (module_rid, principal_type, principal_id) DO NOTHING`,
-        [moduleRid, userId],
+        [moduleRid, principalId, grantedBy],
       );
     }
   } catch (err) {

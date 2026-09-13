@@ -122,6 +122,8 @@ router.post('/:pipelineId/nodes/:nodeId/transforms/uppercase-column-names/previe
 router.post('/:pipelineId/nodes/:nodeId/transforms/uppercase-column-names/apply', authenticate, editor, pipelineController.uppercaseColumnNamesApply);
 router.post('/:pipelineId/nodes/:nodeId/transforms/row-size/preview', authenticate, viewer, pipelineController.rowSizePreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/row-size/apply', authenticate, editor, pipelineController.rowSizeApply);
+router.post('/:pipelineId/nodes/:nodeId/transforms/clean-string/preview', authenticate, viewer, pipelineController.cleanStringPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/clean-string/apply', authenticate, editor, pipelineController.cleanStringApply);
 router.post('/:pipelineId/nodes/:nodeId/transforms/apply-expression/preview', authenticate, viewer, pipelineController.applyExpressionPreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/apply-expression/apply', authenticate, editor, pipelineController.applyExpressionApply);
 router.post('/:pipelineId/nodes/:nodeId/transforms/case-expression/preview', authenticate, viewer, pipelineController.caseExpressionPreview);

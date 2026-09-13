@@ -72,16 +72,88 @@ export function formatObjectList(
     data.push(formatted);
   }
 
-  // Build next page token from last hit's sort values
+  // Build the next page token from the last hit's sort values.
+  //
+  // PITFALL: OpenSearch/Elasticsearch 7.5+ ONLY populates `hit._sort` for
+  // non-fielddata sort criteria. A sort clause consisting solely of `keyword`
+  // doc-value fields (e.g. the injected `__pk` tiebreaker) hits an
+  // optimization that omits `_sort` from every hit — which previously made
+  // `nextPageToken` permanently null on unfiltered (pk-only) sorts and broke
+  // cursor pagination end-to-end.
+  //
+  // Fallback: derive the cursor from `hit._source` using the EFFECTIVE sort
+  // fields (`orderBy` + `__pk` tiebreaker), preferring the property's
+  // `dataType: keyword` sub-field when a `text` parent is sorted. This is
+  // identical to what `search_after` needs — the raw doc-value — and keeps
+  // the token contract (`createPageToken` shape) unchanged.
   let nextPageToken: string | null = null;
   if (hasMore && hitsToReturn.length > 0) {
     const lastHit = hitsToReturn[hitsToReturn.length - 1];
-    if (lastHit._sort) {
-      nextPageToken = createPageToken(lastHit._sort, orderBy, objectTypeApiName, whereClause);
+    const sortValues = resolveHitSortValues(lastHit, orderBy);
+    if (sortValues) {
+      nextPageToken = createPageToken(sortValues, orderBy, objectTypeApiName, whereClause);
     }
   }
 
   return { data, nextPageToken, totalCount: totalValue };
+}
+
+// ---------------------------------------------------------------------------
+// Cursor fallback — doc-value recovery from `hit._source`
+// ---------------------------------------------------------------------------
+
+/** Lower-case keys for case-insensitive `__*` system-field lookups. */
+function sourceValue(
+  source: Record<string, unknown>,
+  field: string,
+): unknown {
+  if (Object.prototype.hasOwnProperty.call(source, field)) return source[field];
+  const lower = field.toLowerCase();
+  for (const key of Object.keys(source)) {
+    if (key.toLowerCase() === lower) return source[key];
+  }
+  return undefined;
+}
+
+/**
+ * The effective ordered sort fields mirroring `buildSortClause`
+ * (`orderBy` + `__pk` asc tiebreaker when absent). These MUST match the
+ * OpenSearch sort clause 1:1 — the cursor payload is positional.
+ */
+function effectiveSortFields(
+  orderBy: Array<{ field: string; direction: string }>,
+): string[] {
+  const fields = orderBy.map((o) => o.field);
+  if (!fields.some((f) => f === "__pk" || f === "__primaryKey")) {
+    fields.push("__pk");
+  }
+  return fields;
+}
+
+/**
+ * Recover the doc-value sort criteria for `hit` — preferring `hit._sort`
+ * (cheap, server-computed) and falling back to `hit._source` when the
+ * `_sort` optimization omitted it (keyword-only sort clauses).
+ * Returns null only when NEITHER source can satisfy the criteria — a
+ * genuinely unsortable page, in which case a null token (page considered
+ * last) is the safe degradation.
+ */
+export function resolveHitSortValues(
+  hit: { _sort?: unknown; _source?: Record<string, unknown> },
+  orderBy: Array<{ field: string; direction: string }>,
+): unknown[] | null {
+  const fields = effectiveSortFields(orderBy);
+  if (Array.isArray(hit._sort) && hit._sort.length === fields.length) {
+    return hit._sort as unknown[];
+  }
+  const source = hit._source ?? {};
+  const values: unknown[] = [];
+  for (const field of fields) {
+    const v = sourceValue(source, field);
+    if (v === undefined) return null;
+    values.push(v);
+  }
+  return values;
 }
 
 // ---------------------------------------------------------------------------

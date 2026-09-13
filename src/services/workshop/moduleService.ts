@@ -49,12 +49,15 @@ import {
 import { emitWorkshopAudit } from "./audit";
 import { WorkshopError } from "./errors";
 import { validateModule } from "./validator";
+import { insertCreatorGrant } from "./grantService";
 
 const MAX_DEFINITION_BYTES = 2 * 1024 * 1024;
 
 export interface Actor {
-  /** Multipass JWT subject (`sub` claim). */
+  /** Local Tellus users.id used by domain foreign keys and audit records. */
   userId: string;
+  /** Keycloak directory subject used by Workshop user grants. */
+  workshopPrincipalId?: string;
   /** Optional branch RID forwarded verbatim downstream (G-05). */
   branchRid?: string | null;
 }
@@ -236,33 +239,15 @@ export async function createModule(
       throw err;
     }
 
-    // Auto-grant creator editor on the module — makes per-module model
-    // work for users without global workshop roles. Best-effort: silently
-    // skip if the grants migration hasn't been applied yet (42P01).
-    try {
-      await client.query(
-        `INSERT INTO workshop_module_grants
-           (module_rid, principal_type, principal_id, role, granted_by)
-         VALUES ($1, 'user', $2, 'editor', $2)
-         ON CONFLICT (module_rid, principal_type, principal_id) DO NOTHING`,
-        [rid, actor.userId],
-      );
-    } catch (_e) {
-      // 42P01 = table missing → migration not yet applied. Log a warning
-      // in non-test environments so the operator notices the gap.
-      const e = _e as { code?: string };
-      if (e.code === "42P01") {
-        // eslint-disable-next-line no-console
-        if (process.env.NODE_ENV !== "test" && process.env.VITEST !== "true") {
-          console.warn(
-            "[workshop:create] workshop_module_grants table missing — " +
-              "migration 181 may not have been applied. Creator grant skipped.",
-          );
-        }
-      } else {
-        throw _e;
-      }
-    }
+    // Grant the creator Editor using the same Keycloak directory subject that
+    // the sharing UI persists for user principals. Keep the local users.id as
+    // granted_by so domain/audit identity remains FK-compatible.
+    await insertCreatorGrant(
+      rid,
+      actor.workshopPrincipalId ?? actor.userId,
+      actor.userId,
+      client,
+    );
 
     const response = rowToResponse(row);
     if (idemCtx) {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   replayUserEditsOnObjectMap,
+  staleInstancePrimaryKeys,
   type ReplayedEdit,
 } from "../../../src/services/reindexService";
 
@@ -222,5 +223,18 @@ describe("replayUserEditsOnObjectMap — persistent edits survive force reindex"
     ]);
 
     expect(map.get("SIG-1")!.signalStatus).toBe("CONFIRMED");
+  });
+});
+
+describe("staleInstancePrimaryKeys — replacement snapshot parity", () => {
+  it("prunes only rows absent from the final datasource + edit map", () => {
+    const final = new Set(["APP-1", "APP-2", "ACTION-CREATED"]);
+
+    expect(
+      staleInstancePrimaryKeys(
+        ["APP-1", "OLD-SNAPSHOT-1", "ACTION-CREATED", "OLD-SNAPSHOT-2"],
+        final,
+      ),
+    ).toEqual(["OLD-SNAPSHOT-1", "OLD-SNAPSHOT-2"]);
   });
 });

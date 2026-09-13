@@ -57,6 +57,39 @@ describe("evaluateSubmissionCriteria", () => {
     expect(denied.failures[0]).toMatch(/required user/);
   });
 
+  it("compares the authenticated current user with a live object property", () => {
+    const crit = {
+      conditions: [{
+        currentUser: "username",
+        parameter: "approvalId",
+        objectType: "RssbApprovalRequest",
+        objectProperty: "requestedByPrincipal",
+        operator: "ne",
+        description: "The maker cannot approve their own request.",
+      }],
+    };
+    const operands = {
+      "approvalId.requestedByPrincipal": "fraud.investigator@tellus.local",
+    };
+    expect(
+      evaluateSubmissionCriteria(
+        crit,
+        { approvalId: "APR-1" },
+        { username: "fraud.supervisor@tellus.local" },
+        operands,
+      ).ok,
+    ).toBe(true);
+
+    const denied = evaluateSubmissionCriteria(
+      crit,
+      { approvalId: "APR-1" },
+      { username: "fraud.investigator@tellus.local" },
+      operands,
+    );
+    expect(denied.ok).toBe(false);
+    expect(denied.failures[0]).toBe("The maker cannot approve their own request.");
+  });
+
   it("accepts a bare conditions array and ignores string labels", () => {
     const crit = [{ parameter: "x", operator: "gt", value: 0 }, "someLabel"];
     expect(evaluateSubmissionCriteria(crit, { x: 5 }).ok).toBe(true);

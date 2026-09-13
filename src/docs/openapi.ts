@@ -486,7 +486,14 @@ const baseSpec = {
       post: { tags: ['Authentication'], summary: 'Create user in Keycloak (superadmin)', responses: { '201': { description: 'User created' } } },
     },
     '/v1/auth/admin/users/{id}': {
+      patch: { tags: ['Authentication'], summary: 'Update user profile fields (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '200': { description: 'Updated' } } },
       delete: { tags: ['Authentication'], summary: 'Delete user and wipe MFA/PAT data (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '204': { description: 'Deleted' } } },
+    },
+    '/v1/auth/admin/users/{id}/passkeys': {
+      delete: { tags: ['Authentication'], summary: 'Reset all passkeys and revoke sessions (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '200': { description: 'Passkeys reset' } } },
+    },
+    '/v1/auth/admin/users/{id}/password-reset': {
+      post: { tags: ['Authentication'], summary: 'Set a replacement password and revoke sessions (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '200': { description: 'Password reset' } } },
     },
     '/v1/auth/admin/users/{id}/enabled': {
       patch: { tags: ['Authentication'], summary: 'Enable or disable a user (superadmin)', parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const } }], responses: { '200': { description: 'Updated' } } },

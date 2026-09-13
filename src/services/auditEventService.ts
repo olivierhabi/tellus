@@ -76,9 +76,12 @@ export type AuditAction =
   // superadmin console
   | 'admin.user.create'
   | 'admin.user.invite'
+  | 'admin.user.update'
   | 'admin.user.delete'
   | 'admin.user.enable'
   | 'admin.user.disable'
+  | 'admin.user.passkeys.reset'
+  | 'admin.user.password.reset'
   | 'admin.setting.update'
   | 'admin.role.create'
   | 'admin.role.update'
