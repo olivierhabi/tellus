@@ -377,10 +377,7 @@ jobs:
             sleep 1
           done
 
-          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
-          chmod +x /usr/local/bin/mc
-          mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-tests-bucket
+          node scripts/ci-create-s3-bucket.mjs tellus-tests-bucket
 
       - name: Start Keycloak and bootstrap realm
         run: |
@@ -553,10 +550,7 @@ jobs:
             sleep 1
           done
 
-          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
-          chmod +x /usr/local/bin/mc
-          mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-tests-e2e-bucket
+          node scripts/ci-create-s3-bucket.mjs tellus-tests-e2e-bucket
 
       - name: Create test data directory
         run: mkdir -p /tmp/ontology-testdata
@@ -707,10 +701,7 @@ jobs:
             sleep 1
           done
 
-          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
-          chmod +x /usr/local/bin/mc
-          mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-tests-perf-bucket
+          node scripts/ci-create-s3-bucket.mjs tellus-tests-perf-bucket
 
       - name: Run database migrations
         run: |
@@ -898,10 +889,7 @@ jobs:
             sleep 1
           done
 
-          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
-          chmod +x /usr/local/bin/mc
-          mc alias set ci http://localhost:9000 minioadmin minioadmin
-          mc mb --ignore-existing ci/tellus-tests-all-bucket
+          node scripts/ci-create-s3-bucket.mjs tellus-tests-all-bucket
 
       - name: Create test data directory
         run: mkdir -p /tmp/ontology-testdata
