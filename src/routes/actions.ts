@@ -101,6 +101,59 @@ function requestOrganizations(req: Request): string[] {
     : [];
 }
 
+/**
+ * Canonical external subject for Foundry-style `currentUserId` parameter
+ * bindings. `req.user.id` is Tellus's local shadow-user FK and must remain the
+ * audit `executedBy`; action parameters that carry a user identity need the
+ * Keycloak/Multipass subject instead.
+ */
+function requestCurrentUserId(req: Request): string {
+  const r = req as Request & {
+    tellusPrincipal?: { keycloakSub?: unknown };
+    auth?: { sub?: unknown };
+    keycloakUser?: { sub?: unknown };
+    security?: { userId?: unknown };
+    user?: { id?: unknown };
+  };
+  const candidates = [
+    r.tellusPrincipal?.keycloakSub,
+    r.auth?.sub,
+    r.keycloakUser?.sub,
+    r.security?.userId,
+    r.user?.id,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return "system";
+}
+
+/**
+ * Human-readable authenticated principal for `Current User · username`
+ * submission criteria. Keep this distinct from both the local shadow-user
+ * UUID (`req.user.id`) and the immutable Keycloak subject (`sub`). Approval
+ * ledgers commonly persist the maker's login/email, so comparing against a
+ * UUID here would make maker/checker segregation fail open.
+ */
+function requestCurrentUsername(req: Request): string | undefined {
+  const r = req as Request & {
+    auth?: { preferred_username?: unknown; email?: unknown };
+    keycloakUser?: { preferred_username?: unknown; email?: unknown };
+    user?: { email?: unknown; displayName?: unknown };
+  };
+  const candidates = [
+    r.auth?.preferred_username,
+    r.auth?.email,
+    r.keycloakUser?.preferred_username,
+    r.keycloakUser?.email,
+    r.user?.email,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // POST /:actionTypeApiName/apply — Execute an action
 // ---------------------------------------------------------------------------
@@ -164,6 +217,8 @@ router.post(
             requests: selected.map((transactionId) => ({ parameters: { transactionId, batchId } })),
             contextFor: () => ({
               executedBy: (req as any).user?.id || "system",
+              currentUserId: requestCurrentUserId(req),
+              currentUsername: requestCurrentUsername(req),
               correlationId: requestCorrelationId(req),
               tenant: resolveRequestTenant(req),
               sourceIp: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null,
@@ -239,6 +294,8 @@ router.post(
         | undefined;
       const context = {
         executedBy: (req as any).user?.id || "system",
+        currentUserId: requestCurrentUserId(req),
+        currentUsername: requestCurrentUsername(req),
         // The correlation middleware preserves a caller-provided value in
         // req.correlationId. Read the header as a fallback for route-level
         // tests and deployments that mount this router before that middleware.
@@ -454,6 +511,8 @@ router.post(
                 | undefined;
               return {
                 executedBy: (req as any).user?.id || "system",
+                currentUserId: requestCurrentUserId(req),
+                currentUsername: requestCurrentUsername(req),
                 correlationId: requestCorrelationId(req),
                 tenant: resolveRequestTenant(req),
                 sourceIp: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null,
@@ -576,6 +635,8 @@ router.post(
           | undefined;
         const context = {
           executedBy: (req as any).user?.id || "system",
+          currentUserId: requestCurrentUserId(req),
+          currentUsername: requestCurrentUsername(req),
           correlationId: requestCorrelationId(req),
           tenant: resolveRequestTenant(req),
           sourceIp:
@@ -813,6 +874,8 @@ router.post(
       const { parameters = {} } = req.body || {};
       const context = {
         executedBy: (req as any).user?.id || "system",
+        currentUserId: requestCurrentUserId(req),
+        currentUsername: requestCurrentUsername(req),
         roles: (req as any).user?.roles || [],
         groups: (req as any).user?.groups || [],
         // Org membership for `{ organization }` submission criteria.
@@ -890,6 +953,8 @@ validateRouter.post(
       const { parameters = {} } = req.body || {};
       const context = {
         executedBy: (req as any).user?.id || "system",
+        currentUserId: requestCurrentUserId(req),
+        currentUsername: requestCurrentUsername(req),
         roles: (req as any).user?.roles || [],
         groups: (req as any).user?.groups || [],
         // Org membership for `{ organization }` submission criteria.
@@ -951,6 +1016,8 @@ function rwandaBulkExecutionContext(req: Request, body: any, index: number) {
     | undefined;
   return {
     executedBy: (req as any).user?.id || "system",
+    currentUserId: requestCurrentUserId(req),
+    currentUsername: requestCurrentUsername(req),
     correlationId: requestCorrelationId(req),
     tenant: resolveRequestTenant(req),
     sourceIp: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null,
@@ -1128,6 +1195,8 @@ batchRouter.post(
           | undefined;
         const context = {
           executedBy: (req as any).user?.id || "system",
+          currentUserId: requestCurrentUserId(req),
+          currentUsername: requestCurrentUsername(req),
           correlationId: requestCorrelationId(req),
           tenant: resolveRequestTenant(req),
           sourceIp:
@@ -1410,6 +1479,8 @@ router.post(
       let failedCount = 0;
       const context = {
         executedBy: (req as any).user?.id || "system",
+        currentUserId: requestCurrentUserId(req),
+        currentUsername: requestCurrentUsername(req),
         correlationId: requestCorrelationId(req),
         tenant: resolveRequestTenant(req),
         sourceIp:

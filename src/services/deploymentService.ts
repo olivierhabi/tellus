@@ -2405,6 +2405,15 @@ export class DeploymentService {
         .where({ id: existingDatasetId })
         .update(datasetPatch);
       datasetId = existingDatasetId;
+      // Keep the output node's relational binding in sync with its config.
+      // This also repairs a legitimately adopted/orphaned dataset where
+      // outputDatasetId was known but pipeline_nodes.dataset_id was null.
+      await this.knex('pipeline_nodes')
+        .where({ id: args.outputNode.id, pipeline_id: args.pipelineId })
+        .update({
+          dataset_id: datasetId,
+          config: JSON.stringify({ ...args.cfg, outputDatasetId: datasetId }),
+        });
       await this.knex('dataset_columns').where({ dataset_id: datasetId }).del();
     } else {
       // Foundry parity — a new output lands in the pipeline's own folder,
@@ -2661,9 +2670,13 @@ export class DeploymentService {
           throw resolveErr;
         }
 
-        if (data.rows.length === 0) {
-          throw new Error('Upstream chain produced zero rows');
-        }
+        // A zero-row result is still a valid dataset build as long as the
+        // upstream chain resolved a schema. This matters for quarantine and
+        // exception outputs: a healthy run commonly produces no records, but
+        // Foundry still materializes the dataset/output so downstream schema
+        // and lineage remain stable. The serializers below already receive
+        // `data.columns`, so an empty build can publish headers/schema without
+        // manufacturing a sentinel row.
 
         // ── Defense-in-depth: deploy-output schema invariant ──────
         // If the output node's immediate upstream is a join or union,
@@ -3182,6 +3195,16 @@ export class DeploymentService {
               updated_by: triggeredBy,
             });
           datasetId = existingDatasetId;
+          // `outputDatasetId` is the durable ownership reference, while
+          // pipeline_nodes.dataset_id drives catalog/UI joins. Keep both
+          // representations synchronized on every build, including adoption
+          // of a pre-existing dataset after an interrupted first deploy.
+          await this.knex('pipeline_nodes')
+            .where({ id: outputNode.id, pipeline_id: pipelineId })
+            .update({
+              dataset_id: datasetId,
+              config: JSON.stringify({ ...cfg, outputDatasetId: datasetId }),
+            });
           await this.knex('dataset_columns').where({ dataset_id: datasetId }).del();
         } else {
           // Foundry parity — a new output lands in the pipeline's own
@@ -3380,7 +3403,15 @@ export class DeploymentService {
 
     const durationMs = Date.now() - startedAt;
     const succeededCount = buildResults.filter((r) => r.status === 'succeeded').length;
-    const overallStatus = succeededCount > 0 ? 'succeeded' : 'failed';
+    const failedCount = buildResults.filter((r) => r.status === 'failed').length;
+    // A multi-output deployment is atomic at the deployment-status level:
+    // every requested output must build successfully. Previously one healthy
+    // output could mask failures in its siblings and mark the deploy
+    // `succeeded`, which made the Pipeline Builder UI report a false success.
+    const overallStatus =
+      failedCount === 0 && succeededCount === outputNodes.length
+        ? 'succeeded'
+        : 'failed';
 
     await this.knex('pipeline_deployments')
       .where({ id: deploymentId })

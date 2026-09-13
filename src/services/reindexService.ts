@@ -405,6 +405,23 @@ export function replayUserEditsOnObjectMap(
   return stats;
 }
 
+/**
+ * Return rows that exist in Object Storage but are absent from the fully
+ * rebuilt datasource + persistent-edit snapshot.
+ *
+ * A force reindex has replacement semantics: after Step 6, `objectMap` is
+ * the complete state that should be visible for the object type. Historical
+ * create/update/delete edits have already been replayed into that map, so an
+ * instance missing from it is an obsolete row from an older datasource
+ * snapshot and must not remain visible to Functions v2 (`Objects.search`).
+ */
+export function staleInstancePrimaryKeys(
+  existingPrimaryKeys: readonly string[],
+  finalPrimaryKeys: ReadonlySet<string>,
+): string[] {
+  return existingPrimaryKeys.filter((pk) => !finalPrimaryKeys.has(pk));
+}
+
 // ---------------------------------------------------------------------------
 // Helper: read a CSV file and return rows
 // ---------------------------------------------------------------------------
@@ -1213,6 +1230,48 @@ export async function reindexObjectType(
     // already wait_for'd — in which case `batch` is empty).
     await flushBatch("wait_for");
     await bulkUpsertInstances(instanceRows.splice(0));
+
+    // A datasource reindex is a replacement snapshot. `objectMap` already
+    // contains the datasource rows plus every persistent create/update edit
+    // replayed in Step 6, and excludes rows removed by persistent deletes.
+    // Prune main-branch Object Storage rows that are not in that final map so
+    // Functions v2 (`Objects.search`) observes the same state as the newly
+    // built OpenSearch generation. Previously these rows accumulated across
+    // successive snapshots, making Workshop tables and Function KPIs disagree.
+    const mainBranchId = deriveMainBranchId(ontologyId);
+    const existingInstanceRows = await query(
+      `SELECT primary_key
+         FROM object_instances
+        WHERE ontology_id = $1
+          AND branch_id = $2
+          AND object_type_api_name = $3`,
+      [ontologyId, mainBranchId, objectTypeApiName],
+    );
+    const staleInstancePks = staleInstancePrimaryKeys(
+      existingInstanceRows.rows.map((row) => String(row.primary_key)),
+      new Set(objectMap.keys()),
+    );
+    for (let offset = 0; offset < staleInstancePks.length; offset += 10_000) {
+      await query(
+        `DELETE FROM object_instances
+          WHERE ontology_id = $1
+            AND branch_id = $2
+            AND object_type_api_name = $3
+            AND primary_key = ANY($4::text[])`,
+        [
+          ontologyId,
+          mainBranchId,
+          objectTypeApiName,
+          staleInstancePks.slice(offset, offset + 10_000),
+        ],
+      );
+    }
+    if (staleInstancePks.length > 0) {
+      console.log(
+        `[Reindex] Step 7+9: Pruned ${staleInstancePks.length} obsolete ` +
+          `object_instances row(s) for '${objectTypeApiName}'`,
+      );
+    }
 
     // The datasource documents above are assembled before Object Storage's
     // upsert decides whether an existing row keeps or increments its version.

@@ -46,13 +46,40 @@ const ONTOLOGY = `ri.ontology.main.ontology.${randomUUID()}`;
 let ctx: SchemaContext | null = null;
 let pgAvailable = true;
 
-function buildApp(roles: string[] | undefined): Express {
+function buildApp(
+  roles: string[] | undefined,
+  userId = "u-rbac",
+): Express {
   const app = express();
   app.use(express.json({ limit: "5mb" }));
   app.use((req, _res, next) => {
     (req as unknown as { user: { id: string; roles?: string[] } }).user = {
-      id: "u-rbac",
+      id: userId,
       ...(roles !== undefined ? { roles } : {}),
+    };
+    next();
+  });
+  app.use("/api/v1/workshop", workshopModulesRouter);
+  return app;
+}
+
+function buildPrincipalApp(args: {
+  localUserId: string;
+  keycloakSub: string;
+  roles: string[];
+}): Express {
+  const app = express();
+  app.use(express.json({ limit: "5mb" }));
+  app.use((req, _res, next) => {
+    (req as unknown as { user: { id: string; roles: string[] } }).user = {
+      id: args.localUserId,
+      roles: args.roles,
+    };
+    (req as unknown as {
+      tellusPrincipal: { userId: string; keycloakSub: string };
+    }).tellusPrincipal = {
+      userId: args.localUserId,
+      keycloakSub: args.keycloakSub,
     };
     next();
   });
@@ -160,7 +187,7 @@ describe("G-06 — RBAC authz", () => {
     const etag = created.headers.etag as string;
 
     // Try to PUT as viewer.
-    const viewer = buildApp(["workshop-viewer"]);
+    const viewer = buildApp(["workshop-viewer"], "u-put-viewer");
     const r = await request(viewer)
       .put(`/api/v1/workshop/modules/${encodeURIComponent(rid)}`)
       .set("If-Match", etag)
@@ -185,7 +212,7 @@ describe("G-06 — RBAC authz", () => {
     const rid = created.body.rid as string;
     const etag = created.headers.etag as string;
 
-    const viewer = buildApp(["workshop-viewer"]);
+    const viewer = buildApp(["workshop-viewer"], "u-delete-viewer");
     const r = await request(viewer)
       .delete(`/api/v1/workshop/modules/${encodeURIComponent(rid)}`)
       .set("If-Match", etag);
@@ -208,7 +235,7 @@ describe("G-06 — RBAC authz", () => {
       });
     const rid = created.body.rid as string;
 
-    const viewer = buildApp(["workshop-viewer"]);
+    const viewer = buildApp(["workshop-viewer"], "u-publish-viewer");
     const r = await request(viewer)
       .post(
         `/api/v1/workshop/modules/${encodeURIComponent(rid)}/versions:publish`,
@@ -252,7 +279,7 @@ describe("G-06 — RBAC authz", () => {
         });
       const rid = created.body.rid as string;
 
-      const viewer = buildApp(["workshop-viewer"]);
+      const viewer = buildApp(["workshop-viewer"], "u-draft-viewer");
       const fetched = await request(viewer).get(
         `/api/v1/workshop/modules/${encodeURIComponent(rid)}`,
       );
@@ -301,7 +328,7 @@ describe("G-06 — RBAC authz", () => {
         .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
         .send({ semver: "1.0.0" });
 
-      const viewer = buildApp(["workshop-viewer"]);
+      const viewer = buildApp(["workshop-viewer"], "u-rollback-viewer");
       const r = await request(viewer)
         .post(`/api/v1/workshop/modules/${rid}/actions/rollback`)
         .send({ semver: "1.0.0" });
@@ -557,6 +584,186 @@ describe("G-06 — RBAC authz", () => {
           definition: emptyDef(),
         });
       expect(r.status).toBe(201);
+    },
+  );
+
+  itp(
+    "C-16: global Viewer + module Editor resolves to Editor",
+    async () => {
+      const admin = buildApp(["tellus-superadmin"]);
+      const created = await request(admin)
+        .post("/api/v1/workshop/modules")
+        .set("Idempotency-Key", randomUUID())
+        .send({
+          displayName: `rbac-max-role-${Date.now()}`,
+          description: null,
+          parentFolderRid: FOLDER,
+          ontologyRid: ONTOLOGY,
+          branchRid: null,
+          definition: emptyDef(),
+        });
+      const rid = created.body.rid as string;
+      await request(admin)
+        .post(`/api/v1/workshop/modules/${rid}/grants`)
+        .send({ principalType: "user", principalId: "u-rbac", role: "editor" });
+
+      const viewer = buildApp(["workshop-viewer"]);
+      const draft = await request(viewer).get(`/api/v1/workshop/modules/${rid}`);
+      expect(draft.status).toBe(200);
+    },
+  );
+
+  itp(
+    "C-17: module Editor can administer grants while Viewer cannot",
+    async () => {
+      const admin = buildApp(["tellus-superadmin"]);
+      const created = await request(admin)
+        .post("/api/v1/workshop/modules")
+        .set("Idempotency-Key", randomUUID())
+        .send({
+          displayName: `rbac-grant-admin-${Date.now()}`,
+          description: null,
+          parentFolderRid: FOLDER,
+          ontologyRid: ONTOLOGY,
+          branchRid: null,
+          definition: emptyDef(),
+        });
+      const rid = created.body.rid as string;
+      await request(admin)
+        .post(`/api/v1/workshop/modules/${rid}/grants`)
+        .send({ principalType: "user", principalId: "module-editor", role: "editor" });
+      await request(admin)
+        .post(`/api/v1/workshop/modules/${rid}/grants`)
+        .send({ principalType: "user", principalId: "module-viewer", role: "viewer" });
+
+      const editorApp = buildPrincipalApp({
+        localUserId: "local-editor",
+        keycloakSub: "module-editor",
+        roles: [],
+      });
+      const editorList = await request(editorApp).get(
+        `/api/v1/workshop/modules/${rid}/grants`,
+      );
+      expect(editorList.status).toBe(200);
+
+      const viewerApp = buildPrincipalApp({
+        localUserId: "local-viewer",
+        keycloakSub: "module-viewer",
+        roles: [],
+      });
+      const viewerList = await request(viewerApp).get(
+        `/api/v1/workshop/modules/${rid}/grants`,
+      );
+      expect(viewerList.status).toBe(403);
+    },
+  );
+
+  itp(
+    "C-18: revoking Editor is effective on the next authorization decision",
+    async () => {
+      const admin = buildApp(["tellus-superadmin"]);
+      const created = await request(admin)
+        .post("/api/v1/workshop/modules")
+        .set("Idempotency-Key", randomUUID())
+        .send({
+          displayName: `rbac-revoke-${Date.now()}`,
+          description: null,
+          parentFolderRid: FOLDER,
+          ontologyRid: ONTOLOGY,
+          branchRid: null,
+          definition: emptyDef(),
+        });
+      const rid = created.body.rid as string;
+      await request(admin)
+        .post(`/api/v1/workshop/modules/${rid}/grants`)
+        .send({ principalType: "user", principalId: "revoked-editor", role: "editor" });
+
+      const editorApp = buildPrincipalApp({
+        localUserId: "local-revoked",
+        keycloakSub: "revoked-editor",
+        roles: [],
+      });
+      expect((await request(editorApp).get(`/api/v1/workshop/modules/${rid}`)).status).toBe(200);
+
+      const removed = await request(admin).delete(
+        `/api/v1/workshop/modules/${rid}/grants/user/revoked-editor`,
+      );
+      expect(removed.status).toBe(204);
+      expect((await request(editorApp).get(`/api/v1/workshop/modules/${rid}`)).status).toBe(404);
+    },
+  );
+
+  itp(
+    "C-19: Keycloak directory subject grant matches a different local users.id",
+    async () => {
+      const admin = buildApp(["tellus-superadmin"]);
+      const created = await request(admin)
+        .post("/api/v1/workshop/modules")
+        .set("Idempotency-Key", randomUUID())
+        .send({
+          displayName: `rbac-subject-${Date.now()}`,
+          description: null,
+          parentFolderRid: FOLDER,
+          ontologyRid: ONTOLOGY,
+          branchRid: null,
+          definition: emptyDef(),
+        });
+      const rid = created.body.rid as string;
+      await request(admin)
+        .post(`/api/v1/workshop/modules/${rid}/versions:publish`)
+        .send({ semver: "1.0.0" });
+      await request(admin)
+        .post(`/api/v1/workshop/modules/${rid}/grants`)
+        .send({ principalType: "user", principalId: "kc-subject", role: "viewer" });
+
+      const subjectApp = buildPrincipalApp({
+        localUserId: "local-subject-user",
+        keycloakSub: "kc-subject",
+        roles: [],
+      });
+      expect(
+        (await request(subjectApp).get(`/api/v1/workshop/modules/${rid}/published`)).status,
+      ).toBe(200);
+      expect(
+        (await request(subjectApp).get(`/api/v1/workshop/modules/${rid}`)).status,
+      ).toBe(403);
+    },
+  );
+
+  itp(
+    "C-20: module creation stores the canonical directory subject as creator Editor",
+    async () => {
+      const creator = buildPrincipalApp({
+        localUserId: "local-creator",
+        keycloakSub: "kc-creator",
+        roles: ["workshop-editor"],
+      });
+      const created = await request(creator)
+        .post("/api/v1/workshop/modules")
+        .set("Idempotency-Key", randomUUID())
+        .send({
+          displayName: `rbac-creator-subject-${Date.now()}`,
+          description: null,
+          parentFolderRid: FOLDER,
+          ontologyRid: ONTOLOGY,
+          branchRid: null,
+          definition: emptyDef(),
+        });
+      expect(created.status).toBe(201);
+      const rid = created.body.rid as string;
+
+      const grants = await request(creator).get(`/api/v1/workshop/modules/${rid}/grants`);
+      expect(grants.status).toBe(200);
+      expect(grants.body.grants).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            principalType: "user",
+            principalId: "kc-creator",
+            role: "editor",
+            grantedBy: "local-creator",
+          }),
+        ]),
+      );
     },
   );
 });

@@ -162,7 +162,6 @@ export class KeycloakAdminService {
     path: string,
     opts: { body?: unknown; query?: Record<string, string | undefined>; parseJson?: boolean } = {},
   ): Promise<T> {
-    const token = await this.getToken();
     const qs = opts.query
       ? '?' +
         Object.entries(opts.query)
@@ -175,21 +174,36 @@ export class KeycloakAdminService {
     // covers the p99 realm-scan latency on slow clusters; anything
     // longer surfaces as a typed 502 instead of hanging the event loop.
     // F-P4-11: shared breaker with getToken() — one wedge trips both.
-    const res = await withBreaker(
-      'kc',
-      () =>
-        fetch(url, {
-          method,
-          headers: {
-            Authorization: `Bearer ${token}`,
-            ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
-          },
-          body: opts.body ? JSON.stringify(opts.body) : undefined,
-          signal: AbortSignal.timeout(8_000),
-        }),
-      {},
-      isKcFailure,
-    );
+    const request = (token: string) =>
+      withBreaker(
+        'kc',
+        () =>
+          fetch(url, {
+            method,
+            headers: {
+              Authorization: `Bearer ${token}`,
+              ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+            },
+            body: opts.body ? JSON.stringify(opts.body) : undefined,
+            signal: AbortSignal.timeout(8_000),
+          }),
+        {},
+        isKcFailure,
+      );
+
+    let token = await this.getToken();
+    let res = await request(token);
+
+    // Keycloak invalidates otherwise unexpired access tokens after realm or
+    // signing-key changes. Discard only the token used by this request (a
+    // concurrent request may already have refreshed it), then retry once.
+    // Without this path every admin-backed surface stays broken until the API
+    // process restarts, including automation user discovery.
+    if (res.status === 401) {
+      if (this.token?.value === token) this.token = null;
+      token = await this.getToken();
+      res = await request(token);
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       if (res.status === 404) {
@@ -576,6 +590,22 @@ export class KeycloakAdminService {
   async setUserEnabled(userId: string, enabled: boolean): Promise<void> {
     await this.call('PUT', `/users/${userId}`, {
       body: { enabled },
+      parseJson: false,
+    });
+  }
+
+  /**
+   * Update the editable profile fields for an existing Keycloak user.
+   * Username is intentionally immutable in the tellus realm
+   * (`editUsernameAllowed=false`); email remains independently editable
+   * because `loginWithEmailAllowed=true`.
+   */
+  async updateUserProfile(
+    userId: string,
+    profile: { email: string; firstName: string; lastName: string },
+  ): Promise<void> {
+    await this.call('PUT', `/users/${userId}`, {
+      body: profile,
       parseJson: false,
     });
   }

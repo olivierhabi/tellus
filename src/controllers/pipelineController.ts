@@ -35,6 +35,8 @@ import {
   UppercaseColumnNamesApplySchema,
   RowSizePreviewSchema,
   RowSizeApplySchema,
+  CleanStringPreviewSchema,
+  CleanStringApplySchema,
   ApplyExpressionPreviewSchema,
   ApplyExpressionApplySchema,
   CaseExpressionPreviewSchema,
@@ -1050,6 +1052,33 @@ export class PipelineController {
       const bodyParsed = UppercaseColumnNamesApplySchema.safeParse(req.body);
       if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
       const node = await this.transformService.uppercaseColumnNamesApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Clean String ------------------------------------------------------
+  cleanStringPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = CleanStringPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.cleanStringPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  cleanStringApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = CleanStringApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.cleanStringApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
       res.json({ success: true, data: node });
     } catch (error) { next(error); }
   };

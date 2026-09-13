@@ -20,6 +20,7 @@ import {
   compareIdentities,
   sortedLockIdentities,
   dedupeIdentities,
+  acquireRowLocks,
   type LockIdentity,
 } from "../../../src/actions/actionLockManager";
 
@@ -398,6 +399,32 @@ describe("actionLockManager — key determinism and ordering", () => {
     const a: LockIdentity = { ontologyId: "o", branchId: "b", objectType: "T", primaryKey: 1 };
     const dup: LockIdentity = { ontologyId: "o", branchId: "b", objectType: "T", primaryKey: 1 };
     expect(dedupeIdentities([a, dup, a])).toHaveLength(1);
+  });
+
+  it("row locks are scoped to the exact ontology and branch identity", async () => {
+    const query = async (sql: string, params: unknown[]) => {
+      expect(sql).toContain("ontology_id = $1::uuid");
+      expect(sql).toContain("branch_id = $2::uuid");
+      expect(sql).toContain("object_type_api_name = $3");
+      expect(sql).toContain("primary_key = $4");
+      expect(params).toEqual([
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "Approval",
+        "APR-1",
+      ]);
+      return { rowCount: 1, rows: [{ "?column?": 1 }] };
+    };
+    const identity: LockIdentity = {
+      ontologyId: "11111111-1111-4111-8111-111111111111",
+      branchId: "22222222-2222-4222-8222-222222222222",
+      objectType: "Approval",
+      primaryKey: "APR-1",
+    };
+
+    const locked = await acquireRowLocks({ query } as any, [identity]);
+
+    expect(locked).toEqual([identity]);
   });
 });
 

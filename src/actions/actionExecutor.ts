@@ -91,6 +91,7 @@ import {
   type FunctionActionBinding,
   type FunctionActionParameterDefinition,
 } from "./functionActionExecutor";
+import { resolveFunctionInputs } from "./functionInputResolver";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -99,6 +100,10 @@ import {
 /** Context provided by the caller (route handler). */
 export interface ExecutionContext {
   executedBy: string;
+  /** Canonical Keycloak/Multipass subject used for currentUserId bindings. */
+  currentUserId?: string;
+  /** Authenticated username/email used by `Current User · username` criteria. */
+  currentUsername?: string;
   /**
    * UI/request trace identifier. When supplied it is propagated unchanged to
    * action plans, writebacks, and audit entries; executionId remains the
@@ -573,7 +578,7 @@ export async function executeAction(
       objectExists,
       fetchObject,
       {
-        currentUserId: context.executedBy,
+        currentUserId: context.currentUserId ?? context.executedBy,
         userExists: async (userId) => {
           const user = await getKeycloakAdminService().getUserById(userId);
           return user?.enabled === true;
@@ -690,7 +695,15 @@ export async function executeAction(
         actionType.submission_criteria,
         resolvedParameters as Record<string, unknown>,
         {
-          username: context.executedBy ?? undefined,
+          // `executedBy` is retained as the audit/display identity, while
+          // `subjectIdentifier` / `currentUserId` are the canonical security
+          // principal values used by Current User submission criteria.
+          username:
+            context.currentUsername
+            ?? context.subjectIdentifier
+            ?? context.executedBy
+            ?? undefined,
+          userId: context.currentUserId ?? undefined,
           roles: context.roles ?? [],
           groups: context.groups ?? [],
           // Multipass organizations + execution context back the OM editor's
@@ -757,10 +770,20 @@ export async function executeAction(
         );
         return result;
       }
+      const functionBinding = actionType.function_config as FunctionActionBinding;
+      const functionParameters = await resolveFunctionInputs({
+        inputs: functionBinding.inputs,
+        resolvedParameters: resolvedParameters as Record<string, unknown>,
+        parameterDefinitions:
+          actionType.parameters as FunctionActionParameterDefinition[],
+        currentUserId: context.currentUserId ?? context.executedBy,
+        executedBy: context.executedBy || "system",
+        objectFetcher: fetchObject,
+      });
       const functionExecution = await executeFunctionAction({
         ontologyId,
-        binding: actionType.function_config as FunctionActionBinding,
-        parameters: resolvedParameters as Record<string, unknown>,
+        binding: functionBinding,
+        parameters: functionParameters,
         parameterDefinitions:
           actionType.parameters as FunctionActionParameterDefinition[],
         executedBy: context.executedBy || "system",
@@ -1165,6 +1188,84 @@ export async function executeAction(
       context.branchId,
     );
 
+    // Every mutated object participates in the shared action lock protocol,
+    // regardless of action-semantics version. Submission criteria may depend
+    // on live object state (for example status=PENDING); serializing by the
+    // mutation identity lets us re-read that state authoritatively inside the
+    // same transaction and prevents two independent checker sessions from
+    // both deciding the same request.
+    const mutationLockIdentities: LockIdentity[] = compilation.edits.map((edit) => ({
+      ontologyId,
+      branchId: resolvedBranchId,
+      objectType: edit.objectType,
+      primaryKey: edit.primaryKey,
+    }));
+
+    const revalidateSubmissionCriteriaAfterLock = async (pg: PoolClient) => {
+      if (actionType?.submission_criteria == null) return;
+
+      const lockedFetcher = async (
+        objectType: string,
+        primaryKey: string,
+      ): Promise<Record<string, unknown> | null> => {
+        // Prefer the canonical transaction-local object state. The row has
+        // already been SELECT ... FOR UPDATE by acquireActionLocks when it
+        // exists. Dataset-seeded objects may not yet have an object_instances
+        // row; in that transitional case fall back to the same indexed-object
+        // contract used by Stage 3. After the first writer commits, subsequent
+        // contenders will observe the newly materialized row here.
+        try {
+          const row = await pg.query<{ properties: Record<string, unknown> | null }>(
+            `SELECT properties FROM object_instances
+              WHERE ontology_id = $1::uuid
+                AND branch_id = $2::uuid
+                AND object_type_api_name = $3
+                AND primary_key = $4
+              LIMIT 1`,
+            [ontologyId, resolvedBranchId, objectType, primaryKey],
+          );
+          const properties = row.rows[0]?.properties;
+          if (properties && typeof properties === "object") return properties;
+        } catch {
+          // Transitional deployments can lack object_instances; the indexed
+          // fallback below preserves the existing read contract.
+        }
+        return fetchObject(objectType, primaryKey);
+      };
+
+      const objectPropertyValues = await resolveObjectPropertyOperands(
+        actionType.submission_criteria,
+        resolvedParameters as Record<string, unknown>,
+        actionType.parameters as ReadonlyArray<{ apiName: string; objectType?: string }>,
+        lockedFetcher,
+      );
+      const submission = evaluateSubmissionCriteria(
+        actionType.submission_criteria,
+        resolvedParameters as Record<string, unknown>,
+        {
+          username:
+            context.currentUsername
+            ?? context.subjectIdentifier
+            ?? context.executedBy
+            ?? undefined,
+          userId: context.currentUserId ?? undefined,
+          roles: context.roles ?? [],
+          groups: context.groups ?? [],
+          organizations: context.organizations ?? [],
+          executionContext: context.executionContext ?? undefined,
+        },
+        objectPropertyValues,
+      );
+      if (!submission.ok) {
+        throw new OntologyError(
+          `Submission criteria not met: ${submission.failures.join("; ")}`,
+          "SUBMISSION_CRITERIA_NOT_MET",
+          422,
+          { failures: submission.failures, executionId },
+        );
+      }
+    };
+
     // Migration 173 — "Testing on branches". Off by default: an action
     // rehearsed on a branch must not call a real external endpoint or
     // email real users. `isNonMainBranch` fails safe toward "this is
@@ -1260,7 +1361,11 @@ export async function executeAction(
       ontologyId,
       branchId: resolvedBranchId,
       semanticsVersion: semantics.semanticsVersion,
-      plannedLockIdentities: v2PlannedLocks,
+      plannedLockIdentities: [
+        ...mutationLockIdentities,
+        ...(v2PlannedLocks ?? []),
+      ],
+      revalidateSubmissionCriteriaAfterLock,
       transactionClient: context.transactionClient,
       deferSearchProjection: context.deferSearchProjection,
       v2RevalidateAfterLock: v2Revalidate,

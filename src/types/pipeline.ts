@@ -504,6 +504,40 @@ export const RowSizeApplySchema = z.object({
 export type RowSizeApplyInput = z.infer<typeof RowSizeApplySchema>;
 
 // ---------------------------------------------------------------------------
+// Clean String transform — trim / normalize whitespace / nullify empty values
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-expression/cleanStringV1
+// ---------------------------------------------------------------------------
+
+export const CleanStringActionsSchema = z.object({
+  /** Trim leading and trailing whitespace (Palantir `Trim`). */
+  trim: z.boolean().optional(),
+  /** Collapse runs of internal whitespace to a single space (Palantir `Normalize whitespace`). */
+  normalizeWhitespace: z.boolean().optional(),
+  /** Convert empty strings (after trimming, when enabled) to null (Palantir `Nullify empty`). */
+  nullifyEmpty: z.boolean().optional(),
+});
+
+export type CleanStringActions = z.infer<typeof CleanStringActionsSchema>;
+
+const cleanStringFields = {
+  /** Columns to clean. Omitted/empty = every column. */
+  columns: z.array(z.string().trim().min(1)).optional(),
+  actions: CleanStringActionsSchema.default({ trim: true }),
+};
+
+export const CleanStringPreviewSchema = z.object({
+  ...cleanStringFields,
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+
+export type CleanStringPreviewInput = z.infer<typeof CleanStringPreviewSchema>;
+
+export const CleanStringApplySchema = z.object(cleanStringFields);
+
+export type CleanStringApplyInput = z.infer<typeof CleanStringApplySchema>;
+
+// ---------------------------------------------------------------------------
 // Shared binary-expression model used by Apply Expression,
 // Apply Multiple Expressions, Apply to Multiple Columns, and
 // Compute if Expression Absent.
@@ -521,6 +555,42 @@ export const BINARY_OPERATORS = [
   '<',
   '>=',
   '<=',
+  // Datetime operators — Palantir Pipeline Builder parity:
+  //   `left <op> right`
+  //   *_between  ⇔  timestampDiffV1(End=left, Start=right, Unit)  → Long
+  //   add_*      ⇔  timestampAddV1(Timestamp=left, Unit, Value=right) → Timestamp
+  // Reference: https://www.palantir.com/docs/foundry/pb-functions-expression/timestampDiffV1
+  //            https://www.palantir.com/docs/foundry/pb-functions-expression/timestampAddV1
+  'seconds_between',
+  'minutes_between',
+  'hours_between',
+  'days_between',
+  'add_seconds',
+  'add_minutes',
+  'add_hours',
+  'add_days',
+] as const;
+
+/**
+ * Operators that read both operands as date/timestamps and return a Long
+ * difference (Palantir `timestampDiffV1`). Null in → null out.
+ */
+export const DATETIME_DIFF_OPERATORS = [
+  'seconds_between',
+  'minutes_between',
+  'hours_between',
+  'days_between',
+] as const;
+
+/**
+ * Operators that read the left operand as a timestamp and the right as an
+ * integer amount, returning a shifted timestamp (Palantir `timestampAddV1`).
+ */
+export const DATETIME_ADD_OPERATORS = [
+  'add_seconds',
+  'add_minutes',
+  'add_hours',
+  'add_days',
 ] as const;
 
 export type BinaryOperator = (typeof BINARY_OPERATORS)[number];

@@ -44,6 +44,8 @@ import type {
   UppercaseColumnNamesApplyInput,
   RowSizePreviewInput,
   RowSizeApplyInput,
+  CleanStringPreviewInput,
+  CleanStringApplyInput,
   ApplyExpressionPreviewInput,
   ApplyExpressionApplyInput,
   CaseExpressionPreviewInput,
@@ -133,6 +135,10 @@ import {
   uppercaseColumnNamesApply as uppercaseColumnNamesApplyOp,
   uppercaseColumnNamesPreview as uppercaseColumnNamesPreviewOp,
 } from './pipelines/ops/columnNameOps';
+import {
+  cleanStringApply as cleanStringApplyOp,
+  cleanStringPreview as cleanStringPreviewOp,
+} from './pipelines/ops/cleanStringOps';
 import {
   applyExpressionApply as applyExpressionApplyOp,
   applyExpressionPreview as applyExpressionPreviewOp,
@@ -478,6 +484,26 @@ export class TransformService {
     input: UppercaseColumnNamesApplyInput,
   ) {
     return uppercaseColumnNamesApplyOp(this, projectId, pipelineId, nodeId, input);
+  }
+
+  // =========================================================================
+  // Clean String — Preview / Apply
+  //
+  // Palantir cleanStringV1. Trim / normalize whitespace / nullify empty.
+  // =========================================================================
+
+  async cleanStringPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: CleanStringPreviewInput,
+  ) {
+    return cleanStringPreviewOp(this, projectId, pipelineId, nodeId, input);
+  }
+
+  async cleanStringApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: CleanStringApplyInput,
+  ) {
+    return cleanStringApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -1374,9 +1400,17 @@ export class TransformService {
         const filteredLeftCols = leftSelected
           ? left.columns.filter((c) => leftSelected.has(c.name))
           : left.columns;
-        const filteredRightCols = rightSelected
-          ? right.columns.filter((c) => rightSelected.has(c.name))
-          : right.columns;
+        // Keep deploy-time schema identical to join preview semantics:
+        // semi/anti joins return LEFT rows/columns only. Previously deploy
+        // appended the right schema even though executeJoin correctly emitted
+        // only left-side rows, causing the final schema invariant to reject a
+        // valid anti-join output (notably an empty quarantine dataset).
+        const filteredRightCols =
+          joinType === 'semi' || joinType === 'anti'
+            ? []
+            : rightSelected
+              ? right.columns.filter((c) => rightSelected.has(c.name))
+              : right.columns;
         const leftNames = new Set(filteredLeftCols.map((c) => c.name));
         // Same derivation as joinPreview: a coalesced right key must be
         // absent here too, or deploy would emit a column the rows do not
@@ -1684,9 +1718,15 @@ export class TransformService {
     // FormatString stays legacy too: printf-style templating (%+.4f etc.) has no
     // portable DuckDB translation, and preview/deploy already agree on the TS
     // engine for it.
-    const needsLegacy = new Set(['Normalize', 'UppercaseColumnNames', 'RowSize', 'FormatString']);
+    const needsLegacy = new Set(['Normalize', 'UppercaseColumnNames', 'RowSize', 'FormatString', 'CleanString']);
+    // The datetime operators (seconds_between/add_minutes/…) are implemented
+    // in the legacy TS evaluator; the DuckDB SQL compiler does not translate
+    // them, so any chain using them must run on the legacy engine — the same
+    // preview/deploy parity argument as FormatString.
+    const DATETIME_OP_PATTERN = /"(?:seconds_between|minutes_between|hours_between|days_between|add_seconds|add_minutes|add_hours|add_days)"/;
     const hasLegacyOnly = existingTransforms.some((t) =>
-      needsLegacy.has((t as { function?: string })?.function ?? ''),
+      needsLegacy.has((t as { function?: string })?.function ?? '')
+        || DATETIME_OP_PATTERN.test(JSON.stringify(t)),
     );
     if (computeType === 'duckdb' && !hasLegacyOnly) {
       try {

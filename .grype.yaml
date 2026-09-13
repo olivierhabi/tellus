@@ -62,3 +62,10 @@ ignore:
   - vulnerability: CVE-2026-56876
     package:
       name: extract-zip
+  # CVE-2026-19693 (High) is the same extract-zip 2.0.1 package reached only
+  # through Cypress. Grype reports no fixed version, so there is no safe
+  # package override to apply. Keep this scoped to the exact CVE + package and
+  # remove it when Cypress stops depending on the vulnerable release.
+  - vulnerability: CVE-2026-19693
+    package:
+      name: extract-zip

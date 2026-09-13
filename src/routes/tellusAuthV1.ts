@@ -2259,6 +2259,223 @@ router.delete(
   },
 );
 
+const UpdateAdminUserSchema = z.object({
+  email: z.string().trim().email().max(320),
+  firstName: z.string().trim().min(1).max(128),
+  lastName: z.string().trim().min(1).max(128),
+});
+
+router.patch(
+  '/admin/users/:id',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = UpdateAdminUserSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+
+      const actor = requireClaimsFor(req);
+      const existingUser = await kcAdmin().getUserById(req.params.id);
+      if (!existingUser) {
+        throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+
+      if (parsed.data.email !== existingUser.email) {
+        const emailOwner = await kcAdmin().findUserByEmail(parsed.data.email);
+        if (emailOwner && emailOwner.id !== req.params.id) {
+          throw new AppError(
+            'A user with this email already exists',
+            409,
+            'USER_ALREADY_EXISTS',
+          );
+        }
+      }
+
+      await kcAdmin().updateUserProfile(req.params.id, parsed.data);
+
+      await emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.user.update',
+        result: 'SUCCESS',
+        req,
+        details: {
+          targetUserId: req.params.id,
+          targetEmail: parsed.data.email,
+          changedFields: ['email', 'firstName', 'lastName'],
+        },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          id: req.params.id,
+          email: parsed.data.email,
+          firstName: parsed.data.firstName,
+          lastName: parsed.data.lastName,
+        },
+      });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+router.delete(
+  '/admin/users/:id/passkeys',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const actor = requireClaimsFor(req);
+      if (req.params.id === actor.sub) {
+        throw new AppError(
+          'Superadmins cannot reset their own passkeys from the admin console',
+          400,
+          'CANNOT_RESET_SELF_PASSKEYS',
+        );
+      }
+      const target = await kcAdmin().getUserById(req.params.id);
+      if (!target) {
+        throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+
+      const db = foundryDb as unknown as Knex;
+      let deletedPasskeys = 0;
+
+      // Revoke live sessions before changing the credential set. If the DB
+      // transaction below fails, the user may need to sign in again but still
+      // has their old passkey; the inverse ordering could leave a successfully
+      // deleted credential paired with a still-active session.
+      await kcAdmin().logoutAll(req.params.id);
+
+      await db.transaction(async (trx) => {
+        deletedPasskeys = await trx('user_webauthn_credentials')
+          .where({ keycloak_sub: req.params.id })
+          .delete();
+        await trx('user_webauthn_challenges')
+          .where({ keycloak_sub: req.params.id })
+          .delete();
+        await trx('passkey_enrollment_tokens')
+          .where({ keycloak_sub: req.params.id })
+          .delete();
+        await trx('auth_mfa_challenges')
+          .where({ keycloak_sub: req.params.id })
+          .delete();
+        await trx('user_reauth_tokens')
+          .where({ keycloak_sub: req.params.id })
+          .delete();
+      });
+
+      await emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.user.passkeys.reset',
+        result: 'SUCCESS',
+        req,
+        details: {
+          targetUserId: req.params.id,
+          deletedPasskeys,
+          sessionsRevoked: true,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: { id: req.params.id, deletedPasskeys, sessionsRevoked: true },
+      });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
+const AdminResetPasswordSchema = z.object({
+  newPassword: z
+    .string()
+    .min(12, 'Password must be at least 12 characters')
+    .max(256)
+    .regex(/[A-Z]/, 'Password must include an uppercase letter')
+    .regex(/[a-z]/, 'Password must include a lowercase letter')
+    .regex(/[0-9]/, 'Password must include a digit')
+    .regex(/[^A-Za-z0-9]/, 'Password must include a symbol'),
+});
+
+router.post(
+  '/admin/users/:id/password-reset',
+  requireTellusAuth({ allowPat: false }),
+  requireSuperAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const parsed = AdminResetPasswordSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'PASSWORD_POLICY_VIOLATION');
+      }
+
+      const actor = requireClaimsFor(req);
+      if (req.params.id === actor.sub) {
+        throw new AppError(
+          'Superadmins cannot reset their own password from the admin console',
+          400,
+          'CANNOT_RESET_SELF_PASSWORD',
+        );
+      }
+
+      const target = await kcAdmin().getUserById(req.params.id);
+      if (!target) {
+        throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+      if (parsed.data.newPassword === target.username) {
+        throw new AppError(
+          'Password cannot match the username',
+          400,
+          'PASSWORD_POLICY_VIOLATION',
+        );
+      }
+
+      // Set the replacement credential directly in Keycloak. No email or
+      // reset link is generated. The value is never persisted by Tellus.
+      await kcAdmin().resetPassword(req.params.id, parsed.data.newPassword);
+      await kcAdmin().logoutAll(req.params.id);
+
+      // Invalidate Tellus-side short-lived auth artifacts issued before the
+      // credential changed so old recovery/reauth flows cannot be replayed.
+      const db = foundryDb as unknown as Knex;
+      await db.transaction(async (trx) => {
+        await trx('user_reauth_tokens').where({ keycloak_sub: req.params.id }).delete();
+        await trx('auth_mfa_challenges').where({ keycloak_sub: req.params.id }).delete();
+        await trx('passkey_enrollment_tokens').where({ keycloak_sub: req.params.id }).delete();
+        await trx('user_webauthn_challenges').where({ keycloak_sub: req.params.id }).delete();
+      });
+
+      await emitAuditEvent({
+        keycloakSub: actor.sub,
+        category: 'admin',
+        action: 'admin.user.password.reset',
+        result: 'SUCCESS',
+        req,
+        details: {
+          targetUserId: req.params.id,
+          targetEmail: target.email,
+          sessionsRevoked: true,
+        },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          id: req.params.id,
+          sessionsRevoked: true,
+        },
+      });
+    } catch (err) {
+      sendError(err, req, res);
+    }
+  },
+);
+
 const ToggleUserSchema = z.object({ enabled: z.boolean() });
 
 router.patch(

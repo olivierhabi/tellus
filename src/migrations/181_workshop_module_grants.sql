@@ -4,7 +4,8 @@
 -- existing global JWT roles (`workshop-editor`, `workshop-viewer`, and
 -- the SUPER_EDITOR_ROLES set). Once at least one grant row exists, the
 -- effective role for a principal is the maximum of:
---  (a) direct user grant (principal_type = 'user', principal_id = user.id)
+--  (a) direct user grant (principal_type = 'user', principal_id = Keycloak
+--      directory user id / JWT subject)
 --  (b) group membership grant (principal_type = 'group',
 --      principal_id IN caller.groups)
 --  (c) implicit default groups: "Workshop Builders" → editor,

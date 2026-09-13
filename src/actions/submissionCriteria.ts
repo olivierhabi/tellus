@@ -57,6 +57,8 @@ export type SubmissionGroupOperator = "all" | "any" | "none";
 
 export interface SubmissionSubject {
   username?: string | null;
+  /** Immutable platform subject id (for example the Multipass/Keycloak user id). */
+  userId?: string | null;
   roles?: string[];
   groups?: string[];
   /** Multipass organizations the subject belongs to (securityContext.organizations). */
@@ -168,6 +170,19 @@ interface Condition {
   anyGroup?: string[];
   username?: string;
   anyUsername?: string[];
+  /**
+   * Foundry-style Current User comparison against another operand. This is
+   * intentionally separate from the legacy `{ username: "..." }` static
+   * allow-list shape above. Example maker/checker guard:
+   *
+   *   { currentUser: "username", parameter: "approvalId",
+   *     objectType: "Approval", objectProperty: "requestedByPrincipal",
+   *     operator: "ne" }
+   *
+   * The object-property operand is resolved from live object state at submit
+   * time (and again inside the mutation transaction by the executor).
+   */
+  currentUser?: "id" | "username";
   /** Subject's multipass organization must include this org. */
   organization?: string;
   /** Subject must belong to at least one of these organizations. */
@@ -337,6 +352,47 @@ function evalCondition(
   const custom = typeof cond.description === "string" && cond.description.trim()
     ? cond.description
     : null;
+
+  // Current User compared with a parameter/object-property operand. Palantir
+  // submission criteria allow the current user's ID to participate in the
+  // same logical statement as parameter-derived values; this shape gives the
+  // runtime that capability without trusting a client-supplied "checker".
+  if (cond.currentUser) {
+    const op = (cond.operator ?? "eq") as SubmissionOperator;
+    const actual = cond.currentUser === "id" ? subject.userId : subject.username;
+    let expected: unknown;
+    let operandLabel = "configured value";
+    if (cond.parameter && cond.objectProperty) {
+      const key = `${cond.parameter}.${cond.objectProperty}`;
+      expected = objectPropertyValues?.[key];
+      operandLabel = `object property '${key}'`;
+      if (expected === undefined) {
+        return {
+          ok: false,
+          reason: custom ?? `${operandLabel} could not be resolved`,
+        };
+      }
+    } else if (cond.compareParameter) {
+      expected = parameters[cond.compareParameter];
+      operandLabel = `parameter '${cond.compareParameter}'`;
+    } else {
+      expected = cond.value;
+    }
+    if (actual == null || actual === "") {
+      return {
+        ok: false,
+        reason: custom ?? `current user ${cond.currentUser} could not be resolved`,
+      };
+    }
+    const ok = compare(actual, op, expected);
+    return {
+      ok,
+      reason: ok
+        ? ""
+        : (custom ?? `current user ${cond.currentUser} ${op} ${operandLabel} not satisfied`),
+    };
+  }
+
   // Parameter predicate (incl. D27 object-property operand).
   if (cond.parameter) {
     const op = (cond.operator ?? "exists") as SubmissionOperator;

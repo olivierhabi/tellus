@@ -77,6 +77,51 @@ export function coerceString(v: unknown): string {
   return String(v);
 }
 
+/** Milliseconds per datetime-operator unit (Palantir time-unit enum subset). */
+const DATETIME_UNIT_MS: Record<string, number> = {
+  seconds: 1000,
+  minutes: 60 * 1000,
+  hours: 60 * 60 * 1000,
+  days: 24 * 60 * 60 * 1000,
+};
+
+/**
+ * Parse a cell value as a timestamp for the datetime operators. Accepts
+ * ISO-8601 strings (what Cast-to-timestamp produces), `Date` instances, and
+ * epoch milliseconds as numbers or all-digit strings (13 digits). Returns
+ * epoch milliseconds, or null when the value is absent or unparseable —
+ * matching Palantir's null-in/null-out contract for timestampDiffV1.
+ */
+export function coerceEpochMillis(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (v instanceof Date) {
+    const t = v.getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const s = String(v).trim();
+  if (s === '') return null;
+  if (/^\d{13}$/.test(s)) return Number(s);
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Evaluate a `*_between` operator: `left - right` in the given unit, truncated toward zero. */
+function evalDatetimeDiff(left: unknown, right: unknown, unitMs: number): number | null {
+  const l = coerceEpochMillis(left);
+  const r = coerceEpochMillis(right);
+  if (l === null || r === null) return null;
+  return Math.trunc((l - r) / unitMs);
+}
+
+/** Evaluate an `add_*` operator: left timestamp + (right × unit), ISO-8601 out. */
+function evalDatetimeAdd(left: unknown, right: unknown, unitMs: number): string | null {
+  const l = coerceEpochMillis(left);
+  const amount = coerceNumeric(right);
+  if (l === null || amount === null) return null;
+  return new Date(l + Math.trunc(amount) * unitMs).toISOString();
+}
+
 export function parseLiteral(op: Operand): unknown {
   // kind === 'literal'
   if (op.kind !== 'literal') return op.value;
@@ -138,6 +183,21 @@ export function evaluateExpression(
     (left === null || left === undefined || right === null || right === undefined)
   ) {
     return null;
+  }
+
+  // Datetime operators (Palantir timestampDiffV1 / timestampAddV1 parity).
+  // These do their own operand coercion (coerceEpochMillis) with
+  // null-in/null-out semantics, so they are handled before the numeric switch.
+  switch (op) {
+    case 'seconds_between': return evalDatetimeDiff(left, right, DATETIME_UNIT_MS.seconds);
+    case 'minutes_between': return evalDatetimeDiff(left, right, DATETIME_UNIT_MS.minutes);
+    case 'hours_between': return evalDatetimeDiff(left, right, DATETIME_UNIT_MS.hours);
+    case 'days_between': return evalDatetimeDiff(left, right, DATETIME_UNIT_MS.days);
+    case 'add_seconds': return evalDatetimeAdd(left, right, DATETIME_UNIT_MS.seconds);
+    case 'add_minutes': return evalDatetimeAdd(left, right, DATETIME_UNIT_MS.minutes);
+    case 'add_hours': return evalDatetimeAdd(left, right, DATETIME_UNIT_MS.hours);
+    case 'add_days': return evalDatetimeAdd(left, right, DATETIME_UNIT_MS.days);
+    default: break;
   }
 
   switch (op) {

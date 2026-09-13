@@ -152,13 +152,15 @@ export async function acquireRowLocks(
   const ordered = sortedLockIdentities(identities);
   const locked: LockIdentity[] = [];
   for (const id of ordered) {
-    const pk = canonicalPrimaryKey(id.primaryKey);
     try {
       const r = await client.query(
         `SELECT 1 FROM object_instances
-           WHERE object_type_api_name = $1 AND primary_key = $2
+           WHERE ontology_id = $1::uuid
+             AND branch_id = $2::uuid
+             AND object_type_api_name = $3
+             AND primary_key = $4
            FOR UPDATE`,
-        [id.objectType, String(id.primaryKey)],
+        [id.ontologyId, id.branchId, id.objectType, String(id.primaryKey)],
       );
       if ((r.rowCount ?? 0) > 0) locked.push(id);
     } catch {

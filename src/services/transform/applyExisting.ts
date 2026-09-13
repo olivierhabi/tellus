@@ -21,6 +21,7 @@ import type {
   BinaryOperator,
   CaseExpressionApplyInput,
   CastTargetType,
+  CleanStringActions,
   ColumnPredicate,
   DynamicAggregation,
   ExpressionItem,
@@ -53,6 +54,7 @@ import {
   applyRenameRows,
   applyUppercaseRows,
 } from '../pipelines/ops/columnNameOps';
+import { applyCleanStringRows } from '../pipelines/ops/cleanStringOps';
 import {
   applyCaseExpressionToRows,
   applyComputeIfAbsentRows,
@@ -320,6 +322,12 @@ export function applyExistingTransforms(
     } else if (fn === 'RowSize') {
       const out = (tx.outputColumn ?? 'row_size') as string;
       result = applyRowSizeRows(result, out);
+    } else if (fn === 'CleanString') {
+      result = applyCleanStringRows(
+        result,
+        tx.columns as string[] | undefined,
+        (tx.actions ?? { trim: true }) as CleanStringActions,
+      );
     } else if (fn === 'ApplyExpression') {
       const exprs = collectExpressionItems(tx);
       for (const e of exprs) result = applyExpressionToRows(result, e);

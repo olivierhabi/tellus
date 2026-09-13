@@ -19,27 +19,26 @@
 //
 // Per-module grants (P1): `requireModuleRole(minRole)` extends the global-role
 // model with module-scoped Viewer/Editor grants from `workshop_module_grants`.
-// Resolution order: super roles → global workshop roles → direct user grant
-// → group membership grants → implicit default groups. When both `roles` and
-// `groups` are undefined the middleware soft-bypasses (test compatibility).
+// Applicable permissions are additive and the strongest role wins
+// (editor > viewer > no access). When both `roles` and `groups` are undefined
+// the middleware soft-bypasses for legacy test compatibility.
 
 import type { NextFunction, Request, Response } from "express";
 import { workshopError, moduleNotFound } from "./errors";
-import { getModuleEffectiveRole } from "./grantService";
+import {
+  getModuleEffectiveRole,
+  meetsWorkshopFileAccessRequirements,
+} from "./grantService";
 
 export const ROLE_EDITOR = "workshop-editor";
 export const ROLE_VIEWER = "workshop-viewer";
 
-// Tellus super-roles that grant editor (and therefore viewer) access to
-// every workshop endpoint. Mirrors the existing convention used by the
-// `cbac` framework: realm super-roles bypass per-resource policy. This
-// also keeps the existing Cypress test user (which carries
-// `ontology-editor` / `ontology-admin` from the bootstrap-keycloak realm
-// seed) authorized without requiring a parallel workshop role mapping.
+// Platform super-role that grants editor (and therefore viewer) access to
+// every Workshop endpoint. Ontology roles are deliberately excluded:
+// ontology-admin / ontology-editor govern Ontology dependencies, while the
+// ability to edit a Workshop module comes from Workshop permissions.
 export const SUPER_EDITOR_ROLES: ReadonlyArray<string> = [
   "tellus-superadmin",
-  "ontology-admin",
-  "ontology-editor",
 ] as const;
 
 interface UserWithRoles {
@@ -48,8 +47,51 @@ interface UserWithRoles {
   groups?: unknown;
 }
 
+interface TellusPrincipalIdentity {
+  keycloakSub?: unknown;
+  userId?: unknown;
+}
+
+function localPrincipalId(req: Request): string | null {
+  const isUuid = (value: unknown): value is string =>
+    typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  const principal = (req as unknown as { tellusPrincipal?: TellusPrincipalIdentity })
+    .tellusPrincipal;
+  if (isUuid(principal?.userId)) {
+    return principal.userId;
+  }
+  const user = userFromReq(req);
+  return isUuid(user?.id) ? user.id : null;
+}
+
 function userFromReq(req: Request): UserWithRoles | null {
   return (req as unknown as { user?: UserWithRoles }).user ?? null;
+}
+
+/**
+ * Workshop sharing stores user principals using the Keycloak directory id
+ * returned by the people picker / access-check APIs. Browser auth also
+ * provisions a separate local database user id on `req.user.id`; using that
+ * local id here makes a valid direct Workshop grant impossible to match.
+ * Prefer the Keycloak subject and retain the local id only as a compatibility
+ * fallback for older tests and synthetic principals.
+ */
+export function moduleGrantPrincipalId(req: Request): string {
+  const principal = (req as unknown as { tellusPrincipal?: TellusPrincipalIdentity })
+    .tellusPrincipal;
+  if (typeof principal?.keycloakSub === "string" && principal.keycloakSub.length > 0) {
+    return principal.keycloakSub;
+  }
+
+  const keycloakUser = (req as unknown as { keycloakUser?: { sub?: unknown } })
+    .keycloakUser;
+  if (typeof keycloakUser?.sub === "string" && keycloakUser.sub.length > 0) {
+    return keycloakUser.sub;
+  }
+
+  const user = userFromReq(req);
+  return typeof user?.id === "string" ? user.id : "";
 }
 
 export function userRolesOrNull(req: Request): string[] | null {
@@ -109,10 +151,8 @@ export function requireRole(required: "editor" | "viewer") {
 /**
  * Returns async Express middleware that enforces per-module role access.
  *
- * Resolution:
- *  a) Super/global roles (same as `requireRole`).
- *  b) Direct user grant (principal_type='user').
- *  c) Group membership + implicit default groups.
+ * Resolution combines super/global roles, direct user grants, group grants,
+ * and implicit default groups; the strongest applicable role wins.
  *
  * Soft-enforcement: when both `roles` AND `groups` are undefined/absent
  * on `req.user`, the middleware allows (test-bypass contract).
@@ -153,7 +193,7 @@ export function requireModuleRole(minRole: "viewer" | "editor") {
       }
 
       const role = await getModuleEffectiveRole(rid, {
-        userId: user.id ?? "",
+        userId: moduleGrantPrincipalId(req),
         roles: roles ?? [],
         groups: groups ?? [],
       });
@@ -161,6 +201,22 @@ export function requireModuleRole(minRole: "viewer" | "editor") {
       if (role == null) {
         next(moduleNotFound(rid));
         return;
+      }
+
+      // Foundry file access is role + Organization + Marking requirements.
+      // Keep these checks in the same middleware used by every Workshop read
+      // and edit route so the Check access verdict and actual enforcement can
+      // never disagree in production.
+      const localUserId = localPrincipalId(req);
+      if (localUserId) {
+        const meetsFileRequirements = await meetsWorkshopFileAccessRequirements(
+          rid,
+          localUserId,
+        );
+        if (!meetsFileRequirements) {
+          next(moduleNotFound(rid));
+          return;
+        }
       }
 
       (req as unknown as Record<string, unknown>).workshopModuleRole = role;

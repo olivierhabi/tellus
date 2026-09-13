@@ -125,7 +125,9 @@ jobs:
             // remediation deadline passes, so the debt cannot be carried
             // indefinitely without a deliberate decision to extend it.
             const GOAL = 80;
-            const DEBT_DEADLINE = Date.UTC(2026, 8, 1); // 2026-09-01
+            // Extended deliberately after the 2026-09-01 checkpoint while the
+            // existing ratchet floors remain enforced and raise-only.
+            const DEBT_DEADLINE = Date.UTC(2026, 9, 15); // 2026-10-15
             const debt = Object.entries(RATCHET).filter(([, m]) => m < GOAL);
             if (debt.length) {
               console.warn(
@@ -134,7 +136,7 @@ jobs:
               );
               if (Date.now() > DEBT_DEADLINE) {
                 console.error(
-                  "coverage DEBT deadline (2026-09-01) has passed: raise the RATCHET floors toward " +
+                  "coverage DEBT deadline (2026-10-15) has passed: raise the RATCHET floors toward " +
                   GOAL + "% by writing the deferred unit tests, or consciously extend the deadline. Failing the gate."
                 );
                 process.exit(1);

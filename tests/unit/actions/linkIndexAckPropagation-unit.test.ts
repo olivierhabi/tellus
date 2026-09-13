@@ -19,6 +19,7 @@ const {
   applyEditsMock,
   appendAuditRowMock,
   standaloneFailureAuditMock,
+  pgQueryMock,
 } = vi.hoisted(() => ({
   getActionTypeMock: vi.fn(),
   validateParametersMock: vi.fn(),
@@ -27,6 +28,7 @@ const {
   applyEditsMock: vi.fn(),
   appendAuditRowMock: vi.fn(),
   standaloneFailureAuditMock: vi.fn(),
+  pgQueryMock: vi.fn(),
 }));
 
 vi.mock("../../../src/models/actionType", () => ({
@@ -66,7 +68,7 @@ vi.mock("../../../src/models/actionAuditLog", () => ({
 
 // Remaining collaborators — unused by the paths under test but mocked
 // so importing the orchestrator never touches PG/OpenSearch.
-vi.mock("../../../src/db", () => ({ query: vi.fn(), pool: {} }));
+vi.mock("../../../src/db", () => ({ query: pgQueryMock, pool: {} }));
 vi.mock("../../../src/actions/actionCbac", () => ({
   runActionCbacGate: vi.fn(),
   cbacDenyMessage: vi.fn(),
@@ -162,6 +164,7 @@ describe("executeAction → ExecutionResult.linkIndexAck", () => {
       affectedObjectCount: 1,
       edits: EDITS,
     });
+    pgQueryMock.mockResolvedValue({ rowCount: 0, rows: [] });
   });
 
   it("confirmed ack → surfaced verbatim on ExecutionResult", async () => {
@@ -229,5 +232,111 @@ describe("executeAction → ExecutionResult.linkIndexAck", () => {
 
     expect(result.result).toBe("success");
     expect(result.linkIndexAck?.reason).toBe("index_outage");
+  });
+
+  it("revalidates live submission criteria after serialization and rejects a stale PENDING approval", async () => {
+    getActionTypeMock.mockResolvedValue({
+      ...declarativeActionRow,
+      api_name: "rssbApproveGovernanceRequest",
+      display_name: "Approve Governance Request",
+      parameters: [
+        { apiName: "approvalId", type: "string", required: true },
+        { apiName: "decisionNote", type: "string", required: true },
+      ],
+      submission_criteria: {
+        match: "all",
+        conditions: [
+          {
+            parameter: "approvalId",
+            objectType: "RssbApprovalRequest",
+            objectProperty: "status",
+            operator: "eq",
+            value: "PENDING",
+            description: "Only a PENDING approval request can be decided.",
+          },
+          {
+            currentUser: "username",
+            parameter: "approvalId",
+            objectType: "RssbApprovalRequest",
+            objectProperty: "requestedByPrincipal",
+            operator: "ne",
+            description: "The maker cannot approve their own request.",
+          },
+        ],
+      },
+      rules: [{
+        type: "modifyObject",
+        objectType: "RssbApprovalRequest",
+        objectReference: { source: "parameter", param: "approvalId" },
+        properties: {
+          status: { source: "static", value: "APPROVED" },
+        },
+      }],
+      max_affected_objects: 1,
+    });
+    validateParametersMock.mockResolvedValue({
+      valid: true,
+      resolvedParameters: {
+        approvalId: "APR-1",
+        decisionNote: "Reviewed independently.",
+      },
+    });
+    compileRulesMock.mockResolvedValue({
+      errors: [],
+      affectedObjectCount: 1,
+      edits: [{
+        objectType: "RssbApprovalRequest",
+        primaryKey: "APR-1",
+        operation: "update",
+        propertyValues: { status: "APPROVED" },
+      }],
+    });
+
+    // Stage 3 preflight sees the request as PENDING and therefore allows the
+    // checker to proceed to the mutation transaction.
+    pgQueryMock.mockResolvedValue({
+      rowCount: 1,
+      rows: [{
+        properties: {
+          status: "PENDING",
+          requestedByPrincipal: "fraud.investigator@tellus.local",
+        },
+      }],
+    });
+
+    applyEditsMock.mockImplementation(async (_edits, ctx) => {
+      // Simulate a competing checker committing first. The transaction-local
+      // reread after the shared object lock must observe APPROVED and fail the
+      // state predicate before this second request writes anything.
+      const transactionClient = {
+        query: vi.fn().mockResolvedValue({
+          rowCount: 1,
+          rows: [{
+            properties: {
+              status: "APPROVED",
+              requestedByPrincipal: "fraud.investigator@tellus.local",
+            },
+          }],
+        }),
+      };
+      await ctx.revalidateSubmissionCriteriaAfterLock(transactionClient);
+      throw new Error("revalidation unexpectedly allowed a stale decision");
+    });
+
+    await expect(
+      executeAction(
+        ONTOLOGY_ID,
+        "rssbApproveGovernanceRequest",
+        { approvalId: "APR-1", decisionNote: "Reviewed independently." },
+        {
+          executedBy: "local-user-row-id",
+          currentUserId: "keycloak-checker-sub",
+          currentUsername: "fraud.supervisor@tellus.local",
+          roles: ["fraud-supervisor"],
+        },
+      ),
+    ).rejects.toMatchObject({ code: "SUBMISSION_CRITERIA_NOT_MET" });
+
+    expect(applyEditsMock).toHaveBeenCalledTimes(1);
   });
 });

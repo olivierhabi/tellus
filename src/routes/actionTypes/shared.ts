@@ -392,6 +392,8 @@ export async function validateFunctionConfig(
       {
         type: String(parameter.type ?? ""),
         required: parameter.required !== false,
+        objectType:
+          typeof parameter.objectType === "string" ? parameter.objectType : undefined,
       },
     ]),
   );
@@ -414,7 +416,21 @@ export async function validateFunctionConfig(
       errors.push(`Function parameter '${signatureParameter.name}' is missing from action parameters.`);
       continue;
     }
-    if (signatureParameter.optional !== true && !actionParameter.required) {
+    const configuredSource =
+      config.inputs && typeof config.inputs === "object" && !Array.isArray(config.inputs)
+        ? config.inputs[signatureParameter.name]
+        : undefined;
+    const mappingUsesSameNamedParameter =
+      configuredSource == null ||
+      (typeof configuredSource === "object" &&
+        !Array.isArray(configuredSource) &&
+        (configuredSource as { source?: unknown }).source === "parameter" &&
+        (configuredSource as { param?: unknown }).param === signatureParameter.name);
+    if (
+      signatureParameter.optional !== true &&
+      mappingUsesSameNamedParameter &&
+      !actionParameter.required
+    ) {
       errors.push(`Function parameter '${signatureParameter.name}' must be required.`);
     }
   }
@@ -431,15 +447,33 @@ export async function validateFunctionConfig(
             `Function input mapping '${functionInput}' is not present in the published ${config.semver} signature.`,
           );
         }
+        const sourcePath = `functionConfig.inputs.${functionInput}`;
+        errors.push(...validateValueSource(rawSource, sourcePath, new Set(declared.keys())));
         if (rawSource == null || typeof rawSource !== "object" || Array.isArray(rawSource)) {
-          errors.push(`functionConfig.inputs.${functionInput} must be a value source.`);
           continue;
         }
         const source = rawSource as { source?: unknown; param?: unknown };
-        if (source.source === "parameter") {
-          if (typeof source.param !== "string" || !declared.has(source.param)) {
+        if (source.source === "generatedSequence" || source.source === "writebackResponse") {
+          errors.push(`${sourcePath} does not support source '${String(source.source)}' for Function-backed actions.`);
+          continue;
+        }
+        if (source.source === "objectProperty") {
+          const parameter =
+            typeof source.param === "string" ? declared.get(source.param) : undefined;
+          if (parameter && (parameter.type !== "object_reference" || !parameter.objectType)) {
             errors.push(
-              `functionConfig.inputs.${functionInput} references missing action parameter '${String(source.param ?? "")}'.`,
+              `${sourcePath} must read from an object_reference action parameter with an objectType.`,
+            );
+          }
+        }
+        if (source.source === "currentTimestamp") {
+          const publishedParameter = signatureParameters.find(
+            (parameter: any) => parameter?.name === functionInput,
+          );
+          const publishedType = String(publishedParameter?.type ?? "").toLowerCase();
+          if (!/(?:date|time|timestamp)/.test(publishedType)) {
+            errors.push(
+              `${sourcePath} maps Current timestamp to incompatible Function parameter type '${String(publishedParameter?.type ?? "unknown")}'.`,
             );
           }
         }

@@ -190,6 +190,10 @@ export async function validateAction(
   parameters: Record<string, unknown>,
   context?: {
     executedBy?: string;
+    /** Canonical external principal ID used by currentUserId parameter bindings. */
+    currentUserId?: string;
+    /** Authenticated username/email used by `Current User · username` criteria. */
+    currentUsername?: string;
     roles?: string[];
     groups?: string[];
     organizations?: string[];
@@ -247,7 +251,7 @@ export async function validateAction(
     objectExists,
     fetchObject,
     {
-      currentUserId: context?.executedBy,
+      currentUserId: context?.currentUserId ?? context?.executedBy,
       userExists: async (userId) => {
         const user = await getKeycloakAdminService().getUserById(userId);
         return user?.enabled === true;
@@ -265,7 +269,8 @@ export async function validateAction(
   // STAGE 3: Submission criteria
   // -----------------------------------------------------------------
   const subject: SubmissionSubject = {
-    username: context?.executedBy ?? undefined,
+    username: context?.currentUsername ?? context?.executedBy ?? undefined,
+    userId: context?.currentUserId ?? undefined,
     // Role/group predicates must use the caller's identity, same as
     // actionExecutor.ts Stage 3 — otherwise /validate rejects every
     // role-gated action that /apply would accept.

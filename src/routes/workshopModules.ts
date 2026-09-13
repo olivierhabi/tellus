@@ -32,7 +32,11 @@ import {
 } from "../services/workshop/types";
 import { validateModule } from "../services/workshop/validator";
 import { workshopRateLimitMiddleware } from "../services/workshop/rateLimit";
-import { requireRole, requireModuleRole } from "../services/workshop/rbac";
+import {
+  moduleGrantPrincipalId,
+  requireRole,
+  requireModuleRole,
+} from "../services/workshop/rbac";
 
 const router: Router = Router();
 
@@ -42,7 +46,11 @@ function actorFromRequest(req: Request): Actor {
   // param on every route; it threads into the actor and from there to any
   // downstream adapter.
   const rawBranch = (req.query.branch as string | undefined) ?? null;
-  return { userId, branchRid: rawBranch && rawBranch.length > 0 ? rawBranch : null };
+  return {
+    userId,
+    workshopPrincipalId: moduleGrantPrincipalId(req),
+    branchRid: rawBranch && rawBranch.length > 0 ? rawBranch : null,
+  };
 }
 
 function ifMatchHeader(req: Request): string | null {
@@ -427,7 +435,7 @@ router.get(
   "/modules/:rid/effectiveRole",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const userId = currentUser(req);
+      const userId = moduleGrantPrincipalId(req);
       const { getModuleEffectiveRole } = await import(
         "../services/workshop/grantService"
       );
@@ -454,10 +462,14 @@ router.get(
 
 router.get(
   "/modules/:rid/access-check/:userId",
-  requireRole("editor"),
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { getModuleAccessDecision, getWorkshopDependencyAccess } = await import(
+      const {
+        getModuleAccessDecision,
+        getWorkshopDependencyAccess,
+        getWorkshopFileAccessRequirements,
+      } = await import(
         "../services/workshop/grantService"
       );
       const { getKeycloakAdminService } = await import(
@@ -484,6 +496,10 @@ router.get(
         roles,
         groups,
       });
+      const accessRequirements = await getWorkshopFileAccessRequirements(
+        req.params.rid,
+        target.email,
+      );
       const dependencies = getWorkshopDependencyAccess(roles);
       res.status(200).json({
         rid: req.params.rid,
@@ -491,6 +507,7 @@ router.get(
         role: decision.role,
         via: decision.via,
         detail: decision.detail,
+        accessRequirements,
         dependencies,
       });
     } catch (err) {
@@ -503,7 +520,7 @@ router.get(
 
 router.get(
   "/modules/:rid/grants",
-  requireRole("editor"),
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { listModuleGrants } = await import(
@@ -529,7 +546,7 @@ const grantBodySchema = z
 
 router.post(
   "/modules/:rid/grants",
-  requireRole("editor"),
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = grantBodySchema.safeParse(req.body);
@@ -560,7 +577,7 @@ router.post(
 
 router.delete(
   "/modules/:rid/grants/:principalType/:principalId",
-  requireRole("editor"),
+  requireModuleRole("editor"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { removeModuleGrant } = await import(
