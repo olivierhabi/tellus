@@ -34,7 +34,7 @@ jobs:
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_ENDPOINT: http://localhost:9000
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with: { node-version: 24.12.0, cache: pnpm }
@@ -149,7 +149,7 @@ jobs:
   ghost-pass-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Scan for ghost-pass patterns
         run: |
           if grep -rnE "if \(!(HAS_DATA|serverAvailable|serverReachable|hasData)\) return|Server not reachable — skipping" tests/ ; then
