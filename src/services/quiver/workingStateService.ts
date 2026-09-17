@@ -10,7 +10,11 @@
 
 import { randomBytes } from "node:crypto";
 import { withTransaction, query } from "../../db";
-import { ActorContext } from "./analysisService";
+import {
+  ActorContext,
+  assertAnalysisEditable,
+  assertAnalysisReadable,
+} from "./analysisService";
 import {
   analysisNotFound,
   invalidAnalysisRequest,
@@ -105,6 +109,10 @@ export async function createWorkingState(
     throw invalidAnalysisRequest({ reason: "fromVersion must be a positive integer" });
   }
 
+  // Folder authorization — editor on the analysis's parent folder (the
+  // working state snapshots the full document).
+  await assertAnalysisEditable(actor, rid);
+
   return withTransaction(async (client) => {
     const sel = await client.query(
       `SELECT rid, cards, canvases, parameters, notebook_metadata, is_deleted
@@ -184,6 +192,9 @@ export async function upsertWorkingStateDocument(
   const sizeBytes = Buffer.byteLength(JSON.stringify(document), "utf8");
   workingStateSizeBytes.observe(sizeBytes);
 
+  // Folder authorization — editor on the parent folder.
+  await assertAnalysisEditable(actor, rid);
+
   return withTransaction(async (client) => {
     const sel = await client.query(
       `SELECT rid, is_deleted FROM quiver_analysis WHERE rid = $1`,
@@ -218,6 +229,8 @@ export async function getWorkingState(
   stateId: string,
 ): Promise<{ info: WorkingStateInfo; document: unknown }> {
   if (!STATE_ID_RE.test(stateId)) throw workingStateNotFound({ rid, stateId });
+  // Folder authorization — viewer+ (the state row carries the document).
+  await assertAnalysisReadable(actor, rid);
   const r = await query(
     `SELECT * FROM quiver_working_state
       WHERE rid = $1 AND state_id = $2 AND branch_rid = $3 AND expires_at > now() LIMIT 1`,

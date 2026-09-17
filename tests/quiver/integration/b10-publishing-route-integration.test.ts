@@ -39,6 +39,7 @@ const ANALYSIS_RID = "ri.tellus-quiver.main.analysis.018f4a9c-7d6e-7c8a-87b0-012
 function authedHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return {
     "x-test-user": TEST_USER,
+    "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "",
     "x-test-org": TEST_ORG,
     ...extra,
   };

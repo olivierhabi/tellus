@@ -13,31 +13,31 @@ describe("B3 apply — addCard / updateCardConfig", () => {
     const doc = emptyDoc();
     const r = applyInstruction(
       doc,
-      { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+      { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
       new Set(),
     );
     expect(r.applied).toBe(true);
-    expect((r.doc.cards as any).c1.id).toBe("c1");
+    expect((r.doc.cards as any)["$A"].id).toBe("$A");
   });
 
   it("updateCardConfig applies RFC-6902 add", () => {
     let doc = emptyDoc();
     doc = applyInstruction(
       doc,
-      { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+      { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
       new Set(),
     ).doc;
     const r = applyInstruction(
       doc,
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "add", path: "/objectSetRid", value: "ri.oss.main.os.x" }],
       } as Instruction,
       new Set(),
     );
     expect(r.applied).toBe(true);
-    expect((r.doc.cards as any).c1.config.objectSetRid).toBe("ri.oss.main.os.x");
+    expect((r.doc.cards as any)["$A"].config.objectSetRid).toBe("ri.oss.main.os.x");
   });
 
   it("update on missing card → card_not_found, applied=false", () => {
@@ -45,7 +45,7 @@ describe("B3 apply — addCard / updateCardConfig", () => {
       emptyDoc(),
       {
         kind: "updateCardConfig",
-        cardId: "missing",
+        cardId: "$MISSING",
         configJsonPatch: [{ op: "add", path: "/x", value: 1 }],
       } as Instruction,
       new Set(),
@@ -61,16 +61,16 @@ describe("B3 C-07 — tombstone semantics", () => {
     const tomb = new Set<string>();
     doc = applyInstruction(
       doc,
-      { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+      { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
       tomb,
     ).doc;
-    doc = applyInstruction(doc, { kind: "deleteCard", cardId: "c1" } as Instruction, tomb).doc;
-    expect(tomb.has("c1")).toBe(true);
+    doc = applyInstruction(doc, { kind: "deleteCard", cardId: "$A" } as Instruction, tomb).doc;
+    expect(tomb.has("$A")).toBe(true);
     const r = applyInstruction(
       doc,
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "add", path: "/x", value: 1 }],
       } as Instruction,
       tomb,
@@ -80,10 +80,10 @@ describe("B3 C-07 — tombstone semantics", () => {
   });
 
   it("addCard reusing tombstoned id is dropped (B2 immutable id rule)", () => {
-    const tomb = new Set<string>(["c1"]);
+    const tomb = new Set<string>(["$A"]);
     const r = applyInstruction(
       emptyDoc(),
-      { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+      { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
       tomb,
     );
     expect(r.applied).toBe(false);

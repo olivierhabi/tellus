@@ -5,7 +5,8 @@
 // Auth: every request requires a Multipass JWT (Keycloak-backed).
 //   The existing securityContext middleware (used elsewhere in the repo)
 //   sets req.userSubject; we trust it here. Tests can short-circuit by
-//   passing `x-test-user` when QUIVER_ALLOW_TEST_AUTH=1.
+//   passing `x-test-user` when QUIVER_ALLOW_TEST_AUTH=1 — token-bound
+//   (X-Tellus-Test-Auth-Token must match the harness secret).
 
 import { Router, type NextFunction, type Request, type Response } from "express";
 import {
@@ -18,7 +19,7 @@ import {
 } from "../../services/quiver/analysisService";
 import { validate as validateDag } from "../../services/quiver/dag";
 import { readBranch } from "../../services/quiver/branchHeader";
-import { isQuiverTestAuthAllowed } from "./testAuth";
+import { isQuiverTestAuthBound } from "./testAuth";
 import {
   invalidAnalysisRequest,
   isQuiverError,
@@ -44,8 +45,9 @@ const ROUTE_LIST = "GET /quiver/api/v1/folders/:folderRid/analyses";
 
 function actorFromReq(req: Request): ActorContext {
   // The securityContext middleware sets these in production.
-  // In tests with QUIVER_ALLOW_TEST_AUTH=1, accept x-test-user header.
-  const allowTest = isQuiverTestAuthAllowed();
+  // In tests with QUIVER_ALLOW_TEST_AUTH=1, accept the token-bound
+  // x-test-user header (untokened headers bind no identity).
+  const allowTest = isQuiverTestAuthBound(req);
   const fromCtx = (req as Request & {
     securityContext?: {
       userSubject?: string;

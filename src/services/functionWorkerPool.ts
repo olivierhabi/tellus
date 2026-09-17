@@ -133,8 +133,9 @@ export function workerOptions(): {
     env: {
       NODE_ENV: process.env.NODE_ENV ?? "development",
       TZ: process.env.TZ ?? "",
-      PATH: process.env.PATH ?? "",
-      HOME: process.env.HOME ?? "",
+      // PATH/HOME intentionally NOT forwarded (Strix dev-posture hardening):
+      // they only induce an escapee to probe host tooling and home-directory
+      // material; the worker needs neither to run.
     },
   };
 }
@@ -357,15 +358,20 @@ export async function runSandboxedWithSdkSync(
   }, binding);
   // Async function: the sandbox returned a Promise (vm can't await). Resolve it
   // here under the timeout — the sync fallback is the structural path (pool
-  // unavailable), and it should still honor async Foundry functions.
+  // unavailable), and it should still honor async Foundry functions. The
+  // resolved value may be a guest container holding realm-sealed leaves —
+  // unwrap before returning; the boundary function itself never leaves this
+  // process.
   if (result.pendingPromise) {
     const settled = await awaitSandboxPromise(result.pendingPromise);
+    const unseal = result.unsealOutput;
     result = {
       ...result,
-      output: settled.output,
+      output: unseal ? unseal(settled.output) : settled.output,
       status: settled.status,
       errorMessage: settled.errorMessage,
       pendingPromise: undefined,
+      unsealOutput: undefined,
     };
   }
   return { ...result, edits: result.status === "ok" ? getEdits() : [], requestedTypes: getRequestedTypes(), objectLoads: getObjectLoads() };

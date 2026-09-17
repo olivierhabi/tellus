@@ -26,6 +26,8 @@ import path from "node:path";
 import { Transform, type Readable } from "node:stream";
 import { query } from "../db";
 import { uploadObject, getObjectStream } from "./storageService";
+import { buildSecurityFilter } from "../middleware/securityContext";
+import type { SecurityContext } from "../middleware/securityContext";
 
 export const MAX_UPLOAD_BYTES = parseInt(
   process.env.ATTACHMENT_MAX_BYTES ?? String(200 * 1024 * 1024),
@@ -254,6 +256,108 @@ interface BlobRow {
   storage_key: string;
 }
 
+// ---------------------------------------------------------------------------
+// Attachment visibility (Finding A — IDOR fix)
+//
+// Bytes are served only when (a) the caller uploaded the attachment
+// (attachment.created_by === caller userId), or (b) the attachment is linked
+// to an object the caller can READ through the security-filtered fetch
+// (executeGetObject with buildSecurityFilter — the same pattern
+// commentService.requireReadableParent uses).
+//
+// Linkage: an attachment becomes linked when its rid is passed as an
+// attachment-type action parameter and lands on an object instance
+// (object_instances.properties). There is no separate link table; the
+// `linked_at` column exists for a future sweeper but is not stamped today,
+// so linkage is resolved by finding object instances whose properties
+// reference the rid. Unlinked attachments are uploader-only.
+//
+// Denials are indistinguishable from "not found" — callers return the same
+// 404 envelope either way (no existence oracle).
+// ---------------------------------------------------------------------------
+
+/**
+ * Batch-resolves which of the given attachment rids the principal may
+ * access. Rule per rid: uploader (created_by === security.userId) always;
+ * otherwise the caller must be able to READ at least one object the
+ * attachment is linked to (via executeGetObject with the caller's security
+ * filter — the same pattern commentService.requireReadableParent uses).
+ * Unknown rids and unlinked attachments are uploader-only. Readable-object
+ * results are cached per call so a batch shares lookups.
+ */
+export async function resolveAccessibleAttachmentRids(
+  rids: string[],
+  security: SecurityContext,
+): Promise<Set<string>> {
+  const visible = new Set<string>();
+  const unique = [...new Set(rids.filter((r) => typeof r === "string" && r.length > 0))];
+  if (unique.length === 0) return visible;
+
+  const { rows } = await query(
+    `SELECT rid, created_by FROM attachment WHERE rid = ANY($1)`,
+    [unique],
+  );
+  const createdBy = new Map<string, string>(
+    rows.map((r: { rid: string; created_by: string }) => [r.rid, r.created_by]),
+  );
+
+  const securityFilter = buildSecurityFilter(security);
+  const readabilityCache = new Map<string, Promise<boolean>>();
+  const canReadObject = (objectType: string, pk: string): Promise<boolean> => {
+    const key = `${objectType}|${pk}`;
+    let p = readabilityCache.get(key);
+    if (!p) {
+      p = import("./queryExecutor")
+        .then((m) => m.executeGetObject(objectType, pk, securityFilter, null))
+        .then((obj) => obj !== null)
+        .catch(() => false); // fail-closed: lookup errors deny, never leak
+      readabilityCache.set(key, p);
+    }
+    return p;
+  };
+
+  for (const rid of unique) {
+    const createdByForRid = createdBy.get(rid);
+    if (createdByForRid === undefined) continue; // unknown attachment: fail-closed
+    if (createdByForRid === security.userId) {
+      visible.add(rid);
+      continue;
+    }
+    // Linked via an action: the rid was stored as a property value on an
+    // object instance. `linked_at` is not stamped today, so resolve the
+    // link target(s) from object_instances.properties.
+    const linked = await query(
+      `SELECT DISTINCT object_type_api_name AS ot, primary_key AS pk
+         FROM object_instances
+        WHERE properties::text LIKE '%' || $1 || '%'
+        LIMIT 25`,
+      [rid],
+    );
+    for (const cand of linked.rows as Array<{ ot: string; pk: string }>) {
+      if (await canReadObject(cand.ot, cand.pk)) {
+        visible.add(rid);
+        break;
+      }
+    }
+  }
+  return visible;
+}
+
+export async function getAttachmentContent(
+  rid: string,
+  security: SecurityContext,
+): Promise<{ stream: Readable; row: BlobRow } | null> {
+  // IDOR guard (Finding A): serve bytes only to the uploader or to a caller
+  // who can READ an object the attachment is linked to. Denials return null
+  // so the route emits the same 404 envelope as a nonexistent attachment —
+  // no existence oracle.
+  const allowed = await resolveAccessibleAttachmentRids([rid], security);
+  if (!allowed.has(rid)) return null;
+  const row = await lookupBlob("attachment", rid);
+  if (!row) return null;
+  return { stream: await getObjectStream(row.storage_key), row };
+}
+
 async function lookupBlob(
   table: "attachment" | "media_item",
   rid: string,
@@ -265,10 +369,3 @@ async function lookupBlob(
   return (rows[0] as BlobRow | undefined) ?? null;
 }
 
-export async function getAttachmentContent(
-  rid: string,
-): Promise<{ stream: Readable; row: BlobRow } | null> {
-  const row = await lookupBlob("attachment", rid);
-  if (!row) return null;
-  return { stream: await getObjectStream(row.storage_key), row };
-}

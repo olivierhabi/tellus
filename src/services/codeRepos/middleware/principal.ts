@@ -9,7 +9,9 @@
 //   G-C-10   principal.userId, principal.source, principal.ip, principal.userAgent
 //            available on every authenticated request
 //   G-C-11   Test-mode fake principal via X-Tellus-Test-Principal header,
-//            ONLY when CODE_REPOS_TEST_AUTH=1 is set in the environment
+//            ONLY when CODE_REPOS_TEST_AUTH=1 is set in the environment AND
+//            the request carries the shared harness token
+//            (X-Tellus-Test-Auth-Token ↔ CODE_REPOS_TEST_AUTH_TOKEN)
 //
 // This module is a thin adapter over the existing requireTellusAuth
 // middleware (src/middleware/tellusAuth.ts) — it does NOT reimplement
@@ -24,7 +26,10 @@
 // ---------------------------------------------------------------------------
 
 import type { Request, Response, NextFunction } from "express";
-import { isTestAuthBypassEnabled } from "../../../utils/testAuthGate";
+import {
+  isTestAuthBypassEnabled,
+  isTestAuthTokenBound,
+} from "../../../utils/testAuthGate";
 import { buildEnvelope, ERROR_CODES } from "../contracts/errors";
 import { requireTellusAuth } from "../../../middleware/tellusAuth";
 
@@ -61,28 +66,10 @@ function extractUa(req: Request): string | null {
   return ua.length > 512 ? ua.slice(0, 512) : ua;
 }
 
-/** True when the request's TCP peer is the loopback interface. Uses
- * `req.socket.remoteAddress` (the actual connection peer, NOT `req.ip` which
- * honors X-Forwarded-For under trust-proxy) so the localhost determination
- * can't be spoofed by a forwarded header. */
-function isLocalhost(req: Request): boolean {
-  const ip = req.socket?.remoteAddress ?? "";
-  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
-}
-
-/** The fabricated dev principal used when no X-Tellus-Test-Principal header is
- * supplied in dev mode. Uses cypress-admin@tellus.local's REAL Keycloak `sub`
- * (a UUID — addressable by the UUID-keyed dataset_acl.principal_id /
- * project_members.user_id columns, unlike an email userId which crashes the
- * Postgres UUID cast) + the tellus-superadmin dev bypass (consistent with the
- * platform-wide bypass). Dev-only: CODE_REPOS_TEST_AUTH=1 && NODE_ENV !=
- * production && localhost. */
-const DEV_FALLBACK_PRINCIPAL =
-  "53cf9bcf-4c20-4aed-83f4-3c7e405453b4/OWNER,EDITOR,READER,tellus-superadmin";
-
-/** Build a synthetic `test`-source principal from a
+/**
+ * Build a synthetic `test`-source principal from a
  * `<userId>[/<role1>,<role2>...]` header string + call next(). Shared by the
- * X-Tellus-Test-Principal override + the localhost dev fallback.
+ * X-Tellus-Test-Principal override.
  *
  * Additional roles come from the documented `X-Tellus-Test-Role` /
  * `X-Tellus-Test-Roles: r1,r2` headers (api/docs/CODE_REPOSITORY_API.md).
@@ -90,7 +77,32 @@ const DEV_FALLBACK_PRINCIPAL =
  * (existing callers pin exact case, e.g. `tellus-superadmin`), but the two
  * role headers carry the Compass repo-role vocabulary, so the well-known
  * names are canonicalized case-insensitively (viewer/editor/owner/reader
- * → VIEWER/EDITOR/OWNER/READER) before the Compass policy sees them. */
+ * → VIEWER/EDITOR/OWNER/READER) before the Compass policy sees them.
+ *
+ * Security (vuln-0038): the Function publish role (`function:publish`, or
+ * whatever `executionPolicy().publishRole` resolves to) is NEVER accepted
+ * from the header — it is stripped from the embedded roles so a forged
+ * X-Tellus-Test-Principal cannot self-authorize Function publication. The
+ * real publish authorization still flows through authorizePublish()
+ * (Keycloak role or a function_publish_grants row).
+ */
+const PUBLISH_ROLE_BLOCKLIST = new Set(["function:publish"]);
+
+// ---------------------------------------------------------------------------
+// Loopback peer check — mirrors globalAuth.ts's gating of the
+// X-Tellus-Test-Auth header (vuln-0034). The X-Tellus-Test-Principal bypass
+// is a test-only affordance: it must never bind an identity to a request
+// arriving from a non-local peer. Behind the dev stack's proxy every remote
+// caller appears loopback, so this is defense-in-depth on top of the
+// CODE_REPOS_TEST_AUTH flag — but on a directly-exposed deployment it is the
+// difference between "anyone on the network can forge any principal" and
+// "only same-host test harnesses can".
+// ---------------------------------------------------------------------------
+function isLoopbackPeer(req: Request): boolean {
+  const ip = req.socket?.remoteAddress ?? "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
 function applyHeaderPrincipal(
   req: Request,
   res: Response,
@@ -115,11 +127,11 @@ function applyHeaderPrincipal(
   const embeddedRoles = (rolesCsv ?? "")
     .split(",")
     .map((r) => r.trim())
-    .filter((r) => r.length > 0);
+    .filter((r) => r.length > 0 && !PUBLISH_ROLE_BLOCKLIST.has(r.toLowerCase()));
   const headerRoles = extraRoleHeaders
     .flatMap((h) => h.split(","))
     .map(canonicalize)
-    .filter((r) => r.length > 0);
+    .filter((r) => r.length > 0 && !PUBLISH_ROLE_BLOCKLIST.has(r.toLowerCase()));
   const roles = [...embeddedRoles, ...headerRoles];
   req.codeReposPrincipal = {
     userId,
@@ -169,26 +181,36 @@ export function requireCodeReposAuth() {
     // has its own envelope shape (errorName: "AuthenticationError") which would
     // violate G-C-08's requirement of `Stemma:Unauthenticated`.
     if (isTestAuthBypassEnabled("CODE_REPOS_TEST_AUTH")) {
-      // 1. Explicit test-principal override (G-C-11). Always honoured in dev
-      //    so integration tests can pin a specific principal (alice/bob/carol)
-      //    regardless of the caller's address.
+      // 1. Explicit test-principal override (G-C-11). Honoured ONLY when the
+      //    caller proves possession of the shared harness secret
+      //    (CODE_REPOS_TEST_AUTH_TOKEN, compared timing-safely) — the flag
+      //    alone merely enables test mode in this process; it does not
+      //    authenticate the caller. The peer address cannot distinguish
+      //    harness from attacker on forwarded deployments (every remote
+      //    caller appears loopback behind the dev stack's proxy), so the
+      //    shared token is the actual boundary; the loopback check remains
+      //    defense-in-depth. Fail closed when the env token is unset, too
+      //    short, or mismatched.
       const header = req.header("X-Tellus-Test-Principal");
-      if (typeof header === "string" && header.length > 0) {
+      if (
+        typeof header === "string" &&
+        header.length > 0 &&
+        isLoopbackPeer(req) &&
+        isTestAuthTokenBound(req)
+      ) {
         applyHeaderPrincipal(req, res, next, header);
         return;
       }
-      // 2. Localhost dev fallback — fabricate a principal so the local browser
-      //    works even when Keycloak tokens are expired/missing. Uses a REAL
-      //    UUID userId (cypress-admin's Keycloak sub — addressable, won't crash
-      //    the UUID-cast in effectiveRole the way an email userId does) + the
-      //    tellus-superadmin dev bypass. Localhost-gated: a leaked
-      //    CODE_REPOS_TEST_AUTH=1 in a remote non-prod env can't grant the dev
-      //    bypass to remote callers — fail-closed to 401 off-localhost.
-      if (!isLocalhost(req)) {
-        sendUnauthenticated(res, req, "Dev principal fallback is localhost-only");
-        return;
-      }
-      applyHeaderPrincipal(req, res, next, DEV_FALLBACK_PRINCIPAL);
+      // 2. No header + test mode: fail closed with 401 (vuln-0024/0038/0042).
+      //    The previous "localhost dev fallback" fabricated a superadmin
+      //    principal (tellus-superadmin + a pre-seeded publish grant) for any
+      //    loopback-appearing caller — behind a proxy/gateway every remote
+      //    caller satisfies that, so a zero-role/no-header request could
+      //    self-grant publish rights and publish executable Functions. There
+      //    is no legitimate reason to bind an unauthenticated request to a
+      //    privileged identity; require an explicit X-Tellus-Test-Principal
+      //    header (tests) or a real credential instead.
+      sendUnauthenticated(res, req, "Authentication required (no test principal header)");
       return;
     }
 

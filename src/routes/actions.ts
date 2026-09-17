@@ -37,10 +37,12 @@ import {
 import { OntologyError } from "../utils/queryErrors";
 import { resolveRequestTenant } from "../utils/requestTenant";
 import {
-  checkIdempotencyKey,
+  checkIdempotencyKeyScoped,
   storeIdempotencyKey,
   withIdempotencyLock,
+  type IdempotencyScope,
 } from "../actions/idempotency";
+import { hashRequest } from "../services/codeRepos/contracts/idempotency";
 import { actionRateLimiter, batchRateLimiter } from "../middleware/rateLimiter";
 import { planInlineEditBatch } from "../actions/inlineEditBatch";
 import { sendError } from "../utils/responseFormatter";
@@ -126,6 +128,23 @@ function requestCurrentUserId(req: Request): string {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
   return "system";
+}
+
+/**
+ * Idempotency scope for the current request (migration 188): the caller's
+ * principal plus a sha256 of the canonical request. Two callers sharing one
+ * Idempotency-Key get independent cache rows; the same caller reusing a key
+ * with a different body gets a 409 instead of a false replay.
+ */
+function requestIdempotencyScope(req: Request): IdempotencyScope {
+  return {
+    principal: requestCurrentUserId(req),
+    requestHash: hashRequest({
+      method: req.method,
+      path: req.originalUrl.split("?")[0],
+      body: (req as Request & { body?: unknown }).body ?? null,
+    }),
+  };
 }
 
 /**
@@ -332,12 +351,25 @@ router.post(
       // still produce the cached response to the client.
       const doExecute = async () => {
         // Step 2: cache re-check inside the lock (or first check if no lock).
+        // Scoped by caller + request body (migration 188): a key reused by
+        // another caller is a plain miss (they execute normally); the same
+        // caller with a different body gets a 409 instead of a false replay.
         if (idempotencyKey) {
-          const cached = await checkIdempotencyKey(
+          const scoped = await checkIdempotencyKeyScoped(
             idempotencyKey,
             actionTypeApiName,
+            requestIdempotencyScope(req),
           );
-          if (cached) {
+          if (scoped.kind === "conflict") {
+            throw new OntologyError(
+              "Idempotency-Key was already used with a different request body",
+              "IDEMPOTENCY_CONFLICT",
+              409,
+              { idempotencyKey },
+            );
+          }
+          if (scoped.kind === "hit") {
+            const cached = scoped.result;
             const { _httpStatus, _isError, ...body } = cached as {
               _httpStatus: number;
               _isError: boolean;
@@ -371,13 +403,14 @@ router.post(
           const outcome = mapApplyExecutionToHttp(result);
           assertApplyOutcomeInvariant(outcome);
 
-          // Step 4a: cache success
+          // Step 4a: cache success (scoped to caller + request body)
           if (idempotencyKey) {
             await storeIdempotencyKey(
               idempotencyKey,
               actionTypeApiName,
               result.executionId,
               { _httpStatus: outcome.status, _isError: false, ...outcome.body },
+              requestIdempotencyScope(req),
             );
           }
 
@@ -409,6 +442,7 @@ router.post(
                 _isError: true,
                 ...errorBody,
               },
+              requestIdempotencyScope(req),
             );
           }
           throw err;
@@ -586,11 +620,21 @@ router.post(
       // Core execute+store closure (same shape as /apply's doExecute).
       const doExecute = async () => {
         if (idempotencyKey) {
-          const cached = await checkIdempotencyKey(
+          const scoped = await checkIdempotencyKeyScoped(
             idempotencyKey,
             batchCacheName,
+            requestIdempotencyScope(req),
           );
-          if (cached) {
+          if (scoped.kind === "conflict") {
+            throw new OntologyError(
+              "Idempotency-Key was already used with a different request body",
+              "IDEMPOTENCY_CONFLICT",
+              409,
+              { idempotencyKey },
+            );
+          }
+          if (scoped.kind === "hit") {
+            const cached = scoped.result;
             const { _httpStatus, _isError, ...cachedBody } = cached as {
               _httpStatus: number;
               _isError: boolean;
@@ -783,6 +827,7 @@ router.post(
 
       // Step 4a (batch idempotency): cache the outcome — a retry replays
       // the SAME status (a 202 stays a 202) without re-executing any item.
+      // Scoped to caller + request body (migration 188).
       if (idempotencyKey) {
         await storeIdempotencyKey(
           idempotencyKey,
@@ -793,6 +838,7 @@ router.post(
             _isError: false,
             ...responseBody,
           },
+          requestIdempotencyScope(req),
         );
       }
 
@@ -1133,7 +1179,8 @@ batchRouter.post(
       }
 
       // Idempotency (Task 21 pattern, same _httpStatus semantics as
-      // the ontology-scoped applyBatch above).
+      // the ontology-scoped applyBatch above), scoped by caller + request
+      // body (migration 188).
       const idempotencyKey = req.headers["idempotency-key"] as
         | string
         | undefined;
@@ -1141,11 +1188,21 @@ batchRouter.post(
 
       const doExecute = async () => {
         if (idempotencyKey) {
-          const cached = await checkIdempotencyKey(
+          const scoped = await checkIdempotencyKeyScoped(
             idempotencyKey,
             batchCacheName,
+            requestIdempotencyScope(req),
           );
-          if (cached) {
+          if (scoped.kind === "conflict") {
+            throw new OntologyError(
+              "Idempotency-Key was already used with a different request body",
+              "IDEMPOTENCY_CONFLICT",
+              409,
+              { idempotencyKey },
+            );
+          }
+          if (scoped.kind === "hit") {
+            const cached = scoped.result;
             const { _httpStatus, _isError, ...cachedBody } = cached as {
               _httpStatus: number;
               _isError: boolean;

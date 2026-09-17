@@ -30,6 +30,15 @@
 // overwrites the cached entry with the new action type's result via
 // ON CONFLICT DO UPDATE, so subsequent retries are correctly served
 // from cache.
+//
+// Principal/body scoping (migration 188): cached rows are keyed by
+// (idempotency_key, principal) and additionally carry a sha256 hash of the
+// canonical request. A cross-user key collision can no longer replay
+// another user's result — the second caller simply misses the cache and
+// executes normally, storing under their own (key, principal) row. The
+// same caller reusing a key with a DIFFERENT body is rejected with a
+// conflict signal the routes map to HTTP 409 (code "IdempotencyConflict"),
+// matching the code-repos contract (G-C-23).
 // ---------------------------------------------------------------------------
 
 import { query, getClient } from "../db";
@@ -43,44 +52,121 @@ export interface CachedResult {
   [key: string]: unknown;
 }
 
+/**
+ * Scope a cached idempotency row is bound to. `principal` identifies the
+ * caller; `requestHash` is the sha256 of the canonical request
+ * (method + path + body) so a reused key with a mutated body is a conflict
+ * rather than a false replay.
+ */
+export interface IdempotencyScope {
+  principal: string;
+  requestHash: string;
+}
+
+/**
+ * Outcome of a scoped cache lookup:
+ *   - "hit"      — same key, same principal, same action type, same body
+ *                  hash: replay the cached result.
+ *   - "miss"     — no usable row for this (key, principal): execute normally.
+ *   - "conflict" — same key + same principal + same action type but a
+ *                  DIFFERENT body hash: the caller must receive a 409
+ *                  (re-executing would risk a duplicate mutation under a
+ *                  replayed key; replaying would return the wrong body).
+ */
+export type ScopedIdempotencyCheck =
+  | { kind: "hit"; result: CachedResult }
+  | { kind: "miss" }
+  | { kind: "conflict" };
+
+/**
+ * Scope for server-internal callers that have no HTTP request context (the
+ * automate effect runtime). Its keys are `automate:<effect_execution_id>` —
+// unique per effect execution — so a fixed principal with an empty body
+ * hash preserves the pre-188 semantics exactly: same key ⇒ replay.
+ */
+const SYSTEM_SCOPE = { principal: "system", requestHash: "" } as const;
+
 // ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
 /**
- * Check if an action with this idempotency key has already been executed.
+ * Pure replay decision over rows already fetched for (key, principal):
+ * the row for the SAME action type decides hit vs conflict; rows for other
+ * action types are ignored (cross-action-type reuse bypasses the cache and
+ * the store step overwrites). Exported for unit tests.
+ */
+export function decideScopedReplay(
+  rows: Array<{
+    action_type_api_name: string;
+    request_hash: string | null;
+    result: CachedResult;
+  }>,
+  actionTypeApiName: string,
+  requestHash: string
+): ScopedIdempotencyCheck {
+  for (const row of rows) {
+    if (row.action_type_api_name !== actionTypeApiName) continue;
+    if ((row.request_hash ?? "") === requestHash) {
+      return { kind: "hit", result: row.result };
+    }
+    return { kind: "conflict" };
+  }
+  return { kind: "miss" };
+}
+
+/**
+ * Scoped cache lookup (migration 188). Only rows belonging to
+ * `scope.principal` are considered, so a cross-user key collision is a
+ * plain miss — the second caller executes normally and stores under their
+ * own (key, principal) row.
  *
- * Returns the cached result if found and not expired, null otherwise.
- * Includes a cross-action-type guard: if the cached result is for a
- * DIFFERENT action type, returns null (ignores the cache). This prevents
- * incorrect results when a client reuses the same key across different
- * action types.
- *
- * @param key              - The idempotency key from the client header
+ * @param key               - The idempotency key from the client header
  * @param actionTypeApiName - The action type being executed
- * @returns The cached result if found, null if not
+ * @param scope             - Caller identity + canonical request hash
+ */
+export async function checkIdempotencyKeyScoped(
+  key: string,
+  actionTypeApiName: string,
+  scope: IdempotencyScope
+): Promise<ScopedIdempotencyCheck> {
+  const result = await query(
+    `SELECT action_type_api_name, request_hash, result
+     FROM idempotency_key
+     WHERE idempotency_key = $1
+       AND principal = $2
+       AND expires_at > now()`,
+    [key, scope.principal]
+  );
+
+  return decideScopedReplay(
+    result.rows as Array<{
+      action_type_api_name: string;
+      request_hash: string | null;
+      result: CachedResult;
+    }>,
+    actionTypeApiName,
+    scope.requestHash
+  );
+}
+
+/**
+ * Backward-compatible unscoped check used by the internal automate runtime
+ * (keys there are `automate:<effect_execution_id>`, unique per execution, so
+ * principal/body scoping adds nothing). Returns just the cached result or
+ * null — conflict is impossible in the fixed system scope because the
+ * request hash is a constant.
  */
 export async function checkIdempotencyKey(
   key: string,
   actionTypeApiName: string
 ): Promise<CachedResult | null> {
-  const result = await query(
-    `SELECT action_type_api_name, result
-     FROM idempotency_key
-     WHERE idempotency_key = $1
-       AND expires_at > now()`,
-    [key]
+  const check = await checkIdempotencyKeyScoped(
+    key,
+    actionTypeApiName,
+    SYSTEM_SCOPE
   );
-
-  if (result.rows.length === 0) return null;
-
-  // Cross-action-type guard: if the cached result is for a DIFFERENT
-  // action type, ignore the cache and execute normally.
-  if (result.rows[0].action_type_api_name !== actionTypeApiName) {
-    return null;
-  }
-
-  return result.rows[0].result as CachedResult;
+  return check.kind === "hit" ? check.result : null;
 }
 
 /**
@@ -100,30 +186,45 @@ export async function checkIdempotencyKey(
  *      time — defeating idempotency. The UPDATE overwrites the cached entry
  *      with the new action type's result, restoring idempotency protection.
  *
+ * When `opts` is supplied (migration 188), the row is additionally bound to
+ * the caller's principal and request-body hash; the upsert then conflicts
+ * only within that caller's scope, never against another user's row.
+ *
  * @param key               - The idempotency key from the client header
  * @param actionTypeApiName - Which action type was executed
  * @param executionId       - The unique execution ID
  * @param result            - The full action result to cache (JSONB)
+ * @param opts              - Optional principal/body-hash scope (migration 188)
  */
 export async function storeIdempotencyKey(
   key: string,
   actionTypeApiName: string,
   executionId: string,
-  result: Record<string, unknown>
+  result: Record<string, unknown>,
+  opts?: { principal: string; requestHash: string }
 ): Promise<void> {
+  const principal = opts?.principal ?? SYSTEM_SCOPE.principal;
+  const requestHash = opts?.requestHash ?? SYSTEM_SCOPE.requestHash;
   await query(
     `INSERT INTO idempotency_key
-       (idempotency_key, action_type_api_name, execution_id, result, expires_at)
-     VALUES ($1, $2, $3, $4, now() + interval '24 hours')
-     ON CONFLICT (idempotency_key) DO UPDATE
+       (idempotency_key, principal, action_type_api_name, request_hash, execution_id, result, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, now() + interval '24 hours')
+     ON CONFLICT (idempotency_key, principal) DO UPDATE
        SET action_type_api_name = EXCLUDED.action_type_api_name,
+           request_hash         = EXCLUDED.request_hash,
            execution_id         = EXCLUDED.execution_id,
            result               = EXCLUDED.result,
            expires_at           = EXCLUDED.expires_at`,
-    [key, actionTypeApiName, executionId, JSON.stringify(result)]
+    [
+      key,
+      principal,
+      actionTypeApiName,
+      requestHash,
+      executionId,
+      JSON.stringify(result),
+    ]
   );
 }
-
 /**
  * Clean up expired idempotency keys. Run this periodically (e.g., daily
  * or every 6 hours) to prevent the table from growing unbounded.

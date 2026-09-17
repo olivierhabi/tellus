@@ -545,12 +545,19 @@ describe("AiEngineClient error mapping", () => {
 });
 
 describe("requireCodeAssistantAuth (test-mode bypass)", () => {
+  const TOKEN = "code-assistant-lane-token-0123456789abcdef0123456789abcdef";
+
   it("honours X-Tellus-Test-Principal when CODE_ASSISTANT_TEST_AUTH=1", () => {
     process.env.CODE_ASSISTANT_TEST_AUTH = "1";
+    process.env.CODE_REPOS_TEST_AUTH_TOKEN = TOKEN;
     process.env.NODE_ENV = "test";
     const req = {
       header: (h: string) =>
-        h === "X-Tellus-Test-Principal" ? "alice/editor" : undefined,
+        h === "X-Tellus-Test-Principal"
+          ? "alice/editor"
+          : h === "X-Tellus-Test-Auth-Token"
+            ? TOKEN
+            : undefined,
     } as unknown as Request;
     const res = {} as Response;
     let nextCalled = false;
@@ -561,6 +568,28 @@ describe("requireCodeAssistantAuth (test-mode bypass)", () => {
     expect(req.codeAssistantPrincipal?.userId).toBe("alice");
     expect(req.codeAssistantPrincipal?.source).toBe("test");
     delete process.env.CODE_ASSISTANT_TEST_AUTH;
+    delete process.env.CODE_REPOS_TEST_AUTH_TOKEN;
+  });
+
+  it("401s when the principal header is presented without the harness token", () => {
+    process.env.CODE_ASSISTANT_TEST_AUTH = "1";
+    process.env.CODE_REPOS_TEST_AUTH_TOKEN = TOKEN;
+    process.env.NODE_ENV = "test";
+    const req = {
+      header: (h: string) =>
+        h === "X-Tellus-Test-Principal" ? "alice/editor" : undefined,
+    } as unknown as Request;
+    const res = {
+      status: () => ({ json: () => undefined }),
+    } as unknown as Response;
+    let nextCalled = false;
+    requireCodeAssistantAuth()(req as Request, res as Response, () => {
+      nextCalled = true;
+    });
+    // Token-bound: an untokened principal header must NOT bind an identity.
+    expect(nextCalled).toBe(false);
+    delete process.env.CODE_ASSISTANT_TEST_AUTH;
+    delete process.env.CODE_REPOS_TEST_AUTH_TOKEN;
   });
 
   it("is fail-closed when NODE_ENV is unset (bypass NOT active)", () => {

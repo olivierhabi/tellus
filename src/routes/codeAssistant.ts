@@ -16,7 +16,10 @@
 // ---------------------------------------------------------------------------
 
 import { Router, type Request, type Response, type NextFunction } from "express";
-import { isTestAuthBypassEnabled } from "../utils/testAuthGate";
+import {
+  isTestAuthBypassEnabled,
+  isTestAuthTokenBound,
+} from "../utils/testAuthGate";
 import { z } from "zod";
 import { AppError } from "../utils/foundryAppError";
 import {
@@ -75,10 +78,26 @@ export function requireCodeAssistantAuth(): AuthMiddleware {
       })
     ) {
       const header = req.header("X-Tellus-Test-Principal");
-      const userId =
-        header && header.length > 0
-          ? header.split("/")[0]
-          : "anonymous";
+      let userId: string;
+      if (header && header.length > 0) {
+        // Security (test-principal injection hardening): a caller that
+        // PRESENTS the header must prove possession of the shared harness
+        // token before an identity is bound (see testAuthGate.ts). Fail
+        // closed with 401 on a missing/mismatched token — never adopt a
+        // caller-chosen principal from an untokened header.
+        if (!isTestAuthTokenBound(req)) {
+          res.status(401).json({
+            errorCode: "UNAUTHENTICATED",
+            errorName: "AuthenticationError",
+            message: "Authentication required (unbound test principal header)",
+            statusCode: 401,
+          });
+          return;
+        }
+        userId = header.split("/")[0];
+      } else {
+        userId = "anonymous";
+      }
       req.codeAssistantPrincipal = { userId, source: "test" };
       next();
       return;

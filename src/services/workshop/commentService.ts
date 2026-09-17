@@ -29,6 +29,7 @@ import { executeGetObject } from "../queryExecutor";
 import { buildSecurityFilter } from "../../middleware/securityContext";
 import type { SecurityContext } from "../../middleware/securityContext";
 import { insertNotification } from "../../models/notificationInbox";
+import { resolveAccessibleAttachmentRids } from "../attachmentService";
 
 function query(sql: string, params?: unknown[]) {
   return getWorkshopDb().query(sql, params);
@@ -236,7 +237,20 @@ export async function listComments(
       ORDER BY created_at ASC, comment_id ASC`,
     [threadId],
   );
-  return result.rows.map((row: Record<string, unknown>) => toCommentRow(row, objectTypeApiName, primaryKey));
+  const comments = result.rows.map((row: Record<string, unknown>) => toCommentRow(row, objectTypeApiName, primaryKey));
+  // Finding A parity: omit attachment refs the reader could not fetch from
+  // the (now access-controlled) content endpoint — visible only to the
+  // uploader or to someone who can read an object the attachment is linked
+  // to. Resolved in one batched pass with per-rid/per-object caching.
+  const allRids = [
+    ...new Set(comments.flatMap((c: CommentRow) => c.attachments.map((a) => a.rid))),
+  ];
+  if (allRids.length === 0) return comments;
+  const visibleRids = await resolveAccessibleAttachmentRids(allRids, security);
+  return comments.map((c: CommentRow) => ({
+    ...c,
+    attachments: c.attachments.filter((a) => visibleRids.has(a.rid)),
+  }));
 }
 
 const UUID_RE =

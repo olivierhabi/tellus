@@ -1184,15 +1184,29 @@ router.get(
       const { objectType, primaryKey } = req.params;
       await ensureObjectTypeExists(objectType);
 
-      // T-10 observability: editHistory queries the audit table directly
-      // (not OpenSearch), but the contract guard still requires the
-      // canonical trio. The buildSecurityFilter call here is a no-op
-      // side effect documenting that the handler’s author considered
-      // CBAC — the actual SQL filter is per-row immutable history.
-      void buildSecurityFilter(req.security);
+      // CWE-639 remediation: editHistory returns full property_values from
+      // the audit table — content identical in sensitivity to the object
+      // itself. Gate on parent-object visibility BEFORE touching
+      // ontology_edit: the same security-filtered read used by GET-single
+      // (executeGetObject re-issues the fetch as a filtered search and
+      // returns null when the caller's markings don't match). An invisible
+      // (marking-restricted or missing) object yields the same 404 as a
+      // nonexistent one, so this endpoint can neither confirm existence
+      // nor leak content of restricted objects.
       const branchId = readBranchHeader(req);
       routeMetric(req, "objects.editHistory", branchId);
-      void primaryKey;
+      const parentObject = await executeGetObject(
+        objectType,
+        primaryKey,
+        buildSecurityFilter(req.security),
+        branchId
+      );
+      if (!parentObject) {
+        throw appError(
+          "OBJECT_NOT_FOUND",
+          `Object with primary key '${primaryKey}' not found in object type '${objectType}'.`
+        );
+      }
 
       // ------------------------------------------------------------------
       // Parse and validate query parameters
@@ -1432,7 +1446,17 @@ router.get(
         // object_instances (funnel down, e.g. CI) then 404'd even though the
         // serving index had the doc. Await both sides explicitly.
         async (ot, pk) =>
-          await (await import("../services/serving/pgObjectAsDoc")).pgObjectAsDoc(ontologyId, ot, pk)
+          // CWE-639 remediation (Strix): the PG doc path previously won
+          // without any marking check. Pass the caller's security context
+          // so pgObjectAsDoc enforces the same conjunctive marking rule as
+          // executeGetObject; a restricted row now returns null here and
+          // the object 404s below instead of leaking.
+          await (await import("../services/serving/pgObjectAsDoc")).pgObjectAsDoc(
+            ontologyId, ot, pk,
+            req.security
+              ? { markings: req.security.markings, markingBypass: req.security.markingBypass ?? req.security.systemPrincipal }
+              : { markings: [] },
+          )
           ?? await executeGetObject(ot, pk, buildSecurityFilter(req.security), branchId),
         async (args) => executeGetObject(args.objectTypeApiName, args.primaryKey, buildSecurityFilter(req.security), branchId),
       );

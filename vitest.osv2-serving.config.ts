@@ -45,7 +45,13 @@ export default defineConfig({
       // The Kafka-engine DDL emitted by the lane must use the INTERNAL
       // broker alias — the engine connects from inside the CH container.
       CLICKHOUSE_KAFKA_BROKERS: "kafka:29092",
-      OPENSEARCH_URL: "http://localhost:9200",
+      OPENSEARCH_URL: "https://localhost:9200",
+      // Security plugin enabled on the shared dev cluster (https + Basic
+      // auth, demo certs). The demo password is the committed compose
+      // default — a deployment override wins via process.env.
+      OPENSEARCH_USERNAME: "admin",
+      OPENSEARCH_PASSWORD:
+        process.env.OPENSEARCH_PASSWORD ?? "Str0ng!P@ssw0rd-Tellus-9a7b3Cz",
       OS_INDEX_PREFIX: "osv2srv-ontology-",
       OPENSEARCH_REQUEST_TIMEOUT: "10000",
       REDIS_URL: "redis://localhost:6379/15",

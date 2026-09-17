@@ -35,6 +35,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import ts from "typescript";
+import { scanSourceForEscapePatterns } from "../functionRuntime";
 
 export interface TypeCheckSourceFile {
   /** Repo-relative POSIX path, e.g. `typescript-functions/src/functions/a.ts`. */
@@ -141,7 +142,10 @@ export function typeCheckRepository(files: readonly TypeCheckSourceFile[]): Type
     writeFileSync(ambient, AMBIENT_STUB, "utf8");
     rootNames.push(ambient);
 
-    const gateDiagnostics = collectAllowlistDiagnostics(files);
+    const gateDiagnostics = [
+      ...collectAllowlistDiagnostics(files),
+      ...collectEscapePatternDiagnostics(files),
+    ];
     const program = ts.createProgram({
       rootNames,
       options: {
@@ -233,6 +237,32 @@ function compareDiagnostics(a: TypeCheckDiagnostic, b: TypeCheckDiagnostic): num
   const byLine = (a.line ?? 0) - (b.line ?? 0);
   if (byLine !== 0) return byLine;
   return a.code - b.code;
+}
+
+/**
+ * Sandbox escape-probe scan (defense-in-depth, NOT a security control): the
+ * runtime realm boundary + codegen disabling (functionRuntime.ts) already
+ * block the constructor-chain escape class; rejecting the obvious textual
+ * probes at the jemma lint stage makes naive attempts observable at PUBLISH
+ * time. Function sources only — tests run in an env-whitelisted child
+ * process and may legitimately assert on constructors. Patterns are member
+ * accesses only (plain `constructor(` class syntax stays legal).
+ */
+function collectEscapePatternDiagnostics(files: readonly TypeCheckSourceFile[]): TypeCheckDiagnostic[] {
+  const diagnostics: TypeCheckDiagnostic[] = [];
+  for (const file of files) {
+    if (file.kind !== "function") continue;
+    for (const hit of scanSourceForEscapePatterns(file.source)) {
+      diagnostics.push({
+        path: file.path,
+        line: null,
+        column: null,
+        code: 0,
+        message: `Sandbox escape probe pattern is not permitted in Functions sources: ${hit}`,
+      });
+    }
+  }
+  return diagnostics;
 }
 
 /**

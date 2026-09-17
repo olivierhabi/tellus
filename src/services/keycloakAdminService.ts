@@ -973,6 +973,24 @@ export class KeycloakAdminService {
 }
 
 let singleton: KeycloakAdminService | null = null;
+/**
+ * Resolves the tellus-confidential client secret. Fail-closed: the
+ * checked-in default was rotated (secret-disclosure vector), so a missing
+ * env var throws a descriptive error instead of silently authenticating
+ * against the wrong account with a stale literal.
+ */
+export function requireConfidentialClientSecret(): string {
+  const secret = process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET;
+  if (!secret) {
+    throw new AppError(
+      'KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET is not set (see .env.example)',
+      500,
+      'CONFIGURATION_ERROR',
+    );
+  }
+  return secret;
+}
+
 export function getKeycloakAdminService(): KeycloakAdminService {
   if (!singleton) {
     singleton = new KeycloakAdminService({
@@ -980,9 +998,7 @@ export function getKeycloakAdminService(): KeycloakAdminService {
       kcRealm: getKeycloakRealm(),
       clientId:
         process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_ID || 'tellus-confidential',
-      clientSecret:
-        process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET ||
-        'tellus-confidential-secret-change-me',
+      clientSecret: requireConfidentialClientSecret(),
     });
   }
   return singleton;

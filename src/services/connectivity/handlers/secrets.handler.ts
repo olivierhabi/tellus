@@ -310,7 +310,20 @@ export async function internalUnwrapWorker(
     // Driver settings (incl. the non-secret `user`) nest under `postgres`.
     const rawCfg = row.rows[0].config ?? {};
     const cfg = (rawCfg.postgres ?? rawCfg) as Record<string, unknown>;
-    const tenant = claims.tenant ?? row.rows[0].tenant;
+    // Tenant comes from the persisted connection row — NEVER from the JWT
+    // claim. The sole legitimate issuer (enqueueBuildForImport in
+    // imports/handlers.ts) mints the token with the connection row's tenant,
+    // so any mismatch means a forged or cross-tenant token: fail closed
+    // before touching the vault (vault.unwrap is tenant-bound, and honoring
+    // the claim would let a token minted for connection A in tenant-evil
+    // unwrap connection A's credentials under the wrong tenant scope).
+    const rowTenant = row.rows[0].tenant;
+    if (claims.tenant !== rowTenant) {
+      throw new TellusError(ScopeRequired, {
+        reason: "tenant_mismatch",
+      });
+    }
+    const tenant = rowTenant;
     const auditCtx = {
       requestId: req.headers["x-request-id"] as string | undefined,
       clientIp: req.ip,

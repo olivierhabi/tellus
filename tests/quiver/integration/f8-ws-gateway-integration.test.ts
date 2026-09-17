@@ -64,6 +64,7 @@ async function createAnalysisHttp(srv: RunningServer): Promise<{ rid: string }> 
     .post("/quiver/api/v1/analyses")
     .set({
       "x-test-user": TEST_USER,
+      "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "",
       "x-test-org": TEST_ORG,
       "idempotency-key": randomUUID(),
     })
@@ -100,7 +101,7 @@ describe("F8 / B3 — WebSocket gateway", () => {
     try {
       const { rid } = await createAnalysisHttp(srv);
       const ws = new WebSocket(`${srv.wsUrl}/quiver/api/v1/analyses/${rid}/stream`, {
-        headers: { "x-test-user": TEST_USER },
+        headers: { "x-test-user": TEST_USER, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "" },
       });
       await waitForOpen(ws);
       expect(ws.readyState).toBe(WebSocket.OPEN);
@@ -134,12 +135,33 @@ describe("F8 / B3 — WebSocket gateway", () => {
     }
   });
 
+  it("B3 C-12b — untokened x-test-user on upgrade is rejected (401)", async () => {
+    const srv = await startServer();
+    try {
+      const { rid } = await createAnalysisHttp(srv);
+      await new Promise<void>((resolve) => {
+        const ws = new WebSocket(
+          `${srv.wsUrl}/quiver/api/v1/analyses/${rid}/stream`,
+          { headers: { "x-test-user": TEST_USER } },
+        );
+        ws.once("error", () => resolve());
+        ws.once("unexpected-response", (_req, res) => {
+          expect(res.statusCode).toBe(401);
+          ws.terminate();
+          resolve();
+        });
+      });
+    } finally {
+      await srv.close();
+    }
+  });
+
   it("F8 C-03 + B3 C-11 — receives appliedInstruction when peer submits over HTTP", async () => {
     const srv = await startServer();
     try {
       const { rid } = await createAnalysisHttp(srv);
       const ws = new WebSocket(`${srv.wsUrl}/quiver/api/v1/analyses/${rid}/stream`, {
-        headers: { "x-test-user": TEST_USER },
+        headers: { "x-test-user": TEST_USER, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "" },
       });
       await waitForOpen(ws);
       const messageP = nextMessage(ws);
@@ -147,12 +169,12 @@ describe("F8 / B3 — WebSocket gateway", () => {
       // Peer submits an instruction over HTTP (F8 C-04: durable over HTTP).
       const r = await request(srv.url)
         .post(`/quiver/api/v1/analyses/${rid}/instructions`)
-        .set({ "x-test-user": PEER_USER, "x-test-org": TEST_ORG })
+        .set({ "x-test-user": PEER_USER, "x-test-org": TEST_ORG, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "" })
         .send({
           baseVersion: 0,
           clientOpIds: [randomUUID()],
           instructions: [
-            { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+            { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
           ],
         });
       expect(r.status).toBe(200);
@@ -173,10 +195,10 @@ describe("F8 / B3 — WebSocket gateway", () => {
     try {
       const { rid } = await createAnalysisHttp(srv);
       const wsA = new WebSocket(`${srv.wsUrl}/quiver/api/v1/analyses/${rid}/stream`, {
-        headers: { "x-test-user": TEST_USER },
+        headers: { "x-test-user": TEST_USER, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "" },
       });
       const wsB = new WebSocket(`${srv.wsUrl}/quiver/api/v1/analyses/${rid}/stream`, {
-        headers: { "x-test-user": PEER_USER },
+        headers: { "x-test-user": PEER_USER, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "" },
       });
       await Promise.all([waitForOpen(wsA), waitForOpen(wsB)]);
 
@@ -186,14 +208,14 @@ describe("F8 / B3 — WebSocket gateway", () => {
         JSON.stringify({
           kind: "presenceUpdate",
           cursor: { x: 100, y: 200 },
-          selectedCardIds: ["c1"],
+          selectedCardIds: ["$A"],
         }),
       );
       const msg = await recvA;
       expect(msg.kind).toBe("presenceUpdate");
       expect(msg.userSubject).toBe(PEER_USER);
       expect(msg.cursor).toEqual({ x: 100, y: 200 });
-      expect(msg.selectedCardIds).toEqual(["c1"]);
+      expect(msg.selectedCardIds).toEqual(["$A"]);
       wsA.close();
       wsB.close();
     } finally {

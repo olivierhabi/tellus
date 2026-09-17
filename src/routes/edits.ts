@@ -28,6 +28,9 @@ import {
   persistInverse,
 } from "../services/undoService";
 import { OntologyError } from "../utils/queryErrors";
+import { executeGetObject } from "../services/queryExecutor";
+import { buildSecurityFilter } from "../middleware/securityContext";
+import type { SecurityContext } from "../middleware/securityContext";
 
 const router = Router({ mergeParams: true });
 
@@ -48,6 +51,67 @@ async function ontologyExists(ontologyId: string): Promise<boolean> {
     [ontologyId]
   );
   return result.rows.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// CWE-639 remediation (Strix) — row-level marking enforcement for edit reads
+//
+// Edit rows carry full property_values, so they inherit the parent object's
+// marking restrictions. Two complementary gates:
+//   (a) Single-object reads (?primaryKey= list filter, /diff/:primaryKey)
+//       re-use the canonical security-filtered read (executeGetObject) and
+//       404 OBJECT_NOT_FOUND when the parent is invisible — same shape as
+//       GET-single, so restricted objects are indistinguishable from missing.
+//   (b) List queries (summary, count, page) carry a NOT EXISTS predicate
+//       against object_instances: hide edit rows whose parent object's
+//       markings are NOT a subset of the caller's markings (conjunctive —
+//       the caller must hold EVERY row marking). Empty caller markings
+//       means only unmarked parents are visible; markingBypass principals
+//       skip the predicate. Parents with no object_instances row keep
+//       legacy visibility (no marking evidence to enforce against).
+// ---------------------------------------------------------------------------
+
+interface CallerSecurity {
+  markings: string[];
+  bypass: boolean;
+}
+
+function callerSecurity(req: Request): CallerSecurity {
+  const sec = req.security as SecurityContext | undefined;
+  return {
+    markings: Array.isArray(sec?.markings) ? sec.markings : [],
+    bypass: Boolean(sec?.markingBypass ?? sec?.systemPrincipal),
+  };
+}
+
+/**
+ * SQL predicate that hides ontology_edit rows whose parent object carries
+ * markings outside the caller's set. `$idx` is the caller-markings text[]
+ * parameter. Fail-open for parents with no object_instances row (deleted /
+ * never-hydrated objects carry no marking evidence to enforce against).
+ */
+function editMarkingPredicate(paramIndex: number): string {
+  return `NOT EXISTS (
+    SELECT 1 FROM object_instances oi
+    WHERE oi.object_type_api_name = ontology_edit.object_type_api_name
+      AND oi.primary_key = ontology_edit.primary_key
+      AND NOT (oi.markings <@ $${paramIndex}::text[])
+  )`;
+}
+
+/** Gate a single object's edit visibility. Returns true when readable. */
+async function parentReadable(
+  req: Request,
+  objectTypeApiName: string,
+  primaryKey: string
+): Promise<boolean> {
+  const obj = await executeGetObject(
+    objectTypeApiName,
+    primaryKey,
+    buildSecurityFilter(req.security),
+    null
+  );
+  return obj !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +259,8 @@ router.get(
       const objectType = resolved.info;
       const apiName = objectType.api_name;
 
+      const { markings: callerMarkings, bypass: callerBypass } = callerSecurity(req);
+
       // -----------------------------------------------------------------
       // Parse query parameters
       // -----------------------------------------------------------------
@@ -258,8 +324,44 @@ router.get(
       }
 
       // -----------------------------------------------------------------
-      // Build summary stats query (unfiltered by pagination)
+      // CWE-639 remediation (Strix): row-level marking enforcement.
+      //
+      // (a) With ?primaryKey=, gate the whole response on the parent
+      //     object's readability (executeGetObject applies the caller's
+      //     marking filter); an invisible parent 404s exactly like a
+      //     missing one.
+      // (b) Every query below (summary, count, page) also carries a
+      //     NOT EXISTS predicate against object_instances so rows whose
+      //     parent object's markings are not a subset of the caller's
+      //     markings are excluded — including from the counts, which
+      //     would otherwise leak restricted-object edit activity.
+      //     (callerMarkings/callerBypass were destructured once above.)
       // -----------------------------------------------------------------
+
+      if (primaryKeyParam !== undefined && !callerBypass) {
+        const readable = await parentReadable(req, apiName, primaryKeyParam);
+        if (!readable) {
+          return sendError(
+            res,
+            "OBJECT_NOT_FOUND",
+            `Object with primary key '${primaryKeyParam}' not found in object type '${apiName}'.`
+          );
+        }
+      }
+
+      // -----------------------------------------------------------------
+      // Build summary stats query (unfiltered by pagination)
+      //
+      // The marking predicate is applied here too: unrestricted counts
+      // would leak restricted-object edit activity (volume + operation
+      // mix) even when the rows themselves are filtered below.
+      // -----------------------------------------------------------------
+      const statsConditions: string[] = ["object_type_api_name = $1"];
+      const statsValues: unknown[] = [apiName];
+      if (!callerBypass) {
+        statsValues.push(callerMarkings);
+        statsConditions.push(editMarkingPredicate(statsValues.length));
+      }
       const statsResult = await query(
         `SELECT
            COUNT(*)::int AS total,
@@ -269,8 +371,8 @@ router.get(
            COUNT(*) FILTER (WHERE operation = 'update')::int AS updates,
            COUNT(*) FILTER (WHERE operation = 'delete')::int AS deletes
          FROM ontology_edit
-         WHERE object_type_api_name = $1`,
-        [apiName]
+         WHERE ${statsConditions.join(" AND ")}`,
+        statsValues
       );
 
       const stats = statsResult.rows[0];
@@ -312,6 +414,15 @@ router.get(
       if (primaryKeys.length > 0) {
         conditions.push(`primary_key = ANY($${paramIndex}::text[])`);
         values.push(primaryKeys);
+        paramIndex++;
+      }
+
+      // CWE-639 (Strix): same parent-marking predicate as the summary
+      // query, so restricted-object edit rows never reach the page or
+      // its pagination count.
+      if (!callerBypass) {
+        values.push(callerMarkings);
+        conditions.push(editMarkingPredicate(paramIndex));
         paramIndex++;
       }
 
@@ -417,6 +528,44 @@ router.get(
           "OBJECT_TYPE_NOT_FOUND",
           `Object type '${apiName}' not found in ontology '${ontologyId}'.`
         );
+      }
+
+      // -----------------------------------------------------------------
+      // CWE-639 remediation (Strix): the diff replays every edit into
+      // currentOntologyValues — the full current state of the object.
+      // Gate on parent-object readability first; an invisible
+      // (marking-restricted or missing) parent 404s exactly like a
+      // missing one. Marking-bypass principals skip the gate.
+      // -----------------------------------------------------------------
+      if (!callerSecurity(req).bypass) {
+        const readable = await parentReadable(req, apiName, primaryKey);
+        if (!readable) {
+          return sendError(
+            res,
+            "OBJECT_NOT_FOUND",
+            `Object with primary key '${primaryKey}' not found in object type '${apiName}'.`
+          );
+        }
+      }
+
+      // -----------------------------------------------------------------
+      // Fetch properties for this object type
+      // -----------------------------------------------------------------
+      // CWE-639 remediation (Strix): the diff replays every edit into
+      // currentOntologyValues — the full current state of the object.
+      // Gate on parent-object readability first; an invisible
+      // (marking-restricted or missing) parent 404s exactly like a
+      // missing one. Marking-bypass principals skip the gate.
+      // -----------------------------------------------------------------
+      if (!callerSecurity(req).bypass) {
+        const readable = await parentReadable(req, apiName, primaryKey);
+        if (!readable) {
+          return sendError(
+            res,
+            "OBJECT_NOT_FOUND",
+            `Object with primary key '${primaryKey}' not found in object type '${apiName}'.`
+          );
+        }
       }
 
       // -----------------------------------------------------------------

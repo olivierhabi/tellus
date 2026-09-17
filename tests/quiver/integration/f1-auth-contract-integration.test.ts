@@ -81,11 +81,27 @@ describe("F1 C-08 — login → API contract surface", () => {
       .post(`/quiver/api/v1/analyses`)
       .set({
         "x-test-user": "ri.multipass.main.user.f1",
+        "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "",
         "x-test-org": "ri.multipass.main.org.f1",
         "idempotency-key": "00000000-0000-7000-8000-000000f10081",
         "content-type": "application/json",
       })
       .send({ displayName: "F1 smoke", parentFolderRid: FAKE_FOLDER });
     expect(r.status).toBe(201);
+  });
+
+  it("F1 C-08b: untokened x-test-user binds no identity → 401", async () => {
+    const app = quiverApp();
+    const r = await request(app)
+      .post(`/quiver/api/v1/analyses`)
+      .set({
+        "x-test-user": "ri.multipass.main.user.attacker",
+        "x-test-org": "ri.multipass.main.org.f1",
+        "idempotency-key": "00000000-0000-7000-8000-000000f10082",
+        "content-type": "application/json",
+      })
+      .send({ displayName: "F1 untokened", parentFolderRid: FAKE_FOLDER });
+    expect(r.status).toBe(401);
+    expect(r.body.errorName).toBe("Tellus:Quiver:Unauthenticated");
   });
 });

@@ -65,15 +65,19 @@ port.on("message", async (msg: WorkerRequest) => {
     // Async function: the sandbox returned a Promise (vm can't await it).
     // Resolve it here under the timeout BEFORE posting — Promises can't cross
     // postMessage. The pool's wall budget is the backstop; the per-Promise
-    // timeout (FUNCTION_TIMEOUT_MS) is tighter.
+    // timeout (FUNCTION_TIMEOUT_MS) is tighter. The resolved value may be a
+    // guest container holding realm-sealed leaves — unwrap before use and
+    // never post the host-only unsealOutput function across the wire.
     if (result.pendingPromise) {
       const settled = await awaitSandboxPromise(result.pendingPromise);
+      const unseal = result.unsealOutput;
       result = {
         ...result,
-        output: settled.output,
+        output: unseal ? unseal(settled.output) : settled.output,
         status: settled.status,
         errorMessage: settled.errorMessage,
         pendingPromise: undefined,
+        unsealOutput: undefined,
       };
     }
     const edits: OntologyEdit[] =

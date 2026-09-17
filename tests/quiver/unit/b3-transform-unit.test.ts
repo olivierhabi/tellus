@@ -8,14 +8,14 @@ describe("B3 C-05 — updateCardConfig LWW field-level", () => {
     const remote: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "replace", path: "/title", value: "Server" }],
       } as Instruction,
     ];
     const local: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "replace", path: "/title", value: "Client" }],
       } as Instruction,
     ];
@@ -29,14 +29,14 @@ describe("B3 C-05 — updateCardConfig LWW field-level", () => {
     const remote: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "replace", path: "/title", value: "Server" }],
       } as Instruction,
     ];
     const local: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "replace", path: "/colour", value: "red" }],
       } as Instruction,
     ];
@@ -49,14 +49,14 @@ describe("B3 C-05 — updateCardConfig LWW field-level", () => {
     const remote: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "replace", path: "/title", value: "Server" }],
       } as Instruction,
     ];
     const local: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [
           { op: "replace", path: "/title", value: "Client" },
           { op: "replace", path: "/colour", value: "red" },
@@ -75,14 +75,14 @@ describe("B3 C-05 — updateCardConfig LWW field-level", () => {
     const remote: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "replace", path: "/style", value: { color: "red" } }],
       } as Instruction,
     ];
     const local: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "replace", path: "/style/color", value: "blue" }],
       } as Instruction,
     ];
@@ -95,10 +95,10 @@ describe("B3 C-05 — updateCardConfig LWW field-level", () => {
 describe("B3 C-06 — bindInput merge vs LWW", () => {
   it("different slots: merged (resolution=merge)", () => {
     const remote: Instruction[] = [
-      { kind: "bindInput", cardId: "c1", slot: "leftInput", sourceCardId: "src1" } as Instruction,
+      { kind: "bindInput", cardId: "$A", slot: "leftInput", sourceCardId: "$S" } as Instruction,
     ];
     const local: Instruction[] = [
-      { kind: "bindInput", cardId: "c1", slot: "rightInput", sourceCardId: "src2" } as Instruction,
+      { kind: "bindInput", cardId: "$A", slot: "rightInput", sourceCardId: "$T" } as Instruction,
     ];
     const t = transformLocalAgainstRemote(local, remote);
     expect(t.results[0].transformed).not.toBeNull();
@@ -107,10 +107,10 @@ describe("B3 C-06 — bindInput merge vs LWW", () => {
 
   it("same slot: LWW, local dropped", () => {
     const remote: Instruction[] = [
-      { kind: "bindInput", cardId: "c1", slot: "in", sourceCardId: "src1" } as Instruction,
+      { kind: "bindInput", cardId: "$A", slot: "in", sourceCardId: "$S" } as Instruction,
     ];
     const local: Instruction[] = [
-      { kind: "bindInput", cardId: "c1", slot: "in", sourceCardId: "src2" } as Instruction,
+      { kind: "bindInput", cardId: "$A", slot: "in", sourceCardId: "$T" } as Instruction,
     ];
     const t = transformLocalAgainstRemote(local, remote);
     expect(t.results[0].transformed).toBeNull();
@@ -120,11 +120,11 @@ describe("B3 C-06 — bindInput merge vs LWW", () => {
 
 describe("B3 C-07 — tombstone semantics in transform", () => {
   it("update on a remote-deleted card → tombstone drop", () => {
-    const remote: Instruction[] = [{ kind: "deleteCard", cardId: "c1" } as Instruction];
+    const remote: Instruction[] = [{ kind: "deleteCard", cardId: "$A" } as Instruction];
     const local: Instruction[] = [
       {
         kind: "updateCardConfig",
-        cardId: "c1",
+        cardId: "$A",
         configJsonPatch: [{ op: "add", path: "/x", value: 1 }],
       } as Instruction,
     ];
@@ -140,7 +140,7 @@ describe("B3 C-08 — placeCardOnCanvas collision: ±32 px offset", () => {
     const remote: Instruction[] = [
       {
         kind: "placeCardOnCanvas",
-        cardId: "c1",
+        cardId: "$A",
         canvasId: "k1",
         position: { x: 100, y: 100 },
         size: { width: 200, height: 100 },
@@ -149,7 +149,7 @@ describe("B3 C-08 — placeCardOnCanvas collision: ±32 px offset", () => {
     const local: Instruction[] = [
       {
         kind: "placeCardOnCanvas",
-        cardId: "c2",
+        cardId: "$B",
         canvasId: "k1",
         position: { x: 100, y: 100 },
         size: { width: 200, height: 100 },
@@ -166,7 +166,7 @@ describe("B3 C-08 — placeCardOnCanvas collision: ±32 px offset", () => {
     const remote: Instruction[] = [
       {
         kind: "placeCardOnCanvas",
-        cardId: "c1",
+        cardId: "$A",
         canvasId: "k1",
         position: { x: 0, y: 0 },
         size: { width: 100, height: 100 },
@@ -175,7 +175,7 @@ describe("B3 C-08 — placeCardOnCanvas collision: ±32 px offset", () => {
     const local: Instruction[] = [
       {
         kind: "placeCardOnCanvas",
-        cardId: "c1",
+        cardId: "$A",
         canvasId: "k1",
         position: { x: 50, y: 50 },
         size: { width: 100, height: 100 },
@@ -191,10 +191,10 @@ describe("B3 C-04 — apply(remote;local') ≡ apply(local;remote') (sample pair
   // Smoke check for the convergence invariant on representative pairs.
   it("non-overlapping addCards converge", () => {
     const remote: Instruction[] = [
-      { kind: "addCard", card: { id: "a", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+      { kind: "addCard", card: { id: "$C", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
     ];
     const local: Instruction[] = [
-      { kind: "addCard", card: { id: "b", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+      { kind: "addCard", card: { id: "$D", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
     ];
     const tA = transformLocalAgainstRemote(local, remote);
     const tB = transformLocalAgainstRemote(remote, local);

@@ -219,17 +219,21 @@ function isExplicitlyAllowed(normalizedHost: string, v4: string | null): boolean
   return false;
 }
 
-/** True when host is a literal private/reserved address or internal hostname. */
-function isReservedTarget(host: string): boolean {
+/**
+ * Core reserved-target classification, IGNORING the
+ * CONNECTIVITY_EGRESS_ALLOW_RESERVED operator opt-in. This is the
+ * "truly-reserved" predicate the connection-registration gate uses: a
+ * caller-authored inline allowlist (or the operator env opt-in) must never
+ * self-authorize a loopback / link-local / metadata / RFC-1918 dial. Only an
+ * operator-APPROVED named egress policy authorizes these destinations (see
+ * `assertReservedTargetRequiresApprovedPolicy`).
+ */
+function isReservedTargetIgnoringAllowlist(host: string): boolean {
   const h = host.trim().toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
   // IPv4-mapped IPv6 (::ffff:a.b.c.d) — unwrap so the v4 rules apply to it.
   const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
   const v4 = mapped ? mapped[1] : h;
   const v4OrNull = ipv4ToInt(v4) !== null ? v4 : null;
-
-  // Operator-approved reserved destinations (dev loopback DB, etc.) override
-  // every block rule below. Default-closed: empty allowlist ⇒ no effect.
-  if (isExplicitlyAllowed(h, v4OrNull)) return false;
 
   if (BLOCKED_HOSTNAMES.has(h) || h.endsWith(".localhost")) return true;
   // IPv6 loopback / unspecified / unique-local / link-local literals.
@@ -242,6 +246,83 @@ function isReservedTarget(host: string): boolean {
     }
   }
   return false;
+}
+
+/** True when host is a literal private/reserved address or internal hostname. */
+function isReservedTarget(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d) — unwrap so the v4 rules apply to it.
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
+  const v4 = mapped ? mapped[1] : h;
+  const v4OrNull = ipv4ToInt(v4) !== null ? v4 : null;
+
+  // Operator-approved reserved destinations (dev loopback DB, etc.) override
+  // every block rule below. Default-closed: empty allowlist ⇒ no effect.
+  if (isExplicitlyAllowed(h, v4OrNull)) return false;
+
+  return isReservedTargetIgnoringAllowlist(host);
+}
+
+/**
+ * True when `host` is reserved or internal, evaluated IGNORING the
+ * CONNECTIVITY_EGRESS_ALLOW_RESERVED operator opt-in. The env opt-in only
+ * relaxes the transient `assertEgressForConfig` / `assertEgressResolved`
+ * probes; it never authorizes a persisted or dialed connection on its own.
+ */
+export function isTrulyReservedTarget(host: string): boolean {
+  return isReservedTargetIgnoringAllowlist(host);
+}
+
+// ---------------------------------------------------------------------------
+// Reserved-target registration gate (SSRF: user-registered loopback dials).
+//
+// A persisted connection whose target is truly-reserved (loopback,
+// link-local, cloud metadata, RFC-1918, …) may ONLY be registered when the
+// request carries an operator-APPROVED named egress policy
+// (`egressPolicyRid` resolving to APPROVED). A caller-authored inline
+// allowlist must never self-authorize a reserved dial — otherwise any
+// authenticated principal could aim a connection at the platform loopback
+// and use the server/worker as an SSRF pivot.
+//
+// Operator steps for the single-developer laptop flow (loopback Postgres):
+//   1. POST /api/v1/connectivity/egress-policies with an allowlist covering
+//      the loopback target, e.g. { kind: "host", host: "localhost", port: 5432 }
+//      (created PENDING).
+//   2. POST /api/v1/connectivity/egress-policies/:eprid/decision with
+//      { "decision": "APPROVED" } + If-Match (operator review; allowlist edits
+//      return the policy to PENDING so destinations are always re-reviewed).
+//   3. POST /api/v1/connectivity/connections with the normal config PLUS
+//      `egressPolicyRid: "<approved rid>"` — the reserved target then dials.
+// ---------------------------------------------------------------------------
+
+/** What the caller presents as authorization for a reserved target. */
+export interface ReservedPolicyAuthorization {
+  egressPolicyRid?: string | null;
+  /** Resolved status of the referenced named policy (PENDING/APPROVED/REJECTED). */
+  policyStatus?: string | null;
+}
+
+/**
+ * Throws Tellus:Connectivity:EgressBlocked (403) when `host` is a
+ * truly-reserved target (evaluated IGNORING the env opt-in) and the caller
+ * does not present an operator-APPROVED named egress policy. Non-reserved
+ * targets always pass; reserved targets with an APPROVED named policy pass.
+ * Fail-closed: missing/unknown/PENDING/REJECTED policy ⇒ throw.
+ */
+export function assertReservedTargetRequiresApprovedPolicy(
+  host: string,
+  port: number,
+  auth: ReservedPolicyAuthorization | null | undefined,
+): void {
+  if (!isTrulyReservedTarget(host)) return;
+  if (auth?.egressPolicyRid && auth?.policyStatus === "APPROVED") return;
+  throw blocked("reserved", "reserved target requires an operator-approved named egress policy", {
+    host,
+    port,
+    egressPolicyRid: auth?.egressPolicyRid ?? null,
+    policyStatus: auth?.policyStatus ?? null,
+    reason: "target resolves to a reserved or internal address range",
+  });
 }
 
 /**
@@ -283,10 +364,24 @@ function isLiteralIp(host: string): boolean {
  * Throws Tellus:Connectivity:EgressBlocked (403) when the host is internal, when
  * resolution fails, or when ANY resolved address is reserved. Literal IPs are
  * validated directly and returned as-is.
+ *
+ * `opts.allowReserved` bypasses the reserved-range refusals (but still
+ * resolves and pins). It exists for ONE caller: the pool layer, AFTER it has
+ * proven the reserved target is covered by an operator-APPROVED named egress
+ * policy (`assertReservedTargetRequiresApprovedPolicy`). In production the env
+ * opt-in is unset, so without this bypass an approved loopback policy could
+ * never actually dial. Never pass `allowReserved: true` from any path that
+ * has not completed that approval check.
  */
-export async function assertEgressResolved(host: string, port: number): Promise<string> {
-  // Block obvious internal hostnames / literal reserved IPs up front.
-  if (isReservedTarget(host)) {
+export async function assertEgressResolved(
+  host: string,
+  port: number,
+  opts?: { allowReserved?: boolean },
+): Promise<string> {
+  const allowReserved = opts?.allowReserved === true;
+  // Block obvious internal hostnames / literal reserved IPs up front (unless
+  // the caller already proved an APPROVED named policy covers this dial).
+  if (!allowReserved && isReservedTarget(host)) {
     throw blocked("reserved", "reserved address range", {
       host,
       port,
@@ -318,7 +413,7 @@ export async function assertEgressResolved(host: string, port: number): Promise<
     });
   }
   for (const { address } of resolved) {
-    if (isReservedTarget(address)) {
+    if (!allowReserved && isReservedTarget(address)) {
       // DNS rebinding: a public-looking name pointing into private space. This
       // is the highest-signal variant of the alarm — a literal reserved IP is
       // usually a misconfiguration, this is usually deliberate.

@@ -30,13 +30,13 @@ function sha(s: string): string {
 
 describe("B3 C-10 — replay produces canonical document", () => {
   const ops: Instruction[] = [
-    { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
-    { kind: "addCard", card: { id: "c2", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
-    { kind: "bindInput", cardId: "c2", slot: "in", sourceCardId: "c1" } as Instruction,
-    { kind: "addCanvas", canvas: { id: "k1", name: "Main", ordering: [], placements: {} } } as Instruction,
-    { kind: "placeCardOnCanvas", cardId: "c1", canvasId: "k1", position: { x: 0, y: 0 }, size: { width: 100, height: 100 } } as Instruction,
-    { kind: "updateCardConfig", cardId: "c1", configJsonPatch: [{ op: "add", path: "/title", value: "Hello" }] } as Instruction,
-    { kind: "deleteCard", cardId: "c2" } as Instruction,
+    { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+    { kind: "addCard", card: { id: "$B", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+    { kind: "bindInput", cardId: "$B", slot: "in", sourceCardId: "$A" } as Instruction,
+    { kind: "addCanvas", canvas: { id: "k1", name: "Main", ordering: [], placements: [] } } as Instruction,
+    { kind: "placeCardOnCanvas", cardId: "$A", canvasId: "k1", position: { x: 0, y: 0 }, size: { width: 100, height: 100 } } as Instruction,
+    { kind: "updateCardConfig", cardId: "$A", configJsonPatch: [{ op: "add", path: "/title", value: "Hello" }] } as Instruction,
+    { kind: "deleteCard", cardId: "$B" } as Instruction,
   ];
 
   it("two replays produce byte-identical documents", () => {
@@ -58,11 +58,11 @@ describe("B3 C-10 — replay produces canonical document", () => {
     const seq: Instruction[] = [
       ...ops,
       // updateCardConfig on already-deleted c2 → drop
-      { kind: "updateCardConfig", cardId: "c2", configJsonPatch: [{ op: "add", path: "/x", value: 1 }] } as Instruction,
+      { kind: "updateCardConfig", cardId: "$B", configJsonPatch: [{ op: "add", path: "/x", value: 1 }] } as Instruction,
     ];
     const r = replay(emptyDoc(), seq);
-    expect(r.tombstones.has("c2")).toBe(true);
-    expect((r.document.cards as any).c2).toBeUndefined();
+    expect(r.tombstones.has("$B")).toBe(true);
+    expect((r.document.cards as any)["$B"]).toBeUndefined();
     expect(r.droppedCount).toBeGreaterThanOrEqual(1);
   });
 });

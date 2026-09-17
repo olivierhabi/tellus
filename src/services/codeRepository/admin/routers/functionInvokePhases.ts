@@ -23,6 +23,7 @@ import {
 import { getVersion, listVersions } from "../../../functionsRegistry/store";
 import { loadOntologySnapshot } from "../../../functions/ontologyRuntime";
 import type { OntologySnapshot } from "../../../functions/ontologyRuntime";
+import { scanSourceForEscapePatterns } from "../../../functionRuntime";
 import type { StemmaAdapter } from "../../adapters/types";
 import { createTtlCache, transpileCacheKey } from "../invokeCache";
 import type { CodeReposErrorName } from "../../errors";
@@ -458,6 +459,23 @@ export type TranspiledInvokeSource =
  * the transpile entirely.
  */
 export function transpileForInvoke(apiName: string, source: string): TranspiledInvokeSource {
+  // Escape-probe scan (defense-in-depth — see functionRuntime.ts): the
+  // realm boundary already blocks constructor-chain escapes at runtime; this
+  // makes naive probes fail LOUDLY at preview/invoke time instead.
+  const escapeHits = scanSourceForEscapePatterns(source);
+  if (escapeHits.length > 0) {
+    return {
+      kind: "invalid",
+      errorName: "CodeRepos:FunctionSourceRejected",
+      parameters: {
+        apiName,
+        reason:
+          "source contains sandbox escape probe pattern(s): " +
+          escapeHits.join(", ") +
+          " — not permitted in the Functions runtime",
+      },
+    };
+  }
   const transpileKey = transpileCacheKey(apiName, source);
   let transpiled = transpileCache.get(transpileKey);
   if (transpiled === undefined) {

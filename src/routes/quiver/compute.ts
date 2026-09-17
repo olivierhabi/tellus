@@ -7,7 +7,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { getAnalysis, ActorContext } from "../../services/quiver/analysisService";
 import { readBranch } from "../../services/quiver/branchHeader";
-import { isQuiverTestAuthAllowed } from "./testAuth";
+import { isQuiverTestAuthBound } from "./testAuth";
 import {
   invalidAnalysisRequest,
   isQuiverError,
@@ -57,7 +57,7 @@ const ComputeCardRequestBody = z.object({
 });
 
 function actorFromReq(req: Request): ActorContext {
-  const allowTest = isQuiverTestAuthAllowed();
+  const allowTest = isQuiverTestAuthBound(req);
   const fromCtx = (req as Request & {
     securityContext?: { userSubject?: string; orgRid?: string };
   }).securityContext;

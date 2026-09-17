@@ -4,7 +4,7 @@
 
 import { Router, type Request, type Response } from "express";
 import { readBranch } from "../../services/quiver/branchHeader";
-import { isQuiverTestAuthAllowed } from "./testAuth";
+import { isQuiverTestAuthBound } from "./testAuth";
 import {
   invalidAnalysisRequest,
   isQuiverError,
@@ -41,7 +41,7 @@ interface Actor {
 }
 
 function actor(req: Request): Actor {
-  const allowTest = isQuiverTestAuthAllowed();
+  const allowTest = isQuiverTestAuthBound(req);
   const ctx = (req as Request & {
     securityContext?: { userSubject?: string; orgRid?: string };
   }).securityContext;

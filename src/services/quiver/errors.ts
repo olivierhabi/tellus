@@ -74,6 +74,11 @@ export const analysisNotFound = E("NOT_FOUND", "AnalysisNotFound");
 export const versionMismatch = E("FAILED_PRECONDITION", "VersionMismatch");
 export const idempotencyKeyReplay = E("CONFLICT", "IdempotencyKeyReplay");
 export const compassUnavailable = E("INTERNAL", "CompassUnavailable");
+/** Fail-closed deny raised when no CompassPort is wired (deny-by-wiring):
+ *  analysis authorization refuses to allow-all just because Compass is
+ *  absent. 503 — the deployment is missing its authorization wiring, not
+ *  the client's permissions. */
+export const compassNotConfigured = E("FAILED_PRECONDITION", "CompassNotConfigured", 503);
 export const unauthenticated = E("UNAUTHENTICATED", "Unauthenticated");
 export const insufficientPermission = E("PERMISSION_DENIED", "InsufficientPermission");
 export const markingRequired = E("PERMISSION_DENIED", "MarkingRequired");

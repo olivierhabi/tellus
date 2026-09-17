@@ -19,7 +19,12 @@ import {
   resetAuditEmitter,
   type QuiverAuditEvent,
 } from "../../../src/services/quiver/audit";
-import { setCompassPort } from "../../../src/services/quiver/analysisService";
+import {
+  getCompassPort,
+  noopCompass,
+  setCompassPort,
+} from "../../../src/services/quiver/analysisService";
+import { dbCompassPort } from "../../../src/services/quiver/dbCompassPort";
 
 let migrationsApplied = false;
 
@@ -93,6 +98,17 @@ export function quiverApp(): Express {
   app.use(express.json({ limit: "8mb" }));
   // Phase 5 enables every router; the test harness needs full surface.
   app.use("/quiver/api/v1", buildQuiverRouter({ phase: 5 }));
+  // buildQuiverRouter wires the production DB-backed CompassPort at mount
+  // (idempotently). This lane's folder rids are synthetic and its principals
+  // are Multipass-shaped test subjects — NOT local users.id UUIDs — so the
+  // real port would (correctly) deny everything. Swap the freshly-wired
+  // production port for the permissive lane default — but ONLY when the
+  // production port is what's active, so a spy installed by `fakeCompass()`
+  // (or any other deliberate override) is never clobbered. Real membership
+  // enforcement is proven by the db-compass-port unit tests.
+  if (getCompassPort() === dbCompassPort) {
+    setCompassPort(noopCompass);
+  }
   return app;
 }
 
@@ -130,12 +146,8 @@ export function fakeCompass(): CompassSpy {
     authorizedReads: [],
     registered: [],
     detach() {
-      // restore default no-op port.
-      setCompassPort({
-        async assertEditorOnFolder() {},
-        async registerAnalysis() {},
-        async assertReadable() {},
-      });
+      // restore the permissive lane default port.
+      setCompassPort(noopCompass);
     },
   };
   setCompassPort({
@@ -148,6 +160,7 @@ export function fakeCompass(): CompassSpy {
         throw parentFolderNotFound({ folderRid });
       }
     },
+    async assertFolderReadable() {},
     async registerAnalysis({ rid, parentFolderRid, branch }) {
       spy.registered.push({ rid, folder: parentFolderRid, branch });
     },

@@ -39,7 +39,7 @@ import type { CardBackend } from "../../../src/services/quiver/compute/types";
 const TEST_USER = "ri.multipass.main.user.alice";
 const TEST_ORG = "ri.multipass.main.org.acme";
 function authedHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, ...extra };
+  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "", ...extra };
 }
 
 beforeAll(async () => {

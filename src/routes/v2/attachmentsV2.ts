@@ -69,8 +69,11 @@ router.get(
   "/attachments/:attachmentRid/content",
   async (req: Request, res: Response) => {
     try {
-      requireSecurityContext(req);
-      const result = await getAttachmentContent(req.params.attachmentRid);
+      const security = requireSecurityContext(req);
+      // Finding A (IDOR): content is served only to the uploader or to a
+      // caller who can READ an object the attachment is linked to. Denials
+      // fall through to the same 404 envelope as a nonexistent attachment.
+      const result = await getAttachmentContent(req.params.attachmentRid, security);
       if (!result) {
         throw Object.assign(new Error("Attachment not found."), {
           errorName: "AttachmentNotFound",

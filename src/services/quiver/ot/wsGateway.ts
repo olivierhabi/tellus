@@ -8,7 +8,9 @@
  *
  * Auth: Multipass JWT lifted from the `Sec-WebSocket-Protocol` header
  * (B3 C-12). In test mode (QUIVER_ALLOW_TEST_AUTH=1) accept the
- * `x-test-user` header on the upgrade request as the user subject.
+ * `x-test-user` header (or its query twin, for browsers) on the upgrade
+ * request as the user subject — ONLY with a valid harness token
+ * (isQuiverTestAuthBound, allowQueryToken).
  *
  * Close codes:
  *   4001 — token expired / invalid
@@ -33,7 +35,7 @@ import {
   otWsDisconnectsTotal,
 } from "../metrics";
 import type { TellusAuthService } from "../../tellusAuthService";
-import { isQuiverTestAuthAllowed } from "../../../routes/quiver/testAuth";
+import { isQuiverTestAuthBound } from "../../../routes/quiver/testAuth";
 
 // Largest inbound frame we will parse (presenceUpdate messages are tiny);
 // caps memory a hostile client can force us to buffer per frame.
@@ -192,11 +194,24 @@ function bindClient(ws: WebSocket, ctx: ClientCtx): void {
 async function defaultResolveUser(
   req: IncomingMessage,
 ): Promise<string | null> {
-  // Test-only header bypass, hard-gated to non-production (see testAuth.ts).
-  if (isQuiverTestAuthAllowed()) {
+  // Test-only identity bypass, token-bound (see testAuth.ts): the caller
+  // must prove possession of the shared harness token or no identity is
+  // adopted. Browsers cannot set upgrade-request headers, so the FE
+  // wsClient sends both x-test-user and the token as query parameters —
+  // the gateway therefore honors the query twin (allowQueryToken) while
+  // HTTP routes stay header-only.
+  if (isQuiverTestAuthBound(req, { allowQueryToken: true })) {
     const u = req.headers["x-test-user"];
     if (typeof u === "string") return u;
     if (Array.isArray(u) && u.length > 0) return u[0];
+    try {
+      const queryUser = new URL(req.url ?? "", "http://localhost").searchParams.get(
+        "x-test-user",
+      );
+      if (queryUser) return queryUser;
+    } catch {
+      // Malformed URLs fail closed (no identity adopted).
+    }
   }
   // Parse `Sec-WebSocket-Protocol: bearer <jwt>` and VERIFY the token
   // (signature, issuer, expiry) against Keycloak before trusting any

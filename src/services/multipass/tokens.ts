@@ -15,9 +15,8 @@
 //
 // Signing: HS256 with TELLUS_WORKLOAD_JWT_SECRET (defaults to a process-local
 // random secret if unset, so tests work out-of-box; a warning is logged in
-// production if the env var is unset). Production deployments swap to RS256
-// via the existing Keycloak issuer if desired; this module's signature
-// algorithm is configurable per call.
+// production if the env var is unset). Verification accepts HS256 only: the
+// key is always symmetric, and no RS256 issuance path exists.
 // ---------------------------------------------------------------------------
 
 import { randomBytes } from "node:crypto";
@@ -27,6 +26,49 @@ const DEFAULT_TTL_S = 300;
 const DEFAULT_ALG: jwt.Algorithm = "HS256";
 
 let cachedSecret: string | null = null;
+
+/**
+ * Known-weak values for TELLUS_WORKLOAD_JWT_SECRET that must never sign
+ * workload tokens in a deployed environment (compared case-insensitively
+ * after trimming). Short values (< 32 chars) are already rejected by
+ * getSecret(), which falls back to a random per-process secret.
+ */
+const WEAK_WORKLOAD_SECRETS = new Set([
+  "dev-tellus-workload-jwt-secret-please-rotate-32b",
+  "changeme",
+  "test",
+  "secret",
+]);
+
+/**
+ * Fail-closed boot guard for the workload-JWT HMAC secret. Throws when
+ * TELLUS_WORKLOAD_JWT_SECRET is explicitly set to a known-weak value or to
+ * a value shorter than the 32-char minimum getSecret() enforces (an explicit
+ * short secret signals misconfiguration: getSecret() would silently downgrade
+ * to an ephemeral per-process secret, which breaks verification on every
+ * other replica). Unset/empty is allowed (single-process dev shape: random
+ * per-process secret; production logs a warning in getSecret()).
+ *
+ * NOT called from module load — wire one line into server boot:
+ *   import { assertStrongWorkloadSecret } from "./services/multipass/tokens";
+ *   assertStrongWorkloadSecret();
+ */
+export function assertStrongWorkloadSecret(): void {
+  const raw = process.env.TELLUS_WORKLOAD_JWT_SECRET;
+  if (!raw) return;
+  const normalized = raw.trim().toLowerCase();
+  if (WEAK_WORKLOAD_SECRETS.has(normalized)) {
+    throw new Error(
+      "[multipass.tokens] TELLUS_WORKLOAD_JWT_SECRET is set to a known-weak value; rotate to a random value ≥32 chars",
+    );
+  }
+  if (raw.length < 32) {
+    throw new Error(
+      "[multipass.tokens] TELLUS_WORKLOAD_JWT_SECRET is <32 chars; set a random value ≥32 chars",
+    );
+  }
+}
+
 function getSecret(): string {
   if (cachedSecret) return cachedSecret;
   const fromEnv = process.env.TELLUS_WORKLOAD_JWT_SECRET;
@@ -97,8 +139,12 @@ export function verifyWorkloadToken(
   token: string,
   expected: { connectionRid: string; scope: string },
 ): VerifyResult {
+  // HS256-only: the verification key is always the symmetric getSecret().
+  // No asymmetric (RS256/Keycloak) issuance path exists for workload tokens,
+  // so RS256 must stay out of the accept list — listing it would let a
+  // verifier accept token shapes this service can never legitimately mint.
   const verifyOpts: VerifyOptions = {
-    algorithms: ["HS256", "RS256"],
+    algorithms: ["HS256"],
     issuer: "tellus:multipass:workload",
     audience: "tellus:connectivity",
   };

@@ -19,7 +19,7 @@ const TEST_ORG = "ri.multipass.main.org.acme";
 const ANALYSIS_RID = "ri.tellus-quiver.main.analysis.018f4a9c-7d6e-7c8a-87b0-0123456789ab";
 
 function authedHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, ...extra };
+  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "", ...extra };
 }
 
 beforeAll(async () => {

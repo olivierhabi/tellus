@@ -6,7 +6,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { readBranch } from "../../services/quiver/branchHeader";
-import { isQuiverTestAuthAllowed } from "./testAuth";
+import { isQuiverTestAuthBound } from "./testAuth";
 import {
   invalidAnalysisRequest,
   isQuiverError,
@@ -23,7 +23,6 @@ import { getTrace } from "../../services/quiver/aip/traces";
 import type {
   AipPort,
   AipSurface,
-  ToolName,
   UserSubject,
 } from "../../services/quiver/aip/types";
 
@@ -33,7 +32,7 @@ interface ActorAndBranch {
 }
 
 function actorAndBranch(req: Request): ActorAndBranch {
-  const allowTest = isQuiverTestAuthAllowed();
+  const allowTest = isQuiverTestAuthBound(req);
   const fromCtx = (req as Request & {
     securityContext?: { userSubject?: string; orgRid?: string };
   }).securityContext;
@@ -61,22 +60,18 @@ const GenerateBody = z.object({
   analysisRid: z.string().min(1),
   contextCardIds: z.array(z.string()).optional(),
   prompt: z.string().min(1),
-  /** Test hook: pre-validated apply_action authorization for this analysis. */
-  authorizeApplyAction: z.boolean().optional(),
 });
 
 const ConfigureBody = z.object({
   analysisRid: z.string().min(1),
   cardId: z.string().min(1),
   prompt: z.string().min(1),
-  authorizeApplyAction: z.boolean().optional(),
 });
 
 const AssistBody = z.object({
   analysisRid: z.string().min(1),
   conversationId: z.string().min(1),
   message: z.string().min(1),
-  authorizeApplyAction: z.boolean().optional(),
 });
 
 let portFactory: () => AipPort = () => inProcessAipPort;
@@ -89,17 +84,11 @@ export function resetAipPortForTests(): void {
   portFactory = () => inProcessAipPort;
 }
 
-function authorizedToolsFor(authorizeApplyAction: boolean): ReadonlyArray<ToolName> {
-  const base = [...defaultAuthorizedTools()];
-  if (authorizeApplyAction) base.push("apply_action");
-  return base;
-}
-
 async function streamSurface(
   req: Request,
   res: Response,
   surface: AipSurface,
-  body: { analysisRid: string; cardId?: string; prompt: string; authorizeApplyAction?: boolean },
+  body: { analysisRid: string; cardId?: string; prompt: string },
 ): Promise<void> {
   let actor: ActorAndBranch;
   try {
@@ -138,10 +127,18 @@ async function streamSurface(
 
   try {
     const port = portFactory();
+    // vuln-0033: the authorized tool manifest is server-derived only. The
+    // privileged `apply_action` tool must never be added from a client-
+    // supplied boolean — its authorization must flow through
+    // buildAuthorizedManifest + AuthPort.canApplyAction (services/quiver/
+    // aip/tools.ts), which the production AIP logic service will wire. The
+    // previous `authorizeApplyAction` request field let any authenticated
+    // user self-authorize apply_action by sending `"authorizeApplyAction":
+    // true`.
     const stream = orchestrate({
       port,
       surface,
-      authorizedTools: authorizedToolsFor(body.authorizeApplyAction ?? false),
+      authorizedTools: defaultAuthorizedTools(),
       req: {
         analysisRid: body.analysisRid,
         cardId: body.cardId,
@@ -222,8 +219,20 @@ aipRouter.get("/aip/traces/:rid", async (req, res) => {
     return;
   }
   // CBAC v1: trace visible to its author. Same-org reads allowed via D-59.
+  // vuln-0028: the mismatch branch was previously an empty no-op, so any
+  // authenticated user could read every other user's AIP trace (plaintext
+  // LLM prompts + tool inputs). Enforce fail-closed as 404 (so trace
+  // existence is not oracle-able by co-tenants), matching the IDOR-as-404
+  // pattern used elsewhere in the quiver/jemma routes.
   if (trace.userRid !== actor.user.userRid && trace.userRid !== "*") {
-    // Tightening to OMS-backed CBAC tracked under B1 C-21 (D-16 deferral).
+    const e = llmTimeout({ reason: "trace not found" });
+    res.status(404).json({
+      errorCode: "NOT_FOUND",
+      errorName: "Tellus:Quiver:TraceNotFound",
+      errorInstanceId: e.envelope.errorInstanceId,
+      parameters: { rid: req.params.rid },
+    });
+    return;
   }
   res.status(200).json(trace);
 });

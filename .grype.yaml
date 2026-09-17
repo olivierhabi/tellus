@@ -38,15 +38,14 @@ ignore:
   # vitest is a devDependency (the unit/integration test runner) and vite is
   # pulled transitively by vitest as its dev-server/build backend. Neither
   # reaches the production image (`pnpm install --prod` in the Dockerfile),
-  # so these advisories are not exploitable in a deployed artifact. Both are
-  # bumpable in principle (vitest ^4.0.18 → 4.1.0 fixes CVE-2026-47429;
-  # vite → 8.0.16 fixes CVE-2026-53571), but the bump is deliberately deferred
-  # to avoid churning the manually-verified test harness mid-release — these
-  # suppressions match the established undici dev-only pattern above. Revisit
-  # both on the next dev-tooling upgrade pass.
-  - vulnerability: CVE-2026-47429
-    package:
-      name: vitest
+  # so these advisories are not exploitable in a deployed artifact.
+  # RESOLVED Sept 2026 (Strix dev-posture remediation): vitest bumped
+  # ^4.0.18 → ^4.1.11, which clears CVE-2026-47429 (fixed in the 4.1.0 line)
+  # and CVE-2026-84373 (fixed in 4.1.11) — both suppressions removed, full
+  # unit lane re-verified green on the bumped toolchain.
+  # Remaining: vite → 8.0.16 fixes CVE-2026-53571 (currently resolves
+  # 8.0.10); left suppressed as dev-only until the next dev-tooling
+  # upgrade pass.
   - vulnerability: CVE-2026-53571
     package:
       name: vite

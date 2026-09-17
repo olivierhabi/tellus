@@ -34,6 +34,7 @@ afterAll(() => {
 const goodHeaders = {
   Authorization: "Bearer t",
   "x-test-user": "ri.multipass.main.user.alice",
+  "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "",
   "x-test-org": "ri.multipass.main.org.test",
   "X-Tellus-Branch": "trunk",
   "Content-Type": "application/json",

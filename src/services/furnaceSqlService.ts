@@ -386,6 +386,23 @@ function firstKeyword(sql: string): string {
 }
 
 function enforceReadOnly(sql: string): void {
+  // V-2026-09-16: a `;` ANYWHERE in the payload is rejected outright.
+  // The previous regex-based statement splitter
+  // (`/;(?=(?:[^']*'[^']*')*[^']*$)/`) counted quote-parity from the end
+  // of the string, so an ODD number of single quotes in a trailing
+  // comment (`-- don'`) made the lookahead consume the statement
+  // separator, collapsing `SELECT 1; CREATE TABLE ...` into ONE
+  // "statement" that then passed the leading-keyword allowlist. DuckDB
+  // itself happily executed every smuggled statement. No legitimate
+  // read-only SELECT/WITH/DESCRIBE/SHOW/EXPLAIN contains a semicolon,
+  // so rejecting the character entirely closes the class (comments,
+  // nested encodings included) without touching valid queries.
+  if (sql.includes(';')) {
+    throw Object.assign(
+      new Error('Multi-statement queries are not allowed.'),
+      { code: 'SQL_WRITE_REJECTED' },
+    );
+  }
   const statements = sql
     .split(/;(?=(?:[^']*'[^']*')*[^']*$)/)
     .map((s) => s.trim())

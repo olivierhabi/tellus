@@ -976,14 +976,14 @@ async function main(): Promise<void> {
   // Check OpenSearch availability
   let opensearchAvailable = false;
   try {
-    const res = await fetch(`http://localhost:9200`, { signal: AbortSignal.timeout(3000) });
-    opensearchAvailable = res.ok;
+    const { isOpenSearchAvailable } = await import("./helpers/opensearchLane");
+    opensearchAvailable = await isOpenSearchAvailable();
   } catch {
     opensearchAvailable = false;
   }
 
   if (!opensearchAvailable) {
-    console.log("ERROR: OpenSearch is not available on localhost:9200.");
+    console.log("ERROR: OpenSearch is not available (https + Basic auth, see tests/helpers/opensearchLane.ts).");
     console.log("This test suite requires a running OpenSearch instance for link resolution.");
     console.log("Start OpenSearch and try again.\n");
     stopServer();

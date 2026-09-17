@@ -46,6 +46,7 @@ const TEST_ORG = "ri.multipass.main.org.acme";
 function authedHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return {
     "x-test-user": TEST_USER,
+    "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "",
     "x-test-org": TEST_ORG,
     ...extra,
   };

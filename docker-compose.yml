@@ -76,13 +76,19 @@ services:
     restart: unless-stopped
     environment:
       - discovery.type=single-node
-      - plugins.security.disabled=true
-      # OpenSearch 2.12+ enforces a strong initial admin password even when
-      # the security plugin is disabled (the demo installer runs first).
-      # Must be >=8 chars with upper/lower/digit/special. Security is still
-      # disabled via `plugins.security.disabled=true` above; this value is
-      # only consumed by the demo installer and never authenticated against.
-      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Str0ng!P@ssw0rd-Tellus-9a7b3Cz
+      # SECURITY (vuln: unauthenticated OpenSearch port — full unauthenticated
+      # read/write on every indexed object, including SECRET-marked data,
+      # bypassing the app's marking enforcement at the datastore layer): the
+      # security plugin stays ENABLED (demo config: TLS on the HTTP layer +
+      # Basic auth). The entrypoint writes the stock demo certificates, so no
+      # custom opensearch.yml mount is needed — the stock posture is the
+      # supportable one: HTTPS + Basic auth on 9200.
+      # OpenSearch 2.12+ enforces a strong initial admin password (the demo
+      # installer runs first and stores the admin hash in the security index
+      # on the first boot of a data volume). The value is env-overridable;
+      # a volume that already bootstrapped with the default keeps that
+      # password until it is reset via the security API.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Str0ng!P@ssw0rd-Tellus-9a7b3Cz}
       # Single-user dev default: 512 MiB heap + 256 MiB direct memory inside a
       # 1.5 GiB container. Large reindex/load tests can restore the old sizing:
       # TELLUS_OPENSEARCH_JAVA_OPTS="-Xms1536m -Xmx1536m -XX:MaxDirectMemorySize=512m"
@@ -103,7 +109,7 @@ services:
     memswap_limit: ${TELLUS_OPENSEARCH_MEMORY_LIMIT:-1536M}
     cpus: "1.5"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200 || exit 1"]
+      test: ["CMD-SHELL", "curl -sk -u 'admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Str0ng!P@ssw0rd-Tellus-9a7b3Cz}' https://localhost:9200 || exit 1"]
       interval: 10s
       timeout: 5s
       # The smaller dev heap trades startup speed for a much lower footprint,
@@ -197,8 +203,14 @@ services:
     restart: unless-stopped
     command: ["start-dev"]
     environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      # SECURITY (vuln: vendor-default admin/admin credentials on the
+      # network-reachable Keycloak master console = full identity-provider
+      # takeover, including token minting for any app user and confidential
+      # client-secret disclosure): the bootstrap admin credentials MUST come
+      # from the environment (.env, gitignored). Compose fails fast when
+      # either value is unset/empty. Never commit a literal here.
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:?KEYCLOAK_ADMIN must be set explicitly (see .env.example) — do not rely on the vendor default}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set to a strong unique value (>= 16 chars) — the vendor default 'admin' enables full IdP takeover}
       KC_DB: dev-file
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_PORT: 8086
@@ -620,7 +632,12 @@ services:
       PGDATABASE: tellus_db
       PGUSER: tellus
       PGPASSWORD: ${PGPASSWORD:-changeme}
-      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_URL: https://opensearch:9200
+      # Basic auth for the OpenSearch client (security plugin is enabled —
+      # see the opensearch service above). The client disables TLS
+      # verification for the demo self-signed cert (client.ts).
+      OPENSEARCH_USERNAME: admin
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Str0ng!P@ssw0rd-Tellus-9a7b3Cz}
       KAFKA_BROKERS: kafka:29092
       # SCHEMA_REGISTRY_URL intentionally unset — nothing in src/ reads it
       # (container-diet pass, 2026-08-13; see note above the keycloak svc).

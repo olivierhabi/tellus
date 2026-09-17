@@ -32,7 +32,7 @@ function postRepo(
 ) {
   return request(app)
     .post("/stemma/api/v1/repositories")
-    .set("X-Tellus-Test-Principal", principal)
+    .set("X-Tellus-Test-Principal", principal).set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
     .set("Idempotency-Key", key)
     .send(body);
 }
@@ -58,7 +58,7 @@ describe("Code Repos idempotency middleware — replay + conflict + scope", () =
   it("G-C-20 missing Idempotency-Key → 400 Stemma:MissingIdempotencyKey", async () => {
     const r = await request(app)
       .post("/stemma/api/v1/repositories")
-      .set("X-Tellus-Test-Principal", "user-a/OWNER")
+      .set("X-Tellus-Test-Principal", "user-a/OWNER").set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({ rid: mintRepositoryRid(), defaultBranchName: "main" });
     expect(r.status).toBe(400);
     expect(isExactEnvelope(r.body)).toBe(true);
@@ -69,7 +69,7 @@ describe("Code Repos idempotency middleware — replay + conflict + scope", () =
   it("G-C-20 malformed Idempotency-Key → 400 Stemma:InvalidIdempotencyKey", async () => {
     const r = await request(app)
       .post("/stemma/api/v1/repositories")
-      .set("X-Tellus-Test-Principal", "user-a/OWNER")
+      .set("X-Tellus-Test-Principal", "user-a/OWNER").set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .set("Idempotency-Key", "definitely-not-a-uuid")
       .send({ rid: mintRepositoryRid(), defaultBranchName: "main" });
     expect(r.status).toBe(400);

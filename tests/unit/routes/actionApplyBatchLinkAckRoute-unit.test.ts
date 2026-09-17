@@ -33,12 +33,14 @@ import request from "supertest";
 const {
   executeActionMock,
   checkIdempotencyKeyMock,
+  checkIdempotencyKeyScopedMock,
   storeIdempotencyKeyMock,
   withIdempotencyLockMock,
   getDefaultOntologyIdMock,
 } = vi.hoisted(() => ({
   executeActionMock: vi.fn(),
   checkIdempotencyKeyMock: vi.fn(),
+  checkIdempotencyKeyScopedMock: vi.fn(),
   storeIdempotencyKeyMock: vi.fn(),
   withIdempotencyLockMock: vi.fn(),
   getDefaultOntologyIdMock: vi.fn(),
@@ -50,6 +52,7 @@ vi.mock("../../../src/actions/actionExecutor", () => ({
 
 vi.mock("../../../src/actions/idempotency", () => ({
   checkIdempotencyKey: checkIdempotencyKeyMock,
+  checkIdempotencyKeyScoped: checkIdempotencyKeyScopedMock,
   storeIdempotencyKey: storeIdempotencyKeyMock,
   // The real helper serialises on a PG advisory lock; the unit lane only
   // needs the inner closure to run.
@@ -124,6 +127,7 @@ describe("POST /applyBatch (ontology-scoped) — linkIndexAck aggregation", () =
   beforeEach(() => {
     vi.clearAllMocks();
     checkIdempotencyKeyMock.mockResolvedValue(null);
+    checkIdempotencyKeyScopedMock.mockResolvedValue({ kind: "miss" });
     storeIdempotencyKeyMock.mockResolvedValue(undefined);
     getDefaultOntologyIdMock.mockResolvedValue(ONT);
     withIdempotencyLockMock.mockImplementation(
@@ -270,10 +274,13 @@ describe("POST /applyBatch (ontology-scoped) — linkIndexAck aggregation", () =
       string,
       unknown
     >;
-    checkIdempotencyKeyMock.mockResolvedValue({
-      _httpStatus,
-      _isError,
-      ...cachedBody,
+    checkIdempotencyKeyScopedMock.mockResolvedValue({
+      kind: "hit",
+      result: {
+        _httpStatus,
+        _isError,
+        ...cachedBody,
+      },
     });
     const r2 = await request(buildApp())
       .post(APPLY_BATCH)
@@ -291,6 +298,7 @@ describe("POST /applyBatch (default-ontology mount) — same contract on the sec
   beforeEach(() => {
     vi.clearAllMocks();
     checkIdempotencyKeyMock.mockResolvedValue(null);
+    checkIdempotencyKeyScopedMock.mockResolvedValue({ kind: "miss" });
     storeIdempotencyKeyMock.mockResolvedValue(undefined);
     getDefaultOntologyIdMock.mockResolvedValue(ONT);
     withIdempotencyLockMock.mockImplementation(
@@ -330,6 +338,7 @@ describe("POST /applyBulk — linkIndexAck aggregation over the bulk shape", () 
   beforeEach(() => {
     vi.clearAllMocks();
     checkIdempotencyKeyMock.mockResolvedValue(null);
+    checkIdempotencyKeyScopedMock.mockResolvedValue({ kind: "miss" });
     storeIdempotencyKeyMock.mockResolvedValue(undefined);
     getDefaultOntologyIdMock.mockResolvedValue(ONT);
     withIdempotencyLockMock.mockImplementation(

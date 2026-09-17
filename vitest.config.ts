@@ -109,6 +109,21 @@ export default defineConfig({
       // Production code paths NEVER consult this header — the env var is the
       // single gate, and it is only set in test configs.
       CODE_REPOS_TEST_AUTH: "1",
+      // Shared harness token for the test-principal bypass (X-Tellus-Test-
+      // Auth-Token). VITEST-LANE-ONLY public constant: the in-process lane
+      // server is never network-reachable, so a fixed lane value is safe
+      // here. A real deployment MUST set a private token in its gitignored
+      // env — NEVER this literal (the flag only enables test mode; the token
+      // is what authenticates the caller).
+      CODE_REPOS_TEST_AUTH_TOKEN:
+        "vitest-lane-9f2c6b4e8a1d3f5c7b9e0d2a4c6f8e1b3d5a7c9e1f3b5d7a9c1e3f5b7d9a1c3",
+      // OpenSearch Basic auth — the shared dev cluster runs the security
+      // plugin enabled; lanes connect with the committed demo creds (the
+      // deployment's private override, if any, wins via process.env).
+      OPENSEARCH_URL: "https://localhost:9200",
+      OPENSEARCH_USERNAME: "admin",
+      OPENSEARCH_PASSWORD:
+        process.env.OPENSEARCH_PASSWORD ?? "Str0ng!P@ssw0rd-Tellus-9a7b3Cz",
       // Publish-author trust gate: exercised by dedicated tests; other lanes
       // opt out explicitly (never honored in production).
       FUNCTION_EXECUTION_TRUST_MODE: "open-development",

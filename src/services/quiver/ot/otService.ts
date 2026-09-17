@@ -17,8 +17,12 @@
  * index locality; serialization back to the row preserves insertion order.
  */
 
-import { withTransaction } from "../../../db";
+import { withTransaction, query } from "../../../db";
 import { computeEtagOf } from "../etag";
+import {
+  assertAnalysisEditable,
+  assertAnalysisReadable,
+} from "../analysisService";
 import {
   malformedInstruction,
   otBaseVersionTooOld,
@@ -159,6 +163,12 @@ export async function submitInstructions(
       reason: "clientOpIds.length must equal instructions.length",
     });
   }
+
+  // Folder authorization (B1 C-06 for the OT surface): editor on the
+  // analysis's parent folder, enforced BEFORE the row lock is acquired —
+  // parentFolderRid is immutable (B1 C-13) so the decision cannot go stale
+  // between check and lock.
+  await assertAnalysisEditable(actor, rid);
 
   return withTransaction(async (client) => {
     // 2. Lock the analysis row for the duration.
@@ -408,13 +418,17 @@ export async function submitInstructions(
   });
 }
 
-/** Read an instruction log slice (used for replay tests + WS catch-up). */
+/** Read an instruction log slice (used for replay tests + WS catch-up).
+ *  Exposes document contents — requires read access (viewer+) on the
+ *  analysis via the CompassPort, same as GET /analyses/:rid. */
 export async function readLogSlice(
+  actor: SubmitInstructionsActor,
   rid: string,
   fromSeq: number,
   toSeq: number = Number.MAX_SAFE_INTEGER,
 ): Promise<Instruction[]> {
-  const r = await (await import("../../../db")).query(
+  await assertAnalysisReadable(actor, rid);
+  const r = await query(
     `SELECT instruction FROM quiver_instruction_log
         WHERE rid = $1 AND seq > $2 AND seq <= $3
         ORDER BY seq ASC`,
