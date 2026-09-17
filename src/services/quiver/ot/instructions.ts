@@ -6,6 +6,12 @@
  */
 
 import { z } from "zod";
+import {
+  CardId,
+  CardType,
+  CanvasId,
+  CanvasPlacement,
+} from "../types";
 
 const positionSchema = z.object({
   x: z.number().int(),
@@ -25,78 +31,85 @@ const jsonPatchOpSchema = z.object({
   from: z.string().optional(),
 });
 
+// Write schemas MUST equal the read-side AnalysisDocument schemas in
+// ../types exactly. A looser write path accepts instructions that poison
+// the quiver_analysis cards/canvases/parameters columns — rows that
+// AnalysisDocument.parse then rejects, 500ing GET and (before per-row
+// hardening) the whole folder listing. types.ts is the single source of
+// truth: import its schemas instead of re-declaring loose primitives.
 const cardSchema = z.object({
-  id: z.string().min(1),
-  type: z.string().min(1),
-  inputs: z.record(z.string(), z.string()).default({}),
+  id: CardId,
+  type: CardType,
+  inputs: z.record(z.string(), CardId).default({}),
   config: z.record(z.string(), z.unknown()).default({}),
   hidden: z.boolean().default(false),
+  displayName: z.string().max(200).optional(),
 });
 
+// Placements use the STORED/wire array form ({cardId,x,y,w,h} — types.ts
+// Canvas, which is what AnalysisDocument.parse expects). The OT apply
+// layer normalizes to its internal record form on ingest and otService
+// converts back to the array form at the row boundary, so addCanvas
+// round-trips byte-identically with the read schema.
 const canvasSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  ordering: z.array(z.string()).default([]),
-  placements: z
-    .record(
-      z.string(),
-      z.object({ position: positionSchema, size: sizeSchema }),
-    )
-    .default({}),
+  id: CanvasId,
+  name: z.string().min(1).max(200),
+  placements: z.array(CanvasPlacement).default([]),
+  ordering: z.array(CardId).default([]),
 });
 
 export const instructionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("addCard"), card: cardSchema }),
   z.object({
     kind: z.literal("updateCardConfig"),
-    cardId: z.string().min(1),
+    cardId: CardId,
     configJsonPatch: z.array(jsonPatchOpSchema),
     baseCardVersion: z.number().int().nonnegative().optional(),
   }),
   z.object({
     kind: z.literal("bindInput"),
-    cardId: z.string().min(1),
+    cardId: CardId,
     slot: z.string().min(1),
-    sourceCardId: z.string().min(1),
+    sourceCardId: CardId,
   }),
   z.object({
     kind: z.literal("unbindInput"),
-    cardId: z.string().min(1),
+    cardId: CardId,
     slot: z.string().min(1),
   }),
-  z.object({ kind: z.literal("deleteCard"), cardId: z.string().min(1) }),
+  z.object({ kind: z.literal("deleteCard"), cardId: CardId }),
   z.object({ kind: z.literal("addCanvas"), canvas: canvasSchema }),
-  z.object({ kind: z.literal("deleteCanvas"), canvasId: z.string().min(1) }),
+  z.object({ kind: z.literal("deleteCanvas"), canvasId: CanvasId }),
   z.object({
     kind: z.literal("renameCanvas"),
-    canvasId: z.string().min(1),
+    canvasId: CanvasId,
     name: z.string().min(1),
   }),
   z.object({
     kind: z.literal("placeCardOnCanvas"),
-    cardId: z.string().min(1),
-    canvasId: z.string().min(1),
+    cardId: CardId,
+    canvasId: CanvasId,
     position: positionSchema,
     size: sizeSchema,
   }),
   z.object({
     kind: z.literal("removeCardFromCanvas"),
-    cardId: z.string().min(1),
-    canvasId: z.string().min(1),
+    cardId: CardId,
+    canvasId: CanvasId,
   }),
   z.object({
     kind: z.literal("reorderCanvasCards"),
-    canvasId: z.string().min(1),
-    ordering: z.array(z.string()),
+    canvasId: CanvasId,
+    ordering: z.array(CardId),
   }),
   z.object({
     kind: z.literal("updateParameter"),
-    parameterId: z.string().min(1),
+    parameterId: CardId,
     valueJson: z.unknown(),
   }),
   z.object({
     kind: z.literal("setHidden"),
-    cardId: z.string().min(1),
+    cardId: CardId,
     hidden: z.boolean(),
   }),
 ]);

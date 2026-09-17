@@ -87,8 +87,16 @@ pipeline (UI + API + validation + execution + tests) — not this change.
 off-main-thread execution, per-worker V8 old-space cap
 (`FUNCTION_WORKER_MAX_OLD_SPACE_MB`, default 256MB), per-phase CPU timeout
 (`FUNCTION_TIMEOUT_MS`), wall-clock worker budget with terminate+respawn,
-environment-variable allowlist (NODE_ENV/TZ/PATH/HOME only), a `require`
-shim restricted to the ontology SDK, output (1 MiB) and log (1000 lines)
+environment-variable allowlist (NODE_ENV/TZ only — PATH/HOME were removed
+in the Sept 2026 Strix hardening), a `require`
+shim restricted to the ontology SDK, **string code-generation disabled in
+every sandbox context (no `eval`/`Function`/`WebAssembly` compilation in the
+guest realm)**, **a realm boundary (`src/services/functions/sandboxBoundary.ts`)
+that trap-seals every host value crossing into the context — `.constructor`/
+`__proto__` chains resolve to the guest realm's own intrinsics, so the host
+`Function` constructor is unreachable (closes the demonstrated constructor-
+chain escape class in-process)**, escape-probe source scans at preview and
+publish time (observable, not a control), output (1 MiB) and log (1000 lines)
 limits, and single-attempt failure isolation (no sync fallback). It does
 **not** provide: kernel-level isolation, network or filesystem denial,
 child-process denial, or secret isolation beyond the env allowlist.
@@ -122,13 +130,22 @@ Consequences are enforced in code (`authorizePublish()` in
   tests (`tests/unit/functions/executionPolicy-unit.test.ts`,
   `tests/integration/code-repos/functions/publish-grants-integration.test.ts`).
 
-### Threat model (documented, not mitigated by vm/worker_threads)
+### Threat model (documented; constructor-chain escapes closed in-process, isolation still Phase-B)
 A malicious function artifact can: consume CPU/memory within the worker's
-caps, read the allowlisted env vars (which contain no secrets), potentially
-escape `vm` (CVE class: vm module is not a security boundary), and then act
-with the API process's OS identity — network included. The trust gate makes
-this a *trusted-author* problem rather than an *untrusted-code* problem until
-Phase-B isolation lands.
+caps, read the allowlisted env vars (which contain no secrets), and attempt
+to escape `vm` (CVE class: vm module is not a security boundary). The
+Sept 2026 Strix pentest demonstrated the constructor-chain escape
+(`console.log.constructor("return process")()` and equivalents through the
+SDK/require shims) — **that class is now closed in-process** by the realm
+boundary + codegen disabling above (all live PoC vectors fail closed with
+`EvalError: Code generation from strings disallowed`, verified by
+`tests/unit/functions/sandboxEscapeHardening-unit.test.ts`). The residual
+risk is unchanged in KIND but reduced in reach: a vm context still shares the
+heap with the API process, so a NOVEL escape class (not constructor chains)
+would still act with the API process's OS identity — network included. The
+trust gate keeps this a *trusted-author* problem until Phase-B isolation
+lands; the in-process hardening narrows what a trusted-author compromise or
+novel escape can reach.
 
 ### Follow-up specification: durable isolated execution (not this change)
 1. Execution requests become immutable queue messages (artifact digest +

@@ -25,6 +25,7 @@ import { newQuiverRid } from "./rids";
 import {
   analysisNotFound,
   analysisTooLarge,
+  compassNotConfigured,
   invalidAnalysisRequest,
   parentFolderNotFound,
   versionMismatch,
@@ -33,6 +34,7 @@ import { computeAnalysisEtag, etagsMatch, canonicalizeJson } from "./etag";
 import { emitQuiverAudit } from "./audit";
 import {
   analysisActiveTotal,
+  analysesCorruptSkippedTotal,
   analysisSizeBytes,
   etagMismatchTotal,
 } from "./metrics";
@@ -49,9 +51,19 @@ export interface ActorContext {
 export interface CompassPort {
   /**
    * Asserts the actor has Editor on the parent folder; otherwise throws
-   * `parentFolderNotFound`. Branch is forwarded.
+   * `parentFolderNotFound` (folder missing/trashed) or a 403 quiver error
+   * (no owner/editor membership). Branch is forwarded.
    */
   assertEditorOnFolder(opts: {
+    folderRid: string;
+    userSubject: string;
+    branch: string;
+  }): Promise<void>;
+  /**
+   * Asserts the actor has at least Viewer on the folder (used by
+   * listAnalysesInFolder). Same error contract as assertEditorOnFolder.
+   */
+  assertFolderReadable(opts: {
     folderRid: string;
     userSubject: string;
     branch: string;
@@ -65,6 +77,8 @@ export interface CompassPort {
     parentFolderRid: string;
     displayName: string;
     branch: string;
+    /** Local users.id — the Compass resources row's created_by owner. */
+    userSubject: string;
   }): Promise<void>;
   /** Compass-driven `isAuthorized(userRid, resourceRid, op)` for getAnalysis. */
   assertReadable(opts: {
@@ -74,17 +88,93 @@ export interface CompassPort {
   }): Promise<void>;
 }
 
-/** Default port: in-tree no-op for environments where Compass isn't wired
- *  yet (smoke tests). Production will inject a real implementation. */
+/**
+ * DENY-BY-WIRING default: with no port installed, every authorization
+ * question denies with `CompassNotConfigured` (503) instead of the previous
+ * allow-all no-op. Production wires the real DB-backed port
+ * (`dbCompassPort`) at router mount (`wireDbCompassPort` in
+ * src/routes/quiver/index.ts); test harnesses explicitly install their own
+ * port through `setCompassPort`.
+ *
+ * `noopCompass` below remains exported ONLY for direct unit harnesses that
+ * deliberately opt into a permissive port — nothing in the production boot
+ * path installs it.
+ */
+const unconfiguredCompass: CompassPort = {
+  async assertEditorOnFolder() {
+    throw compassNotConfigured({ reason: "no CompassPort wired (deny-by-wiring)" });
+  },
+  async assertFolderReadable() {
+    throw compassNotConfigured({ reason: "no CompassPort wired (deny-by-wiring)" });
+  },
+  async registerAnalysis() {
+    throw compassNotConfigured({ reason: "no CompassPort wired (deny-by-wiring)" });
+  },
+  async assertReadable() {
+    throw compassNotConfigured({ reason: "no CompassPort wired (deny-by-wiring)" });
+  },
+};
+
+/** Permissive no-op port — test-only; see the note on `unconfiguredCompass`. */
 export const noopCompass: CompassPort = {
   async assertEditorOnFolder() {},
+  async assertFolderReadable() {},
   async registerAnalysis() {},
   async assertReadable() {},
 };
 
-let compass: CompassPort = noopCompass;
+let compass: CompassPort = unconfiguredCompass;
 export function setCompassPort(port: CompassPort): void {
   compass = port;
+}
+export function getCompassPort(): CompassPort {
+  return compass;
+}
+
+// ---------- Shared authorization helpers ------------------------------------
+// Used by the sibling mutation surfaces (otService, versionService,
+// workingStateService, publishing) so every path that reads or mutates an
+// analysis enforces the SAME membership model as this service.
+
+/** Load an analysis's (immutable) parent folder rid for authorization.
+ *  Returns null when the analysis does not exist or is soft-deleted. */
+export async function loadAnalysisParentFolderForAuthz(
+  rid: string,
+): Promise<string | null> {
+  const r = await query(
+    `SELECT parent_folder_rid, is_deleted FROM quiver_analysis WHERE rid = $1 LIMIT 1`,
+    [rid],
+  );
+  if (r.rowCount === 0) return null;
+  const row = r.rows[0] as { parent_folder_rid: string; is_deleted: boolean };
+  return row.is_deleted ? null : row.parent_folder_rid;
+}
+
+/** Assert the actor may EDIT (mutate) the analysis — editor+ on its parent
+ *  folder. Throws AnalysisNotFound for missing/soft-deleted rows. */
+export async function assertAnalysisEditable(
+  actor: ActorContext,
+  rid: string,
+): Promise<void> {
+  const folder = await loadAnalysisParentFolderForAuthz(rid);
+  if (folder === null) throw analysisNotFound({ rid });
+  await compass.assertEditorOnFolder({
+    folderRid: folder,
+    userSubject: actor.userSubject,
+    branch: actor.branch,
+  });
+}
+
+/** Assert the actor may READ the analysis — viewer+ (port-driven). */
+export async function assertAnalysisReadable(
+  actor: ActorContext,
+  rid: string,
+): Promise<void> {
+  await compass.assertReadable({
+    rid,
+    userSubject: actor.userSubject,
+    branch: actor.branch,
+  });
 }
 
 // ---------- Internal row mapping -------------------------------------------
@@ -285,6 +375,7 @@ export async function createAnalysis(
       parentFolderRid: req.parentFolderRid,
       displayName: req.displayName,
       branch: actor.branch,
+      userSubject: actor.userSubject,
     });
 
     return { row, etag };
@@ -362,6 +453,11 @@ export async function updateAnalysisMetadata(
   ) {
     throw invalidAnalysisRequest({ reason: "no mutable fields supplied" });
   }
+
+  // Folder authorization (B1 C-06) — editor on the analysis's parent folder.
+  // Checked before the row lock; parentFolderRid is immutable (B1 C-13), so
+  // the pre-lock check cannot be raced into a stale decision.
+  await assertAnalysisEditable(actor, rid);
 
   return withTransaction(async (client) => {
     // SELECT FOR UPDATE — D-06.
@@ -456,6 +552,23 @@ export async function deleteAnalysis(
   rid: string,
   ifMatch: string,
 ): Promise<void> {
+  // Folder authorization (B1 C-06) — editor on the parent folder. Deleted
+  // rows stay idempotent (B1 C-14) without leaking a 404-vs-403 oracle.
+  const folder = await loadAnalysisParentFolderForAuthz(rid);
+  if (folder === null) {
+    const exists = await query(
+      `SELECT is_deleted FROM quiver_analysis WHERE rid = $1 LIMIT 1`,
+      [rid],
+    );
+    if (exists.rowCount === 0) throw analysisNotFound({ rid });
+    return; // already soft-deleted — idempotent success
+  }
+  await compass.assertEditorOnFolder({
+    folderRid: folder,
+    userSubject: actor.userSubject,
+    branch: actor.branch,
+  });
+
   await withTransaction(async (client) => {
     const sel = await client.query(
       `SELECT * FROM quiver_analysis WHERE rid = $1 FOR UPDATE`,
@@ -466,6 +579,24 @@ export async function deleteAnalysis(
     if (before.is_deleted) {
       // Idempotent on repeat per B1 C-14.
       return;
+    }
+    // Corrupt-row recovery escape (poisoned rows from the pre-strict OT
+    // write schema): when the stored document no longer parses against
+    // AnalysisDocument, GET /analyses/:rid 500s and the caller cannot read
+    // the ETag header. Recovery route: DELETE with any If-Match → 412
+    // VersionMismatch whose body carries `parameters.currentEtag` (the RAW
+    // row's etag column) → retry DELETE with that etag. The CAS below runs
+    // against the raw etag column, so the corrupt row stays deletable
+    // without ever parsing the poisoned document. Healthy rows keep the
+    // normal-etag behavior unchanged.
+    let corruptRow = false;
+    try {
+      rowToDocument(before);
+    } catch {
+      corruptRow = true;
+      analysesCorruptSkippedTotal
+        .labels({ endpoint: "DELETE /analyses/:rid" })
+        .inc();
     }
     if (!etagsMatch(ifMatch, before.etag)) {
       etagMismatchTotal.labels({ endpoint: "DELETE /analyses/:rid" }).inc();
@@ -508,6 +639,7 @@ export async function deleteAnalysis(
       branch: actor.branch,
       beforeEtag: before.etag,
       afterEtag: newEtag,
+      details: { corruptRow },
     });
     analysisActiveTotal.labels({ org: actor.orgRid }).dec();
   });
@@ -520,6 +652,12 @@ export async function listAnalysesInFolder(
   pageToken: string | undefined,
   pageSize: number,
 ): Promise<AnalysesPage> {
+  // Folder authorization — viewer+ before any row is listed.
+  await compass.assertFolderReadable({
+    folderRid,
+    userSubject: actor.userSubject,
+    branch: actor.branch,
+  });
   const ps = Math.max(1, Math.min(200, Math.trunc(pageSize)));
   const cursor = pageToken
     ? Buffer.from(pageToken, "base64url").toString("utf8")
@@ -537,10 +675,28 @@ export async function listAnalysesInFolder(
      LIMIT $3`,
     params,
   );
-  const items = (r.rows as AnalysisRow[]).map(rowToDocument);
+  // Read-path hardening: a poisoned row (one whose stored document fails
+  // AnalysisDocument.parse — e.g. written by the pre-strict OT write
+  // schema) must not 500 the whole folder listing. Skip it per-row and
+  // count it so operators can find the corrupt RIDs via the metric.
+  // The pagination cursor stays rid-based off the RAW last row so pages
+  // continue past the skipped entry instead of silently truncating.
+  const items: AnalysisDocument[] = [];
+  for (const row of r.rows as AnalysisRow[]) {
+    try {
+      items.push(rowToDocument(row));
+    } catch {
+      analysesCorruptSkippedTotal
+        .labels({ endpoint: "GET /folders/:folderRid/analyses" })
+        .inc();
+    }
+  }
   const next =
-    items.length === ps
-      ? Buffer.from(items[items.length - 1].rid, "utf8").toString("base64url")
+    r.rows.length === ps
+      ? Buffer.from(
+          (r.rows[r.rows.length - 1] as AnalysisRow).rid,
+          "utf8",
+        ).toString("base64url")
       : null;
   return { items, nextPageToken: next };
 }

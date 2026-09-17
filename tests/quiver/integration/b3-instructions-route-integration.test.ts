@@ -28,7 +28,7 @@ const TEST_USER = "ri.multipass.main.user.alice";
 const TEST_ORG = "ri.multipass.main.org.acme";
 
 function authed(extra: Record<string, string> = {}): Record<string, string> {
-  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, ...extra };
+  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "", ...extra };
 }
 
 async function createAnalysis(branch?: string): Promise<{ rid: string; etag: string }> {
@@ -79,7 +79,7 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
         instructions: [
           {
             kind: "addCard",
-            card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false },
+            card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false },
           },
         ],
       });
@@ -110,7 +110,7 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
         baseVersion: 0,
         clientOpIds: [randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
         ],
       });
     // Batch 2
@@ -121,8 +121,8 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
         baseVersion: 1,
         clientOpIds: [randomUUID(), randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "c2", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } },
-          { kind: "bindInput", cardId: "c2", slot: "in", sourceCardId: "c1" },
+          { kind: "addCard", card: { id: "$B", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "bindInput", cardId: "$B", slot: "in", sourceCardId: "$A" },
         ],
       });
     expect(r2.status).toBe(200);
@@ -158,7 +158,7 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
       baseVersion: 0,
       clientOpIds: [opId],
       instructions: [
-        { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+        { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
       ],
     };
     const r1 = await request(app)
@@ -189,7 +189,7 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
         baseVersion: 999,
         clientOpIds: [randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
         ],
       });
     expect(r.status).toBe(412);
@@ -206,7 +206,7 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
         baseVersion: 0,
         clientOpIds: [randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
         ],
       });
     const row = await pool.query(
@@ -227,8 +227,8 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
         baseVersion: 0,
         clientOpIds: [randomUUID(), randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
-          { kind: "addCard", card: { id: "c2", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$B", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } },
         ],
       });
     // Allow microtasks to flush
@@ -250,7 +250,7 @@ describe("B3 — POST /analyses/:rid/instructions", () => {
         baseVersion: 0,
         clientOpIds: [randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
         ],
       });
     const dump = await register.metrics();
@@ -284,8 +284,8 @@ describe("B3 — GET /analyses/:rid/instructions (replay endpoint)", () => {
         baseVersion: 0,
         clientOpIds: [randomUUID(), randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
-          { kind: "addCard", card: { id: "c2", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$B", type: "FILTER_OBJECT_SET", inputs: {}, config: {}, hidden: false } },
         ],
       });
     const r = await request(app)
@@ -310,9 +310,9 @@ describe("B3 — GET /analyses/:rid/instructions (replay endpoint)", () => {
         baseVersion: 0,
         clientOpIds: [randomUUID(), randomUUID(), randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "seed1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
-          { kind: "addCard", card: { id: "seed2", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
-          { kind: "addCanvas", canvas: { id: "cv1", name: "C", ordering: [], placements: {} } },
+          { kind: "addCard", card: { id: "$SAA", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCard", card: { id: "$SAB", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+          { kind: "addCanvas", canvas: { id: "cv1", name: "C", ordering: [], placements: [] } },
         ],
       })
       .expect(200);
@@ -337,8 +337,8 @@ describe("B3 — GET /analyses/:rid/instructions (replay endpoint)", () => {
         baseVersion: 1,
         clientOpIds: [randomUUID(), randomUUID()],
         instructions: [
-          { kind: "addCard", card: { id: "obj", type: "OBJECT_SET", config: { apiName: "OlivierOrderJune" }, inputs: {}, hidden: false } },
-          { kind: "placeCardOnCanvas", cardId: "obj", canvasId: "cv1", position: { x: 40, y: 40 }, size: { width: 480, height: 360 } },
+          { kind: "addCard", card: { id: "$OBJ", type: "OBJECT_SET", config: { apiName: "OlivierOrderJune" }, inputs: {}, hidden: false } },
+          { kind: "placeCardOnCanvas", cardId: "$OBJ", canvasId: "cv1", position: { x: 40, y: 40 }, size: { width: 480, height: 360 } },
         ],
       });
 
@@ -354,5 +354,108 @@ describe("B3 — GET /analyses/:rid/instructions (replay endpoint)", () => {
     );
     expect(Number(after.rows[0].max_seq)).toBe(5);
     expect(Number(after.rows[0].current_version)).toBe(5);
+  });
+});
+
+describe("B3 — stored-shape round-trip (write schema == AnalysisDocument)", () => {
+  it("updateParameter persists a Parameter-shaped entry; the row still parses (GET 200)", async () => {
+    const app = quiverApp();
+    const { rid } = await createAnalysis();
+    const r = await request(app)
+      .post(`/quiver/api/v1/analyses/${rid}/instructions`)
+      .set(authed())
+      .send({
+        baseVersion: 0,
+        clientOpIds: [randomUUID(), randomUUID()],
+        instructions: [
+          { kind: "addCard", card: { id: "$P", type: "PARAMETER_STRING", inputs: {}, config: {}, hidden: false } },
+          { kind: "updateParameter", parameterId: "$P", valueJson: "Olivier" },
+        ],
+      });
+    expect(r.status).toBe(200);
+
+    // Before the stored-shape fix the parameters column held
+    // {"$P": {"value": ...}} — AnalysisDocument.parse rejected the row and
+    // GET 500'd.
+    const got = await request(app)
+      .get(`/quiver/api/v1/analyses/${rid}`)
+      .set(authed());
+    expect(got.status).toBe(200);
+    expect(got.body.parameters["$P"]).toMatchObject({
+      cardId: "$P",
+      type: "STRING",
+      defaultValueJson: "Olivier",
+    });
+  });
+
+  it("addCanvas placements round-trip as the stored array form", async () => {
+    const app = quiverApp();
+    const { rid } = await createAnalysis();
+    const r = await request(app)
+      .post(`/quiver/api/v1/analyses/${rid}/instructions`)
+      .set(authed())
+      .send({
+        baseVersion: 0,
+        clientOpIds: [randomUUID()],
+        instructions: [
+          {
+            kind: "addCanvas",
+            canvas: {
+              id: "cvX",
+              name: "X",
+              placements: [{ cardId: "$A", x: 10, y: 20, w: 200, h: 120 }],
+              ordering: ["$A"],
+            },
+          },
+        ],
+      });
+    expect(r.status).toBe(200);
+
+    const got = await request(app)
+      .get(`/quiver/api/v1/analyses/${rid}`)
+      .set(authed());
+    expect(got.status).toBe(200);
+    const cv = (got.body.canvases as Array<{ id: string; placements: unknown[]; ordering: string[] }>).find(
+      (c) => c.id === "cvX",
+    );
+    expect(cv).toBeDefined();
+    expect(cv!.placements).toEqual([{ cardId: "$A", x: 10, y: 20, w: 200, h: 120 }]);
+    expect(cv!.ordering).toEqual(["$A"]);
+  });
+
+  it("loose card id/type is rejected with 400 MalformedInstruction (write == read)", async () => {
+    const app = quiverApp();
+    const { rid } = await createAnalysis();
+    const bad = await request(app)
+      .post(`/quiver/api/v1/analyses/${rid}/instructions`)
+      .set(authed())
+      .send({
+        baseVersion: 0,
+        clientOpIds: [randomUUID()],
+        instructions: [
+          { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+        ],
+      });
+    expect(bad.status).toBe(400);
+    expect(bad.body.errorName).toBe("Tellus:Quiver:MalformedInstruction");
+
+    const badType = await request(app)
+      .post(`/quiver/api/v1/analyses/${rid}/instructions`)
+      .set(authed())
+      .send({
+        baseVersion: 0,
+        clientOpIds: [randomUUID()],
+        instructions: [
+          { kind: "addCard", card: { id: "$A", type: "metric", inputs: {}, config: {}, hidden: false } },
+        ],
+      });
+    expect(badType.status).toBe(400);
+    expect(badType.body.errorName).toBe("Tellus:Quiver:MalformedInstruction");
+
+    // The row was never poisoned: GET still 200s.
+    const got = await request(app)
+      .get(`/quiver/api/v1/analyses/${rid}`)
+      .set(authed());
+    expect(got.status).toBe(200);
   });
 });

@@ -30,7 +30,17 @@ services:
       QUIVER_AUDIT_BEST_EFFORT: "${QUIVER_AUDIT_BEST_EFFORT:-1}"
       # ---- Dev / test hooks (allowed in development mode) ----
       TELLUS_TEST_HOOKS: "${TELLUS_TEST_HOOKS:-0}"
+      # Dev-only credential-mutation auth hooks (/api/v1/auth/_test/*): the
+      # explicit opt-in is separate from TELLUS_TEST_HOOKS so a box that only
+      # wants the rate-limiter reset does not also expose MFA-destroying
+      # hooks. Handlers still require the X-Tellus-Test-Hook header + loopback.
+      TELLUS_AUTH_TEST_HOOKS: "${TELLUS_AUTH_TEST_HOOKS:-0}"
       CODE_REPOS_TEST_AUTH: "${CODE_REPOS_TEST_AUTH:-0}"
+      # Shared harness secret for the test-principal bypass (X-Tellus-Test-
+      # Auth-Token). REQUIRED (>= 32 chars) whenever CODE_REPOS_TEST_AUTH=1 —
+      # the flag alone only enables test mode; the token authenticates the
+      # caller. Generate with: openssl rand -hex 32
+      CODE_REPOS_TEST_AUTH_TOKEN: "${CODE_REPOS_TEST_AUTH_TOKEN}"
       WEBHOOK_ALLOW_PRIVATE_NETWORK_FOR_DEV: "${WEBHOOK_ALLOW_PRIVATE_NETWORK_FOR_DEV:-0}"
       CONNECTIVITY_EGRESS_ALLOW_RESERVED: "${CONNECTIVITY_EGRESS_ALLOW_RESERVED}"
       # ---- Rate limit / timeouts ----

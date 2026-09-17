@@ -100,6 +100,10 @@ function mockReq(headers: Record<string, string>, remoteAddress = "127.0.0.1"): 
   } as unknown as Request;
 }
 
+// Shared harness token for token-bound test-principal cases (also stubbed
+// into process.env via vi.stubEnv in each case).
+const TOKEN = "gate-lane-token-0123456789abcdef0123456789abcdef01";
+
 function mockRes() {
   const state = { statusCode: 200, body: null as unknown };
   const res = {
@@ -143,7 +147,11 @@ describe("X-Tellus-Test-Principal rejected in production-like environments", () 
   it("code-repos: development + flag + header → principal honored", () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("CODE_REPOS_TEST_AUTH", "1");
-    const req = mockReq({ "X-Tellus-Test-Principal": "alice/READER" });
+    vi.stubEnv("CODE_REPOS_TEST_AUTH_TOKEN", TOKEN);
+    const req = mockReq({
+      "X-Tellus-Test-Principal": "alice/READER",
+      "X-Tellus-Test-Auth-Token": TOKEN,
+    });
     const res = mockRes();
     let nextCalled = false;
     requireCodeReposAuth()(req, res, () => {
@@ -153,6 +161,28 @@ describe("X-Tellus-Test-Principal rejected in production-like environments", () 
     expect(
       (req as Request & { codeReposPrincipal?: { userId: string } }).codeReposPrincipal?.userId,
     ).toBe("alice");
+  });
+
+  it("code-repos: development + flag + header but NO token → no principal, 401", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("CODE_REPOS_TEST_AUTH", "1");
+    vi.stubEnv("CODE_REPOS_TEST_AUTH_TOKEN", TOKEN);
+    const req = mockReq({
+      "X-Tellus-Test-Principal": "attacker/tellus-superadmin",
+    });
+    const res = mockRes();
+    let nextCalled = false;
+    requireCodeReposAuth()(req, res, () => {
+      nextCalled = true;
+    });
+    // Token-bound: an untokened header must not bind an identity even on
+    // loopback (port-forwarded deployments present remote callers as
+    // loopback, so the token is the actual boundary).
+    expect(nextCalled).toBe(false);
+    expect(
+      (req as Request & { codeReposPrincipal?: unknown }).codeReposPrincipal,
+    ).toBeUndefined();
+    expect(res.state.statusCode).toBe(401);
   });
 
   it("code-assistant: production + flag + header → 401, no test principal", () => {
@@ -170,7 +200,11 @@ describe("X-Tellus-Test-Principal rejected in production-like environments", () 
   it("code-assistant: test env + flag + header → principal honored", () => {
     vi.stubEnv("NODE_ENV", "test");
     vi.stubEnv("CODE_ASSISTANT_TEST_AUTH", "1");
-    const req = mockReq({ "X-Tellus-Test-Principal": "alice" });
+    vi.stubEnv("CODE_REPOS_TEST_AUTH_TOKEN", TOKEN);
+    const req = mockReq({
+      "X-Tellus-Test-Principal": "alice",
+      "X-Tellus-Test-Auth-Token": TOKEN,
+    });
     const res = mockRes();
     let nextCalled = false;
     requireCodeAssistantAuth()(req, res, () => {
@@ -181,5 +215,22 @@ describe("X-Tellus-Test-Principal rejected in production-like environments", () 
       (req as Request & { codeAssistantPrincipal?: { userId: string } })
         .codeAssistantPrincipal?.userId,
     ).toBe("alice");
+  });
+
+  it("code-assistant: test env + flag + header but NO token → 401, no test principal", () => {
+    vi.stubEnv("NODE_ENV", "test");
+    vi.stubEnv("CODE_ASSISTANT_TEST_AUTH", "1");
+    vi.stubEnv("CODE_REPOS_TEST_AUTH_TOKEN", TOKEN);
+    const req = mockReq({ "X-Tellus-Test-Principal": "attacker" });
+    const res = mockRes();
+    let nextCalled = false;
+    requireCodeAssistantAuth()(req, res, () => {
+      nextCalled = true;
+    });
+    expect(nextCalled).toBe(false);
+    expect(
+      (req as Request & { codeAssistantPrincipal?: unknown }).codeAssistantPrincipal,
+    ).toBeUndefined();
+    expect(res.state.statusCode).toBe(401);
   });
 });

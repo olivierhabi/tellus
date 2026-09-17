@@ -23,6 +23,8 @@ import {
   validateCardinalityChange,
   validateForeignKeys,
   validateJoinTable,
+  isSafeJoinTablePath,
+  joinTableBaseDir,
 } from "../services/linkResolverService";
 import { sendSuccess, sendCreated, sendNoContent, sendError, encodePageToken, decodePageToken } from "../utils/responseFormatter";
 import { buildSecurityFilter } from "../middleware/securityContext";
@@ -70,7 +72,7 @@ import { query } from "../db";
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
-      const dir = path.join(process.cwd(), "data", "join_tables");
+      const dir = joinTableBaseDir();
       fs.mkdirSync(dir, { recursive: true });
       cb(null, dir);
     },
@@ -218,6 +220,12 @@ router.post("/", requireOntologyWrite, async (req: Request, res: Response, next:
 
     if (!VALID_CARDINALITIES.includes(cardinality)) {
       return sendError(res, "VALIDATION_FAILED", `Invalid cardinality. Must be one of: ${VALID_CARDINALITIES.join(", ")}`);
+    }
+
+    // CWE-22: joinTableFilePath must stay inside the join-table upload dir;
+    // otherwise the stored path is later used to read arbitrary files.
+    if (joinTableFilePath && !isSafeJoinTablePath(joinTableFilePath)) {
+      return sendError(res, "VALIDATION_FAILED", "joinTableFilePath must reference a join-table CSV under data/join_tables (set it via the /upload endpoint).");
     }
 
     const linkType = await linkTypeModel.create(ontologyId, {
@@ -583,6 +591,12 @@ router.put("/:apiName", async (req: Request, res: Response, next: NextFunction) 
 
     if (cardinality && !VALID_CARDINALITIES.includes(cardinality)) {
       return sendError(res, "VALIDATION_FAILED", `Invalid cardinality. Must be one of: ${VALID_CARDINALITIES.join(", ")}`);
+    }
+
+    // CWE-22: same containment check as on create — an attacker must not
+    // be able to point an existing link type at an arbitrary file.
+    if (joinTableFilePath && !isSafeJoinTablePath(joinTableFilePath)) {
+      return sendError(res, "VALIDATION_FAILED", "joinTableFilePath must reference a join-table CSV under data/join_tables (set it via the /upload endpoint).");
     }
 
     const updated = await linkTypeModel.update(ontologyId, apiName, {
@@ -1444,7 +1458,7 @@ router.get("/:apiName/edges", async (req: Request, res: Response, next: NextFunc
       created_at: string | null;
     }> = [];
 
-    if (linkType.storage_backend !== "iceberg" && linkType.join_table_file_path) {
+    if (linkType.storage_backend !== "iceberg" && linkType.join_table_file_path && isSafeJoinTablePath(linkType.join_table_file_path)) {
       const fs = await import("fs");
       if (fs.existsSync(linkType.join_table_file_path)) {
         const data = fs.readFileSync(linkType.join_table_file_path, "utf-8");

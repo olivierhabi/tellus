@@ -30,6 +30,7 @@ import {
 } from "vitest";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
+import { register } from "prom-client";
 import { pool } from "../../../src/db";
 import {
   applyQuiverMigrations,
@@ -45,6 +46,7 @@ const TEST_ORG = "ri.multipass.main.org.acme";
 function authedHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return {
     "x-test-user": TEST_USER,
+    "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "",
     "x-test-org": TEST_ORG,
     ...extra,
   };
@@ -447,6 +449,100 @@ describe("Quiver B1 — GET /folders/:folderRid/analyses (B1 C-15)", () => {
       .set(authedHeaders());
     expect(r.status).toBe(200);
     expect(r.body.items.length).toBe(5);
+  });
+});
+
+describe("Quiver B1 — poisoned-row resilience (OT write/read schema divergence)", () => {
+  const POISON_FOLDER = "ri.compass.main.folder.poison";
+
+  // A card map written by the old loose OT schema: keys and ids that
+  // AnalysisDocument.parse (types.ts CardId/CARD_TYPES) rejects.
+  const POISON_CARDS = {
+    c1: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false },
+  };
+
+  async function seedAnalysis(
+    app: ReturnType<typeof quiverApp>,
+    displayName: string,
+  ): Promise<{ rid: string; etag: string }> {
+    const r = await request(app)
+      .post("/quiver/api/v1/analyses")
+      .set(authedHeaders({ "idempotency-key": randomUUID() }))
+      .send({ parentFolderRid: POISON_FOLDER, displayName });
+    expect(r.status).toBe(201);
+    return { rid: r.body.rid, etag: r.headers["etag"] };
+  }
+
+  it("listAnalysesInFolder skips an unparseable row instead of 500ing the folder", async () => {
+    const app = quiverApp();
+    const a = await seedAnalysis(app, "healthy-a");
+    const poisoned = await seedAnalysis(app, "poisoned");
+    const b = await seedAnalysis(app, "healthy-b");
+
+    await pool.query(
+      "UPDATE quiver_analysis SET cards = $1::jsonb WHERE rid = $2",
+      [JSON.stringify(POISON_CARDS), poisoned.rid],
+    );
+
+    // The poisoned row itself still fails honestly on direct GET...
+    const single = await request(app)
+      .get(`/quiver/api/v1/analyses/${poisoned.rid}`)
+      .set(authedHeaders());
+    expect(single.status).toBe(500);
+
+    // ...but the folder listing returns 200 with the surviving entries.
+    const list = await request(app)
+      .get(`/quiver/api/v1/folders/${POISON_FOLDER}/analyses`)
+      .set(authedHeaders());
+    expect(list.status).toBe(200);
+    expect(list.body.items).toHaveLength(2);
+    expect(list.body.items.map((i: { rid: string }) => i.rid).sort()).toEqual(
+      [a.rid, b.rid].sort(),
+    );
+
+    const metrics = await register.metrics();
+    expect(metrics).toMatch(
+      /tellus_quiver_analyses_corrupt_skipped_total\{endpoint="GET \/folders\/:folderRid\/analyses"\} [1-9]/,
+    );
+  });
+
+  it("deleteAnalysis recovers a poisoned row via the If-Match etag from the 412 body", async () => {
+    const app = quiverApp();
+    const poisoned = await seedAnalysis(app, "poisoned-delete");
+
+    await pool.query(
+      "UPDATE quiver_analysis SET cards = $1::jsonb WHERE rid = $2",
+      [JSON.stringify(POISON_CARDS), poisoned.rid],
+    );
+
+    // GET 500s so the victim cannot read the ETag header. Probe DELETE with
+    // a bogus If-Match: the 412 body carries the RAW row's etag column.
+    const probe = await request(app)
+      .delete(`/quiver/api/v1/analyses/${poisoned.rid}`)
+      .set(authedHeaders({ "if-match": 'W/"deadbeef"' }));
+    expect(probe.status).toBe(412);
+    expect(probe.body.errorName).toBe("Tellus:Quiver:VersionMismatch");
+    const rawEtag = probe.body.parameters.currentEtag;
+    expect(typeof rawEtag).toBe("string");
+    expect(rawEtag.length).toBeGreaterThan(0);
+
+    // Retry with the recovered etag → soft-delete succeeds on the corrupt row.
+    const del = await request(app)
+      .delete(`/quiver/api/v1/analyses/${poisoned.rid}`)
+      .set(authedHeaders({ "if-match": rawEtag }));
+    expect(del.status).toBe(204);
+
+    const row = await pool.query(
+      "SELECT is_deleted FROM quiver_analysis WHERE rid = $1",
+      [poisoned.rid],
+    );
+    expect(row.rows[0].is_deleted).toBe(true);
+
+    // The corrupt-delete metric was counted (recovery path taken).
+    const metrics = await register.metrics();
+    expect(metrics).toMatch(
+      /tellus_quiver_analyses_corrupt_skipped_total\{endpoint="DELETE \/analyses\/:rid"\} [1-9]/,
+    );
   });
 });
 

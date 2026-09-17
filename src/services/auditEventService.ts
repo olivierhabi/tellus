@@ -70,6 +70,10 @@ export type AuditAction =
   // mfa gates
   | 'mfa.login'
   | 'mfa.budget-exceeded'
+  // Dev-only test-hook credential mutations (tellusAuthTestHooks) — audited
+  // so a second-factor strip/seed is never silent (vuln: unauth MFA reset).
+  | 'mfa.admin-reset'
+  | 'mfa.admin-seed'
   // reauth
   | 'reauth.issue'
   | 'reauth.fail'

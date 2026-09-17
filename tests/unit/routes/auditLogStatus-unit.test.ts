@@ -42,6 +42,17 @@ import { globalAuditRouter } from "../../../src/routes/auditLog";
 function buildApp(): Express {
   const app = express();
   app.use(express.json());
+  // vuln-0009: the global audit handlers are gated on the ontology-admin
+  // role (authorize("ontology-admin")). Mount a minimal admin principal so
+  // the route contract itself stays under test; the authz gate has its own
+  // regression coverage.
+  app.use((req, _res, next) => {
+    (req as unknown as { user?: { id: string; roles: string[] } }).user = {
+      id: "test-admin",
+      roles: ["ontology-admin"],
+    };
+    next();
+  });
   app.use("/api/v1/audit", globalAuditRouter);
   app.use((err, _req, res, _next) => {
     res.status(500).json({ error: { message: err.message } });

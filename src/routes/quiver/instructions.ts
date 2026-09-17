@@ -14,7 +14,7 @@ import {
   unauthenticated,
 } from "../../services/quiver/errors";
 import { readBranch } from "../../services/quiver/branchHeader";
-import { isQuiverTestAuthAllowed } from "./testAuth";
+import { isQuiverTestAuthBound } from "./testAuth";
 import {
   submitInstructions,
   readLogSlice,
@@ -23,7 +23,7 @@ import {
 } from "../../services/quiver/ot/otService";
 
 function actorFromReq(req: Request): SubmitInstructionsActor {
-  const allowTest = isQuiverTestAuthAllowed();
+  const allowTest = isQuiverTestAuthBound(req);
   const fromCtx = (req as Request & {
     securityContext?: { userSubject?: string; orgRid?: string };
   }).securityContext;
@@ -105,14 +105,14 @@ instructionsRouter.post(
 instructionsRouter.get(
   "/analyses/:rid/instructions",
   handle(async (req, res) => {
-    actorFromReq(req); // auth-only
+    const actor = actorFromReq(req); // also feeds the read-authorization below
     const rid = req.params.rid;
     const fromSeq = Number(req.query.fromSeq ?? 0);
     const toSeq = Number(req.query.toSeq ?? Number.MAX_SAFE_INTEGER);
     if (!Number.isFinite(fromSeq) || fromSeq < 0) {
       throw invalidAnalysisRequest({ reason: "fromSeq must be a non-negative integer" });
     }
-    const slice = await readLogSlice(rid, fromSeq, toSeq);
+    const slice = await readLogSlice(actor, rid, fromSeq, toSeq);
     res.status(200).json({ instructions: slice, count: slice.length });
   }),
 );

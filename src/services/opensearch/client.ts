@@ -80,14 +80,31 @@ const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "http://localhost:9200";
 const OS_REQUEST_TIMEOUT = Number(process.env.OPENSEARCH_REQUEST_TIMEOUT ?? 5_000);
 const OS_MAX_RETRIES = Number(process.env.OPENSEARCH_MAX_RETRIES ?? 1);
 
-const client = new Client({
+// Security hardening (vuln: unauthenticated OpenSearch port): when the
+// cluster runs with the security plugin ENABLED, every request must carry
+// Basic auth. Credentials are read from OPENSEARCH_USERNAME /
+// OPENSEARCH_PASSWORD; when the password is unset the auth block is
+// omitted entirely so the client keeps working against a cluster with the
+// security plugin disabled (the credentials would be ignored anyway).
+// Mirrors the auth pattern already used by migrations/038.
+const osClientOptions: ConstructorParameters<typeof Client>[0] = {
   node: OPENSEARCH_URL,
+  ...(process.env.OPENSEARCH_USERNAME && process.env.OPENSEARCH_PASSWORD
+    ? {
+        auth: {
+          username: process.env.OPENSEARCH_USERNAME,
+          password: process.env.OPENSEARCH_PASSWORD,
+        },
+      }
+    : {}),
   ssl: {
     rejectUnauthorized: false,
   },
   requestTimeout: OS_REQUEST_TIMEOUT,
   maxRetries: OS_MAX_RETRIES,
-});
+};
+
+const client = new Client(osClientOptions);
 
 // ---------------------------------------------------------------------------
 // Helper: wrap errors in a consistent format

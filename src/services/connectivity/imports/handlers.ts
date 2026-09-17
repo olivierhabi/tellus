@@ -25,7 +25,14 @@ import {
   ResourceVersionMismatch,
   IfMatchRequired,
   InvalidConfiguration,
+  EgressPolicyNotFound,
+  EgressPolicyNotApproved,
 } from "../../../lib/errors/connectivity.errors";
+import * as egressPoliciesRepo from "../store/egress-policies.repo";
+import {
+  assertEgressAllowed,
+  assertEgressResolved,
+} from "../connectors/postgresql/egress";
 import {
   TableImportCreateRequest,
   TableImportUpdateRequest,
@@ -567,8 +574,8 @@ export async function enqueueBuildForImport(
     throw new TellusError(ConnectionNotFound, { importRid });
   }
 
-  const conn = await pool.query<{ config: any; tenant: string }>(
-    `SELECT config, tenant FROM connectivity_connections WHERE rid=$1 AND deleted_at IS NULL`,
+  const conn = await pool.query<{ config: any; tenant: string; egress_policy: any; egress_policy_rid: string | null }>(
+    `SELECT config, tenant, egress_policy, egress_policy_rid FROM connectivity_connections WHERE rid=$1 AND deleted_at IS NULL`,
     [row.rows[0].connection_rid],
   );
   if (conn.rowCount === 0) {
@@ -588,6 +595,41 @@ export async function enqueueBuildForImport(
   // The connection config nests the driver settings under `postgres`
   // (matching PostgresConfig); fall back to a flat shape defensively.
   const pgConfig = conn.rows[0].config?.postgres ?? conn.rows[0].config ?? {};
+
+  // Zero-trust egress gate at build admission (Strix medium 6.5, Sept 2026):
+  // the import worker child dials pgConfig.host:pgPort DIRECTLY with only
+  // the connection's self-authored allowlist installed — it never passes
+  // through pool.getPool. Enforce the same checks here as at dial time
+  // (pool.ts getPool) BEFORE any child process spawns: a referenced named
+  // egress policy must be APPROVED, the effective allowlist must cover
+  // host:port, and reserved/internal targets are refused unless the
+  // operator opted them in via CONNECTIVITY_EGRESS_ALLOW_RESERVED.
+  // Without this, a connection to e.g. 169.254.169.254:80 is refused by
+  // the guarded /test path but still dialed by the import worker.
+  const connectionRid = row.rows[0].connection_rid;
+  let effectivePolicy = conn.rows[0].egress_policy;
+  if (conn.rows[0].egress_policy_rid) {
+    const named = await egressPoliciesRepo.resolveForEnforcement(
+      conn.rows[0].egress_policy_rid,
+    );
+    if (!named) {
+      throw new TellusError(EgressPolicyNotFound, {
+        connectionRid,
+        egressPolicyRid: conn.rows[0].egress_policy_rid,
+      });
+    }
+    if (named.status !== "APPROVED") {
+      throw new TellusError(EgressPolicyNotApproved, {
+        connectionRid,
+        egressPolicyRid: conn.rows[0].egress_policy_rid,
+        status: named.status,
+      });
+    }
+    effectivePolicy = { allowlist: named.allowlist };
+  }
+  assertEgressAllowed(connectionRid, pgConfig.host, pgConfig.port, effectivePolicy);
+  await assertEgressResolved(pgConfig.host, pgConfig.port);
+
   const lastWm = await pool.query<{ value: string | null }>(
     `SELECT watermark_value AS value FROM table_import_watermarks WHERE import_rid=$1`,
     [importRid],

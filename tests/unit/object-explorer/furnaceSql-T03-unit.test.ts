@@ -207,6 +207,52 @@ describe("T-03 C-303/C-304: enforceReadOnly classification", () => {
     expect(caughtCode).toBe("SQL_WRITE_REJECTED");
   });
 
+  // V-2026-09-16 regression: the old quote-parity statement splitter was
+  // evadable with an odd number of single quotes inside a trailing comment,
+  // collapsing smuggled DDL/DML into the first (allowlisted) statement.
+  // Any semicolon anywhere must now reject before DuckDB sees the SQL.
+  it.each([
+    // trailing apostrophe-comment breaks the old parity lookahead
+    "SELECT 1 AS x; CREATE TABLE evil (a INT) -- don'",
+    // SET smuggled past the leading-keyword gate
+    "SELECT 1 AS x; SET threads = 64 -- don'",
+    // semicolon hidden inside a comment still rejects (deny-by-char)
+    "SELECT 1 AS x /* ; harmless comment */",
+    // the trailing terminator itself must reject too
+    "SELECT 1;",
+  ])("rejects semicolon-bearing query %s with SQL_WRITE_REJECTED", async (sql) => {
+    let caughtCode: string | undefined;
+    try {
+      await executeFurnaceSql(ONTOLOGY, sql);
+    } catch (err) {
+      caughtCode = (err as { code?: string }).code;
+    }
+    expect(caughtCode).toBe("SQL_WRITE_REJECTED");
+  });
+
+  it("still accepts legitimate single-statement read queries (no semicolon)", async () => {
+    // The shared stubBuildDb awaits a resolver that only the concurrent-caller
+    // scenario fires — a plain call here would hang on any machine where the
+    // duckdb binary exists. Re-stub buildDb to fail fast: the assertion is
+    // "no SQL_WRITE_REJECTED", so ANY other outcome (fast DUCKDB_UNAVAILABLE)
+    // proves the semicolon guard did not fire.
+    vi.spyOn(__internals, "buildDb").mockRejectedValue(
+      Object.assign(new Error("duckdb missing in test environment"), {
+        code: "DUCKDB_UNAVAILABLE",
+      }),
+    );
+    let caughtCode: string | undefined;
+    try {
+      await executeFurnaceSql(ONTOLOGY, "SELECT 1 AS x -- don'");
+    } catch (err) {
+      caughtCode = (err as { code?: string }).code;
+    }
+    // The apostrophe in the comment must not trip the new semicolon guard;
+    // rejection here can only come from the mock layer (DUCKDB path), not
+    // from SQL_WRITE_REJECTED.
+    expect(caughtCode).not.toBe("SQL_WRITE_REJECTED");
+  });
+
   it("rejects unknown leading keyword with SQL_DISALLOWED_KEYWORD", async () => {
     let caughtCode: string | undefined;
     try {

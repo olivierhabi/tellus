@@ -46,6 +46,10 @@ export default defineConfig({
       // Keycloak realm. requireCodeReposAuth() ignores this header unless
       // CODE_REPOS_TEST_AUTH=1 is set, so production paths are unaffected.
       CODE_REPOS_TEST_AUTH: "1",
+      // Shared harness token for the test-principal bypass (X-Tellus-Test-
+      // Auth-Token). VITEST-LANE-ONLY public constant — see vitest.config.ts.
+      CODE_REPOS_TEST_AUTH_TOKEN:
+        "vitest-lane-9f2c6b4e8a1d3f5c7b9e0d2a4c6f8e1b3d5a7c9e1f3b5d7a9c1e3f5b7d9a1c3",
       // Publish-author trust gate: exercised by dedicated tests; other lanes
       // opt out explicitly (never honored in production).
       FUNCTION_EXECUTION_TRUST_MODE: "open-development",

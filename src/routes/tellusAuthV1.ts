@@ -22,7 +22,7 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { Knex } from 'knex';
 import foundryDb from '../config/foundryDb';
 import { TellusAuthService, TellusClaims } from '../services/tellusAuthService';
-import { getKeycloakAdminService } from '../services/keycloakAdminService';
+import { getKeycloakAdminService, requireConfidentialClientSecret } from '../services/keycloakAdminService';
 import { getWebauthnService } from '../services/webauthnService';
 import {
   getTotpService,
@@ -1332,7 +1332,7 @@ router.post('/me/password', requireTellusAuth({ allowPat: false }), async (req: 
     const body = new URLSearchParams({
       grant_type: 'client_credentials',
       client_id: process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_ID || 'tellus-confidential',
-      client_secret: process.env.KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET || 'tellus-confidential-secret-change-me',
+      client_secret: requireConfidentialClientSecret(),
     });
     // F-P4-08: client_credentials token exchange inside the
     // password-reset path. 5 s matches tellusAuthService.loginWithPassword

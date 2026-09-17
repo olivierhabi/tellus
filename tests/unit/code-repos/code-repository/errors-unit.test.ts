@@ -60,7 +60,7 @@ describe("B2 — error catalog completeness", () => {
     expect(CODE_REPOS_ERROR_STATUS["CodeRepos:Internal"]?.status).toBe(500);
   });
 
-  it("CODE_REPOS_ERROR_NAMES enumerates exactly 41 names", () => {
+  it("CODE_REPOS_ERROR_NAMES enumerates exactly 42 names", () => {
     // 6 spec-mandated (B2-C-30..35) + 4 cross-cutting (G-C-08/09/13)
     // + 6 read-path (B2-C-10/11: InvalidPath, InvalidDepth, BranchNotFound,
     // FileNotFound, InvalidPathType, RateLimited)
@@ -82,10 +82,12 @@ describe("B2 — error catalog completeness", () => {
     //   InternalError and only when NO version resolved)
     // + 3 body validation (InvalidArgumentBody, InvalidSettings,
     //   Unauthenticated)
+    // + 1 sandbox escape-probe rejection (FunctionSourceRejected — Strix
+    //   CWE-94 2026 hardening; 422 like FunctionCompileError)
     // NOTE: this guard previously expected 36 while HEAD already
     // carried 39 — the function-invoke/chat/imports groups were
     // added without updating the count. Fixed to the true count.
-    expect(CODE_REPOS_ERROR_NAMES.length).toBe(41);
+    expect(CODE_REPOS_ERROR_NAMES.length).toBe(42);
     expect(CODE_REPOS_ERROR_STATUS["CodeRepos:PublishedArtifactMissing"]?.status).toBe(500);
     // The enqueue guard maps to the same 409 CONFLICT semantics as
     // the retrigger Jemma:RunAlreadyActive contract.

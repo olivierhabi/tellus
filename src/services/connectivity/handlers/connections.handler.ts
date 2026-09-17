@@ -54,7 +54,12 @@ import {
   RestApiConfig,
 } from "../contracts";
 import * as repo from "../store/connections.repo";
+import * as egressPoliciesRepo from "../store/egress-policies.repo";
 import * as outbox from "../store/outbox";
+import {
+  assertReservedTargetRequiresApprovedPolicy,
+  isTrulyReservedTarget,
+} from "../connectors/postgresql/egress";
 import { resolvePrincipalNames } from "../principalNames";
 import { evict as evictPgPool } from "../connectors/postgresql/pool";
 
@@ -279,6 +284,70 @@ function mintConnectionRid(): string {
   return `ri.magritte.main.source.${randomUUID()}`;
 }
 
+// --- reserved-target registration gate (SSRF) ---------------------------------
+//
+// A truly-reserved target (evaluated IGNORING the
+// CONNECTIVITY_EGRESS_ALLOW_RESERVED operator opt-in — loopback, link-local,
+// cloud metadata, RFC-1918, …) may only be registered when the request carries
+// an operator-APPROVED named egress policy. A caller-authored inline allowlist
+// must never self-authorize a reserved dial. Fail-closed: any lookup failure
+// or non-APPROVED status ⇒ 403 Tellus:Connectivity:EgressBlocked.
+//
+// Laptop flow (loopback dev Postgres): create a named policy covering the
+// loopback host:port (PENDING), approve it via POST
+// /egress-policies/:eprid/decision { "decision": "APPROVED" }, then pass its
+// RID as `egressPolicyRid` on connection create/update.
+
+/** Every dialable hostname in a connection config (postgres host + REST domains). */
+function extractConnectionHosts(
+  config: ConnectionCreateRequest["config"] | ConnectionUpdateRequest["config"],
+): string[] {
+  if (!config) return [];
+  if (config.connectorType === "postgresql") {
+    return config.postgres.host ? [config.postgres.host] : [];
+  }
+  const hosts: string[] = [];
+  for (const domain of config.restApi.domains ?? []) {
+    try {
+      hosts.push(new URL(domain.baseUrl).hostname);
+    } catch {
+      // Malformed URLs are rejected by Zod validation; ignore them here so
+      // this gate never masks a schema error.
+    }
+  }
+  return hosts;
+}
+
+/**
+ * Enforces the reserved-target gate for connection registration (create AND
+ * update/patch AND the on-demand /test path, which re-validates the stored
+ * record the same way). `egressPolicyRid` is the EFFECTIVE reference (the
+ * request value on create; patch value ?? stored value on update).
+ */
+async function assertReservedRegistrationAllowed(params: {
+  tenant: string;
+  hosts: string[];
+  egressPolicyRid: string | null | undefined;
+}): Promise<void> {
+  if (!params.hosts.some((h) => isTrulyReservedTarget(h))) return;
+  const rid = params.egressPolicyRid ?? null;
+  let status: string | null = null;
+  if (rid) {
+    try {
+      const policy = await egressPoliciesRepo.findByRid(rid, params.tenant);
+      status = policy.status;
+    } catch {
+      status = null; // unknown/deleted/cross-tenant ⇒ fail closed below
+    }
+  }
+  // The pure gate throws 403 EgressBlocked unless the named policy is APPROVED.
+  assertReservedTargetRequiresApprovedPolicy(
+    params.hosts.find((h) => isTrulyReservedTarget(h)) as string,
+    0,
+    { egressPolicyRid: rid, policyStatus: status },
+  );
+}
+
 // --- handlers ---------------------------------------------------------------
 
 export const postConnection = instrument("/api/v1/connectivity/connections", "POST")(
@@ -322,6 +391,15 @@ export const postConnection = instrument("/api/v1/connectivity/connections", "PO
         });
       }
     }
+
+    // SSRF gate: a truly-reserved target requires an operator-APPROVED named
+    // egress policy — an inline allowlist never self-authorizes. Runs before
+    // any side effect (Compass lookup, vault write, insert).
+    await assertReservedRegistrationAllowed({
+      tenant: user.tenant,
+      hosts: extractConnectionHosts(request.config),
+      egressPolicyRid: request.egressPolicyRid ?? null,
+    });
 
     const folder = await compassClient.getFolder(request.compassFolderRid);
     await compassClient.assertWritePermission(folder.rid, user.id);
@@ -513,6 +591,19 @@ export const putConnection = instrument(
       });
     }
   }
+
+  // SSRF gate (same rule as create): the EFFECTIVE target (patched config or
+  // the stored config when the patch leaves it untouched) must be covered by
+  // an operator-APPROVED named policy when truly-reserved. Runs before the
+  // vault write and the update so a rejected registration leaves no trace.
+  await assertReservedRegistrationAllowed({
+    tenant: user.tenant,
+    hosts: extractConnectionHosts(patch.config ?? current.config),
+    egressPolicyRid:
+      patch.egressPolicyRid !== undefined
+        ? (patch.egressPolicyRid ?? null)
+        : (current.egressPolicyRid ?? null),
+  });
 
   // Rotate the mTLS client key into the vault when a new one is supplied; mirror
   // the encrypted-key flag onto the config that will be persisted.

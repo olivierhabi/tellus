@@ -18,7 +18,12 @@ import * as vault from "../../credentials/vault";
 import * as credStore from "../../credentials/store.repo";
 import { installPgTypeParsers } from "./pg-types-config";
 import { assemblePgPoolOptions, type PgCredentialMaterial } from "./config";
-import { assertEgressAllowed, assertEgressResolved } from "./egress";
+import {
+  assertEgressAllowed,
+  assertEgressResolved,
+  assertReservedTargetRequiresApprovedPolicy,
+  isTrulyReservedTarget,
+} from "./egress";
 import { setPoolCountProvider } from "../../metrics";
 import { assertAgentAvailable } from "../../agent/proxy";
 import { TellusError } from "../../../../lib/errors/envelope";
@@ -153,6 +158,7 @@ export async function getPool(connectionRid: string): Promise<Pool> {
   // a PENDING/REJECTED (or missing) policy fails closed before any socket is
   // opened. Otherwise the connection's inline allowlist applies.
   let effectivePolicy = conn.egressPolicy;
+  let namedStatus: string | null = null;
   if (conn.egressPolicyRid) {
     const named = await egressPoliciesRepo.resolveForEnforcement(
       conn.egressPolicyRid,
@@ -170,7 +176,24 @@ export async function getPool(connectionRid: string): Promise<Pool> {
         status: named.status,
       });
     }
+    namedStatus = named.status;
     effectivePolicy = { allowlist: named.allowlist };
+  }
+
+  // SSRF gate (registration rule, enforced again at dial time so a connection
+  // whose stored target was written before the gate — or whose policy was
+  // revoked/rejected after registration — cannot dial): a truly-reserved
+  // target (IGNORING the CONNECTIVITY_EGRESS_ALLOW_RESERVED opt-in) requires
+  // an operator-APPROVED named policy; an inline allowlist never suffices.
+  // This also covers the on-demand POST /connections/:rid/test probe, which
+  // dials through getPool and therefore loads the stored policy the same way.
+  const trulyReserved = isTrulyReservedTarget(pgConfig.host);
+  if (trulyReserved) {
+    assertReservedTargetRequiresApprovedPolicy(
+      pgConfig.host,
+      pgConfig.port,
+      { egressPolicyRid: conn.egressPolicyRid ?? null, policyStatus: namedStatus },
+    );
   }
 
   // Zero-trust egress gate: the source may only reach the host:port its own
@@ -182,7 +205,12 @@ export async function getPool(connectionRid: string): Promise<Pool> {
   // DNS-pinned egress: resolve + validate EVERY address now and connect to the
   // pinned IP (keeping the original hostname for TLS `servername`), closing the
   // resolution-time TOCTOU / DNS-rebinding window the string-only guard leaves.
-  const pinnedHost = await assertEgressResolved(pgConfig.host, pgConfig.port);
+  // allowReserved is set ONLY after the approved-policy gate above passed: in
+  // production the env opt-in is unset, so without this bypass an approved
+  // loopback policy could never actually dial.
+  const pinnedHost = await assertEgressResolved(pgConfig.host, pgConfig.port, {
+    allowReserved: trulyReserved,
+  });
 
   const creds: PgCredentialMaterial = {
     user: pgConfig.user,

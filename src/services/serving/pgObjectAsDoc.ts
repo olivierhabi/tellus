@@ -17,11 +17,32 @@
 
 import { query } from "../../../src/db";
 
-/** PG-path object lookup (the fallback for legacy-mode rollout). Returns the same doc-shape as executeGetObject.formatSingleObject minima. */
+/**
+ * Caller security context for the PG read path. Mirrors the fields
+ * `buildSecurityFilter` consumes from the request SecurityContext.
+ */
+export interface PgDocCallerSecurity {
+  markings?: string[];
+  markingBypass?: boolean;
+}
+
+/**
+ * PG-path object lookup (the fallback for legacy-mode rollout). Returns the same doc-shape as executeGetObject.formatSingleObject minima.
+ *
+ * CWE-639 remediation (Strix): when `callerSecurity` is supplied (the
+ * client-facing GET-single path), the row's `markings` are compared
+ * against the caller's with conjunctive semantics — the caller must hold
+ * EVERY marking on the row — and `markingBypass` skips the check. A
+ * restricted row returns null so the caller falls through to the 404
+ * path, matching executeGetObject's invisible-not-forbidden contract.
+ * Internal hydration paths that omit `callerSecurity` keep the previous
+ * ungated behavior.
+ */
 export async function pgObjectAsDoc(
   ontologyId: string,
   objectTypeApiName: string,
   primaryKey: string,
+  callerSecurity?: PgDocCallerSecurity,
 ): Promise<Record<string, unknown> | null> {
   const res = await query(
     `SELECT ontology_id, object_type_api_name, primary_key, properties, markings, last_modified_at, branch_id, version
@@ -32,6 +53,12 @@ export async function pgObjectAsDoc(
   );
   const row = res.rows[0] as Record<string, unknown> | undefined;
   if (!row) return null;
+  if (callerSecurity && !callerSecurity.markingBypass) {
+    const callerMarkings = callerSecurity.markings ?? [];
+    const rowMarkings = (row.markings as string[]) ?? [];
+    // Conjunctive: the caller must hold EVERY marking on the row.
+    if (!rowMarkings.every((m) => callerMarkings.includes(m))) return null;
+  }
   return {
     __pk: row.primary_key,
     __objectType: row.object_type_api_name,

@@ -32,7 +32,7 @@ const TEST_USER = "ri.multipass.main.user.b2";
 const TEST_ORG = "ri.multipass.main.org.b2";
 
 function headers(extra: Record<string, string> = {}): Record<string, string> {
-  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, ...extra };
+  return { "x-test-user": TEST_USER, "x-test-org": TEST_ORG, "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "", ...extra };
 }
 
 beforeAll(async () => {

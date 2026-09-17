@@ -10,7 +10,11 @@
 // Versions are monotonic per (rid, branch_rid).
 
 import { withTransaction, query } from "../../db";
-import { ActorContext } from "./analysisService";
+import {
+  ActorContext,
+  assertAnalysisEditable,
+  assertAnalysisReadable,
+} from "./analysisService";
 import {
   analysisNotFound,
   invalidAnalysisRequest,
@@ -123,6 +127,10 @@ export async function saveVersion(
     });
   }
 
+  // Folder authorization — editor on the analysis's parent folder (a save
+  // snapshots the whole document; viewer+ is not enough).
+  await assertAnalysisEditable(actor, rid);
+
   const result = await withTransaction(async (client) => {
     const sel = await client.query(
       `SELECT * FROM quiver_analysis WHERE rid = $1 FOR UPDATE`,
@@ -216,6 +224,9 @@ export async function listVersions(
     ? Number(Buffer.from(pageToken, "base64url").toString("utf8"))
     : null;
 
+  // Folder authorization — viewer+ (version rows carry full documents).
+  await assertAnalysisReadable(actor, rid);
+
   // Existence + branch scope check.
   const head = await query(
     `SELECT rid FROM quiver_analysis WHERE rid = $1 AND is_deleted = false`,
@@ -251,6 +262,8 @@ export async function getVersion(
   rid: string,
   version: number,
 ): Promise<{ info: VersionInfo; document: unknown }> {
+  // Folder authorization — viewer+ (the version row carries the document).
+  await assertAnalysisReadable(actor, rid);
   const r = await query(
     `SELECT * FROM quiver_analysis_version
       WHERE rid = $1 AND version = $2 AND branch_rid = $3 LIMIT 1`,
@@ -269,6 +282,8 @@ export async function revertToVersion(
   ifMatch: string,
 ): Promise<{ rid: string; etag: string; revertedTo: number; newVersion: number }> {
   const t0 = process.hrtime.bigint();
+  // Folder authorization — editor on the parent folder (revert mutates).
+  await assertAnalysisEditable(actor, rid);
   const r = await withTransaction(async (client) => {
     const sel = await client.query(
       `SELECT * FROM quiver_analysis WHERE rid = $1 FOR UPDATE`,

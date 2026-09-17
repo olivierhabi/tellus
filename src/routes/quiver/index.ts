@@ -12,6 +12,8 @@ import { instructionsRouter } from "./instructions";
 import { aipRouter } from "./aip";
 import { publishingRouter } from "./publishing";
 import { assertRegistryIntegrity } from "../../services/quiver/dag";
+import { setCompassPort } from "../../services/quiver/analysisService";
+import { dbCompassPort } from "../../services/quiver/dbCompassPort";
 
 export interface QuiverPhaseFlags {
   phase: number;
@@ -23,9 +25,27 @@ export function readPhaseFlags(): QuiverPhaseFlags {
   return { phase: Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0 };
 }
 
+let compassWired = false;
+/**
+ * Idempotent production wiring of the DB-backed CompassPort — the real
+ * membership authorization (project owner / project_members owner|editor|
+ * viewer via the Compass resources tree). The analysisService default is
+ * DENY-BY-WIRING (`CompassNotConfigured`), so mounting the router is what
+ * turns authorization on; test harnesses may still override the port via
+ * `setCompassPort` AFTER the router is built (the wire never re-fires, so a
+ * harness override is never clobbered by a later `buildQuiverRouter` call).
+ */
+export function wireDbCompassPort(): void {
+  if (compassWired) return;
+  compassWired = true;
+  setCompassPort(dbCompassPort);
+}
+
 export function buildQuiverRouter(flags: QuiverPhaseFlags = readPhaseFlags()): Router {
   // Boot-time invariant: 26 card types in registry (B2 C-02). Throws on drift.
   assertRegistryIntegrity();
+  // Authorization wiring (idempotent — see wireDbCompassPort).
+  wireDbCompassPort();
   const r = Router();
 
   // Bridge globalAuth's verified principal into the actor shape the Quiver
@@ -35,7 +55,7 @@ export function buildQuiverRouter(flags: QuiverPhaseFlags = readPhaseFlags()): R
   // — which nothing else in the stack ever sets, so real (non-test) auth would
   // always 401. Derive it here once for every sub-router. In QUIVER_ALLOW_TEST_
   // AUTH mode globalAuth short-circuits before setting req.user, so this no-ops
-  // and the existing x-test-user header path still applies.
+  // and the existing (token-bound) x-test-user header path still applies.
   r.use((req: Request, _res: Response, next: NextFunction) => {
     const anyReq = req as Request & {
       user?: { id?: string };

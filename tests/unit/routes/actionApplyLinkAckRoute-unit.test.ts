@@ -17,11 +17,13 @@ import request from "supertest";
 const {
   executeActionMock,
   checkIdempotencyKeyMock,
+  checkIdempotencyKeyScopedMock,
   storeIdempotencyKeyMock,
   withIdempotencyLockMock,
 } = vi.hoisted(() => ({
   executeActionMock: vi.fn(),
   checkIdempotencyKeyMock: vi.fn(),
+  checkIdempotencyKeyScopedMock: vi.fn(),
   storeIdempotencyKeyMock: vi.fn(),
   withIdempotencyLockMock: vi.fn(),
 }));
@@ -32,6 +34,7 @@ vi.mock("../../../src/actions/actionExecutor", () => ({
 
 vi.mock("../../../src/actions/idempotency", () => ({
   checkIdempotencyKey: checkIdempotencyKeyMock,
+  checkIdempotencyKeyScoped: checkIdempotencyKeyScopedMock,
   storeIdempotencyKey: storeIdempotencyKeyMock,
   // The real helper serialises on a PG advisory lock; the unit lane only
   // needs the inner closure to run.
@@ -77,6 +80,7 @@ describe("POST /apply — linkIndexAck HTTP contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     checkIdempotencyKeyMock.mockResolvedValue(null);
+    checkIdempotencyKeyScopedMock.mockResolvedValue({ kind: "miss" });
     storeIdempotencyKeyMock.mockResolvedValue(undefined);
     withIdempotencyLockMock.mockImplementation(
       async (_key: string, fn: () => Promise<void>) => fn()
@@ -158,7 +162,10 @@ describe("POST /apply — linkIndexAck HTTP contract", () => {
 
     // Second call: cache hit replays the stored 202 without re-executing.
     const { _httpStatus, _isError, ...cachedBody } = storedBody as Record<string, unknown>;
-    checkIdempotencyKeyMock.mockResolvedValue({ _httpStatus, _isError, ...cachedBody });
+    checkIdempotencyKeyScopedMock.mockResolvedValue({
+      kind: "hit",
+      result: { _httpStatus, _isError, ...cachedBody },
+    });
     const r2 = await request(buildApp())
       .post(URL)
       .set("Idempotency-Key", key)

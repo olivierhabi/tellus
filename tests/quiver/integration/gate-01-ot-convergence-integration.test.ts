@@ -53,12 +53,24 @@ function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
+// CardId regex is /^\$[A-Z]+$/ (types.ts) — letters only, no digits.
+function toCardId(n: number): string {
+  let s = "";
+  let v = n + 1;
+  while (v > 0) {
+    v -= 1;
+    s = String.fromCharCode(65 + (v % 26)) + s;
+    v = Math.floor(v / 26);
+  }
+  return `$${s}`;
+}
+
 function genInstr(rng: Prng, known: string[], replicaId: number, opCounter: { n: number }): Instruction {
   const op = ++opCounter.n;
   const choice = rng.int(5);
   if (choice === 0 || known.length === 0) {
     // addCard — replica-prefixed id avoids accidental cross-replica collisions
-    const id = `r${replicaId}-c${rng.int(40)}`;
+    const id = `$${String.fromCharCode(65 + replicaId)}${toCardId(rng.int(40)).slice(1)}`;
     if (!known.includes(id)) known.push(id);
     return { kind: "addCard", card: { id, type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction;
   }

@@ -31,6 +31,7 @@ if (process.env.NODE_ENV === "development" && process.env.TELLUS_DEV_EXTRA_CA_CE
 import "./services/otelBootstrap";
 import { assertQuiverTestAuthSafe } from "./routes/quiver/testAuth";
 import { assertNoTestAuthInProduction, TEST_AUTH_FLAGS } from "./utils/testAuthGate";
+import { assertStrongWorkloadSecret } from "./services/multipass/tokens";
 import { createCompressionMiddleware } from "./middleware/compression";
 import crypto from "crypto";
 import http from "http";
@@ -58,7 +59,7 @@ import propertyRouter from "./routes/properties";
 import branchesRouter from "./routes/branches";
 import ontologyWorkingStateRouter from "./routes/ontologyWorkingState";
 import groupsRouter from "./routes/groups";
-import functionsRouter from "./routes/functions";
+// functionsRouter (legacy) decommissioned — see vuln-0041 note at mount site.
 import favoritesRouter from "./routes/favorites";
 import explorationsRouter from "./routes/explorations";
 import exportsRouter from "./routes/exports";
@@ -238,6 +239,10 @@ try {
   // QUIVER_ALLOW_TEST_AUTH and TELLUS_TEST_HOOKS (Phase 5: the
   // code-assistant bypass previously had NO boot guard).
   assertNoTestAuthInProduction(TEST_AUTH_FLAGS);
+  // Refuse to boot with a known-weak workload JWT secret: the credential
+  // unwrap route is unauthenticated-by-design (worker JWT only), so a weak
+  // shared HS256 secret is a full vault-read bypass (Strix Sept 2026).
+  assertStrongWorkloadSecret();
 } catch (err) {
   logger.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
@@ -762,18 +767,48 @@ app.get("/api/metrics", async (_req: Request, res: Response) => {
 // keys.
 // ---------------------------------------------------------------------------
 if (process.env.TELLUS_TEST_HOOKS === "1") {
+  // Loopback peer gate for the whole /api/v1/_test family (Strix Sept 2026):
+  // the rate-limiter reset wipes every action-rate-limit window, so a
+  // network peer must never drive it. Uses the raw socket peer (NOT req.ip)
+  // so X-Forwarded-For cannot spoof loopback. tests/helpers/rateLimitReset.ts
+  // always calls from localhost.
+  const loopbackOnly = (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.socket?.remoteAddress ?? "";
+    if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1") {
+      next();
+      return;
+    }
+    res.status(403).json({
+      errorCode: "FORBIDDEN",
+      errorName: "Forbidden",
+      message: "Test hooks are loopback-only",
+      statusCode: 403,
+    });
+  };
+  app.use("/api/v1/_test", loopbackOnly);
   // Lazy-import to avoid loading test-only code in production.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { limiter } = require("./middleware/rateLimiter");
   app.post(
     "/api/v1/_test/rate-limiter/reset",
-    (_req: Request, res: Response) => {
+    (req: Request, res: Response) => {
+      // Header gate on top of the loopback peer check (Strix Sept 2026).
+      // tests/helpers/rateLimitReset.ts sends this header.
+      if (req.headers["x-tellus-test-hook"] !== "1") {
+        res.status(403).json({
+          errorCode: "FORBIDDEN",
+          errorName: "Forbidden",
+          message: "Test hook not authorized",
+          statusCode: 403,
+        });
+        return;
+      }
       limiter.reset();
       res.status(204).end();
     },
   );
   logger.info(
-    "[test-hooks] Mounted /api/v1/_test/rate-limiter/reset (TELLUS_TEST_HOOKS=1)",
+    "[test-hooks] Mounted /api/v1/_test/rate-limiter/reset (TELLUS_TEST_HOOKS=1, loopback+header gated)",
   );
 
   // Rwanda QA campaign: namespace-scoped fixture reset (see
@@ -1299,7 +1334,13 @@ app.use(healthRouter);
 app.use("/api/v1/ontology/:ontologyId/branches", branchesRouter);
 app.use("/api/v1/ontology/:ontologyId/working-state", ontologyWorkingStateRouter);
 app.use("/api/v1/ontology/:ontologyId/groups", groupsRouter);
-app.use("/api/v1/ontology/:ontologyId/functions", functionsRouter);
+// DECOMMISSIONED (vuln-0041): the legacy /api/v1/ontology/:ontologyId/functions
+// router (src/routes/functions.ts) registered+executed arbitrary TypeScript
+// with NO publish gate and an in-process Node `vm` that is trivially escaped
+// via the constructor chain — a low-priv viewer achieved host command
+// execution. The canonical Functions registry (/api/v1/functions) and the
+// code-repositories invoke path (gated by authorizePublish) replace it.
+// app.use("/api/v1/ontology/:ontologyId/functions", functionsRouter);
 app.use("/api/v1/ontology/:ontologyId/explorations", explorationsRouter);
 app.use("/api/v1/ontology/:ontologyId/exports", exportsRouter);
 app.use("/api/v1/ontology/:ontologyId/summary", summaryRouter);
@@ -1365,7 +1406,16 @@ app.use("/api/v1/developer-console", developerConsoleRouter);
 
 // Dev-only: Cypress's MFA cleanup hooks live under /api/v1/auth/_test.
 // Mount conditionally so production bundles never expose the router at all.
-if (process.env.NODE_ENV !== "production") {
+// SECURITY (vuln: unauth MFA-reset account takeover): these hooks DELETE
+// second factors, so mounting them requires BOTH the dev NODE_ENV AND the
+// explicit TELLUS_AUTH_TEST_HOOKS=1 opt-in — a dev/staging box that only
+// wants the rate-limiter reset (TELLUS_TEST_HOOKS) must not automatically
+// also expose credential-mutation hooks. Each handler additionally
+// re-checks the X-Tellus-Test-Hook header + loopback TCP peer.
+if (
+  process.env.NODE_ENV !== "production" &&
+  process.env.TELLUS_AUTH_TEST_HOOKS === "1"
+) {
   app.use("/api/v1/auth/_test", tellusAuthTestHooksRouter);
 }
 app.use("/api/v1/projects/:projectId/members", foundryMembersRouter);

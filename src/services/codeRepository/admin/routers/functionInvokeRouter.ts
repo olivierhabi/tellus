@@ -12,6 +12,7 @@ import { codeReposError } from "../../errors";
 import { isRid } from "../../../codeRepos/contracts/rid";
 import { runSandboxedWithSdkAsync } from "../../../functionWorkerPool";
 import type { SandboxBinding } from "../../../functionRuntime";
+import { authorizePublish } from "../../../functions/executionPolicy";
 import {
   applyEdits,
   normalizeOntologyId,
@@ -74,6 +75,33 @@ export function createFunctionInvokeRouter(ctx: CodeRepositoryRouteContext): Rou
       }
       const { apiName } = parsedBody.body;
       const body = parsedBody.body;
+
+      // Publish-authorization gate (vuln-0042): the working-tree invoke
+      // executes caller-supplied TypeScript (inlineSource or committed tree)
+      // through the worker_threads+vm pool — which is NOT an untrusted-code
+      // sandbox (constructor-chain escapes are documented). Execution is at
+      // least as powerful as publishing a Function, so it must clear the same
+      // authorizePublish() boundary as POST /:rid/tags: the Keycloak publish
+      // role, an active function_publish_grants row, or open-development.
+      // Without this gate, an unauthenticated caller (via the removed dev
+      // fallback) reached arbitrary code execution with zero credentials.
+      const publishPrincipal = req.codeReposPrincipal;
+      if (!publishPrincipal) {
+        return sendError(res, codeReposError("CodeRepos:Internal", { reason: "principal not bound" }));
+      }
+      const publishDecision = await authorizePublish(ctx.pool, {
+        localUserId: publishPrincipal.userId,
+        keycloakSub: publishPrincipal.keycloakSub,
+        roles: publishPrincipal.roles,
+        repositoryRid: rid,
+        releaseTag: null,
+      });
+      if (!publishDecision.allowed) {
+        if (publishDecision.auditFailed) {
+          return sendError(res, codeReposError("CodeRepos:Internal", { reason: "publish-audit-unavailable" }));
+        }
+        return sendError(res, codeReposError("CodeRepos:PermissionDenied", { reason: publishDecision.reason }));
+      }
 
       // Resolve the repo + branch, then the function source (inline,
       // published artifact, or committed working tree).

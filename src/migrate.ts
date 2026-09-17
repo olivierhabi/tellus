@@ -885,25 +885,31 @@ async function migrate(): Promise<void> {
     logTableStatus("link_edit", linkEditExisted);
 
     // ------------------------------------------------------------------
-    // TABLE 12: idempotency_key (Task 21)
+    // TABLE 12: idempotency_key (Task 21, scoped by migration 188)
     //
-    // Tracks idempotency keys for action execution. When a client includes
-    // an Idempotency-Key header, the server checks this table before
-    // executing. If a matching key exists (and is not expired), the cached
-    // result is returned instead of re-executing the action.
+    // Tracks idempotency keys for action execution. Rows are scoped by
+    // (idempotency_key, principal) so a key reused by a different caller
+    // never replays another user's result; request_hash (sha256 of the
+    // canonical request) turns same-caller/different-body reuse into a
+    // 409 IdempotencyConflict instead of a false replay.
     //
     // Keys expire after 24 hours to prevent unbounded table growth.
+    // Migration 188 upgrades pre-existing tables in place (expiring
+    // unscoped rows); this CREATE covers fresh databases only.
     // ------------------------------------------------------------------
     const idempotencyKeyExisted = await tableExists(client, "idempotency_key");
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS idempotency_key (
-        idempotency_key   TEXT        PRIMARY KEY,
+        idempotency_key   TEXT        NOT NULL,
+        principal         TEXT        NOT NULL,
         action_type_api_name TEXT     NOT NULL,
+        request_hash      TEXT        NOT NULL DEFAULT '',
         execution_id      UUID        NOT NULL,
         result            JSONB       NOT NULL,
         created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-        expires_at        TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '24 hours')
+        expires_at        TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '24 hours'),
+        PRIMARY KEY (idempotency_key, principal)
       );
     `);
 
@@ -913,7 +919,12 @@ async function migrate(): Promise<void> {
     `);
 
     await client.query(`
-      COMMENT ON TABLE idempotency_key IS 'Stores cached action execution results keyed by client-provided idempotency keys. Prevents duplicate action execution on client retries. Keys expire after 24 hours.';
+      CREATE INDEX IF NOT EXISTS idx_idempotency_key_principal
+        ON idempotency_key (principal);
+    `);
+
+    await client.query(`
+      COMMENT ON TABLE idempotency_key IS 'Stores cached action execution results keyed by (client-provided idempotency key, principal). Prevents duplicate action execution on client retries; keys expire after 24 hours. Cross-principal replay is impossible by construction (migration 188).';
     `);
 
     logTableStatus("idempotency_key", idempotencyKeyExisted);

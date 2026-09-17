@@ -151,6 +151,25 @@ function buildFilterClauses(
   return clauses;
 }
 
+/**
+ * Exact-ish equality for ontology string properties across both mapping
+ * generations used by Tellus. Newer object indices expose a `.keyword`
+ * multi-field; some legacy/demo-backed object types are text-only. Search
+ * Around must resolve links across either shape, so try the keyword term and
+ * the raw-field phrase match together.
+ */
+function propertyEqualityClause(field: string, value: unknown): Record<string, unknown> {
+  return {
+    bool: {
+      minimum_should_match: 1,
+      should: [
+        { term: { [termField(field)]: value } },
+        { match_phrase: { [field]: value } },
+      ],
+    },
+  };
+}
+
 async function getPropertyApiName(propertyId: string): Promise<string> {
   const result = await query(
     "SELECT api_name FROM property WHERE property_id = $1",
@@ -271,7 +290,39 @@ function encodeToken(offset: number): string {
 // CSV Join Table helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Base directory for join-table CSVs (the directory the /:apiName/upload
+ * route writes to via multer). Overridable via JOIN_TABLE_DIR so test lanes
+ * and non-standard deployments can point at a different upload root.
+ */
+export function joinTableBaseDir(): string {
+  return process.env.JOIN_TABLE_DIR ?? path.join(process.cwd(), "data", "join_tables");
+}
+
+/**
+ * CWE-22 containment check: a joinTableFilePath is only accepted when it
+ * resolves STRICTLY INSIDE the join-table upload directory. Rejects null
+ * bytes and any traversal/absolute path escaping the base dir. The
+ * path.sep boundary prevents sibling-prefix bypasses (e.g.
+ * "data/join_tables_evil" must NOT match "data/join_tables").
+ */
+export function isSafeJoinTablePath(filePath: string): boolean {
+  if (typeof filePath !== "string" || filePath.length === 0) return false;
+  if (filePath.includes("\0")) return false; // null-byte injection
+  const base = path.resolve(joinTableBaseDir());
+  const resolved = path.resolve(filePath);
+  return resolved.startsWith(base + path.sep);
+}
+
 function parseJoinTableCSV(filePath: string): Array<{ source: string; target: string }> {
+  // CWE-22 defense-in-depth: never open a path outside the join-table
+  // upload directory, even if such a path was persisted before the route-
+  // level validation existed.
+  if (!isSafeJoinTablePath(filePath)) {
+    throw new Error(
+      `Refusing to read join table CSV outside ${joinTableBaseDir()}: ${filePath}`
+    );
+  }
   if (!fs.existsSync(filePath)) return [];
 
   const content = fs.readFileSync(filePath, "utf-8");
@@ -379,8 +430,26 @@ async function resolveForward(
       if (!targetPropName) {
         return { linkedObjects: [], totalCount: 0, nextPageToken: null };
       }
+      // A ONE_TO_MANY link may explicitly join two non-PK properties
+      // (for example WorkflowViolation.applicationId ->
+      // OperationalException.applicationId).  Historically this resolver
+      // assumed the target FK always referenced the source object's primary
+      // key, which made those valid links disappear in Search Around.
+      let sourceJoinValue = sourcePK;
+      if (linkType.source_property_id) {
+        const sourcePropName = await getPropertyApiName(linkType.source_property_id);
+        const sourceDoc = await getDocByPK(sourceIndex, sourcePK, securityFilter, branchId);
+        if (!sourceDoc) {
+          return { linkedObjects: [], totalCount: 0, nextPageToken: null };
+        }
+        const configuredValue = sourceDoc[sourcePropName];
+        if (configuredValue === null || configuredValue === undefined || configuredValue === "") {
+          return { linkedObjects: [], totalCount: 0, nextPageToken: null };
+        }
+        sourceJoinValue = String(configuredValue);
+      }
       const musts: Array<Record<string, unknown>> = [
-        { term: { [termField(targetPropName)]: sourcePK } },
+        propertyEqualityClause(targetPropName, sourceJoinValue),
         ...filterClauses,
       ];
       const { hits, total } = await searchIndex(targetIndex, musts, from, size, undefined, securityFilter, branchId);
@@ -511,8 +580,18 @@ async function resolveReverse(
       if (fkValue === null || fkValue === undefined || fkValue === "") {
         return { linkedObjects: [], totalCount: 0, nextPageToken: null };
       }
+      // If the link declares a source property, the target FK references
+      // that property rather than the source object's primary key.  This is
+      // required for bidirectional non-PK joins such as applicationId <->
+      // applicationId.  Falling back to __pk remains the legacy behaviour
+      // for links whose source property is intentionally omitted.
+      const sourcePropName = linkType.source_property_id
+        ? await getPropertyApiName(linkType.source_property_id)
+        : null;
       const musts: Array<Record<string, unknown>> = [
-        { term: { __pk: String(fkValue) } },
+        sourcePropName
+          ? propertyEqualityClause(sourcePropName, String(fkValue))
+          : { term: { __pk: String(fkValue) } },
         ...filterClauses,
       ];
       const { hits, total } = await searchIndex(sourceIndex, musts, 0, 1, undefined, securityFilter, branchId);
@@ -766,17 +845,39 @@ export async function searchAround(
       : { match_all: {} };
 
   let sourcePKs: string[] = [];
+  let sourceJoinValues: string[] | null = null;
+  // Bulk Search Around normally joins against the filtered side's primary
+  // keys. When both sides explicitly declare join properties, project the
+  // filtered side's configured property too and use those values instead.
+  // This keeps the fast path semantically identical to resolveForward /
+  // resolveReverse for non-PK joins.
+  let searchSideJoinField: string | null = null;
+  if (linkType.cardinality === "ONE_TO_MANY" && direction === "forward" && linkType.source_property_id) {
+    searchSideJoinField = await getPropertyApiName(linkType.source_property_id);
+  } else if (linkType.cardinality === "MANY_TO_ONE" && direction === "reverse" && linkType.target_property_id) {
+    searchSideJoinField = await getPropertyApiName(linkType.target_property_id);
+  }
   const MAX_SOURCE = 100000;
   try {
     const { body: resp } = await client.search({
       index: searchIndexName,
       // F-P3-13: source-side object lookup respects branch isolation.
-      body: injectSecurityFilter({ size: MAX_SOURCE, _source: ["__pk"], query: sourceQuery }, securityFilter, branchId),
+      body: injectSecurityFilter({
+        size: MAX_SOURCE,
+        _source: searchSideJoinField ? ["__pk", searchSideJoinField] : ["__pk"],
+        query: sourceQuery,
+      }, securityFilter, branchId),
     });
     const hitsObj = (resp as any).hits;
 
     const totalHits = typeof hitsObj.total === "object" ? hitsObj.total.value : hitsObj.total;
     sourcePKs = (hitsObj.hits as any[]).map((h: any) => h._source.__pk as string);
+    if (searchSideJoinField) {
+      sourceJoinValues = (hitsObj.hits as any[])
+        .map((h: any) => h._source?.[searchSideJoinField!])
+        .filter((value: unknown) => value !== null && value !== undefined && value !== "")
+        .map((value: unknown) => String(value));
+    }
 
     if (totalHits > MAX_SOURCE) {
       warnings.push(`Source filter matched ${totalHits} objects but only first ${MAX_SOURCE} were used.`);
@@ -832,8 +933,20 @@ export async function searchAround(
     (cardinality === "ONE_TO_MANY" && direction === "forward") ||
     (cardinality === "MANY_TO_ONE" && direction === "reverse")
   )) {
+    const joinValues = sourceJoinValues ?? sourcePKs;
+    if (joinValues.length === 0) {
+      return { linkedObjects: [], totalCount: 0, nextPageToken: null, warnings };
+    }
     const musts: Array<Record<string, unknown>> = [
-      { terms: { [termField(fkField)]: sourcePKs } },
+      {
+        bool: {
+          minimum_should_match: 1,
+          should: [
+            { terms: { [termField(fkField)]: joinValues } },
+            ...joinValues.slice(0, 1024).map((value) => ({ match_phrase: { [fkField!]: value } })),
+          ],
+        },
+      },
       ...targetFilterClauses,
     ];
     const { hits, total } = await searchIndex(resolveIndexName, musts, from, pageSize, sortClause, securityFilter, branchId);
@@ -1668,17 +1781,29 @@ export function runSelfTests(): void {
   assert(dist.avg === 5.5, "distribution avg");
   assert(dist.p50 === 6, "distribution p50");
 
-  // Test parseJoinTableCSV with non-existent file
-  const noRows = parseJoinTableCSV("/nonexistent/path.csv");
-  assert(noRows.length === 0, "parseJoinTableCSV: non-existent file returns []");
+  // Test parseJoinTableCSV with non-existent file INSIDE the join-table dir
+  // (in-tree missing file still returns [], per the documented contract)
+  const inTreeMissing = path.join(joinTableBaseDir(), "definitely-not-present.csv");
+  const noRows = parseJoinTableCSV(inTreeMissing);
+  assert(noRows.length === 0, "parseJoinTableCSV: non-existent in-tree file returns []");
 
-  // Test getTargetPKsFromJoinTable with non-existent file
-  const noPKs = getTargetPKsFromJoinTable("/nonexistent/path.csv", "pk1");
-  assert(noPKs.length === 0, "getTargetPKsFromJoinTable: non-existent returns []");
+  // Test getTargetPKsFromJoinTable with non-existent in-tree file
+  const noPKs = getTargetPKsFromJoinTable(inTreeMissing, "pk1");
+  assert(noPKs.length === 0, "getTargetPKsFromJoinTable: non-existent in-tree returns []");
 
-  // Test getSourcePKsFromJoinTable with non-existent file
-  const noSrcPKs = getSourcePKsFromJoinTable("/nonexistent/path.csv", "pk1");
-  assert(noSrcPKs.length === 0, "getSourcePKsFromJoinTable: non-existent returns []");
+  // Test getSourcePKsFromJoinTable with non-existent in-tree file
+  const noSrcPKs = getSourcePKsFromJoinTable(inTreeMissing, "pk1");
+  assert(noSrcPKs.length === 0, "getSourcePKsFromJoinTable: non-existent in-tree returns []");
+
+  // CWE-22: out-of-tree paths must be refused, not read
+  assert(!isSafeJoinTablePath("/nonexistent/path.csv"), "isSafeJoinTablePath: out-of-tree rejected");
+  assert(!isSafeJoinTablePath(joinTableBaseDir() + "/../secret.csv"), "isSafeJoinTablePath: traversal rejected");
+  let refused = false;
+  try { parseJoinTableCSV("/etc/passwd"); } catch { refused = true; }
+  assert(refused, "parseJoinTableCSV: out-of-tree path throws");
+  let refusedTrav = false;
+  try { parseJoinTableCSV(path.join(joinTableBaseDir(), "..", "..", "etc", "passwd")); } catch { refusedTrav = true; }
+  assert(refusedTrav, "parseJoinTableCSV: traversal path throws");
 
   console.log(`\n  ${passed} passed, ${failed} failed`);
   if (failed === 0) {

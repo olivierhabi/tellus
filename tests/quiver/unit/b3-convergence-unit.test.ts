@@ -43,11 +43,23 @@ function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
+// CardId regex is /^\$[A-Z]+$/ (types.ts) — letters only, no digits.
+function toCardId(n: number): string {
+  let s = "";
+  let v = n + 1;
+  while (v > 0) {
+    v -= 1;
+    s = String.fromCharCode(65 + (v % 26)) + s;
+    v = Math.floor(v / 26);
+  }
+  return `$${s}`;
+}
+
 function genInstruction(rng: Prng, knownCards: string[]): Instruction {
   const choices = ["addCard", "updateCardConfig", "bindInput", "deleteCard", "setHidden"];
   const choice = rng.pick(choices);
   if (choice === "addCard" || knownCards.length === 0) {
-    const id = `c${rng.int(20)}`; // intentionally collide so addCard sees existing ids
+    const id = toCardId(rng.int(20)); // intentionally collide so addCard sees existing ids
     if (!knownCards.includes(id)) knownCards.push(id);
     return { kind: "addCard", card: { id, type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction;
   }
@@ -140,16 +152,16 @@ describe("B3 C-16 — 0 divergent documents under concurrent simulation", () => 
 describe("B3 C-17 — tombstone scenario converges deterministically", () => {
   it("client A delete + client B update on same card converge", () => {
     const local: Instruction[] = [
-      { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
+      { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } } as Instruction,
     ];
     // Server applies setup.
     let server = emptyDoc();
     const tomb = new Set<string>();
     for (const op of local) server = applyInstruction(server, op, tomb).doc;
 
-    const A: Instruction[] = [{ kind: "deleteCard", cardId: "c1" } as Instruction];
+    const A: Instruction[] = [{ kind: "deleteCard", cardId: "$A" } as Instruction];
     const B: Instruction[] = [
-      { kind: "updateCardConfig", cardId: "c1", configJsonPatch: [{ op: "add", path: "/x", value: 1 }] } as Instruction,
+      { kind: "updateCardConfig", cardId: "$A", configJsonPatch: [{ op: "add", path: "/x", value: 1 }] } as Instruction,
     ];
     // Server accepts A first.
     const tA = transformLocalAgainstRemote(A, []);
@@ -159,6 +171,6 @@ describe("B3 C-17 — tombstone scenario converges deterministically", () => {
     expect(tB.results[0].transformed).toBeNull();
     expect(tB.results[0].resolution).toBe("tombstone");
     // Server is unchanged by B.
-    expect((server.cards as any).c1).toBeUndefined();
+    expect((server.cards as any)["$A"]).toBeUndefined();
   });
 });

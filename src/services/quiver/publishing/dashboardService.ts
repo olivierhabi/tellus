@@ -37,6 +37,7 @@ import {
   dashboardPublishTotal,
   publishingDurationSeconds,
 } from "../metrics";
+import { assertAnalysisEditable } from "../analysisService";
 
 export interface ActorContext {
   userSubject: string;
@@ -147,6 +148,11 @@ export async function publishDashboard(
     });
   }
   const req = parsed.data;
+
+  // Folder authorization — publishing exposes the analysis's canvases, so
+  // the actor must be an editor on the analysis's parent folder (same
+  // membership model as every other analysis-mutating surface).
+  await assertAnalysisEditable(actor, req.analysisRid);
 
   // Validate that exposedCanvases reference real canvases on the source analysis.
   const analysis = await pool.query(

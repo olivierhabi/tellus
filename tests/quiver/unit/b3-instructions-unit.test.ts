@@ -27,19 +27,19 @@ describe("B3 C-01 — instruction discriminated union (13 variants)", () => {
 
   it("accepts a well-formed list of all kinds", () => {
     const list: Instruction[] = [
-      { kind: "addCard", card: { id: "c1", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
-      { kind: "updateCardConfig", cardId: "c1", configJsonPatch: [{ op: "add", path: "/x", value: 1 }] },
-      { kind: "bindInput", cardId: "c2", slot: "in", sourceCardId: "c1" },
-      { kind: "unbindInput", cardId: "c2", slot: "in" },
-      { kind: "deleteCard", cardId: "c3" },
-      { kind: "addCanvas", canvas: { id: "k1", name: "Main", ordering: [], placements: {} } },
+      { kind: "addCard", card: { id: "$A", type: "OBJECT_SET", inputs: {}, config: {}, hidden: false } },
+      { kind: "updateCardConfig", cardId: "$A", configJsonPatch: [{ op: "add", path: "/x", value: 1 }] },
+      { kind: "bindInput", cardId: "$B", slot: "in", sourceCardId: "$A" },
+      { kind: "unbindInput", cardId: "$B", slot: "in" },
+      { kind: "deleteCard", cardId: "$C" },
+      { kind: "addCanvas", canvas: { id: "k1", name: "Main", ordering: [], placements: [] } },
       { kind: "deleteCanvas", canvasId: "k1" },
       { kind: "renameCanvas", canvasId: "k1", name: "x" },
-      { kind: "placeCardOnCanvas", cardId: "c1", canvasId: "k1", position: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
-      { kind: "removeCardFromCanvas", cardId: "c1", canvasId: "k1" },
-      { kind: "reorderCanvasCards", canvasId: "k1", ordering: ["c1"] },
-      { kind: "updateParameter", parameterId: "p1", valueJson: { v: 1 } },
-      { kind: "setHidden", cardId: "c1", hidden: true },
+      { kind: "placeCardOnCanvas", cardId: "$A", canvasId: "k1", position: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
+      { kind: "removeCardFromCanvas", cardId: "$A", canvasId: "k1" },
+      { kind: "reorderCanvasCards", canvasId: "k1", ordering: ["$A"] },
+      { kind: "updateParameter", parameterId: "$P", valueJson: { v: 1 } },
+      { kind: "setHidden", cardId: "$A", hidden: true },
     ];
     const r = instructionListSchema.safeParse(list);
     expect(r.success).toBe(true);
@@ -63,8 +63,8 @@ describe("B3 C-14 — malformed instructions rejected", () => {
     const r = instructionListSchema.safeParse([
       {
         kind: "placeCardOnCanvas",
-        cardId: "c",
-        canvasId: "k",
+        cardId: "$A",
+        canvasId: "k1",
         position: { x: 0.5, y: 0 },
         size: { width: 100, height: 100 },
       },

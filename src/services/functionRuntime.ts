@@ -7,6 +7,12 @@
 //   • a fresh context per invocation (no globals leak between calls)
 //   • a CPU timeout enforced by V8 (kills the script when it overruns)
 //   • no `require`, no `process`, no `fs`, no network
+//   • codeGeneration DISABLED in every sandbox context (no eval / Function /
+//     WebAssembly string compilation inside the guest realm)
+//   • a realm boundary (functions/sandboxBoundary.ts): every host value that
+//     crosses into the context is trap-wrapped so `.constructor` /
+//     `__proto__` chains resolve to the GUEST realm's intrinsics — the host
+//     Function constructor is unreachable (Strix CWE-94 hardening).
 //
 // The sandbox accepts either a CommonJS-style module (`module.exports = …`)
 // or an ES-style default export expression that evaluates to a function.
@@ -14,8 +20,38 @@
 // ---------------------------------------------------------------------------
 
 import vm from "vm";
+import { createGuestBoundary, type GuestBoundary } from "./functions/sandboxBoundary";
 
 export const FUNCTION_TIMEOUT_MS = 5000;
+
+/** All sandbox contexts disable code generation from strings: no eval, no
+ * Function constructor, no WebAssembly compilation inside the guest realm. */
+const SANDBOX_CONTEXT_OPTIONS: vm.CreateContextOptions = {
+  codeGeneration: { strings: false, wasm: false },
+};
+
+// ---------------------------------------------------------------------------
+// Escape-pattern source scanning (defense-in-depth, NOT a security control).
+// The realm boundary + codegen disabling block the constructor-chain escape
+// class at runtime; these scans make NAIVE probes observable at authoring
+// time (preview invoke) and publish time (jemma lint stage) instead of
+// failing deep inside execution. Patterns are deliberately narrow: member
+// accesses only, so ordinary `constructor(` class syntax stays legal.
+// ---------------------------------------------------------------------------
+export const SANDBOX_ESCAPE_SOURCE_PATTERNS: readonly { re: RegExp; label: string }[] = [
+  { re: /\.constructor\b/, label: ".constructor member access" },
+  { re: /\b__proto__\b/, label: "__proto__ reference" },
+  { re: /\.mainModule\b/, label: ".mainModule member access" },
+];
+
+/** Returns the labels of every escape-probe pattern present in the source. */
+export function scanSourceForEscapePatterns(source: string): string[] {
+  const hits: string[] = [];
+  for (const { re, label } of SANDBOX_ESCAPE_SOURCE_PATTERNS) {
+    if (re.test(source)) hits.push(label);
+  }
+  return hits;
+}
 
 export interface SandboxResult {
   output: unknown;
@@ -31,6 +67,13 @@ export interface SandboxResult {
    * the wire (Promises can't cross postMessage).
    */
   pendingPromise?: Promise<unknown>;
+  /**
+   * Realm-boundary unwrapper for the async path (host-only, never on the
+   * wire): the resolving value may be a guest container holding sealed
+   * leaves — the consumer applies this before using `output`. Set only when
+   * pendingPromise is set; stripped by every consumer before postMessage.
+   */
+  unsealOutput?: (value: unknown) => unknown;
 }
 
 /**
@@ -51,17 +94,20 @@ function compile(source: string): (input: unknown) => unknown {
 
   // Initialize `module.exports = exports = {}` so transpiled ESM code
   // (which emits `Object.defineProperty(exports, "__esModule", ...)`)
-  // doesn't crash on a non-object `exports`.
+  // doesn't crash on a non-object `exports`. The module object crosses into
+  // the guest realm sealed (sandboxBoundary) — `module.constructor` must
+  // never resolve to the host Object constructor.
   const moduleObj: { exports: unknown } = { exports: {} };
   const context: Record<string, unknown> = {
-    module: moduleObj,
-    exports: moduleObj.exports,
     console: undefined as unknown,
   };
-  vm.createContext(context);
+  vm.createContext(context, SANDBOX_CONTEXT_OPTIONS);
+  const boundary = createGuestBoundary(context);
+  context.module = boundary.sealForGuest(moduleObj);
+  context.exports = boundary.sealForGuest(moduleObj.exports);
   const script = new vm.Script(normalized, { filename: "user-function.js" });
   script.runInContext(context, { timeout: 1000 });
-  const fn = (context.module as { exports: unknown }).exports;
+  const fn = moduleObj.exports;
   if (typeof fn !== "function") {
     throw new SyntaxError(
       "Function source must export a callable (export default fn or module.exports = fn).",
@@ -95,18 +141,21 @@ export function runSandboxed(
     };
   }
 
-  // Build a per-call context with a sandboxed console and the input.
+  // Build a per-call context with a sandboxed console and the input. Every
+  // host value (console shim, input payload) crosses the realm boundary
+  // sealed — `input.constructor.constructor("…")` resolves to the GUEST
+  // (codegen-disabled) Function constructor, not the host's.
   const sandboxConsole = {
     log: (...args: unknown[]) => logs.push(args.map(String).join(" ")),
     error: (...args: unknown[]) => logs.push("[err] " + args.map(String).join(" ")),
   };
-  const context: Record<string, unknown> = {
-    __fn: fn,
-    __input: input,
-    __result: undefined,
-    console: sandboxConsole,
-  };
-  vm.createContext(context);
+  const context: Record<string, unknown> = {};
+  vm.createContext(context, SANDBOX_CONTEXT_OPTIONS);
+  const boundary = createGuestBoundary(context);
+  context.__fn = fn;
+  context.__input = boundary.sealForGuest(input);
+  context.__result = undefined;
+  context.console = boundary.sealForGuest(sandboxConsole);
 
   try {
     new vm.Script("__result = __fn(__input);").runInContext(context, {
@@ -114,7 +163,8 @@ export function runSandboxed(
       breakOnSigint: true,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const hostErr = boundary.unsealForHost(err);
+    const msg = hostErr instanceof Error ? hostErr.message : String(hostErr);
     const isTimeout =
       msg.includes("Script execution timed out") ||
       msg.includes("Script execution was interrupted");
@@ -128,7 +178,7 @@ export function runSandboxed(
   }
 
   // Resolve a returned promise (with the same hard cap).
-  const out = context.__result;
+  const out = boundary.unsealForHost(context.__result);
   if (out && typeof (out as { then?: unknown }).then === "function") {
     // Promises can't be safely timed by vm; resolve synchronously by
     // requiring user functions to be synchronous. Promise returns are
@@ -453,16 +503,24 @@ export function runSandboxedWithSdk(
   };
 
   const moduleObj: { exports: unknown } = { exports: {} };
-  const context: Record<string, unknown> = {
-    module: moduleObj,
-    exports: moduleObj.exports,
-    require: requireShim,
-    console: sandboxConsole,
-    __input: input,
-    __result: undefined,
-    ...sdkGlobals, // ambient Objects / Edits
-  };
-  vm.createContext(context);
+  // Realm boundary (CWE-94 hardening): every host value that crosses into
+  // the guest context — module/exports, the require + console shims, the
+  // request input, and every ambient SDK global — is sealed behind traps
+  // so host constructors are unreachable. `vm.createContext` is called on
+  // an EMPTY object first (createGuestBoundary captures the guest realm's
+  // intrinsics inside it), then the sealed globals are attached.
+  const context: Record<string, unknown> = {};
+  vm.createContext(context, SANDBOX_CONTEXT_OPTIONS);
+  const boundary = createGuestBoundary(context);
+  context.module = boundary.sealForGuest(moduleObj);
+  context.exports = boundary.sealForGuest(moduleObj.exports);
+  context.require = boundary.sealForGuest(requireShim);
+  context.console = boundary.sealForGuest(sandboxConsole);
+  context.__input = boundary.sealForGuest(input);
+  context.__result = undefined;
+  for (const [ambientKey, ambientValue] of Object.entries(sdkGlobals)) {
+    context[ambientKey] = boundary.sealForGuest(ambientValue);
+  }
 
   // Phase 1 — evaluate the module to populate module.exports.
   try {
@@ -471,10 +529,10 @@ export function runSandboxedWithSdk(
       breakOnSigint: true,
     });
   } catch (err) {
-    return errorResult(start, logs, err);
+    return errorResult(start, logs, boundary.unsealForHost(err));
   }
 
-  const exported = (context.module as { exports: unknown }).exports;
+  const exported = moduleObj.exports;
   const fn =
     typeof exported === "function"
       ? exported
@@ -512,7 +570,12 @@ export function runSandboxedWithSdk(
       logs,
     };
   }
-  context.__callArgs = callArgs;
+  context.__callArgs =
+    callArgs === null
+      ? null
+      : callArgs.map((arg) =>
+          arg === CLIENT_STUB ? boundary.sealForGuest(CLIENT_STUB) : boundary.sealForGuest(arg),
+        );
   const callExpression = callArgs
     ? "__result = __fn(...__callArgs);"
     : "__result = __fn(__input);";
@@ -522,7 +585,7 @@ export function runSandboxedWithSdk(
       breakOnSigint: true,
     });
   } catch (err) {
-    return errorResult(start, logs, err);
+    return errorResult(start, logs, boundary.unsealForHost(err));
   }
 
   const out = context.__result;
@@ -533,12 +596,13 @@ export function runSandboxedWithSdk(
     return {
       output: undefined,
       pendingPromise: out as Promise<unknown>,
+      unsealOutput: boundary.unsealForHost,
       durationMs: Date.now() - start,
       status: "ok",
       logs,
     };
   }
-  return { output: out, durationMs: Date.now() - start, status: "ok", logs };
+  return { output: boundary.unsealForHost(out), durationMs: Date.now() - start, status: "ok", logs };
 }
 
 /**

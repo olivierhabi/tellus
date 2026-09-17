@@ -1,14 +1,20 @@
 // ---------------------------------------------------------------------------
-// principal-dev-fallback-unit.test.ts — refined Fix A regression.
+// principal-dev-fallback-unit.test.ts — security hardening regression.
 //
-// In dev mode (CODE_REPOS_TEST_AUTH=1), requireCodeReposAuth fabricates a
-// principal so the local browser works without a valid token. Pins:
-//   - no-header + localhost        -> cypress-admin's REAL UUID sub (addressable,
-//     NOT the email that crashed the UUID cast) + tellus-superadmin dev bypass.
-//   - X-Tellus-Test-Principal header -> override wins (precedence over fallback).
-//   - no-header + NON-localhost     -> 401 Stemma:Unauthenticated (the gate:
-//     a leaked CODE_REPOS_TEST_AUTH=1 in a remote non-prod env can't grant the
-//     dev bypass to remote callers).
+// In dev mode (CODE_REPOS_TEST_AUTH=1) requireCodeReposAuth no longer
+// fabricates a privileged principal for no-header requests (vuln-0024/0038/
+// 0042): the previous "localhost dev fallback" handed every loopback-
+// appearing caller tellus-superadmin + a pre-seeded publish grant, and
+// behind a proxy every remote caller satisfies loopback. Pins:
+//   - no-header (localhost OR not)  -> 401 Stemma:Unauthenticated (fail closed).
+//   - X-Tellus-Test-Principal header -> override wins ONLY when the request
+//     proves possession of the shared harness token (X-Tellus-Test-Auth-Token
+//     matching CODE_REPOS_TEST_AUTH_TOKEN, >= 32 chars, timing-safe). An
+//     untokened header — or an unset/short env token — fails closed 401
+//     (vuln: unauth identity/role injection on port-forwarded deployments
+//     where every remote caller appears loopback).
+//   - Roles honored verbatim EXCEPT `function:publish`, which is stripped
+//     (vuln-0038).
 //
 // Run: npx vitest run --config vitest.unit.config.ts <this-file>
 // ---------------------------------------------------------------------------
@@ -23,7 +29,7 @@ vi.mock("../../../src/middleware/tellusAuth.js", () => ({
 
 import { requireCodeReposAuth } from "../../../src/services/codeRepos/middleware/principal";
 
-const CYPRESS_ADMIN_SUB = "53cf9bcf-4c20-4aed-83f4-3c7e405453b4";
+const TOKEN = "unit-lane-token-0123456789abcdef0123456789abcdef";
 
 interface ResState {
   statusCode: number;
@@ -67,10 +73,11 @@ function principalOf(req: Request): { userId: string; roles: string[]; source: s
 beforeEach(() => {
   vi.stubEnv("CODE_REPOS_TEST_AUTH", "1");
   vi.stubEnv("NODE_ENV", "test");
+  vi.stubEnv("CODE_REPOS_TEST_AUTH_TOKEN", TOKEN);
 });
 
-describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () => {
-  it("fabricates cypress-admin's REAL UUID + superadmin for a localhost, no-header request", () => {
+describe("requireCodeReposAuth — no-header fails closed (vuln-0024/0038/0042)", () => {
+  it("401s for a localhost, no-header request (no fabricated superadmin)", () => {
     const auth = requireCodeReposAuth();
     const req = mockReq({ remoteAddress: "127.0.0.1" });
     const res = mockRes();
@@ -79,24 +86,26 @@ describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () =
       nextCalled = true;
     });
 
-    expect(nextCalled).toBe(true);
-    const p = principalOf(req);
-    expect(p).toBeDefined();
-    expect(p!.userId).toBe(CYPRESS_ADMIN_SUB); // addressable UUID, NOT the email
-    expect(p!.roles).toContain("tellus-superadmin"); // dev bypass
-    expect(p!.source).toBe("test");
+    expect(nextCalled).toBe(false); // fail-closed: no privileged fabrication
+    expect(res.state.statusCode).toBe(401);
+    expect((res.state.body as { errorName?: string }).errorName).toBe(
+      "Stemma:Unauthenticated",
+    );
   });
 
-  it("honors X-Tellus-Test-Principal override (precedence over the localhost fallback)", () => {
+  it("honors X-Tellus-Test-Principal override (loopback + valid harness token)", () => {
     const auth = requireCodeReposAuth();
     const req = mockReq({
-      header: { "X-Tellus-Test-Principal": "some-uuid/VIEWER" },
+      header: {
+        "X-Tellus-Test-Principal": "some-uuid/VIEWER",
+        "X-Tellus-Test-Auth-Token": TOKEN,
+      },
       remoteAddress: "127.0.0.1",
     });
     auth(req, mockRes(), () => {});
 
     const p = principalOf(req);
-    expect(p!.userId).toBe("some-uuid"); // the override, not the cypress-admin UUID
+    expect(p!.userId).toBe("some-uuid");
     expect(p!.roles).toEqual(["VIEWER"]);
   });
 
@@ -106,6 +115,7 @@ describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () =
       header: {
         "X-Tellus-Test-Principal": "transforms-e2e",
         "X-Tellus-Test-Roles": "editor",
+        "X-Tellus-Test-Auth-Token": TOKEN,
       },
       remoteAddress: "127.0.0.1",
     });
@@ -113,8 +123,6 @@ describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () =
 
     const p = principalOf(req);
     expect(p!.userId).toBe("transforms-e2e");
-    // lowercase 'editor' from the documented header canonicalizes to the
-    // Compass repo-role name the WRITE gate recognizes.
     expect(p!.roles).toEqual(["EDITOR"]);
   });
 
@@ -124,6 +132,7 @@ describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () =
       header: {
         "X-Tellus-Test-Principal": "alice/tellus-superadmin",
         "X-Tellus-Test-Role": "Owner",
+        "X-Tellus-Test-Auth-Token": TOKEN,
       },
       remoteAddress: "127.0.0.1",
     });
@@ -133,7 +142,22 @@ describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () =
     expect(p!.roles).toEqual(["tellus-superadmin", "OWNER"]);
   });
 
-  it("401s (Stemma:Unauthenticated) for a no-header, NON-localhost request (the gate)", () => {
+  it("strips function:publish from the embedded header roles (vuln-0038)", () => {
+    const auth = requireCodeReposAuth();
+    const req = mockReq({
+      header: {
+        "X-Tellus-Test-Principal": "attacker/function:publish,EDITOR",
+        "X-Tellus-Test-Auth-Token": TOKEN,
+      },
+      remoteAddress: "127.0.0.1",
+    });
+    auth(req, mockRes(), () => {});
+
+    const p = principalOf(req);
+    expect(p!.roles).toEqual(["EDITOR"]); // function:publish stripped
+  });
+
+  it("401s (Stemma:Unauthenticated) for a no-header, NON-localhost request", () => {
     const auth = requireCodeReposAuth();
     const req = mockReq({ remoteAddress: "203.0.113.10" }); // non-loopback
     const res = mockRes();
@@ -152,6 +176,85 @@ describe("requireCodeReposAuth — dev fallback principal (refined Fix A)", () =
   it("also fails-closed for IPv6 non-loopback", () => {
     const auth = requireCodeReposAuth();
     const req = mockReq({ remoteAddress: "2001:db8::1" });
+    const res = mockRes();
+    let nextCalled = false;
+    auth(req, res, () => {
+      nextCalled = true;
+    });
+    expect(nextCalled).toBe(false);
+    expect(res.state.statusCode).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token binding (vuln: unauth test-principal injection). The flag only
+// enables test mode; the shared token is what authenticates the caller.
+// ---------------------------------------------------------------------------
+describe("requireCodeReposAuth — harness token binding fails closed", () => {
+  it("401s when the principal header is presented WITHOUT the harness token", () => {
+    const auth = requireCodeReposAuth();
+    const req = mockReq({
+      header: { "X-Tellus-Test-Principal": "attacker/tellus-superadmin" },
+      remoteAddress: "127.0.0.1", // loopback — the token is the boundary
+    });
+    const res = mockRes();
+    let nextCalled = false;
+    auth(req, res, () => {
+      nextCalled = true;
+    });
+    expect(nextCalled).toBe(false);
+    expect(principalOf(req)).toBeUndefined();
+    expect(res.state.statusCode).toBe(401);
+  });
+
+  it("401s when the presented token does not match the env token", () => {
+    const auth = requireCodeReposAuth();
+    const req = mockReq({
+      header: {
+        "X-Tellus-Test-Principal": "attacker/tellus-superadmin",
+        "X-Tellus-Test-Auth-Token": "wrong-token-wrong-token-wrong-token",
+      },
+      remoteAddress: "127.0.0.1",
+    });
+    const res = mockRes();
+    let nextCalled = false;
+    auth(req, res, () => {
+      nextCalled = true;
+    });
+    expect(nextCalled).toBe(false);
+    expect(principalOf(req)).toBeUndefined();
+    expect(res.state.statusCode).toBe(401);
+  });
+
+  it("401s when the env token is unset (fail closed — no bypass at all)", () => {
+    vi.stubEnv("CODE_REPOS_TEST_AUTH_TOKEN", "");
+    const auth = requireCodeReposAuth();
+    const req = mockReq({
+      header: {
+        "X-Tellus-Test-Principal": "attacker/tellus-superadmin",
+        "X-Tellus-Test-Auth-Token": "",
+      },
+      remoteAddress: "127.0.0.1",
+    });
+    const res = mockRes();
+    let nextCalled = false;
+    auth(req, res, () => {
+      nextCalled = true;
+    });
+    expect(nextCalled).toBe(false);
+    expect(res.state.statusCode).toBe(401);
+  });
+
+  it("401s when the env token is too short (< 32 chars)", () => {
+    vi.stubEnv("CODE_REPOS_TEST_AUTH_TOKEN", "short-token");
+    const auth = requireCodeReposAuth();
+    const req = mockReq({
+      header: {
+        "X-Tellus-Test-Principal": "attacker/tellus-superadmin",
+        "X-Tellus-Test-Auth-Token": "short-token",
+      },
+      remoteAddress: "127.0.0.1",
+    });
     const res = mockRes();
     let nextCalled = false;
     auth(req, res, () => {

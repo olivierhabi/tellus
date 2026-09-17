@@ -71,6 +71,9 @@ export const Card = z.object({
 });
 export type Card = z.infer<typeof Card>;
 
+export const CanvasId = z.string().min(1).max(80);
+export type CanvasId = z.infer<typeof CanvasId>;
+
 export const CanvasPlacement = z.object({
   cardId: CardId,
   x: z.number().int(),
@@ -79,7 +82,7 @@ export const CanvasPlacement = z.object({
   h: z.number().int().positive(),
 });
 export const Canvas = z.object({
-  id: z.string().min(1).max(80),
+  id: CanvasId,
   name: z.string().min(1).max(200),
   placements: z.array(CanvasPlacement).default([]),
   ordering: z.array(CardId).default([]),

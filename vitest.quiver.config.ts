@@ -31,6 +31,16 @@ export default defineConfig({
     exclude: ["node_modules", "dist"],
     sequence: { concurrent: false },
     fileParallelism: false,
+    env: {
+      // Quiver test-auth bypass opt-in (x-test-user is honoured only when
+      // this flag is set) + the shared harness token that authenticates the
+      // caller (X-Tellus-Test-Auth-Token, timing-safe). VITEST-LANE-ONLY
+      // public constant — see vitest.config.ts. A real deployment MUST use
+      // a private token in its gitignored env, never this literal.
+      QUIVER_ALLOW_TEST_AUTH: "1",
+      CODE_REPOS_TEST_AUTH_TOKEN:
+        "vitest-lane-9f2c6b4e8a1d3f5c7b9e0d2a4c6f8e1b3d5a7c9e1f3b5d7a9c1e3f5b7d9a1c3",
+    },
     coverage: {
       provider: "v8",
       include: [

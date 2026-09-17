@@ -62,16 +62,16 @@ export function testRateLimit(
   res: Response,
   next: NextFunction,
 ): void {
-  // Authenticated principals are EXEMPT from the connection-test rate limit.
-  // These endpoints already sit behind globalAuth + the connectivity:test/read
-  // scope, and the reserved-range SSRF guard (assertEgressForConfig /
-  // assertEgressResolved) is what actually bounds where a probe may be aimed —
-  // the token bucket here is only a secondary velocity cap. Throttling
-  // legitimate authenticated users (who routinely re-test while configuring a
-  // source) produced 429 EgressRateLimited friction for no real security gain.
-  // The bucket is retained for the unauthenticated fallback as defense in depth
-  // (globalAuth normally makes that path unreachable). Set
-  // CONNECTIVITY_TEST_RATE_LIMIT_ALL=1 to throttle authenticated callers too.
+  // vuln-0040: the token bucket now applies to EVERY caller, authenticated or
+  // not. Previously authenticated principals were exempt, so any holder of
+  // the connectivity:test scope could sweep loopback and operator-allowlisted
+  // address space at full speed and fingerprint internal services by port,
+  // protocol family, and reachability via the error-class oracle — the rate
+  // limit only ever throttled the unauthenticated fallback that globalAuth
+  // already blocks. The egress guard bounds WHERE a probe may be aimed;
+  // this bucket bounds how fast. Operators who accept the fingerprinting
+  // risk in exchange for friction-free re-testing can restore the legacy
+  // authenticated exemption with CONNECTIVITY_TEST_RATE_LIMIT_ALL=0.
   let principalId: string | null = null;
   try {
     principalId = extractUser(req).id;
@@ -79,7 +79,7 @@ export function testRateLimit(
     principalId = null;
   }
 
-  if (principalId && process.env.CONNECTIVITY_TEST_RATE_LIMIT_ALL !== "1") {
+  if (principalId && process.env.CONNECTIVITY_TEST_RATE_LIMIT_ALL === "0") {
     next();
     return;
   }
@@ -184,17 +184,26 @@ export async function testConnection(
       }),
     );
     if (mapped.kind === "auth") {
+      // Distinct auth envelope is retained here (and only here): the
+      // credentials being tested belong to the caller's OWN saved
+      // connection, so telling them the credentials were rejected leaks
+      // nothing they are not entitled to know (vuln-0040 caveat).
       new TellusError(JdbcAuthFailed, { connectionRid: rid }).send(res);
       return;
     }
     if (mapped.kind === "connect") {
-      new TellusError(JdbcConnectFailed, {
-        connectionRid: rid,
-        reason: mapped.reason,
-      }).send(res);
+      // vuln-0040: uniform envelope — the refused/timeout/tls distinction is
+      // an internal service fingerprint, kept only in server-side logs and
+      // metrics (observeProbe above).
+      new TellusError(JdbcConnectFailed, { connectionRid: rid }).send(res);
       return;
     }
-    next(err);
+    // vuln-0040: previously fell through to next(err) → 500 with the raw pg
+    // message ("Connection terminated unexpectedly" = open non-PG port;
+    // "Connection terminated due to connection timeout" = blackholed service)
+    // — a deterministic open-port oracle. Collapse to the same uniform 502;
+    // the classification is preserved in the console.warn + metrics above.
+    new TellusError(JdbcConnectFailed, { connectionRid: rid }).send(res);
   }
 }
 
@@ -301,6 +310,16 @@ export async function testConfig(
           elapsedMsSince(started),
         );
       }
+      // vuln-0040: JdbcConnectFailed instances raised here (the withTimeout
+      // probe deadline) carry a `reason` ("timeout after Nms") that
+      // distinguishes an accepted-then-silent socket from a refused one —
+      // re-send the uniform envelope without it. Non-probe errors (egress
+      // blocks, scope denials, validation) never opened a socket and keep
+      // their precise, informative envelopes.
+      if (err.definition === JdbcConnectFailed) {
+        new TellusError(JdbcConnectFailed, {}).send(res);
+        return;
+      }
       err.send(res);
       return;
     }
@@ -311,19 +330,13 @@ export async function testConfig(
       sanitizeForLog({ kind: mapped.kind, reason: mapped.reason }),
     );
     observeProbe("postgresql", probeStateForMapped(mapped), elapsedMsSince(started));
-    if (mapped.kind === "auth") {
-      // Uniform response envelope: never disclose to the caller whether the
-      // failure was refused-connection, auth, timeout, or protocol mismatch —
-      // that distinction is an internal service fingerprint. The internal
-      // classification above stays for metrics/logging only.
-      new TellusError(JdbcConnectFailed, {}).send(res);
-      return;
-    }
-    if (mapped.kind === "connect") {
-      new TellusError(JdbcConnectFailed, { reason: mapped.reason }).send(res);
-      return;
-    }
-    next(err);
+    // vuln-0040: ONE uniform 502 JdbcConnectFailed envelope for every
+    // connect / auth / timeout / protocol outcome. The previous auth→401,
+    // connect→(reason-carrying 502), other→500-with-raw-pg-message split was
+    // a deterministic four-way oracle that fingerprinted internal services
+    // (closed port vs open non-PG vs live PG vs blackholed). The fine-grained
+    // classification stays in observeProbe metrics + the console.warn above.
+    new TellusError(JdbcConnectFailed, {}).send(res);
   } finally {
     if (pool) await pool.end().catch(() => undefined);
   }

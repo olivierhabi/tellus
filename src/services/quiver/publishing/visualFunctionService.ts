@@ -25,6 +25,7 @@ import {
   visualFunctionPublishTotal,
 } from "../metrics";
 import { getCardType } from "../dag/cardTypeRegistry";
+import { assertAnalysisEditable } from "../analysisService";
 import type { CardType } from "../types";
 import type { ActorContext, DashboardCompassPort } from "./dashboardService";
 
@@ -138,6 +139,10 @@ export async function publishVisualFunction(
     });
   }
   const req = parsed.data;
+
+  // Folder authorization — publishing derives the visual function from the
+  // analysis's cards, so the actor must be an editor on its parent folder.
+  await assertAnalysisEditable(actor, req.analysisRid);
 
   const ar = await pool.query(
     `SELECT cards, parent_folder_rid FROM quiver_analysis WHERE rid = $1 AND is_deleted = false`,

@@ -33,6 +33,52 @@ export interface ApplyResult {
   dropReason?: "tombstoned" | "noop" | "card_not_found" | "canvas_not_found";
 }
 
+// The wire/stored placements shape is the flat array ({cardId,x,y,w,h} —
+// types.ts CanvasPlacement, what AnalysisDocument.parse expects); the OT
+// engine keeps canvases as records keyed by cardId of
+// {position:{x,y}, size:{width,height}} (see otService.placementsRecordToArray
+// for the inverse at the row boundary). addCanvas ingests the array form and
+// normalizes to the record form here. Legacy logged instructions carry the
+// record form — accept both so replay of old logs still works.
+function placementsToRecord(p: unknown): Record<string, any> {
+  if (Array.isArray(p)) {
+    const out: Record<string, any> = {};
+    for (const x of p as Array<{ cardId: string; x: number; y: number; w: number; h: number }>) {
+      out[x.cardId] = { position: { x: x.x, y: x.y }, size: { width: x.w, height: x.h } };
+    }
+    return out;
+  }
+  return p && typeof p === "object" ? (p as Record<string, any>) : {};
+}
+
+// Parameter card type → Parameter record type (types.ts Parameter.type).
+const PARAMETER_CARD_TYPES: Record<string, "STRING" | "NUMBER" | "DATETIME" | "BOOLEAN"> = {
+  PARAMETER_STRING: "STRING",
+  PARAMETER_NUMBER: "NUMBER",
+  PARAMETER_DATETIME: "DATETIME",
+  PARAMETER_BOOLEAN: "BOOLEAN",
+};
+
+// The persisted parameters column is Record<CardId, Parameter>
+// (AnalysisDocument). updateParameter must store that exact shape or the
+// row stops parsing. Type resolution: keep an existing entry's type, else
+// derive from the parameter card (PARAMETER_* card type), else infer from
+// the JSON value (number→NUMBER, boolean→BOOLEAN, anything else→STRING).
+function parameterTypeFor(
+  doc: OtDocument,
+  parameterId: string,
+  valueJson: unknown,
+  existing: { type?: string } | undefined,
+): "STRING" | "NUMBER" | "DATETIME" | "BOOLEAN" {
+  if (existing?.type) return existing.type as "STRING" | "NUMBER" | "DATETIME" | "BOOLEAN";
+  const card = (doc.cards ?? {} as Record<string, any>)[parameterId];
+  const fromCard = card ? PARAMETER_CARD_TYPES[card.type] : undefined;
+  if (fromCard) return fromCard;
+  if (typeof valueJson === "number") return "NUMBER";
+  if (typeof valueJson === "boolean") return "BOOLEAN";
+  return "STRING";
+}
+
 /** Mutates a tombstone set with an instruction's effect, then returns updated doc. */
 export function applyInstruction(
   doc: OtDocument,
@@ -137,7 +183,13 @@ export function applyInstruction(
       return {
         doc: {
           ...doc,
-          canvases: { ...doc.canvases, [instr.canvas.id]: { ...instr.canvas } },
+          canvases: {
+            ...doc.canvases,
+            [instr.canvas.id]: {
+              ...instr.canvas,
+              placements: placementsToRecord(instr.canvas.placements),
+            },
+          },
         },
         applied: true,
       };
@@ -222,7 +274,18 @@ export function applyInstruction(
     }
     case "updateParameter": {
       const params = { ...((doc.parameters ?? {}) as Record<string, any>) };
-      params[instr.parameterId] = { value: instr.valueJson };
+      const existing = params[instr.parameterId];
+      // Store the canonical Parameter shape (types.ts) so the parameters
+      // column round-trips AnalysisDocument.parse — the old `{value: X}`
+      // envelope poisoned the row against the read schema.
+      params[instr.parameterId] = {
+        cardId: instr.parameterId,
+        type: parameterTypeFor(doc, instr.parameterId, instr.valueJson, existing),
+        defaultValueJson: instr.valueJson ?? null,
+        ...(existing?.externalName !== undefined
+          ? { externalName: existing.externalName }
+          : {}),
+      };
       return { doc: { ...doc, parameters: params }, applied: true };
     }
     case "setHidden": {

@@ -39,12 +39,12 @@ describe("function worker hardening (Phase 5)", () => {
 
     const options = workerOptions();
 
-    expect(Object.keys(options.env).sort()).toEqual([
-      "HOME",
-      "NODE_ENV",
-      "PATH",
-      "TZ",
-    ]);
+    // PATH/HOME are deliberately NOT forwarded either (Strix dev-posture
+    // hardening): they only induce an escapee to probe host tooling and
+    // home-directory material — the worker needs neither to run.
+    expect(Object.keys(options.env).sort()).toEqual(["NODE_ENV", "TZ"]);
+    expect(options.env.PATH).toBeUndefined();
+    expect(options.env.HOME).toBeUndefined();
     expect(options.env.PGPASSWORD).toBeUndefined();
     expect(options.env.LLM_API_KEY).toBeUndefined();
     expect(options.env.TELOS_AIE_AGENT_TOKEN).toBeUndefined();

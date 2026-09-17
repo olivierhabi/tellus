@@ -24,6 +24,9 @@ const BASE = process.env.TELLUS_TEST_BASE_URL || "http://localhost:3000";
 export async function resetRateLimiter(): Promise<void> {
   const res = await fetch(`${BASE}/api/v1/_test/rate-limiter/reset`, {
     method: "POST",
+    // Server gates the reset on this header (Strix Sept 2026) — without it
+    // the endpoint answers 403 even from loopback.
+    headers: { "x-tellus-test-hook": "1" },
   }).catch(() => null);
   if (!res) return; // server unreachable; suite's own skip guard will handle
   if (res.status === 204) return;

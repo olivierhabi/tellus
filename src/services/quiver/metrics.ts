@@ -76,6 +76,14 @@ export const analysisActiveTotal =
     labelNames: ["org"] as const,
   });
 
+export const analysesCorruptSkippedTotal =
+  existing<Counter<"endpoint">>("tellus_quiver_analyses_corrupt_skipped_total") ??
+  new Counter({
+    name: "tellus_quiver_analyses_corrupt_skipped_total",
+    help: "Analysis rows whose stored document failed AnalysisDocument.parse — skipped in folder listing, or soft-deleted via the corrupt-row recovery path",
+    labelNames: ["endpoint"] as const,
+  });
+
 export const compassRegisterFailuresTotal =
   existing<Counter<never>>("tellus_quiver_compass_register_failures_total") ??
   new Counter({

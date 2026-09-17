@@ -192,6 +192,13 @@ export const CODE_REPOS_ERROR_STATUS: Readonly<
     status: 422,
     errorCode: ERROR_CODES.INVALID_ARGUMENT,
   },
+  // FunctionSourceRejected — source contains a sandbox escape probe pattern
+  // (defense-in-depth scan; the runtime realm boundary already blocks the
+  // escape class — this makes naive probes fail loudly at preview time). 422
+  "CodeRepos:FunctionSourceRejected": {
+    status: 422,
+    errorCode: ERROR_CODES.INVALID_ARGUMENT,
+  },
   "CodeRepos:FunctionRuntimeError": {
     status: 422,
     errorCode: ERROR_CODES.INVALID_ARGUMENT,

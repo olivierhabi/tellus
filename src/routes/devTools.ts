@@ -1,12 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import foundryDb from '../config/foundryDb';
 import { authenticate } from '../middleware/auth';
+import { requireSuperAdmin } from '../middleware/requireSuperAdmin';
 
 const devRouter = Router();
 
 // Only enable in development
 if (process.env.NODE_ENV !== 'production') {
-  devRouter.post('/seed', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  devRouter.post('/seed', authenticate, requireSuperAdmin, async (req: Request, res: Response, next: NextFunction) => {
     try {
       // Create sample data
       const userId = (req as any).user?.id;
@@ -22,7 +23,7 @@ if (process.env.NODE_ENV !== 'production') {
     } catch (err) { next(err); }
   });
 
-  devRouter.post('/reset', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  devRouter.post('/reset', authenticate, requireSuperAdmin, async (req: Request, res: Response, next: NextFunction) => {
     try {
       // Delete in correct FK order
       await foundryDb('dataset_columns').delete();
