@@ -10,7 +10,7 @@ jobs:
   m1:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Query Prometheus for M.1 invariants
         run: |
           echo "M.1.1 coverage gate — checked by coverage-gate.yml"

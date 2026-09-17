@@ -14,7 +14,7 @@ jobs:
   k6:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: grafana/setup-k6-action@v1
       - run: k6 run --summary-export=k6-summary.json ops/loadtest/k6-scenario.js
         env:
