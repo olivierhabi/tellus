@@ -644,6 +644,12 @@ services:
       KEYCLOAK_URL: http://keycloak:8086
       KEYCLOAK_REALM: tellus
       KEYCLOAK_CLIENT_ID: tellus-frontend
+      # Admin-service credentials for the tellus-confidential client
+      # (user directory lookups, superadmin bootstrap). Empty default:
+      # the service fails closed with a descriptive error only when an
+      # admin operation is actually attempted.
+      KEYCLOAK_CONFIDENTIAL_CLIENT_ID: ${KEYCLOAK_CONFIDENTIAL_CLIENT_ID:-tellus-confidential}
+      KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET: ${KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET:-}
       # Point the AWS SDK at the in-cluster MinIO. These override the
       # `.env` defaults (which assume host-side `localhost:9000`) when
       # the app is containerised.
