@@ -18,6 +18,12 @@
 name: deploy-demo
 
 on:
+  # workflow_dispatch only fires for workflows present on the default branch;
+  # this workflow intentionally lives on a feature branch, so a push to that
+  # branch is the trigger (push events run from the branch's own workflow
+  # file). workflow_dispatch is kept for when it is eventually promoted to main.
+  push:
+    branches: ["fix/compose-keycloak-confidential-creds"]
   workflow_dispatch:
     inputs:
       frontend_ref:
@@ -55,7 +61,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/tellus-fe
-          ref: ${{ inputs.frontend_ref }}
+          ref: ${{ inputs.frontend_ref || 'chore/edge-nginx-demo' }}
           token: ${{ secrets.CROSS_REPO_TOKEN }}
           path: frontend
 
