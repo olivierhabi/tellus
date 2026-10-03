@@ -30,6 +30,11 @@ on:
         description: "tellus-fe branch/tag to build"
         required: false
         default: "chore/edge-nginx-demo"
+      deploy:
+        description: "Also deploy to the demo VM (leave false to build only)"
+        type: boolean
+        required: false
+        default: false
       tag:
         description: "image tag suffix (default: run number)"
         required: false
@@ -114,6 +119,13 @@ jobs:
   deploy:
     name: Deploy to demo VM
     needs: build
+    # MANUAL DEPLOY ONLY. This job pushes to the live demo VM, so it must not
+    # run implicitly from a push — an un-reviewed merge should never restart
+    # the demo on its own. Pushes build and push images to GHCR only; the VM
+    # is then updated deliberately, either by dispatching this workflow with
+    # `deploy=true`, or by pulling the built tag and recreating the
+    # containers by hand.
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
