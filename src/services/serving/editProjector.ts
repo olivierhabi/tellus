@@ -43,6 +43,7 @@ import {
   toCanonicalProperties,
   toIndexableProperties,
 } from "../opensearch/syncFromInstances";
+import { collectBulkFailures, formatBulkFailures } from "./bulkResult";
 import { incCounter } from "../funnel/metrics";
 
 export interface ProjectorTickResult {
@@ -179,17 +180,23 @@ async function projectObjectType(
       items?: Array<Record<string, { status: number; result?: string; error?: { type?: string; reason?: string } }>>;
     };
     if (res.errors) {
-      // A delete against a doc that was never indexed is idempotent
-      // success (404 not_found) — the end state (absent doc) is achieved.
-      const realFailures = (res.items ?? [])
-        .map((i) => ({ op: Object.keys(i)[0], ...Object.values(i)[0] }))
-        .filter((a) => a.status >= 400 && !(a.op === "delete" && a.status === 404));
-      if (realFailures.length > 0) {
-        const first = realFailures[0];
-        throw new Error(
-          `bulk project failed for ${objectTypeApiName}: ${first.error?.reason ?? `status ${first.status}`}`,
-        );
-      }
+      // Poison-pill isolation: acknowledge every document the serving store
+      // accepted and retry ONLY the rejected ones next tick. Without this,
+      // one unindexable document (e.g. an over-long _id minted by a bad
+      // generatedSequence config) wedges the whole object type forever.
+      const failures = collectBulkFailures(res.items);
+      const failedIds = new Set(failures.map((f) => f.id));
+      const acceptedEditIds = pending
+        .filter((e) => e.primary_key && !failedIds.has(e.primary_key))
+        .map((e) => e.edit_id);
+      const acknowledged = await markEditsAppliedToIndex(acceptedEditIds);
+      incCounter("serving_projector_projection_failed_total", {
+        object_type: objectTypeApiName,
+      }, failures.length);
+      throw new Error(
+        `bulk project failed for ${objectTypeApiName}: ${failures.length} document(s) rejected ` +
+          `(${formatBulkFailures(failures)}); ${acknowledged} accepted document(s) acknowledged`,
+      );
     }
   }
 
