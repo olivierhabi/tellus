@@ -152,4 +152,30 @@ jobs:
             sleep 10
           done
           docker ps --filter name=tellus-app-1 --filter name=tellus-fe-fe --format '{{.Names}} {{.Status}}'
+
+          # --- disk guard -------------------------------------------------
+          # The VM's root fs is 29G. On 2026-10-03 it hit 98%, OpenSearch
+          # crossed its 95% flood-stage watermark and set
+          # read_only_allow-delete on EVERY index: all indexing silently
+          # failed, a stuck ontology_edit row accumulated, and types showed
+          # empty. Nothing errored loudly, so it presented as a seed/data bug.
+          #
+          # Report usage every deploy, and only reclaim when it is actually
+          # needed. Images are re-pullable from GHCR, so older r* tags are
+          # disposable; the current $TAG is always kept.
+          echo "--- disk usage ---"
+          df -h / | tail -1
+          DISK_PCT=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+          if [ "$DISK_PCT" -ge 75 ]; then
+            echo "root fs at ${DISK_PCT}% — pruning stale r* image tags (keeping ${TAG})"
+            for img in ${{ env.APP_IMAGE }} ${{ env.FE_IMAGE }}; do
+              docker images --format '{{.Repository}} {{.Tag}}' "$img" \
+                | awk -v keep="$TAG" -v repo="$img" '$2 != keep && $2 ~ /^r[0-9]+$/ {print $2}' \
+                | while read -r old; do
+                    [ -n "$old" ] && docker rmi "$img:$old" >/dev/null 2>&1 || true
+                  done
+            done
+            docker builder prune -af >/dev/null 2>&1 || true
+            df -h / | tail -1
+          fi
           REMOTE_EOF
