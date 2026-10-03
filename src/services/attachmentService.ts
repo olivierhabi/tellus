@@ -25,9 +25,10 @@ import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { Transform, type Readable } from "node:stream";
 import { query } from "../db";
-import { uploadObject, getObjectStream } from "./storageService";
+import { uploadObject, getObjectStream, deleteObjects } from "./storageService";
 import { buildSecurityFilter } from "../middleware/securityContext";
 import type { SecurityContext } from "../middleware/securityContext";
+import { incCounter } from "./funnel/metrics";
 
 export const MAX_UPLOAD_BYTES = parseInt(
   process.env.ATTACHMENT_MAX_BYTES ?? String(200 * 1024 * 1024),
@@ -367,5 +368,242 @@ async function lookupBlob(
     [rid],
   );
   return (rows[0] as BlobRow | undefined) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Attachment lifecycle (Foundry upload-attachments parity):
+//   https://www.palantir.com/docs/foundry/action-types/upload-attachments
+//
+//   - An upload is TEMPORARY until linked to an object via an action.
+//     Linking stamps `linked_at` (post-commit, best-effort — see
+//     stampAttachmentsLinked, called from the action apply path).
+//   - An upload never linked within ATTACHMENT_LINK_WINDOW_HOURS is swept
+//     (bytes + row removed) by sweepUnlinkedAttachments.
+//   - An attachment may be linked to at most ATTACHMENT_MAX_LINKED_OBJECTS
+//     objects in its lifetime (verifyAttachmentReferences enforces this at
+//     apply time; re-upload as a new attachment to link further).
+// ---------------------------------------------------------------------------
+
+/** `ri.attachments.main.attachment.<uuid>` — the only RID shape actions may link. */
+export const ATTACHMENT_RID_PATTERN =
+  /^ri\.attachments\.main\.attachment\.[0-9a-fA-F-]{36}$/;
+
+export const ATTACHMENT_MAX_LINKED_OBJECTS = 10;
+export const ATTACHMENT_LINK_WINDOW_HOURS = 1;
+
+/** Deep-scan any value (scalars, arrays, objects) for attachment RIDs. */
+export function extractAttachmentRids(
+  value: unknown,
+  into: Set<string> = new Set<string>(),
+): Set<string> {
+  if (typeof value === "string") {
+    if (ATTACHMENT_RID_PATTERN.test(value)) into.add(value);
+  } else if (Array.isArray(value)) {
+    for (const v of value) extractAttachmentRids(v, into);
+  } else if (value !== null && typeof value === "object") {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      extractAttachmentRids(v, into);
+    }
+  }
+  return into;
+}
+
+/** Collect attachment RIDs referenced by compiled edits' property values. */
+export function collectAttachmentRidsFromEdits(
+  edits: Array<{ propertyValues?: Record<string, unknown> | null }>,
+): string[] {
+  const rids = new Set<string>();
+  for (const edit of edits) {
+    if (edit.propertyValues) extractAttachmentRids(edit.propertyValues, rids);
+  }
+  return [...rids];
+}
+
+export interface AttachmentReferenceCheck {
+  missing: string[];
+  overLinked: Array<{ rid: string; linkedObjects: number }>;
+}
+
+/**
+ * Fail-fast verification for attachment RIDs an action is about to link:
+ * every RID must exist, and none may already serve
+ * ATTACHMENT_MAX_LINKED_OBJECTS objects. Linkage is resolved the same way
+ * content visibility resolves it — RIDs stored on object instances
+ * (object_instances.properties), since there is no separate link table.
+ */
+export async function verifyAttachmentReferences(
+  rids: string[],
+): Promise<AttachmentReferenceCheck> {
+  const unique = [...new Set(rids.filter((r) => typeof r === "string" && r.length > 0))];
+  if (unique.length === 0) return { missing: [], overLinked: [] };
+  const { rows } = await query(
+    `SELECT a.rid AS rid,
+            COUNT(DISTINCT oi.object_type_api_name || '|' || oi.primary_key)::int AS links
+       FROM attachment a
+       LEFT JOIN object_instances oi
+         ON oi.properties::text LIKE '%' || a.rid || '%'
+      WHERE a.rid = ANY($1)
+      GROUP BY a.rid`,
+    [unique],
+  );
+  const seen = new Map<string, number>(
+    (rows as Array<{ rid: string; links: number }>).map((r) => [r.rid, Number(r.links)]),
+  );
+  const missing = unique.filter((r) => !seen.has(r));
+  const overLinked = unique
+    .filter((r) => (seen.get(r) ?? 0) >= ATTACHMENT_MAX_LINKED_OBJECTS)
+    .map((r) => ({ rid: r, linkedObjects: seen.get(r) ?? 0 }));
+  return { missing, overLinked };
+}
+
+/**
+ * Stamp `linked_at` (+ ontology when known) for attachments an action just
+ * linked. Post-commit, best-effort: callers must never fail an apply on a
+ * stamp error — log + metric instead.
+ */
+export async function stampAttachmentsLinked(
+  rids: string[],
+  ontologyId: string | null,
+): Promise<number> {
+  const unique = [...new Set(rids.filter((r) => typeof r === "string" && r.length > 0))];
+  if (unique.length === 0) return 0;
+  const ontologyUuid =
+    ontologyId && /^[0-9a-fA-F-]{36}$/.test(ontologyId) ? ontologyId : null;
+  const result = await query(
+    `UPDATE attachment
+        SET linked_at = COALESCE(linked_at, now()),
+            ontology_id = COALESCE(ontology_id, $2::uuid)
+      WHERE rid = ANY($1)`,
+    [unique, ontologyUuid],
+  );
+  const stamped = result.rowCount ?? 0;
+  incCounter("tellus_attachments_linked_total", {}, stamped);
+  return stamped;
+}
+
+export interface AttachmentSweepResult {
+  scanned: number;
+  swept: number;
+  blobsDeleted: number;
+  dryRun: boolean;
+  durationMs: number;
+}
+
+export interface AttachmentSweepOptions {
+  /** Hours an upload may stay unlinked before removal. Default 1 (Foundry). */
+  olderThanHours?: number;
+  /** Max candidates removed per run. Default 200. */
+  maxPerRun?: number;
+  /** Log + metric only, delete nothing. Env ATTACHMENT_SWEEP_DRY_RUN also enables. */
+  dryRun?: boolean;
+}
+
+/**
+ * Remove uploads that were never linked to an object within the link
+ * window. A candidate is swept only when NO object instance references its
+ * RID — seeded/demo attachments referenced from synced instances are
+ * therefore never touched. Blob deletion precedes row deletion; both are
+ * idempotent so a crashed run simply retries.
+ */
+export async function sweepUnlinkedAttachments(
+  options: AttachmentSweepOptions = {},
+): Promise<AttachmentSweepResult> {
+  const started = Date.now();
+  const olderThanHours = options.olderThanHours ?? ATTACHMENT_LINK_WINDOW_HOURS;
+  const maxPerRun = options.maxPerRun ?? 200;
+  const dryRun =
+    options.dryRun ?? process.env.ATTACHMENT_SWEEP_DRY_RUN === "true";
+  const candidates = (
+    await query(
+      `SELECT rid, storage_key FROM attachment
+        WHERE linked_at IS NULL
+          AND created_at < now() - make_interval(hours => $1)
+        ORDER BY created_at ASC
+        LIMIT $2`,
+      [olderThanHours, maxPerRun],
+    )
+  ).rows as Array<{ rid: string; storage_key: string }>;
+  if (candidates.length === 0) {
+    return { scanned: 0, swept: 0, blobsDeleted: 0, dryRun, durationMs: Date.now() - started };
+  }
+  const rids = candidates.map((c) => c.rid);
+  const referenced = new Set(
+    (
+      await query(
+        `SELECT DISTINCT a.rid AS rid
+           FROM attachment a
+           JOIN object_instances oi
+             ON oi.properties::text LIKE '%' || a.rid || '%'
+          WHERE a.rid = ANY($1)`,
+        [rids],
+      )
+    ).rows.map((r: { rid: string }) => r.rid),
+  );
+  const sweepable = candidates.filter((c) => !referenced.has(c.rid));
+  incCounter(
+    "tellus_attachments_sweep_candidates_total",
+    { dry_run: String(dryRun) },
+    sweepable.length,
+  );
+  if (dryRun || sweepable.length === 0) {
+    return {
+      scanned: candidates.length,
+      swept: 0,
+      blobsDeleted: 0,
+      dryRun,
+      durationMs: Date.now() - started,
+    };
+  }
+  const blobs = await deleteObjects(sweepable.map((c) => c.storage_key));
+  const removed = await query(`DELETE FROM attachment WHERE rid = ANY($1)`, [
+    sweepable.map((c) => c.rid),
+  ]);
+  const swept = removed.rowCount ?? 0;
+  incCounter("tellus_attachments_swept_total", {}, swept);
+  console.log(
+    `[attachments/sweeper] swept ${swept} unlinked upload(s) (${blobs.deleted} blob(s) deleted, ${blobs.errors} blob error(s))`,
+  );
+  return {
+    scanned: candidates.length,
+    swept,
+    blobsDeleted: blobs.deleted,
+    dryRun,
+    durationMs: Date.now() - started,
+  };
+}
+
+let sweeperTimer: NodeJS.Timeout | null = null;
+let sweeperRunning = false;
+
+export interface AttachmentSweeperOptions extends AttachmentSweepOptions {
+  intervalMs?: number;
+}
+
+/** Hourly background loop. Safe to call multiple times; never drops work. */
+export function startAttachmentSweeper(options: AttachmentSweeperOptions = {}): void {
+  if (sweeperTimer) return;
+  const { intervalMs, ...sweepOptions } = options;
+  sweeperTimer = setInterval(async () => {
+    if (sweeperRunning) return;
+    sweeperRunning = true;
+    try {
+      const result = await sweepUnlinkedAttachments(sweepOptions);
+      if (result.swept > 0 || result.scanned > 0) {
+        console.debug(JSON.stringify({ type: "attachment_sweep", ...result }));
+      }
+    } catch (err) {
+      console.warn(`[attachments/sweeper] tick failed: ${(err as Error).message}`);
+    } finally {
+      sweeperRunning = false;
+    }
+  }, intervalMs ?? 3_600_000);
+  sweeperTimer.unref?.();
+}
+
+export function stopAttachmentSweeper(): void {
+  if (sweeperTimer) {
+    clearInterval(sweeperTimer);
+    sweeperTimer = null;
+  }
 }
 

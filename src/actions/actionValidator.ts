@@ -27,6 +27,10 @@ import { validateParameters } from "./parameterValidator";
 import type { ParameterDefinition } from "./parameterValidator";
 import { compileRules } from "./ruleCompiler";
 import type { CompiledEdit } from "./ruleCompiler";
+import {
+  collectAttachmentRidsFromEdits,
+  verifyAttachmentReferences,
+} from "../services/attachmentService";
 import { evaluateSubmissionCriteria, resolveObjectPropertyOperands, type SubmissionSubject } from "./submissionCriteria";
 import { getIndexName } from "../services/opensearch/indexMappingGenerator";
 import { client as opensearchClient } from "../services/opensearch/client";
@@ -331,6 +335,29 @@ export async function validateAction(
         `Would affect ${compilation.affectedObjectCount} objects (limit: ${actionType.max_affected_objects})`,
       ],
     };
+  }
+
+  // Attachment reference verification (Foundry upload-attachments parity —
+  // same gate as the submit path, so validate predicts apply).
+  const attachmentRids = collectAttachmentRidsFromEdits(compilation.edits);
+  if (attachmentRids.length > 0) {
+    const attachmentCheck = await verifyAttachmentReferences(attachmentRids);
+    const attachmentErrors: string[] = [];
+    for (const rid of attachmentCheck.missing) {
+      attachmentErrors.push(
+        `Attachment '${rid}' does not exist or is no longer available. ` +
+          `Upload the file again and resubmit.`,
+      );
+    }
+    for (const over of attachmentCheck.overLinked) {
+      attachmentErrors.push(
+        `Attachment '${over.rid}' is already linked to ${over.linkedObjects} object(s) ` +
+          `(limit 10). Upload the file again as a new attachment to link it further.`,
+      );
+    }
+    if (attachmentErrors.length > 0) {
+      return { valid: false, errors: attachmentErrors };
+    }
   }
 
   // -----------------------------------------------------------------

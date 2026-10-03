@@ -144,6 +144,7 @@ import {
 } from "./services/pipelines/icebergMaintenance";
 import { startOverlaySweeper, stopOverlaySweeper } from "./services/overlay/sweeper";
 import { startServingProjector, stopServingProjector } from "./services/serving/editProjector";
+import { startAttachmentSweeper, stopAttachmentSweeper } from "./services/attachmentService";
 import { stopHealthProber } from "./services/connectivity/health/prober";
 import { ensureLinkTablesForAllLinkTypes } from "./services/funnel/clickhouseBootstrap";
 import {
@@ -1918,6 +1919,22 @@ async function start(): Promise<void> {
     } catch (err) {
       logger.warn(
         `WARNING: could not start serving projector: ${(err as Error).message}`
+      );
+    }
+
+    // Attachment lifecycle sweeper (Foundry upload-attachments parity):
+    // uploads never linked to an object via an action within 1h are
+    // removed (bytes + row). Candidates referenced by any object instance
+    // are never touched. Kill-switch: ATTACHMENT_SWEEPER_DISABLED=true;
+    // observe-only: ATTACHMENT_SWEEP_DRY_RUN=true.
+    try {
+      if (process.env.ATTACHMENT_SWEEPER_DISABLED !== "true") {
+        startAttachmentSweeper();
+        logger.info("Attachment sweeper started");
+      }
+    } catch (err) {
+      logger.warn(
+        `WARNING: could not start attachment sweeper: ${(err as Error).message}`
       );
     }
 
