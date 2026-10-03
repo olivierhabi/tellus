@@ -1,0 +1,132 @@
+# =============================================================================
+# Tellus — Demo deploy (GitHub Actions -> Azure demo VM)
+#
+# Why this exists: the demo VM (2 vCPU / 7.8 GB, no swap) also SERVES the
+# site. Building images in-place starved live traffic (load hit ~250 and the
+# host became unresponsive to SSH). Build here on a native amd64 runner
+# instead, push to GHCR, and have the VM only `docker pull` + recreate the two
+# containers — a light, low-risk operation.
+#
+# Both images are pushed under the BACKEND repo's GHCR namespace using nested
+# package paths (ghcr.io/olivierhabi/tellus/app, .../fe) so a single
+# GITHUB_TOKEN (packages: write) owns both, avoiding cross-repo package ACLs.
+#
+# The frontend is a PRIVATE sibling repo, so it is checked out with a PAT
+# (CROSS_REPO_TOKEN) that has `repo` scope.
+# =============================================================================
+
+name: deploy-demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_ref:
+        description: "tellus-fe branch/tag to build"
+        required: false
+        default: "chore/edge-nginx-demo"
+      tag:
+        description: "image tag suffix (default: run number)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/tellus/app
+  FE_IMAGE: ghcr.io/${{ github.repository_owner }}/tellus/fe
+  DEPLOY_HOST: "20.51.243.30"
+  DEPLOY_USER: "azureuser"
+
+jobs:
+  build:
+    name: Build + push images
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v7
+
+      - name: Checkout frontend (private sibling)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/tellus-fe
+          ref: ${{ inputs.frontend_ref }}
+          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          path: frontend
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve tag
+        id: meta
+        run: echo "tag=${{ inputs.tag || format('r{0}', github.run_number) }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.APP_IMAGE }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build + push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.FE_IMAGE }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to demo VM
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Write SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+
+      - name: Pull + recreate containers on VM
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=accept-new \
+              "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" bash -s <<EOF
+          set -euo pipefail
+          # Authenticate to GHCR for this run only (no creds persisted on disk).
+          echo "\${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          docker pull ${{ env.APP_IMAGE }}:\$TAG
+          docker pull ${{ env.FE_IMAGE }}:\$TAG
+
+          # Retag to the names the compose files reference, then recreate
+          # (--no-build so compose never rebuilds on the small VM).
+          docker tag ${{ env.APP_IMAGE }}:\$TAG tellus-app:latest
+          docker tag ${{ env.FE_IMAGE }}:\$TAG tellus-fe:workshop-demo
+
+          cd ~/tellus && docker compose up -d --no-build app
+          cd ~/tellus-fe && docker compose up -d --no-build fe
+
+          echo "--- waiting for app health ---"
+          for i in \$(seq 1 60); do
+            if [ "\$(docker inspect --format '{{.State.Health.Status}}' tellus-app-1 2>/dev/null)" = "healthy" ]; then
+              echo "app healthy after \${i}0s"; break
+            fi
+            sleep 10
+          done
+          docker ps --filter name=tellus-app-1 --filter name=tellus-fe-fe --format '{{.Names}} {{.Status}}'
+          EOF
