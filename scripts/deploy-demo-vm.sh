@@ -41,6 +41,19 @@ fi
 
 echo "==> deploying ${APP_IMAGE}:${TAG}$([[ -n "$SKIP_FE" ]] || echo " + ${FE_IMAGE}:${TAG}") to ${DEPLOY_USER}@${DEPLOY_HOST}"
 
+# The images are private, so the VM needs GHCR credentials. The retired CI job
+# did `docker login` itself; doing it by hand means supplying a token. It is
+# read from the environment and piped to `docker login --password-stdin`, so it
+# never lands in the command line, the process list, or this script.
+#   export GHCR_PAT=ghp_...        # needs read:packages on the tellus repo
+if [[ -n "${GHCR_PAT:-}" ]]; then
+  echo "==> authenticating to ghcr.io as ${GHCR_USER:-olivierhabi}"
+  printf '%s' "$GHCR_PAT" | ssh -i "$KEY" -o StrictHostKeyChecking=no \
+      "${DEPLOY_USER}@${DEPLOY_HOST}" \
+      'read -r TOK; printf "%s" "$TOK" | docker login ghcr.io -u "'"${GHCR_USER:-olivierhabi}"'" --password-stdin' \
+    || { echo "ghcr login failed" >&2; exit 1; }
+fi
+
 ssh -i "$KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
     "${DEPLOY_USER}@${DEPLOY_HOST}" bash -s -- "$TAG" "$APP_IMAGE" "$FE_IMAGE" "$SKIP_FE" <<'REMOTE_EOF'
