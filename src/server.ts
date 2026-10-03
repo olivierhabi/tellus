@@ -296,7 +296,13 @@ app.use(contentLanguage);
 // src/middleware/compression.ts for why (zlib buffers SSE → "comes at once").
 app.use(createCompressionMiddleware());
 
-// Rate limiting — configurable requests per minute per IP.
+// Rate limiting — configurable requests per minute per IP. Default 1000:
+// a single Workshop Provider Profile load legitimately bursts ~300 requests
+// (per-claim Search Around fan-out × N claims + per-widget aggregates +
+// searches + function invokes), measured 2026-10-02 — the previous default
+// of 200 throttled the app's own frontend into 429s ("Failed to load pivot
+// data"). Writes/actions keep their own stricter per-user limiters
+// (middleware/rateLimiter.ts), so this coarse backstop stays meaningful.
 //
 // `/health`, `/api/v1/health`, and `/api/metrics` are intentionally exempted
 // because Kubernetes liveness probes and Prometheus scrapers hit them on a
@@ -306,7 +312,7 @@ app.use(createCompressionMiddleware());
 // We also normalize the limit-exceeded response to the same
 // `{ error: { code, message } }` envelope every other route uses, so
 // monitoring and the frontend toaster can treat 429 like any other error.
-const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "200", 10);
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "1000", 10);
 const RATE_LIMIT_SKIP = new Set<string>([
   "/health",
   "/api/v1/health",
