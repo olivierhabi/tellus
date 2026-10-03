@@ -121,7 +121,9 @@ jobs:
               "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" bash -s <<EOF
           set -euo pipefail
           # Authenticate to GHCR for this run only (no creds persisted on disk).
-          echo "\${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Use CROSS_REPO_TOKEN (a PAT with write:packages), NOT the run-scoped
+          # GITHUB_TOKEN — the latter is rejected by ghcr.io for registry login.
+          echo "\${{ secrets.CROSS_REPO_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
           docker pull ${{ env.APP_IMAGE }}:\$TAG
           docker pull ${{ env.FE_IMAGE }}:\$TAG
