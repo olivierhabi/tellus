@@ -39,6 +39,16 @@ permissions:
   contents: read
   packages: write
 
+# Two overlapping runs race on the single demo VM: both `docker compose up -d`
+# retag `tellus-app:latest` and recreate `tellus-app-1` concurrently, and one
+# fails with `No such container: <id>` while the other recreates it. Measured
+# on 2026-10-03 (runs 37151339444 / 37151425962). `cancel-in-progress: false`
+# queues a newer push BEHIND the in-flight deploy instead of letting them
+# interleave, so each `up -d` sees a stable container set.
+concurrency:
+  group: deploy-demo-vm
+  cancel-in-progress: false
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   APP_IMAGE: ghcr.io/${{ github.repository_owner }}/tellus/app
