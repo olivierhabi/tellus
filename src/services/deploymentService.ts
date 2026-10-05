@@ -3,7 +3,7 @@ import fs from 'fs';
 import { randomUUID } from 'crypto';
 import { uploadObject, getObjectStream } from './storageService';
 import { TransformService } from './transformService';
-import { assertFolderNameAvailable } from './datasets/folderNameGuard';
+import { registerDataset } from './datasets/datasetRegistration';
 import { DatasetTransactionService } from './datasets/transactionService';
 import { applyWriteMode, validateWriteModeConfig } from './pipelines/writeModes';
 import { AppError } from '../utils/foundryAppError';
@@ -2218,6 +2218,365 @@ export class DeploymentService {
    * v1), Iceberg-format source dataset, and input rows ≥
    * TELLUS_BATCH_ENGINE_MIN_ROWS.
    */
+  /**
+   * TELLUS_PIPELINE_ENGINE=duckdb — compile the pipeline_nodes DAG to DuckDB
+   * and publish without ever holding the rows in this process.
+   *
+   * WHY (measured, PaySim 6,362,620 rows / 471 MB)
+   * The in-process path materialises every row as a JS object:
+   * `materializeForDeploy` → `readCsvRows(file, Number.MAX_SAFE_INTEGER)`,
+   * ~4.8 GB of V8 heap for one output, and a join holds BOTH branches
+   * (~5.7 GB). The process dies at Node's 4 GB old-space cap. The engine path
+   * runs the identical chain in 19 s at ~790 MB peak RSS.
+   *
+   * WHAT IT DOES DIFFERENTLY
+   *  - Each node becomes one DuckDB stage sunk with COPY … TO, so rows go
+   *    engine → disk and never transit the Node heap (pipelines/engineBuild).
+   *  - The published file is streamed to object storage from local disk via a
+   *    ReadStream, so the output bytes are never a Node Buffer either.
+   *  - Data expectations are evaluated as SQL aggregates
+   *    (pipelines/engineExpectations) against the typed sink — the in-heap
+   *    evaluator needs the full row array, which is the OOM itself. Verdicts
+   *    are byte-identical to the in-heap evaluator; pinned by
+   *    engineExpectations-parity-unit.test.ts.
+   *  - Expectations gate BEFORE any upload or row commit, so a failing rule
+   *    leaves the previously-healthy dataset untouched (same invariant as the
+   *    in-process path).
+   *
+   * ENGAGEMENT
+   *  - pipeline.compute_type === 'duckdb' (the pipeline's own engine choice),
+   *  - `TELLUS_BATCH_ENGINE=in-process` forces the legacy path (operator
+   *    escape hatch, honoured for every engine),
+   *  - `TELLUS_PIPELINE_ENGINE_DISABLED=true` is the kill switch,
+   *  - output_format='iceberg' is NOT claimed here — tryEngineBuild owns
+   *    Iceberg (Lakekeeper/PyIceberg snapshots), and csv/parquet are.
+   *
+   * Returns null on ANY ineligibility or pre-commit failure so the in-process
+   * path runs unchanged. Once the dataset row is committed the build owns its
+   * outcome: a post-commit failure throws rather than silently re-running
+   * (which would publish twice).
+   */
+  /**
+   * Resolve an output node's dataset binding, verifying it still exists.
+   * Output nodes recreated in the canvas (or whose datasets were deleted)
+   * keep the old `outputDatasetId` in config. Trusting it makes the
+   * foundry_datasets UPDATE touch 0 rows and then violates
+   * pipeline_nodes_dataset_id_fkey on the node — a build that succeeded is
+   * reported as failed. A missing binding is not an error; it just means
+   * INSERT a fresh dataset row.
+   */
+  private async resolveBoundDatasetId(cfg: unknown): Promise<string | undefined> {
+    const id =
+      ((cfg as Record<string, unknown> | null | undefined)?.outputDatasetId as
+        | string
+        | undefined) ?? undefined;
+    if (!id) return undefined;
+    const row = await this.knex('foundry_datasets').where({ id }).first('id');
+    return row ? id : undefined;
+  }
+
+  /**
+   * Adopt an existing dataset row as this output's dataset when the node's
+   * own binding is missing or stale but a same-named dataset already sits in
+   * the pipeline's output folder. Adoption is deliberately narrow:
+   *   - bound to THIS output node  -> adopt (it's ours; rebind + overwrite).
+   *   - bound to nothing (orphan)  -> adopt (leftover of a failed/interrupted
+   *     run; nothing references it).
+   *   - bound to a DIFFERENT node  -> refuse (genuine collision; the caller
+   *     then fails cleanly on the folder name-uniqueness check instead of
+   *     hijacking someone else's output).
+   * Measured trigger: an output recreated in the canvas keeps the old
+   * `outputDatasetId` (ghost) while a same-named dataset from an earlier
+   * successful build already occupies the folder — without adoption every
+   * redeploy fails at registration after doing all the build work.
+   */
+
+  private async tryDuckDbEngineBuild(args: {
+    projectId: string;
+    pipelineId: string;
+    deploymentId: string;
+    outputNode: any;
+    cfg: any;
+    pipeline: any;
+    triggeredBy: string;
+  }): Promise<{
+    datasetId: string;
+    filePath: string;
+    rowCount: number;
+    columnCount: number;
+  } | null> {
+    const {
+      pipelineId,
+      deploymentId,
+      outputNode,
+      cfg,
+      pipeline,
+      triggeredBy,
+      projectId,
+    } = args;
+
+    // ── Eligibility (all pre-flight; nothing is written in this block) ──
+    if (process.env.TELLUS_PIPELINE_ENGINE_DISABLED === "true") return null;
+    const { selectedBatchEngine } = await import('./pipelines/computeEngine');
+    if (selectedBatchEngine() === 'in-process') return null;
+    if ((pipeline.compute_type ?? '').toLowerCase() !== 'duckdb') return null;
+    const outputFormat = (pipeline.output_format ?? 'csv') as string;
+    if (outputFormat !== 'csv' && outputFormat !== 'parquet') return null;
+
+    const { buildWithEngine, EngineIneligibleError, assertEngineEligible, engineReadPath } =
+      await import('./pipelines/engineBuild');
+    type EngineNode = import('./pipelines/engineBuild').PipelineNodeInfo;
+
+    // Load the whole DAG. `output` nodes carry their dataset binding but no
+    // data; the source `dataset` node carries the object-storage key.
+    const nodeRows = (await this.knex('pipeline_nodes')
+      .where({ pipeline_id: pipelineId })
+      .select('id', 'node_type', 'config', 'dataset_id')
+      .orderBy('created_at', 'asc')) as Array<Record<string, any>>;
+    if (nodeRows.length === 0) return null;
+
+    const datasetIds = nodeRows.map((r) => r.dataset_id).filter(Boolean) as string[];
+    const datasetPaths = new Map<string, string>();
+    if (datasetIds.length > 0) {
+      const dsRows = (await this.knex('foundry_datasets')
+        .whereIn('id', datasetIds)
+        .select('id', 'file_path')) as Array<{ id: string; file_path: string | null }>;
+      for (const d of dsRows) if (d.file_path) datasetPaths.set(d.id, d.file_path);
+    }
+
+    const nodes = new Map<string, EngineNode>();
+    for (const r of nodeRows) {
+      let parsed: Record<string, any> = {};
+      if (typeof r.config === 'string') {
+        try { parsed = JSON.parse(r.config) as Record<string, any>; } catch { parsed = {}; }
+      } else if (r.config && typeof r.config === 'object') {
+        parsed = r.config as Record<string, any>;
+      }
+      const filePath = r.dataset_id ? datasetPaths.get(r.dataset_id) : undefined;
+      nodes.set(r.id, {
+        nodeId: r.id,
+        nodeType: r.node_type,
+        config: parsed,
+        sourceNodeId: (parsed.sourceNodeId as string | null) ?? null,
+        // An output node's dataset_id is the RESULT, never an input.
+        datasetPath:
+          r.node_type === 'dataset' && filePath ? engineReadPath(filePath) : null,
+      });
+    }
+
+    // Reject the whole graph up front if ANY node needs the in-process
+    // evaluator — a half-engine build would publish a wrong dataset.
+    for (const n of nodes.values()) {
+      const tf = (n.config.transforms as unknown[]) ?? [];
+      try {
+        assertEngineEligible(tf);
+      } catch (e) {
+        if (e instanceof EngineIneligibleError) return null;
+        throw e;
+      }
+      for (const id of (n.config.rightNodeIds as string[] | undefined) ?? []) {
+        if (!nodes.has(id)) return null;
+      }
+      if (n.nodeType !== 'dataset' && n.nodeType !== 'output' && !n.sourceNodeId) return null;
+    }
+
+    const { mkdirSync, rmSync, createReadStream, statSync } = await import('node:fs');
+    const { join, resolve } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    // Staging volume is operator-configurable: the engine writes every stage
+    // to local disk before streaming to object storage, so on a host whose
+    // system volume is nearly full the build must be pointable at a larger
+    // one rather than hardcoded to os.tmpdir().
+    const scratchRoot = resolve(
+      process.env.TELLUS_PIPELINE_ENGINE_SCRATCH?.trim() || tmpdir(),
+    );
+    const scratch = join(scratchRoot, `pipeline-engine-${deploymentId}`);
+    mkdirSync(scratch, { recursive: true });
+
+    // Preflight disk: refuse BEFORE minutes of work with one actionable
+    // message, instead of surfacing `No space left on device` as a build
+    // failure part-way through. Size the requirement off the real source.
+    {
+      const { assertScratchCapacity } = await import('./pipelines/engineBuild');
+      const sourceDatasetId = nodeRows.find((r) => r.node_type === 'dataset')?.dataset_id as
+        | string
+        | undefined;
+      const srcFile =
+        sourceDatasetId
+          ? (datasetPaths.get(sourceDatasetId) ?? null)
+          : null;
+      let sourceBytes = 0;
+      if (srcFile) {
+        const head = await this.knex('foundry_datasets')
+          .where({ id: sourceDatasetId })
+          .first('file_size_bytes')
+          .catch(() => null);
+        sourceBytes = Number((head as { file_size_bytes?: number } | null)?.file_size_bytes ?? 0);
+      }
+      if (sourceBytes > 0) {
+        assertScratchCapacity({ scratchDir: scratchRoot, sourceBytes });
+      }
+    }
+
+    try {
+      const safeName = String(outputNode.label).replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const sinkFormat = outputFormat === 'parquet' ? 'parquet' : 'csv';
+
+      const built = await buildWithEngine(outputNode.id, {
+        nodes,
+        sinkFormat,
+        stagingPrefix: `${scratch}/`,
+      });
+
+      // ── Expectations gate BEFORE upload/row commit ────────────────
+      const expRows = (await this.knex('pipeline_expectations')
+        .where({ pipeline_id: pipelineId, active: true })
+        .where((qb) => qb.whereNull('node_id').orWhere('node_id', outputNode.id))
+        .select('*')) as Array<Record<string, any>>;
+      if (expRows.length > 0) {
+        const { evaluateExpectationsOnEngine, parquetSource } =
+          await import('./pipelines/engineExpectations');
+        const { mapExpectationRow } = await import('./pipelines/expectations');
+        const { acquireConnection, releaseConnection } = await import('./duckdb/pool');
+        const conn = await acquireConnection();
+        let expectationResults: import('./pipelines/expectations').ExpectationResult[];
+        try {
+          expectationResults = await evaluateExpectationsOnEngine(
+            expRows.map((r) => mapExpectationRow(r as Parameters<typeof mapExpectationRow>[0])) as import('./pipelines/expectations').PipelineExpectation[],
+            parquetSource(built.sinkPath),
+            {
+              async one(sql: string) {
+                const out: Record<string, unknown> = {};
+                const stream = (conn as unknown as {
+                  stream(s: string): AsyncIterable<Record<string, unknown>>;
+                }).stream(sql);
+                for await (const r of stream) {
+                  for (const [k, v] of Object.entries(r)) {
+                    out[k] = typeof v === 'bigint' ? Number(v) : v;
+                  }
+                }
+                return out;
+              },
+            },
+          );
+        } finally {
+          releaseConnection(conn);
+        }
+        await this.knex('pipeline_deployments')
+          .where({ id: deploymentId })
+          .update({ expectation_results: JSON.stringify(expectationResults) });
+        const blocking = expectationResults.filter(
+          (r) => r.status === 'FAIL' && r.severity === 'fail',
+        );
+        if (blocking.length > 0) {
+          throw new AppError(
+            `Cannot deploy output "${outputNode.label}": ${blocking.length} ` +
+              `data expectation${blocking.length === 1 ? '' : 's'} failed: ` +
+              blocking.map((r) => `${r.name} (${r.detail})`).join('; '),
+            400,
+            'EXPECTATIONS_FAILED',
+            true,
+            {
+              nodeId: outputNode.id,
+              failures: blocking.map((r) => ({ name: r.name, detail: r.detail })),
+            },
+            'ExpectationsFailed',
+          );
+        }
+      }
+
+      // ── Stream the export to object storage (never a Node Buffer) ──
+      // A half-gigabyte CSV streams as a multipart upload, and object stores
+      // abort idle multiparts (MinIO) or reset long ones under load. A single
+      // attempt turns a transient transport failure into a failed build, so
+      // retry with a FRESH stream each time — a consumed ReadStream cannot
+      // be rewound. The local export file is the durable retry source; it is
+      // only deleted in the `finally` after a successful upload commits the
+      // dataset row.
+      const s3Key =
+        `projects/${projectId}/pipeline-outputs/${pipelineId}/` +
+        `${safeName}_${timestamp}.${sinkFormat === 'csv' ? 'csv' : 'parquet'}`;
+      const mimeType = sinkFormat === 'csv' ? 'text/csv' : 'application/vnd.apache.parquet';
+      const exportSize = statSync(built.exportPath).size;
+      const UPLOAD_ATTEMPTS = Number(process.env.PIPELINE_ENGINE_UPLOAD_ATTEMPTS ?? 3);
+      let uploadError: unknown = null;
+      for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS; attempt++) {
+        try {
+          await uploadObject(
+            s3Key,
+            createReadStream(built.exportPath),
+            mimeType,
+            { pipelineId, nodeId: outputNode.id, deploymentId },
+            exportSize,
+          );
+          uploadError = null;
+          break;
+        } catch (e) {
+          uploadError = e;
+          if (attempt < UPLOAD_ATTEMPTS) {
+            // Brief backoff so a just-aborted multipart can settle.
+            await new Promise((r) => setTimeout(r, 2000 * attempt));
+          }
+        }
+      }
+      if (uploadError) throw uploadError;
+
+      // ── Register / update the output dataset ───────────────────────
+      // Single atomic writer (incident 3ec397d5): exactly one concurrent
+      // executor wins the INSERT; the loser adopts the winner when lineage
+      // permits (our node or orphan) instead of failing with
+      // "already in use" after doing all the build work.
+      const outputFolderId = await this.resolveOutputFolderId(pipelineId, projectId);
+      const datasetPatch = {
+        name: outputNode.label,
+        file_path: s3Key,
+        row_count: built.rowCount,
+        row_count_exact: built.rowCount,
+        column_count: built.columns.length,
+        file_size_bytes: exportSize,
+        mime_type: mimeType,
+        format: sinkFormat,
+        original_filename:
+          sinkFormat === 'csv' ? `${safeName}.csv` : `${safeName}/part-00000.parquet`,
+        status: 'ready',
+        updated_by: triggeredBy,
+      };
+      const { datasetId } = await registerDataset(this.knex, {
+        projectId,
+        folderId: outputFolderId,
+        name: outputNode.label,
+        patch: datasetPatch,
+        createdBy: triggeredBy,
+        columns: built.columns.map((col, idx) => ({
+          column_name: col.name,
+          column_type: col.type || 'string',
+          ordinal_position: idx + 1,
+          nullable: true,
+          logical_type: pipelineTypeToParquetLogicalType(col.type ?? 'string'),
+        })),
+        bindNode: {
+          pipelineId,
+          nodeId: outputNode.id,
+          config: (id) => ({ ...cfg, outputDatasetId: id }),
+        },
+        recordDeployment: { deploymentId, nodeId: outputNode.id },
+        resolveBoundId: () => this.resolveBoundDatasetId(cfg),
+        actor: `deploy:${deploymentId}`,
+      });
+
+      return {
+        datasetId,
+        filePath: s3Key,
+        rowCount: built.rowCount,
+        columnCount: built.columns.length,
+      };
+    } finally {
+      // Stages can be hundreds of MB; never leak tmp across deployments.
+      try { rmSync(scratch, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  }
+
   private async tryEngineBuild(args: {
     projectId: string;
     pipelineId: string;
@@ -2483,8 +2842,11 @@ export class DeploymentService {
         output_table_location: `${target.warehouse}:${target.namespace}.${target.table}`,
       });
 
-    let datasetId: string;
-    const existingDatasetId = args.cfg.outputDatasetId as string | undefined;
+    // Single atomic writer (incident 3ec397d5) — see tryDuckDbEngineBuild.
+    const outputFolderId = await this.resolveOutputFolderId(
+      args.pipelineId,
+      args.projectId,
+    );
     const datasetPatch = {
       name: args.outputNode.label,
       file_path: filePath,
@@ -2500,75 +2862,28 @@ export class DeploymentService {
       status: 'ready',
       updated_by: args.triggeredBy,
     };
-    if (existingDatasetId) {
-      // Foundry parity — ResourceNameAlreadyExists (409): the rename that
-      // keeps the dataset name in lock-step with the output-node label
-      // must not collide with a sibling resource in the same folder.
-      const current = (await this.knex('foundry_datasets')
-        .where({ id: existingDatasetId })
-        .first('name', 'folder_id', 'project_id')) as
-        | { name: string; folder_id: string | null; project_id: string | null }
-        | undefined;
-      if (current && current.name !== datasetPatch.name) {
-        await assertFolderNameAvailable(this.knex, {
-          name: datasetPatch.name,
-          folderId: current.folder_id ?? null,
-          projectId: current.project_id ?? args.projectId,
-          excludeDatasetId: existingDatasetId,
-        });
-      }
-      await this.knex('foundry_datasets')
-        .where({ id: existingDatasetId })
-        .update(datasetPatch);
-      datasetId = existingDatasetId;
-      // Keep the output node's relational binding in sync with its config.
-      // This also repairs a legitimately adopted/orphaned dataset where
-      // outputDatasetId was known but pipeline_nodes.dataset_id was null.
-      await this.knex('pipeline_nodes')
-        .where({ id: args.outputNode.id, pipeline_id: args.pipelineId })
-        .update({
-          dataset_id: datasetId,
-          config: JSON.stringify({ ...args.cfg, outputDatasetId: datasetId }),
-        });
-      await this.knex('dataset_columns').where({ dataset_id: datasetId }).del();
-    } else {
-      // Foundry parity — a new output lands in the pipeline's own folder,
-      // and its name must be unique among that folder's resources.
-      const outputFolderId = await this.resolveOutputFolderId(
-        args.pipelineId,
-        args.projectId,
-      );
-      await assertFolderNameAvailable(this.knex, {
-        name: datasetPatch.name,
-        folderId: outputFolderId,
-        projectId: args.projectId,
-      });
-      const [newDataset] = await this.knex('foundry_datasets')
-        .insert({
-          ...datasetPatch,
-          project_id: args.projectId,
-          folder_id: outputFolderId,
-          created_by: args.triggeredBy,
-        })
-        .returning('*');
-      datasetId = newDataset.id;
-      await this.knex('pipeline_nodes')
-        .where({ id: args.outputNode.id })
-        .update({
-          dataset_id: datasetId,
-          config: JSON.stringify({ ...args.cfg, outputDatasetId: datasetId }),
-        });
-    }
-    await this.knex('dataset_columns').insert(
-      plan.outputSchema.map((col, idx) => ({
-        dataset_id: datasetId,
+    const { datasetId } = await registerDataset(this.knex, {
+      projectId: args.projectId,
+      folderId: outputFolderId,
+      name: args.outputNode.label,
+      patch: datasetPatch,
+      createdBy: args.triggeredBy,
+      columns: plan.outputSchema.map((col, idx) => ({
         column_name: col.name,
         column_type: col.type || 'string',
         ordinal_position: idx + 1,
         nullable: true,
         logical_type: pipelineTypeToParquetLogicalType(col.type ?? 'string'),
       })),
-    );
+      bindNode: {
+        pipelineId: args.pipelineId,
+        nodeId: args.outputNode.id,
+        config: (id) => ({ ...args.cfg, outputDatasetId: id }),
+      },
+      recordDeployment: { deploymentId: args.deploymentId, nodeId: args.outputNode.id },
+      resolveBoundId: () => this.resolveBoundDatasetId(args.cfg),
+      actor: `deploy:${args.deploymentId}`,
+    });
 
     const pipeMarkings = await this.knex('pipelines')
       .where({ id: args.pipelineId })
@@ -2910,7 +3225,7 @@ export class DeploymentService {
         // rows come from the LATEST committed transaction on `master` —
         // Foundry semantics, the transaction log is authoritative, not
         // any denormalized cache of the dataset row.
-        const existingDatasetId = cfg.outputDatasetId as string | undefined;
+        const existingDatasetId = await this.resolveBoundDatasetId(cfg);
         const deployCfgRow = await this.knex('pipeline_deployments')
           .where({ id: deploymentId })
           .first('config');
@@ -3269,8 +3584,8 @@ export class DeploymentService {
         }
 
         // Create or update output dataset (`existingDatasetId` resolved
-        // earlier for the write-mode application).
-        let datasetId: string;
+        // earlier for the write-mode application; registration below
+        // revalidates it — ghosts take the atomic path).
 
         const datasetFormat =
           outputFormat === 'iceberg'
@@ -3285,112 +3600,49 @@ export class DeploymentService {
             ? `${safeName}/part-00000.parquet`
             : `${safeName}.csv`;
 
-        if (existingDatasetId) {
-          // Keep the dataset's display name in lock-step with the
-          // output node's label. Without this, renaming the output
-          // node on the canvas would write a new CSV at the new
-          // sanitized filename but leave the project's file listing
-          // showing the stale name from the first deploy — the user
-          // sees the rename in the canvas but never in the file tree.
-          // `original_filename` is already refreshed from `safeName`
-          // below; pairing `name` with it keeps the two columns in
-          // a consistent state across renames.
-          // Foundry parity — the rename is subject to folder
-          // name-uniqueness (ResourceNameAlreadyExists → 409).
-          const currentDs = (await this.knex('foundry_datasets')
-            .where({ id: existingDatasetId })
-            .first('name', 'folder_id', 'project_id')) as
-            | { name: string; folder_id: string | null; project_id: string | null }
-            | undefined;
-          if (currentDs && currentDs.name !== outputNode.label) {
-            await assertFolderNameAvailable(this.knex, {
-              name: outputNode.label,
-              folderId: currentDs.folder_id ?? null,
-              projectId: currentDs.project_id ?? projectId,
-              excludeDatasetId: existingDatasetId,
-            });
-          }
-          await this.knex('foundry_datasets')
-            .where({ id: existingDatasetId })
-            .update({
-              name: outputNode.label,
-              file_path: s3Key,
-              row_count: data.rows.length,
-              row_count_exact: rowCountExact,
-              column_count: data.columns.length,
-              file_size_bytes: fileSizeBytes,
-              mime_type: mimeType,
-              format: datasetFormat,
-              original_filename: originalFilename,
-              status: 'ready',
-              updated_by: triggeredBy,
-            });
-          datasetId = existingDatasetId;
-          // `outputDatasetId` is the durable ownership reference, while
-          // pipeline_nodes.dataset_id drives catalog/UI joins. Keep both
-          // representations synchronized on every build, including adoption
-          // of a pre-existing dataset after an interrupted first deploy.
-          await this.knex('pipeline_nodes')
-            .where({ id: outputNode.id, pipeline_id: pipelineId })
-            .update({
-              dataset_id: datasetId,
-              config: JSON.stringify({ ...cfg, outputDatasetId: datasetId }),
-            });
-          await this.knex('dataset_columns').where({ dataset_id: datasetId }).del();
-        } else {
-          // Foundry parity — a new output lands in the pipeline's own
-          // folder; its name must be unique among that folder's resources
-          // (ResourceNameAlreadyExists → 409 otherwise).
-          const outputFolderId = await this.resolveOutputFolderId(pipelineId, projectId);
-          await assertFolderNameAvailable(this.knex, {
+        // Single atomic writer (incident 3ec397d5) — see tryDuckDbEngineBuild.
+        // NOTE: existingDatasetId (above) is still used for the write-mode
+        // previous-rows read; registration revalidates it internally, so a
+        // ghost binding takes the atomic path here too.
+        const outputFolderId = await this.resolveOutputFolderId(pipelineId, projectId);
+        const { datasetId } = await registerDataset(this.knex, {
+          projectId,
+          folderId: outputFolderId,
+          name: outputNode.label,
+          patch: {
             name: outputNode.label,
-            folderId: outputFolderId,
-            projectId,
-          });
-          const [newDataset] = await this.knex('foundry_datasets')
-            .insert({
-              name: outputNode.label,
-              project_id: projectId,
-              folder_id: outputFolderId,
-              file_path: s3Key,
-              original_filename: originalFilename,
-              mime_type: mimeType,
-              format: datasetFormat,
-              file_size_bytes: fileSizeBytes,
-              row_count: data.rows.length,
-              row_count_exact: rowCountExact,
-              column_count: data.columns.length,
-              status: 'ready',
-              created_by: triggeredBy,
-              updated_by: triggeredBy,
-            })
-            .returning('*');
-          datasetId = newDataset.id;
-
-          await this.knex('pipeline_nodes')
-            .where({ id: outputNode.id })
-            .update({
-              dataset_id: datasetId,
-              config: JSON.stringify({ ...cfg, outputDatasetId: datasetId }),
-            });
-        }
-
-        // Insert column schema (with Parquet logical type when applicable)
-        const columnRows = data.columns.map((col, idx) => ({
-          dataset_id: datasetId,
-          column_name: col.name,
-          column_type: col.type || 'text',
-          ordinal_position: idx + 1,
-          nullable: true,
-          logical_type:
-            logicalTypesByColumn?.get(col.name) ??
-            (outputFormat === 'parquet' || outputFormat === 'iceberg'
-              ? pipelineTypeToParquetLogicalType(col.type ?? 'string')
-              : null),
-        }));
-        if (columnRows.length > 0) {
-          await this.knex('dataset_columns').insert(columnRows);
-        }
+            file_path: s3Key,
+            row_count: data.rows.length,
+            row_count_exact: rowCountExact,
+            column_count: data.columns.length,
+            file_size_bytes: fileSizeBytes,
+            mime_type: mimeType,
+            format: datasetFormat,
+            original_filename: originalFilename,
+            status: 'ready',
+            updated_by: triggeredBy,
+          },
+          createdBy: triggeredBy,
+          columns: data.columns.map((col, idx) => ({
+            column_name: col.name,
+            column_type: col.type || 'text',
+            ordinal_position: idx + 1,
+            nullable: true,
+            logical_type:
+              logicalTypesByColumn?.get(col.name) ??
+              (outputFormat === 'parquet' || outputFormat === 'iceberg'
+                ? pipelineTypeToParquetLogicalType(col.type ?? 'string')
+                : null),
+          })),
+          bindNode: {
+            pipelineId,
+            nodeId: outputNode.id,
+            config: (id) => ({ ...cfg, outputDatasetId: id }),
+          },
+          recordDeployment: { deploymentId, nodeId: outputNode.id },
+          resolveBoundId: () => this.resolveBoundDatasetId(cfg),
+          actor: `deploy:${deploymentId}`,
+        });
 
         // Foundry Datasets v2 — the build commits a transaction on the
         // output dataset's `master` branch, typed by the write mode (and

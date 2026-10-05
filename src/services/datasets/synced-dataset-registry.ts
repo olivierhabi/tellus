@@ -125,30 +125,49 @@ export async function registerSyncedDataset(
     }
 
     const filePath = `iceberg://${input.warehouse}/${input.schema}/${input.table}`;
-    await pool.query(
-      `INSERT INTO foundry_datasets
-         (id, name, project_id, folder_id, file_path, format, markings, status,
-          row_count, file_size_bytes)
-       VALUES ($1,$2,$3,$4,$5,'iceberg','{}'::text[],$6,$7,$8)
-       ON CONFLICT (id) DO UPDATE SET
-          name = EXCLUDED.name,
-          project_id = EXCLUDED.project_id,
-          folder_id = EXCLUDED.folder_id,
-          status = EXCLUDED.status,
-          row_count = COALESCE(EXCLUDED.row_count, foundry_datasets.row_count),
-          file_size_bytes = COALESCE(EXCLUDED.file_size_bytes, foundry_datasets.file_size_bytes),
-          updated_at = now()`,
-      [
-        id,
-        input.name,
-        projectId,
-        folderId,
-        filePath,
-        datasetStatus(input.status),
-        input.rowCount ?? null,
-        input.fileSizeBytes ?? null,
-      ],
-    );
+    try {
+      await pool.query(
+        `INSERT INTO foundry_datasets
+           (id, name, project_id, folder_id, file_path, format, markings, status,
+            row_count, file_size_bytes)
+         VALUES ($1,$2,$3,$4,$5,'iceberg','{}'::text[],$6,$7,$8)
+         ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            project_id = EXCLUDED.project_id,
+            folder_id = EXCLUDED.folder_id,
+            status = EXCLUDED.status,
+            row_count = COALESCE(EXCLUDED.row_count, foundry_datasets.row_count),
+            file_size_bytes = COALESCE(EXCLUDED.file_size_bytes, foundry_datasets.file_size_bytes),
+            updated_at = now()`,
+        [
+          id,
+          input.name,
+          projectId,
+          folderId,
+          filePath,
+          datasetStatus(input.status),
+          input.rowCount ?? null,
+          input.fileSizeBytes ?? null,
+        ],
+      );
+    } catch (upsertErr) {
+      // Race-safe registration (incident 3ec397d5): the name pre-check
+      // above is TOCTOU across concurrent syncs (the June *_raw x34 groups
+      // are this exact failure). The unique index refuses the loser — map
+      // it to the contractual non-throwing name_conflict, same as the
+      // pre-check. This also covers re-registration renaming onto a taken
+      // name via the DO UPDATE SET name branch.
+      const { isDatasetNameUniqueViolation } =
+        await import("./folderNameGuard");
+      if (isDatasetNameUniqueViolation(upsertErr)) {
+        console.warn(
+          `[synced-dataset-registry] refusing to register ${input.datasetRid}: ` +
+            `name "${input.name}" already used in folder ${folderId ?? "<root>"}`,
+        );
+        return { ok: false, reason: "name_conflict" };
+      }
+      throw upsertErr;
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };

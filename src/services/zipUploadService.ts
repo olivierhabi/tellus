@@ -101,7 +101,19 @@ export class ZipUploadService {
 
           const [dataset] = await this.knex('foundry_datasets')
             .insert({ name: entry.name, folder_id: parentFolderId, file_path: objectKey, original_filename: entry.name, mime_type: mimeType, file_size_bytes: fileBuffer.length, status: 'pending', created_by: ownerId, updated_by: ownerId })
-            .returning('*');
+            .returning('*')
+            .catch(async (e: unknown) => {
+              // Race-safe upload (incident 3ec397d5): two concurrent uploads
+              // of same-named files must not duplicate. The unique index
+              // refuses the loser — surface it as a name-taken error, not
+              // a generic failure.
+              const { isDatasetNameUniqueViolation } =
+                await import('./datasets/folderNameGuard');
+              if (!isDatasetNameUniqueViolation(e)) throw e;
+              throw new Error(
+                `A dataset named "${entry.name}" already exists in this folder.`,
+              );
+            });
           result.created.push(entry.name);
           scheduleParseJob(dataset.id as string);
         } catch (error) {

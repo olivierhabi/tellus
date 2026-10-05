@@ -338,8 +338,10 @@ export class TrashService {
               });
               continue;
             }
-            const result = await c.query(
-              `INSERT INTO foundry_datasets
+            const restoreDsName = (d.name as string | undefined) ?? "Restored dataset";
+            const insertDataset = (name: string) =>
+              c.query(
+                `INSERT INTO foundry_datasets
                  (id, name, project_id, folder_id, file_path, original_filename,
                   mime_type, file_size_bytes, row_count, row_count_exact, column_count,
                   schema_info, markings, status, format, content_hash,
@@ -350,30 +352,48 @@ export class TrashService {
                        $17,
                        $18,NOW(),$19,$20)
                ON CONFLICT (id) DO NOTHING`,
-              [
-                d.id,
-                d.name ?? "Restored dataset",
-                d.project_id ?? projectId,
-                safeFolderId,
-                d.file_path,
-                d.original_filename ?? null,
-                d.mime_type ?? null,
-                d.file_size_bytes ?? null,
-                d.row_count ?? null,
-                d.row_count_exact ?? null,
-                d.column_count ?? null,
-                d.schema_info ? JSON.stringify(d.schema_info) : null,
-                Array.isArray(d.markings) ? d.markings : [],
-                d.status ?? "ready",
-                d.format ?? "csv",
-                d.content_hash ?? null,
-                d.last_output_schema_fingerprint ?? null,
-                d.created_at ?? new Date().toISOString(),
-                d.created_by ?? validActorId,
-                validActorId,
-              ],
-            );
-            restoredDatasets += result.rowCount ?? 0;
+                [
+                  d.id,
+                  name,
+                  d.project_id ?? projectId,
+                  safeFolderId,
+                  d.file_path,
+                  d.original_filename ?? null,
+                  d.mime_type ?? null,
+                  d.file_size_bytes ?? null,
+                  d.row_count ?? null,
+                  d.row_count_exact ?? null,
+                  d.column_count ?? null,
+                  d.schema_info ? JSON.stringify(d.schema_info) : null,
+                  Array.isArray(d.markings) ? d.markings : [],
+                  d.status ?? "ready",
+                  d.format ?? "csv",
+                  d.content_hash ?? null,
+                  d.last_output_schema_fingerprint ?? null,
+                  d.created_at ?? new Date().toISOString(),
+                  d.created_by ?? validActorId,
+                  validActorId,
+                ],
+              );
+            // Race-safe restore (incident 3ec397d5): a live sibling may hold
+            // the original name (created after the trash event). Mirror the
+            // pipelines precedent below — suffix and warn, never duplicate
+            // (the unique index refuses a second same-named row).
+            try {
+              const result = await insertDataset(restoreDsName);
+              restoredDatasets += result.rowCount ?? 0;
+            } catch (err) {
+              const { isDatasetNameUniqueViolation } =
+                await import("./datasets/folderNameGuard");
+              if (!isDatasetNameUniqueViolation(err)) throw err;
+              warnings.push({
+                kind: "dataset_name_collision",
+                folder_id: d.id,
+                detail: `dataset name '${restoreDsName}' taken; restored with -restored-<ts> suffix`,
+              });
+              const retry = await insertDataset(`${restoreDsName}-restored-${Date.now()}`);
+              restoredDatasets += retry.rowCount ?? 0;
+            }
           }
 
           // ---- Recreate pipelines rows --------------------------------
@@ -572,7 +592,7 @@ export class TrashService {
               "RESOURCE_ORPHANED",
             );
           }
-          const result = await c.query(
+          const insertRestoredDataset = (name: unknown) => c.query(
             `INSERT INTO foundry_datasets
                (id, name, project_id, folder_id, file_path, original_filename,
                 mime_type, file_size_bytes, row_count, row_count_exact, column_count,
@@ -586,7 +606,7 @@ export class TrashService {
              ON CONFLICT (id) DO NOTHING`,
             [
               d.id,
-              d.name,
+              name,
               d.project_id,
               d.folder_id,
               d.file_path,
@@ -607,7 +627,25 @@ export class TrashService {
               validActorId,
             ],
           );
-          restoredDatasets += result.rowCount ?? 0;
+          // Race-safe restore (incident 3ec397d5): same suffix precedent as
+          // the bulk path above and pipelines — warn, never duplicate.
+          try {
+            const result = await insertRestoredDataset(d.name);
+            restoredDatasets += result.rowCount ?? 0;
+          } catch (err) {
+            const { isDatasetNameUniqueViolation } =
+              await import("./datasets/folderNameGuard");
+            if (!isDatasetNameUniqueViolation(err)) throw err;
+            warnings.push({
+              kind: "dataset_name_collision",
+              folder_id: d.id,
+              detail: `dataset name '${d.name}' taken; restored with -restored-<ts> suffix`,
+            });
+            const retry = await insertRestoredDataset(
+              `${d.name}-restored-${Date.now()}`,
+            );
+            restoredDatasets += retry.rowCount ?? 0;
+          }
         }
         if (warnings.length > 0) {
           // Single line per restore call so SREs can grep one event for
