@@ -918,9 +918,25 @@ async function migrate(): Promise<void> {
         ON idempotency_key(expires_at);
     `);
 
+    // The principal column is added by file migration 188, which runs AFTER
+    // this inline phase. On databases that have not applied 188 yet (e.g. a
+    // test lane at 187 with the pre-188 idempotency_key shape), the column
+    // does not exist and this index build fails the whole run. Guard on the
+    // column so the inline phase stays re-runnable at every ledger state;
+    // post-188 databases get the index here, pre-188 ones get it via 188's
+    // own path once applied (index is IF NOT EXISTS either way).
     await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_idempotency_key_principal
-        ON idempotency_key (principal);
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+           WHERE table_name = 'idempotency_key' AND column_name = 'principal'
+        ) THEN
+          CREATE INDEX IF NOT EXISTS idx_idempotency_key_principal
+            ON idempotency_key (principal);
+        END IF;
+      END
+      $$;
     `);
 
     await client.query(`
