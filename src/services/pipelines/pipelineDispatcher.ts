@@ -94,6 +94,10 @@ export async function sweepOrphanPipelineDeployments(
             duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at))::integer * 1000
       WHERE status = 'running'
         AND started_at < NOW() - (max_run_duration_seconds || ' seconds')::interval
+        -- FENCED (incident 3ec397d5): a live lease proves a healthy owner
+        -- is heartbeating. Only sweep expired/absent claims; the lease
+        -- holder finalises its own terminal state.
+        AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
       RETURNING id`
   );
   // knex.raw on pg returns { rows: [...] }
@@ -173,7 +177,9 @@ async function tick(options: DispatcherOptions): Promise<number> {
       if (signal.signal_type !== "deployStart") continue;
       if (!signal.deployment_id) continue;
 
-      await deploymentService.executeDeploymentById(signal.deployment_id);
+      await deploymentService.executeDeploymentById(signal.deployment_id, {
+        workerId: `dispatcher-${process.pid}`,
+      });
       processed++;
     } catch (err) {
       console.warn(
@@ -182,10 +188,22 @@ async function tick(options: DispatcherOptions): Promise<number> {
       // Failed signals should mark the deployment failed so the UI
       // doesn't show a perma-spinner. The dispatcher owns this — the
       // executor may have crashed before it could update the row.
+      // FENCED (incident 3ec397d5): only mark failed when NO live owner
+      // exists. The executor may have lost its lease to a recovery worker
+      // that is executing right now; a blind terminal write would kill a
+      // healthy run. Expired/absent claims fall through to the mark (the
+      // orphan sweeper would get them anyway).
       if (signal.deployment_id) {
         try {
           await knex("pipeline_deployments")
             .where({ id: signal.deployment_id, status: "running" })
+            .andWhere(function () {
+              this.whereNull("claimed_by").orWhere(
+                "lease_expires_at",
+                "<",
+                knex.fn.now(),
+              );
+            })
             .update({
               status: "failed",
               finished_at: knex.fn.now(),

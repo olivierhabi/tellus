@@ -768,7 +768,9 @@ export class DeploymentService {
       // Legacy inline path (tests only). Fire-and-forget mirrors the
       // prior behaviour so deploymentService tests that don't run the
       // dispatcher still exercise the build.
-      this.executeDeploymentById(deploymentId).catch((err) => {
+      this.executeDeploymentById(deploymentId, {
+        workerId: `inline-${process.pid}`,
+      }).catch((err) => {
         console.error(
           `[DeploymentService] inline build failed for deployment ${deploymentId}:`,
           err,
@@ -795,7 +797,81 @@ export class DeploymentService {
    * `pipeline_deployments.cancellation_requested_at` and exits with
    * status='cancelled' if set.
    */
-  async executeDeploymentById(deploymentId: string): Promise<void> {
+  /**
+   * Execution-claim protocol (incident 3ec397d5, migration 191).
+   *
+   * The Temporal pipelineDeployWorkflow activity AND the PG pipeline
+   * dispatcher both invoke executeDeploymentById for the same deployment,
+   * and nothing ever mutual-excluded them. The old
+   * `status !== 'running'` re-check is a non-atomic check-then-act: both
+   * executors read 'running' at start and both proceeded, double-
+   * registering every output.
+   *
+   * The claim is a single atomic UPDATE: exactly one executor wins.
+   * Everyone else gets zero rows and must exit WITHOUT touching the
+   * deployment (no terminal writes — the owner finalises).
+   *
+   * Leases: the winner holds a TTL. Heartbeats renew it between outputs;
+   * any executor (including recovery after a crash) may claim an expired
+   * lease. Fencing is enforced at output granularity: before each output
+   * the executor renews, and a failed renewal aborts WITHOUT finalising
+   * (ownership moved on; the new owner finalises).
+   */
+  static readonly DEPLOY_LEASE_TTL_SECONDS = 300;
+
+  async claimDeployment(
+    deploymentId: string,
+    workerId: string,
+    ttlSeconds: number = DeploymentService.DEPLOY_LEASE_TTL_SECONDS,
+  ): Promise<Record<string, unknown> | null> {
+    const res = await this.knex.raw(
+      `UPDATE pipeline_deployments
+          SET claimed_by = ?,
+              claimed_at = now(),
+              lease_expires_at = now() + (? * interval '1 second')
+        WHERE id = ?
+          AND (claimed_by IS NULL OR lease_expires_at < now())
+          AND status IN ('running', 'running_streaming')
+      RETURNING *`,
+      [workerId, ttlSeconds, deploymentId],
+    );
+    const row = (res?.rows ?? res ?? [])[0] as Record<string, unknown> | undefined;
+    return row ?? null;
+  }
+
+  /** Heartbeat: extend our lease. False => lease lost (someone else owns it). */
+  async renewDeploymentLease(
+    deploymentId: string,
+    workerId: string,
+    ttlSeconds: number = DeploymentService.DEPLOY_LEASE_TTL_SECONDS,
+  ): Promise<boolean> {
+    const res = await this.knex.raw(
+      `UPDATE pipeline_deployments
+          SET lease_expires_at = now() + (? * interval '1 second')
+        WHERE id = ?
+          AND claimed_by = ?
+          AND status IN ('running', 'running_streaming')
+      RETURNING id`,
+      [ttlSeconds, deploymentId, workerId],
+    );
+    return ((res?.rows ?? res ?? []) as unknown[]).length > 0;
+  }
+
+  /** Fence check: do we still own this deployment? Read-only. */
+  async holdsDeploymentClaim(
+    deploymentId: string,
+    workerId: string,
+  ): Promise<boolean> {
+    const row = await this.knex('pipeline_deployments')
+      .where({ id: deploymentId, claimed_by: workerId })
+      .first('id');
+    return !!row;
+  }
+
+  async executeDeploymentById(
+    deploymentId: string,
+    opts?: { workerId?: string; leaseTtlSeconds?: number },
+  ): Promise<void> {
     const deployment = await this.knex('pipeline_deployments')
       .where({ id: deploymentId })
       .first();
@@ -805,6 +881,20 @@ export class DeploymentService {
     }
     if (deployment.status !== 'running') {
       // Already finalised — defend against double-dispatch.
+      return;
+    }
+    // Single-execution fence: exactly one executor proceeds. Losers exit
+    // silently — the winner owns all terminal writes from here on.
+    const workerId =
+      opts?.workerId ?? `exec-${process.pid}-${randomUUID().slice(0, 8)}`;
+    const ttlSeconds = opts?.leaseTtlSeconds
+      ?? DeploymentService.DEPLOY_LEASE_TTL_SECONDS;
+    const claimed = await this.claimDeployment(deploymentId, workerId, ttlSeconds);
+    if (!claimed) {
+      console.log(
+        `[DeploymentService] deployment ${deploymentId} already claimed; ` +
+          `worker ${workerId} standing down`,
+      );
       return;
     }
     if (deployment.cancellation_requested_at) {
@@ -856,6 +946,7 @@ export class DeploymentService {
         deploymentId,
         outputNodes,
         pipeline,
+        { workerId, leaseTtlSeconds: ttlSeconds },
       );
       return;
     }
@@ -867,6 +958,7 @@ export class DeploymentService {
       deployment.triggered_by,
       outputNodes,
       pipeline,
+      { workerId, leaseTtlSeconds: ttlSeconds },
     );
   }
 
@@ -936,7 +1028,31 @@ export class DeploymentService {
     outputNodes: any[],
      
     pipeline: any,
+    execOpts?: { workerId: string; leaseTtlSeconds: number },
   ): Promise<void> {
+    // Submission singularity: a prior executor may already have submitted
+    // (claim expired mid-submit, recovery re-entered). Never submit twice.
+    const priorJob = await this.knex('pipeline_deployments')
+      .where({ id: deploymentId })
+      .first('flink_job_id');
+    if (priorJob?.flink_job_id) {
+      console.log(
+        `[DeploymentService] deployment ${deploymentId} already submitted ` +
+          `as Flink job ${priorJob.flink_job_id}; standing down`,
+      );
+      return;
+    }
+    if (execOpts && !(await this.renewDeploymentLease(
+      deploymentId, execOpts.workerId, execOpts.leaseTtlSeconds,
+    ))) {
+      // Lease lost mid-flight: ownership moved on. Exit WITHOUT writing —
+      // the new owner decides (its own pre-submit check above applies).
+      console.warn(
+        `[DeploymentService] deployment ${deploymentId} lease lost; ` +
+          `worker ${execOpts.workerId} aborting submit`,
+      );
+      return;
+    }
     // 1. Validate streaming caps via ThroughputGuard (acceptance f).
     const guard = getThroughputGuard(`pipeline:${pipelineId}`);
     const requestedParallelism = Number(pipeline.streaming_parallelism ?? 4);
@@ -2526,6 +2642,7 @@ export class DeploymentService {
     outputNodes: any[],
      
     pipeline: any,
+    execOpts?: { workerId: string; leaseTtlSeconds: number },
   ): Promise<void> {
     const startedAt = Date.now();
     const buildResults: BuildResult[] = [];
@@ -2575,6 +2692,20 @@ export class DeploymentService {
       // of the current output (upper-bounded by outputPreview + upload).
       if (await this.isCancellationRequested(deploymentId)) {
         await this.finaliseCancelled(deploymentId, buildResults);
+        decrementOnExit();
+        return;
+      }
+      // Execution fence (incident 3ec397d5): heartbeat our lease. A failed
+      // renewal means ownership moved on (crash recovery claimed the
+      // expired lease and is executing). Abort WITHOUT finalising — any
+      // terminal write from a stale worker would fight the live owner.
+      if (execOpts && !(await this.renewDeploymentLease(
+        deploymentId, execOpts.workerId, execOpts.leaseTtlSeconds,
+      ))) {
+        console.warn(
+          `[deploy] deployment ${deploymentId} lease lost; worker ` +
+            `${execOpts.workerId} aborting without finalising`,
+        );
         decrementOnExit();
         return;
       }
