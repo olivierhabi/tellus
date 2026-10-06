@@ -269,9 +269,142 @@ export function buildEditStatements(
   return out;
 }
 
-/** Full prefix in execution order (steps 2–8). `localPaths[i]` is the
- *  downloaded changelog parquet for contributions[i]. */
-export function buildMergePrefixStatements(args: {
+/**
+ * Kill switch for the narrow-key dedup (default ON). Precedent:
+ * MERGE_DELTA=0, MERGE_FAST_PATH=0. Gates the SQL SHAPE (narrow vs legacy
+ * wide sort), not execution — incident response, not rollout.
+ */
+export function isNarrowDedupEnabled(): boolean {
+  return process.env.MERGE_NARROW_DEDUP !== "0";
+}
+
+/** Target rows per hash bucket; <= 0 or unset disables bucketing. */
+export function mergeBucketTargetRows(): number {
+  const raw = Number(process.env.MERGE_BUCKET_ROWS ?? 1_000_000);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
+/**
+ * Bucket predicate: every row of a PK lands in exactly one bucket.
+ * hash() is signed (measured: returns BigInt, can be negative), so the
+ * double-mod normalizes to [0, count) for both signed and unsigned hashes.
+ */
+export function bucketPredicate(bucketId: number, bucketCount: number): string {
+  return `(((hash(primary_key) % ${bucketCount}) + ${bucketCount}) % ${bucketCount} = ${bucketId})`;
+}
+
+export interface NarrowBucket {
+  id: number;
+  count: number;
+}
+
+/**
+ * Narrow `changes`: the wide rows plus a stable row handle. `rid` is
+ * assigned by a single `row_number() OVER ()` in the same statement that
+ * materializes the table, so it is a consistent join key for the join-back
+ * below regardless of assignment order. Optional bucket filter is pushed
+ * into each arm (per-file pushdown) so a bucket never materializes rows it
+ * will not process.
+ */
+export function buildNarrowChangesStatement(
+  contributions: PrefixContribution[],
+  localPaths: string[],
+  bucket: NarrowBucket | null,
+): string {
+  const filter = bucket !== null ? ` WHERE ${bucketPredicate(bucket.id, bucket.count)}` : "";
+  const arms = contributions.map((_, i) => {
+    const lp = escPath(localPaths[i]);
+    return `SELECT ${i}::INTEGER AS contrib_idx,
+        primary_key::VARCHAR AS primary_key,
+        operation::VARCHAR AS operation,
+        properties::VARCHAR AS properties,
+        source_transaction_id::VARCHAR AS source_transaction_id,
+        source_commit_timestamp::VARCHAR AS source_commit_timestamp
+      FROM read_parquet('${lp}')${filter}`;
+  });
+  if (arms.length > 0) {
+    return `CREATE OR REPLACE TEMP TABLE changes AS
+      SELECT row_number() OVER () AS rid, u.contrib_idx, u.primary_key,
+             u.operation, u.properties, u.source_transaction_id,
+             u.source_commit_timestamp
+      FROM (${arms.join(" UNION ALL ")}) u`;
+  }
+  return `CREATE OR REPLACE TEMP TABLE changes (
+          rid BIGINT, contrib_idx INTEGER, primary_key VARCHAR,
+          operation VARCHAR, properties VARCHAR,
+          source_transaction_id VARCHAR, source_commit_timestamp VARCHAR
+        )`;
+}
+
+// Narrow changes_seq: the SAME ordering keys as the legacy global sort, over
+// (rid + ordering keys) instead of (full wide rows). Sort cost drops from
+// "N rows carrying a JSON blob" to "N (rid, keys) tuples"; the properties
+// blob is joined back by rid afterwards. `rid` is the FINAL tiebreak: the
+// legacy sort left full ties (identical contrib/ts/txn/pk) to an arbitrary
+// order, so confining the arbitrariness to a deterministic-per-run handle
+// changes behavior ONLY in a case that was already nondeterministic.
+export function buildNarrowSeqStatements(): string[] {
+  return [
+    `CREATE OR REPLACE TEMP TABLE changes_narrow AS
+      SELECT rid, primary_key, contrib_idx, source_commit_timestamp,
+             source_transaction_id, operation
+      FROM changes`,
+    `CREATE OR REPLACE TEMP TABLE changes_seq AS
+      SELECT *, CAST(row_number() OVER (
+        ORDER BY contrib_idx, source_commit_timestamp,
+                 source_transaction_id, primary_key, rid
+      ) AS BIGINT) AS glob_seq FROM changes_narrow`,
+    `DROP TABLE changes_narrow;`,
+  ];
+}
+
+// Narrow effective_rows: same filter/join as the legacy step, then join back
+// to the wide rows by rid for the properties blob. Row-identical to the
+// legacy step on tie-free input (same ORDER BY keys ⇒ same glob_seq ⇒ same
+// rows); on full ties the winner is rid-deterministic (see above).
+export function buildNarrowEffectiveRowsStatement(): string {
+  return `CREATE OR REPLACE TEMP TABLE effective_rows AS
+      SELECT c.primary_key, c.contrib_idx, cm.datasource_id, ch.properties,
+             c.source_transaction_id, c.source_commit_timestamp, c.glob_seq
+      FROM changes_seq c
+      JOIN per_pk_last_delete d ON d.primary_key = c.primary_key
+      JOIN contrib_meta cm      ON cm.contrib_idx = c.contrib_idx
+      JOIN changes ch           ON ch.rid = c.rid
+      WHERE c.operation <> 'DELETE' AND c.glob_seq > d.last_del_seq`;
+}
+
+function buildDropChangesStatement(): string {
+  // The wide table is needed until the effective join-back; drop it with
+  // the other intermediates so the source_state build doesn't carry dead
+  // pinned pages (same OOM discipline as the legacy path).
+  return `DROP TABLE changes;`;
+}
+
+/**
+ * Narrow prefix in execution order (steps 2–7 + edit tables come from the
+ * caller via buildEditStatements, as before). Default construction for
+ * buildMergePrefixStatements below.
+ */
+export function buildNarrowPrefixStatements(args: {
+  contributions: PrefixContribution[];
+  localPaths: string[];
+  bucket: NarrowBucket | null;
+  singleContribution: boolean;
+}): string[] {
+  return [
+    ...buildContribMetaStatements(args.contributions),
+    buildNarrowChangesStatement(args.contributions, args.localPaths, args.bucket),
+    ...buildNarrowSeqStatements(),
+    buildPerPkLastDeleteStatement(),
+    buildNarrowEffectiveRowsStatement(),
+    buildDropChangesStatement(),
+    ...buildSourceStateStatements(args.singleContribution),
+  ];
+}
+
+/** Legacy wide-sort prefix, verbatim (steps 2–8). Used only when
+ *  MERGE_NARROW_DEDUP=0 and by the narrow-vs-legacy equivalence tests. */
+export function buildLegacyMergePrefixStatements(args: {
   contributions: PrefixContribution[];
   localPaths: string[];
   editOpsRows: string[];
@@ -286,6 +419,83 @@ export function buildMergePrefixStatements(args: {
     ...buildSourceStateStatements(args.contributions.length === 1),
     ...buildEditStatements(args.editOpsRows, args.editPropsRows),
   ];
+}
+
+/** Full prefix in execution order (steps 2–8). `localPaths[i]` is the
+ *  downloaded changelog parquet for contributions[i]. Narrow by default;
+ *  legacy wide sort only under MERGE_NARROW_DEDUP=0. */
+export function buildMergePrefixStatements(args: {
+  contributions: PrefixContribution[];
+  localPaths: string[];
+  editOpsRows: string[];
+  editPropsRows: string[];
+}): string[] {
+  if (!isNarrowDedupEnabled()) {
+    return buildLegacyMergePrefixStatements(args);
+  }
+  return [
+    ...buildNarrowPrefixStatements({
+      contributions: args.contributions,
+      localPaths: args.localPaths,
+      bucket: null,
+      singleContribution: args.contributions.length === 1,
+    }),
+    ...buildEditStatements(args.editOpsRows, args.editPropsRows),
+  ];
+}
+
+/** One bucket's prefix (steps 2–7 equivalent), ending with a `source_state`
+ *  temp table the caller COPYs to the bucket file. Table names are reused
+ *  across buckets — the caller drops/COPYs between iterations. */
+export function buildNarrowBucketStatements(args: {
+  contributions: PrefixContribution[];
+  localPaths: string[];
+  bucket: NarrowBucket;
+  singleContribution: boolean;
+}): string[] {
+  return buildNarrowPrefixStatements({
+    contributions: args.contributions,
+    localPaths: args.localPaths,
+    bucket: args.bucket,
+    singleContribution: args.singleContribution,
+  });
+}
+
+/** Assemble the final source_state from per-bucket output files. Explicit
+ *  column list: bucket files must agree with the in-process schema exactly. */
+export function buildBucketAssemblyStatement(bucketFiles: string[]): string {
+  const files = bucketFiles.map((f) => `'${escPath(f)}'`).join(", ");
+  return `CREATE OR REPLACE TEMP TABLE source_state AS
+  SELECT primary_key, source_datasource_id, source_transaction_id,
+         source_timestamp, tombstoned,
+         CAST(properties AS JSON) AS properties, markings
+  FROM read_parquet([${files}])`;
+}
+
+/** Per-bucket source_state COPY. Same explicit CASTs as the prefix export. */
+export function buildBucketExportStatement(
+  bucketFile: string,
+): string {
+  return `COPY (SELECT primary_key, source_datasource_id, source_transaction_id,
+                  source_timestamp, tombstoned,
+                  CAST(properties AS VARCHAR) AS properties, markings
+           FROM source_state) TO '${escPath(bucketFile)}' (FORMAT PARQUET)`;
+}
+
+/**
+ * Order-independent fingerprint of a bucket's PK set, for the checkpoint
+ * row. bit_xor commutes: row order cannot change it. `from` is either the
+ * `source_state` temp table or a `read_parquet('<file>')` expression, so the
+ * same statement fingerprints live tables and resume-downloaded files.
+ * An empty input yields n=0 and h=NULL (no rows to xor) — callers store
+ * NULL, and resume compares NULL to NULL.
+ */
+export function buildBucketChecksumStatement(
+  from: string = "source_state",
+): string {
+  return `SELECT CAST(count(*) AS VARCHAR) AS n,
+                 CAST(bit_xor(hash(primary_key)) AS VARCHAR) AS h
+          FROM ${from}`;
 }
 
 /**
