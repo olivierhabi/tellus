@@ -350,11 +350,20 @@ export async function runDuckDbCliScript(
       lastObserved = total;
       lastProgressAt = Date.now();
     }
-    onProgress?.({
-      wallMs: Date.now() - startedAt,
-      spillBytes,
-      watchedBytes,
-    });
+    // A throwing progress callback must never kill the watchdog interval —
+    // liveness reporting is best-effort by construction. Log and continue.
+    try {
+      onProgress?.({
+        wallMs: Date.now() - startedAt,
+        spillBytes,
+        watchedBytes,
+      });
+    } catch (e) {
+      console.warn(
+        "[merge-cli] onProgress threw; watchdog continues —",
+        e instanceof Error ? e.message : String(e),
+      );
+    }
     return { spillBytes, watchedBytes };
   };
 

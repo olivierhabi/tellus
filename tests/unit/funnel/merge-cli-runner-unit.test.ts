@@ -259,6 +259,48 @@ describe("runDuckDbCliScript", () => {
     expect(seen[seen.length - 1].spillBytes).toBeGreaterThan(0);
   }, 30_000);
 
+  it("a throwing onProgress neither kills the watchdog nor fails the run, and is logged", async () => {
+    // Liveness reporting is best-effort: a throwing progress callback must
+    // not escape the watchdog interval (uncaught in a timer = dead
+    // watchdog / crashed process). The throw must be logged, not swallowed.
+    const wd = workDir();
+    armStub("ok", wd);
+    const warnings: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...a: unknown[]) => {
+      warnings.push(a);
+    };
+    try {
+      let calls = 0;
+      const res = await runDuckDbCliScript({
+        scriptText: "SELECT 42;\n",
+        workDir: wd,
+        spillDir: path.join(wd, "spill"),
+        watchPaths: [path.join(wd, "out.parquet")],
+        timeoutMs: 30_000,
+        stallAfterMs: 10_000,
+        pollMs: 25,
+        command: [process.execPath, stubJs],
+        onProgress: () => {
+          calls++;
+          throw new Error("boom from progress");
+        },
+      });
+      expect(res.wallMs).toBeGreaterThanOrEqual(0);
+      expect(res.peakSpillBytes).toBeGreaterThan(0);
+      expect(calls).toBeGreaterThan(0);
+      expect(
+        warnings.some(
+          (a) =>
+            String(a[0]).includes("[merge-cli]") &&
+            String(a[0]).includes("onProgress"),
+        ),
+      ).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
+  }, 30_000);
+
   it("nonzero exit => CliExitError carrying the stderr tail", async () => {
     const wd = workDir();
     armStub("exit1", wd);
