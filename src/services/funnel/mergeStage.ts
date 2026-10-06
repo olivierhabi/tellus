@@ -80,9 +80,14 @@ import {
   buildFastSourceStateStatement,
   isFastPathEnabled,
   isFastPathPrecheckPass,
+  isNarrowDedupEnabled,
   PREFIX_EXPORT_FILES,
   type FastPathPrecheck,
 } from "./mergePrefixSql";
+import {
+  planBucketCount,
+  runBucketedMergePrefix,
+} from "./mergeBuckets";
 import {
   runDuckDbCliScript,
   resolveCliSettings,
@@ -888,15 +893,64 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       }
     }
     if (!fastPath) {
-      const oop = await shouldUseOutOfProcessMerge();
-      if (oop.outOfProcess) {
-        mergePath = "duckdb_sql_cli";
-        await runMergePrefixOutOfProcess(input, prefixArgs, conn, {
-          leaseObjectTypeId,
+      // Bucket planning from contribution row counts (changelog manifest
+      // metadata — no extra scan). Unknown counts plan a single bucket.
+      const bucketPlan = planBucketCount(
+        input.contributions.map((c) => c.parquetRef?.rowCount),
+      );
+      if (bucketPlan.bucketCount > 1) {
+        const oop = await shouldUseOutOfProcessMerge();
+        mergePath = oop.outOfProcess
+          ? "duckdb_sql_bucketed_cli"
+          : "duckdb_sql_bucketed";
+        const res = await runBucketedMergePrefix({
+          objectTypeApiName: input.objectTypeApiName,
+          snapshotId: preMergedSnapshotId,
+          contributions: input.contributions,
+          localPaths: downloads.map((d) => d.localPath),
+          singleContribution: input.contributions.length === 1,
+          bucketCount: bucketPlan.bucketCount,
+          runKey: input.runKey ?? null,
+          conn,
+          outOfProcess: oop.outOfProcess,
+          onBucketComplete: (b, n) => {
+            reportStageProgress(`merge bucket ${b + 1}/${n} complete`);
+            if (leaseObjectTypeId) {
+              void bestEffortLease(
+                () => reportIndexingProgress(leaseObjectTypeId),
+                "progress-bucket",
+              );
+            }
+          },
         });
-      } else {
-        for (const stmt of buildMergePrefixStatements(prefixArgs)) {
+        console.log(
+          `[merge-sql] ${input.objectTypeApiName} bucketed prefix ` +
+            `buckets=${res.bucketCount} skipped=${res.skipped} computed=${res.computed}`,
+        );
+        // Step 8 still runs: downstream (existing-load, merged_result)
+        // reads edit_bucket + edit_props_latest.
+        for (const stmt of buildEditStatements(
+          prefixArgs.editOpsRows,
+          prefixArgs.editPropsRows,
+        )) {
           await runAll(conn, stmt);
+        }
+      } else {
+        const oop = await shouldUseOutOfProcessMerge();
+        if (oop.outOfProcess) {
+          mergePath = "duckdb_sql_cli";
+          await runMergePrefixOutOfProcess(input, prefixArgs, conn, {
+            leaseObjectTypeId,
+          });
+        } else {
+          // Narrow-key dedup is the default SQL shape; the legacy wide sort
+          // runs only under MERGE_NARROW_DEDUP=0.
+          mergePath = isNarrowDedupEnabled()
+            ? "duckdb_sql_narrow"
+            : "duckdb_sql";
+          for (const stmt of buildMergePrefixStatements(prefixArgs)) {
+            await runAll(conn, stmt);
+          }
         }
       }
     }

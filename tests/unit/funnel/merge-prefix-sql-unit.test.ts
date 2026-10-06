@@ -11,14 +11,19 @@
 //   * export/attach round-trip shape (CASTs, file names).
 // ---------------------------------------------------------------------------
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 
 import {
   buildMergePrefixStatements,
+  buildLegacyMergePrefixStatements,
   buildPrefixExportStatements,
   buildPrefixAttachStatements,
   PREFIX_EXPORT_FILES,
 } from "../../../src/services/funnel/mergePrefixSql";
+
+afterEach(() => {
+  delete process.env.MERGE_NARROW_DEDUP;
+});
 
 const CONTRIBS = [
   { datasource_id: "ds-1", owned_properties: ["a"], markings: [] },
@@ -30,7 +35,7 @@ const CONTRIBS = [
 ];
 
 describe("buildMergePrefixStatements", () => {
-  it("emits steps 2–8 in order with the expected temp tables", () => {
+  it("emits steps 2–8 in order with the expected temp tables (narrow default)", () => {
     const stmts = buildMergePrefixStatements({
       contributions: CONTRIBS,
       localPaths: ["/tmp/c0.parquet", "/tmp/c1.parquet"],
@@ -42,10 +47,15 @@ describe("buildMergePrefixStatements", () => {
       "CREATE OR REPLACE TEMP TABLE contrib_meta",
       "INSERT INTO contrib_meta VALUES",
       "CREATE OR REPLACE TEMP TABLE changes AS",
+      "AS rid",
+      "CREATE OR REPLACE TEMP TABLE changes_narrow AS",
       "CREATE OR REPLACE TEMP TABLE changes_seq AS",
-      "DROP TABLE changes;",
+      "primary_key, rid",
+      "DROP TABLE changes_narrow;",
       "CREATE OR REPLACE TEMP TABLE per_pk_last_delete AS",
       "CREATE OR REPLACE TEMP TABLE effective_rows AS",
+      "JOIN changes ch",
+      "ON ch.rid = c.rid",
       "CREATE OR REPLACE TEMP TABLE source_state AS",
       "DROP TABLE changes_seq;",
       "DROP TABLE per_pk_last_delete;",
@@ -64,6 +74,31 @@ describe("buildMergePrefixStatements", () => {
     // No PG-touching statements in the prefix: it must stay pure-SQL so it
     // can run in a process with no database handle.
     expect(joined).not.toMatch(/object_instances|COPY \(/);
+  });
+
+  it("legacy wide sort runs only under MERGE_NARROW_DEDUP=0", () => {
+    process.env.MERGE_NARROW_DEDUP = "0";
+    const stmts = buildMergePrefixStatements({
+      contributions: CONTRIBS,
+      localPaths: ["/tmp/c0.parquet", "/tmp/c1.parquet"],
+      editOpsRows: [],
+      editPropsRows: [],
+    });
+    const joined = stmts.join("\n");
+    expect(joined).toContain("CREATE OR REPLACE TEMP TABLE changes AS");
+    // Wide sort: no rid handle, no narrow table, no join-back.
+    expect(joined).not.toContain("AS rid");
+    expect(joined).not.toContain("changes_narrow");
+    expect(joined).not.toContain("ch.rid = c.rid");
+    // And the legacy builder emits the same text (single source check).
+    expect(stmts.join("\n")).toBe(
+      buildLegacyMergePrefixStatements({
+        contributions: CONTRIBS,
+        localPaths: ["/tmp/c0.parquet", "/tmp/c1.parquet"],
+        editOpsRows: [],
+        editPropsRows: [],
+      }).join("\n"),
+    );
   });
 
   it("UNION ALL tags each contribution with its fold-order index", () => {
