@@ -73,9 +73,15 @@ import {
 import { reportStageProgress } from "./temporal/stageProgress";
 import {
   buildMergePrefixStatements,
+  buildEditStatements,
   buildPrefixAttachStatements,
   buildPrefixExportStatements,
+  buildFastPathPrecheckStatement,
+  buildFastSourceStateStatement,
+  isFastPathEnabled,
+  isFastPathPrecheckPass,
   PREFIX_EXPORT_FILES,
+  type FastPathPrecheck,
 } from "./mergePrefixSql";
 import {
   runDuckDbCliScript,
@@ -827,15 +833,71 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       );
       return null;
     });
-    const oop = await shouldUseOutOfProcessMerge();
-    if (oop.outOfProcess) {
-      mergePath = "duckdb_sql_cli";
-      await runMergePrefixOutOfProcess(input, prefixArgs, conn, {
-        leaseObjectTypeId,
-      });
-    } else {
-      for (const stmt of buildMergePrefixStatements(prefixArgs)) {
-        await runAll(conn, stmt);
+    // Fast path: a single contribution whose changelog parquet provably
+    // holds distinct non-null, non-empty PKs skips the dedup sort entirely
+    // — the sort removes zero rows on such input (measured: the 6.36M-row
+    // changelog was already deduped) while costing 46 s + 4 GiB of spill.
+    // The precheck is re-run per merge, never cached: it is what makes
+    // skipping safe. A precheck failure falls through to the general path
+    // (which will surface the real error loudly); only a PASS skips.
+    let fastPath = false;
+    if (isFastPathEnabled() && input.contributions.length === 1) {
+      try {
+        const preRows = await queryAll<Record<string, string>>(
+          conn,
+          buildFastPathPrecheckStatement(downloads[0].localPath),
+        );
+        const pre: FastPathPrecheck = {
+          total: Number(preRows[0]?.total ?? -1),
+          distinctPk: Number(preRows[0]?.distinct_pk ?? -1),
+          nullPk: Number(preRows[0]?.null_pk ?? -1),
+          emptyPk: Number(preRows[0]?.empty_pk ?? -1),
+        };
+        if (isFastPathPrecheckPass(pre)) {
+          fastPath = true;
+          mergePath = "duckdb_sql_fast";
+          console.log(
+            `[merge-sql] ${input.objectTypeApiName} fast path: single ` +
+              `contribution, unique PKs total=${pre.total} — skipping dedup sort`,
+          );
+          await runAll(
+            conn,
+            buildFastSourceStateStatement(
+              downloads[0].localPath,
+              input.contributions[0].datasource_id,
+              input.contributions[0].markings,
+            ),
+          );
+          // Step 8 still runs: downstream (existing-load, merged_result)
+          // reads edit_bucket + edit_props_latest.
+          for (const stmt of buildEditStatements(
+            prefixArgs.editOpsRows,
+            prefixArgs.editPropsRows,
+          )) {
+            await runAll(conn, stmt);
+          }
+        }
+      } catch (err) {
+        // Precheck is an optimization: its own failure must not fail the
+        // merge. The general path below will hit the same parquet and
+        // surface the real error.
+        console.warn(
+          `[merge-sql] ${input.objectTypeApiName} fast-path precheck failed, ` +
+            `taking general path: ${(err as Error).message}`,
+        );
+      }
+    }
+    if (!fastPath) {
+      const oop = await shouldUseOutOfProcessMerge();
+      if (oop.outOfProcess) {
+        mergePath = "duckdb_sql_cli";
+        await runMergePrefixOutOfProcess(input, prefixArgs, conn, {
+          leaseObjectTypeId,
+        });
+      } else {
+        for (const stmt of buildMergePrefixStatements(prefixArgs)) {
+          await runAll(conn, stmt);
+        }
       }
     }
     if (leaseObjectTypeId) {
