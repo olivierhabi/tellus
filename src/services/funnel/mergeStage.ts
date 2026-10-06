@@ -62,6 +62,7 @@ import {
   queryAll,
   streamQuery,
   releaseConnection,
+  type DuckDBConnection,
 } from "../duckdb/pool";
 import { getObjectStream, uploadObject } from "../storageService";
 import {
@@ -70,6 +71,18 @@ import {
   clearMergeProgress,
 } from "./mergeProgress";
 import { reportStageProgress } from "./temporal/stageProgress";
+import {
+  buildMergePrefixStatements,
+  buildPrefixAttachStatements,
+  buildPrefixExportStatements,
+  PREFIX_EXPORT_FILES,
+} from "./mergePrefixSql";
+import {
+  runDuckDbCliScript,
+  resolveCliSettings,
+  cliSettingsPreamble,
+  shouldUseOutOfProcessMerge,
+} from "./mergeCliRunner";
 
 // Delta PG tail: diff the freshly-built merged parquet against the PREVIOUS
 // merged snapshot's parquet (same producer — DuckDB — so plain string
@@ -615,6 +628,71 @@ async function batchDeleteInstances(
 }
 
 /**
+ * Run merge steps 2–8 in a separate DuckDB CLI process and re-attach the
+ * prefix outputs in-process. The CLI work dir holds script.sql, stdout.log,
+ * stderr.log and the three prefix parquets. On CLI failure the dir is KEPT
+ * for forensics (the error carries its path); on success the parquets are
+ * materialized as temp tables by the attach statements and the dir is
+ * deleted immediately after — prefix outputs never outlive the attach.
+ *
+ * Exported for tests (cross-process glue test).
+ */
+export async function runMergePrefixOutOfProcess(
+  input: MergeSQLInput,
+  prefixArgs: {
+    contributions: SQLContribution[];
+    localPaths: string[];
+    editOpsRows: string[];
+    editPropsRows: string[];
+  },
+  conn: DuckDBConnection,
+  opts?: {
+    /** Test hook: replaces the DuckDB CLI command (cf. runDuckDbCliScript). */
+    command?: string[];
+  },
+): Promise<void> {
+  const cliDir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-cli-"));
+  const spillDir = path.join(cliDir, "spill");
+  const settings = resolveCliSettings(
+    spillDir,
+    process.env.DUCKDB_HOME_DIRECTORY ?? "/tmp/tellus-duckdb",
+  );
+  const scriptText =
+    cliSettingsPreamble(settings) +
+    [
+      ...buildMergePrefixStatements(prefixArgs),
+      ...buildPrefixExportStatements(cliDir),
+    ].join(";\n") +
+    ";\n";
+  const res = await runDuckDbCliScript({
+    scriptText,
+    workDir: cliDir,
+    spillDir,
+    command: opts?.command,
+    watchPaths: PREFIX_EXPORT_FILES.map((f) => path.join(cliDir, f)),
+    onProgress: (p) => {
+      // Liveness evidence, not just process-alive: bytes on disk. A wedged
+      // child stops growing spill/outputs and the watchdog kills it.
+      reportStageProgress(
+        `merge cli-prefix spillBytes=${p.spillBytes} wallMs=${p.wallMs}`,
+      );
+    },
+  });
+  console.log(
+    `[merge-sql] ${input.objectTypeApiName} cli prefix ` +
+      `wallMs=${res.wallMs} peakSpillBytes=${res.peakSpillBytes}`,
+  );
+  for (const stmt of buildPrefixAttachStatements(cliDir)) {
+    await runAll(conn, stmt);
+  }
+  try {
+    fs.rmSync(cliDir, { recursive: true, force: true });
+  } catch {
+    /* ignore — /tmp reaps it */
+  }
+}
+
+/**
  * DuckDB SQL k-way merge. Builds the per-PK overlay (tombstone carry-forward +
  * markings union + source info + edits overlay) entirely in SQL, COPYs the
  * merged result straight to a local parquet (flat memory — DuckDB streams the
@@ -624,6 +702,10 @@ async function batchDeleteInstances(
  * `mergedRows` is NOT materialised (the rows live in the returned
  * `parquetRef`; {@link loadMergedRowsFromSnapshot} / {@link streamParquetRows}
  * re-read them). This is the pass-by-reference contract.
+ *
+ * Steps 2–8 (the pure-SQL prefix) execute either in-process (default) or in
+ * a separate DuckDB CLI process (FUNNEL_MERGE_OUT_OF_PROCESS=1) — see
+ * {@link runMergePrefixOutOfProcess}. Statement text is shared.
  */
 export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult> {
   validateColumnwiseMDO(
@@ -662,6 +744,19 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
     input.contributions.map((c) => downloadParquetRefToLocal(c.parquetRef)),
   );
 
+  // Steps 2–8 (pure-SQL prefix) run either in-process (default — today's
+  // path) or in a separate DuckDB CLI process
+  // (FUNNEL_MERGE_OUT_OF_PROCESS=1). Statement text is shared via
+  // mergePrefixSql: a single source of SQL for both executors, so a change
+  // to the merge logic cannot diverge between them.
+  const prefixArgs = {
+    contributions: input.contributions,
+    localPaths: downloads.map((d) => d.localPath),
+    editOpsRows,
+    editPropsRows,
+  };
+  let mergePath = "duckdb_sql";
+
   const conn = await acquireConnection({ skipHttpfs: true });
   const preMergedSnapshotId = newSnapshotId();
   const mergedKey = mergedParquetKey(input.objectTypeApiName, preMergedSnapshotId);
@@ -676,232 +771,19 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
   let lastPk: string | null = null;
   let rowsProcessed = 0;
   try {
-    // 2. contrib_meta (per-contribution constants; contrib_markings = c.markings
-    //    since the changelog parquet carries NO markings column).
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE contrib_meta (
-        contrib_idx INTEGER, datasource_id VARCHAR,
-        owned_properties VARCHAR[], contrib_markings VARCHAR[]
-      )`,
-    );
-    const metaVals = input.contributions
-      .map((c, i) =>
-        `(${i},${sqlStr(c.datasource_id)},${sqlVarcharArray(
-          c.owned_properties,
-        )},${sqlVarcharArray(c.markings)})`,
-      )
-      .join(",");
-    if (metaVals) {
-      await runAll(conn, `INSERT INTO contrib_meta VALUES ${metaVals}`);
-    }
-
-    // 3. changes: UNION ALL of every contribution's changelog parquet, tagged
-    //    with contrib_idx (0-based, = fold order).
-    const arms = input.contributions.map((c, i) => {
-      const lp = downloads[i].localPath.replace(/'/g, "''");
-      return `SELECT ${i}::INTEGER AS contrib_idx,
-        primary_key::VARCHAR AS primary_key,
-        operation::VARCHAR AS operation,
-        properties::VARCHAR AS properties,
-        source_transaction_id::VARCHAR AS source_transaction_id,
-        source_commit_timestamp::VARCHAR AS source_commit_timestamp
-      FROM read_parquet('${lp}')`;
-    });
-    if (arms.length > 0) {
-      await runAll(
-        conn,
-        `CREATE OR REPLACE TEMP TABLE changes AS ${arms.join(" UNION ALL ")}`,
-      );
+    // Steps 2–8 execute here. In-process (default): today's path, one
+    // statement at a time. Out-of-process (FUNNEL_MERGE_OUT_OF_PROCESS=1):
+    // the same statements run in a separate DuckDB CLI process and the
+    // prefix outputs cross back as parquet files.
+    const oop = await shouldUseOutOfProcessMerge();
+    if (oop.outOfProcess) {
+      mergePath = "duckdb_sql_cli";
+      await runMergePrefixOutOfProcess(input, prefixArgs, conn);
     } else {
-      // No contributions (e.g. an OT with pending edits but no backing
-      // datasource yet) — create an empty `changes` table so the downstream
-      // CTEs degrade to empty (merged_result = edits-only path).
-      await runAll(
-        conn,
-        `CREATE OR REPLACE TEMP TABLE changes (
-          contrib_idx INTEGER, primary_key VARCHAR, operation VARCHAR,
-          properties VARCHAR, source_transaction_id VARCHAR,
-          source_commit_timestamp VARCHAR
-        )`,
-      );
+      for (const stmt of buildMergePrefixStatements(prefixArgs)) {
+        await runAll(conn, stmt);
+      }
     }
-
-    // 4. changes_seq: glob_seq = total fold order. The PRIMARY key is contrib_idx
-    //    (contributions-array order = OUTER fold loop); secondary keys
-    //    reconstruct per-contribution transaction order. We deliberately do NOT
-    //    rely on read_parquet file order (Phase 0's dedup writes the parquet
-    //    pk-SORTED on disk, NOT transaction-sorted) — the explicit ORDER BY is
-    //    what makes a multi-row-per-PK contribution fold correctly. For OO7
-    //    (one row per PK post-dedup) this is an arbitrary per-PK tiebreak.
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE changes_seq AS
-      SELECT *, CAST(row_number() OVER (
-        ORDER BY contrib_idx, source_commit_timestamp,
-                 source_transaction_id, primary_key
-      ) AS BIGINT) AS glob_seq FROM changes`,
-    );
-    // changes_seq holds glob_seq; the bare `changes` table is no longer
-    // referenced (per_pk_last_delete, effective_rows, source_state all read
-    // changes_seq). DROP it now to free ~1GB of pinned-in-memory temp-table
-    // pages — without this, `changes`+`changes_seq`+`effective_rows`+
-    // `source_state` coexist during source_state creation and OOM at 4GB
-    // (DuckDB does NOT spill materialized TEMP tables while a query that
-    // references their siblings runs, so the coexisting set is the peak).
-    await runAll(conn, `DROP TABLE changes;`);
-    //    watermark.
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE per_pk_last_delete AS
-      SELECT primary_key,
-        COALESCE(max(glob_seq) FILTER (WHERE operation = 'DELETE'), -1) AS last_del_seq
-      FROM changes_seq GROUP BY primary_key`,
-    );
-
-    // 6. effective_rows: ALL non-DELETE rows STRICTLY AFTER the last DELETE.
-    //    We do NOT keep only the last row per (PK, contribution) — the JS spec
-    //    (mergeChanges:248-272) ACCUMULATES partial post-DELETE rows: each
-    //    INSERT/UPDATE does `next.properties = { ...prior.properties }` then
-    //    overlays THIS row's owned_properties, so earlier partial rows' keys
-    //    carry forward. Keeping only the last row would DROP those earlier
-    //    keys (DATA LOSS — verified by the tombstone-then-untombstone-partial
-    //    adversarial case: INSERT{a1,a2}→DELETE→INSERT{a1}→UPDATE{a2} must
-    //    yield {a1,a2}, not {a2}). The accumulation happens in eff_props below.
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE effective_rows AS
-      SELECT c.primary_key, c.contrib_idx, cm.datasource_id, c.properties,
-             c.source_transaction_id, c.source_commit_timestamp, c.glob_seq
-      FROM changes_seq c
-      JOIN per_pk_last_delete d ON d.primary_key = c.primary_key
-      JOIN contrib_meta cm      ON cm.contrib_idx = c.contrib_idx
-      WHERE c.operation <> 'DELETE' AND c.glob_seq > d.last_del_seq`,
-    );
-
-    // 7. source_state — per-PK overlay. `eff_props` ACCUMULATES the
-    //    post-DELETE non-DELETE rows per (PK, contribution) in glob_seq order
-    //    (json_merge_patch fold = the JS `{...prior.properties}` carry-forward
-    //    + per-owned-property overlay; column-wise MDO means no key conflict
-    //    across contributions). The fast path (count=1 → first(properties))
-    //    skips the per-PK JSON fold for the common deduped-1-row-per-PK case
-    //    (OO7 — Phase 0's dedup yields exactly 1 row/PK, so the fold is a
-    //    no-op); the fold engages for multi-row-per-PK contributions (multiple
-    //    INSERT/UPDATE versions after a DELETE) — WITHOUT it the SQL would
-    //    drop earlier partial rows (data loss). For >1 contribution a 2-level
-    //    fold: inner per (PK, contribution) accumulate, outer cross-contribution
-    //    merge (in contrib_idx = fold order).
-    const contribFold = (expr: string) =>
-      `CASE WHEN count(*) = 1
-        THEN first(${expr})
-        ELSE list_reduce(
-          list_prepend('{}'::JSON, list(${expr} ORDER BY glob_seq)),
-          (acc, p) -> json_merge_patch(acc, p))
-       END`;
-    const effPropsCte =
-      input.contributions.length === 1
-        ? `eff_props AS (
-          SELECT primary_key, ${contribFold("properties::JSON")} AS properties
-          FROM effective_rows GROUP BY primary_key
-        )`
-        : `eff_props AS (
-          SELECT primary_key,
-            list_reduce(
-              list_prepend('{}'::JSON,
-                list(per_contrib_props ORDER BY contrib_idx)),
-              (acc, p) -> json_merge_patch(acc, p)
-            ) AS properties
-          FROM (
-            SELECT primary_key, contrib_idx,
-              ${contribFold("properties::JSON")} AS per_contrib_props
-            FROM effective_rows GROUP BY primary_key, contrib_idx
-          ) pc
-          GROUP BY primary_key
-        )`;
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE source_state AS
-      WITH src_info AS (
-        SELECT c.primary_key,
-          first(cm.datasource_id ORDER BY c.glob_seq DESC)           AS source_datasource_id,
-          first(c.source_transaction_id ORDER BY c.glob_seq DESC)     AS source_transaction_id,
-          first(c.source_commit_timestamp ORDER BY c.glob_seq DESC)   AS source_timestamp
-        FROM changes_seq c
-        JOIN contrib_meta cm ON cm.contrib_idx = c.contrib_idx
-        GROUP BY c.primary_key
-      ),
-      ${effPropsCte},
-      eff_pks AS (SELECT DISTINCT primary_key FROM effective_rows),
-      src_markings AS (
-        SELECT c.primary_key,
-          COALESCE(
-            array_sort(array_agg(DISTINCT trim(m))
-              FILTER (WHERE m IS NOT NULL AND trim(m) <> '')),
-            ARRAY[]::VARCHAR[]
-          ) AS markings
-        FROM changes_seq c
-        JOIN contrib_meta cm ON cm.contrib_idx = c.contrib_idx
-        LEFT JOIN unnest(cm.contrib_markings) AS t(m) ON true
-        GROUP BY c.primary_key
-      )
-      SELECT s.primary_key, s.source_datasource_id, s.source_transaction_id,
-             s.source_timestamp,
-             (ep.primary_key IS NULL) AS tombstoned,
-             COALESCE(epp.properties, '{}'::JSON) AS properties,
-             mk.markings
-      FROM src_info s
-      LEFT JOIN eff_pks   ep  ON ep.primary_key  = s.primary_key
-      LEFT JOIN eff_props epp ON epp.primary_key = s.primary_key
-      LEFT JOIN src_markings mk ON mk.primary_key = s.primary_key`,
-    );
-    // source_state is materialized from changes_seq + effective_rows; neither
-    // is referenced again (edit_* come from JS arrays; the existing-block COPY
-    // reads source_state + edit_bucket; merged_result reads source_state +
-    // edit_bucket + edit_props_latest). DROP them now so the existing-block +
-    // merged_result stages don't carry ~2GB of dead pinned temp-table pages.
-    await runAll(conn, `DROP TABLE changes_seq;`);
-    await runAll(conn, `DROP TABLE per_pk_last_delete;`);
-    await runAll(conn, `DROP TABLE effective_rows;`);
-
-    // 8. edits temp tables (BEFORE the existing-load — the existing PK stream
-    //    below references edit_bucket). edit_ops: one row per edit; edit_props:
-    //    one row per non-delete edit × property. For OO7 (0 edits) both are
-    //    empty. Depends only on the JS pendingEdits array (no DuckDB temp table).
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE edit_ops (
-        primary_key VARCHAR, operation VARCHAR, created_at VARCHAR, edit_seq INTEGER
-      )`,
-    );
-    if (editOpsRows.length > 0) {
-      await runAll(conn, `INSERT INTO edit_ops VALUES ${editOpsRows.join(",")}`);
-    }
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE edit_props (
-        primary_key VARCHAR, prop VARCHAR, value VARCHAR, created_at VARCHAR, edit_seq INTEGER
-      )`,
-    );
-    if (editPropsRows.length > 0) {
-      await runAll(conn, `INSERT INTO edit_props VALUES ${editPropsRows.join(",")}`);
-    }
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE edit_bucket AS
-      SELECT primary_key,
-        first(operation ORDER BY created_at DESC, edit_seq ASC) AS edit_op
-      FROM edit_ops GROUP BY primary_key`,
-    );
-    await runAll(
-      conn,
-      `CREATE OR REPLACE TEMP TABLE edit_props_latest AS
-      WITH x AS (
-        SELECT primary_key, prop, value, created_at,
-          row_number() OVER (PARTITION BY primary_key, prop ORDER BY edit_seq DESC) AS rn
-        FROM edit_props
-      )
-      SELECT primary_key, prop, value, created_at FROM x WHERE rn = 1`,
-    );
 
     // 9. existing instances — batched from PG (flat memory; ~5000/chunk on the
     //    idx_object_instances_ot_pk index — Phase 0 migration 109). For OO7's
@@ -1508,7 +1390,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         edit_strategy: input.editStrategy,
         contributions: input.contributions.map((c) => c.datasource_id),
         parquet_ref: mergedParquetRef,
-        merge_path: "duckdb_sql",
+        merge_path: mergePath,
       },
     });
   } catch (err) {
