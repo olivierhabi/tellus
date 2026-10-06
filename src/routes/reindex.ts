@@ -142,10 +142,11 @@ async function claimIndexingLock(
   allowStealStale: boolean,
 ): Promise<boolean> {
   const result = await query(
-    `INSERT INTO funnel_state (object_type_id, status, error_message, updated_at)
-     VALUES ($1, 'indexing', NULL, now())
+    `INSERT INTO funnel_state (object_type_id, status, error_message, updated_at, last_progress_at)
+     VALUES ($1, 'indexing', NULL, now(), now())
      ON CONFLICT (object_type_id) DO UPDATE
-       SET status = 'indexing', error_message = NULL, updated_at = now()
+       SET status = 'indexing', error_message = NULL, updated_at = now(),
+           last_progress_at = now()
        WHERE funnel_state.status <> 'indexing'
           OR ($2::boolean AND funnel_state.updated_at < now() - $3::interval)
      RETURNING object_type_id`,
@@ -282,14 +283,43 @@ router.post(
       // funnel_state.updated_at on every stage transition, so "not touched for
       // FORCE_STEAL_STALE_MS" means the holder is gone, not slow.
       if (!(await claimIndexingLock(objectType.object_type_id, force))) {
+        // Enriched conflict: say what holds the lock, what stage its run is
+        // in, and when either was last heard from — a bare "in progress" is
+        // indistinguishable from a wedged run. Best-effort: a failed read
+        // must not mask the 409 itself.
+        let detail = "";
+        try {
+          const { describeIndexingLock } = await import(
+            "../services/funnel/indexingLease"
+          );
+          const lock = await describeIndexingLock(
+            objectType.object_type_id,
+          );
+          if (lock) {
+            const age = lock.updatedAt
+              ? ` (lock touched ${lock.updatedAt})`
+              : "";
+            const run = lock.activeRunId
+              ? ` run ${lock.activeRunId} stage=${lock.runStage ?? "?"} ` +
+                `started=${lock.runStartedAt ?? "?"}`
+              : " no live run row";
+            detail =
+              ` Lock: status=${lock.status} indexed=${lock.objectsIndexed}` +
+              `${age}.${run}.`;
+          }
+        } catch {
+          /* keep the generic message */
+        }
         return sendError(
           res,
           "REINDEX_IN_PROGRESS",
-          force
+          (force
             ? `A reindex for object type '${apiName}' is already in progress and ` +
-                `is still making progress. Force cannot interrupt a live run; ` +
-                `wait for it to finish or fail.`
-            : `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`,
+              `is still making progress. Force cannot interrupt a live run; ` +
+              `wait for it to finish or fail.`
+            : `A reindex for object type '${apiName}' is already in progress. Please wait for it to complete.`) +
+            detail,
+          {},
         );
       }
 

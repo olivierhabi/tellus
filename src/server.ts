@@ -1887,6 +1887,25 @@ async function start(): Promise<void> {
           `WARNING: orphaned funnel_run sweep failed: ${(err as Error).message}`
         );
       }
+      // Release funnel_state 'indexing' locks whose owner cannot be alive:
+      // heartbeat older than the boot grace AND linked run terminal-or-
+      // missing. Locks whose run is still 'running' are left alone — Temporal
+      // may resume them after restart. Idempotent; safe on every boot.
+      try {
+        const { reconcileStaleIndexingLocks } = await import(
+          "./services/funnel/indexingLease"
+        );
+        const { released } = await reconcileStaleIndexingLocks();
+        if (released.length > 0) {
+          logger.info(
+            `Released ${released.length} stale indexing lock(s) at boot: ${released.join(", ")}`
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          `WARNING: stale indexing-lock reconcile failed: ${(err as Error).message}`
+        );
+      }
     })();
     try {
       if (process.env.OVERLAY_SWEEPER_DISABLED !== "true") {

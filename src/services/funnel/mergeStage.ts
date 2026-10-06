@@ -83,6 +83,29 @@ import {
   cliSettingsPreamble,
   shouldUseOutOfProcessMerge,
 } from "./mergeCliRunner";
+import {
+  touchIndexingLock,
+  reportIndexingProgress,
+  resolveLeaseObjectTypeId,
+} from "./indexingLease";
+
+/**
+ * Best-effort lease signalling: a missed heartbeat/progress report delays
+ * steal-safety but never corrupts — so signalling must never fail (or slow)
+ * the merge it observes.
+ */
+async function bestEffortLease(
+  fn: () => Promise<unknown>,
+  what: string,
+): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.warn(
+      `[merge-sql] lease ${what} failed: ${(err as Error).message}`,
+    );
+  }
+}
 
 // Delta PG tail: diff the freshly-built merged parquet against the PREVIOUS
 // merged snapshot's parquet (same producer — DuckDB — so plain string
@@ -649,6 +672,8 @@ export async function runMergePrefixOutOfProcess(
   opts?: {
     /** Test hook: replaces the DuckDB CLI command (cf. runDuckDbCliScript). */
     command?: string[];
+    /** funnel_state lock key for progress reports; null skips them. */
+    leaseObjectTypeId?: string | null;
   },
 ): Promise<void> {
   const cliDir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-cli-"));
@@ -664,6 +689,11 @@ export async function runMergePrefixOutOfProcess(
       ...buildPrefixExportStatements(cliDir),
     ].join(";\n") +
     ";\n";
+  // Throttled movement reports to the indexing lease: the watchdog polls
+  // every ~2 s, but a PG UPDATE per poll is wasteful — 15 s granularity is
+  // plenty for a 10-minute stall budget. Fire-and-forget: lease reporting
+  // must never fail (or slow) the merge it observes.
+  let lastLeaseReport = 0;
   const res = await runDuckDbCliScript({
     scriptText,
     workDir: cliDir,
@@ -676,6 +706,13 @@ export async function runMergePrefixOutOfProcess(
       reportStageProgress(
         `merge cli-prefix spillBytes=${p.spillBytes} wallMs=${p.wallMs}`,
       );
+      if (opts?.leaseObjectTypeId && Date.now() - lastLeaseReport > 15_000) {
+        lastLeaseReport = Date.now();
+        void bestEffortLease(
+          () => reportIndexingProgress(opts.leaseObjectTypeId as string),
+          "progress",
+        );
+      }
     },
   });
   console.log(
@@ -775,14 +812,37 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
     // statement at a time. Out-of-process (FUNNEL_MERGE_OUT_OF_PROCESS=1):
     // the same statements run in a separate DuckDB CLI process and the
     // prefix outputs cross back as parquet files.
+    //
+    // Lease signalling (indexingLease): the holder refreshes the lock
+    // heartbeat at every stage boundary and reports movement from the
+    // long phases, so the stall watchdog can tell alive-but-stuck from
+    // alive-and-moving. Best-effort throughout — signalling never fails
+    // the merge it observes.
+    const leaseObjectTypeId = await resolveLeaseObjectTypeId(
+      input.ontologyId,
+      input.objectTypeApiName,
+    ).catch((err: unknown) => {
+      console.warn(
+        `[merge-sql] lease resolve failed: ${(err as Error).message}`,
+      );
+      return null;
+    });
     const oop = await shouldUseOutOfProcessMerge();
     if (oop.outOfProcess) {
       mergePath = "duckdb_sql_cli";
-      await runMergePrefixOutOfProcess(input, prefixArgs, conn);
+      await runMergePrefixOutOfProcess(input, prefixArgs, conn, {
+        leaseObjectTypeId,
+      });
     } else {
       for (const stmt of buildMergePrefixStatements(prefixArgs)) {
         await runAll(conn, stmt);
       }
+    }
+    if (leaseObjectTypeId) {
+      await bestEffortLease(
+        () => touchIndexingLock(leaseObjectTypeId),
+        "heartbeat-prefix",
+      );
     }
 
     // 9. existing instances — batched from PG (flat memory; ~5000/chunk on the
@@ -944,6 +1004,13 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       }
     }
 
+    if (leaseObjectTypeId) {
+      await bestEffortLease(
+        () => touchIndexingLock(leaseObjectTypeId),
+        "heartbeat-existing",
+      );
+    }
+
     // 10. merged_result — the final per-PK resolution. Edits overlay
     //     (resolveProperty) applied AFTER source overlay, per PK. The `<STRATEGY>`
     //     literal inlines user_edit_wins (always include edited prop) vs
@@ -1049,6 +1116,13 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
                  COALESCE(source_transaction_id, '')   AS source_transaction_id
           FROM merged_result ORDER BY primary_key
         ) TO '${lp}' (FORMAT PARQUET, CODEC 'ZSTD', ROW_GROUP_SIZE 100000)`,
+      );
+    }
+
+    if (leaseObjectTypeId) {
+      await bestEffortLease(
+        () => touchIndexingLock(leaseObjectTypeId),
+        "heartbeat-merged",
       );
     }
 
@@ -1286,6 +1360,14 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
               // block — and it is what lets heartbeatTimeout fail this activity
               // if the PG tail ever wedges again.
               reportStageProgress(`merge pg-tail rows=${rowsProcessed}`);
+              // Movement evidence for the indexing-lease watchdog: the same
+              // cadence, best-effort, never blocking the tail.
+              if (leaseObjectTypeId) {
+                void bestEffortLease(
+                  () => reportIndexingProgress(leaseObjectTypeId),
+                  "progress-tail",
+                );
+              }
             }
           }
           keysetAfter = lastPk ?? ""; // advance the cursor to the last row of this batch
