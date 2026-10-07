@@ -12,7 +12,8 @@
 // different process, not a different query.
 //
 // What this module does:
-//   * spawns a DuckDB CLI (`DUCKDB_CLI_PATH`, default `duckdb`) with the
+//   * spawns a DuckDB CLI (versioned path from funnelRuntimeConfig —
+//     `duckdb` on PATH for dev/test, `/usr/local/bin/duckdb` in prod) with the
 //     merge script on stdin and stdout/stderr captured to files in workDir;
 //   * applies the SAME DuckDB settings the in-process pool applies
 //     (memory_limit, temp_directory, threads-only-if-positive,
@@ -38,6 +39,7 @@
 import { spawn, ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
 
 export const MERGE_CLI_TIMEOUT_MS_DEFAULT = 30 * 60 * 1000;
 export const MERGE_CLI_KILL_GRACE_MS_DEFAULT = 5_000;
@@ -145,19 +147,23 @@ export function mergeCliTimeoutMs(): number {
   );
 }
 
-/** `DUCKDB_CLI_PATH`, default `duckdb` on PATH. The production image must
- *  ship a DuckDB CLI binary for the out-of-process merge path. */
-export function duckDbCliPath(): string {
-  return process.env.DUCKDB_CLI_PATH ?? "duckdb";
+/** Versioned DuckDB CLI path (per deployment profile — never `.env`). */
+export function duckDbCliPath(env: NodeJS.ProcessEnv = process.env): string {
+  return funnelRuntimeConfig(env).duckdbCliPath;
 }
 
 let cachedAvailability: boolean | null = null;
+let cachedAvailabilityPath: string | null = null;
 
-/** Is a DuckDB CLI runnable here? Cached per process. Never throws. */
-export async function isDuckDbCliAvailable(): Promise<boolean> {
-  if (cachedAvailability !== null) return cachedAvailability;
+/** Is a DuckDB CLI runnable here? Cached per process+path. Never throws. */
+export async function isDuckDbCliAvailable(
+  cliPath: string = duckDbCliPath(),
+): Promise<boolean> {
+  if (cachedAvailability !== null && cachedAvailabilityPath === cliPath) {
+    return cachedAvailability;
+  }
   try {
-    const child = spawn(duckDbCliPath(), ["--version"], {
+    const child = spawn(cliPath, ["--version"], {
       stdio: "ignore",
     });
     const ok = await new Promise<boolean>((resolve) => {
@@ -179,9 +185,11 @@ export async function isDuckDbCliAvailable(): Promise<boolean> {
       });
     });
     cachedAvailability = ok;
+    cachedAvailabilityPath = cliPath;
     return ok;
   } catch {
     cachedAvailability = false;
+    cachedAvailabilityPath = cliPath;
     return false;
   }
 }
@@ -189,6 +197,7 @@ export async function isDuckDbCliAvailable(): Promise<boolean> {
 /** Test hook: reset the cached availability probe. */
 export function resetCliAvailabilityCache(): void {
   cachedAvailability = null;
+  cachedAvailabilityPath = null;
 }
 
 export interface CliSettings {
@@ -201,16 +210,17 @@ export interface CliSettings {
 }
 
 /** Read DuckDB settings with the pool's exact defaults (pool.ts
- *  applyInstanceSettings): memory_limit 1GB, threads unset (= auto), and the
- *  same env names. tempDirectory/homeDirectory take explicit per-run values
+ *  applyInstanceSettings): memory_limit from the versioned funnel runtime
+ *  config, threads unset (= auto), and the same env names. tempDirectory/homeDirectory take explicit per-run values
  *  from the caller instead of the shared pool defaults. */
 export function resolveCliSettings(
   tempDirectory: string,
   homeDirectory: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): CliSettings {
   const threads = Number(process.env.DUCKDB_THREADS ?? "0");
   return {
-    memoryLimit: process.env.DUCKDB_MEMORY_LIMIT ?? "1GB",
+    memoryLimit: funnelRuntimeConfig(env).duckdbMemoryLimit,
     tempDirectory,
     threads: Number.isFinite(threads) ? threads : 0,
     homeDirectory,
@@ -456,23 +466,25 @@ export async function runDuckDbCliScript(
 }
 
 /**
- * Should the merge run out of process? Strict opt-in
- * (`FUNNEL_MERGE_OUT_OF_PROCESS=1`, same convention as
- * FUNNEL_OPENSEARCH_PIPELINE) AND a runnable CLI. Flag on but no CLI falls
- * back to the in-process path with a loud warning — availability over
- * isolation, never silent.
+ * Should the merge run out of process? Versioned per-profile decision
+ * (funnelRuntime.mergeOutOfProcess) AND a runnable CLI. Flag off (or no
+ * CLI) falls back to the in-process path with a loud warning — availability
+ * over isolation, never silent.
  */
-export async function shouldUseOutOfProcessMerge(): Promise<{
+export async function shouldUseOutOfProcessMerge(
+  env: NodeJS.ProcessEnv = process.env,
+  cliPath: string = duckDbCliPath(env),
+): Promise<{
   outOfProcess: boolean;
   reason: string;
 }> {
-  if (process.env.FUNNEL_MERGE_OUT_OF_PROCESS !== "1") {
+  if (!funnelRuntimeConfig(env).mergeOutOfProcess) {
     return { outOfProcess: false, reason: "flag-off" };
   }
-  if (!(await isDuckDbCliAvailable())) {
+  if (!(await isDuckDbCliAvailable(cliPath))) {
     console.warn(
-      "[merge-cli] FUNNEL_MERGE_OUT_OF_PROCESS=1 but no DuckDB CLI found " +
-        `(DUCKDB_CLI_PATH=${duckDbCliPath()}) — falling back to in-process merge`,
+      "[merge-cli] out-of-process merge is enabled but no DuckDB CLI found " +
+        `(path=${cliPath}) — falling back to in-process merge`,
     );
     return { outOfProcess: false, reason: "cli-missing" };
   }

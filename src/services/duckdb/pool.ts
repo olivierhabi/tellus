@@ -25,6 +25,7 @@
 // sandbox, etc.) the caller is expected to feature-detect via
 // `isDuckDBAvailable()` and fall back to the legacy Node.js engine.
 import { mkdir } from "node:fs/promises";
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
 
 type DuckDBDatabaseCtor = new (p: string) => DuckDBDatabase;
 interface DuckDBDatabase {
@@ -234,8 +235,9 @@ async function applyInstanceSettings(
 
   // Never default to the host's entire memory allocation. The former 12 GB
   // fallback could starve a 16 GB developer laptop and made an unconfigured
-  // container rely on the OOM killer for isolation.
-  const memoryLimit = options.memoryLimit ?? process.env.DUCKDB_MEMORY_LIMIT ?? "1GB";
+  // container rely on the OOM killer for isolation. The default comes from
+  // the versioned funnel runtime config (per deployment profile).
+  const memoryLimit = options.memoryLimit ?? funnelRuntimeConfig().duckdbMemoryLimit;
   const tempDir = options.tempDirectory ?? process.env.DUCKDB_TEMP_DIR ?? "/tmp/duckdb_spill";
   // DuckDB resolves extension/cache state through `home_directory`. In the
   // production image we run as an unprivileged user, so make this an

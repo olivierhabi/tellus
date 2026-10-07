@@ -525,14 +525,16 @@ export async function projectFunnelTerminalToState(
       await query(
         `INSERT INTO funnel_state
            (object_type_id, status, error_message, environment_id,
-            active_run_id, active_run_started_at)
-         VALUES ($1, $2, NULL, $3, $4, $5)
+            active_run_id, active_run_started_at, last_progress_at, lease_heartbeat_at)
+         VALUES ($1, $2, NULL, $3, $4, $5, now(), now())
          ON CONFLICT (object_type_id) DO UPDATE SET
            status        = EXCLUDED.status,
            error_message = NULL,
            environment_id = COALESCE(EXCLUDED.environment_id, funnel_state.environment_id),
            active_run_id = COALESCE(EXCLUDED.active_run_id, funnel_state.active_run_id),
            active_run_started_at = COALESCE(EXCLUDED.active_run_started_at, funnel_state.active_run_started_at),
+           last_progress_at = now(),
+           lease_heartbeat_at = now(),
            updated_at    = now()`,
         [
           objectTypeId,

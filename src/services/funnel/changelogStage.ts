@@ -109,6 +109,13 @@ export interface ComputeChangelogInput {
   outputFileLocation: string;
   /** Max bytes per second. Default 2 MiB/s per spec. Set to 0 to disable. */
   throughputCapBytesPerSec?: number;
+  /**
+   * Real-advancement hook, called every 5 000 streamed source rows. The
+   * Temporal activity wires this to reportStageProgress (progress-coupled
+   * heartbeat) + the indexing-lease movement signal. Optional so unit
+   * tests and the PG dispatcher call sites are unaffected.
+   */
+  onRowsAdvanced?: (rowsStreamed: number) => void;
 }
 
 export interface ComputeChangelogResult {
@@ -212,6 +219,13 @@ export async function computeChangelog(
 
       for (const k of Object.keys(r.properties)) ownedProperties.add(k);
       idx++;
+      if (idx % 5000 === 0) {
+        try {
+          input.onRowsAdvanced?.(idx);
+        } catch {
+          /* progress reporting is best-effort — never fail the stream */
+        }
+      }
 
       // Flatten to the fixed Parquet schema; `properties` is a JSON string.
       yield {

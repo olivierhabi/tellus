@@ -32,6 +32,11 @@ import {
   getPendingIndexEdits,
   markEditsAppliedToIndex,
 } from "../../../models/ontologyEdit";
+import {
+  resolveLeaseObjectTypeId,
+  reportIndexingProgress,
+  touchLeaseHeartbeat,
+} from "../indexingLease";
 import { runIndexingActivity } from "../../quickwit/indexingActivity";
 import { ensureIndex } from "../../quickwit/indexManager";
 import {
@@ -236,9 +241,39 @@ export async function runChangelogActivity(
    *  the full row array so the Temporal completion payload stays bounded. */
   ownedProperties: string[];
 }> {
-  return withStageInstrumentation("changelog", input.objectTypeApiName, async () =>
-    runChangelogActivityImpl(input)
-  );
+  return withStageInstrumentation("changelog", input.objectTypeApiName, async () => {
+    const stop = await startLockHeartbeat(input);
+    try {
+      return await runChangelogActivityImpl(input);
+    } finally {
+      stop();
+    }
+  });
+}
+
+async function startLockHeartbeat(input: ObjectTypeCtx): Promise<() => void> {
+  let objectTypeId: string | null = null;
+  try {
+    objectTypeId = input.objectTypeRid ?? (await resolveLeaseObjectTypeId(input.ontologyId, input.objectTypeApiName));
+  } catch {
+    return () => {};
+  }
+  if (!objectTypeId) return () => {};
+  // Holder liveness ONLY: this timer proves the process is alive. It must
+  // never move last_progress_at — a timer that did would blind the stall
+  // watchdog to a hung native query. Movement is reported separately, only
+  // where rows/bytes actually advance.
+  const timer = setInterval(() => {
+    void touchLeaseHeartbeat(objectTypeId).catch(() => {});
+  }, 5_000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+/** Best-effort movement report: rows/bytes actually advanced. Never throws. */
+function bestEffortMovement(objectTypeId: string | null): void {
+  if (!objectTypeId) return;
+  void reportIndexingProgress(objectTypeId).catch(() => {});
 }
 
 async function runChangelogActivityImpl(
@@ -267,6 +302,11 @@ async function runChangelogActivityImpl(
   // while also handling `.csv` / `.tsv` / `.json` so wizard-created OTs
   // index correctly on every save.
   let reader: SnapshotDiffReader;
+  // Fail-closed zero-row gate (Blocker 4): true only when we positively
+  // know the source file is non-empty. The pending-edit fallback keeps
+  // sourceNonEmpty=false — a genuinely edit-less object type may
+  // legitimately emit zero rows.
+  let sourceNonEmpty = false;
   const iceberg = await loadIcebergSource(input.objectTypeApiName);
   if (iceberg && isDuckDBAvailable()) {
     reader = duckdbIcebergDiffReader({
@@ -314,6 +354,7 @@ async function runChangelogActivityImpl(
               `parts or raise the ceiling.`,
           );
         }
+        sourceNonEmpty = foundryHead.contentLength > 0;
         reader = await buildFoundryBridgedReader(foundry);
       }
     } else {
@@ -345,6 +386,13 @@ async function runChangelogActivityImpl(
       };
     }
   }
+  // Movement signal for the stall watchdog, resolved once up front. The
+  // changelog stream reports real advancement every 5 000 rows; the 5 s
+  // holder timer reports liveness only and never touches this signal.
+  const leaseObjectTypeId = await resolveLeaseObjectTypeId(
+    input.ontologyId,
+    input.objectTypeApiName,
+  ).catch(() => null);
   const result = await computeChangelog(
     {
       ontologyId: input.ontologyId,
@@ -355,9 +403,18 @@ async function runChangelogActivityImpl(
       toSnapshotId: table.latest_snapshot_id ?? ZERO_UUID,
       changelogTableId: table.dataset_table_id,
       outputFileLocation: `${table.location}/data/${new Date().toISOString()}.parquet`,
+      onRowsAdvanced: (rowsStreamed) => {
+        reportStageProgress(`changelog rows=${rowsStreamed}`);
+        bestEffortMovement(leaseObjectTypeId);
+      },
     },
     reader
   );
+  assertChangelogNonEmpty({
+    objectTypeApiName: input.objectTypeApiName,
+    rowsEmitted: result.rowsEmitted,
+    sourceNonEmpty,
+  });
   // PASS-BY-REFERENCE (Option 2): the emitted rows are persisted as a
   // Parquet object in MinIO; the committed snapshot's `summary_json`
   // carries only a small `parquet_ref` (computeChangelog does the write).
@@ -408,9 +465,14 @@ export async function runMergeActivity(
   /** Current materialized object cardinality after the merge. */
   objectsIndexed: number;
 }> {
-  return withStageInstrumentation("merge", input.objectTypeApiName, async () =>
-    runMergeActivityImpl(input)
-  );
+  return withStageInstrumentation("merge", input.objectTypeApiName, async () => {
+    const stop = await startLockHeartbeat(input);
+    try {
+      return await runMergeActivityImpl(input);
+    } finally {
+      stop();
+    }
+  });
 }
 
 async function runMergeActivityImpl(
@@ -910,12 +972,61 @@ interface FoundryBridgedDatasource {
   primaryKeyColumn: string | null;
 }
 
+/**
+ * Strict parse of the synthetic backing_datasource locator
+ * `<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>`. Throws a clear,
+ * actionable error on any malformed marker — a corrupt locator must fail
+ * the changelog loudly, never stream zero rows silently.
+ */
+export function parseFoundryMarker(filePath: string): {
+  s3Key: string;
+  foundryDatasetUuid: string;
+  objectTypeUuid: string;
+} {
+  const m = filePath.match(
+    /^(.+)#foundry-dataset:([0-9a-f-]{36})#object-type:([0-9a-f-]{36})$/i,
+  );
+  if (!m) {
+    throw new Error(
+      `foundry-bridged backing source '${filePath}' has a missing or ` +
+        `malformed marker — expected ` +
+        `'<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>'. ` +
+        `Re-register the datasource; refusing to emit zero rows silently.`,
+    );
+  }
+  return {
+    s3Key: m[1],
+    foundryDatasetUuid: m[2],
+    objectTypeUuid: m[3],
+  };
+}
+
+/**
+ * Fail-closed gate: a changelog that emitted zero rows for a source that
+ * is NOT empty is a wiring bug, not an empty object type. Throws — the
+ * run fails loudly instead of completing with objects_indexed = 0.
+ */
+export function assertChangelogNonEmpty(args: {
+  objectTypeApiName: string;
+  rowsEmitted: number;
+  sourceNonEmpty: boolean;
+}): void {
+  if (args.rowsEmitted === 0 && args.sourceNonEmpty) {
+    throw new Error(
+      `changelog for object type '${args.objectTypeApiName}' emitted 0 ` +
+        `rows for a non-empty source — refusing to index an empty snapshot. ` +
+        `Check the backing datasource locator and reader selection.`,
+    );
+  }
+}
+
 async function loadFoundryBridgedDatasource(
   objectTypeApiName: string
 ): Promise<FoundryBridgedDatasource | null> {
   try {
     const res = await query(
-      `SELECT bd.file_path, bd.file_format, bd.primary_key_column
+      `SELECT bd.file_path, bd.file_format, bd.primary_key_column,
+              bd.foundry_dataset_id
          FROM backing_datasource bd
          JOIN object_type ot ON ot.object_type_id = bd.object_type_id
         WHERE ot.api_name = $1
@@ -927,10 +1038,17 @@ async function loadFoundryBridgedDatasource(
     if (!row) return null;
     const filePath: string = row.file_path;
     if (!filePath) return null;
-    // Restrict to foundry-bridged files (presence of the `#foundry-dataset:`
-    // tag). Local-filesystem paths fall through to the pending-edit fallback
-    // — the funnel's contract is that "real" backing data lives in MinIO.
-    if (!filePath.includes("#foundry-dataset:")) return null;
+    const bridgedById = row.foundry_dataset_id != null;
+    // A row registered through the foundry bridge MUST carry a well-formed
+    // marker. Missing/malformed => fail here, never fall through to the
+    // pending-edit fallback (which would emit a silent zero-row changelog).
+    if (bridgedById || filePath.includes("#foundry-dataset:")) {
+      parseFoundryMarker(filePath);
+    } else {
+      // Legacy local-filesystem path — not a foundry-bridged source; the
+      // pending-edit fallback below owns it.
+      return null;
+    }
     const explicitFormat = (row.file_format as string | null) ?? null;
     let fileFormat = explicitFormat;
     if (!fileFormat) {
@@ -1070,10 +1188,13 @@ export async function buildFoundryBridgedReader(
 ): Promise<SnapshotDiffReader> {
   const s3Key = stripFoundryTags(ds.filePath);
   if (!s3Key) {
-    // Defensive: a `#foundry-dataset:` tag with no preceding key is corrupt.
-    // Treat as "no source" so the changelog stage emits zero rows instead of
-    // throwing — the projection activity will surface this as an empty run.
-    return { async *read() { /* no rows */ } };
+    // A `#foundry-dataset:` tag with no preceding key is corrupt. Fail
+    // loudly — emitting zero rows here once masked a broken locator as a
+    // successful empty run.
+    throw new Error(
+      `foundry-bridged backing source '${ds.filePath}' has an empty object ` +
+        `key before '#foundry-dataset:' — refusing to emit zero rows silently.`,
+    );
   }
   const pkCol = ds.primaryKeyColumn ?? "primary_key";
   // `source_transaction_id` lands in `object_instances.source_transaction_id`

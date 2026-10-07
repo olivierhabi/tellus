@@ -654,6 +654,22 @@ export async function registerWithFoundryDataset(
   // Hardened: fd.file_path is now guaranteed valid (status=ready + contains '/');
   // never fall back to bare UUID tag.
   const filePathValue = `${fd.file_path}#${tag}`;
+  // Registration-time marker validation (Blocker 4): the synthetic locator
+  // must be exactly `<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>`.
+  // A malformed locator can never HEAD-resolve, and the funnel now fails
+  // such rows loudly instead of emitting zero rows — so refuse to persist
+  // one here.
+  if (
+    !/^(.+)#foundry-dataset:([0-9a-f-]{36})#object-type:([0-9a-f-]{36})$/i.test(
+      filePathValue,
+    )
+  ) {
+    throw appError(
+      "DATASOURCE_MARKER_INVALID",
+      `Refusing to register backing_datasource with malformed foundry locator '${filePathValue}' — ` +
+        `expected '<s3-key>#foundry-dataset:<uuid>#object-type:<uuid>'. Fix the dataset's file_path.`,
+    );
+  }
   const fileFormat = inferFoundryFileFormat(fd.original_filename || fd.file_path || "");
 
   let insertResult;
