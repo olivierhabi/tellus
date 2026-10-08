@@ -74,6 +74,7 @@ function nextDisplayName(prefix: string): string {
 function withAuth(req: request.Test): request.Test {
   return req
     .set("X-Tellus-Test-Principal", "alice")
+    .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
     .set("X-Tellus-Test-Roles", "editor");
 }
 

@@ -85,7 +85,8 @@ describe("Code Repos auth middleware — Stemma:Unauthenticated + IDOR-as-404", 
     it("X-Tellus-Test-Principal with empty userId → 401", async () => {
       const r = await request(app)
         .post("/stemma/api/v1/repositories")
-        .set("X-Tellus-Test-Principal", "/OWNER") // empty userId before the slash
+        .set("X-Tellus-Test-Principal", "/OWNER")
+        .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "") // empty userId before the slash
         .set("Idempotency-Key", randomUUID())
         .send({ rid: mintRepositoryRid(), defaultBranchName: "main" });
       expect(r.status).toBe(401);
@@ -111,7 +112,8 @@ describe("Code Repos auth middleware — Stemma:Unauthenticated + IDOR-as-404", 
       const rid = mintRepositoryRid();
       const r = await request(app)
         .get(`/stemma/api/v1/repositories/${encodeURIComponent(rid)}/refs`)
-        .set("X-Tellus-Test-Principal", "stranger/READER");
+        .set("X-Tellus-Test-Principal", "stranger/READER")
+        .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
       expect(r.status).toBe(404);
       expect(r.body.errorName).toBe("Stemma:RepositoryNotFound");
       // The contract is explicit: never 403. We assert this directly.
@@ -122,7 +124,8 @@ describe("Code Repos auth middleware — Stemma:Unauthenticated + IDOR-as-404", 
       const rid = mintRepositoryRid();
       const r = await request(app)
         .delete(`/stemma/api/v1/repositories/${encodeURIComponent(rid)}`)
-        .set("X-Tellus-Test-Principal", "stranger/OWNER");
+        .set("X-Tellus-Test-Principal", "stranger/OWNER")
+        .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
       expect(r.status).toBe(404);
       expect(r.body.errorName).toBe("Stemma:RepositoryNotFound");
       expect(r.status).not.toBe(403);
@@ -134,19 +137,22 @@ describe("Code Repos auth middleware — Stemma:Unauthenticated + IDOR-as-404", 
       const create = await request(app)
         .post("/stemma/api/v1/repositories")
         .set("X-Tellus-Test-Principal", "owner-1/OWNER")
+        .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
         .set("Idempotency-Key", randomUUID())
         .send({ rid, defaultBranchName: "main" });
       expect(create.status).toBe(201);
 
       const del = await request(app)
         .delete(`/stemma/api/v1/repositories/${encodeURIComponent(rid)}`)
-        .set("X-Tellus-Test-Principal", "owner-1/OWNER");
+        .set("X-Tellus-Test-Principal", "owner-1/OWNER")
+        .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
       expect(del.status).toBe(200);
 
       // Now read it as another authenticated user — must be 404.
       const r = await request(app)
         .get(`/stemma/api/v1/repositories/${encodeURIComponent(rid)}/refs`)
-        .set("X-Tellus-Test-Principal", "stranger/READER");
+        .set("X-Tellus-Test-Principal", "stranger/READER")
+        .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
       expect(r.status).toBe(404);
       expect(r.body.errorName).toBe("Stemma:RepositoryNotFound");
     });
@@ -160,6 +166,7 @@ describe("Code Repos auth middleware — Stemma:Unauthenticated + IDOR-as-404", 
     const r = await request(app)
       .post("/stemma/api/v1/repositories")
       .set("X-Tellus-Test-Principal", "alice-from-test/OWNER,EDITOR")
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .set("Idempotency-Key", randomUUID())
       .send({ rid, defaultBranchName: "main" });
     expect(r.status).toBe(201);

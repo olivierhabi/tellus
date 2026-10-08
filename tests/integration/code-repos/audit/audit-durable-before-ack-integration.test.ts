@@ -51,6 +51,7 @@ describe("Code Repos audit — G-C-52 durable-before-ack", () => {
     const r = await request(app)
       .post("/stemma/api/v1/repositories")
       .set("X-Tellus-Test-Principal", "sabotage-test/OWNER")
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .set("Idempotency-Key", randomUUID())
       .send({ rid, defaultBranchName: "main" });
 

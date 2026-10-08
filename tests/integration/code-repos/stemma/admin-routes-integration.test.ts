@@ -47,14 +47,14 @@ function authed(app: import("express").Express) {
   // Wrap each verb so callers can write `authed(app).post("...")` exactly
   // like they would with bare supertest, and the principal header is
   // applied transparently. We retain the ability to override the header
-  // by chaining .set("X-Tellus-Test-Principal", ...).
+  // by chaining .set("X-Tellus-Test-Principal", ...) .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "").
   const agent = request(app);
   return {
-    get: (url: string) => agent.get(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER),
-    post: (url: string) => agent.post(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER),
-    delete: (url: string) => agent.delete(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER),
-    put: (url: string) => agent.put(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER),
-    patch: (url: string) => agent.patch(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER),
+    get: (url: string) => agent.get(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER).set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
+    post: (url: string) => agent.post(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER).set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
+    delete: (url: string) => agent.delete(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER).set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
+    put: (url: string) => agent.put(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER).set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
+    patch: (url: string) => agent.patch(url).set("X-Tellus-Test-Principal", TEST_PRINCIPAL_HEADER).set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
   };
 }
 
