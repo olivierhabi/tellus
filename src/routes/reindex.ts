@@ -142,11 +142,11 @@ async function claimIndexingLock(
   allowStealStale: boolean,
 ): Promise<boolean> {
   const result = await query(
-    `INSERT INTO funnel_state (object_type_id, status, error_message, updated_at, last_progress_at)
-     VALUES ($1, 'indexing', NULL, now(), now())
+    `INSERT INTO funnel_state (object_type_id, status, error_message, updated_at, last_progress_at, lease_heartbeat_at)
+     VALUES ($1, 'indexing', NULL, now(), now(), now())
      ON CONFLICT (object_type_id) DO UPDATE
        SET status = 'indexing', error_message = NULL, updated_at = now(),
-           last_progress_at = now()
+           last_progress_at = now(), lease_heartbeat_at = now()
        WHERE funnel_state.status <> 'indexing'
           OR ($2::boolean AND funnel_state.updated_at < now() - $3::interval)
      RETURNING object_type_id`,

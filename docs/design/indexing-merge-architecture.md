@@ -188,3 +188,70 @@ catch a reintroduction.
 
 Rollout: dev → staging at full scale → production behind a feature flag, old path
 retained one release as fallback.
+
+## 9. Close-out status, decisions, open items (2026-10-07)
+
+**Status:** implemented on `pr/indexing-merge-clean` (Draft PR #79);
+dev-scale evidence below; scale benchmarks ticketed.
+
+**Decisions (implemented):**
+- D1 — Two lock signals, not one (`src/services/funnel/indexingLease.ts`,
+  migration 194): `lease_heartbeat_at` is written ONLY by the 5 s holder
+  timer (`touchLeaseHeartbeat`); `last_progress_at` is written ONLY where
+  rows/bytes actually advance (changelog 5 000-row milestones via
+  `ComputeChangelogInput.onRowsAdvanced`, merge CLI prefix bytes, bucket
+  completions, PG-tail batches). The stall sweep reads `last_progress_at`
+  only; the dead-process sweep reads `lease_heartbeat_at` only and skips
+  live runs. Claim-time reset (`last_progress_at = now(),
+  lease_heartbeat_at = now()`) on every fresh claim
+  (`src/services/funnel/funnelStateProjection.ts`,
+  `src/routes/reindex.ts` `claimIndexingLock`).
+- D2 — Staging + promote (`src/services/funnel/mergeStaging.ts`, migration
+  195 `merge_staging_instances`): the SQL PG tail loads staging, runs
+  count/distinct/null-empty + 1 000-row sample checks, then promotes
+  atomically. Bulk loading keeps the chunked-unnest pattern (NOT raw
+  `COPY`): `COPY` would need a server-visible file or a new copy-stream
+  dependency, while chunked unnest stays under PG's bind ceiling with one
+  round trip per 1 000-row chunk. Promotion is set-based in ONE transaction.
+  The small-scale pure-TS `mergeChanges` path still writes live directly
+  inside a single transaction (test/fallback scale only).
+- D3 — Fail-closed sources (`src/services/funnel/temporal/activities.ts`
+  `parseFoundryMarker` / `assertChangelogNonEmpty`,
+  `src/services/datasetDatasourceService.ts`): malformed
+  `#foundry-dataset:` locators throw at read AND at registration; a zero-row
+  changelog for a non-empty source file throws instead of completing empty.
+- D4 — Versioned runtime config (`src/config/funnelRuntime.ts`): the five
+  non-secret funnel knobs (stall/boot/dead budgets, OOP flag, batch size,
+  staging retention, DuckDB CLI path + memory, Lakekeeper container
+  endpoint) are committed per profile (development/test/production); the
+  corresponding `.env` names are retired (see `.env.example`). Stall stays
+  10 min on every profile. Secrets (S3 creds, `LAKEKEEPER_PG_ENCRYPTION_KEY`)
+  stay in gitignored env / secret manager.
+- D5 — Lakekeeper container endpoint is the docker-internal name
+  (`http://minio:9000`): a host loopback from inside the Lakekeeper
+  container fails warehouse validation with a gzip-decompression error.
+
+**Measured dev-scale evidence (code paths named):**
+- Transaction 6 362 620 rows: source DISTINCT tx set == PG DISTINCT pk set,
+  0 rows each side (`src-pks-synth.txt` sha256
+  `daf8a349…f4171a1` vs `object_instances` via DuckDB `postgres_scanner`).
+- Account 9 695 421 rows: source DISTINCT account set == PG DISTINCT pk set,
+  0 rows each side (`accounts_synth.csv` sha256 `2e0f8aa7…3058f76`).
+- Staging round-trip on a fresh DB: stage 3 → verify → promote → live has
+  the 2 upserts, staging empty.
+- Migrations 194/195: scratch-DB up/down verified; ledgered apply on dev.
+
+**Open items (ticketed, not implied):**
+- O1 — 1M/5M/10M benchmarks + CI budgets (§8): no full-scale benchmark has
+  run against the staging design yet.
+- O2 — Bucketed 5M synthetic with duplicates + SIGKILL mid-bucket through
+  the wired OOP path (bucketed path never ran at scale; both gate datasets
+  took the fast path).
+- O3 — Kill/resume re-run against staging at scale (kill mid-load ⇒ live
+  unchanged ⇒ resume promotes exactly once).
+- O4 — Hang regression fixture (old wide in-process plan must be killed by
+  the watchdog within threshold).
+- O5 — Datasource-guard test at 2M+1 (clean 4xx naming type/count/route).
+- O6 — DuckDB CLI in the image: pinned v1.4.4 + checksum + boot self-check.
+- O7 — Follow-ups: compose-profile P0, Node/Temporal version alignment +
+  HTTP cancel, merge tie-break determinism review.

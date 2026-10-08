@@ -9,50 +9,55 @@
 //     detects a STUCK process but says nothing about one that never
 //     instrumented itself.
 //
-// The three signals and their owners:
-//   1. touchIndexingLock — lease heartbeat ("process alive"). Called at merge
-//      stage boundaries. Moves updated_at only.
-//   2. reportIndexingProgress — movement ("work advancing"). Called from the
-//      out-of-process prefix progress callback and the PG-tail batch loop.
-//      Moves last_progress_at (and updated_at with it).
-//   3. sweepStalledIndexing — watchdog ("alive but not moving"). Fails runs
+// The signals and their owners:
+//   1. touchIndexingLock — stage-boundary touch. Moves updated_at only.
+//   2. touchLeaseHeartbeat — holder liveness ("process alive"). Written by
+//      the 5 s holder timer ONLY. Moves lease_heartbeat_at (and updated_at
+//      with it, so force-steal still sees a live holder). NEVER moves
+//      last_progress_at: a timer proves the event loop is alive, not that
+//      a native query is advancing.
+//   3. reportIndexingProgress — movement ("work advancing"). Called ONLY
+//      from real advancement points (changelog dedup milestones, merge CLI
+//      prefix bytes, bucket completions, PG-tail batches). Moves
+//      last_progress_at (and updated_at with it).
+//   4. sweepStalledIndexing — watchdog ("alive but not moving"). Fails runs
 //      whose last_progress_at is older than the stall budget. Skips rows with
 //      NULL last_progress_at: those predate instrumentation (or never opted
 //      in) and belong to the boot reconciler, not the watchdog — failing
 //      them here would punish slow-but-uninstrumented runs.
-//   4. reconcileStaleIndexingLocks — boot ("owner cannot be alive").
-//      Releases 'indexing' rows whose active run is terminal-or-missing AND
-//      whose heartbeat is older than the boot grace. Never touches a row
-//      whose run is still 'running': Temporal may resume it after restart.
+//   5. sweepDeadIndexingLocks — dead-process sweep ("owner gone"). Fails
+//      locks whose lease_heartbeat_at is older than the dead budget AND
+//      whose run is terminal-or-missing. Uses lease_heartbeat_at ONLY —
+//      never last_progress_at. A lock whose run is still 'running' is left
+//      alone: Temporal may resume it after restart.
+//   6. reconcileStaleIndexingLocks — boot ("owner cannot be alive").
+//      Legacy backstop for pre-instrumentation rows (NULL lease heartbeat)
+//      using updated_at; instrumented rows belong to sweep #5.
 //
 // All mutators are scoped to status='indexing' and idempotent: re-running
 // them changes nothing.
 // ---------------------------------------------------------------------------
 
 import { query } from "../../db";
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
 
 export const INDEXING_STALL_AFTER_MS_DEFAULT = 600_000; // 10 min
 export const INDEXING_BOOT_STALE_MS_DEFAULT = 900_000; // 15 min
-
-function positiveIntEnv(value: string | undefined, def: number): number {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? n : def;
-}
+export const INDEXING_DEAD_AFTER_MS_DEFAULT = 900_000; // 15 min
 
 /** Watchdog budget: no movement for this long => STALLED. */
 export function indexingStallAfterMs(): number {
-  return positiveIntEnv(
-    process.env.FUNNEL_INDEXING_STALL_AFTER_MS,
-    INDEXING_STALL_AFTER_MS_DEFAULT,
-  );
+  return funnelRuntimeConfig().indexingStallAfterMs;
 }
 
 /** Boot grace: a lock untouched for this long with no live run is released. */
 export function indexingBootStaleMs(): number {
-  return positiveIntEnv(
-    process.env.FUNNEL_INDEXING_BOOT_STALE_MS,
-    INDEXING_BOOT_STALE_MS_DEFAULT,
-  );
+  return funnelRuntimeConfig().indexingBootStaleMs;
+}
+
+/** Dead-process budget: no lease heartbeat for this long => owner dead. */
+export function indexingDeadAfterMs(): number {
+  return funnelRuntimeConfig().indexingDeadAfterMs;
 }
 
 function toMs(t: unknown): number | null {
@@ -116,6 +121,25 @@ export async function touchIndexingLock(
   const res = await query(
     `UPDATE funnel_state
         SET updated_at = now()
+      WHERE object_type_id = $1 AND status = 'indexing'`,
+    [objectTypeId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+/**
+ * Holder-process liveness, written by the 5 s holder timer ONLY. Moves
+ * lease_heartbeat_at (and updated_at so lock-steal logic still sees a live
+ * holder). Deliberately does NOT move last_progress_at — a timer that
+ * moved the movement signal would blind the stall watchdog to a hung
+ * native query (the exact failure mode this split exists to prevent).
+ */
+export async function touchLeaseHeartbeat(
+  objectTypeId: string,
+): Promise<boolean> {
+  const res = await query(
+    `UPDATE funnel_state
+        SET lease_heartbeat_at = now(), updated_at = now()
       WHERE object_type_id = $1 AND status = 'indexing'`,
     [objectTypeId],
   );
@@ -240,10 +264,61 @@ export async function reconcileStaleIndexingLocks(
   return { released };
 }
 
+export interface DeadLock {
+  object_type_id: string;
+  lease_heartbeat_at: string;
+  updated_at: string;
+}
+
+export interface DeadSweepResult {
+  swept: DeadLock[];
+}
+
+/**
+ * Dead-process sweep: fail instrumented locks whose holder stopped
+ * heartbeating AND whose run is terminal-or-missing. Uses
+ * lease_heartbeat_at ONLY — never last_progress_at — so a live-but-stuck
+ * run (fresh heartbeat, quiet movement) is never mistaken for a dead
+ * owner; that case belongs to sweepStalledIndexing. NULL heartbeats
+ * predate instrumentation and belong to the boot reconciler.
+ * Idempotent; safe on every dispatcher tick.
+ */
+export async function sweepDeadIndexingLocks(
+  deadMs: number = indexingDeadAfterMs(),
+): Promise<DeadSweepResult> {
+  const stale = await query(
+    `UPDATE funnel_state fs
+        SET status = 'failed',
+            error_message = 'DEAD: indexing holder stopped heartbeating within the dead-process budget; ' ||
+              'see indexingLease.sweepDeadIndexingLocks',
+            updated_at = now()
+      WHERE fs.status = 'indexing'
+        AND fs.lease_heartbeat_at IS NOT NULL
+        AND fs.lease_heartbeat_at < now() - ($1::text || ' milliseconds')::interval
+        AND NOT EXISTS (
+          SELECT 1 FROM funnel_run fr
+           WHERE fr.run_id = fs.active_run_id
+             AND fr.status = 'running'
+        )
+      RETURNING fs.object_type_id, fs.lease_heartbeat_at, fs.updated_at`,
+    [String(Math.floor(deadMs))],
+  );
+  const swept = (stale.rows ?? []) as DeadLock[];
+  if (swept.length > 0) {
+    console.warn(
+      `[indexing-lease] DEAD ${swept.length} indexing lock(s): ` +
+        swept.map((r) => r.object_type_id).join(", "),
+    );
+  }
+  return { swept };
+}
+
 export interface IndexingLockDescription {
   status: string;
   objectsIndexed: number;
   updatedAt: string | null;
+  leaseHeartbeatAt: string | null;
+  lastProgressAt: string | null;
   activeRunId: string | null;
   runStage: string | null;
   runStartedAt: string | null;
@@ -258,7 +333,8 @@ export async function describeIndexingLock(
   objectTypeId: string,
 ): Promise<IndexingLockDescription | null> {
   const res = await query(
-    `SELECT fs.status, fs.objects_indexed, fs.updated_at, fs.active_run_id,
+    `SELECT fs.status, fs.objects_indexed, fs.updated_at,
+            fs.lease_heartbeat_at, fs.last_progress_at, fs.active_run_id,
             fr.current_stage, fr.started_at
        FROM funnel_state fs
        LEFT JOIN funnel_run fr
@@ -270,6 +346,8 @@ export async function describeIndexingLock(
     status: string;
     objects_indexed: number;
     updated_at: string | null;
+    lease_heartbeat_at: string | null;
+    last_progress_at: string | null;
     active_run_id: string | null;
     current_stage: string | null;
     started_at: string | null;
@@ -279,6 +357,8 @@ export async function describeIndexingLock(
     status: row.status,
     objectsIndexed: Number(row.objects_indexed ?? 0),
     updatedAt: row.updated_at,
+    leaseHeartbeatAt: row.lease_heartbeat_at,
+    lastProgressAt: row.last_progress_at,
     activeRunId: row.active_run_id,
     runStage: row.current_stage,
     runStartedAt: row.started_at,
