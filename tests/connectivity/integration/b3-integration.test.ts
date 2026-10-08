@@ -113,6 +113,25 @@ async function boot(_opts?: { includePg?: boolean }): Promise<Booted> {
     ),
   );
 
+  // Named egress policies (088): a truly-reserved target such as the
+  // loopback container requires an operator-APPROVED named policy at dial
+  // time (pool.ts → assertReservedTargetRequiresApprovedPolicy); the inline
+  // allowlist + CONNECTIVITY_EGRESS_ALLOW_RESERVED no longer suffice. The
+  // migration is idempotent, so applying it is safe even if the shared
+  // fixture list already includes it.
+  await fixture.pool.query(
+    readFileSync(
+      resolve(
+        __dirname,
+        "..",
+        "..",
+        "..",
+        "src/migrations/088_b1_connectivity_egress_policies.sql",
+      ),
+      "utf8",
+    ),
+  );
+
   // The container is BOTH the platform DB (connectivity_connections lives
   // here) AND the connection target the tests probe. Parse its URI once.
   const u = new URL(fixture.connectionString);
@@ -155,6 +174,9 @@ async function boot(_opts?: { includePg?: boolean }): Promise<Booted> {
   const connectionsRepo = await import(
     "../../../src/services/connectivity/store/connections.repo"
   );
+  const egressPoliciesRepo = await import(
+    "../../../src/services/connectivity/store/egress-policies.repo"
+  );
   const db = await import("../../../src/db");
   // Inject the local KMS adapter via the documented test hook (setKmsAdapter)
   // rather than getKmsAdapter()'s lazy require("./adapters/local-aesgcm"),
@@ -196,13 +218,35 @@ async function boot(_opts?: { includePg?: boolean }): Promise<Booted> {
       },
       compassFolderRid: folderRid,
     } as ConnectionCreateRequest;
+    const policyRid = `ri.magritte.main.egress-policy.${randomUUID()}`;
     await db.withTransaction(async (client) => {
+      // Operator-approved named policy for the loopback target.
+      await egressPoliciesRepo.insert(client, {
+        rid: policyRid,
+        tenant: "default",
+        name: `b3-it-${name}-${policyRid.slice(-12)}`,
+        description: "b3 integration loopback target",
+        allowlist: [{ kind: "host", host: pgHost, port: pgPort }],
+        actor,
+      } as Parameters<typeof egressPoliciesRepo.insert>[1]);
+      await egressPoliciesRepo.decide(
+        client,
+        policyRid,
+        "default",
+        1,
+        "APPROVED",
+        actor,
+      );
       await connectionsRepo.insert(client, {
         rid,
         tenant: "default",
         request,
         actor,
       });
+      await client.query(
+        `UPDATE connectivity_connections SET egress_policy_rid = $1 WHERE rid = $2`,
+        [policyRid, rid],
+      );
     });
     // Seal the credential through the B2 vault so the pool layer (getPool →
     // vault.unwrap) can recover the plaintext on connect.

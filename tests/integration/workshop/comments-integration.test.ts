@@ -9,8 +9,8 @@
 //     across parents)
 //   * references + attachment rids round-trip
 //
-// The parent-object readability check (executeGetObject) and the
-// notification inbox insert are mocked: the OpenSearch read path and the
+// The parent-object readability check (executeGetObject), the attachment
+// accessibility filter and the notification inbox insert are mocked: the OpenSearch read path and the
 // dispatch pipeline have their own coverage; here we pin the comment
 // service + route contract.
 
@@ -47,6 +47,16 @@ vi.mock("../../../src/models/notificationInbox", () => ({
     NOTIFICATIONS.rows.push(row);
     return row;
   }),
+}));
+
+// Attachment rids are filtered through resolveAccessibleAttachmentRids on
+// read (attachments the viewer cannot access are dropped). The attachment
+// store has its own coverage; treat every rid as accessible here so the
+// round-trip contract is what's under test.
+vi.mock("../../../src/services/attachmentService", () => ({
+  resolveAccessibleAttachmentRids: vi.fn(
+    async (rids: string[]) => new Set(rids),
+  ),
 }));
 
 import workshopCommentsRouter from "../../../src/routes/workshopComments";

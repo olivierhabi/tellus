@@ -4,9 +4,10 @@
 // Proves through the real Apply Action API + the controlled webhook service:
 //   §12.1 Submitting the same Idempotency-Key does not duplicate object
 //       creation — the second submit returns the CACHED first result
-//       (X-Idempotency-Cached: true) and does NOT execute a second time
-//       (the second payload's distinct primary key is NOT created). A
-//       different key executes normally (creates its own object).
+//       (X-Idempotency-Cached: true) and does NOT execute a second time.
+//       Reusing the key with a DIFFERENT body is a 409 conflict (migration
+//       188) and its distinct primary key is NOT created. A different key
+//       executes normally (creates its own object).
 //   §12.4 A stable idempotency key IS propagated to the external webhook
 //       (the controlled service records the X-Idempotency-Key header on the
 //       writeback invocation it received), and the same key produces the
@@ -113,19 +114,27 @@ describe("Gap H.1 — same idempotency key does not duplicate object creation", 
     expect(hist[0].idempotencyKey).toBeTruthy();
   });
 
-  it("the second submit with the SAME key returns the cached result and does NOT create the new PK", async () => {
-    // Same idempotency key but a DIFFERENT primary key — if executed it would
-    // create h-obj-2. Idempotency must suppress this second execution.
-    const res = await apply("h-obj-2", KEY_FIRST);
+  it("the second submit with the SAME key + SAME body returns the cached result without re-executing", async () => {
+    const res = await apply("h-obj-1", KEY_FIRST);
     expect(res.status).toBe(200);
     const cached = res.headers.get ? res.headers.get("x-idempotency-cached") : (res.headers as any)["x-idempotency-cached"];
     expect(cached).toBe("true");
     const aff = affectedList(res.body);
-    // The cached result references the FIRST execution's object, not h-obj-2.
-    expect(aff.some((a) => a.primaryKey === "h-obj-2" && a.operation === "create")).toBe(false);
     expect(aff.some((a) => a.primaryKey === "h-obj-1")).toBe(true);
     // No additional writeback invocation should have been recorded for the
     // cached (suppressed) second submit.
+    const hist = await controlledHistory("/writeback/success");
+    expect(hist.length).toBe(1);
+  });
+
+  it("reusing the SAME key with a DIFFERENT body is rejected (409) and does NOT create the new PK", async () => {
+    // Migration 188 scopes idempotency rows by (key, principal) + request
+    // hash: the same caller reusing a key with a mutated body gets a 409
+    // IdempotencyConflict instead of a silent replay (src/actions/idempotency.ts).
+    const res = await apply("h-obj-2", KEY_FIRST);
+    expect(res.status).toBe(409);
+    const aff = affectedList(res.body);
+    expect(aff.some((a) => a.primaryKey === "h-obj-2" && a.operation === "create")).toBe(false);
     const hist = await controlledHistory("/writeback/success");
     expect(hist.length).toBe(1);
   });

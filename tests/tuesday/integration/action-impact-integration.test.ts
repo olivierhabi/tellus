@@ -133,6 +133,24 @@ describe("Action Type Impact Analysis (Task 24)", () => {
   beforeAll(async () => {
     if (skip()) return;
 
+    // 0. LINK_ACTION's addLink rule references the taxpayerBusiness link
+    // type. It is not part of the seed — other suites (friday, multi-rule)
+    // create it — so ensure it here; with sharded / reordered runs this
+    // suite cannot rely on another file having run first.
+    const lt = await request("POST", `/api/v1/ontology/${ontologyId}/linkTypes`, {
+      apiName: "taxpayerBusiness",
+      displayName: "Taxpayer Business",
+      cardinality: "MANY_TO_MANY",
+      sourceObjectTypeApiName: "Taxpayer",
+      targetObjectTypeApiName: "Business",
+      isBidirectional: true,
+    });
+    if (lt.status !== 201 && lt.status !== 200 && lt.status !== 409) {
+      throw new Error(
+        `Failed to ensure link type 'taxpayerBusiness': ${lt.status} ${JSON.stringify(lt.body).substring(0, 300)}`
+      );
+    }
+
     // 1. Basic action: creates a Taxpayer with properties
     await ensureActionType({
       apiName: BASIC_ACTION,

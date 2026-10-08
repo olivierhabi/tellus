@@ -5,10 +5,9 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import { randomUUID } from "node:crypto";
 import { query } from "../../src/db";
-import { countLinks } from "../../src/services/linkResolverService";
+import { countLinks, joinTableBaseDir } from "../../src/services/linkResolverService";
 import { buildSecurityFilter } from "../../src/middleware/securityContext";
 import { client as osClient } from "../../src/services/opensearch/client";
 import { getIndexName } from "../../src/services/opensearch/indexMappingGenerator";
@@ -47,7 +46,11 @@ describe("STAGE 4 — indexed security lane", () => {
     await osClient.index({ index: idx, body: { __pk: "t-secret", __objectType: tgtOt, _security: { markings: ["SECRET"] } }, refresh: "wait_for" });
 
     // CSV-join file with TWO edges: s1→t-public + s1→t-secret:
-    const tmp = path.join(os.tmpdir(), `${tagr.replace(/[^a-zA-Z0-9]/g, "_")}.csv`);
+    // The join-table reader refuses paths outside joinTableBaseDir()
+    // (path-traversal guard), so the fixture CSV must live under it.
+    const joinDir = joinTableBaseDir();
+    fs.mkdirSync(joinDir, { recursive: true });
+    const tmp = path.join(joinDir, `${tagr.replace(/[^a-zA-Z0-9]/g, "_")}.csv`);
     fs.writeFileSync(tmp, "source,target\ns1,t-public\ns1,t-secret\n");
     // Register a link type with the join file.
     const lt = {

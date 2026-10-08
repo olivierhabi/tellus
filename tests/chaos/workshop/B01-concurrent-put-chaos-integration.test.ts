@@ -32,6 +32,10 @@ import {
   resetWorkshopDb,
   setWorkshopDb,
 } from "../../../src/services/workshop/db";
+import {
+  resetAuditEmitter,
+  setAuditEmitter,
+} from "../../../src/services/workshop/audit";
 import workshopModulesRouter from "../../../src/routes/workshopModules";
 
 const FOLDER = `ri.compass.main.folder.${randomUUID()}`;
@@ -67,6 +71,9 @@ beforeAll(async () => {
     ctx = await openTestSchema("workshop_b01_chaos");
     await ctx.applyMigration("src/migrations/058_b1_workshop_module.sql");
     await ctx.applyMigration("src/migrations/059_b1_workshop_idempotency.sql");
+    // Module create now also writes the creator's owner grant
+    // (workshop_module_grants) — same migration set as B01-route.
+    await ctx.applyMigration("src/migrations/181_workshop_module_grants.sql");
   } catch (err) {
     pgAvailable = false;
     // eslint-disable-next-line no-console
@@ -94,6 +101,9 @@ beforeAll(async () => {
       }
     },
   });
+  // Audit is asserted elsewhere (B01-route); keep it in-memory here so the
+  // race exercises only the module + grant tables in the test schema.
+  setAuditEmitter(async () => {});
   app = express();
   app.use(express.json({ limit: "5mb" }));
   app.use((req, _res, next) => {
@@ -105,6 +115,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   resetWorkshopDb();
+  resetAuditEmitter();
   if (ctx) await ctx.close();
 });
 
