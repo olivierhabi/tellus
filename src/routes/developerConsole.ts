@@ -49,7 +49,7 @@ function principal(req: Request): DeveloperConsoleActor {
     user?: { id?: string | null; displayName?: string; email?: string };
   }).user;
   const userId =
-    p?.userId ?? p?.keycloakSub ?? (user?.id ?? undefined) ?? 'anonymous';
+    p?.userId ?? p?.keycloakSub ?? user?.id ?? 'anonymous';
   const claims = req.tellusClaims as {
     preferred_username?: string;
     email?: string;

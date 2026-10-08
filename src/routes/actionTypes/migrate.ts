@@ -152,8 +152,7 @@ router.post(
       const actor = actorOf(req);
       const correlationId =
         (req as any).correlationId ??
-        ((req as any).requestId ?? null) ??
-        null;
+        (req as any).requestId ?? null;
 
       const row = await getActionType(ontologyId, actionApiName);
       if (!row) {
@@ -316,7 +315,7 @@ router.post(
       const { ontologyId, actionApiName } = req.params;
       const actor = actorOf(req);
       const correlationId =
-        (req as any).correlationId ?? ((req as any).requestId ?? null) ?? null;
+        (req as any).correlationId ?? (req as any).requestId ?? null;
       const result = await rollbackActionTypeMigration(
         ontologyId,
         actionApiName,
