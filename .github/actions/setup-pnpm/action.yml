@@ -1,0 +1,28 @@
+name: Setup pnpm + Node.js
+description: >-
+  Installs pnpm (version from package.json `packageManager`), Node.js with the
+  pnpm store cache keyed on pnpm-lock.yaml, and runs a frozen-lockfile install.
+  Shared by every CI job so the toolchain is defined once (docs/ci.md).
+inputs:
+  node-version:
+    description: Node.js version (matches .nvmrc / engines).
+    default: "24.12.0"
+  install:
+    description: Run `pnpm install --frozen-lockfile`.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install pnpm
+      uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: pnpm
+
+    - name: Install dependencies
+      if: inputs.install == 'true'
+      shell: bash
+      run: pnpm install --frozen-lockfile

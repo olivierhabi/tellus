@@ -1,0 +1,120 @@
+name: Start integration-lane dependencies
+description: >-
+  Starts the per-job, ephemeral docker-run dependencies the vitest lane needs
+  that cannot be GitHub service containers (Temporal needs a repo-mounted
+  dynamicconfig, Keycloak needs the `start-dev` argument, MinIO needs the
+  `server` argument). Everything is torn down with the runner — no state is
+  shared between jobs. Steps are moved unchanged from the former ci.yml
+  `integration` job.
+inputs:
+  temporal:
+    description: Start Temporal (+ its Postgres) on a user-defined bridge network.
+    default: "false"
+  minio:
+    description: Start MinIO and create `minio-bucket`.
+    default: "true"
+  minio-bucket:
+    description: Bucket to create in MinIO.
+    default: tellus-tests-bucket
+  keycloak:
+    description: Start Keycloak (realm bootstrap is done by tests/globalSetup.ts).
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Start Temporal (funnel lane workers)
+      if: inputs.temporal == 'true'
+      shell: bash
+      # tests/funnel/integration/multi-replica + automate suites spawn REAL
+      # Temporal workers against localhost:7233 in the lane namespace
+      # (tellus-funnel-tellus-tests-main, registered by testStackBootstrap).
+      run: |
+        # A user-defined bridge network is REQUIRED: container DNS aliases
+        # (temporal-postgres, temporal) only resolve inside a user-defined
+        # network.
+        docker network create tellus-ci-net
+
+        docker run -d --name temporal-postgres --network tellus-ci-net \
+          -e POSTGRES_DB=temporal \
+          -e POSTGRES_USER=temporal \
+          -e POSTGRES_PASSWORD=temporal_pw \
+          postgres:16-alpine
+
+        for i in $(seq 1 30); do
+          if docker exec temporal-postgres pg_isready -U temporal -d temporal >/dev/null 2>&1; then
+            echo "temporal-postgres ready"; break
+          fi
+          [ "$i" -eq 30 ] && { echo "temporal-postgres failed to start"; docker logs temporal-postgres; exit 1; }
+          sleep 1
+        done
+
+        docker run -d --name temporal --network tellus-ci-net -p 7233:7233 \
+          -e DB=postgres12 \
+          -e DB_PORT=5432 \
+          -e POSTGRES_USER=temporal \
+          -e POSTGRES_PWD=temporal_pw \
+          -e POSTGRES_SEEDS=temporal-postgres \
+          -v "$GITHUB_WORKSPACE/deploy/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro" \
+          temporalio/auto-setup:1.25.2
+
+        # Readiness probe MUST use the container's bridge IP: auto-setup binds
+        # the frontend ONLY to the container's eth0 address.
+        TEMPORAL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' temporal)"
+        echo "temporal container ip: $TEMPORAL_IP"
+
+        for i in $(seq 1 90); do
+          if docker exec temporal temporal operator cluster health --address "$TEMPORAL_IP:7233" 2>/dev/null | grep -q SERVING; then
+            echo "temporal ready"; break
+          fi
+          [ "$i" -eq 90 ] && { echo "temporal failed to start"; docker logs temporal; exit 1; }
+          sleep 2
+        done
+
+    - name: Start MinIO and create lane bucket
+      if: inputs.minio == 'true'
+      shell: bash
+      env:
+        BUCKET: ${{ inputs.minio-bucket }}
+      run: |
+        docker run -d --name minio \
+          -e MINIO_ROOT_USER=minioadmin \
+          -e MINIO_ROOT_PASSWORD=minioadmin \
+          -p 9000:9000 \
+          "$MINIO_IMAGE" server /data
+
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+            echo "MinIO ready"
+            break
+          fi
+          [ "$i" -eq 30 ] && { echo "MinIO failed to start"; docker logs minio; exit 1; }
+          sleep 1
+        done
+
+        node scripts/ci-create-s3-bucket.mjs "$BUCKET"
+
+    - name: Start Keycloak
+      if: inputs.keycloak == 'true'
+      shell: bash
+      run: |
+        docker run -d --name keycloak \
+          -e KEYCLOAK_ADMIN=admin \
+          -e KEYCLOAK_ADMIN_PASSWORD=admin \
+          -e KC_DB=dev-file \
+          -e KC_HEALTH_ENABLED=true \
+          -e KC_HTTP_PORT=8086 \
+          -e KC_HOSTNAME_STRICT=false \
+          -p 8086:8086 \
+          quay.io/keycloak/keycloak:25.0 start-dev
+
+        echo "Waiting for Keycloak..."
+        for i in $(seq 1 60); do
+          if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
+            echo "Keycloak ready"
+            break
+          fi
+          if [ "$i" -eq 60 ]; then
+            echo "Keycloak failed to start"; docker logs keycloak; exit 1
+          fi
+          sleep 2
+        done

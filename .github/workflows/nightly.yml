@@ -1,0 +1,293 @@
+# =============================================================================
+# Tier 4 — Nightly full CI (docs/ci.md)
+#
+# Runs the complete suite against the default branch, including everything
+# too slow or too broad for PRs:
+#   * full integration suite UNSHARDED in one process (catches cross-suite /
+#     cross-service interactions that sharding can hide)
+#   * E2E, perf and test:all (extended suites)
+#   * in-process load runner (tests/load) — informational
+#   * AI contract suite (when vars.AI_CONTRACT_TEST_ENABLED == '1')
+#   * quarantined tests (non-blocking signal for the tracking issues)
+# On failure it opens (or updates) ONE issue labelled `ci-nightly-failure`;
+# on the next green run it comments and closes it.
+# =============================================================================
+name: Nightly
+
+on:
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+
+env:
+  # PostgreSQL connection — F-14: use GitHub Actions secrets.
+  # For local testing these fall back to CI-only defaults below.
+  PGHOST: localhost
+  PGPORT: 5432
+  PGDATABASE: tellus_db
+  PGUSER: ${{ secrets.CI_PGUSER || 'tellus' }}
+  PGPASSWORD: ${{ secrets.CI_PGPASSWORD || 'tellus123' }}
+  POSTGRES_URL: postgresql://${{ secrets.CI_PGUSER || 'tellus' }}:${{ secrets.CI_PGPASSWORD || 'tellus123' }}@localhost:5432/tellus_db
+
+  # OpenSearch connection
+  OPENSEARCH_URL: http://localhost:9200
+
+  # Test data directory (used by seed scripts)
+  DATA_DIR: /tmp/ontology-testdata
+
+  # MinIO / S3 object storage — F-14: credentials via secrets with fallback.
+  S3_ENDPOINT: http://localhost:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: tellus-uploads
+  S3_ACCESS_KEY_ID: ${{ secrets.CI_S3_ACCESS_KEY_ID || 'minioadmin' }}
+  S3_SECRET_ACCESS_KEY: ${{ secrets.CI_S3_SECRET_ACCESS_KEY || 'minioadmin' }}
+  S3_FORCE_PATH_STYLE: "true"
+  # MinIO Community is source-only upstream; use a source-built final release
+  # and pin the OCI index digest so every job resolves the same image.
+  MINIO_IMAGE: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+
+  # Keycloak (SSO / OAuth 2.0) — F-14: secret via GitHub secrets with fallback.
+  KEYCLOAK_URL: http://localhost:8086
+  KEYCLOAK_REALM: tellus
+  KEYCLOAK_CLIENT_ID: tellus-api
+  KEYCLOAK_FRONTEND_CLIENT_ID: tellus-frontend
+  KEYCLOAK_CONFIDENTIAL_CLIENT_ID: tellus-confidential
+  KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET: ${{ secrets.CI_KEYCLOAK_SECRET || 'tellus-confidential-secret-change-me' }}
+  KEYCLOAK_TEST_USER: cypress@tellus.local
+  KEYCLOAK_TEST_PASS: ${{ secrets.CI_KEYCLOAK_TEST_PASS || 'Password123!' }}
+
+  # Elevated rate limits for CI (prevents test interference)
+  RATE_LIMIT_MAX: 10000
+  ACTION_RATE_LIMIT_MAX: 10000
+  USER_RATE_LIMIT_MAX: 50000
+  GLOBAL_ACTION_RATE_LIMIT_MAX: 100000
+  BATCH_RATE_LIMIT_MAX: 1000
+
+  # Force JavaScript actions still bundled for Node 20 to run under Node 24
+  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+
+jobs:
+  tier1:
+    name: Tier 1
+    uses: ./.github/workflows/_tier1.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      upload-coverage: false
+
+  coverage:
+    name: Coverage
+    uses: ./.github/workflows/coverage-gate.yml
+    permissions:
+      contents: read
+
+  integration-full:
+    name: Integration (full, unsharded)
+    uses: ./.github/workflows/_integration.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      label: nightly-full
+      mode: tests
+      timeout-minutes: 75
+
+  quarantine:
+    name: Quarantine (non-blocking)
+    uses: ./.github/workflows/_integration.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      label: nightly-quarantine
+      mode: quarantine
+      non-blocking: true
+      timeout-minutes: 30
+
+  extended:
+    name: Extended
+    uses: ./.github/workflows/_extended.yml
+    permissions:
+      contents: read
+    secrets: inherit
+
+  load:
+    name: Load (in-process, informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # SLO numbers are reported, not enforced: shared runners are too noisy
+    # for a hard latency gate. Real-stack k6 runs stay in loadtest.yml.
+    continue-on-error: true
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm + Node.js + install
+        uses: ./.github/actions/setup-pnpm
+      - name: Run in-process load runner
+        run: |
+          set -o pipefail
+          pnpm exec tsx tests/load/in-process-load-runner.ts 2>&1 | tee /tmp/load-runner.log
+      - name: Upload load report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-load-report
+          path: /tmp/load-runner.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Job 6: AI edit-function contract (Phase 3 — REAL production models)
+  #
+  # Runs the real-LLM contract test: for every model in the production
+  # catalog, a real generation is published through the versioned
+  # release/registry path and must store function_kind = 'edit'.
+  #
+  # INERT BY DEFAULT. Requires a repo admin to configure:
+  #   - variable TELOS_AIE_AGENT_URL      — a reachable telos-AIE-agent
+  #     engine holding the production LLM credentials (credentials never
+  #     live in this repo or in CI).
+  #   - variable AI_CONTRACT_TEST_ENABLED = "1" — explicit opt-in gate.
+  #   - secret  TELOS_AIE_AGENT_TOKEN     — only if the engine enforces
+  #     the shared-secret header (optional).
+  # ===========================================================================
+  ai-contract:
+    name: AI Contract (real models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ vars.AI_CONTRACT_TEST_ENABLED == '1' }}
+
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      AI_CONTRACT_TEST: "1"
+      TELOS_AIE_AGENT_URL: ${{ vars.TELOS_AIE_AGENT_URL }}
+      TELOS_AIE_AGENT_TOKEN: ${{ secrets.TELOS_AIE_AGENT_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm + Node.js + install
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Verify engine catalog is reachable
+        run: |
+          if [ -z "$TELOS_AIE_AGENT_URL" ]; then
+            echo "TELOS_AIE_AGENT_URL is not configured — set the repo variable or disable AI_CONTRACT_TEST_ENABLED."
+            exit 1
+          fi
+          curl -sf --max-time 15 "$TELOS_AIE_AGENT_URL/api/models"
+
+      - name: Run AI contract test (real production models)
+        run: pnpm run test:ai-contract
+
+  # ---------------------------------------------------------------------------
+  # Failure notification — one open issue at a time, closed on recovery.
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Report nightly result
+    if: always()
+    needs: [tier1, coverage, integration-full, extended, ai-contract]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close the ci-nightly-failure issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const LABEL = 'ci-nightly-failure';
+            const needs = JSON.parse(process.env.NEEDS_JSON);
+            const failed = Object.entries(needs)
+              .filter(([, v]) => v.result === 'failure' || v.result === 'cancelled')
+              .map(([k, v]) => `${k} (${v.result})`);
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const sha = context.sha.slice(0, 7);
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: LABEL, per_page: 100,
+            });
+            const existing = open.filter((i) => !i.pull_request).sort((a, b) => a.number - b.number)[0];
+
+            if (failed.length === 0) {
+              core.info('Nightly green.');
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `Nightly CI recovered on ${sha}: ${runUrl}. Closing.`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number, state: 'closed', state_reason: 'completed',
+                });
+              }
+              return;
+            }
+
+            const body = [
+              `Nightly CI failed on \`${sha}\` — ${runUrl}`,
+              '',
+              '**Failed jobs:**',
+              ...failed.map((f) => `- ${f}`),
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              core.notice(`Updated #${existing.number}`);
+              return;
+            }
+            try {
+              await github.rest.issues.createLabel({
+                owner, repo, name: LABEL, color: 'b60205',
+                description: 'Nightly full CI run failed (managed by nightly.yml)',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e; // 422 = label already exists
+            }
+            const { data: issue } = await github.rest.issues.create({
+              owner, repo, labels: [LABEL],
+              title: `Nightly CI failing (${new Date().toISOString().slice(0, 10)})`,
+              body: body + '\n\nThis issue is updated by each failing nightly run and closed automatically on the next green run.',
+            });
+            core.notice(`Opened #${issue.number}`);

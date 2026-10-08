@@ -1,0 +1,256 @@
+# =============================================================================
+# Integration lane (reusable) — Tier 1 smoke, Tier 2 selective groups,
+# Tier 3/4/5 full sharded runs and the non-blocking quarantine lane.
+# docs/ci.md
+#
+# Every invocation gets its own ephemeral services (GitHub service containers
+# + docker-run deps torn down with the runner): no shared DB, no shared state
+# between shards or PRs. The vitest lane itself (tests/globalSetup.ts) creates
+# and seals tellus_tests, migrates, seeds and spawns the API server.
+#
+# mode:
+#   smoke       run the `smoke` list from .github/ci/test-selection.json
+#   tests       run vitest with the JSON `filters` (empty = everything),
+#               optionally --shard=N/M
+#   quarantine  run ONLY the quarantine list (CI_TEST_MODE=quarantine)
+# stack:
+#   full        PG + OpenSearch + ClickHouse + Kafka/ZK + Temporal + MinIO + Keycloak
+#   minimal     PG + OpenSearch + MinIO + Keycloak (smoke; ~1 min faster boot)
+# =============================================================================
+name: integration-lane
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: Human-readable lane label (used in artifact names).
+        type: string
+        required: true
+      mode:
+        type: string
+        default: tests
+      filters:
+        description: JSON array of vitest file filters ("[]" = all tests).
+        type: string
+        default: "[]"
+      shard:
+        type: number
+        default: 1
+      shard-total:
+        type: number
+        default: 1
+      stack:
+        type: string
+        default: full
+      timeout-minutes:
+        type: number
+        default: 30
+      non-blocking:
+        description: Never fail the caller (quarantine lane).
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+
+env:
+  # PostgreSQL connection — F-14: use GitHub Actions secrets.
+  # For local testing these fall back to CI-only defaults below.
+  PGHOST: localhost
+  PGPORT: 5432
+  PGDATABASE: tellus_db
+  PGUSER: ${{ secrets.CI_PGUSER || 'tellus' }}
+  PGPASSWORD: ${{ secrets.CI_PGPASSWORD || 'tellus123' }}
+  POSTGRES_URL: postgresql://${{ secrets.CI_PGUSER || 'tellus' }}:${{ secrets.CI_PGPASSWORD || 'tellus123' }}@localhost:5432/tellus_db
+
+  # OpenSearch connection
+  OPENSEARCH_URL: http://localhost:9200
+
+  # Test data directory (used by seed scripts)
+  DATA_DIR: /tmp/ontology-testdata
+
+  # MinIO / S3 object storage — F-14: credentials via secrets with fallback.
+  S3_ENDPOINT: http://localhost:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: tellus-uploads
+  S3_ACCESS_KEY_ID: ${{ secrets.CI_S3_ACCESS_KEY_ID || 'minioadmin' }}
+  S3_SECRET_ACCESS_KEY: ${{ secrets.CI_S3_SECRET_ACCESS_KEY || 'minioadmin' }}
+  S3_FORCE_PATH_STYLE: "true"
+  # MinIO Community is source-only upstream; use a source-built final release
+  # and pin the OCI index digest so every job resolves the same image.
+  MINIO_IMAGE: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+
+  # Keycloak (SSO / OAuth 2.0) — F-14: secret via GitHub secrets with fallback.
+  KEYCLOAK_URL: http://localhost:8086
+  KEYCLOAK_REALM: tellus
+  KEYCLOAK_CLIENT_ID: tellus-api
+  KEYCLOAK_FRONTEND_CLIENT_ID: tellus-frontend
+  KEYCLOAK_CONFIDENTIAL_CLIENT_ID: tellus-confidential
+  KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET: ${{ secrets.CI_KEYCLOAK_SECRET || 'tellus-confidential-secret-change-me' }}
+  KEYCLOAK_TEST_USER: cypress@tellus.local
+  KEYCLOAK_TEST_PASS: ${{ secrets.CI_KEYCLOAK_TEST_PASS || 'Password123!' }}
+
+  # Elevated rate limits for CI (prevents test interference)
+  RATE_LIMIT_MAX: 10000
+  ACTION_RATE_LIMIT_MAX: 10000
+  USER_RATE_LIMIT_MAX: 50000
+  GLOBAL_ACTION_RATE_LIMIT_MAX: 100000
+  BATCH_RATE_LIMIT_MAX: 1000
+
+  # Force JavaScript actions still bundled for Node 20 to run under Node 24
+  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+
+jobs:
+  vitest:
+    name: vitest (${{ inputs.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    continue-on-error: ${{ inputs.non-blocking }}
+
+    services:
+      # ClickHouse / ZooKeeper / Kafka are only needed by the osv2-serving +
+      # funnel CDC suites; an empty image string skips the service container
+      # for the minimal (smoke) stack.
+      clickhouse:
+        image: ${{ inputs.stack == 'full' && 'clickhouse/clickhouse-server:24.8-alpine' || '' }}
+        env:
+          CLICKHOUSE_USER: tellus
+          CLICKHOUSE_PASSWORD: tellus_ch_pw
+          CLICKHOUSE_DB: default
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd="wget -qO- http://127.0.0.1:8123/ping | grep -q Ok || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+      zookeeper:
+        image: ${{ inputs.stack == 'full' && 'confluentinc/cp-zookeeper:7.6.1' || '' }}
+        env:
+          ZOOKEEPER_CLIENT_PORT: 2181
+          ZOOKEEPER_TICK_TIME: 2000
+        ports:
+          - 2181:2181
+
+      kafka:
+        image: ${{ inputs.stack == 'full' && 'confluentinc/cp-kafka:7.6.1' || '' }}
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd="kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=12
+
+      postgres:
+        # ECR Public mirror of the official image (Docker Hub pulls were
+        # intermittently timing out on runners).
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      opensearch:
+        image: opensearchproject/opensearch:2.11.0
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm + Node.js + install
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Start lane dependencies (Temporal / MinIO / Keycloak)
+        uses: ./.github/actions/start-lane-deps
+        with:
+          temporal: ${{ inputs.stack == 'full' }}
+
+      - name: Run vitest
+        env:
+          MODE: ${{ inputs.mode }}
+          FILTERS_JSON: ${{ inputs.filters }}
+          SHARD: ${{ inputs.shard }}
+          SHARD_TOTAL: ${{ inputs.shard-total }}
+          JUNIT_OUTPUT: reports/junit.xml
+        run: |
+          set -euo pipefail
+          set -f  # filters are literal paths/prefixes, never globs
+          args=(vitest run --config vitest.ci.config.ts)
+          files=()
+          case "$MODE" in
+            smoke)
+              mapfile -t files < <(node scripts/ci/plan-tests.mjs list smoke | jq -r '.[]')
+              ;;
+            tests)
+              mapfile -t files < <(jq -r '.[]' <<<"$FILTERS_JSON")
+              # A selective filter may legitimately match nothing in one shard.
+              if [ "${#files[@]}" -gt 0 ]; then args+=(--passWithNoTests); fi
+              ;;
+            quarantine)
+              export CI_TEST_MODE=quarantine
+              args+=(--passWithNoTests)
+              ;;
+            *)
+              echo "unknown mode: $MODE" >&2; exit 2
+              ;;
+          esac
+          if [ "$SHARD_TOTAL" -gt 1 ]; then
+            args+=("--shard=${SHARD}/${SHARD_TOTAL}")
+          fi
+          if [ "${#files[@]}" -gt 0 ]; then
+            args+=("${files[@]}")
+          fi
+          echo "pnpm exec ${args[*]}"
+          pnpm exec "${args[@]}"
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-${{ inputs.label }}-${{ inputs.shard }}of${{ inputs.shard-total }}-${{ github.run_attempt }}
+          path: reports/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload server log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: server-log-${{ inputs.label }}-${{ inputs.shard }}of${{ inputs.shard-total }}-${{ github.run_attempt }}
+          path: /tmp/tellus-integration-server.log
+          if-no-files-found: ignore
+          retention-days: 7

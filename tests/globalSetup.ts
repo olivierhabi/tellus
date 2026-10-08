@@ -436,6 +436,12 @@ export async function setup(): Promise<void> {
       // NOT be set in production. It enables the rate-limiter test suite to
       // reset in-process counter state without restarting the server.
       TELLUS_TEST_HOOKS: "1",
+      // Auth test hooks (POST /api/v1/auth/_test/login-bypass) are mounted by
+      // src/server.ts only when NODE_ENV !== "production" AND
+      // TELLUS_AUTH_TEST_HOOKS === "1"; the handler additionally requires the
+      // X-Tellus-Test-Hook header from a loopback peer. The foundry BE-013
+      // suite exercises this route, so the lane server must expose it.
+      TELLUS_AUTH_TEST_HOOKS: "1",
       RATE_LIMIT_MAX: "999999",
       // Restore action-specific rate limits to their production defaults.
       // CI workflows (and some developer shells) set these to elevated
