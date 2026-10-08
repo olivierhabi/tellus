@@ -1,0 +1,94 @@
+{
+  "$comment": "Single source of truth for CI test selection (docs/ci.md). Read by scripts/ci/plan-tests.mjs (path filters + shard matrix) and vitest.ci.config.ts (quarantine). Paths are picomatch globs (dorny/paths-filter); group `tests` are vitest file-name filters (substring match).",
+  "fullShards": 8,
+  "smoke": [
+    "tests/smoke/db-connectivity-smoke-integration.test.ts",
+    "tests/tuesday/integration/global-auth-integration.test.ts",
+    "tests/wednesday/integration/query-basic-integration.test.ts",
+    "tests/tuesday/integration/action-validate-integration.test.ts"
+  ],
+  "quarantine": [
+    {
+      "file": "tests/integration/automate/automate-object-condition-integration.test.ts",
+      "issue": 80,
+      "reason": "Timing-sensitive Temporal condition evaluation (docs/adr/2026-08-08-action-pin-drift-followups.md §3)"
+    },
+    {
+      "file": "tests/integration/automate/automate-run-on-all-load-integration.test.ts",
+      "issue": 81,
+      "reason": "Load-shaped run-on-all fan-out, intermittent timeouts (docs/adr/2026-08-08-action-pin-drift-followups.md §3)"
+    },
+    {
+      "file": "tests/osv2-serving/cdc-topology-e2e-integration.test.ts",
+      "issue": 82,
+      "reason": "Kafka CDC topology convergence race (docs/adr/2026-08-08-action-pin-drift-followups.md §3)"
+    }
+  ],
+  "run_all": [
+    "src/*.ts",
+    "src/db/**", "src/db*", "src/config/**", "src/middleware/**", "src/utils/**",
+    "src/lib/**", "src/types/**", "src/models/**", "src/boot/**", "src/schemas/**",
+    "src/migrations/**", "src/migrate*", "src/foundryMigrate*", "src/seed*", "src/seeds/**",
+    "schemas/**", "migrations/**",
+    "infra/**", "k8s/**", "deploy/**", "keycloak/**", "packages/**", "scripts/**",
+    "docker-compose*", "Dockerfile*", ".dockerignore",
+    ".github/**",
+    "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".nvmrc",
+    "tsconfig*.json", "vitest*.ts", "eslint.config.js",
+    "tests/*.ts", "tests/helpers/**", "tests/fixtures/**", "tests/utils/**", "tests/webhooks/**", "tests/smoke/**"
+  ],
+  "no_tests": [
+    "docs/**", "**/*.md", "decisions/**", "runbooks/**", "assets/**",
+    "LICENSE", ".gitignore", ".gitleaks.toml", "codecov.yml"
+  ],
+  "groups": {
+    "quiver": {
+      "paths": ["src/services/quiver/**", "src/routes/quiver/**", "src/**/quiver*"],
+      "tests": ["tests/quiver/"],
+      "shards": 1
+    },
+    "code-repos": {
+      "paths": ["src/services/codeRepos/**", "src/services/codeRepository/**", "src/routes/codeRepo*", "src/services/functions*/**", "src/**/functionsPublish*"],
+      "tests": ["tests/integration/code-repos/", "tests/unit/code-repos/", "tests/unit/functions/", "tests/unit/functionsPublish/"],
+      "shards": 2
+    },
+    "workshop": {
+      "paths": ["src/services/workshop/**", "src/routes/workshop*"],
+      "tests": ["tests/integration/workshop/", "tests/unit/workshop/", "tests/chaos/workshop/"],
+      "shards": 1
+    },
+    "automate": {
+      "paths": ["src/services/automate/**", "src/routes/automations*"],
+      "tests": ["tests/integration/automate/", "tests/unit/automate/"],
+      "shards": 1
+    },
+    "connectivity": {
+      "paths": ["src/services/connectivity/**", "src/routes/connectivity*"],
+      "tests": ["tests/connectivity/"],
+      "shards": 1
+    },
+    "funnel": {
+      "paths": ["src/services/funnel/**", "src/routes/funnel*"],
+      "tests": ["tests/funnel/", "tests/unit/funnel/", "tests/foundry/integration/funnel-b9-", "tests/foundry/integration/final-06-funnel"],
+      "shards": 1
+    },
+    "osv2-serving": {
+      "paths": ["src/services/serving/**", "src/services/stemma/**", "src/services/stemmaEvents/**", "src/services/jemma/**", "src/routes/serving*"],
+      "tests": ["tests/osv2-serving/", "tests/unit/serving/"],
+      "shards": 1
+    },
+    "foundry": {
+      "paths": [
+        "src/services/compass/**", "src/services/gatekeeper/**", "src/services/trash/**",
+        "src/services/project*/**", "src/services/folder*/**", "src/services/pipelines/**",
+        "src/services/deploy/**", "src/services/transform/**", "src/services/iceberg-catalog/**",
+        "src/services/duckdb/**", "src/services/datasets/**", "src/services/jobSpec/**",
+        "src/services/templates/**",
+        "src/routes/foundry*", "src/routes/projects*", "src/routes/folders*", "src/routes/pipelines*",
+        "src/routes/compass*", "src/routes/projectUploads*", "src/routes/projectWorkspace*"
+      ],
+      "tests": ["tests/foundry/", "tests/unit/pipelines/", "tests/unit/services/deploy/", "tests/unit/services/transform/"],
+      "shards": 2
+    }
+  }
+}
