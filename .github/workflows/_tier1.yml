@@ -1,0 +1,133 @@
+# =============================================================================
+# Tier 1 — fast static + unit checks (reusable). docs/ci.md
+#
+# Called by ci.yml (every PR / merge-queue / push) and nightly.yml. No Docker,
+# no services. The three jobs run in parallel (the old `unit needs typecheck`
+# serialization is gone: `unit` already compiles via `pnpm run build`).
+# =============================================================================
+name: tier1
+
+on:
+  workflow_call:
+    inputs:
+      upload-coverage:
+        description: Upload unit coverage to Codecov.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Same workflow-level env the jobs had in the former ci.yml.
+
+env:
+  # PostgreSQL connection — F-14: use GitHub Actions secrets.
+  # For local testing these fall back to CI-only defaults below.
+  PGHOST: localhost
+  PGPORT: 5432
+  PGDATABASE: tellus_db
+  PGUSER: ${{ secrets.CI_PGUSER || 'tellus' }}
+  PGPASSWORD: ${{ secrets.CI_PGPASSWORD || 'tellus123' }}
+  POSTGRES_URL: postgresql://${{ secrets.CI_PGUSER || 'tellus' }}:${{ secrets.CI_PGPASSWORD || 'tellus123' }}@localhost:5432/tellus_db
+
+  # OpenSearch connection
+  OPENSEARCH_URL: http://localhost:9200
+
+  # Test data directory (used by seed scripts)
+  DATA_DIR: /tmp/ontology-testdata
+
+  # MinIO / S3 object storage — F-14: credentials via secrets with fallback.
+  S3_ENDPOINT: http://localhost:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: tellus-uploads
+  S3_ACCESS_KEY_ID: ${{ secrets.CI_S3_ACCESS_KEY_ID || 'minioadmin' }}
+  S3_SECRET_ACCESS_KEY: ${{ secrets.CI_S3_SECRET_ACCESS_KEY || 'minioadmin' }}
+  S3_FORCE_PATH_STYLE: "true"
+  # MinIO Community is source-only upstream; use a source-built final release
+  # and pin the OCI index digest so every job resolves the same image.
+  MINIO_IMAGE: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+
+  # Keycloak (SSO / OAuth 2.0) — F-14: secret via GitHub secrets with fallback.
+  KEYCLOAK_URL: http://localhost:8086
+  KEYCLOAK_REALM: tellus
+  KEYCLOAK_CLIENT_ID: tellus-api
+  KEYCLOAK_FRONTEND_CLIENT_ID: tellus-frontend
+  KEYCLOAK_CONFIDENTIAL_CLIENT_ID: tellus-confidential
+  KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET: ${{ secrets.CI_KEYCLOAK_SECRET || 'tellus-confidential-secret-change-me' }}
+  KEYCLOAK_TEST_USER: cypress@tellus.local
+  KEYCLOAK_TEST_PASS: ${{ secrets.CI_KEYCLOAK_TEST_PASS || 'Password123!' }}
+
+  # Elevated rate limits for CI (prevents test interference)
+  RATE_LIMIT_MAX: 10000
+  ACTION_RATE_LIMIT_MAX: 10000
+  USER_RATE_LIMIT_MAX: 50000
+  GLOBAL_ACTION_RATE_LIMIT_MAX: 100000
+  BATCH_RATE_LIMIT_MAX: 1000
+
+  # Force JavaScript actions still bundled for Node 20 to run under Node 24
+  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+
+jobs:
+  lint:
+    name: Lint & SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm + Node.js + install
+        uses: ./.github/actions/setup-pnpm
+      - name: Run ESLint (TypeScript + security)
+        run: pnpm run lint
+
+  typecheck:
+    name: TypeScript Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm + Node.js + install
+        uses: ./.github/actions/setup-pnpm
+      - name: Typecheck (tsc --noEmit)
+        run: npx tsc --noEmit
+
+  unit:
+    name: Unit Tests (no Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm + Node.js + install
+        uses: ./.github/actions/setup-pnpm
+      - name: TypeScript compile check
+        run: pnpm run build
+      - name: Run unit tests with coverage
+        # Same command as `pnpm run test:unit`, plus a JUnit reporter.
+        run: >-
+          pnpm exec vitest run --config vitest.unit.config.ts
+          --reporter=verbose --reporter=junit
+          --outputFile.junit=reports/junit-unit.xml
+        env:
+          COVERAGE: "1"
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-unit-${{ github.run_attempt }}
+          path: reports/junit-unit.xml
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload coverage reports to Codecov
+        # Fork PRs get no CODECOV_TOKEN (secrets are never exposed to forks);
+        # the upload is best-effort either way.
+        if: always() && inputs.upload-coverage
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unit
+          fail_ci_if_error: false
