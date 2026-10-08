@@ -14,7 +14,7 @@
 //
 // The resolver is exercised against a stub knex (no PG needed) so the real
 // query shape — which table, which columns, the project scoping — is asserted,
-// not just the presence of a string in the source. The two INSERT call sites
+// not just the presence of a string in the source. The registration call sites
 // are then pinned by a source guard, since reaching them for real requires a
 // full materializing deploy (covered by the manual browser/API run).
 // ---------------------------------------------------------------------------
@@ -107,50 +107,48 @@ describe("output dataset folder inheritance", () => {
   });
 });
 
-describe("both INSERT sites inherit, both UPDATE sites do not", () => {
+describe("every registration site inherits, update patches do not", () => {
   const source = readFileSync(
     resolve(__dirname, "../../../src/services/deploymentService.ts"),
     "utf-8",
   );
 
-  it("calls the resolver at the engine/Iceberg and legacy INSERT sites", () => {
-    // Two insert paths exist (engine/Iceberg + legacy CSV/parquet). A fix that
-    // lands on only one leaves half the deploys stranded at the root.
+  it("calls the resolver at the DuckDB-engine, Iceberg-engine and legacy registration sites", () => {
+    // Three registration paths exist (DuckDB engine, Iceberg engine, legacy
+    // CSV/parquet). A fix that lands on only some leaves deploys stranded at
+    // the root. All three now go through registerDataset (incident 3ec397d5).
     const calls = source.match(/resolveOutputFolderId\(/g) ?? [];
-    // 1 declaration + 2 call sites.
-    expect(calls).toHaveLength(3);
+    // 1 declaration + 3 call sites.
+    expect(calls).toHaveLength(4);
     expect(source).toMatch(
       /const outputFolderId = await this\.resolveOutputFolderId\(\s*args\.pipelineId,\s*args\.projectId,?\s*\)/s,
     );
-    expect(source).toMatch(
-      /const outputFolderId = await this\.resolveOutputFolderId\(pipelineId, projectId\)/,
-    );
-    // Both INSERT sites place the dataset in the resolved folder.
-    for (const m of source.matchAll(
-      /\.insert\(\{[\s\S]{0,1400}?folder_id: outputFolderId[\s\S]{0,200}?\}\)/g,
-    )) {
-      expect(m[0]).toMatch(/foundry_datasets|datasetPatch|project_id/);
-    }
     expect(
-      source.match(/folder_id: outputFolderId/g) ?? [],
+      source.match(/const outputFolderId = await this\.resolveOutputFolderId\(pipelineId, projectId\)/g) ?? [],
     ).toHaveLength(2);
+    // Every registration places the dataset in the resolved folder.
+    expect(source.match(/registerDataset\(this\.knex, \{/g) ?? []).toHaveLength(3);
+    expect(source.match(/folderId: outputFolderId/g) ?? []).toHaveLength(3);
   });
 
   it("leaves folder_id out of the existing-dataset UPDATE patches", () => {
     // Redeploy must not drag a dataset the user has since moved back into the
-    // pipeline's folder. The UPDATE branches are keyed on the immutable
-    // `outputDatasetId`, so placement is the user's from then on.
-    const patch = source.slice(
-      source.indexOf("const datasetPatch = {"),
-      source.indexOf("if (existingDatasetId) {"),
-    );
-    expect(patch.length).toBeGreaterThan(0);
-    expect(patch).not.toMatch(/folder_id/);
-
-    for (const m of source.matchAll(
-      /\.where\(\{ id: existingDatasetId \}\)\s*\.update\(([\s\S]{0,900}?)\);/g,
-    )) {
+    // pipeline's folder. folder_id is only set on INSERT (registerDataset's
+    // baseRow); the update-in-place / adopt paths write `patch` alone.
+    const patches = [...source.matchAll(/const datasetPatch = \{([\s\S]*?)\n\s*\};/g)];
+    expect(patches.length).toBeGreaterThan(0);
+    for (const m of patches) expect(m[1]).not.toMatch(/folder_id/);
+    for (const m of source.matchAll(/patch: \{([\s\S]*?)\n\s*\},/g)) {
       expect(m[1]).not.toMatch(/folder_id/);
     }
+
+    const reg = readFileSync(
+      resolve(__dirname, "../../../src/services/datasets/datasetRegistration.ts"),
+      "utf-8",
+    );
+    const updates = reg.match(/\.update\(([^)]*)\)/g) ?? [];
+    const datasetUpdates = updates.filter((u) => u.includes("patch"));
+    expect(datasetUpdates.length).toBeGreaterThan(0);
+    for (const u of datasetUpdates) expect(u).toBe(".update(args.patch)");
   });
 });

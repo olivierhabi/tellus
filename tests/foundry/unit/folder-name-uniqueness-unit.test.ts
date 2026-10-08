@@ -186,10 +186,20 @@ describe("guard is wired into every create/rename path", () => {
     expect(insertIdx).toBeGreaterThan(guardIdx);
   });
 
-  it("rename/move (updateDataset) and duplicateDataset guard", () => {
+  it("rename/move (updateDataset) guards; duplicateDataset uses the atomic registrar", () => {
     const s = src("services/datasetService.ts");
+    // updateDataset keeps the friendly pre-check (unique index is the backstop).
     const matches = s.match(/assertFolderNameAvailable\(this\.knex,/g) ?? [];
-    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(matches.length).toBeGreaterThanOrEqual(1);
+    // duplicateDataset goes through registerDataset (incident 3ec397d5) and
+    // keeps refuse-on-conflict semantics.
+    expect(s).toMatch(/registerDataset\(this\.knex, \{[\s\S]*?adoptIf: async \(\) => false/);
+  });
+
+  it("registerDataset is DB-atomic and keeps the rename pre-check", () => {
+    const s = src("services/datasets/datasetRegistration.ts");
+    expect(s).toContain("ON CONFLICT (project_id, folder_id, name) DO NOTHING");
+    expect(s).toMatch(/findFolderNameConflict\(trx, \{[\s\S]*?excludeDatasetId: boundId/);
   });
 
   it("kafka stream source guards the project-root insert", () => {
@@ -199,13 +209,19 @@ describe("guard is wired into every create/rename path", () => {
     );
   });
 
-  it("both deploy INSERT branches and both rename-on-redeploy branches guard", () => {
+  it("every deploy output registration goes through the atomic registrar", () => {
+    // Incident 3ec397d5: the SELECT-then-INSERT guard (assertFolderNameAvailable
+    // + insert) raced across executors. All deploy writers (DuckDB engine,
+    // Iceberg engine, legacy) now call registerDataset(), which enforces the
+    // name rule via INSERT ... ON CONFLICT and the rename pre-check.
     const s = src("services/deploymentService.ts");
-    const matches = s.match(/assertFolderNameAvailable\(this\.knex, \{/g) ?? [];
-    expect(matches).toHaveLength(4);
-    // Renames must exclude the dataset being updated from its own check.
-    const excludes = s.match(/excludeDatasetId: existingDatasetId/g) ?? [];
-    expect(excludes).toHaveLength(2);
+    const calls = s.match(/registerDataset\(this\.knex, \{/g) ?? [];
+    expect(calls).toHaveLength(3);
+    expect(s).not.toMatch(/assertFolderNameAvailable\(/);
+    expect(s).not.toMatch(/knex\(['"]foundry_datasets['"]\)\s*\.insert\(/);
+    // Renames revalidate the existing binding inside the registrar.
+    const rebinds = s.match(/resolveBoundId: \(\) => this\.resolveBoundDatasetId\(/g) ?? [];
+    expect(rebinds.length).toBe(3);
   });
 
   it("the non-throwing sync registry refuses name conflicts", () => {
