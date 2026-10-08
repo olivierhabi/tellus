@@ -49,6 +49,15 @@ const KNOWN_CODES = new Set([
   "REINDEX_TOO_LARGE",
 ]);
 
+/**
+ * Codes thrown by reindexObjectType that carry their OWN HTTP status and must
+ * reach the client through sendError (ERROR_CODES mapping) instead of being
+ * rewritten into a generic 500 REINDEX_FAILED by the execute-step catch.
+ * REINDEX_TOO_LARGE is the datasource merge-budget guard (413): its message
+ * names the type, the count and the funnel route as the remediation.
+ */
+export const PASSTHROUGH_REINDEX_CODES = new Set(["REINDEX_TOO_LARGE"]);
+
 // ---------------------------------------------------------------------------
 // Helper: validate ontology exists
 // ---------------------------------------------------------------------------
@@ -391,6 +400,16 @@ router.post(
           );
         } catch {
           // Best-effort
+        }
+
+        // Status-carrying guard errors (e.g. REINDEX_TOO_LARGE → 413) keep
+        // their mapped status — never collapse them into a 500.
+        if (err.code && PASSTHROUGH_REINDEX_CODES.has(err.code)) {
+          return sendError(res, err.code, err.message, {
+            objectType: apiName,
+            durationMs,
+            failedAtStep,
+          });
         }
 
         // If it's a known error, return structured response

@@ -966,7 +966,7 @@ async function isQuickwitReachable(): Promise<boolean> {
 // row becomes an INSERT change keyed on the OT's primary-key column.
 // ---------------------------------------------------------------------------
 
-interface FoundryBridgedDatasource {
+export interface FoundryBridgedDatasource {
   filePath: string;
   fileFormat: string;
   primaryKeyColumn: string | null;
@@ -1020,9 +1020,31 @@ export function assertChangelogNonEmpty(args: {
   }
 }
 
-async function loadFoundryBridgedDatasource(
+/**
+ * Resolve the foundry-bridged backing datasource for an object type.
+ *
+ * Fail-closed contract (§4.1): a row registered through the foundry bridge
+ * (non-null foundry_dataset_id, or a `#foundry-dataset:` tag in file_path)
+ * MUST carry a well-formed marker. A malformed marker THROWS out of this
+ * function — it must never be swallowed into `null`, because the caller
+ * treats `null` as "no foundry source" and falls through to the pending-edit
+ * fallback with sourceNonEmpty=false, which disarms the zero-row gate and
+ * completes the run with zero rows silently.
+ *
+ * Only the catalog read itself is best-effort (unchanged behaviour): a
+ * failing lookup still resolves to `null`. Exported for unit tests.
+ */
+export async function loadFoundryBridgedDatasource(
   objectTypeApiName: string
 ): Promise<FoundryBridgedDatasource | null> {
+  let row:
+    | {
+        file_path: string | null;
+        file_format: string | null;
+        primary_key_column: string | null;
+        foundry_dataset_id: string | null;
+      }
+    | undefined;
   try {
     const res = await query(
       `SELECT bd.file_path, bd.file_format, bd.primary_key_column,
@@ -1034,38 +1056,39 @@ async function loadFoundryBridgedDatasource(
         LIMIT 1`,
       [objectTypeApiName]
     );
-    const row = res.rows[0];
-    if (!row) return null;
-    const filePath: string = row.file_path;
-    if (!filePath) return null;
-    const bridgedById = row.foundry_dataset_id != null;
-    // A row registered through the foundry bridge MUST carry a well-formed
-    // marker. Missing/malformed => fail here, never fall through to the
-    // pending-edit fallback (which would emit a silent zero-row changelog).
-    if (bridgedById || filePath.includes("#foundry-dataset:")) {
-      parseFoundryMarker(filePath);
-    } else {
-      // Legacy local-filesystem path — not a foundry-bridged source; the
-      // pending-edit fallback below owns it.
-      return null;
-    }
-    const explicitFormat = (row.file_format as string | null) ?? null;
-    let fileFormat = explicitFormat;
-    if (!fileFormat) {
-      const cleanPath = filePath.slice(0, filePath.indexOf("#"));
-      const ext = cleanPath.toLowerCase();
-      if (ext.endsWith(".json") || ext.endsWith(".jsonl")) fileFormat = "json";
-      else if (ext.endsWith(".tsv")) fileFormat = "tsv";
-      else fileFormat = "csv";
-    }
-    return {
-      filePath,
-      fileFormat,
-      primaryKeyColumn: (row.primary_key_column as string | null) ?? null,
-    };
+    row = res.rows[0];
   } catch {
     return null;
   }
+  if (!row) return null;
+  const filePath: string = row.file_path ?? "";
+  if (!filePath) return null;
+  const bridgedById = row.foundry_dataset_id != null;
+  // A row registered through the foundry bridge MUST carry a well-formed
+  // marker. Missing/malformed => throw here (OUTSIDE the lookup try/catch),
+  // never fall through to the pending-edit fallback (which would emit a
+  // silent zero-row changelog).
+  if (bridgedById || filePath.includes("#foundry-dataset:")) {
+    parseFoundryMarker(filePath);
+  } else {
+    // Legacy local-filesystem path — not a foundry-bridged source; the
+    // pending-edit fallback below owns it.
+    return null;
+  }
+  const explicitFormat = row.file_format ?? null;
+  let fileFormat = explicitFormat;
+  if (!fileFormat) {
+    const cleanPath = filePath.slice(0, filePath.indexOf("#"));
+    const ext = cleanPath.toLowerCase();
+    if (ext.endsWith(".json") || ext.endsWith(".jsonl")) fileFormat = "json";
+    else if (ext.endsWith(".tsv")) fileFormat = "tsv";
+    else fileFormat = "csv";
+  }
+  return {
+    filePath,
+    fileFormat,
+    primaryKeyColumn: row.primary_key_column ?? null,
+  };
 }
 
 function stripFoundryTags(filePath: string): string {
