@@ -346,7 +346,29 @@ resourceLifecycleRouter.post(
               ds.last_output_schema_fingerprint,
               ds.created_at, ds.created_by ?? actorId, actorId,
             ],
-          );
+          ).catch(async (e: unknown) => {
+            // Race-safe restore (incident 3ec397d5): re-creating a trashed
+            // dataset whose name is now held by a live sibling must 409,
+            // not duplicate (the unique index refuses the second row).
+            const { isDatasetNameUniqueViolation, datasetNameConflict } =
+              await import("../services/datasets/folderNameGuard");
+            if (!isDatasetNameUniqueViolation(e)) throw e;
+            const holder = await client.query(
+              `SELECT id FROM foundry_datasets WHERE name = $1 AND project_id = $2
+                 AND ((folder_id = $3) OR (folder_id IS NULL AND $3 IS NULL)) LIMIT 1`,
+              [ds.name, ds.project_id, ds.folder_id],
+            );
+            const conflict = datasetNameConflict({
+              name: String(ds.name),
+              projectId: String(ds.project_id),
+              folderId: (ds.folder_id as string | null) ?? null,
+              conflictingDatasetId: holder.rows[0]?.id,
+            });
+            // Throw (outer catch rolls back; the error middleware maps the
+            // AppError's 409). Must not `res.json` here — the flow below
+            // would attempt a second response.
+            throw conflict;
+          });
 
           // Re-INSERT columns
           if (snap.columns && snap.columns.length > 0) {

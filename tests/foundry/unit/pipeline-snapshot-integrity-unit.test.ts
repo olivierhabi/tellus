@@ -37,6 +37,12 @@ const PIPELINE_ID = "22222222-2222-4222-8222-222222222222";
 const NODE_ID = "33333333-3333-4333-8333-333333333333";
 const SOURCE_ID = "44444444-4444-4444-8444-444444444444";
 const RIGHT_ID = "55555555-5555-4555-8555-555555555555";
+const FILTER_STEP = {
+  function: "Filter",
+  mode: "keep",
+  match: "all",
+  conditions: [{ column: "a", operator: "isNotNull" }],
+};
 
 /**
  * Minimal knex stand-in: a function returning per-table chains that capture
@@ -100,7 +106,9 @@ describe("updateNode — previewSnapshot is write-protected", () => {
     // The client echoes a config that (legitimately) does not include the
     // snapshot — e.g. re-applying a transform chain.
     await svc.updateNode(PROJECT_ID, PIPELINE_ID, NODE_ID, {
-      config: { transforms: [{ function: "Filter" }], sourceNodeId: SOURCE_ID },
+      // A well-formed Filter: updateNode refuses structurally incomplete
+      // steps (transformStepIntegrity), so the echo must carry conditions.
+      config: { transforms: [FILTER_STEP], sourceNodeId: SOURCE_ID },
     });
 
     expect(captured).toHaveLength(1);
@@ -108,7 +116,7 @@ describe("updateNode — previewSnapshot is write-protected", () => {
     // The incoming replace carries no snapshot; the PERSISTED one is
     // re-attached from the current row so it can never be wiped.
     expect(written.previewSnapshot).toEqual({ columns: [{ name: "a", type: "text" }] });
-    expect(written.transforms).toEqual([{ function: "Filter" }]);
+    expect(written.transforms).toEqual([FILTER_STEP]);
     expect(written.sourceNodeId).toBe(SOURCE_ID);
   });
 

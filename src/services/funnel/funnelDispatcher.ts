@@ -132,6 +132,15 @@ async function tick(options: DispatcherOptions): Promise<number> {
       console.warn(`[funnel/dispatcher] reconcile tick failed: ${(err as Error).message}`);
     }
   }
+  // Stall watchdog (both paths hold funnel_state locks — Temporal-driven and
+  // PG-dispatcher alike). Fails instrumented-but-quiet locks so a wedged run
+  // surfaces as STALLED within the stall budget instead of spinning forever.
+  try {
+    const { sweepStalledIndexing } = await import("./indexingLease");
+    await sweepStalledIndexing();
+  } catch (err) {
+    console.warn(`[funnel/dispatcher] stall sweep failed: ${(err as Error).message}`);
+  }
   const objectTypes = options.objectTypes ?? (await listObjectTypesWithSignals());
   let runsStarted = 0;
   for (const objectTypeApiName of objectTypes) {

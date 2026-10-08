@@ -205,10 +205,40 @@ function normaliseFormat(raw: string | null | undefined): InputFormat {
  * Compute the current canonical chain hash for a node given its config
  * JSON. Kept here so transformService and deploymentService hash the
  * same way and the staleness check is symmetric.
+ *
+ * A UNION node's second input and its column-merge policy live at CONFIG
+ * level — `unionApply` writes `config.rightNodeId` / `config.rightNodeIds`
+ * and `config.mode`, deliberately NOT into `config.transforms` — so hashing
+ * the transform array alone left the deploy gate (previewPinning) unable to
+ * see a swapped union input or a `strict` -> `wide` policy change. That is
+ * the dangerous direction: the gate exists to catch "the canvas preview no
+ * longer matches what deploy will execute", and for union nodes it was blind.
+ *
+ * So the union wiring is folded into the payload whenever it exists. Nodes
+ * with no union keep the exact historical payload (the bare transform array),
+ * which means every non-union snapshot captured before this change still
+ * hashes identically and no unrelated pipeline is suddenly PREVIEW_STALE.
+ * Union snapshots captured before this change DO hash differently and will be
+ * reported stale once — that is the intended fail-closed direction: their old
+ * hash never covered the wiring, so it cannot be trusted to certify it.
  */
 export function chainHashFromNodeConfig(config: unknown): string {
-  const transforms = Array.isArray((config as { transforms?: unknown })?.transforms)
-    ? (config as { transforms: unknown[] }).transforms
-    : [];
-  return hashTransformChain(transforms);
+  const cfg = (config ?? {}) as {
+    transforms?: unknown;
+    rightNodeId?: unknown;
+    rightNodeIds?: unknown;
+    mode?: unknown;
+  };
+  const transforms = Array.isArray(cfg.transforms) ? cfg.transforms : [];
+  const rightNodeIds = Array.isArray(cfg.rightNodeIds)
+    ? cfg.rightNodeIds.filter((v): v is string => typeof v === 'string')
+    : (typeof cfg.rightNodeId === 'string' ? [cfg.rightNodeId] : []);
+  if (rightNodeIds.length === 0) return hashTransformChain(transforms);
+  return hashTransformChain({
+    transforms,
+    union: {
+      rightNodeIds,
+      mode: typeof cfg.mode === 'string' ? cfg.mode : null,
+    },
+  });
 }

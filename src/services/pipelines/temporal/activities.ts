@@ -96,7 +96,9 @@ export async function pbRunDeployment(
       spanId: input.spanId ?? undefined,
       deploymentId: input.deploymentId,
     },
-    () => deployment().executeDeploymentById(input.deploymentId),
+    () => deployment().executeDeploymentById(input.deploymentId, {
+      workerId: `temporal-${input.deploymentId}`,
+    }),
   );
   return { deploymentId: input.deploymentId, terminal: true };
 }

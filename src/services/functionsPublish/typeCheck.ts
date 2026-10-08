@@ -152,6 +152,9 @@ export function typeCheckRepository(files: readonly TypeCheckSourceFile[]): Type
         target: ts.ScriptTarget.ES2022,
         module: ts.ModuleKind.CommonJS,
         moduleResolution: ts.ModuleResolutionKind.Node10,
+        // TS 6 deprecates baseUrl (TS5101) and node10 resolution (TS5107);
+        // silence those diagnostics so they don't fail every publish check.
+        ignoreDeprecations: "6.0",
         strict: true,
         esModuleInterop: true,
         allowSyntheticDefaultImports: true,

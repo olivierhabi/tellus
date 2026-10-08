@@ -70,6 +70,11 @@ router.get('/:pipelineId/expectations', authenticate, viewer, pipelineController
 router.post('/:pipelineId/expectations', authenticate, editor, pipelineController.addExpectation);
 router.delete('/:pipelineId/expectations/:expectationId', authenticate, editor, pipelineController.removeExpectation);
 
+// Per-node dataset health checks — surfaced by the Data Health dialog.
+router.get('/:pipelineId/health-checks', authenticate, viewer, pipelineController.listHealthChecks);
+router.post('/:pipelineId/health-checks', authenticate, editor, pipelineController.addHealthCheck);
+router.delete('/:pipelineId/health-checks/:healthCheckId', authenticate, editor, pipelineController.removeHealthCheck);
+
 // Pipeline node routes — node CRUD is PUT/POST/DELETE on pipeline state → editor.
 router.post('/:pipelineId/nodes', authenticate, editor, pipelineController.addNode);
 router.post('/:pipelineId/nodes/bulk', authenticate, editor, pipelineController.addNodesBulk);
@@ -140,6 +145,16 @@ router.post('/:pipelineId/nodes/:nodeId/transforms/compute-if-absent/preview', a
 router.post('/:pipelineId/nodes/:nodeId/transforms/compute-if-absent/apply', authenticate, editor, pipelineController.computeIfExpressionAbsentApply);
 router.post('/:pipelineId/nodes/:nodeId/transforms/text-block/preview', authenticate, viewer, pipelineController.textBlockPreview);
 router.post('/:pipelineId/nodes/:nodeId/transforms/text-block/apply', authenticate, editor, pipelineController.textBlockApply);
+
+// Palantir expression sha256V1 — "Hash sha256". Null-propagating; the second
+// half of the documented concat-then-hash unique-ID recipe.
+router.post('/:pipelineId/nodes/:nodeId/transforms/hash-sha256/preview', authenticate, viewer, pipelineController.hashSha256Preview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/hash-sha256/apply', authenticate, editor, pipelineController.hashSha256Apply);
+
+// Palantir transform windowV1 — aggregations over a partition, row count
+// preserved (the expressible form of `count(*) over (partition by ...)`).
+router.post('/:pipelineId/nodes/:nodeId/transforms/window/preview', authenticate, viewer, pipelineController.windowPreview);
+router.post('/:pipelineId/nodes/:nodeId/transforms/window/apply', authenticate, editor, pipelineController.windowApply);
 
 // Tier B aggregate-family transforms (PB-B2.follow-2).
 router.post('/:pipelineId/nodes/:nodeId/transforms/aggregate/preview', authenticate, viewer, pipelineController.aggregatePreview);

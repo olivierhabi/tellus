@@ -68,3 +68,21 @@ ignore:
   - vulnerability: CVE-2026-19693
     package:
       name: extract-zip
+
+  # --- braces — dev-only tooling, no fixed version exists ---
+  # CVE-2026-93687 (High): braces 3.0.3 is the latest 3.x release and grype
+  # reports no fix. It is reached ONLY via chokidar / micromatch under nodemon,
+  # ts-node-dev and tsc-alias (all devDependencies); the production image is
+  # built with `pnpm install --prod`. Remove when a patched braces ships.
+  - vulnerability: CVE-2026-93687
+    package:
+      name: braces
+
+  # --- http-cache-semantics — install-time only, no fixed version exists ---
+  # CVE-2026-93748 / GHSA-ch52-4w7c-c8xp (High): reached only via
+  # duckdb > node-gyp > make-fetch-happen, which runs at install/build time to
+  # fetch native binaries, never at request time. No patched release exists.
+  # Mirrors the pnpm.auditConfig.ignoreGhsas entry in package.json.
+  - vulnerability: CVE-2026-93748
+    package:
+      name: http-cache-semantics

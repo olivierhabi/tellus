@@ -33,6 +33,92 @@ export interface NameConflict {
   resourceName: string;
 }
 
+/**
+ * Name of the backstop unique index created by migration
+ * 190_dataset_name_uniqueness.sql: one live dataset name per
+ * (project, folder). Root-level rows (folder_id NULL) participate via
+ * NULLS NOT DISTINCT.
+ */
+export const DATASET_NAME_UNIQUE_INDEX =
+  'uq_foundry_datasets_project_folder_name';
+
+/**
+ * Typed domain error for a 23505 raised by DATASET_NAME_UNIQUE_INDEX.
+ * Thrown by the atomic registration path (which has no pre-check to
+ * throw from); carries the same 409 code surface as the guard so callers
+ * and the HTTP layer treat both identically.
+ *
+ * NOTE: intentionally a factory returning the BASE AppError, not a
+ * subclass. foundryAppError sets `name = constructor.name`, and the
+ * error middleware (2b) duck-type-matches `name === 'AppError'` — a
+ * subclass would fall through to a generic 500. Discriminate with
+ * isDatasetNameConflict() (code check), never instanceof.
+ */
+export const DATASET_NAME_ALREADY_EXISTS = 'DATASET_NAME_ALREADY_EXISTS';
+
+export function datasetNameConflict(args: {
+  name: string;
+  projectId: string;
+  folderId: string | null;
+  conflictingDatasetId?: string;
+}): AppError {
+  return new AppError(
+    `The name "${args.name}" is already in use by another dataset ` +
+      `(${args.conflictingDatasetId ?? 'unknown'}) in ` +
+      `${args.folderId ? `folder "${args.folderId}"` : 'the project root'}.`,
+    409,
+    DATASET_NAME_ALREADY_EXISTS,
+    true,
+    {
+      parentFolderId: args.folderId,
+      displayName: args.name,
+      conflictingResourceId: args.conflictingDatasetId,
+      conflictingResourceType: 'dataset',
+    },
+    'ResourceNameAlreadyExists',
+  );
+}
+
+/** Discriminate DATASET_NAME_ALREADY_EXISTS failures (code, not class). */
+export function isDatasetNameConflict(err: unknown): boolean {
+  return (err as { code?: unknown })?.code === DATASET_NAME_ALREADY_EXISTS;
+}
+
+/**
+ * Pure predicate: is this a unique violation from our dataset-name index?
+ * Usable from raw-pool call sites (routes, restore paths) that cannot pass
+ * a knex handle to asDatasetNameConflict.
+ */
+export function isDatasetNameUniqueViolation(err: unknown): boolean {
+  if ((err as { code?: unknown })?.code !== '23505') return false;
+  const constraint = (err as { constraint?: unknown })?.constraint;
+  return (
+    typeof constraint !== 'string' ||
+    constraint.length === 0 ||
+    constraint === DATASET_NAME_UNIQUE_INDEX
+  );
+}
+export async function asDatasetNameConflict(
+  db: Q,
+  err: unknown,
+  args: { name: string; projectId: string; folderId: string | null },
+): Promise<AppError | null> {
+  if (!isDatasetNameUniqueViolation(err)) return null;
+  let conflictingDatasetId: string | undefined;
+  try {
+    const q = db('foundry_datasets').select('id').where({
+      name: args.name,
+      project_id: args.projectId,
+    });
+    if (args.folderId) q.andWhere({ folder_id: args.folderId });
+    else q.andWhereRaw('folder_id IS NULL');
+    conflictingDatasetId = (await q.first('id'))?.id;
+  } catch {
+    /* best-effort only; the conflict itself is the fact that matters */
+  }
+  return datasetNameConflict({ ...args, conflictingDatasetId });
+}
+
 /** Returns the first conflicting sibling resource, or null. */
 export async function findFolderNameConflict(
   knex: Q,

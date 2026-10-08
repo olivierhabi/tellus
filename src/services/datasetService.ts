@@ -279,8 +279,22 @@ export class DatasetService {
       if (updates.folderId !== undefined) updateData.folder_id = updates.folderId;
     }
 
-    const [updated] = await this.knex('foundry_datasets').where({ id: datasetId }).update(updateData).returning('*');
-    return updated;
+    // The unique index (migration 190) backstops the residual race: two
+    // concurrent renames to the same name both pass the pre-check above,
+    // and the loser gets a typed 409 instead of a raw PG error.
+    try {
+      const [updated] = await this.knex('foundry_datasets').where({ id: datasetId }).update(updateData).returning('*');
+      return updated;
+    } catch (e) {
+      const { asDatasetNameConflict } = await import('./datasets/folderNameGuard');
+      const mapped = await asDatasetNameConflict(this.knex, e, {
+        name: String(updateData.name ?? dataset.name),
+        projectId: String((dataset.project_id as string | null) ?? (updateData as Record<string, unknown>).project_id ?? ''),
+        folderId: ((updateData as Record<string, unknown>).folder_id as string | null | undefined) ?? (dataset.folder_id as string | null) ?? null,
+      });
+      if (mapped) throw mapped;
+      throw e;
+    }
   }
 
   /**
@@ -527,50 +541,48 @@ export class DatasetService {
     }
 
     const newName = dataset.name.replace(/(\.[^.]+)$/, ' (copy)$1');
-    // Foundry parity — the copy lands in the same folder; block with 409
-    // if a sibling already holds the derived name.
-    await assertFolderNameAvailable(this.knex, {
-      name: newName,
-      folderId: dataset.folder_id ?? null,
-      projectId,
-    });
+    // Single atomic writer (incident 3ec397d5). Clone preserves the old
+    // refuse-on-conflict semantics: adoptIf always false, so a concurrent
+    // clone of the same source (or any same-named writer) 409s via the
+    // unique index instead of duplicating.
     // NOTE: file_path and content_hash are copied verbatim — the
     // duplicate references the same S3 object as the source. Hard-delete
     // of either row deliberately leaves the object in place; physical
     // GC is gated on a separate reference-count sweep (see TRASH-RETENTION).
-    const [dup] = await this.knex('foundry_datasets').insert({
-      name: newName,
-      project_id: projectId,
-      folder_id: dataset.folder_id,
-      file_path: dataset.file_path,
-      original_filename: dataset.original_filename,
-      mime_type: dataset.mime_type,
-      file_size_bytes: dataset.file_size_bytes,
-      row_count: dataset.row_count,
-      row_count_exact: dataset.row_count_exact ?? null,
-      column_count: dataset.column_count,
-      schema_info: dataset.schema_info ? JSON.stringify(dataset.schema_info) : null,
-      markings: dataset.markings ?? null,
-      status: dataset.status,
-      format: dataset.format ?? null,
-      content_hash: dataset.content_hash,
-      last_output_schema_fingerprint: dataset.last_output_schema_fingerprint ?? null,
-      created_by: userId ?? null,
-      updated_by: userId ?? null,
-    }).returning('*');
-
-    // Copy columns
+    const { registerDataset } = await import('./datasets/datasetRegistration');
     const columns = await this.knex('dataset_columns').where({ dataset_id: datasetId });
-    if (columns.length > 0) {
-      await this.knex('dataset_columns').insert(columns.map((c: any) => ({
-        dataset_id: dup.id,
+    const { datasetId: dupId } = await registerDataset(this.knex, {
+      projectId,
+      folderId: dataset.folder_id ?? null,
+      name: newName,
+      patch: {
+        file_path: dataset.file_path,
+        original_filename: dataset.original_filename,
+        mime_type: dataset.mime_type,
+        file_size_bytes: dataset.file_size_bytes,
+        row_count: dataset.row_count,
+        row_count_exact: dataset.row_count_exact ?? null,
+        column_count: dataset.column_count,
+        schema_info: dataset.schema_info ? JSON.stringify(dataset.schema_info) : null,
+        markings: dataset.markings ?? null,
+        status: dataset.status,
+        format: dataset.format ?? null,
+        content_hash: dataset.content_hash,
+        last_output_schema_fingerprint: dataset.last_output_schema_fingerprint ?? null,
+        updated_by: userId ?? null,
+      },
+      createdBy: userId ?? null,
+      columns: columns.map((c: any) => ({
         column_name: c.column_name,
         column_type: c.column_type,
         ordinal_position: c.ordinal_position,
         nullable: c.nullable,
-        sample_values: JSON.stringify(c.sample_values ?? []),
-      })));
-    }
+        sample_values: c.sample_values ?? [],
+      })),
+      adoptIf: async () => false,
+      actor: `clone:${datasetId}`,
+    });
+    const dup = await this.knex('foundry_datasets').where({ id: dupId }).first();
 
     return dup;
   }

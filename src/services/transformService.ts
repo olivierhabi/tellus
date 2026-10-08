@@ -13,7 +13,6 @@ import {
 import {
   chainHashFromNodeConfig,
   fingerprintSchema,
-  hashTransformChain,
 } from './pipelines/previewSnapshot';
 import { resolveUnionInputIds } from '../types/pipeline';
 import type {
@@ -60,7 +59,11 @@ import type {
   ApplyToMultipleColumnsApplyInput,
   ComputeIfExpressionAbsentPreviewInput,
   ComputeIfExpressionAbsentApplyInput,
-  TextBlockPreviewInput,
+TextBlockPreviewInput,
+  HashSha256PreviewInput,
+  HashSha256ApplyInput,
+  WindowPreviewInput,
+  WindowApplyInput,
   TextBlockApplyInput,
   AggregatePreviewInput,
   AggregateApplyInput,
@@ -153,6 +156,12 @@ import {
   textBlockApply as textBlockApplyOp,
   textBlockPreview as textBlockPreviewOp,
 } from './pipelines/ops/expressionOps';
+import {
+  hashSha256Apply as hashSha256ApplyOp,
+  hashSha256Preview as hashSha256PreviewOp,
+  windowApply as windowApplyOp,
+  windowPreview as windowPreviewOp,
+} from './pipelines/ops/windowHashOps';
 import {
   concatenateStringsApply as concatenateStringsApplyOp,
   concatenateStringsPreview as concatenateStringsPreviewOp,
@@ -678,6 +687,50 @@ export class TransformService {
     input: TextBlockApplyInput,
   ) {
     return textBlockApplyOp(this, projectId, pipelineId, nodeId, input);
+  }
+
+  // =========================================================================
+  // Hash sha256 (Palantir expression sha256V1) — Preview / Apply
+  //
+  // One Expression<Binary | String> argument, String output, NULL-PROPOGATING
+  // (the published example is `null -> null`). The documented unique-ID recipe
+  // is concat-then-hash, so this is the second half of that pattern.
+  // =========================================================================
+
+  async hashSha256Preview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: HashSha256PreviewInput,
+  ) {
+    return hashSha256PreviewOp(this, projectId, pipelineId, nodeId, input);
+  }
+
+  async hashSha256Apply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: HashSha256ApplyInput,
+  ) {
+    return hashSha256ApplyOp(this, projectId, pipelineId, nodeId, input);
+  }
+
+  // =========================================================================
+  // Window (Palantir transform windowV1) — Preview / Apply
+  //
+  // Aggregations evaluated over a partition and attached to every row of it,
+  // preserving row count (Batch/Faster; streaming parity is the separate
+  // aggregateOverWindowV2 transform).
+  // =========================================================================
+
+  async windowPreview(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: WindowPreviewInput,
+  ) {
+    return windowPreviewOp(this, projectId, pipelineId, nodeId, input);
+  }
+
+  async windowApply(
+    projectId: string, pipelineId: string, nodeId: string,
+    input: WindowApplyInput,
+  ) {
+    return windowApplyOp(this, projectId, pipelineId, nodeId, input);
   }
 
   // =========================================================================
@@ -1641,7 +1694,10 @@ export class TransformService {
       rows: snapshotRows,
       rowCount: snapshotRows.length,
       transforms,
-      chainHash: hashTransformChain(transforms),
+      // Derive from the live config (not the local array) so a UNION node's
+      // config-level wiring is covered — must match the reader in
+      // previewPinning -> chainHashFromNodeConfig exactly.
+      chainHash: chainHashFromNodeConfig(config),
       schemaFingerprint: fingerprintSchema(columns),
       nodeId,
       transitiveInputSnapshots: await this.walkTransitiveInputs(pipelineId, nodeId),
@@ -1871,7 +1927,12 @@ export class TransformService {
     // deploy path runs PB-B6's stale+pin flow it can re-capture against
     // the current upstream; for the immediate envelope we at least
     // record enough to detect chain-level drift.
-    const chainHash = hashTransformChain(input.transforms ?? []);
+    // Hash the LIVE config, not the client-supplied chain. The client can
+    // send a stale/empty transform list (and never sends a union node's
+    // config-level rightNodeId/mode at all), so hashing `input.transforms`
+    // wrote a hash the deploy gate would immediately disagree with — the same
+    // writer/reader asymmetry that made union nodes permanently stale.
+    const chainHash = chainHashFromNodeConfig(config);
     const schemaFingerprint = fingerprintSchema(input.columns ?? []);
     // PB-B6 follow-transitive — walk the node graph to collect every
     // upstream dataset (direct sourceNodeId chain + rightNodeId on
