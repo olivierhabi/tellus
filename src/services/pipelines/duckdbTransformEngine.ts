@@ -73,6 +73,8 @@ export type TransformStep =
   | ApplyToMultipleColumnsStep
   | ComputeIfExpressionAbsentStep
   | TextBlockStep
+  | HashSha256Step
+  | WindowStep
   | AggregateStep
   | RollupStep
   | AggregateOnConditionStep
@@ -133,6 +135,15 @@ export interface JoinStep {
   // For this cut we don't support chained JOIN after transforms on the
   // right input — that's follow-5.
   rightPath: string;
+  /**
+   * The PERSISTED identifier for the right-hand input. Present on stored node
+   * configs (which key the join off a canvas node) but absent from the engine
+   * vocabulary, which identifies the input by `rightPath`. Carried here only
+   * so a shape mismatch can name the offending node instead of failing with
+   * `Cannot read properties of undefined`. Resolution rightNodeId → rightPath
+   * is the caller's job — see pipelines/engineBuild.toEngineSteps.
+   */
+  rightNodeId?: string;
   rightAlias?: string;
   joinType: "inner" | "left" | "right" | "full" | "cross" | "semi" | "anti";
   /**
@@ -256,6 +267,58 @@ export interface TextBlockStep {
   function: "TextBlock";
   text?: string;
   title?: string;
+}
+
+/**
+ * Hash sha256 — Parity: pb-functions-expression/sha256V1.
+ *
+ * Declared arguments (Palantir): one `Expression<Binary | String>`.
+ * Output type: String. Supported in: Batch, Faster, Streaming.
+ * Documented example: `null | null` — the function is NULL-PROPOGATING, so a
+ * null input must yield null rather than the hash of an empty string.
+ *
+ * DuckDB's `sha256()` is itself null-propagating, so the only work here is
+ * the Binary → String coercion (Palantir accepts binary input; DuckDB would
+ * reject a BLOB argument to sha256).
+ */
+export interface HashSha256Step {
+  function: "HashSha256";
+  /** Column name or literal to hash. */
+  expression: string;
+  outputColumn: string;
+}
+
+/**
+ * Window — Parity: pb-functions-transform/windowV1.
+ *
+ * Declared arguments (Palantir):
+ *   - Dataset:  Table to perform aggregations on
+ *   - Expressions: List<Expression<AnyType>> evaluated over the window
+ *   - Window:   the grouping to operate over
+ * Description: "Performs the specified aggregations on the input dataset
+ * grouped by a set of columns." Supported in: Batch, Faster (NOT Streaming —
+ * that is `aggregateOverWindowV2`, a different transform with trigger and
+ * accumulation-mode arguments).
+ *
+ * Row cardinality is PRESERVED (this is an analytic aggregate, not GROUP BY):
+ * every input row keeps its identity and gains one column per aggregation,
+ * which is what makes `count(*) OVER (PARTITION BY …)` expressible. An empty
+ * `partitionBy` is the whole-table partition, matching SQL's behaviour when
+ * PARTITION BY is omitted.
+ */
+export interface WindowStep {
+  function: "Window";
+  /** PARTITION BY columns. Empty/omitted = one partition over all rows. */
+  partitionBy?: string[];
+  /** ORDER BY within each partition. Omitted = unordered (non-deterministic
+   *  for order-sensitive aggregates, as Palantir documents). */
+  orderBy?: Array<{ column: string; direction: "asc" | "desc" }>;
+  /** One output column per entry; `count` without a column counts rows. */
+  aggregations: Array<{
+    function: AggregateFn;
+    column?: string;
+    outputColumn: string;
+  }>;
 }
 
 // --- Tier B aggregate-family steps (PB-B2.follow-2) ------------------------
@@ -388,6 +451,12 @@ export function compileTransformChain(
     switch (step.function) {
       case "Cast":
         ctes.push(`${next} AS (${compileCast(step, current)})`);
+        break;
+      case "HashSha256":
+        ctes.push(`${next} AS (${compileHashSha256(step, current)})`);
+        break;
+      case "Window":
+        ctes.push(`${next} AS (${compileWindow(step, current)})`);
         break;
       case "Filter":
         ctes.push(`${next} AS (${compileFilter(step, current)})`);
@@ -783,7 +852,12 @@ function compileRename(step: RenameStep, from: string): string {
 }
 
 function compileJoin(step: JoinStep, from: string): string {
-  const right = readSource(step.rightPath);
+  const right = readSource(
+    step.rightPath,
+    step.rightNodeId
+      ? `join references node ${String(step.rightNodeId).slice(0, 8)}`
+      : undefined,
+  );
   const alias = step.rightAlias ?? "r";
   const joinKind = joinSql(step.joinType);
   if (step.joinType === "cross") {
@@ -1137,6 +1211,63 @@ function compileComputeIfAbsent(
 // pivotV1, unpivotV1, keepDuplicatesV1.
 // ---------------------------------------------------------------------------
 
+/**
+ * Hash sha256 — `sha256V1` parity.
+ *
+ * Palantir declares one `Expression<Binary | String>` argument and a String
+ * output, with the documented example `null -> null`. DuckDB's `sha256()` is
+ * already null-propagating; the explicit CAST covers the Binary half of the
+ * declared type, which DuckDB's sha256 would not accept as a BLOB.
+ * A source column of the same name is replaced in place (`* REPLACE`),
+ * matching compileCast / compileCurrentTimestamp.
+ */
+function compileHashSha256(step: HashSha256Step, from: string): string {
+  const out = quoteIdent(step.outputColumn);
+  const expr = `sha256(CAST(${quoteIdent(step.expression)} AS VARCHAR))`;
+  if (step.outputColumn === step.expression) {
+    return `SELECT * REPLACE (${expr} AS ${out}) FROM ${from}`;
+  }
+  return `SELECT *, ${expr} AS ${out} FROM ${from}`;
+}
+
+/**
+ * Window — `windowV1` parity.
+ *
+ * Each aggregation becomes an analytic aggregate over the partition, so row
+ * cardinality is preserved: `COUNT(*) OVER (PARTITION BY a, b) AS n` is the
+ * per-key row count attached to every row of that key, which is what makes
+ * `count(*) over (partition by step, amount_key)` expressible as one step.
+ *
+ * An unordered window (no `orderBy`) matches Palantir's documented caveat for
+ * window aggregates without ordering: only order-INSENSITIVE aggregates
+ * (count / sum / min / max) are deterministic, and an order-sensitive one
+ * (row-number-like) has no meaning without an ORDER BY. `aggregateSql` can
+ * only emit the order-insensitive family, so that holds structurally.
+ */
+function compileWindow(step: WindowStep, from: string): string {
+  const parts: string[] = [];
+  const partition = (step.partitionBy ?? []).map(quoteIdent);
+  if (partition.length > 0) parts.push(`PARTITION BY ${partition.join(", ")}`);
+  const order = (step.orderBy ?? []).map(
+    (o) => `${quoteIdent(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`,
+  );
+  if (order.length > 0) parts.push(`ORDER BY ${order.join(", ")}`);
+  const over = parts.length > 0 ? ` OVER (${parts.join(" ")})` : " OVER ()";
+  const aggs = step.aggregations.map(
+    (a) => `${aggregateSql(a as AggregationItemShape)}${over} AS ${quoteIdent(a.outputColumn)}`,
+  );
+  if (aggs.length === 0) {
+    // windowV1 declares Expressions as a non-empty list, so an empty one is a
+    // malformed step, not a pass-through.
+    throw new AppError(
+      "Window requires at least one aggregation (windowV1 declares a non-empty Expressions list)",
+      400,
+      "VALIDATION_ERROR",
+    );
+  }
+  return `SELECT *, ${aggs.join(", ")} FROM ${from}`;
+}
+
 /** Map an aggregation spec to its DuckDB aggregate expression. */
 function aggregateSql(a: AggregationItemShape): string {
   const col = a.column ? quoteIdent(a.column) : null;
@@ -1366,7 +1497,28 @@ function compileKeepDuplicates(step: KeepDuplicatesStep, from: string): string {
 // transparently without a compile-time flag.
 // ---------------------------------------------------------------------------
 
-export function readSource(path: string): string {
+export function readSource(path: string, context?: string): string {
+  // Guard the shape contract. The stored node config and the engine step
+  // vocabulary are DIFFERENT: a persisted Join carries `rightNodeId`
+  // (+ `conditions[].leftColumn/rightColumn`), while the compiler needs
+  // `rightPath` (+ `on[].left/right`). Any caller that hands the stored
+  // config straight to the compiler lands here with `path === undefined`,
+  // and `path.replace` threw:
+  //   TypeError: Cannot read properties of undefined (reading 'replace')
+  //     at readSource → compileJoin → compileTransformChain
+  // surfacing as an opaque 500 INTERNAL_ERROR. Name the actual problem
+  // instead.
+  if (typeof path !== 'string' || path.trim() === '') {
+    throw new AppError(
+      'Join/union input could not be resolved to a file path' +
+        `${context ? ` (${context})` : ''}. The referenced node was not ` +
+        'translated into an engine input — either it was deleted from the ' +
+        'canvas, or the step still carries `rightNodeId` where the engine ' +
+        'requires `rightPath`.',
+      400,
+      'TRANSFORM_INPUT_UNRESOLVED',
+    );
+  }
   const p = path.replace(/'/g, "''");
   const isParquet = /\.parquet$/i.test(path) || /\/$/.test(path);
   if (isParquet) {

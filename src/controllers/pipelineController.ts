@@ -53,6 +53,10 @@ import {
   ComputeIfExpressionAbsentApplySchema,
   TextBlockPreviewSchema,
   TextBlockApplySchema,
+  HashSha256PreviewSchema,
+  HashSha256ApplySchema,
+  WindowPreviewSchema,
+  WindowApplySchema,
   AggregatePreviewSchema,
   AggregateApplySchema,
   RollupPreviewSchema,
@@ -72,6 +76,7 @@ import {
   DeployPipelineSchema,
   UpdateBuildScheduleSchema,
   CreateExpectationSchema,
+  CreateHealthCheckSchema,
 } from '../types/pipeline';
 import { AppError } from '../utils/foundryAppError';
 import { DeploymentService } from '../services/deploymentService';
@@ -421,6 +426,53 @@ export class PipelineController {
         this.getProjectId(req),
         this.getPipelineId(req),
         req.params.expectationId,
+      );
+      res.json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * GET/POST/DELETE /projects/:projectId/pipelines/:pipelineId/health-checks
+   * Per-node dataset health checks surfaced by the Data Health dialog.
+   */
+  listHealthChecks = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await this.pipelineService.listHealthChecks(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+      );
+      res.json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  addHealthCheck = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const parsed = CreateHealthCheckSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new AppError(parsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      }
+      const data = await this.pipelineService.addHealthCheck(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+        parsed.data,
+        this.getUserId(req),
+      );
+      res.status(201).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  removeHealthCheck = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await this.pipelineService.removeHealthCheck(
+        this.getProjectId(req),
+        this.getPipelineId(req),
+        req.params.healthCheckId,
       );
       res.json({ success: true, data });
     } catch (error) {
@@ -1320,6 +1372,60 @@ export class PipelineController {
       const bodyParsed = TextBlockApplySchema.safeParse(req.body);
       if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
       const node = await this.transformService.textBlockApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Hash sha256 (sha256V1) -----------------------------------------
+  hashSha256Preview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = HashSha256PreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.hashSha256Preview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  hashSha256Apply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = HashSha256ApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.hashSha256Apply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: node });
+    } catch (error) { next(error); }
+  };
+
+  // ---- Window (windowV1) ----------------------------------------------
+  windowPreview = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = WindowPreviewSchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const result = await this.transformService.windowPreview(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
+      res.json({ success: true, data: result });
+    } catch (error) { next(error); }
+  };
+
+  windowApply = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = this.getProjectId(req);
+      const pipelineId = this.getPipelineId(req);
+      const nodeParsed = PipelineNodeParamsSchema.safeParse(req.params);
+      if (!nodeParsed.success) throw new AppError('Invalid node UUID format', 400, 'VALIDATION_ERROR');
+      const bodyParsed = WindowApplySchema.safeParse(req.body);
+      if (!bodyParsed.success) throw new AppError(bodyParsed.error.issues[0].message, 400, 'VALIDATION_ERROR');
+      const node = await this.transformService.windowApply(projectId, pipelineId, nodeParsed.data.nodeId, bodyParsed.data);
       res.json({ success: true, data: node });
     } catch (error) { next(error); }
   };

@@ -8,8 +8,8 @@ import { findNearNameMatches, unionSideLabels } from '../../../utils/columnNameR
 import { resolveUnionInputIds } from '../../../types/pipeline';
 import type { UnionPreviewInput, UnionApplyInput } from '../../../types/pipeline';
 import {
+  chainHashFromNodeConfig,
   fingerprintSchema,
-  hashTransformChain,
 } from '../previewSnapshot';
 import { PREVIEW_SOURCE_ROW_LIMIT } from './shared';
 import type { TransformOpsContext } from './transformOpsContext';
@@ -340,8 +340,16 @@ export async function unionApply(
     columns: unionResult.columns,
     rows: unionResult.rows,
     rowCount: unionResult.rows.length,
-    transforms: [],
-    chainHash: hashTransformChain([]),
+    transforms: Array.isArray(config.transforms) ? config.transforms : [],
+    // Hash the node's REAL chain + union wiring, never a hardcoded empty
+    // chain. `unionApply` is not necessarily the last writer of this node's
+    // transforms — a DropDuplicates/Case/... can be appended afterwards — and
+    // pinning sha256("[]") here made every such node permanently
+    // PREVIEW_STALE at deploy, with no API path able to reconcile it (union
+    // preview has no `persist`, and re-applying the union just rewrote the
+    // same empty hash). Must stay byte-identical to the reader in
+    // previewPinning -> chainHashFromNodeConfig.
+    chainHash: chainHashFromNodeConfig(config),
     schemaFingerprint: fingerprintSchema(unionResult.columns),
     nodeId,
     transitiveInputSnapshots: await ctx.walkTransitiveInputs(pipelineId, nodeId),

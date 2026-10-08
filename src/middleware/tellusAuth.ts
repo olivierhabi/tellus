@@ -71,6 +71,9 @@ function envelope(code: string, status: number, message: string, req: Request) {
 }
 
 function reject(res: Response, req: Request, err: unknown) {
+  // The API budget middleware may already have flushed a 504 — never
+  // attempt a second response (ERR_HTTP_HEADERS_SENT otherwise).
+  if (res.headersSent || res.writableEnded) return;
   if (err instanceof AppError) {
     return res.status(err.statusCode).json(envelope(err.code, err.statusCode, err.message, req));
   }

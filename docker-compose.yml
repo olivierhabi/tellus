@@ -280,11 +280,8 @@ services:
           cpus: "1.0"
     memswap_limit: ${TELLUS_MINIO_MEMORY_LIMIT:-384M}
     healthcheck:
-      # `mc ready local` is preferred but requires the mc client which
-      # this image doesn't ship — the `/minio/health/live` endpoint is
-      # the official liveness probe and returns 200 once the API is
-      # accepting requests.
-      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      # The coollabsio/minio image ships `mc` but not curl; probe via mc.
+      test: ["CMD-SHELL", "mc alias set local http://localhost:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null && mc ready local"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -301,7 +298,7 @@ services:
   # idempotently if someone wiped the MinIO volume.
   # -------------------------------------------------------------------------
   minio-init:
-    image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+    image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
     depends_on:
       minio:
         condition: service_healthy

@@ -872,6 +872,66 @@ export const AggregateApplySchema = z.object({
 });
 
 export type AggregateApplyInput = z.infer<typeof AggregateApplySchema>;
+// ---------------------------------------------------------------------------
+// Hash sha256 (Palantir expression sha256V1)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-expression/sha256V1
+//
+// Declared arguments: one Expression<Binary | String>. Output type: String.
+// Supported in Batch, Faster, Streaming. Documented example: null -> null,
+// so the transform is NULL-PROPOGATING (a null input yields null rather than
+// the hash of an empty string). Documented in the "Create unique IDs" guide
+// as the second half of the concatenate-then-hash unique-ID recipe.
+// ---------------------------------------------------------------------------
+export const HashSha256BaseSchema = z.object({
+  /** Column to hash. */
+  expression: z.string().trim().min(1, 'expression is required').max(255),
+  outputColumn: z.string().trim().min(1, 'outputColumn is required').max(255),
+});
+export const HashSha256PreviewSchema = HashSha256BaseSchema.extend({
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+export type HashSha256PreviewInput = z.infer<typeof HashSha256PreviewSchema>;
+export const HashSha256ApplySchema = HashSha256BaseSchema;
+export type HashSha256ApplyInput = z.infer<typeof HashSha256ApplySchema>;
+
+// ---------------------------------------------------------------------------
+// Window (Palantir transform windowV1)
+// Reference: https://www.palantir.com/docs/foundry/pb-functions-transform/windowV1
+//
+// "Performs the specified aggregations on the input dataset grouped by a set
+// of columns." Declared arguments: Dataset, Expressions (List), Window.
+// Supported in Batch, Faster — NOT Streaming (that is aggregateOverWindowV2,
+// which adds Trigger and Accumulation mode and is a different transform).
+//
+// Unlike Aggregate, row cardinality is PRESERVED: each aggregation is an
+// analytic aggregate evaluated over the partition and attached to every row of
+// it, which is what expresses `count(*) over (partition by ...)`.
+// ---------------------------------------------------------------------------
+export const WindowBaseSchema = z.object({
+  /** PARTITION BY columns. Empty = a single partition over all rows. */
+  partitionBy: z.array(z.string().trim().min(1)).max(100).default([]),
+  /** ORDER BY within each partition; omitted = unordered. */
+  orderBy: z
+    .array(
+      z.object({
+        column: z.string().trim().min(1),
+        direction: z.enum(['asc', 'desc']),
+      }),
+    )
+    .max(100)
+    .default([]),
+  /** One output column per entry. `count` without a column counts rows. */
+  aggregations: z.array(AggregationItemSchema).min(1, 'At least one aggregation is required').max(100),
+});
+export const WindowPreviewSchema = WindowBaseSchema.extend({
+  limit: z.number().int().min(1).max(5000).default(500),
+  priorTransforms: z.array(PriorTransformSchema).optional(),
+});
+export type WindowPreviewInput = z.infer<typeof WindowPreviewSchema>;
+export const WindowApplySchema = WindowBaseSchema;
+export type WindowApplyInput = z.infer<typeof WindowApplySchema>;
+
 
 // ---------------------------------------------------------------------------
 // Rollup transform — GROUP BY ROLLUP(...) super-aggregates (rollUpV1)
@@ -1373,6 +1433,22 @@ export const CreateExpectationSchema = z.object({
 });
 
 export type CreateExpectationInput = z.infer<typeof CreateExpectationSchema>;
+
+/**
+ * Pipeline Builder — per-node dataset health checks (Data Health dialog).
+ * Types: build_success {} · freshness {maxAgeMinutes} · row_count {min?,max?}.
+ * Status starts UNKNOWN; PASS/FAIL are set by the evaluating surface.
+ */
+export const CreateHealthCheckSchema = z.object({
+  nodeId: z.string().uuid('Invalid node UUID').optional().nullable(),
+  name: z.string().trim().min(1, 'Health check name is required').max(255),
+  type: z.enum(['build_success', 'freshness', 'row_count'], {
+    message: 'type must be one of: build_success, freshness, row_count',
+  }),
+  config: z.record(z.string(), z.unknown()).default({}),
+});
+
+export type CreateHealthCheckInput = z.infer<typeof CreateHealthCheckSchema>;
 
 export const DeployPipelineSchema = z.object({
   /** Which output node IDs to build. If empty/omitted, builds ALL output nodes. */

@@ -1,6 +1,10 @@
 import { Knex } from 'knex';
 import { AppError } from '../utils/foundryAppError';
 import { assertFolderNameAvailable } from './datasets/folderNameGuard';
+import {
+  findMalformedTransformSteps,
+  describeTransformStepIssues,
+} from './pipelines/transformStepIntegrity';
 import type {
   CreatePipelineInput,
   UpdatePipelineInput,
@@ -366,6 +370,24 @@ export class PipelineService {
       }
     }
 
+    // Structural guard: a step missing its required payload can never execute,
+    // and persisting one silently destroys whatever the canvas authored.
+    // See pipelines/transformStepIntegrity for the measured failure.
+    for (const input of inputs) {
+      const issues = findMalformedTransformSteps(
+        (input.config as Record<string, unknown> | undefined)?.transforms,
+      );
+      if (issues.length > 0) {
+        throw new AppError(
+          `Cannot save node "${input.label}": ${describeTransformStepIssues(issues)}. ` +
+            'This usually means the client sent a partial transform — it would ' +
+            'overwrite the node\'s saved logic with a skeleton that cannot run.',
+          400,
+          'MALFORMED_TRANSFORM_STEP',
+        );
+      }
+    }
+
     const rows = inputs.map((input) => ({
       pipeline_id: pipelineId,
       dataset_id: input.datasetId ?? null,
@@ -508,6 +530,22 @@ export class PipelineService {
     if (input.positionX !== undefined) updateData.position_x = input.positionX;
     if (input.positionY !== undefined) updateData.position_y = input.positionY;
     if (input.config !== undefined) {
+      // Structural guard BEFORE the whole-config REPLACE below. This is the
+      // exact write that stripped a 31-branch CaseExpression down to
+      // `{ function: 'CaseExpression' }` and both of node 48's Joins down to
+      // `{ function: 'Join' }`, after which the node could never execute again.
+      const incomingIssues = findMalformedTransformSteps(
+        (input.config as Record<string, unknown>).transforms,
+      );
+      if (incomingIssues.length > 0) {
+        throw new AppError(
+          `Cannot update node: ${describeTransformStepIssues(incomingIssues)}. ` +
+            'Refusing to overwrite the saved transform chain with an ' +
+            'incomplete one — re-open the node so its steps load, then retry.',
+          400,
+          'MALFORMED_TRANSFORM_STEP',
+        );
+      }
       // previewSnapshot is owned exclusively by POST .../preview-snapshot
       // (transformService.savePreviewSnapshot). The REST update above
       // REPLACES the whole config column, so a client that echoes back its
@@ -633,6 +671,101 @@ export class PipelineService {
       .delete();
     if (n === 0) throw new AppError('Expectation not found', 404, 'NOT_FOUND');
     return { id: expectationId, deleted: true };
+  }
+
+  /**
+   * Per-node dataset health checks (Data Health dialog). Status is
+   * UNKNOWN until an evaluator stamps PASS/FAIL; CRUD mirrors expectations.
+   */
+  async listHealthChecks(projectId: string, pipelineId: string) {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    const rows = await this.knex('pipeline_health_checks as hc')
+      .leftJoin('pipeline_nodes as pn', 'pn.id', 'hc.node_id')
+      .where({ 'hc.pipeline_id': pipelineId })
+      .orderBy('hc.created_at', 'asc')
+      .select('hc.*', 'pn.label as node_label');
+    return rows.map((r: Record<string, unknown>) => ({
+      id: r.id,
+      pipelineId: r.pipeline_id,
+      nodeId: r.node_id,
+      nodeLabel: r.node_label ?? null,
+      name: r.name,
+      type: r.type,
+      config: typeof r.config === 'string' ? JSON.parse(r.config as string) : r.config,
+      status: r.status,
+      detail: r.detail ?? null,
+      active: Boolean(r.active),
+      createdAt: r.created_at,
+    }));
+  }
+
+  async addHealthCheck(
+    projectId: string,
+    pipelineId: string,
+    input: {
+      nodeId?: string | null;
+      name: string;
+      type: 'build_success' | 'freshness' | 'row_count';
+      config: Record<string, unknown>;
+    },
+    actorId?: string,
+  ) {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    if (input.nodeId) {
+      const node = await this.knex('pipeline_nodes')
+        .where({ id: input.nodeId, pipeline_id: pipelineId })
+        .first('id', 'node_type');
+      if (!node) throw new AppError('Node not found in pipeline', 404, 'NOT_FOUND');
+    }
+    if (input.type === 'freshness') {
+      const maxAge = (input.config ?? {}).maxAgeMinutes;
+      if (typeof maxAge !== 'number' || !Number.isFinite(maxAge) || maxAge <= 0) {
+        throw new AppError('freshness checks require config.maxAgeMinutes > 0', 400, 'VALIDATION_ERROR');
+      }
+    }
+    if (input.type === 'row_count') {
+      const c = input.config ?? {};
+      const hasMin = typeof c.min === 'number';
+      const hasMax = typeof c.max === 'number';
+      if (!hasMin && !hasMax) {
+        throw new AppError('row_count checks require config.min and/or config.max', 400, 'VALIDATION_ERROR');
+      }
+      if (hasMin && hasMax && (c.min as number) > (c.max as number)) {
+        throw new AppError('row_count config.min must be <= config.max', 400, 'VALIDATION_ERROR');
+      }
+    }
+    const { randomUUID } = await import('node:crypto');
+    const id = randomUUID();
+    await this.knex('pipeline_health_checks').insert({
+      id,
+      pipeline_id: pipelineId,
+      node_id: input.nodeId ?? null,
+      name: input.name,
+      type: input.type,
+      config: JSON.stringify(input.config ?? {}),
+      status: 'UNKNOWN',
+      created_by: actorId ?? null,
+    });
+    return {
+      id,
+      pipelineId,
+      nodeId: input.nodeId ?? null,
+      name: input.name,
+      type: input.type,
+      config: input.config ?? {},
+      status: 'UNKNOWN',
+      detail: null,
+      active: true,
+    };
+  }
+
+  async removeHealthCheck(projectId: string, pipelineId: string, healthCheckId: string) {
+    await this.ensurePipelineExists(projectId, pipelineId);
+    const n = await this.knex('pipeline_health_checks')
+      .where({ id: healthCheckId, pipeline_id: pipelineId })
+      .delete();
+    if (n === 0) throw new AppError('Health check not found', 404, 'NOT_FOUND');
+    return { id: healthCheckId, deleted: true };
   }
 
   /**

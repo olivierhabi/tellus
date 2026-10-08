@@ -57,13 +57,19 @@ const pool = new Pool({
   idleTimeoutMillis: 30_000,
 
   // If a new connection cannot be established within the timeout the query
-  // fails with a timeout error. Default 5s; bump via PG_CONNECT_TIMEOUT_MS
-  // for test/CI environments where parallel suites can briefly queue past
-  // the pool max under bursty action-batch load.
+  // fails with a timeout error. Default 30s (was 5s): parallel pollers can
+  // briefly queue past `max` under bursty action-batch load, and a too-short
+  // connect timeout turns that into spurious pool churn.
   connectionTimeoutMillis: parseInt(
-    process.env.PG_CONNECT_TIMEOUT_MS || "5000",
+    process.env.PG_CONNECT_TIMEOUT_MS || "30000",
     10,
   ),
+
+  // TCP keepalive so half-open sockets (server restart, NAT drop, docker
+  // network churn) are detected at the TCP layer and evicted from the pool
+  // instead of surfacing as mid-query "Connection terminated" errors.
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10_000,
 
   // Server-side deadline for any single statement. Without this a single
   // pathological query (missing index, runaway recompute) holds its pooled
@@ -79,9 +85,12 @@ const pool = new Pool({
   ),
   // Releases a connection left holding an open transaction (a leaked
   // BEGIN without COMMIT/ROLLBACK) so it cannot pin a slot forever. Paired
-  // with `withTransaction`'s poison-on-rollback guard below.
+  // with `withTransaction`'s poison-on-rollback guard below. Default 5min
+  // (was 60s): several schedulers legitimately hold a tx across a paged
+  // evaluation/claim loop, and a 60s server-side kill derailed the whole
+  // pool (FATAL idle-in-transaction kills → connect-time churn).
   idle_in_transaction_session_timeout: parseInt(
-    process.env.PG_IDLE_TX_TIMEOUT_MS || "60000",
+    process.env.PG_IDLE_TX_TIMEOUT_MS || "300000",
     10,
   ),
 });

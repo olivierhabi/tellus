@@ -3048,15 +3048,28 @@ export class DeploymentService {
         // REST catalog (catalog OCC, no manual retry, no PyIceberg
         // sidecar). Any ineligibility or engine failure returns null
         // and the legacy in-process path below runs unchanged.
-        const engineBuild = await this.tryEngineBuild({
-          projectId,
-          pipelineId,
-          deploymentId,
-          outputNode,
-          cfg,
-          pipeline,
-          triggeredBy,
-        });
+        const engineBuild =
+          (await this.tryEngineBuild({
+            projectId,
+            pipelineId,
+            deploymentId,
+            outputNode,
+            cfg,
+            pipeline,
+            triggeredBy,
+          })) ??
+          // DuckDB path claims csv/parquet builds; tryEngineBuild (above)
+          // returns null unless it is the Iceberg/Trino owner, so exactly one
+          // engine ever wins and the in-process path stays the final fallback.
+          (await this.tryDuckDbEngineBuild({
+            projectId,
+            pipelineId,
+            deploymentId,
+            outputNode,
+            cfg,
+            pipeline,
+            triggeredBy,
+          }));
         if (engineBuild) {
           buildResults.push({
             nodeId: outputNode.id,
