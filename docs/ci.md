@@ -159,3 +159,5 @@ summary and a `ci-effectiveness` JSON artifact:
 3. Labels `run-full-ci` and `ci-nightly-failure` (the latter is auto-created).
 
 [dorny/paths-filter]: https://github.com/dorny/paths-filter
+
+<!-- ci: retrigger -->
