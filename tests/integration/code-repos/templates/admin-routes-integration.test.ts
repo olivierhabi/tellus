@@ -18,8 +18,8 @@ function loadMigration(name: string): string {
 }
 
 const authed = (a: Express) => ({
-  get: (p: string) => request(a).get(p).set("X-Tellus-Test-Principal", "alice").set("X-Tellus-Test-Roles", "editor"),
-  post: (p: string) => request(a).post(p).set("X-Tellus-Test-Principal", "alice").set("X-Tellus-Test-Roles", "editor"),
+  get: (p: string) => request(a).get(p).set("X-Tellus-Test-Principal", "alice").set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "").set("X-Tellus-Test-Roles", "editor"),
+  post: (p: string) => request(a).post(p).set("X-Tellus-Test-Principal", "alice").set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "").set("X-Tellus-Test-Roles", "editor"),
 });
 
 beforeAll(async () => {
