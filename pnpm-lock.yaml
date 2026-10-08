@@ -100,8 +100,8 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
       dotenv:
-        specifier: ^17.3.1
-        version: 17.3.1
+        specifier: ^18.0.1
+        version: 18.0.1
       duckdb:
         specifier: ^1.4.4
         version: 1.4.4(encoding@0.1.13)
@@ -3195,9 +3195,10 @@ packages:
     resolution: {integrity: sha512-avsq/xk4YPIrn0CgleX5bjT9Y8IT1p9PxrNQ++RBQ2WEyFfHCTDsT9kmyxz+H/axnjAwg8wJWEIuPGOUuNupiA==}
     engines: {node: '>= 14.17'}
 
-  dotenv@17.3.1:
-    resolution: {integrity: sha512-IO8C/dzEb6O3F9/twg6ZLXz164a2fhTnEWb95H23Dm4OuN+92NmEAlTrupP9VW6Jm3sO26tQlqyvyi4CsnY9GA==}
+  dotenv@18.0.1:
+    resolution: {integrity: sha512-0eR4m4D/jH5eaI3evo2ZqqMii5mrTCR12v12VChdie6O1gPHs7XAjzTep0CWc1Bd+oNx3vVfbi734dK4zghigw==}
     engines: {node: '>=12'}
+    hasBin: true
 
   duckdb@1.4.4:
     resolution: {integrity: sha512-hEJJ5hyVF0VLj3dmOLpsWrQR0b3d4Ykqtygm6iUXjHJDDnSqg/USKxcb5qvNrOhFYPgktayU6dXCtgPqcmmpog==}
@@ -9525,7 +9526,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  dotenv@17.3.1: {}
+  dotenv@18.0.1: {}
 
   duckdb@1.4.4(encoding@0.1.13):
     dependencies:
