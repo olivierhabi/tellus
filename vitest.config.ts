@@ -120,7 +120,9 @@ export default defineConfig({
       // OpenSearch Basic auth — the shared dev cluster runs the security
       // plugin enabled; lanes connect with the committed demo creds (the
       // deployment's private override, if any, wins via process.env).
-      OPENSEARCH_URL: "https://localhost:9200",
+      // CI runs a plain-http OpenSearch service and exports OPENSEARCH_URL;
+      // honor it instead of forcing https (ERR_SSL_PACKET_LENGTH_TOO_LONG).
+      OPENSEARCH_URL: process.env.OPENSEARCH_URL ?? "https://localhost:9200",
       OPENSEARCH_USERNAME: "admin",
       OPENSEARCH_PASSWORD:
         process.env.OPENSEARCH_PASSWORD ?? "Str0ng!P@ssw0rd-Tellus-9a7b3Cz",
