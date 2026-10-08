@@ -1,1060 +1,284 @@
 # =============================================================================
-# Ontology Engine — CI Pipeline
+# Ontology Engine — CI Pipeline (tiered). Full design: docs/ci.md
 #
-# Runs the full test suite on every push and pull request:
-#   0. Lint + SAST      (eslint — fails the build on any violation)
-#   0b. Typecheck       (tsc --noEmit — required gate before all test jobs)
-#   1. Unit tests      (vitest.unit.config.ts — FIRST gate, zero Docker:
-#                        pnpm install && npm run test:unit, no compose up)
-#   2. Integration tests (requires PostgreSQL + OpenSearch + running server)
-#   3. E2E tests        (bash curl-based, requires PostgreSQL + OpenSearch + running server)
-#   4. Performance tests (benchmarks against running server)
-#   5. Full test runner  (test:all — consolidated runner)
+#   Tier 1  every PR / MQ / push   lint, typecheck, unit (+coverage gate,
+#                                  CVE scan, secret scan) and the integration
+#                                  SMOKE set (auth, DB connectivity, core
+#                                  read + action APIs). Target < 10 min.
+#   Tier 2  pull_request           integration tests SELECTED by changed paths
+#                                  (.github/ci/test-selection.json). Core /
+#                                  shared / build files and anything
+#                                  unclassified => the full suite.
+#   Tier 3  merge_group            full integration suite (8 shards) + E2E,
+#                                  perf, test:all, Docker build. Also on push
+#                                  to main/master/develop.
+#   Tier 4  nightly.yml            full suite incl. slow suites, unsharded.
+#   Tier 5  `run-full-ci` label or workflow_dispatch(run_full) => Tier 3 set
+#                                  on demand.
 #
-# Services:
-#   - PostgreSQL 16 (port 5432)
-#   - OpenSearch 2.11 (port 9200)
-#   - Keycloak 25 (port 8086) — SSO / OAuth 2.0 identity provider
-#   - MinIO (port 9000) — S3-compatible object storage for file uploads
+# Branch protection should require ONLY the `ci-gate` check (docs/ci.md).
 # =============================================================================
 
 name: CI
 
 on:
-  push:
-    branches: [main, master, develop]
   pull_request:
     branches: [main, master, develop]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main, master, develop]
+  workflow_dispatch:
+    inputs:
+      run_full:
+        description: Run the full suite (Tier 5). false = Tier 1 + smoke only.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Superseded PR runs are cancelled; merge-queue and protected-branch runs are
+# never cancelled. Label events other than `run-full-ci` get their own group so
+# an unrelated label never cancels an in-flight PR run.
+concurrency:
+  group: >-
+    ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}${{
+    (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+    && github.event.label.name != 'run-full-ci'
+    && format('-label-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # PostgreSQL connection — F-14: use GitHub Actions secrets.
-  # For local testing these fall back to CI-only defaults below.
-  PGHOST: localhost
-  PGPORT: 5432
-  PGDATABASE: tellus_db
-  PGUSER: ${{ secrets.CI_PGUSER || 'tellus' }}
-  PGPASSWORD: ${{ secrets.CI_PGPASSWORD || 'tellus123' }}
-  POSTGRES_URL: postgresql://${{ secrets.CI_PGUSER || 'tellus' }}:${{ secrets.CI_PGPASSWORD || 'tellus123' }}@localhost:5432/tellus_db
-
-  # OpenSearch connection
-  OPENSEARCH_URL: http://localhost:9200
-
-  # Test data directory (used by seed scripts)
-  DATA_DIR: /tmp/ontology-testdata
-
-  # MinIO / S3 object storage — F-14: credentials via secrets with fallback.
-  S3_ENDPOINT: http://localhost:9000
-  S3_REGION: us-east-1
-  S3_BUCKET: tellus-uploads
-  S3_ACCESS_KEY_ID: ${{ secrets.CI_S3_ACCESS_KEY_ID || 'minioadmin' }}
-  S3_SECRET_ACCESS_KEY: ${{ secrets.CI_S3_SECRET_ACCESS_KEY || 'minioadmin' }}
-  S3_FORCE_PATH_STYLE: "true"
-  # MinIO Community is source-only upstream; use a source-built final release
-  # and pin the OCI index digest so every job resolves the same image.
-  MINIO_IMAGE: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
-
-  # Keycloak (SSO / OAuth 2.0) — F-14: secret via GitHub secrets with fallback.
-  KEYCLOAK_URL: http://localhost:8086
-  KEYCLOAK_REALM: tellus
-  KEYCLOAK_CLIENT_ID: tellus-api
-  KEYCLOAK_FRONTEND_CLIENT_ID: tellus-frontend
-  KEYCLOAK_CONFIDENTIAL_CLIENT_ID: tellus-confidential
-  KEYCLOAK_CONFIDENTIAL_CLIENT_SECRET: ${{ secrets.CI_KEYCLOAK_SECRET || 'tellus-confidential-secret-change-me' }}
-  KEYCLOAK_TEST_USER: cypress@tellus.local
-  KEYCLOAK_TEST_PASS: ${{ secrets.CI_KEYCLOAK_TEST_PASS || 'Password123!' }}
-
-  # Elevated rate limits for CI (prevents test interference)
-  RATE_LIMIT_MAX: 10000
-  ACTION_RATE_LIMIT_MAX: 10000
-  USER_RATE_LIMIT_MAX: 50000
-  GLOBAL_ACTION_RATE_LIMIT_MAX: 100000
-  BATCH_RATE_LIMIT_MAX: 1000
-
-  # Force JavaScript actions still bundled for Node 20 to run under Node 24
-  # (GitHub deprecation: Node 20 removed from runners on 2026-09-16).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # ===========================================================================
-  # Job 0: Lint + Static Security Analysis (no services needed) — F-07
-  # ===========================================================================
-  lint:
-    name: Lint & SAST
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run ESLint (TypeScript + security)
-        # No continue-on-error: a lint failure exits non-zero and fails the
-        # workflow, gating the PR.
-        run: pnpm run lint
-
-  # ===========================================================================
-  # Job 0b: Typecheck (tsc --noEmit) — required gate before any test job runs
-  # ===========================================================================
-  typecheck:
-    name: TypeScript Typecheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Typecheck (tsc --noEmit)
-        run: npx tsc --noEmit
-
-  # ===========================================================================
-  # Job 1: Unit Tests — FIRST gate, ZERO external services (no Docker).
-  #
-  # Contributors run exactly this immediately after `pnpm install`, with no
-  # `docker compose up` and no exported secrets:
-  #
-  #   pnpm install && npm run test:unit
-  #
-  # Guarantees (enforced by vitest.unit.config.ts, not by convention):
-  #   - no globalSetup / setupFiles / server spawn (see the config header);
-  #   - PGPASSWORD falls back to a non-functional sentinel, so even a
-  #     latent live-DB connection attempt fails auth loudly instead of
-  #     touching a real database (the lane is proven green with a bogus
-  #     password);
-  #   - coverage floor enforced via coverage.thresholds (raise-only ratchet;
-  #     `npm run test:unit:coverage` exits non-zero on regression).
-  # ===========================================================================
-  unit:
-    name: Unit Tests (no Docker)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: typecheck
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: TypeScript compile check
-        run: pnpm run build
-
-      - name: Run unit tests with coverage
-        run: pnpm run test:unit
-        env:
-          COVERAGE: "1"
-
-      - name: Upload coverage reports to Codecov
-        if: always()
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage/lcov.info
-          flags: unit
-          fail_ci_if_error: false
-
-  # ===========================================================================
-  # Job 2: Integration Tests (PostgreSQL + OpenSearch + Keycloak required)
-  # ===========================================================================
-  integration:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    # 25 min was marginal: the last green main run took 24m48s and the
-    # 2026-08-28 run was cancelled at the timeout. 40 gives headroom.
-    timeout-minutes: 40
-    needs: typecheck
-
-    services:
-      clickhouse:
-        # osv2-serving + funnel CH suites (ch-migration, cdc-topology,
-        # edge-version-semantics, benchmarks) publish to the lane ClickHouse.
-        # Only the HTTP port is published — the native TCP port (9000) stays
-        # internal so it can't collide with MinIO on the runner.
-        image: clickhouse/clickhouse-server:24.8-alpine
-        env:
-          CLICKHOUSE_USER: tellus
-          CLICKHOUSE_PASSWORD: tellus_ch_pw
-          CLICKHOUSE_DB: default
-          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
-        ports:
-          - 8123:8123
-        options: >-
-          --health-cmd="wget -qO- http://127.0.0.1:8123/ping | grep -q Ok || exit 1"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
-
-      zookeeper:
-        image: confluentinc/cp-zookeeper:7.6.1
-        env:
-          ZOOKEEPER_CLIENT_PORT: 2181
-          ZOOKEEPER_TICK_TIME: 2000
-        ports:
-          - 2181:2181
-
-      kafka:
-        # CDC link producer/consumer suites (funnel cdc-topology, link-index
-        # ack) publish to localhost:9092 with auto topic creation — mirrors
-        # docker-compose.yml's dev broker.
-        image: confluentinc/cp-kafka:7.6.1
-        env:
-          KAFKA_BROKER_ID: 1
-          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-          KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
-        ports:
-          - 9092:9092
-        options: >-
-          --health-cmd="kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"
-          --health-interval=10s
-          --health-timeout=10s
-          --health-retries=12
-
-      postgres:
-        # Pull Postgres from the AWS ECR Public mirror of the official image
-        # instead of Docker Hub. registry-1.docker.io has been intermittently
-        # unreachable from the runners (connection timeouts on `docker pull`),
-        # failing jobs before any test runs. ECR Public mirrors the same
-        # official image, needs no auth, and is not Docker-Hub-rate-limited.
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_DB: tellus_db
-          POSTGRES_USER: tellus
-          POSTGRES_PASSWORD: tellus123
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_db"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
-
-      opensearch:
-        image: opensearchproject/opensearch:2.11.0
-        env:
-          discovery.type: single-node
-          DISABLE_SECURITY_PLUGIN: "true"
-          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
-          --health-interval=10s
-          --health-timeout=10s
-          --health-retries=20
-
-      # Keycloak is started as a docker run step (not a service) because
-      # the image requires "start-dev" as a command argument, which GitHub
-      # Actions service containers do not support.
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Start Temporal (funnel lane workers)
-        # tests/funnel/integration/multi-replica + automate suites spawn REAL
-        # Temporal workers against localhost:7233 in the lane namespace
-        # (tellus-funnel-tellus-tests-main, registered by testStackBootstrap).
-        # Mirrors docker-compose.temporal{,-postgres}; the dynamicconfig file
-        # (worker-versioning APIs) is a repo path, so docker-run is used
-        # instead of a service container.
-        run: |
-          # A user-defined bridge network is REQUIRED: container DNS aliases
-          # (temporal-postgres, temporal) only resolve inside a user-defined
-          # network. The previous `--network host` run made both names
-          # unresolvable (auto-setup logged "nc: bad address
-          # 'temporal-postgres'" forever → step timeout → job failure).
-          docker network create tellus-ci-net
-
-          docker run -d --name temporal-postgres --network tellus-ci-net \
-            -e POSTGRES_DB=temporal \
-            -e POSTGRES_USER=temporal \
-            -e POSTGRES_PASSWORD=temporal_pw \
-            postgres:16-alpine
-
-          for i in $(seq 1 30); do
-            if docker exec temporal-postgres pg_isready -U temporal -d temporal >/dev/null 2>&1; then
-              echo "temporal-postgres ready"; break
-            fi
-            [ "$i" -eq 30 ] && { echo "temporal-postgres failed to start"; docker logs temporal-postgres; exit 1; }
-            sleep 1
-          done
-
-          docker run -d --name temporal --network tellus-ci-net -p 7233:7233 \
-            -e DB=postgres12 \
-            -e DB_PORT=5432 \
-            -e POSTGRES_USER=temporal \
-            -e POSTGRES_PWD=temporal_pw \
-            -e POSTGRES_SEEDS=temporal-postgres \
-            -v "$PWD/deploy/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro" \
-            temporalio/auto-setup:1.25.2
-
-          # Readiness probe MUST use the container's bridge IP, not
-          # "localhost": auto-setup binds the frontend ONLY to the container's
-          # eth0 address (verified: ss shows LISTEN on <bridge-ip>:7233 with
-          # no 127.0.0.1/::1 binding), so an in-container probe against
-          # localhost always gets "connection refused" even when the cluster
-          # is fully SERVING.
-          TEMPORAL_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' temporal)"
-          echo "temporal container ip: $TEMPORAL_IP"
-
-          for i in $(seq 1 90); do
-            if docker exec temporal temporal operator cluster health --address "$TEMPORAL_IP:7233" 2>/dev/null | grep -q SERVING; then
-              echo "temporal ready"; break
-            fi
-            [ "$i" -eq 90 ] && { echo "temporal failed to start"; docker logs temporal; exit 1; }
-            sleep 2
-          done
-
-      - name: Start MinIO and create lane bucket
-        # Functions-publish artifact-storage + service suites (and the
-        # code-repos publish path) stream real blobs to S3 — the lane bucket
-        # is tests/laneEnv.ts:S3_BUCKET ("tellus-tests-bucket").
-        run: |
-          docker run -d --name minio \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            -p 9000:9000 \
-            "$MINIO_IMAGE" server /data
-
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-              echo "MinIO ready"
-              break
-            fi
-            [ "$i" -eq 30 ] && { echo "MinIO failed to start"; docker logs minio; exit 1; }
-            sleep 1
-          done
-
-          node scripts/ci-create-s3-bucket.mjs tellus-tests-bucket
-
-      - name: Start Keycloak and bootstrap realm
-        run: |
-          docker run -d --name keycloak \
-            -e KEYCLOAK_ADMIN=admin \
-            -e KEYCLOAK_ADMIN_PASSWORD=admin \
-            -e KC_DB=dev-file \
-            -e KC_HEALTH_ENABLED=true \
-            -e KC_HTTP_PORT=8086 \
-            -e KC_HOSTNAME_STRICT=false \
-            -p 8086:8086 \
-            quay.io/keycloak/keycloak:25.0 start-dev
-
-          echo "Waiting for Keycloak..."
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
-              echo "Keycloak ready"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "Keycloak failed to start"; docker logs keycloak; exit 1
-            fi
-            sleep 2
-          done
-
-      # NOTE: no job-level Keycloak realm bootstrap, migrations, or seeds.
-      # The pinned vitest lane (tests/laneEnv.ts + tests/globalSetup.ts +
-      # tests/testStackBootstrap.ts) is fully self-sufficient: it creates and
-      # seals its own DB (tellus_tests / tellus-tests-main), runs the 4-pass
-      # migration, seeds via src/seed.ts + actionTypes.seed.ts with the full
-      # destructive-test-guard proof, and bootstraps the tellus-tests realm.
-      # The previous steps targeted the dev-shaped default (tellus_db) and
-      # are now refused by the FUNN-ISO-1 destructive-test guard by design.
-
-      - name: Run integration tests
-        run: pnpm run test:integration
-
-      - name: Upload server log on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: integration-server-log
-          path: /tmp/tellus-integration-server.log
-          retention-days: 7
-
-  # ===========================================================================
-  # Job 3: E2E Tests (PostgreSQL + OpenSearch + Keycloak + MinIO required)
-  # ===========================================================================
-  e2e:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    needs: typecheck
-
-    # FUNN-ISO-1 lane identity: src/seed.ts → resetEnterpriseOntologyForSeed
-    # runs the destructive-test guard, which DENIES dev-shaped identity
-    # (tellus_db / realm tellus / ontology- prefix / tellus-uploads) and
-    # requires the full 10-field proof + a sealed db. This job therefore runs
-    # as its own provably-test lane: environment tellus-tests-e2e, db sealed
-    # below, temporal ns/queue + realm + index prefix + bucket all test-shaped.
-    env:
-      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
-      TELLUS_ENVIRONMENT_ID: tellus-tests-e2e
-      PGDATABASE: tellus_tests_e2e
-      PGUSER: tellus
-      PGPASSWORD: tellus123
-      PGHOST: localhost
-      PGPORT: "5432"
-      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-e2e
-      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-e2e
-      KEYCLOAK_REALM: tellus-tests-e2e
-      OS_INDEX_PREFIX: ttest-e2e-ontology-
-      S3_BUCKET: tellus-tests-e2e-bucket
-      TELLUS_TEST_API_BASE_URL: http://localhost:3000
-
-    services:
-      postgres:
-        # Pull Postgres from the AWS ECR Public mirror of the official image
-        # instead of Docker Hub. registry-1.docker.io has been intermittently
-        # unreachable from the runners (connection timeouts on `docker pull`),
-        # failing jobs before any test runs. ECR Public mirrors the same
-        # official image, needs no auth, and is not Docker-Hub-rate-limited.
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_DB: tellus_tests_e2e
-          POSTGRES_USER: tellus
-          POSTGRES_PASSWORD: tellus123
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_db"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
-
-      opensearch:
-        image: opensearchproject/opensearch:2.11.0
-        env:
-          discovery.type: single-node
-          DISABLE_SECURITY_PLUGIN: "true"
-          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
-          --health-interval=10s
-          --health-timeout=10s
-          --health-retries=20
-
-      # Keycloak is started as a docker run step (not a service) because
-      # the image requires "start-dev" as a command argument, which GitHub
-      # Actions service containers do not support.
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Start Keycloak and bootstrap realm
-        run: |
-          docker run -d --name keycloak \
-            -e KEYCLOAK_ADMIN=admin \
-            -e KEYCLOAK_ADMIN_PASSWORD=admin \
-            -e KC_DB=dev-file \
-            -e KC_HEALTH_ENABLED=true \
-            -e KC_HTTP_PORT=8086 \
-            -e KC_HOSTNAME_STRICT=false \
-            -p 8086:8086 \
-            quay.io/keycloak/keycloak:25.0 start-dev
-
-          echo "Waiting for Keycloak..."
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
-              echo "Keycloak ready"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "Keycloak failed to start"; docker logs keycloak; exit 1
-            fi
-            sleep 2
-          done
-
-          KC_REALM=tellus-tests-e2e bash scripts/bootstrap-keycloak.sh
-
-      - name: Start MinIO and create bucket
-        run: |
-          docker run -d --name minio \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            -p 9000:9000 \
-            "$MINIO_IMAGE" server /data
-
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-              echo "MinIO ready"
-              break
-            fi
-            [ "$i" -eq 30 ] && { echo "MinIO failed to start"; docker logs minio; exit 1; }
-            sleep 1
-          done
-
-          node scripts/ci-create-s3-bucket.mjs tellus-tests-e2e-bucket
-
-      - name: Create test data directory
-        run: mkdir -p /tmp/ontology-testdata
-
-      - name: Seal the e2e-lane database (FUNN-ISO-1)
-        # First-writer-wins: the destructive-test guard requires the connected
-        # DB to carry the deployment_environment seal for TELLUS_ENVIRONMENT_ID
-        # before seed.ts may reset the enterprise ontology. Migrations must
-        # exist first (run-all.sh re-runs them idempotently afterwards).
-        run: |
-          pnpm run migrate:all
-          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
-            VALUES (TRUE, 'tellus-tests-e2e', 'ci-e2e-lane') ON CONFLICT (singleton) DO NOTHING"
-
-      - name: Run E2E tests
-        run: pnpm run test:e2e
-
-      - name: Upload server log on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: e2e-server-log
-          path: /tmp/tellus-e2e-server.log
-          retention-days: 7
-
-  # ===========================================================================
-  # Job 4: Performance Benchmarks (PostgreSQL + OpenSearch + Keycloak + MinIO required)
-  # ===========================================================================
-  perf:
-    name: Performance Benchmarks
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: typecheck
-
-    # FUNN-ISO-1 lane identity: src/seed.ts resets the enterprise ontology,
-    # which the destructive-test guard only allows for a provably-test lane
-    # (sealed DB, test-shaped ns/queue/realm/prefix/bucket) — never for
-    # dev-shaped identity (tellus_db / realm tellus / tellus-uploads).
-    env:
-      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
-      TELLUS_ENVIRONMENT_ID: tellus-tests-perf
-      PGDATABASE: tellus_tests_perf
-      PGUSER: tellus
-      PGPASSWORD: tellus123
-      PGHOST: localhost
-      PGPORT: "5432"
-      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-perf
-      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-perf
-      KEYCLOAK_REALM: tellus-tests-perf
-      OS_INDEX_PREFIX: ttest-perf-ontology-
-      S3_BUCKET: tellus-tests-perf-bucket
-      TELLUS_TEST_API_BASE_URL: http://localhost:3000
-
-    services:
-      postgres:
-        # Pull Postgres from the AWS ECR Public mirror of the official image
-        # instead of Docker Hub. registry-1.docker.io has been intermittently
-        # unreachable from the runners (connection timeouts on `docker pull`),
-        # failing jobs before any test runs. ECR Public mirrors the same
-        # official image, needs no auth, and is not Docker-Hub-rate-limited.
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_DB: tellus_tests_perf
-          POSTGRES_USER: tellus
-          POSTGRES_PASSWORD: tellus123
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_tests_perf"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
-
-      opensearch:
-        image: opensearchproject/opensearch:2.11.0
-        env:
-          discovery.type: single-node
-          DISABLE_SECURITY_PLUGIN: "true"
-          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
-          --health-interval=10s
-          --health-timeout=10s
-          --health-retries=20
-
-      # Keycloak is started as a docker run step (not a service) because
-      # the image requires "start-dev" as a command argument, which GitHub
-      # Actions service containers do not support.
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Start Keycloak and bootstrap realm
-        run: |
-          docker run -d --name keycloak \
-            -e KEYCLOAK_ADMIN=admin \
-            -e KEYCLOAK_ADMIN_PASSWORD=admin \
-            -e KC_DB=dev-file \
-            -e KC_HEALTH_ENABLED=true \
-            -e KC_HTTP_PORT=8086 \
-            -e KC_HOSTNAME_STRICT=false \
-            -p 8086:8086 \
-            quay.io/keycloak/keycloak:25.0 start-dev
-
-          echo "Waiting for Keycloak..."
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
-              echo "Keycloak ready"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "Keycloak failed to start"; docker logs keycloak; exit 1
-            fi
-            sleep 2
-          done
-
-          KC_REALM=tellus-tests-perf bash scripts/bootstrap-keycloak.sh
-
-      - name: Start MinIO and create bucket
-        run: |
-          docker run -d --name minio \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            -p 9000:9000 \
-            "$MINIO_IMAGE" server /data
-
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-              echo "MinIO ready"
-              break
-            fi
-            [ "$i" -eq 30 ] && { echo "MinIO failed to start"; docker logs minio; exit 1; }
-            sleep 1
-          done
-
-          node scripts/ci-create-s3-bucket.mjs tellus-tests-perf-bucket
-
-      - name: Run database migrations
-        run: |
-          pnpm run migrate
-          pnpm run migrate:foundry
-          pnpm run migrate:auth
-
-      - name: Seal the perf lane database (FUNN-ISO-1)
-        # First-writer-wins seal proving this DB belongs to the test lane;
-        # required before src/seed.ts may reset the enterprise ontology.
-        run: |
-          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
-            VALUES (TRUE, 'tellus-tests-perf', 'ci-perf-lane') ON CONFLICT (singleton) DO NOTHING"
-
-      - name: Seed database
-        run: |
-          pnpm run seed
-          npx tsx src/seeds/actionTypes.seed.ts
-
-      - name: Start server
-        run: |
-          nohup npx tsx src/server.ts > /tmp/tellus-server.log 2>&1 &
-          echo "SERVER_PID=$!" >> $GITHUB_ENV
-
-          # Wait for server to be ready
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
-              echo "Server ready"
-              break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "Server failed to start. Log:"
-              tail -30 /tmp/tellus-server.log
-              exit 1
-            fi
-            sleep 1
-          done
-
-      - name: Run performance benchmarks
-        run: pnpm run test:perf
-
-      - name: Stop server
-        if: always()
-        run: kill $SERVER_PID 2>/dev/null || true
-
-      - name: Upload server log
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: perf-server-log
-          path: /tmp/tellus-server.log
-          retention-days: 7
-
-  # ===========================================================================
-  # Job 5: Full Test Runner (test:all)
-  # ===========================================================================
-  test-all:
-    name: Full Test Suite (test:all)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: typecheck
-
-    # FUNN-ISO-1 lane identity: tests/runAll.ts manages its own backend on
-    # :3000 and expects a seeded ontology, so this job runs its explicit
-    # migrate+seed steps as a provably-test lane (sealed DB, test-shaped
-    # ns/queue/realm/prefix/bucket) — the destructive-test guard refuses
-    # dev-shaped identity by design. Vitest suites spawned inside runAll
-    # still boot their own pinned tellus_tests lane independently.
-    env:
-      TELLUS_DESTRUCTIVE_TESTS_ALLOWED: "1"
-      TELLUS_ENVIRONMENT_ID: tellus-tests-all
-      PGDATABASE: tellus_tests_all
-      PGUSER: tellus
-      PGPASSWORD: tellus123
-      PGHOST: localhost
-      PGPORT: "5432"
-      TEMPORAL_NAMESPACE: tellus-funnel-tellus-tests-all
-      TEMPORAL_TASK_QUEUE: tellus-funnel-queue-tellus-tests-all
-      KEYCLOAK_REALM: tellus-tests-all
-      # NOTE: OS_INDEX_PREFIX is deliberately NOT job-env. This job runs
-      # tests/runAll.ts, whose day suites + inline self-test modules (and
-      # the vitest unit lane) assert the unprefixed default index names
-      # (`ontology-taxpayer` etc.) — a job-level prefix leaks through
-      # CHILD_ENV and breaks them (CI run 32091038758: 'ttest-all-ontology-'
-      # mismatches). The destructive-test guard only needs the test-shaped
-      # prefix for the one-off `pnpm run seed` below (resetEnterprise
-      # OntologyForSeed), so it is scoped to that step.
-      S3_BUCKET: tellus-tests-all-bucket
-      TELLUS_TEST_API_BASE_URL: http://localhost:3000
-
-    services:
-      postgres:
-        # Pull Postgres from the AWS ECR Public mirror of the official image
-        # instead of Docker Hub. registry-1.docker.io has been intermittently
-        # unreachable from the runners (connection timeouts on `docker pull`),
-        # failing jobs before any test runs. ECR Public mirrors the same
-        # official image, needs no auth, and is not Docker-Hub-rate-limited.
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_DB: tellus_tests_all
-          POSTGRES_USER: tellus
-          POSTGRES_PASSWORD: tellus123
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_tests_all"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
-
-      opensearch:
-        image: opensearchproject/opensearch:2.11.0
-        env:
-          discovery.type: single-node
-          DISABLE_SECURITY_PLUGIN: "true"
-          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd="curl -sf http://localhost:9200/_cluster/health || exit 1"
-          --health-interval=10s
-          --health-timeout=10s
-          --health-retries=20
-
-      # Keycloak is started as a docker run step (not a service) because
-      # the image requires "start-dev" as a command argument, which GitHub
-      # Actions service containers do not support.
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Start Keycloak and bootstrap realm
-        run: |
-          docker run -d --name keycloak \
-            -e KEYCLOAK_ADMIN=admin \
-            -e KEYCLOAK_ADMIN_PASSWORD=admin \
-            -e KC_DB=dev-file \
-            -e KC_HEALTH_ENABLED=true \
-            -e KC_HTTP_PORT=8086 \
-            -e KC_HOSTNAME_STRICT=false \
-            -p 8086:8086 \
-            quay.io/keycloak/keycloak:25.0 start-dev
-
-          echo "Waiting for Keycloak..."
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:8086/realms/master > /dev/null 2>&1; then
-              echo "Keycloak ready"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "Keycloak failed to start"; docker logs keycloak; exit 1
-            fi
-            sleep 2
-          done
-
-          KC_REALM=tellus-tests-all bash scripts/bootstrap-keycloak.sh
-
-      - name: Start MinIO and create bucket
-        run: |
-          docker run -d --name minio \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            -p 9000:9000 \
-            "$MINIO_IMAGE" server /data
-
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-              echo "MinIO ready"
-              break
-            fi
-            [ "$i" -eq 30 ] && { echo "MinIO failed to start"; docker logs minio; exit 1; }
-            sleep 1
-          done
-
-          node scripts/ci-create-s3-bucket.mjs tellus-tests-all-bucket
-
-      - name: Create test data directory
-        run: mkdir -p /tmp/ontology-testdata
-
-      - name: Run database migrations
-        run: |
-          pnpm run migrate
-          pnpm run migrate:foundry
-          pnpm run migrate:auth
-
-      - name: Seal the test-all lane database (FUNN-ISO-1)
-        # First-writer-wins seal proving this DB belongs to the test lane;
-        # required before src/seed.ts may reset the enterprise ontology.
-        run: |
-          psql -c "INSERT INTO deployment_environment (singleton, environment_id, sealed_by) \
-            VALUES (TRUE, 'tellus-tests-all', 'ci-test-all-lane') ON CONFLICT (singleton) DO NOTHING"
-
-      - name: Seed database
-        env:
-          # The destructive-test guard demands a test-shaped OS prefix when
-          # src/seed.ts resets the enterprise ontology (FUNN-ISO-1 10-field
-          # proof). This is the ONLY step that needs it — see the job-env
-          # note above.
-          OS_INDEX_PREFIX: ttest-all-ontology-
-        run: |
-          pnpm run seed
-          npx tsx src/seeds/actionTypes.seed.ts
-
-      - name: Start server
-        run: |
-          nohup npx tsx src/server.ts > /tmp/tellus-server.log 2>&1 &
-          echo "SERVER_PID=$!" >> $GITHUB_ENV
-
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
-              echo "Server ready"
-              break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "Server failed to start. Log:"
-              tail -30 /tmp/tellus-server.log
-              exit 1
-            fi
-            sleep 1
-          done
-
-      - name: Run full test suite
-        run: |
-          set -o pipefail
-          pnpm run test:all 2>&1 | tee /tmp/test-all.log
-
-      - name: Stop server
-        if: always()
-        run: kill $SERVER_PID 2>/dev/null || true
-
-      - name: Upload server log
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-all-server-log
-          path: /tmp/tellus-server.log
-          retention-days: 7
-
-      - name: Upload test:all console log
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-all-console-log
-          path: /tmp/test-all.log
-          retention-days: 7
-
-  # ===========================================================================
-  # Job 6: AI edit-function contract (Phase 3 — REAL production models)
-  #
-  # Runs the real-LLM contract test: for every model in the production
-  # catalog, a real generation is published through the versioned
-  # release/registry path and must store function_kind = 'edit'.
-  #
-  # INERT BY DEFAULT. Requires a repo admin to configure:
-  #   - variable TELOS_AIE_AGENT_URL      — a reachable telos-AIE-agent
-  #     engine holding the production LLM credentials (credentials never
-  #     live in this repo or in CI).
-  #   - variable AI_CONTRACT_TEST_ENABLED = "1" — explicit opt-in gate.
-  #   - secret  TELOS_AIE_AGENT_TOKEN     — only if the engine enforces
-  #     the shared-secret header (optional).
-  # ===========================================================================
-  ai-contract:
-    name: AI Contract (real models)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    if: ${{ vars.AI_CONTRACT_TEST_ENABLED == '1' }}
-
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_DB: tellus_db
-          POSTGRES_USER: tellus
-          POSTGRES_PASSWORD: tellus123
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U tellus -d tellus_db"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
-
-    env:
-      AI_CONTRACT_TEST: "1"
-      TELOS_AIE_AGENT_URL: ${{ vars.TELOS_AIE_AGENT_URL }}
-      TELOS_AIE_AGENT_TOKEN: ${{ secrets.TELOS_AIE_AGENT_TOKEN }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.12.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify engine catalog is reachable
-        run: |
-          if [ -z "$TELOS_AIE_AGENT_URL" ]; then
-            echo "TELOS_AIE_AGENT_URL is not configured — set the repo variable or disable AI_CONTRACT_TEST_ENABLED."
-            exit 1
-          fi
-          curl -sf --max-time 15 "$TELOS_AIE_AGENT_URL/api/models"
-
-      - name: Run AI contract test (real production models)
-        run: pnpm run test:ai-contract
-
-  # Secret scanning — fails the build when a NEW commit introduces a
-  # credential. Scans PR/push commits (gitleaks default), not the full
-  # historical tree; the known historical exposure (litellm_config.yaml,
-  # commit dd0ea16, rotated) is governed by docs/security/
-  # litellm-credential-rotation.md instead of a perpetual CI failure.
-  secret-scan:
-    runs-on: ubuntu-latest
+  # ---------------------------------------------------------------------------
+  # Tier 1 — static checks + unit tests (reusable, also used by nightly)
+  # ---------------------------------------------------------------------------
+  tier1:
+    name: Tier 1
+    uses: ./.github/workflows/_tier1.yml
     permissions:
       contents: read
-      # gitleaks-action on pull_request events (1) lists PR commits via the
-      # REST API and (2) posts findings as a PR review/comment — both need
-      # write on pull-requests, else 403 Resource not accessible by
-      # integration (x-accepted-github-permissions: pull_requests=read for
-      # the list; the comment endpoint needs write).
+    secrets: inherit
+
+  coverage:
+    name: Coverage
+    uses: ./.github/workflows/coverage-gate.yml
+    permissions:
+      contents: read
+
+  security-scan:
+    name: Security
+    uses: ./.github/workflows/cve-scan.yml
+    permissions:
+      contents: read
+
+  # Secret scanning — fails the build when a NEW commit introduces a
+  # credential (PR/push commits, gitleaks default). gitleaks-action does not
+  # support merge_group events; the same commits were already scanned on the
+  # PR, so it is skipped there (skipped == pass in ci-gate).
+  secret-scan:
+    name: Secret scan
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # gitleaks-action lists PR commits via the REST API and posts findings
+      # as a PR comment — needs write on pull-requests.
       pull-requests: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          # Pin 8.30.1: .gitleaks.toml uses the [[allowlists]] array form,
-          # which 8.24.x (the action's default) silently ignores — the local
-          # scan was validated byte-identically with this version.
+          # Pin 8.30.1: .gitleaks.toml uses the [[allowlists]] array form.
           GITLEAKS_VERSION: 8.30.1
+
+  # ---------------------------------------------------------------------------
+  # Tier 1 — integration smoke (minimal ephemeral stack, ~4 tests)
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: Smoke
+    uses: ./.github/workflows/_integration.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      label: smoke
+      mode: smoke
+      stack: minimal
+      timeout-minutes: 15
+
+  # ---------------------------------------------------------------------------
+  # Tier 2/3/5 planner — decides selective vs full from changed paths
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # paths-filter lists PR files via the API
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      integration: ${{ steps.plan.outputs.integration }}
+      extended: ${{ steps.plan.outputs.extended }}
+      docker: ${{ steps.plan.outputs.docker }}
+      quarantine: ${{ steps.plan.outputs.quarantine }}
+    steps:
+      - name: Checkout planner config
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github/ci
+            scripts/ci
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.12.0
+      - name: Build path filters from .github/ci/test-selection.json
+        id: filters
+        run: |
+          node scripts/ci/plan-tests.mjs filters "$RUNNER_TEMP/ci-filters.json"
+          echo "path=$RUNNER_TEMP/ci-filters.json" >> "$GITHUB_OUTPUT"
+      - name: Detect changed paths
+        id: changes
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: ${{ steps.filters.outputs.path }}
+          list-files: json
+      - name: Plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'run-full-ci') || (github.event_name == 'workflow_dispatch' && inputs.run_full) }}
+          FILTER_OUTPUTS: ${{ toJSON(steps.changes.outputs) }}
+        run: node scripts/ci/plan-tests.mjs plan
+
+  # ---------------------------------------------------------------------------
+  # Tier 2 (selected groups) / Tier 3+5 (8 full shards)
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Integration (${{ matrix.name }} ${{ matrix.shard }}/${{ matrix.total }})
+    needs: plan
+    if: needs.plan.outputs.integration == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/_integration.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      label: ${{ matrix.name }}
+      mode: tests
+      filters: ${{ matrix.filters }}
+      shard: ${{ matrix.shard }}
+      shard-total: ${{ matrix.total }}
+      timeout-minutes: 35
+
+  # Known-flaky tests (quarantine list, each with a tracking issue). Runs on
+  # full runs for signal only: NEVER blocks and is deliberately NOT a
+  # dependency of ci-gate.
+  quarantine:
+    name: Quarantine (non-blocking)
+    needs: plan
+    if: needs.plan.outputs.quarantine == 'true'
+    uses: ./.github/workflows/_integration.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      label: quarantine
+      mode: quarantine
+      non-blocking: true
+      timeout-minutes: 30
+
+  # E2E / perf / test:all — full runs only (merge queue, push, label, dispatch)
+  extended:
+    name: Extended
+    needs: plan
+    if: needs.plan.outputs.extended == 'true'
+    uses: ./.github/workflows/_extended.yml
+    permissions:
+      contents: read
+    secrets: inherit
+
+  docker-build:
+    name: Docker build
+    needs: plan
+    if: needs.plan.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build image (layer cache, no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          tags: tellus-api:ci-${{ github.sha }}
+          cache-from: type=gha,scope=tellus-api
+          cache-to: type=gha,mode=max,scope=tellus-api
+
+  # ---------------------------------------------------------------------------
+  # Single required check. Passes only if every blocking job succeeded or was
+  # intentionally skipped by the planner; fails on failure OR cancellation.
+  # ---------------------------------------------------------------------------
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs:
+      - tier1
+      - coverage
+      - security-scan
+      - secret-scan
+      - smoke
+      - plan
+      - integration
+      - extended
+      - docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check results of all blocking jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          MODE: ${{ needs.plan.outputs.mode }}
+        run: |
+          set -euo pipefail
+          echo "plan mode: ${MODE:-unknown}"
+          {
+            echo "### ci-gate"
+            echo ""
+            echo "| Job | Result |"
+            echo "|---|---|"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"$NEEDS_JSON"
+          } >> "$GITHUB_STEP_SUMMARY"
+          bad="$(jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"' <<<"$NEEDS_JSON")"
+          if [ -n "$bad" ]; then
+            echo "::error::blocking jobs did not pass: $(echo "$bad" | tr '\n' ' ')"
+            exit 1
+          fi
+          # A skipped planner means the selection itself never ran: fail closed.
+          if [ "$(jq -r '.plan.result' <<<"$NEEDS_JSON")" != "success" ]; then
+            echo "::error::plan job did not run"; exit 1
+          fi
+          echo "all blocking jobs passed or were intentionally skipped"
