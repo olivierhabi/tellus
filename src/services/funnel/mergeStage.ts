@@ -99,6 +99,18 @@ import {
   reportIndexingProgress,
   resolveLeaseObjectTypeId,
 } from "./indexingLease";
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
+import {
+  clearMergeStaging,
+  clearMergeStagingRun,
+  stageMergeRows,
+  verifyMergeStaging,
+  promoteMergeStaging,
+  resolveStagingRunId,
+  type StagedRowInput,
+  type StagingVerification,
+  type StagingScope,
+} from "./mergeStaging";
 
 /**
  * Best-effort lease signalling: a missed heartbeat/progress report delays
@@ -643,22 +655,102 @@ async function downloadParquetRefToLocal(
   return { dir, localPath };
 }
 
-/** Batched delete for the merge's delete tail. ONE array param (well under
- *  PG's 65535 bind ceiling) replaces the pure-TS path's one-`deleteInstance`-
- *  per-row loop. Idempotent (DELETE on absent rows is a no-op). */
-async function batchDeleteInstances(
-  client: PoolClient,
-  ontologyId: string,
+/** Staging gate: the staged set must equal the merged tail exactly —
+ *  same cardinality, all-distinct PKs, no null/empty keys. Throws (live
+ *  table untouched) on any deviation. Exported for unit tests. */
+export function assertStagedTail(
+  staged: StagingVerification,
+  tailRowCount: number,
   objectTypeApiName: string,
-  pks: string[],
+): void {
+  const where = `staging verification for ${objectTypeApiName}`;
+  if (staged.staged !== tailRowCount) {
+    throw new Error(
+      `[merge-sql] ${where} failed: staged=${staged.staged} expected tail=${tailRowCount}`,
+    );
+  }
+  if (staged.distinctPk !== staged.staged) {
+    throw new Error(
+      `[merge-sql] ${where} failed: distinctPk=${staged.distinctPk} staged=${staged.staged} (duplicate PKs in staging)`,
+    );
+  }
+  if (staged.nullPk !== 0 || staged.emptyPk !== 0) {
+    throw new Error(
+      `[merge-sql] ${where} failed: nullPk=${staged.nullPk} emptyPk=${staged.emptyPk}`,
+    );
+  }
+}
+
+/**
+ * 1 000-row field-by-field sample: the first 1 000 staged PKs (ordered)
+ * must match the merged parquet on operation + properties + markings.
+ * Catches a corrupt staging load that the counts alone would miss.
+ */
+async function verifyStagedSample(
+  conn: DuckDBConnection,
+  client: PoolClient,
+  tailFile: string,
+  scope: StagingScope,
 ): Promise<void> {
-  if (pks.length === 0) return;
-  await client.query(
-    `DELETE FROM object_instances
-      WHERE ontology_id = $1 AND object_type_api_name = $2
-        AND primary_key = ANY($3::text[])`,
-    [ontologyId, objectTypeApiName, pks],
+  const lp = tailFile.replace(/'/g, "''");
+  const sample = await queryAll<Record<string, unknown>>(
+    conn,
+    `SELECT primary_key, CAST(properties AS VARCHAR) AS properties,
+            to_json(markings) AS markings, operation
+       FROM read_parquet('${lp}')
+       ORDER BY primary_key LIMIT 1000`,
   );
+  if (sample.length === 0) return;
+  const pks = sample.map((r) => String(r.primary_key));
+  const res = await client.query(
+    `SELECT primary_key, operation, properties, markings
+       FROM merge_staging_instances
+      WHERE staging_run_id = $1
+        AND ontology_id = $2 AND object_type_api_name = $3
+        AND primary_key = ANY($4::text[])`,
+    [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName, pks],
+  );
+  const byPk = new Map<string, Record<string, unknown>>();
+  for (const r of res.rows as Record<string, unknown>[]) {
+    byPk.set(String(r.primary_key), r);
+  }
+  const normMarkings = (v: unknown): string[] => {
+    if (Array.isArray(v)) return (v as unknown[]).map(String).sort();
+    try {
+      const p = JSON.parse(String(v ?? "[]"));
+      return Array.isArray(p) ? p.map(String).sort() : [];
+    } catch {
+      return [];
+    }
+  };
+  for (const r of sample) {
+    const pk = String(r.primary_key);
+    const s = byPk.get(pk);
+    if (!s) {
+      throw new Error(
+        `[merge-sql] staging sample failed for ${scope.objectTypeApiName}: pk ${pk} missing from staging`,
+      );
+    }
+    const wantOp = r.operation === "delete" ? "delete" : "upsert";
+    if (s.operation !== wantOp) {
+      throw new Error(
+        `[merge-sql] staging sample failed for ${scope.objectTypeApiName}: pk ${pk} operation staged=${s.operation} parquet=${r.operation}`,
+      );
+    }
+    const wantProps = JSON.parse(String(r.properties ?? "{}")) as unknown;
+    if (JSON.stringify(s.properties) !== JSON.stringify(wantProps)) {
+      throw new Error(
+        `[merge-sql] staging sample failed for ${scope.objectTypeApiName}: pk ${pk} properties differ`,
+      );
+    }
+    const gotM = normMarkings(s.markings);
+    const wantM = normMarkings(r.markings);
+    if (JSON.stringify(gotM) !== JSON.stringify(wantM)) {
+      throw new Error(
+        `[merge-sql] staging sample failed for ${scope.objectTypeApiName}: pk ${pk} markings differ`,
+      );
+    }
+  }
 }
 
 /**
@@ -748,11 +840,16 @@ export async function runMergePrefixOutOfProcess(
  * `merged_result` to batched PG upserts + deletes inside ONE transaction.
  *
  * `mergedRows` is NOT materialised (the rows live in the returned
- * `parquetRef`; {@link loadMergedRowsFromSnapshot} / {@link streamParquetRows}
- * re-read them). This is the pass-by-reference contract.
+ *  `parquetRef`; {@link loadMergedRowsFromSnapshot} / {@link streamParquetRows}
+ *  re-read them). This is the pass-by-reference contract.
  *
- * Steps 2–8 (the pure-SQL prefix) execute either in-process (default) or in
- * a separate DuckDB CLI process (FUNNEL_MERGE_OUT_OF_PROCESS=1) — see
+ *  The PG tail is staging + promote (see mergeStaging.ts): the merged rows
+ *  load into merge_staging_instances first, count/distinct/sample checks
+ *  run, and only then does a single transaction promote into the live
+ *  object_instances. A failed run leaves the live table unchanged.
+ *
+ * Steps 2–8 (the pure-SQL prefix) execute either in-process or in
+ * a separate DuckDB CLI process (versioned funnelRuntime.mergeOutOfProcess) — see
  * {@link runMergePrefixOutOfProcess}. Statement text is shared.
  */
 export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult> {
@@ -794,7 +891,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
 
   // Steps 2–8 (pure-SQL prefix) run either in-process (default — today's
   // path) or in a separate DuckDB CLI process
-  // (FUNNEL_MERGE_OUT_OF_PROCESS=1). Statement text is shared via
+  // (versioned funnelRuntime.mergeOutOfProcess). Statement text is shared via
   // mergePrefixSql: a single source of SQL for both executors, so a change
   // to the merge logic cannot diverge between them.
   const prefixArgs = {
@@ -820,7 +917,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
   let rowsProcessed = 0;
   try {
     // Steps 2–8 execute here. In-process (default): today's path, one
-    // statement at a time. Out-of-process (FUNNEL_MERGE_OUT_OF_PROCESS=1):
+    // statement at a time. Out-of-process (versioned flag on):
     // the same statements run in a separate DuckDB CLI process and the
     // prefix outputs cross back as parquet files.
     //
@@ -1392,12 +1489,21 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         }
       } else {
       const tTail = Date.now();
+      const batchSize = funnelRuntimeConfig().mergeBatchSize;
+      const stagingScope = {
+        ontologyId: input.ontologyId,
+        objectTypeApiName: input.objectTypeApiName,
+        stagingRunId: resolveStagingRunId(input.runKey, preMergedSnapshotId),
+      };
       const client = await getClient();
-      const upsertBuf: UpsertInstanceInput[] = [];
-      const deleteBuf: string[] = [];
+      const stageBuf: StagedRowInput[] = [];
       let pgTailCommitted = false;
+      // Phase 1 — load the merged tail into STAGING (never the live table).
+      // A kill here rolls the staging transaction back; object_instances
+      // is untouched until the verified promote in Phase 3.
       try {
         await client.query("BEGIN");
+        await clearMergeStaging(client, stagingScope);
         // Batched queryAll over the LOCAL merged parquet (pk-sorted — the COPY
         // at step 12 wrote it ORDER BY primary_key). Keyset pagination
         // (WHERE primary_key > $last) — NOT a DuckDB stream. A stream
@@ -1419,7 +1525,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
              COALESCE(source_transaction_id, '') AS source_transaction_id
            FROM read_parquet('${lp}')
            ${after ? `WHERE primary_key > ${sqlStr(after)}` : ""}
-           ORDER BY primary_key LIMIT 5000`;
+           ORDER BY primary_key LIMIT ${batchSize}`;
         let keysetAfter = "";
         for (;;) {
           const batch = await queryAll<Record<string, unknown>>(
@@ -1430,32 +1536,20 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
           for (const row of batch) {
             lastPk = String(row.primary_key);
             rowsProcessed++;
-            if (row.operation === "delete") {
-              deleteBuf.push(lastPk);
-              if (deleteBuf.length >= 5000) {
-                deletes += deleteBuf.length;
-                await batchDeleteInstances(
-                  client,
-                  input.ontologyId,
-                  input.objectTypeApiName,
-                  deleteBuf.splice(0),
-                );
-              }
-            } else {
-              upsertBuf.push({
-                ontology_id: input.ontologyId,
-                object_type_api_name: input.objectTypeApiName,
-                primary_key: lastPk,
-                properties: parseJsonColumn(row.properties),
-                markings: parseJsonArrayColumn(row.markings),
-                source_datasource_id:
-                  String(row.source_datasource_id ?? "") || null,
-                source_transaction_id:
-                  String(row.source_transaction_id ?? "") || null,
-              });
-              if (upsertBuf.length >= 1000) {
-                upserts += await bulkUpsertInstances(upsertBuf.splice(0), client);
-              }
+            stageBuf.push({
+              ontology_id: input.ontologyId,
+              object_type_api_name: input.objectTypeApiName,
+              primary_key: lastPk,
+              operation: row.operation === "delete" ? "delete" : "upsert",
+              properties: parseJsonColumn(row.properties),
+              markings: parseJsonArrayColumn(row.markings),
+              source_datasource_id:
+                String(row.source_datasource_id ?? "") || null,
+              source_transaction_id:
+                String(row.source_transaction_id ?? "") || null,
+            });
+            if (stageBuf.length >= 1000) {
+              await stageMergeRows(client, stagingScope, stageBuf.splice(0));
             }
             // Advisory progress (transaction NOT committed yet — advisory only).
             // Deliberately NOT awaited: this runs inside the open BEGIN/COMMIT
@@ -1465,7 +1559,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
             // rows, and up to the full connect deadline each when Redis is
             // down. recordMergeProgress swallows its own failures, so a
             // floating rejection is impossible.
-            if (input.runKey && rowsProcessed % 5000 === 0) {
+            if (input.runKey && rowsProcessed % batchSize === 0) {
               void recordMergeProgress(input.runKey, {
                 committed: false,
                 lastPk,
@@ -1488,29 +1582,55 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
           }
           keysetAfter = lastPk ?? ""; // advance the cursor to the last row of this batch
         }
-        if (upsertBuf.length > 0) {
-          upserts += await bulkUpsertInstances(upsertBuf, client);
-        }
-        if (deleteBuf.length > 0) {
-          deletes += deleteBuf.length;
-          await batchDeleteInstances(
-            client,
-            input.ontologyId,
-            input.objectTypeApiName,
-            deleteBuf,
-          );
+        if (stageBuf.length > 0) {
+          await stageMergeRows(client, stagingScope, stageBuf.splice(0));
         }
         await client.query("COMMIT");
         console.log(
-          `[merge-sql] ${input.objectTypeApiName} pg-tail rows=${rowsProcessed} ` +
-            `upserts=${upserts} deletes=${deletes} durMs=${Date.now() - tTail}`,
+          `[merge-sql] ${input.objectTypeApiName} staging rows=${rowsProcessed} ` +
+            `durMs=${Date.now() - tTail}`,
         );
-        pgTailCommitted = true;
       } catch (err) {
         await client.query("ROLLBACK");
         throw err;
       } finally {
         client.release();
+      }
+      // Phase 2 — verify staging BEFORE touching the live table. Count +
+      // distinct + null/empty over the staged rows, plus a 1 000-row
+      // field-by-field sample against the merged parquet. Any failure here
+      // throws with object_instances unchanged.
+      const stageClient = await getClient();
+      try {
+        const staged = await verifyMergeStaging(stageClient, stagingScope);
+        assertStagedTail(staged, tailRowCount, input.objectTypeApiName);
+        await verifyStagedSample(conn, stageClient, tailFile, stagingScope);
+        upserts = staged.stagedUpserts;
+        deletes = staged.stagedDeletes;
+        // Phase 3 — atomic promote: staged upserts + deletes cut over to
+        // the live table inside ONE transaction, then staging is dropped.
+        await stageClient.query("BEGIN");
+        try {
+          const promoted = await promoteMergeStaging(stageClient, stagingScope);
+          await stageClient.query("COMMIT");
+          console.log(
+            `[merge-sql] ${input.objectTypeApiName} pg-tail rows=${rowsProcessed} ` +
+              `upserts=${upserts} deletes=${deletes} ` +
+              `promotedUpserts=${promoted.upserts} promotedDeletes=${promoted.deletes} ` +
+              `durMs=${Date.now() - tTail}`,
+          );
+        } catch (err) {
+          await stageClient.query("ROLLBACK");
+          throw err;
+        }
+        pgTailCommitted = true;
+      } catch (err) {
+        if (!funnelRuntimeConfig().mergeStagingRetainOnFailure) {
+          await clearMergeStagingRun(stageClient, stagingScope).catch(() => {});
+        }
+        throw err;
+      } finally {
+        stageClient.release();
       }
       // committed=true is recorded only AFTER the pool client is released, so
       // the Redis write can never extend the lifetime of a PG connection.

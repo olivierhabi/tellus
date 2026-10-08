@@ -32,16 +32,20 @@ vi.mock("../../../src/db", () => ({
 import {
   indexingStallAfterMs,
   indexingBootStaleMs,
+  indexingDeadAfterMs,
   isTimestampStale,
   shouldMarkStalled,
   touchIndexingLock,
+  touchLeaseHeartbeat,
   reportIndexingProgress,
   sweepStalledIndexing,
+  sweepDeadIndexingLocks,
   reconcileStaleIndexingLocks,
   describeIndexingLock,
   resolveLeaseObjectTypeId,
   INDEXING_STALL_AFTER_MS_DEFAULT,
   INDEXING_BOOT_STALE_MS_DEFAULT,
+  INDEXING_DEAD_AFTER_MS_DEFAULT,
 } from "../../../src/services/funnel/indexingLease";
 
 const flat = (sql: string) => sql.replace(/\s+/g, " ").trim();
@@ -52,24 +56,20 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.FUNNEL_INDEXING_STALL_AFTER_MS;
-  delete process.env.FUNNEL_INDEXING_BOOT_STALE_MS;
+  delete process.env.TELLUS_ENVIRONMENT_ID;
+  delete process.env.NODE_ENV;
 });
 
-describe("env parsing", () => {
-  it("defaults: 10 min stall, 15 min boot grace; rejects junk", () => {
-    delete process.env.FUNNEL_INDEXING_STALL_AFTER_MS;
-    delete process.env.FUNNEL_INDEXING_BOOT_STALE_MS;
+describe("versioned config", () => {
+  it("defaults: 10 min stall, 15 min boot grace, 15 min dead budget", () => {
+    delete process.env.TELLUS_ENVIRONMENT_ID;
+    delete process.env.NODE_ENV;
     expect(indexingStallAfterMs()).toBe(INDEXING_STALL_AFTER_MS_DEFAULT);
     expect(indexingBootStaleMs()).toBe(INDEXING_BOOT_STALE_MS_DEFAULT);
+    expect(indexingDeadAfterMs()).toBe(INDEXING_DEAD_AFTER_MS_DEFAULT);
     expect(INDEXING_STALL_AFTER_MS_DEFAULT).toBe(600_000);
     expect(INDEXING_BOOT_STALE_MS_DEFAULT).toBe(900_000);
-    process.env.FUNNEL_INDEXING_STALL_AFTER_MS = "junk";
-    process.env.FUNNEL_INDEXING_BOOT_STALE_MS = "-5";
-    expect(indexingStallAfterMs()).toBe(INDEXING_STALL_AFTER_MS_DEFAULT);
-    expect(indexingBootStaleMs()).toBe(INDEXING_BOOT_STALE_MS_DEFAULT);
-    process.env.FUNNEL_INDEXING_STALL_AFTER_MS = "60000";
-    expect(indexingStallAfterMs()).toBe(60_000);
+    expect(INDEXING_DEAD_AFTER_MS_DEFAULT).toBe(900_000);
   });
 });
 
@@ -133,6 +133,16 @@ describe("touchIndexingLock / reportIndexingProgress", () => {
     );
     expect(flat(calls[0].sql)).toContain("status = 'indexing'");
   });
+
+  it("holder timer moves lease_heartbeat_at and never last_progress_at", async () => {
+    respond = () => ({
+      rows: [{ object_type_id: "ot-1" }],
+    });
+    await expect(touchLeaseHeartbeat("ot-1")).resolves.toBe(true);
+    expect(flat(calls[0].sql)).toContain("SET lease_heartbeat_at = now()");
+    expect(flat(calls[0].sql)).not.toContain("last_progress_at");
+    expect(flat(calls[0].sql)).toContain("status = 'indexing'");
+  });
 });
 
 describe("sweepStalledIndexing", () => {
@@ -186,6 +196,35 @@ describe("sweepStalledIndexing", () => {
   });
 });
 
+describe("sweepDeadIndexingLocks", () => {
+  it("uses the lease heartbeat only and skips live runs", async () => {
+    respond = (sql) => {
+      if (sql.includes("UPDATE funnel_state")) {
+        return {
+          rows: [
+            {
+              object_type_id: "ot-dead",
+              lease_heartbeat_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-01T00:00:00Z",
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    };
+    const { swept } = await sweepDeadIndexingLocks(900_000);
+    expect(swept.map((r) => r.object_type_id)).toEqual(["ot-dead"]);
+    const sql = flat(calls[0].sql);
+    expect(sql).toContain("lease_heartbeat_at IS NOT NULL");
+    expect(sql).toContain("lease_heartbeat_at < now()");
+    expect(sql).not.toContain("last_progress_at");
+    expect(sql).toContain("NOT EXISTS");
+    expect(sql).toContain("fr.status = 'running'");
+    expect(sql).toContain("DEAD");
+    expect(calls[0].params).toEqual(["900000"]);
+  });
+});
+
 describe("reconcileStaleIndexingLocks", () => {
   it("releases only old locks with no live run (NOT EXISTS running)", async () => {
     respond = () => ({ rows: [{ object_type_id: "ot-old" }] });
@@ -211,6 +250,8 @@ describe("describeIndexingLock / resolveLeaseObjectTypeId", () => {
           status: "indexing",
           objects_indexed: 42,
           updated_at: "2026-01-01T00:00:00Z",
+          lease_heartbeat_at: "2026-01-01T00:00:01Z",
+          last_progress_at: "2026-01-01T00:00:02Z",
           active_run_id: "run-9",
           current_stage: "merge",
           started_at: "2026-01-01T00:00:00Z",
@@ -221,6 +262,8 @@ describe("describeIndexingLock / resolveLeaseObjectTypeId", () => {
       status: "indexing",
       objectsIndexed: 42,
       updatedAt: "2026-01-01T00:00:00Z",
+      leaseHeartbeatAt: "2026-01-01T00:00:01Z",
+      lastProgressAt: "2026-01-01T00:00:02Z",
       activeRunId: "run-9",
       runStage: "merge",
       runStartedAt: "2026-01-01T00:00:00Z",

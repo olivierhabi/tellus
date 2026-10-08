@@ -7,7 +7,7 @@
 // inline; it is factored out so two executors can run it:
 //
 //   * in-process (today's path): statements executed one-by-one via runAll;
-//   * out-of-process (FUNNEL_MERGE_OUT_OF_PROCESS=1): concatenated with the
+//   * out-of-process (versioned funnelRuntime.mergeOutOfProcess): concatenated with the
 //     CLI settings preamble plus the export COPYs, run by mergeCliRunner in
 //     a separate DuckDB CLI process, then re-attached in-process via the
 //     attach statements.

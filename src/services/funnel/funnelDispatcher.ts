@@ -133,11 +133,14 @@ async function tick(options: DispatcherOptions): Promise<number> {
     }
   }
   // Stall watchdog (both paths hold funnel_state locks — Temporal-driven and
-  // PG-dispatcher alike). Fails instrumented-but-quiet locks so a wedged run
-  // surfaces as STALLED within the stall budget instead of spinning forever.
+  // PG-dispatcher alike). Two distinct sweeps on two distinct signals:
+  // last_progress_at => STALLED (alive but not moving); lease_heartbeat_at
+  // => DEAD (holder gone, no live run). A wedged run surfaces within the
+  // stall budget instead of spinning forever.
   try {
-    const { sweepStalledIndexing } = await import("./indexingLease");
+    const { sweepStalledIndexing, sweepDeadIndexingLocks } = await import("./indexingLease");
     await sweepStalledIndexing();
+    await sweepDeadIndexingLocks();
   } catch (err) {
     console.warn(`[funnel/dispatcher] stall sweep failed: ${(err as Error).message}`);
   }
