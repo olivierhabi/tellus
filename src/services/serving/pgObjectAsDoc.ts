@@ -15,7 +15,7 @@
 //     overlay semantics remain the route-level overlay coverage).
 // ---------------------------------------------------------------------------
 
-import { query } from "../../../src/db";
+import { query } from "../../db";
 
 /**
  * Caller security context for the PG read path. Mirrors the fields

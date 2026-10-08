@@ -27,11 +27,11 @@ const MIGRATIONS = [
 function authed(app: Express) {
   return {
     get: (url: string) =>
-      request(app).get(url).set("X-Tellus-Test-Principal", "alice/editor"),
+      request(app).get(url).set("X-Tellus-Test-Principal", "alice/editor").set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
     post: (url: string) =>
-      request(app).post(url).set("X-Tellus-Test-Principal", "alice/editor"),
+      request(app).post(url).set("X-Tellus-Test-Principal", "alice/editor").set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
     delete: (url: string) =>
-      request(app).delete(url).set("X-Tellus-Test-Principal", "alice/editor"),
+      request(app).delete(url).set("X-Tellus-Test-Principal", "alice/editor").set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? ""),
   };
 }
 

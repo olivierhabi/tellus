@@ -81,23 +81,27 @@ describe("admin API authorization", () => {
     const create = await request(app)
       .post(`${base}/function-publish-grants`)
       .set("X-Tellus-Test-Principal", NON_ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({ subjectType: "local_user", subjectId: "x", scopeType: "global", reason: "r" });
     expect(create.status).toBe(403);
     expect(create.body.errorName).toBe("Functions:PermissionDenied");
 
     const list = await request(app)
       .get(`${base}/function-publish-grants`)
-      .set("X-Tellus-Test-Principal", NON_ADMIN);
+      .set("X-Tellus-Test-Principal", NON_ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(list.status).toBe(403);
 
     const revoke = await request(app)
       .delete(`${base}/function-publish-grants/00000000-0000-0000-0000-000000000000`)
-      .set("X-Tellus-Test-Principal", NON_ADMIN);
+      .set("X-Tellus-Test-Principal", NON_ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(revoke.status).toBe(403);
 
     const audit = await request(app)
       .get(`${base}/function-publish-audit-log`)
-      .set("X-Tellus-Test-Principal", NON_ADMIN);
+      .set("X-Tellus-Test-Principal", NON_ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(audit.status).toBe(403);
   });
 });
@@ -109,6 +113,7 @@ describe("grant lifecycle", () => {
     const r = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "local_user",
         subjectId: "alice",
@@ -136,6 +141,7 @@ describe("grant lifecycle", () => {
     const r = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "local_user",
         subjectId: "alice",
@@ -158,7 +164,8 @@ describe("grant lifecycle", () => {
   it("revocation is effective on the very next request and audited", async () => {
     const r = await request(app)
       .delete(`/api/v1/functions/admin/function-publish-grants/${grantId}`)
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(r.status).toBe(200);
     expect(r.body.grant.status).toBe("revoked");
     expect(r.body.grant.revokedBy).toBe("admin-user");
@@ -181,13 +188,15 @@ describe("grant lifecycle", () => {
   it("double-revoke is a 404, unknown id is a 404", async () => {
     const again = await request(app)
       .delete(`/api/v1/functions/admin/function-publish-grants/${grantId}`)
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(again.status).toBe(404);
     const missing = await request(app)
       .delete(
         "/api/v1/functions/admin/function-publish-grants/00000000-0000-0000-0000-000000000000",
       )
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(missing.status).toBe(404);
   });
 });
@@ -197,6 +206,7 @@ describe("grant validation", () => {
     const noRid = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "local_user",
         subjectId: "carol",
@@ -208,6 +218,7 @@ describe("grant validation", () => {
     const unknownRid = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "local_user",
         subjectId: "carol",
@@ -223,12 +234,14 @@ describe("grant validation", () => {
     const noReason = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({ subjectType: "local_user", subjectId: "carol", scopeType: "global" });
     expect(noReason.status).toBe(400);
 
     const badType = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "email",
         subjectId: "carol",
@@ -240,6 +253,7 @@ describe("grant validation", () => {
     const pastExpiry = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "local_user",
         subjectId: "carol",
@@ -256,6 +270,7 @@ describe("scoped + expiring grants against the real clock", () => {
     const r = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "local_user",
         subjectId: "carol",
@@ -305,6 +320,7 @@ describe("scoped + expiring grants against the real clock", () => {
     const r = await request(app)
       .post("/api/v1/functions/admin/function-publish-grants")
       .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
       .send({
         subjectType: "keycloak_sub",
         subjectId: "kc-carol",
@@ -326,7 +342,8 @@ describe("list endpoints", () => {
   it("lists grants with status filter + keyset pagination", async () => {
     const active = await request(app)
       .get("/api/v1/functions/admin/function-publish-grants?status=active")
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(active.status).toBe(200);
     // carol's (now expired) grant is excluded; the kc-carol grant remains.
     expect(active.body.items.map((g: { subjectId: string }) => g.subjectId)).toEqual([
@@ -335,7 +352,8 @@ describe("list endpoints", () => {
 
     const page1 = await request(app)
       .get("/api/v1/functions/admin/function-publish-grants?limit=1")
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(page1.status).toBe(200);
     expect(page1.body.items).toHaveLength(1);
     expect(page1.body.nextPageToken).toBeTruthy();
@@ -343,7 +361,8 @@ describe("list endpoints", () => {
       .get(
         `/api/v1/functions/admin/function-publish-grants?limit=1&cursor=${encodeURIComponent(page1.body.nextPageToken)}`,
       )
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(page2.status).toBe(200);
     expect(page2.body.items).toHaveLength(1);
     expect(page2.body.items[0].id).not.toBe(page1.body.items[0].id);
@@ -354,12 +373,14 @@ describe("list endpoints", () => {
       .get(
         "/api/v1/functions/admin/function-publish-audit-log?eventType=grant_created",
       )
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(r.status).toBe(200);
     expect(r.body.totalCount).toBe(3); // alice global + carol repo + kc-carol global
     const subject = await request(app)
       .get("/api/v1/functions/admin/function-publish-audit-log?subject=alice")
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(
       subject.body.items.every(
         (row: { subjectId: string }) => row.subjectId === "alice",
@@ -367,7 +388,8 @@ describe("list endpoints", () => {
     ).toBe(true);
     const badFilter = await request(app)
       .get("/api/v1/functions/admin/function-publish-audit-log?eventType=nope")
-      .set("X-Tellus-Test-Principal", ADMIN);
+      .set("X-Tellus-Test-Principal", ADMIN)
+      .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
     expect(badFilter.status).toBe(400);
   });
 });

@@ -45,6 +45,23 @@ export interface LinkCountResult {
 
 export interface SearchAroundOptions {
   sourceFilter?: Record<string, unknown>;
+  /**
+   * Caller already knows the source-side primary keys — skip the source-side
+   * index lookup entirely.
+   *
+   * `sourceWhere`/`sourceFilter` force this function to SEARCH the source index
+   * (up to `MAX_SOURCE` = 100k docs projected to `__pk`) just to turn a filter
+   * into a PK list. Every Search Around hop after the first arrives already
+   * holding the exact PKs of the previous hop's output, so that round trip
+   * re-derives what the caller had. Measured on the RSSB Provider Profile
+   * (2026-10-03): skipping it removed one OpenSearch round trip per hop.
+   *
+   * SECURITY: the linked (target) objects are still fetched through the normal
+   * security-filtered path, so nothing is disclosed by skipping the SOURCE
+   * lookup. This is only sound because `sourcePks` originates from a previous
+   * security-filtered hop — do not populate it from user-supplied input.
+   */
+  sourcePks?: string[];
   /** Canonical ontology-search where DSL. Prefer this for Workshop linked
    * filters; `sourceFilter` remains for legacy flat equality maps. */
   sourceWhere?: Record<string, unknown>;
@@ -846,6 +863,13 @@ export async function searchAround(
 
   let sourcePKs: string[] = [];
   let sourceJoinValues: string[] | null = null;
+  // Covering path: the caller already holds the source PKs, so do not spend a
+  // source-side index query rediscovering them. Not applicable when the link
+  // joins on an explicit property (we would still need that property's value).
+  const presuppliedSourcePks =
+    Array.isArray(options.sourcePks) && options.sourcePks.length > 0
+      ? [...new Set(options.sourcePks.map((pk) => String(pk)))]
+      : null;
   // Bulk Search Around normally joins against the filtered side's primary
   // keys. When both sides explicitly declare join properties, project the
   // filtered side's configured property too and use those values instead.
@@ -859,6 +883,12 @@ export async function searchAround(
   }
   const MAX_SOURCE = 100000;
   try {
+    if (presuppliedSourcePks && searchSideJoinField === null) {
+      sourcePKs = presuppliedSourcePks;
+      if (process.env.OSV2_TRACE === "1") {
+        console.log(JSON.stringify({ t: "searchAround-src-presupplied", n: sourcePKs.length }));
+      }
+    } else {
     const { body: resp } = await client.search({
       index: searchIndexName,
       // F-P3-13: source-side object lookup respects branch isolation.
@@ -881,6 +911,7 @@ export async function searchAround(
 
     if (totalHits > MAX_SOURCE) {
       warnings.push(`Source filter matched ${totalHits} objects but only first ${MAX_SOURCE} were used.`);
+    }
     }
   } catch (srcErr) {
     if (process.env.OSV2_TRACE === "1") {

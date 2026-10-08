@@ -25,6 +25,7 @@ function authed(app: express.Express): {
 } {
   const headers = {
     "X-Tellus-Test-Principal": "alice",
+    "X-Tellus-Test-Auth-Token": process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "",
     "X-Tellus-Test-Roles": "editor",
   };
   return {

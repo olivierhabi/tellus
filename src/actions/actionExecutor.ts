@@ -36,6 +36,11 @@ import { DEFAULT_EGRESS_POLICY } from "../services/webhookSafeTransport";
 import * as https from "https";
 import * as http from "http";
 import { applyEdits } from "./editApplicator";
+import {
+  collectAttachmentRidsFromEdits,
+  stampAttachmentsLinked,
+  verifyAttachmentReferences,
+} from "../services/attachmentService";
 import { evaluateSubmissionCriteria, resolveObjectPropertyOperands } from "./submissionCriteria";
 import { fireActionWebhooks } from "./actionWebhooks";
 import { sendNotifications } from "./sideEffectNotifier";
@@ -1003,6 +1008,45 @@ export async function executeAction(
     }
 
     // -----------------------------------------------------------------
+    // STAGE 4.5: Attachment reference verification (Foundry
+    // upload-attachments parity — an action may only link uploads that
+    // exist, and an upload serves at most 10 objects in its lifetime).
+    // Fail fast here so a dangling/missing file can never commit as a
+    // dead mediaRid that renders as a broken Evidence row downstream.
+    // -----------------------------------------------------------------
+    const attachmentRids = collectAttachmentRidsFromEdits(compilation.edits);
+    if (attachmentRids.length > 0) {
+      const attachmentCheck = await verifyAttachmentReferences(attachmentRids);
+      if (attachmentCheck.missing.length > 0 || attachmentCheck.overLinked.length > 0) {
+        const reasons: string[] = [];
+        for (const rid of attachmentCheck.missing) {
+          reasons.push(
+            `Attachment '${rid}' does not exist or is no longer available. ` +
+              `Upload the file again and resubmit.`,
+          );
+        }
+        for (const over of attachmentCheck.overLinked) {
+          reasons.push(
+            `Attachment '${over.rid}' is already linked to ${over.linkedObjects} object(s) ` +
+              `(limit 10). Upload the file again as a new attachment to link it further.`,
+          );
+        }
+        result.failureType =
+          attachmentCheck.missing.length > 0 ? "invalid_parameter" : "scale_limit";
+        result.errorMessage = reasons.join(" ");
+        pendingError = new OntologyError(
+          result.errorMessage,
+          attachmentCheck.missing.length > 0
+            ? "ATTACHMENT_NOT_FOUND"
+            : "ATTACHMENT_LINK_LIMIT_EXCEEDED",
+          undefined,
+          { executionId },
+        );
+        return result;
+      }
+    }
+
+    // -----------------------------------------------------------------
     // STAGE 4a (Phase 6): Version-2 plan + final-state validation.
     //
     // For version 2 (and only when the v2 execution flag is on), build the
@@ -1438,6 +1482,26 @@ export async function executeAction(
       primaryKey: e.primaryKey,
       operation: e.operation,
     }));
+
+    // Attachment linkage stamp (Foundry parity — an upload becomes a
+    // *linked* attachment only once an action commits it onto an object).
+    // Post-commit and best-effort: a stamp failure must never fail an
+    // already-durable apply. Without the stamp the 1h unlinked-upload
+    // sweeper cannot tell live attachments from orphans.
+    if (application.success && attachmentRids.length > 0) {
+      try {
+        await stampAttachmentsLinked(attachmentRids, ontologyId);
+      } catch (err) {
+        try {
+          incCounter("tellus_attachments_link_stamp_failed_total", {
+            actionType: actionTypeApiName,
+          });
+        } catch { /* metrics non-blocking */ }
+        console.warn(
+          `[attachments] link-stamp failed for ${actionTypeApiName} ${executionId}: ${(err as Error).message}`,
+        );
+      }
+    }
 
     // OSv2 ack transparency: surface the edge-index confirmation verdict so
     // the REST contract can distinguish "confirmed queryable" from

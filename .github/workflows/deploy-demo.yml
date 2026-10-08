@@ -1,0 +1,203 @@
+# =============================================================================
+# Tellus — Demo deploy (GitHub Actions -> Azure demo VM)
+#
+# Why this exists: the demo VM (2 vCPU / 7.8 GB, no swap) also SERVES the
+# site. Building images in-place starved live traffic (load hit ~250 and the
+# host became unresponsive to SSH). Build here on a native amd64 runner
+# instead, push to GHCR, and have the VM only `docker pull` + recreate the two
+# containers — a light, low-risk operation.
+#
+# Both images are pushed under the BACKEND repo's GHCR namespace using nested
+# package paths (ghcr.io/olivierhabi/tellus/app, .../fe) so a single
+# GITHUB_TOKEN (packages: write) owns both, avoiding cross-repo package ACLs.
+#
+# The frontend is a PRIVATE sibling repo, so it is checked out with a PAT
+# (CROSS_REPO_TOKEN) that has `repo` scope.
+# =============================================================================
+
+name: deploy-demo
+
+on:
+  # workflow_dispatch only fires for workflows present on the default branch;
+  # this workflow intentionally lives on a feature branch, so a push to that
+  # branch is the trigger (push events run from the branch's own workflow
+  # file). workflow_dispatch is kept for when it is eventually promoted to main.
+  push:
+    branches: ["fix/compose-keycloak-confidential-creds"]
+  workflow_dispatch:
+    inputs:
+      frontend_ref:
+        description: "tellus-fe branch/tag to build"
+        required: false
+        default: "chore/edge-nginx-demo"
+      deploy:
+        description: "Also deploy to the demo VM (leave false to build only)"
+        type: boolean
+        required: false
+        default: false
+      tag:
+        description: "image tag suffix (default: run number)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+# Two overlapping runs race on the single demo VM: both `docker compose up -d`
+# retag `tellus-app:latest` and recreate `tellus-app-1` concurrently, and one
+# fails with `No such container: <id>` while the other recreates it. Measured
+# on 2026-10-03 (runs 37151339444 / 37151425962). `cancel-in-progress: false`
+# queues a newer push BEHIND the in-flight deploy instead of letting them
+# interleave, so each `up -d` sees a stable container set.
+concurrency:
+  group: deploy-demo-vm
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/tellus/app
+  FE_IMAGE: ghcr.io/${{ github.repository_owner }}/tellus/fe
+  DEPLOY_HOST: "20.51.243.30"
+  DEPLOY_USER: "azureuser"
+
+jobs:
+  build:
+    name: Build + push images
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v7
+
+      - name: Checkout frontend (private sibling)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/tellus-fe
+          ref: ${{ inputs.frontend_ref || 'chore/edge-nginx-demo' }}
+          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          path: frontend
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tag
+        id: meta
+        run: echo "tag=${{ inputs.tag || format('r{0}', github.run_number) }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.APP_IMAGE }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build + push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.FE_IMAGE }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to demo VM
+    needs: build
+    # MANUAL DEPLOY ONLY. This job pushes to the live demo VM, so it must not
+    # run implicitly from a push — an un-reviewed merge should never restart
+    # the demo on its own. Pushes build and push images to GHCR only; the VM
+    # is then updated deliberately, either by dispatching this workflow with
+    # `deploy=true`, or by pulling the built tag and recreating the
+    # containers by hand.
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Write SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+
+      - name: Log in to GHCR on VM
+        env:
+          GHCR_PAT: ${{ secrets.CROSS_REPO_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_PAT" | ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+
+      - name: Pull + recreate containers on VM
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" "TAG='${{ needs.build.outputs.tag }}' bash -s" <<'REMOTE_EOF'
+          set -euo pipefail
+          cleanup() { docker logout ghcr.io >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          docker pull ${{ env.APP_IMAGE }}:$TAG
+          docker pull ${{ env.FE_IMAGE }}:$TAG
+
+          # Retag to the names the compose files reference, then recreate
+          # (--no-build so compose never rebuilds on the small VM).
+          docker tag ${{ env.APP_IMAGE }}:$TAG tellus-app:latest
+          docker tag ${{ env.FE_IMAGE }}:$TAG tellus-fe:workshop-demo
+
+          cd ~/tellus && docker compose up -d --no-build app
+          cd ~/tellus-fe && docker compose up -d --no-build fe
+
+          echo "--- waiting for app health ---"
+          for i in $(seq 1 60); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' tellus-app-1 2>/dev/null)" = "healthy" ]; then
+              echo "app healthy after ${i}0s"; break
+            fi
+            sleep 10
+          done
+          docker ps --filter name=tellus-app-1 --filter name=tellus-fe-fe --format '{{.Names}} {{.Status}}'
+
+          # --- disk guard -------------------------------------------------
+          # The VM's root fs is 29G. On 2026-10-03 it hit 98%, OpenSearch
+          # crossed its 95% flood-stage watermark and set
+          # read_only_allow-delete on EVERY index: all indexing silently
+          # failed, a stuck ontology_edit row accumulated, and types showed
+          # empty. Nothing errored loudly, so it presented as a seed/data bug.
+          #
+          # Report usage every deploy, and only reclaim when it is actually
+          # needed. Images are re-pullable from GHCR, so older r* tags are
+          # disposable; the current $TAG is always kept.
+          echo "--- disk usage ---"
+          df -h / | tail -1
+          DISK_PCT=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+          if [ "$DISK_PCT" -ge 75 ]; then
+            echo "root fs at ${DISK_PCT}% — pruning stale r* image tags (keeping ${TAG})"
+            for img in ${{ env.APP_IMAGE }} ${{ env.FE_IMAGE }}; do
+              docker images --format '{{.Repository}} {{.Tag}}' "$img" \
+                | awk -v keep="$TAG" -v repo="$img" '$2 != keep && $2 ~ /^r[0-9]+$/ {print $2}' \
+                | while read -r old; do
+                    [ -n "$old" ] && docker rmi "$img:$old" >/dev/null 2>&1 || true
+                  done
+            done
+            docker builder prune -af >/dev/null 2>&1 || true
+            df -h / | tail -1
+          fi
+          REMOTE_EOF

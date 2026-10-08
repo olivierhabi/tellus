@@ -149,6 +149,7 @@ async function requestEditFunction(
   const res = await request(app)
     .post("/api/v1/code-assistant/typescript-v2")
     .set("X-Tellus-Test-Principal", "ai-contract/READER")
+    .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
     .send({ message, model, mode: "generate", stream: false });
 
   if (res.status !== 200) {

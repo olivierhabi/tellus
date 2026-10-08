@@ -293,8 +293,18 @@ bootstrap_keycloak_realm() {
     || die "keycloak realm bootstrap failed (scripts/bootstrap-keycloak.sh)"
   # Relax the password policy for dev deployments (the bootstrap script sets
   # length(12); dev superadmin passwords like "Elie0?Telos" are 11 chars).
+  # Authenticate as the Keycloak master admin using THIS project's .env
+  # credentials. Hardcoding admin/admin (the old behaviour) makes this
+  # unreachable on any deployment that sets KEYCLOAK_ADMIN_PASSWORD — which
+  # docker-compose.yml REQUIRES — so the realm/superadmin bootstrap silently
+  # degraded to a warning. Read the creds; fall back to admin/admin only when
+  # unset, preserving the historical default.
+  local kc_admin_user kc_admin_pass
+  kc_admin_user="$(env_val KEYCLOAK_ADMIN)"; kc_admin_user="${kc_admin_user:-admin}"
+  kc_admin_pass="$(env_val KEYCLOAK_ADMIN_PASSWORD)"; kc_admin_pass="${kc_admin_pass:-admin}"
   local tok; tok="$(curl -sf "${kc_url}/realms/master/protocol/openid-connect/token" \
-    -d grant_type=password -d client_id=admin-cli -d username=admin -d password=admin 2>/dev/null | jq -r '.access_token // empty')" || true
+    -d grant_type=password -d client_id=admin-cli \
+    -d username="$kc_admin_user" -d password="$kc_admin_pass" 2>/dev/null | jq -r '.access_token // empty')" || true
   if [[ -n "$tok" ]]; then
     local rj; rj="$(curl -sf "${kc_url}/admin/realms/${kc_realm}" -H "Authorization: Bearer ${tok}" 2>/dev/null)" || true
     if [[ -n "$rj" ]]; then
@@ -330,10 +340,13 @@ bootstrap_ensure_superadmin() {
   kc_port="$({ "${COMPOSE[@]}" port keycloak 8086 2>/dev/null || true; } | sed 's/.*://')" || kc_port=""
   kc_port="${kc_port:-8086}"
   kc_url="http://127.0.0.1:${kc_port}"
+  local kc_admin_user kc_admin_pass
+  kc_admin_user="$(env_val KEYCLOAK_ADMIN)"; kc_admin_user="${kc_admin_user:-admin}"
+  kc_admin_pass="$(env_val KEYCLOAK_ADMIN_PASSWORD)"; kc_admin_pass="${kc_admin_pass:-admin}"
   local tok
   tok="$(curl -sf "${kc_url}/realms/master/protocol/openid-connect/token" \
           -d grant_type=password -d client_id=admin-cli \
-          -d username=admin -d password=admin 2>/dev/null | jq -r '.access_token // empty')" || true
+          -d username="$kc_admin_user" -d password="$kc_admin_pass" 2>/dev/null | jq -r '.access_token // empty')" || true
   if [[ -z "$tok" ]]; then
     warn "keycloak admin token exchange failed — skipping superadmin ensure"
     SUPERADMIN_CREATED=0

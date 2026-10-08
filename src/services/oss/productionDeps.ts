@@ -341,6 +341,216 @@ export function makeProductionExecutorDeps(
     }
     return [...targets].sort();
   };
+  // The real traversal implementation, hoisted out of the deps object so the
+  // exported `traverse` can route it through single-flight coalescing (helper
+  // at end of file): concurrent identical hops must execute ONCE.
+  const traverseImpl = async ({
+    fromObjectType,
+    link,
+    anchorWhere,
+    interfaceLink,
+  }: TraverseArgs): Promise<TraverseResult | TraverseResult[]> => {
+    if (interfaceLink) {
+      const { rows } = await query(
+        `SELECT DISTINCT lt.api_name
+           FROM interface_link_constraint ilc
+           JOIN object_type source_ot
+             ON source_ot.ontology_id = ilc.ontology_id
+            AND source_ot.api_name = $3
+           JOIN object_type_interface source_impl
+             ON source_impl.object_type_id = source_ot.object_type_id
+            AND source_impl.interface_id = ilc.interface_id
+           JOIN link_type lt
+             ON lt.ontology_id = ilc.ontology_id
+            AND lt.source_object_type = source_ot.object_type_id
+            AND lt.cardinality = ilc.cardinality
+          WHERE ilc.ontology_id = $1
+            AND ilc.api_name = $2
+            AND ilc.status = 'active'
+            AND (
+              (
+                ilc.target_object_type_id IS NOT NULL
+                AND lt.target_object_type = ilc.target_object_type_id
+              )
+              OR (
+                ilc.target_interface_id IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                    FROM object_type_interface target_impl
+                   WHERE target_impl.object_type_id =
+                         lt.target_object_type
+                     AND target_impl.interface_id =
+                         ilc.target_interface_id
+                )
+              )
+            )
+          ORDER BY lt.api_name`,
+        [sec.ontologyId, link, fromObjectType],
+      );
+      if (rows.length === 0) {
+        throw new ObjectSetExecutionError(
+          "InterfaceLinkTypeNotFound",
+          `No concrete link type implements interface link: ${link}`,
+          { interfaceLink: link, fromObjectType },
+          404,
+        );
+      }
+      const grouped = new Map<string, Set<string>>();
+      for (const row of rows) {
+        const concrete = await linkTypeModel.getByApiName(
+          sec.ontologyId,
+          String(row.api_name),
+        );
+        if (!concrete) {
+          throw new ObjectSetExecutionError(
+            "InterfaceLinkTypeNotFound",
+            `Concrete link type disappeared while resolving: ${String(row.api_name)}`,
+            { interfaceLink: link, concreteLinkType: row.api_name },
+            404,
+          );
+        }
+        const targetType = await resolveObjectTypeApiName(
+          concrete.target_object_type,
+        );
+        let pageToken: string | null = null;
+        const pks = grouped.get(targetType) ?? new Set<string>();
+        const { maybeServingEdgeResolver } = await import("../serving/linkServingStore");
+        const weeder = await maybeServingEdgeResolver({
+          linkType: concrete,
+          direction: "forward",
+          branchId: sec.branchId,
+          userMarkings: new Set(sec.markings),
+          tenantId: sec.tenant,
+          capability: "oss.traverse",
+        });
+        do {
+          const response = await linkSearchAround(
+            concrete,
+            "forward",
+            {
+              // See the non-interface branch below: `anchorWhere` is a query DSL,
+              // `sourceFilter` is a legacy flat equality map, and a bare PK anchor
+              // lets us skip the source-side index lookup.
+              ...(anchorWhere ? { sourceWhere: anchorWhere as Record<string, unknown> } : {}),
+              ...(anchorPrimaryKeys(anchorWhere)
+                ? { sourcePks: anchorPrimaryKeys(anchorWhere)! }
+                : {}),
+              pageSize: 1000,
+              pageToken: pageToken ?? undefined,
+              edgeResolver: weeder,
+            },
+            scopedSecurityFilter,
+            sec.branchId,
+          );
+          for (const object of response.linkedObjects) {
+            const row = object as Record<string, unknown>;
+            // See the non-interface branch: read both PK spellings.
+            const pk = row.__primaryKey ?? row.__pk;
+            if (typeof pk === "string") pks.add(String(pk));
+          }
+          pageToken = response.nextPageToken ?? null;
+        } while (pageToken && pks.size < MAX_SEARCH_AROUND_PKS);
+        grouped.set(
+          targetType,
+          new Set(
+            await applyContextTraversalEdits({
+              linkType: concrete.api_name,
+              direction: "forward",
+              fromObjectType,
+              anchorWhere,
+              baseTargetPks: [...pks],
+            }),
+          ),
+        );
+      }
+      return [...grouped.entries()].map(([targetObjectType, pks]) => ({
+        targetObjectType,
+        targetPks: [...pks],
+      }));
+    }
+    const lt = await linkTypeModel
+      .getByApiName(sec.ontologyId, link)
+      .catch(() => null);
+    if (!lt) {
+      throw new ObjectSetExecutionError(
+        "LinkTypeNotFound",
+        `Link type not found: ${link}`,
+        { linkType: link },
+        404,
+      );
+    }
+    // Direction: hop source must match the plan's object type.
+    const sourceApi = await resolveObjectTypeApiName(lt.source_object_type).catch(() => null);
+    const direction =
+      sourceApi === fromObjectType ? ("forward" as const) : ("reverse" as const);
+    const targetId =
+      direction === "forward" ? lt.target_object_type : lt.source_object_type;
+    const targetType = await resolveObjectTypeApiName(targetId).catch(() => null);
+    if (!targetType) {
+      throw new ObjectSetExecutionError(
+        "LinkTypeNotFound",
+        `Could not resolve target of link type: ${link}`,
+        { linkType: link },
+        404,
+      );
+    }
+    const targetPks: string[] = [];
+    let pageToken: string | null = null;
+    const { maybeServingEdgeResolver } = await import("../serving/linkServingStore");
+    const weeder = await maybeServingEdgeResolver({
+      linkType: lt,
+      direction,
+      branchId: sec.branchId,
+      userMarkings: new Set(sec.markings),
+      tenantId: sec.tenant,
+      capability: "oss.traverse",
+    });
+    do {
+      const r = await linkSearchAround(
+        lt,
+        direction,
+        {
+          // `anchorWhere` arrives from objectSetExecutor as a canonical ontology-search
+          // where DSL (`{type:"in",field:"__pk",value:[…]}`), NOT the legacy flat
+          // equality map `sourceFilter` expects — passing it there built `term`
+          // clauses keyed on type/field/value and silently matched NOTHING.
+          // `sourceWhere` is the DSL-aware field, translated against the search
+          // side's object type inside linkResolverService. When the anchor is a
+          // bare PK predicate we also hand over the keys so the source-side
+          // index lookup is skipped entirely.
+          ...(anchorWhere ? { sourceWhere: anchorWhere as Record<string, unknown> } : {}),
+          ...(anchorPrimaryKeys(anchorWhere)
+            ? { sourcePks: anchorPrimaryKeys(anchorWhere)! }
+            : {}),
+          pageSize: 1000,
+          pageToken: pageToken ?? undefined,
+          edgeResolver: weeder,
+        },
+        scopedSecurityFilter,
+        sec.branchId,
+      );
+      for (const o of r.linkedObjects) {
+        const row = o as Record<string, unknown>;
+        // Read BOTH PK spellings: `linkSearchAround` emits `__pk`, while the legacy
+        // /objects/:type/:pk/searchAround route additionally normalizes `__primaryKey`.
+        // Reading only one made a 48-row hop resolve to 0 pks.
+        const pk = row.__primaryKey ?? row.__pk;
+        if (typeof pk === "string") targetPks.push(String(pk));
+      }
+      pageToken = r.nextPageToken ?? null;
+    } while (pageToken && targetPks.length < MAX_SEARCH_AROUND_PKS);
+    return {
+      targetObjectType: targetType,
+      targetPks: await applyContextTraversalEdits({
+        linkType: lt.api_name,
+        direction,
+        fromObjectType,
+        anchorWhere,
+        baseTargetPks: targetPks,
+      }),
+    };
+  };
+
   return {
     authorizeProperties,
     keywordOf: async (objectType, field) => {
@@ -883,186 +1093,7 @@ export function makeProductionExecutorDeps(
       }
     },
 
-    traverse: async ({ fromObjectType, link, anchorWhere, interfaceLink }) => {
-      if (interfaceLink) {
-        const { rows } = await query(
-          `SELECT DISTINCT lt.api_name
-             FROM interface_link_constraint ilc
-             JOIN object_type source_ot
-               ON source_ot.ontology_id = ilc.ontology_id
-              AND source_ot.api_name = $3
-             JOIN object_type_interface source_impl
-               ON source_impl.object_type_id = source_ot.object_type_id
-              AND source_impl.interface_id = ilc.interface_id
-             JOIN link_type lt
-               ON lt.ontology_id = ilc.ontology_id
-              AND lt.source_object_type = source_ot.object_type_id
-              AND lt.cardinality = ilc.cardinality
-            WHERE ilc.ontology_id = $1
-              AND ilc.api_name = $2
-              AND ilc.status = 'active'
-              AND (
-                (
-                  ilc.target_object_type_id IS NOT NULL
-                  AND lt.target_object_type = ilc.target_object_type_id
-                )
-                OR (
-                  ilc.target_interface_id IS NOT NULL
-                  AND EXISTS (
-                    SELECT 1
-                      FROM object_type_interface target_impl
-                     WHERE target_impl.object_type_id =
-                           lt.target_object_type
-                       AND target_impl.interface_id =
-                           ilc.target_interface_id
-                  )
-                )
-              )
-            ORDER BY lt.api_name`,
-          [sec.ontologyId, link, fromObjectType],
-        );
-        if (rows.length === 0) {
-          throw new ObjectSetExecutionError(
-            "InterfaceLinkTypeNotFound",
-            `No concrete link type implements interface link: ${link}`,
-            { interfaceLink: link, fromObjectType },
-            404,
-          );
-        }
-        const grouped = new Map<string, Set<string>>();
-        for (const row of rows) {
-          const concrete = await linkTypeModel.getByApiName(
-            sec.ontologyId,
-            String(row.api_name),
-          );
-          if (!concrete) {
-            throw new ObjectSetExecutionError(
-              "InterfaceLinkTypeNotFound",
-              `Concrete link type disappeared while resolving: ${String(row.api_name)}`,
-              { interfaceLink: link, concreteLinkType: row.api_name },
-              404,
-            );
-          }
-          const targetType = await resolveObjectTypeApiName(
-            concrete.target_object_type,
-          );
-          let pageToken: string | null = null;
-          const pks = grouped.get(targetType) ?? new Set<string>();
-          const { maybeServingEdgeResolver } = await import("../serving/linkServingStore");
-          const weeder = await maybeServingEdgeResolver({
-            linkType: concrete,
-            direction: "forward",
-            branchId: sec.branchId,
-            userMarkings: new Set(sec.markings),
-            tenantId: sec.tenant,
-            capability: "oss.traverse",
-          });
-          do {
-            const response = await linkSearchAround(
-              concrete,
-              "forward",
-              {
-                sourceFilter:
-                  (anchorWhere as Record<string, unknown> | null) ?? undefined,
-                pageSize: 1000,
-                pageToken: pageToken ?? undefined,
-                edgeResolver: weeder,
-              },
-              scopedSecurityFilter,
-              sec.branchId,
-            );
-            for (const object of response.linkedObjects) {
-              const pk = (object as Record<string, unknown>).__primaryKey;
-              if (typeof pk === "string") pks.add(pk);
-            }
-            pageToken = response.nextPageToken ?? null;
-          } while (pageToken && pks.size < MAX_SEARCH_AROUND_PKS);
-          grouped.set(
-            targetType,
-            new Set(
-              await applyContextTraversalEdits({
-                linkType: concrete.api_name,
-                direction: "forward",
-                fromObjectType,
-                anchorWhere,
-                baseTargetPks: [...pks],
-              }),
-            ),
-          );
-        }
-        return [...grouped.entries()].map(([targetObjectType, pks]) => ({
-          targetObjectType,
-          targetPks: [...pks],
-        }));
-      }
-      const lt = await linkTypeModel
-        .getByApiName(sec.ontologyId, link)
-        .catch(() => null);
-      if (!lt) {
-        throw new ObjectSetExecutionError(
-          "LinkTypeNotFound",
-          `Link type not found: ${link}`,
-          { linkType: link },
-          404,
-        );
-      }
-      // Direction: hop source must match the plan's object type.
-      const sourceApi = await resolveObjectTypeApiName(lt.source_object_type).catch(() => null);
-      const direction =
-        sourceApi === fromObjectType ? ("forward" as const) : ("reverse" as const);
-      const targetId =
-        direction === "forward" ? lt.target_object_type : lt.source_object_type;
-      const targetType = await resolveObjectTypeApiName(targetId).catch(() => null);
-      if (!targetType) {
-        throw new ObjectSetExecutionError(
-          "LinkTypeNotFound",
-          `Could not resolve target of link type: ${link}`,
-          { linkType: link },
-          404,
-        );
-      }
-      const targetPks: string[] = [];
-      let pageToken: string | null = null;
-      const { maybeServingEdgeResolver } = await import("../serving/linkServingStore");
-      const weeder = await maybeServingEdgeResolver({
-        linkType: lt,
-        direction,
-        branchId: sec.branchId,
-        userMarkings: new Set(sec.markings),
-        tenantId: sec.tenant,
-        capability: "oss.traverse",
-      });
-      do {
-        const r = await linkSearchAround(
-          lt,
-          direction,
-          {
-            sourceFilter:
-              (anchorWhere as Record<string, unknown> | null) ?? undefined,
-            pageSize: 1000,
-            pageToken: pageToken ?? undefined,
-            edgeResolver: weeder,
-          },
-          scopedSecurityFilter,
-          sec.branchId,
-        );
-        for (const o of r.linkedObjects) {
-          const pk = (o as Record<string, unknown>).__primaryKey;
-          if (typeof pk === "string") targetPks.push(pk);
-        }
-        pageToken = r.nextPageToken ?? null;
-      } while (pageToken && targetPks.length < MAX_SEARCH_AROUND_PKS);
-      return {
-        targetObjectType: targetType,
-        targetPks: await applyContextTraversalEdits({
-          linkType: lt.api_name,
-          direction,
-          fromObjectType,
-          anchorWhere,
-          baseTargetPks: targetPks,
-        }),
-      };
-    },
+    traverse: (args: TraverseArgs) => singleFlightTraverse(sec, args, traverseImpl),
 
     resolveStaticRids: async (rids) => {
       const { rows } = await query(
@@ -1247,3 +1278,176 @@ export function makeProductionCompilerDeps(opts: {
 
 /** Read overlay helper re-exported for snapshot route paths. */
 export { readOverlay };
+
+// ---------------------------------------------------------------------------
+// Single-flight traversal coalescing
+// ---------------------------------------------------------------------------
+//
+// A Workshop page with N Search-Around widgets compiles to N object-set
+// expressions that share a traversal PREFIX. Measured on the RSSB Provider
+// Profile page (2026-10-03): 10 concurrent `loadObjects` requests recomputed
+// the provider->claims hop SEVEN times, and 5 of those 10 requests were exact
+// duplicates of another. Each hop costs an OpenSearch source query plus an
+// edge resolution plus a target fetch, so that redundancy dominated wall
+// clock (~3s to paint one Pivot Table).
+//
+// This is CONCURRENT-ONLY coalescing (single flight): the map entry is deleted
+// the instant the promise settles, so nothing is ever served from a cache
+// afterwards. There is therefore NO staleness window — a caller arriving after
+// completion always re-executes, and the only work suppressed is a duplicate
+// of an identical IN-FLIGHT request. Read-your-writes after an Action is
+// unaffected, and a rejection propagates to every sharer exactly as each would
+// have failed independently.
+//
+// The key carries the full security scope (ontology, tenant, branch, user,
+// markings, cbac, organizations, markingBypass) so a result can never be
+// shared across security contexts.
+
+// Mirrors `ExecutorDeps["traverse"]` exactly — the wrapper must not narrow
+// or widen the contract the executor depends on.
+interface TraverseArgs {
+  fromObjectType: string;
+  link: string;
+  anchorWhere: unknown;
+  interfaceLink?: boolean | undefined;
+}
+
+interface TraverseResult {
+  targetObjectType: string;
+  targetPks: string[];
+}
+
+const traverseInFlight = new Map<
+  string,
+  Promise<TraverseResult | TraverseResult[]>
+>();
+
+/**
+ * Cross-request hop cache TTL. `0` disables the cache entirely (single-flight
+ * still applies).
+ *
+ * Why a TTL is acceptable here: `searchAround` is ALREADY eventually
+ * consistent — `linkResolverService` explicitly returns the index answer on a
+ * merge failure ("default reads: documented eventual consistency"). A
+ * sub-second cache therefore weakens no guarantee the platform makes, and it
+ * is what lets a page-load BURST (a Workshop page fires every widget's
+ * traversal at once, and deep chains re-request the same shared prefix)
+ * collapse onto one execution.
+ *
+ * Kept short deliberately. If this is ever raised to a user-visible window,
+ * it MUST be paired with explicit invalidation from the edit-apply path — a
+ * TTL alone is not an invalidation strategy for a read path.
+ */
+function traversalCacheTtlMs(): number {
+  const raw = process.env.OSS_TRAVERSAL_CACHE_TTL_MS;
+  if (raw === undefined || raw.trim() === "") return 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function traversalCacheMax(): number {
+  const raw = process.env.OSS_TRAVERSAL_CACHE_MAX;
+  if (raw === undefined || raw.trim() === "") return 500;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+interface TraverseCacheEntry {
+  value: TraverseResult | TraverseResult[];
+  expiresAt: number;
+}
+
+const traverseCache = new Map<string, TraverseCacheEntry>();
+
+function traverseKey(sec: RequestSecurity, a: TraverseArgs): string {
+  return JSON.stringify([
+    sec.ontologyId,
+    sec.tenant,
+    sec.branchId ?? null,
+    sec.userId,
+    [...sec.markings].sort(),
+    [...sec.cbac].sort(),
+    [...sec.organizations].sort(),
+    sec.markingBypass,
+    a.fromObjectType,
+    a.link,
+    a.interfaceLink ?? null,
+    a.anchorWhere ?? null,
+  ]);
+}
+
+function singleFlightTraverse(
+  sec: RequestSecurity,
+  args: TraverseArgs,
+  run: (a: TraverseArgs) => Promise<TraverseResult | TraverseResult[]>,
+): Promise<TraverseResult | TraverseResult[]> {
+  const key = traverseKey(sec, args);
+  const ttl = traversalCacheTtlMs();
+
+  if (ttl > 0) {
+    const hit = traverseCache.get(key);
+    if (hit) {
+      if (hit.expiresAt > Date.now()) {
+        // Refresh LRU position.
+        traverseCache.delete(key);
+        traverseCache.set(key, hit);
+        return Promise.resolve(hit.value);
+      }
+      traverseCache.delete(key);
+    }
+  }
+
+  const existing = traverseInFlight.get(key);
+  if (existing) return existing;
+
+  const promise = run(args).then(
+    (value) => {
+      if (ttl > 0) {
+        const max = traversalCacheMax();
+        if (max > 0) {
+          // Insertion-ordered eviction: oldest first.
+          while (traverseCache.size >= max) {
+            const oldest = traverseCache.keys().next();
+            if (oldest.done) break;
+            traverseCache.delete(oldest.value);
+          }
+          traverseCache.set(key, { value, expiresAt: Date.now() + ttl });
+        }
+      }
+      return value;
+    },
+    (err) => {
+      throw err;
+    },
+  ).finally(() => {
+    if (traverseInFlight.get(key) === promise) traverseInFlight.delete(key);
+  });
+
+  traverseInFlight.set(key, promise);
+  return promise;
+}
+
+/**
+ * Extract source-side primary keys from an object-set anchor when it is
+ * unambiguously a primary-key predicate. `objectSetExecutor` builds every
+ * hop after the first as `{type:"in", field:"__pk", value:[...]}` and a
+ * selection-rooted first hop as the same shape with one element, so this
+ * covers effectively every traversal the OSS v2 path issues.
+ *
+ * Returns `null` for anything else (arbitrary filters, `and`/`or` trees,
+ * linked predicates) so the caller falls back to the source-side index lookup
+ * rather than guessing. Never populated from user input — see the
+ * `sourcePks` contract in `SearchAroundOptions`.
+ */
+function anchorPrimaryKeys(anchorWhere: unknown): string[] | null {
+  if (!anchorWhere || typeof anchorWhere !== "object") return null;
+  const node = anchorWhere as { type?: unknown; field?: unknown; value?: unknown };
+  if (node.field !== "__pk") return null;
+  if (node.type === "in" && Array.isArray(node.value)) {
+    return node.value.map((v) => String(v));
+  }
+  if (node.type === "eq" && typeof node.value === "string") {
+    return [node.value];
+  }
+  return null;
+}

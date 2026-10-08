@@ -31,12 +31,14 @@ function authedPost(app: import("express").Express, url: string) {
   return request(app)
     .post(url)
     .set("X-Tellus-Test-Principal", TEST_PRINCIPAL)
+    .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "")
     .set("Idempotency-Key", randomUUID());
 }
 function authedDelete(app: import("express").Express, url: string) {
   return request(app)
     .delete(url)
-    .set("X-Tellus-Test-Principal", TEST_PRINCIPAL);
+    .set("X-Tellus-Test-Principal", TEST_PRINCIPAL)
+    .set("X-Tellus-Test-Auth-Token", process.env.CODE_REPOS_TEST_AUTH_TOKEN ?? "");
 }
 
 describe("Code Repos audit chain — durability + tamper-evidence", () => {
