@@ -6,6 +6,7 @@
 // route's execute-step catch used to rewrite EVERY error into a 500
 // REINDEX_FAILED, so the operator never saw the 413 nor its remediation.
 // This drives the real route handler with db / auth / service mocked.
+// (CI retrigger.)
 // ---------------------------------------------------------------------------
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
