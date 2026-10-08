@@ -34,11 +34,7 @@ import {
 } from "../../../src/services/funnel/mergeCliRunner";
 
 const ENV_KEYS = [
-  "DUCKDB_MEMORY_LIMIT",
   "DUCKDB_THREADS",
-  "DUCKDB_HOME_DIRECTORY",
-  "DUCKDB_CLI_PATH",
-  "FUNNEL_MERGE_OUT_OF_PROCESS",
   "FUNNEL_MERGE_CLI_TIMEOUT_MS",
   "FUNNEL_STAGE_STALL_AFTER_MS",
   "STUB_BEHAVIOR",
@@ -46,6 +42,13 @@ const ENV_KEYS = [
   "STUB_OUT",
   "STUB_ALIVE",
 ];
+
+/** Versioned-config identities (no per-knob env overrides). */
+const TEST_ENV = {
+  NODE_ENV: "test",
+  TELLUS_ENVIRONMENT_ID: "tellus-tests-main",
+} as NodeJS.ProcessEnv;
+const PROD_ENV = { TELLUS_DEPLOYMENT_STRICT: "1" } as NodeJS.ProcessEnv;
 
 afterEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
@@ -136,10 +139,9 @@ function aliveMtime(wd: string): number {
 }
 
 describe("cliSettingsPreamble", () => {
-  it("mirrors pool.ts: memory default 1GB, threads omitted when unset/0, order home/memory/temp/preserve", () => {
-    delete process.env.DUCKDB_MEMORY_LIMIT;
+  it("mirrors pool.ts: versioned memory default, threads omitted when unset/0, order home/memory/temp/preserve", () => {
     delete process.env.DUCKDB_THREADS;
-    const pre = cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home"));
+    const pre = cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home", TEST_ENV));
     const lines = pre.trim().split("\n");
     expect(lines[0]).toBe("SET home_directory='/tmp/home';");
     expect(lines[1]).toBe("SET memory_limit='1GB';");
@@ -152,24 +154,23 @@ describe("cliSettingsPreamble", () => {
   it("emits SET threads only when DUCKDB_THREADS is positive", () => {
     process.env.DUCKDB_THREADS = "4";
     expect(
-      cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home")),
+      cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home", TEST_ENV)),
     ).toContain("SET threads=4;");
     process.env.DUCKDB_THREADS = "0";
     expect(
-      cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home")),
+      cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home", TEST_ENV)),
     ).not.toContain("SET threads");
     process.env.DUCKDB_THREADS = "junk";
     expect(
-      cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home")),
+      cliSettingsPreamble(resolveCliSettings("/tmp/spill", "/tmp/home", TEST_ENV)),
     ).not.toContain("SET threads");
   });
 
-  it("honours DUCKDB_MEMORY_LIMIT and quotes paths", () => {
-    process.env.DUCKDB_MEMORY_LIMIT = "6GB";
+  it("uses versioned memory per profile and quotes paths", () => {
     const pre = cliSettingsPreamble(
-      resolveCliSettings("/tmp/o'brien", "/tmp/home"),
+      resolveCliSettings("/tmp/o'brien", "/tmp/home", PROD_ENV),
     );
-    expect(pre).toContain("SET memory_limit='6GB';");
+    expect(pre).toContain("SET memory_limit='8GB';");
     expect(pre).toContain("PRAGMA temp_directory='/tmp/o''brien';");
   });
 });
@@ -185,50 +186,50 @@ describe("env parsing", () => {
     expect(mergeCliTimeoutMs()).toBe(MERGE_CLI_TIMEOUT_MS_DEFAULT);
   });
 
-  it("duckDbCliPath defaults to duckdb on PATH", () => {
-    delete process.env.DUCKDB_CLI_PATH;
-    expect(duckDbCliPath()).toBe("duckdb");
-    process.env.DUCKDB_CLI_PATH = "/opt/duckdb";
-    expect(duckDbCliPath()).toBe("/opt/duckdb");
+  it("duckDbCliPath comes from the versioned profile", () => {
+    expect(duckDbCliPath(TEST_ENV)).toBe("duckdb");
+    expect(duckDbCliPath(PROD_ENV)).toBe("/usr/local/bin/duckdb");
   });
 });
 
 describe("shouldUseOutOfProcessMerge", () => {
-  it("flag off => in-process", async () => {
-    delete process.env.FUNNEL_MERGE_OUT_OF_PROCESS;
-    await expect(shouldUseOutOfProcessMerge()).resolves.toEqual({
+  it("test profile => in-process", async () => {
+    await expect(shouldUseOutOfProcessMerge(TEST_ENV)).resolves.toEqual({
       outOfProcess: false,
       reason: "flag-off",
     });
   });
 
-  it("flag on but no CLI => in-process with cli-missing", async () => {
-    process.env.FUNNEL_MERGE_OUT_OF_PROCESS = "1";
-    process.env.DUCKDB_CLI_PATH = "/nonexistent/duckdb-binary-xyz";
-    await expect(shouldUseOutOfProcessMerge()).resolves.toEqual({
+  it("production profile but no CLI => in-process with cli-missing", async () => {
+    resetCliAvailabilityCache();
+    await expect(
+      shouldUseOutOfProcessMerge(PROD_ENV, "/nonexistent/duckdb-binary-xyz"),
+    ).resolves.toEqual({
       outOfProcess: false,
       reason: "cli-missing",
     });
   });
 
-  it("flag on with a runnable CLI => out-of-process", async () => {
-    process.env.FUNNEL_MERGE_OUT_OF_PROCESS = "1";
+  it("production profile with a runnable CLI => out-of-process", async () => {
+    resetCliAvailabilityCache();
     // probeSh ignores --version and exits 0: proves the probe runs the
     // configured binary without needing a real DuckDB here.
-    process.env.DUCKDB_CLI_PATH = probeSh;
-    await expect(shouldUseOutOfProcessMerge()).resolves.toEqual({
+    await expect(
+      shouldUseOutOfProcessMerge(PROD_ENV, probeSh),
+    ).resolves.toEqual({
       outOfProcess: true,
       reason: "flag-on-cli-available",
     });
   });
 
-  it("isDuckDbCliAvailable never throws and caches", async () => {
-    process.env.DUCKDB_CLI_PATH = probeSh;
-    await expect(isDuckDbCliAvailable()).resolves.toBe(true);
-    await expect(isDuckDbCliAvailable()).resolves.toBe(true);
+  it("isDuckDbCliAvailable never throws and caches per path", async () => {
     resetCliAvailabilityCache();
-    process.env.DUCKDB_CLI_PATH = "/nonexistent/duckdb-binary-xyz";
-    await expect(isDuckDbCliAvailable()).resolves.toBe(false);
+    await expect(isDuckDbCliAvailable(probeSh)).resolves.toBe(true);
+    await expect(isDuckDbCliAvailable(probeSh)).resolves.toBe(true);
+    resetCliAvailabilityCache();
+    await expect(
+      isDuckDbCliAvailable("/nonexistent/duckdb-binary-xyz"),
+    ).resolves.toBe(false);
   });
 });
 
@@ -257,6 +258,48 @@ describe("runDuckDbCliScript", () => {
     expect(res.peakSpillBytes).toBeGreaterThan(0);
     expect(seen.length).toBeGreaterThan(0);
     expect(seen[seen.length - 1].spillBytes).toBeGreaterThan(0);
+  }, 30_000);
+
+  it("a throwing onProgress neither kills the watchdog nor fails the run, and is logged", async () => {
+    // Liveness reporting is best-effort: a throwing progress callback must
+    // not escape the watchdog interval (uncaught in a timer = dead
+    // watchdog / crashed process). The throw must be logged, not swallowed.
+    const wd = workDir();
+    armStub("ok", wd);
+    const warnings: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...a: unknown[]) => {
+      warnings.push(a);
+    };
+    try {
+      let calls = 0;
+      const res = await runDuckDbCliScript({
+        scriptText: "SELECT 42;\n",
+        workDir: wd,
+        spillDir: path.join(wd, "spill"),
+        watchPaths: [path.join(wd, "out.parquet")],
+        timeoutMs: 30_000,
+        stallAfterMs: 10_000,
+        pollMs: 25,
+        command: [process.execPath, stubJs],
+        onProgress: () => {
+          calls++;
+          throw new Error("boom from progress");
+        },
+      });
+      expect(res.wallMs).toBeGreaterThanOrEqual(0);
+      expect(res.peakSpillBytes).toBeGreaterThan(0);
+      expect(calls).toBeGreaterThan(0);
+      expect(
+        warnings.some(
+          (a) =>
+            String(a[0]).includes("[merge-cli]") &&
+            String(a[0]).includes("onProgress"),
+        ),
+      ).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
   }, 30_000);
 
   it("nonzero exit => CliExitError carrying the stderr tail", async () => {

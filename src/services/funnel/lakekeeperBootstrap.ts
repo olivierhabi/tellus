@@ -10,6 +10,7 @@ import { query } from "../../db";
 import { getLakekeeperClient } from "./lakekeeperClient";
 import { funnelNamespace } from "./icebergCatalog";
 import { envWithDefault, requireSecret } from "../../utils/requireEnv";
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
 import {
   pipelineNamespace,
   slugForNamespace,
@@ -66,9 +67,11 @@ export async function bootstrapLakekeeper(): Promise<LakekeeperBootstrapResult> 
     warehouseId = await client.ensureWarehouse({
       warehouseName,
       bucket: envWithDefault("ICEBERG_BUCKET", "iceberg-warehouse"),
-      endpoint:
-        envWithDefault("ICEBERG_S3_ENDPOINT", "") ||
-        envWithDefault("S3_ENDPOINT", "http://minio:9000"),
+      // Versioned container endpoint (per deployment profile). The
+      // Lakekeeper container must use the docker-internal name
+      // (http://minio:9000); a host loopback here fails warehouse
+      // validation with a gzip-decompression error.
+      endpoint: funnelRuntimeConfig().icebergContainerEndpoint,
       accessKeyId: requireSecret("S3_ACCESS_KEY_ID", "Lakekeeper bootstrap requires S3 access key."),
       secretAccessKey: requireSecret("S3_SECRET_ACCESS_KEY", "Lakekeeper bootstrap requires S3 secret key."),
       pathStyleAccess: true,

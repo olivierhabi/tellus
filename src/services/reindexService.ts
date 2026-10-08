@@ -581,6 +581,30 @@ function parsePositiveIntEnv(
   return Number.isFinite(n) && n > 0 ? n : def;
 }
 
+/**
+ * Datasource-path merge budget (Blocker: datasource guard). The legacy
+ * reindex path collapses every row into a JS Map + Set (~356 B/row), so
+ * past the limit the failure mode is a V8 heap OOM that aborts the whole
+ * process. This converts it into a clean, attributable per-object-type
+ * REINDEX_TOO_LARGE (413) naming the type, the count, and the funnel
+ * route. Exported for unit tests.
+ */
+export function assertDatasourceMergeBudget(
+  distinctPkCount: number,
+  limit: number,
+  objectTypeApiName: string,
+): void {
+  if (distinctPkCount <= limit) return;
+  throw appError(
+    "REINDEX_TOO_LARGE",
+    `Object type '${objectTypeApiName}' merged past ${limit} distinct primary keys, ` +
+      `the in-memory limit for the datasource reindex path. Aborting before the process runs out of heap. ` +
+      `Index this object type through the Object Storage V2 funnel (which merges on disk via DuckDB), ` +
+      `or raise REINDEX_MAX_MERGED_OBJECTS if this process has headroom for it.`,
+    { failedAtStep: "merge_changes" },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main: reindexObjectType
 //
@@ -802,14 +826,10 @@ export async function reindexObjectType(
       2_000_000,
     );
     const assertMergeBudget = () => {
-      if (objectMap.size <= REINDEX_MAX_MERGED_OBJECTS) return;
-      throw appError(
-        "REINDEX_TOO_LARGE",
-        `Object type '${objectTypeApiName}' merged past ${REINDEX_MAX_MERGED_OBJECTS} distinct primary keys, ` +
-          `the in-memory limit for the datasource reindex path. Aborting before the process runs out of heap. ` +
-          `Index this object type through the Object Storage V2 funnel (which merges on disk via DuckDB), ` +
-          `or raise REINDEX_MAX_MERGED_OBJECTS if this process has headroom for it.`,
-        { failedAtStep: "merge_changes" },
+      assertDatasourceMergeBudget(
+        objectMap.size,
+        REINDEX_MAX_MERGED_OBJECTS,
+        objectTypeApiName,
       );
     };
 
