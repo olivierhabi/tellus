@@ -93,6 +93,22 @@ export interface SnapshotDiffReader {
    *  keep the Palantir hard-throw (they don't pre-dedupe). Explicit + named
    *  rather than a boolean so a future reader kind is self-documenting. */
   readerKind?: "foundry-bridged";
+  /** Source data-quality measured by a pre-deduplicating reader, read AFTER
+   *  `read()` is drained. Recorded as `summary_json.source_quality` so
+   *  duplicate-PK collapses are visible (phase 1 of
+   *  docs/adr/2026-10-09-funnel-duplicate-primary-keys.md). */
+  sourceQuality?: () => FoundrySourceQuality | null;
+}
+
+/** What a pre-deduplicating reader collapsed. Palantir fails indexing on
+ *  duplicate primary keys within one transaction; Tellus currently keeps
+ *  last-wins for foundry CSVs and reports the count instead. */
+export interface FoundrySourceQuality {
+  sourceRows: number;
+  distinctPrimaryKeys: number;
+  duplicatePkRows: number;
+  nullOrEmptyPkRows: number;
+  duplicatePkSamples: string[];
 }
 
 export interface ComputeChangelogInput {
@@ -277,6 +293,7 @@ export async function computeChangelog(
         },
       ];
 
+  const sourceQuality = reader.sourceQuality?.() ?? null;
   let snapshot;
   try {
     snapshot = await commitSnapshot({
@@ -293,6 +310,7 @@ export async function computeChangelog(
         // Small, N-independent reference — replaces the old `inline_rows`
         // array. `loadChangelogRowsFromSnapshot` resolves it back to rows.
         parquet_ref: parquetRef,
+        ...(sourceQuality ? { source_quality: sourceQuality } : {}),
       },
     });
   } catch (err) {

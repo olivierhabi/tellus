@@ -1,0 +1,7 @@
+{
+  "$comment": "Provisional per-size ceilings for tests/funnel/scale/o1-benchmark.scale.test.ts (wall ms, Node maxRSS MiB, DuckDB CLI peak spill MiB). Sized for GitHub ubuntu-latest (4 vCPU / 16 GiB). Ratchet DOWN to ~1.3x the p95 of the nightly funnel-scale reports once 7 runs exist; never raise without an ADR note. 100k is the PR-level lite size.",
+  "100000":   { "changelogMs": 60000,   "mergeMs": 90000,   "incrementalMergeMs": 90000,   "maxRssMb": 1536 },
+  "1000000":  { "changelogMs": 240000,  "mergeMs": 420000,  "incrementalMergeMs": 420000,  "maxRssMb": 2560 },
+  "5000000":  { "changelogMs": 900000,  "mergeMs": 1800000, "incrementalMergeMs": 1800000, "maxRssMb": 4096 },
+  "10000000": { "changelogMs": 1800000, "mergeMs": 3600000, "incrementalMergeMs": 3600000, "maxRssMb": 6144 }
+}

@@ -31,8 +31,10 @@ import {
   buildBucketExportStatement,
 } from "../../../src/services/funnel/mergePrefixSql";
 import { runAll, queryAll } from "../../../src/services/duckdb/pool";
+import { setFunnelRuntimeOverridesForTesting } from "../../../src/config/funnelRuntime";
 
 afterEach(() => {
+  setFunnelRuntimeOverridesForTesting(null);
   delete process.env.MERGE_NARROW_DEDUP;
 });
 

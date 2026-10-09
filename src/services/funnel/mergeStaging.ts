@@ -208,21 +208,46 @@ export async function promoteMergeStaging(
             EXCLUDED.source_datasource_id, EXCLUDED.source_transaction_id)`,
     [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName],
   );
-  const del = await client.query(
-    `DELETE FROM object_instances oi
-      USING merge_staging_instances st
-      WHERE st.staging_run_id = $1
-        AND st.ontology_id = $2 AND st.object_type_api_name = $3
-        AND st.operation = 'delete'
-        AND oi.ontology_id = st.ontology_id
-        AND oi.branch_id = st.branch_id
-        AND oi.object_type_api_name = st.object_type_api_name
-        AND oi.primary_key = st.primary_key`,
+  // Deletes: the old plain `DELETE … USING merge_staging_instances` join was
+  // planned against stale statistics — the staging rows were bulk-loaded
+  // seconds earlier and the upserts above are in this same transaction — as
+  // a nested loop over EVERY live row of the type × EVERY staged row of the
+  // run. Quadratic: 90k rows blew the 60 s statement_timeout in the O2/O3
+  // scale suites even with ZERO deletes. Now: skip when nothing is staged
+  // for deletion (every first load), otherwise forbid the nested loop for
+  // this one statement so Postgres hashes the staged keys (linear; 9k
+  // deletes over 90k live rows: ~0.1 s instead of ~10 s).
+  const pending = await client.query(
+    `SELECT EXISTS (SELECT 1 FROM merge_staging_instances
+                     WHERE staging_run_id = $1 AND ontology_id = $2
+                       AND object_type_api_name = $3 AND operation = 'delete') AS any`,
     [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName],
   );
+  let deleted = 0;
+  if (pending.rows[0]?.any === true) {
+    const prev = await client.query(`SELECT current_setting('enable_nestloop') AS v`);
+    await client.query(`SELECT set_config('enable_nestloop', 'off', true)`);
+    try {
+      const del = await client.query(
+        `DELETE FROM object_instances oi
+          USING merge_staging_instances st
+          WHERE st.staging_run_id = $1
+            AND st.ontology_id = $2 AND st.object_type_api_name = $3
+            AND st.operation = 'delete'
+            AND oi.ontology_id = st.ontology_id
+            AND oi.branch_id = st.branch_id
+            AND oi.object_type_api_name = st.object_type_api_name
+            AND oi.primary_key = st.primary_key`,
+        [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName],
+      );
+      deleted = (del.rowCount ?? 0) as number;
+    } finally {
+      await client.query(`SELECT set_config('enable_nestloop', $1, true)`, [String(prev.rows[0]?.v ?? "on")]);
+    }
+  }
   await clearMergeStagingRun(client, scope);
   return {
     upserts: (up.rowCount ?? 0) as number,
-    deletes: (del.rowCount ?? 0) as number,
+    deletes: deleted,
   };
 }

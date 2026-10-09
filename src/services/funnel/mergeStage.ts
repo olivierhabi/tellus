@@ -134,9 +134,10 @@ async function bestEffortLease(
 // merged snapshot's parquet (same producer — DuckDB — so plain string
 // comparison is exact; no jsonb-canonicalisation pitfalls) and ship ONLY
 // changed/new/deleted rows to PG. Steady-state re-merges go from O(dataset)
-// writes to O(changes). Set MERGE_DELTA=0 to force the full-rewrite tail
-// (e.g. to self-heal out-of-band PG drift).
-const MERGE_DELTA = (process.env.MERGE_DELTA ?? "1") !== "0";
+// writes to O(changes). Versioned per profile (funnelRuntime.mergeDelta);
+// the retired MERGE_DELTA env knob is ignored. Out-of-band PG drift is
+// self-healed by the materialized-count check (full tail on drift).
+const mergeDeltaEnabled = (): boolean => funnelRuntimeConfig().mergeDelta;
 
 /**
  * Snapshot history can outlive `object_instances` (for example after a
@@ -1429,7 +1430,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
             `expected=${activeRowCount} actual=${materializedRows} — full PG tail`,
         );
       }
-      if (MERGE_DELTA && !forceFullTail) {
+      if (mergeDeltaEnabled() && !forceFullTail) {
         try {
           const tDelta = Date.now();
           const prevRes = await query(

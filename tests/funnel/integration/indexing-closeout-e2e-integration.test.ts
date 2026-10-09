@@ -24,6 +24,7 @@
 import { LANE } from "../../laneEnv";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { setFunnelRuntimeOverridesForTesting } from "../../../src/config/funnelRuntime";
 
 const STAMP = Date.now();
 const ONTOLOGY_ID = "00000000-0000-0000-0000-000000000001";
@@ -99,6 +100,13 @@ async function runPipelinePass() {
     changelogOwnedProperties: cl.ownedProperties,
   });
   return { cl, merge };
+}
+
+async function mergePathOf(snapshotId: string): Promise<string | null> {
+  const r = await db.query(`SELECT summary_json->>'merge_path' AS p FROM funnel_snapshot WHERE snapshot_id = $1`, [
+    snapshotId,
+  ]);
+  return (r.rows[0]?.p as string | undefined) ?? null;
 }
 
 async function instances(): Promise<
@@ -185,6 +193,19 @@ describe("indexing close-out e2e: foundry CSV → changelog → merge → object
       const distinct = Object.keys(V1_EXPECTED).length;
 
       expect(cl.rowsEmitted).toBe(distinct);
+      // Duplicate-PK collapse is measured, not silent (ADR 2026-10-09
+      // duplicate primary keys, phase 1): 7 data rows, 5 distinct keys.
+      const q = await db.query(
+        `SELECT summary_json->'source_quality' AS q FROM funnel_snapshot WHERE snapshot_id = $1`,
+        [cl.snapshotId],
+      );
+      expect(q.rows[0]?.q).toEqual({
+        sourceRows: 7,
+        distinctPrimaryKeys: 5,
+        duplicatePkRows: 2,
+        nullOrEmptyPkRows: 0,
+        duplicatePkSamples: ["1", "3"],
+      });
       expect(merge.mergedRowCount).toBe(distinct);
       expect(merge.objectsIndexed).toBe(distinct);
 
@@ -230,27 +251,26 @@ describe("indexing close-out e2e: foundry CSV → changelog → merge → object
   });
 
   let currentCsv = CSV_V2;
-  // The fast path above is what a single small source takes. Exercise the
-  // general SQL prefix and the hash-bucketed prefix too (the shapes large
-  // production sources take), via the existing kill-switch knobs.
+  // The fast path above is what a single small source takes. Exercise every
+  // merge strategy the pipeline can select (general, bucketed, legacy wide
+  // sort, full PG tail): all must materialise the same result.
   for (const variant of [
-    { label: "general SQL prefix (MERGE_FAST_PATH=0)", env: { MERGE_FAST_PATH: "0" }, pk: "3", name: "charlie-general" },
-    { label: "bucketed prefix (MERGE_BUCKET_ROWS=2)", env: { MERGE_FAST_PATH: "0", MERGE_BUCKET_ROWS: "2" }, pk: "4", name: "delta-bucketed" },
+    { label: "general SQL prefix (fast path off)", overrides: { mergeFastPath: false }, pk: "3", name: "charlie-general" },
+    { label: "bucketed prefix (2-row buckets)", overrides: { mergeFastPath: false, mergeBucketTargetRows: 2 }, pk: "4", name: "delta-bucketed" },
+    { label: "legacy wide-sort prefix", overrides: { mergeFastPath: false, mergeNarrowDedup: false }, pk: "5", name: "echo-wide" },
+    { label: "full PG tail (delta off)", overrides: { mergeDelta: false }, pk: "1", name: "alpha-fulltail" },
   ]) {
     it(`${variant.label} materialises the same result shape`, { timeout: 180_000 }, async () => {
-      const saved: Record<string, string | undefined> = {};
-      for (const [k, v] of Object.entries(variant.env)) {
-        saved[k] = process.env[k];
-        process.env[k] = v;
-      }
+      setFunnelRuntimeOverridesForTesting(variant.overrides);
       try {
         const before = new Map((await instances()).map((r) => [r.primary_key, r]));
         // Start from v2 plus every earlier variant's change (cumulative state).
-        const csv = currentCsv.split("\n")
+        const csv = currentCsv
+          .split("\n")
           .map((line) => {
             if (!line.startsWith(`${variant.pk},`)) return line;
             const cols = line.split(",");
-            cols[1] = variant.name; // change only the name; qty stays as in v2
+            cols[1] = variant.name; // change only the name
             return cols.join(",");
           })
           .join("\n");
@@ -266,6 +286,14 @@ describe("indexing close-out e2e: foundry CSV → changelog → merge → object
           expect(row.source_transaction_id, `provenance for pk ${pk}`).toBe(DATASET_UUID);
           if (pk !== variant.pk) expect(row.properties, `pk ${pk} unchanged`).toEqual(before.get(pk)!.properties);
         }
+        const path = await mergePathOf(merge.mergedSnapshotId);
+        if (variant.overrides.mergeFastPath === false) expect(path).not.toBe("duckdb_sql_fast");
+        if ("mergeBucketTargetRows" in variant.overrides) expect(path).toMatch(/bucketed/);
+        if (process.env.TELLUS_EXPECT_OOP_MERGE === "1" && variant.overrides.mergeFastPath === false) {
+          // CI funnel-oop lane: the production profile + bundled CLI must take
+          // the out-of-process path — never a silent in-process fallback.
+          expect(path).toMatch(/_cli$/);
+        }
         const staging = await db.query(
           `SELECT count(*)::int AS n FROM merge_staging_instances
             WHERE ontology_id = $1 AND object_type_api_name = $2`,
@@ -273,10 +301,7 @@ describe("indexing close-out e2e: foundry CSV → changelog → merge → object
         );
         expect(staging.rows[0].n).toBe(0);
       } finally {
-        for (const [k, v] of Object.entries(saved)) {
-          if (v === undefined) delete process.env[k];
-          else process.env[k] = v;
-        }
+        setFunnelRuntimeOverridesForTesting(null);
       }
     });
   }

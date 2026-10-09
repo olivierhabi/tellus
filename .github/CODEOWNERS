@@ -1,0 +1,11 @@
+# Reviews required for the funnel indexing pipeline and schema changes
+# (indexing close-out, docs/runbooks/funnel-indexing-rollout.md).
+/src/services/funnel/          @olivierhabi
+/src/config/funnelRuntime.ts   @olivierhabi
+/src/migrations/               @olivierhabi
+/scripts/sim/                  @olivierhabi
+/scripts/funnel-invariants.ts  @olivierhabi
+/tests/funnel/                 @olivierhabi
+/Dockerfile                    @olivierhabi
+/.github/workflows/            @olivierhabi
+/.github/CODEOWNERS            @olivierhabi

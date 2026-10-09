@@ -67,10 +67,12 @@ import { getObjectBuffer, getObjectStream, headObject } from "../../storageServi
 import { parseCsvReadable } from "../../indexing/streamingCsv";
 import {
   acquireConnection,
+  queryAll,
   runAll,
   streamQuery,
   releaseConnection,
 } from "../../duckdb/pool";
+import type { FoundrySourceQuality } from "../changelogStage";
 import {
   runWithStageProgress,
   reportStageProgress,
@@ -1252,8 +1254,14 @@ export async function buildFoundryBridgedReader(
   // "foundry-bridged"` lets computeChangelog skip its own `seenInTxn` O(N)
   // Map (redundant + would re-introduce the heap wall). Iceberg + pending-
   // edit readers keep the hard-throw (they don't pre-dedupe).
+  // Phase 1 of docs/adr/2026-10-09-funnel-duplicate-primary-keys.md: the
+  // CSV path still dedups last-wins, but it now MEASURES what it collapsed
+  // (Palantir fails indexing on duplicate PKs within one transaction) so
+  // the count lands in the changelog snapshot summary as `source_quality`.
+  let quality: FoundrySourceQuality | null = null;
   return {
     readerKind: "foundry-bridged",
+    sourceQuality: () => quality,
     async *read() {
       // CSV/TSV (the large-foundry-CSV case — OO7's 895 MiB / 5.6M-row
       // test04.csv) take the FAST path: DuckDB reads the file natively +
@@ -1261,7 +1269,9 @@ export async function buildFoundryBridgedReader(
       // JSONL/JSON stay on the general INSERT path (smaller volumes;
       // read_csv_auto is CSV-only).
       if (ds.fileFormat === "csv" || ds.fileFormat === "tsv") {
-        yield* dedupFoundryCsvViaDuckDB(ds, s3Key, pkCol, txnId, ts);
+        yield* dedupFoundryCsvViaDuckDB(ds, s3Key, pkCol, txnId, ts, (q) => {
+          quality = q;
+        });
       } else {
         yield* dedupFoundryRows(streamFoundryRows(ds, s3Key), pkCol, txnId, ts);
       }
@@ -1290,6 +1300,7 @@ async function* dedupFoundryCsvViaDuckDB(
   pkCol: string,
   txnId: string,
   ts: string,
+  onQuality?: (q: FoundrySourceQuality) => void,
 ): AsyncGenerator<SourceChangeRow> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fb-csv-"));
   const localPath = path.join(dir, "source.csv");
@@ -1306,6 +1317,42 @@ async function* dedupFoundryCsvViaDuckDB(
     // Explicit delim matches the old parseFoundryRows/parseCsvReadable behavior
     // (CSV ',', TSV literal tab).
     const delim = ds.fileFormat === "tsv" ? "\t" : ",";
+    const src = `read_csv_auto('${lp}', delim='${delim}', PARALLEL=false, all_varchar=true)`;
+    if (onQuality) {
+      // One aggregate scan (DuckDB's vectorised CSV reader: seconds at 5M
+      // rows). Duplicate count = rows with a usable PK minus distinct PKs.
+      const agg = await queryAll<{ total: unknown; null_pk: unknown; distinct_pk: unknown }>(
+        conn,
+        `SELECT count(*) AS total, ` +
+          `count(*) FILTER (WHERE ${pkQ} IS NULL OR ${pkQ} = '') AS null_pk, ` +
+          `count(DISTINCT ${pkQ}) FILTER (WHERE ${pkQ} IS NOT NULL AND ${pkQ} <> '') AS distinct_pk ` +
+          `FROM ${src}`,
+      );
+      const total = Number(agg[0]?.total ?? 0);
+      const nullPk = Number(agg[0]?.null_pk ?? 0);
+      const distinctPk = Number(agg[0]?.distinct_pk ?? 0);
+      const duplicatePkRows = Math.max(0, total - nullPk - distinctPk);
+      let samples: string[] = [];
+      if (duplicatePkRows > 0) {
+        const s = await queryAll<{ pk: unknown }>(
+          conn,
+          `SELECT ${pkQ} AS pk FROM ${src} WHERE ${pkQ} IS NOT NULL AND ${pkQ} <> '' ` +
+            `GROUP BY 1 HAVING count(*) > 1 ORDER BY 1 LIMIT 5`,
+        );
+        samples = s.map((r) => String(r.pk));
+        console.warn(
+          `[funnel] foundry CSV '${s3Key}' has ${duplicatePkRows} duplicate-PK row(s) on '${pkCol}' ` +
+            `(collapsed last-wins; Palantir would fail this transaction). samples=${JSON.stringify(samples)}`,
+        );
+      }
+      onQuality({
+        sourceRows: total,
+        distinctPrimaryKeys: distinctPk,
+        duplicatePkRows,
+        nullOrEmptyPkRows: nullPk,
+        duplicatePkSamples: samples,
+      });
+    }
     const sql =
       `SELECT DISTINCT ON (${pkQ}) * FROM (` +
       `SELECT *, row_number() OVER () AS rn FROM read_csv_auto('${lp}', delim='${delim}', PARALLEL=false, all_varchar=true)` +

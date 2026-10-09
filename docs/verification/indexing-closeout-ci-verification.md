@@ -13,11 +13,19 @@ How each close-out checklist row is proven automatically on every PR.
 | Prod image | DuckDB CLI v1.4.4 (SHA-256 pinned) bundled at `/usr/local/bin/duckdb`; under `NODE_ENV=production` the compiled runner selects the out-of-process merge and drives the real CLI as the non-root user | `Dockerfile`, `ci.yml` docker-build, `scripts/ci/docker-merge-cli-smoke.cjs` |
 | 5.1 | gitleaks over every commit on every ref; reviewed historical false positives pinned by exact fingerprint in `.gitleaksignore` | `ci.yml` `secret-scan-history` |
 
-## Not covered by CI (needs a production-shaped environment)
+| Merge strategy | MERGE_* env knobs retired; strategy is versioned config; every variant yields identical rows; `merge_path` recorded per snapshot | `docs/adr/2026-10-09-funnel-merge-strategy-config.md`, merge-* unit tests, e2e above |
+| Duplicate PKs (phase 1) | CSV duplicate-PK collapse is measured into `summary_json.source_quality` (Palantir fails these; enforcement is phase 2) | `docs/adr/2026-10-09-funnel-duplicate-primary-keys.md`, e2e above |
+| Fleet (replaces tellus_db) | Simulated fleet with one object type per production failure mode; read-only invariant checker must report exactly the planted violations | `scripts/sim/tellusFleetSim.ts`, `src/services/funnel/funnelInvariants.ts`, `tests/funnel/integration/funnel-fleet-sim-integration.test.ts`, `docs/adr/2026-10-09-funnel-fleet-simulation.md` |
+| O1 | Full + incremental benchmark with exact counts/last-wins vs `budgets.json` (100k per PR; 1M/5M/10M nightly) | `tests/funnel/scale/o1-benchmark.scale.test.ts`, `.github/workflows/funnel-scale.yml` |
+| O2 | Bucketed OOP merge with duplicates; DuckDB CLI SIGKILLed mid-bucket ⇒ live unchanged; same runKey resumes skipping completed buckets | `tests/funnel/scale/o2-bucket-kill.scale.test.ts` |
+| O3 | Merge worker process SIGKILLed during the staging load ⇒ live unchanged; fresh-process retry promotes exactly once; duplicate delivery is a no-op | `tests/funnel/scale/o3-kill-resume.scale.test.ts` |
+| Promote at scale | Promote DELETE no longer plans a quadratic nested loop over stale stats (found by O2/O3: 90k rows hit the 60 s statement_timeout) | `src/services/funnel/mergeStaging.ts`, `tests/unit/funnel/merge-staging-unit.test.ts` |
+| OOP lane | All of the above run on the production profile (`TELLUS_DEPLOYMENT_STRICT=1`, `TELLUS_EXPECT_OOP_MERGE=1`) with Postgres 16 + MinIO + the pinned DuckDB CLI | `ci.yml` job `funnel-oop`, `vitest.funnel-oop.config.ts` |
+| Process | CODEOWNERS on funnel + migration paths; rollout/rollback runbook | `.github/CODEOWNERS`, `docs/runbooks/funnel-indexing-rollout.md` |
 
-- Real `tellus_db` data and the ghost run (`cfb7b070`) investigation.
-- Scale/soak rows (O1–O3): multi-million-row sources, spill and memory ceilings.
-- The out-of-process merge end-to-end on the integration lane (the lane runs the
-  `test` profile, which keeps the merge in-process; the CLI path is covered by the
-  image smoke and was run locally against Postgres 16 + S3 with
-  `TELLUS_DEPLOYMENT_STRICT=1`, `MERGE_FAST_PATH=0` and `MERGE_BUCKET_ROWS=2`).
+## Still needs a real deployment
+
+- Running `scripts/funnel-invariants.ts --probe-storage` against each real
+  environment after deploy (simulation covers known failure modes only). The
+  ghost run `cfb7b070` matches the `GHOST_INDEXED_EMPTY` signature; confirm there.
+- Budgets are provisional until 7 nightly `funnel-scale` reports exist.
