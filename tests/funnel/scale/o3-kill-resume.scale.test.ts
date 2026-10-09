@@ -2,7 +2,8 @@
 //
 // v1 is indexed. The v2 merge runs in a child Node process
 // (mergeRunner.ts). As soon as that process's Postgres backend is touching
-// merge_staging_instances, the child is SIGKILLed (its open transaction dies
+// merge_staging_instances (bulk `COPY … FROM STDIN`, or the chunked INSERT
+// fallback), the child is SIGKILLed (its open transaction dies
 // with the connection). Then:
 //   * object_instances still equals v1 exactly (staging never leaks live);
 //   * a fresh process retrying the identical activity input promotes v2
@@ -86,7 +87,7 @@ describe(`O3 kill merge worker mid staging-load, resume @ ${ROWS} rows`, () => {
     const deadline = Date.now() + 30 * 60_000;
     while (Date.now() < deadline && a1.child.exitCode === null) {
       const r = await db.query(
-        `SELECT query FROM pg_stat_activity WHERE application_name = $1 AND query ILIKE 'INSERT INTO merge_staging_instances%' LIMIT 1`,
+        `SELECT query FROM pg_stat_activity WHERE application_name = $1 AND (query ILIKE 'COPY merge_staging_instances%' OR query ILIKE 'INSERT INTO merge_staging_instances%') LIMIT 1`,
         [`scale-o3-${STAMP}`],
       );
       if (r.rows.length > 0) {

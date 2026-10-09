@@ -31,7 +31,7 @@
 //     markings for that PK.
 // ---------------------------------------------------------------------------
 
-import { planIndexing } from "./indexingPlan";
+import { isSnapshotUuid, planIndexing } from "./indexingPlan";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -2274,6 +2274,8 @@ function mergedRowFromParquet(r: Record<string, unknown>): MergeResult["mergedRo
 
 /** The merged snapshot's indexing plan (null for pre-plan snapshots). */
 export async function loadMergedIndexingPlan(snapshotId: string): Promise<unknown> {
+  // Non-uuid ids would raise 22P02; no plan ⇒ the caller indexes in full.
+  if (!isSnapshotUuid(snapshotId)) return null;
   const res = await query(
     `SELECT summary_json->'indexing_plan' AS plan FROM funnel_snapshot WHERE snapshot_id = $1`,
     [snapshotId],

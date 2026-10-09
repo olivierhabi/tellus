@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   decideIndexingMode,
+  isSnapshotUuid,
   parseIndexingPlan,
   planIndexing,
 } from "../../../src/services/funnel/indexingPlan";
@@ -113,5 +114,15 @@ describe("temporal indexing gate: source-only changes reach the index", () => {
     const { out, fetched } = await run("new");
     expect(fetched).toBe(false);
     expect(out).toEqual({ editsIndexed: 0, publishedSplitIds: [], quickwit: false });
+  });
+});
+
+describe("isSnapshotUuid (guards uuid-typed snapshot queries)", () => {
+  it("accepts uuids and rejects probe / legacy ids", () => {
+    expect(isSnapshotUuid("6f1c2a9e-3b4d-4c5e-8f60-0123456789ab")).toBe(true);
+    expect(isSnapshotUuid("6F1C2A9E-3B4D-4C5E-8F60-0123456789AB")).toBe(true);
+    expect(isSnapshotUuid("probe-snapshot")).toBe(false);
+    expect(isSnapshotUuid("")).toBe(false);
+    expect(isSnapshotUuid(undefined)).toBe(false);
   });
 });

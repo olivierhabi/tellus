@@ -104,6 +104,17 @@ export function decideIndexingMode(args: {
   return { mode: "incremental", reason: args.plan.reason, alreadyIndexed };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * funnel_snapshot.snapshot_id and the watermark column are uuid. Callers can
+ * hand us a non-uuid id (probes, legacy runs); querying with it would raise
+ * 22P02 and abort indexing before the truthful-defer path runs.
+ */
+export function isSnapshotUuid(id: unknown): id is string {
+  return typeof id === "string" && UUID_RE.test(id);
+}
+
 export function parseIndexingPlan(raw: unknown): IndexingPlan | null {
   if (!raw || typeof raw !== "object") return null;
   const p = raw as Partial<IndexingPlan>;
@@ -146,6 +157,8 @@ export async function writeIndexWatermark(args: {
   mode: IndexingMode;
   rowsPublished: number;
 }): Promise<void> {
+  // A non-uuid snapshot can't be a delta base; skipping leaves the next pass full.
+  if (!isSnapshotUuid(args.mergedSnapshotId)) return;
   await query(
     `INSERT INTO funnel_index_watermark
        (ontology_id, object_type_api_name, last_indexed_merged_snapshot_id,
