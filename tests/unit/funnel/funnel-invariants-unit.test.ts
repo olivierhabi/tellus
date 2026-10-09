@@ -1,7 +1,7 @@
 // Pins the invariant checker's locator grammar to the changelog's strict
 // parser (parseFoundryMarker) and the expected-violation model of the
 // simulated fleet. DB behaviour is covered by
-// tests/funnel/integration/funnel-fleet-sim-integration.test.ts.
+// tests/funnel/integration/funnel-fleet-sim.lane.test.ts.
 import { describe, expect, it } from "vitest";
 import { classifyLocator, INVARIANT_SEVERITY } from "../../../src/services/funnel/funnelInvariants";
 import { parseFoundryMarker } from "../../../src/services/funnel/temporal/activities";

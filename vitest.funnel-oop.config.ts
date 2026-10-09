@@ -19,7 +19,7 @@ export default defineConfig({
       ? ["tests/funnel/scale/*.scale.test.ts"]
       : [
           "tests/funnel/integration/indexing-closeout-*-integration.test.ts",
-          "tests/funnel/integration/funnel-fleet-sim-integration.test.ts",
+          "tests/funnel/integration/funnel-fleet-sim.lane.test.ts",
           "tests/funnel/scale/*.scale.test.ts",
         ],
     testTimeout: 4 * 3_600_000,
