@@ -372,6 +372,8 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --entrypoint /usr/local/bin/duckdb "tellus-api:ci-${{ github.sha }}" --version
+          # ./run.sh runs the post-deploy funnel invariant report from the image.
+          docker run --rm --entrypoint node "tellus-api:ci-${{ github.sha }}" -e "require.resolve('./dist/funnelInvariants.js')"
       - name: Out-of-process merge smoke (production profile, real CLI)
         run: |
           set -euo pipefail

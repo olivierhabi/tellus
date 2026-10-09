@@ -6,9 +6,14 @@ Applies to PR #85 and later funnel changes. Owner: @olivierhabi (CODEOWNERS).
 
 1. CI green, including `funnel-oop` (production profile, OOP merge, sim fleet,
    O1–O3 lite) and the latest nightly `funnel-scale` report within budget.
-2. Run the invariant report against the target environment (read-only):
-   `pnpm exec tsx scripts/funnel-invariants.ts --probe-storage > before.json`.
-   Keep it to compare after the deploy.
+2. Baseline: `./run.sh` runs the read-only funnel invariant report after every
+   full deploy (inside the `app` container, so it sees this deployment's
+   Postgres + object store) and writes `reports/funnel-invariants-<ts>.json`.
+   Keep the first report as the baseline. Ad hoc on a running stack:
+   `docker compose -p <project> exec -T app node dist/funnelInvariants.js --probe-storage`.
+   Modes: `RUN_INVARIANTS=warn` (default, never fails the deploy),
+   `RUN_INVARIANTS=strict` (fail on error-level violations — switch to this
+   once the baseline is clean), `--no-invariants` / `RUN_INVARIANTS=0` to skip.
 
 ## Deploy
 
@@ -28,7 +33,8 @@ Applies to PR #85 and later funnel changes. Owner: @olivierhabi (CODEOWNERS).
 | Duplicate PKs | `funnel_snapshot.summary_json.source_quality.duplicatePkRows > 0` | list affected types for the phase-2 ADR |
 | Orphan staging | `ORPHAN_STAGING` | rows older than the merge CLI ceiling |
 
-After 24 h, run the checker again (`after.json`). Expect: no new errors;
+After 24 h, run the checker again (re-run `./run.sh --no-build`, or the
+`docker compose … exec` command above). Expect: no new errors;
 `REPLAY_REQUIRED` types reindexed and cleared; `GHOST_INDEXED_EMPTY` types
 reindexed (they now either index rows or fail loudly).
 

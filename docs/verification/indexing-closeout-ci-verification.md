@@ -23,9 +23,12 @@ How each close-out checklist row is proven automatically on every PR.
 | OOP lane | All of the above run on the production profile (`TELLUS_DEPLOYMENT_STRICT=1`, `TELLUS_EXPECT_OOP_MERGE=1`) with Postgres 16 + MinIO + the pinned DuckDB CLI | `ci.yml` job `funnel-oop`, `vitest.funnel-oop.config.ts` |
 | Process | CODEOWNERS on funnel + migration paths; rollout/rollback runbook | `.github/CODEOWNERS`, `docs/runbooks/funnel-indexing-rollout.md` |
 
-## Still needs a real deployment
+## Real deployments (not CI)
 
-- Running `scripts/funnel-invariants.ts --probe-storage` against each real
-  environment after deploy (simulation covers known failure modes only). The
-  ghost run `cfb7b070` matches the `GHOST_INDEXED_EMPTY` signature; confirm there.
-- Budgets are provisional until 7 nightly `funnel-scale` reports exist.
+CI databases start empty, so real data is checked at deploy time instead:
+`./run.sh` runs `node dist/funnelInvariants.js --probe-storage` inside the
+deployed `app` container after every full deploy and stores the report in
+`reports/` (`RUN_INVARIANTS=warn` default, `strict` to gate the deploy). The
+ghost run `cfb7b070` matches the `GHOST_INDEXED_EMPTY` signature and should
+appear in the first report. Budgets stay provisional until 7 nightly
+`funnel-scale` reports exist.

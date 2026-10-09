@@ -42,8 +42,11 @@ Sources: <https://www.palantir.com/docs/foundry/object-indexing/faq/>,
    deterministic DuckDB-generated CSVs (1M/5M/10M nightly, 100k on PRs),
    SIGKILL of the DuckDB CLI mid-bucket and of the whole merge worker
    mid staging-load, with exact last-wins verification.
-4. Running the checker against a real deployment is an operational step
-   (runbook), not a test dependency.
+4. Real deployments are checked at deploy time, not in CI: `./run.sh` runs
+   the compiled checker (`dist/funnelInvariants.js`) inside the deployed
+   `app` container after every full deploy, report in `reports/`; `warn` by
+   default so legacy state never blocks the deploy that fixes it, `strict`
+   once the baseline is clean.
 
 ## Consequences
 
