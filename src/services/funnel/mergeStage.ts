@@ -111,6 +111,7 @@ import {
   type StagedRowInput,
   type StagingVerification,
   type StagingScope,
+  type StagingChunkOptions,
 } from "./mergeStaging";
 
 /**
@@ -1472,10 +1473,18 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       const materializedRows = Number(materializedCountRes.rows[0]?.n ?? 0);
       const forceFullTail = requiresFullPgTail(activeRowCount, materializedRows);
       if (forceFullTail) {
-        console.warn(
-          `[merge-sql] ${input.objectTypeApiName} materialized-count drift ` +
-            `expected=${activeRowCount} actual=${materializedRows} — full PG tail`,
-        );
+        if (materializedRows === 0) {
+          // Empty live table: a first load (or a fully cleared type), not drift.
+          console.log(
+            `[merge-sql] ${input.objectTypeApiName} first load ` +
+              `(live table empty, rows=${activeRowCount}) — full PG tail`,
+          );
+        } else {
+          console.warn(
+            `[merge-sql] ${input.objectTypeApiName} materialized-count drift ` +
+              `expected=${activeRowCount} actual=${materializedRows} — full PG tail`,
+          );
+        }
       }
       if (mergeDeltaEnabled() && !forceFullTail) {
         try {
@@ -1564,6 +1573,21 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         objectTypeApiName: input.objectTypeApiName,
         stagingRunId: resolveStagingRunId(input.runKey, preMergedSnapshotId),
       };
+      // Clear / verify / promote / cleanup walk staging in pk-ordered chunks; report
+      // after every chunk so the progress-coupled heartbeat and the lease
+      // watchdog see movement through a multi-million-row promote.
+      const stagingChunkOpts: StagingChunkOptions = {
+        chunkRows: funnelRuntimeConfig().mergePromoteChunkRows,
+        onProgress: ({ phase, rowsDone }) => {
+          reportStageProgress(`merge staging-${phase} rows=${rowsDone}`);
+          if (leaseObjectTypeId) {
+            void bestEffortLease(
+              () => reportIndexingProgress(leaseObjectTypeId),
+              `progress-${phase}`,
+            );
+          }
+        },
+      };
       const client = await getClient();
       const stageBuf: StagedRowInput[] = [];
       let pgTailCommitted = false;
@@ -1572,7 +1596,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       // is untouched until the verified promote in Phase 3.
       try {
         await client.query("BEGIN");
-        await clearMergeStaging(client, stagingScope);
+        await clearMergeStaging(client, stagingScope, stagingChunkOpts);
         // Batched queryAll over the LOCAL merged parquet (pk-sorted — the COPY
         // at step 12 wrote it ORDER BY primary_key). Keyset pagination
         // (WHERE primary_key > $last) — NOT a DuckDB stream. A stream
@@ -1671,7 +1695,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       // throws with object_instances unchanged.
       const stageClient = await getClient();
       try {
-        const staged = await verifyMergeStaging(stageClient, stagingScope);
+        const staged = await verifyMergeStaging(stageClient, stagingScope, stagingChunkOpts);
         assertStagedTail(staged, tailRowCount, input.objectTypeApiName);
         await verifyStagedSample(conn, stageClient, tailFile, stagingScope);
         upserts = staged.stagedUpserts;
@@ -1680,12 +1704,14 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         // the live table inside ONE transaction, then staging is dropped.
         await stageClient.query("BEGIN");
         try {
-          const promoted = await promoteMergeStaging(stageClient, stagingScope);
+          const tPromote = Date.now();
+          const promoted = await promoteMergeStaging(stageClient, stagingScope, stagingChunkOpts);
           await stageClient.query("COMMIT");
           console.log(
             `[merge-sql] ${input.objectTypeApiName} pg-tail rows=${rowsProcessed} ` +
               `upserts=${upserts} deletes=${deletes} ` +
               `promotedUpserts=${promoted.upserts} promotedDeletes=${promoted.deletes} ` +
+              `chunkRows=${stagingChunkOpts.chunkRows} promoteMs=${Date.now() - tPromote} ` +
               `durMs=${Date.now() - tTail}`,
           );
         } catch (err) {
@@ -1695,7 +1721,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         pgTailCommitted = true;
       } catch (err) {
         if (!funnelRuntimeConfig().mergeStagingRetainOnFailure) {
-          await clearMergeStagingRun(stageClient, stagingScope).catch(() => {});
+          await clearMergeStagingRun(stageClient, stagingScope, stagingChunkOpts).catch(() => {});
         }
         throw err;
       } finally {

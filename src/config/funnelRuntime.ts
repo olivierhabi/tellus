@@ -48,6 +48,10 @@ export interface FunnelRuntimeConfig {
   mergeOutOfProcess: boolean;
   /** PG-tail batch size (rows per keyset page). */
   mergeBatchSize: number;
+  /** Staged rows per statement for the chunked verify / promote / cleanup
+   *  of merge_staging_instances. Must keep one statement well inside
+   *  PG_STATEMENT_TIMEOUT_MS (60 s) and well inside stageStallAfterMs. */
+  mergePromoteChunkRows: number;
   /** Keep the staging table on promotion failure for forensics. */
   mergeStagingRetainOnFailure: boolean;
   /** DuckDB CLI binary for the out-of-process path. */
@@ -79,6 +83,7 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     mergeCliTimeoutMs: 1_800_000,
     mergeOutOfProcess: true,
     mergeBatchSize: 5_000,
+    mergePromoteChunkRows: 250_000,
     mergeStagingRetainOnFailure: false,
     duckdbCliPath: "duckdb",
     duckdbMemoryLimit: "8GB",
@@ -98,6 +103,7 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     mergeCliTimeoutMs: 1_800_000,
     mergeOutOfProcess: false,
     mergeBatchSize: 5_000,
+    mergePromoteChunkRows: 250_000,
     mergeStagingRetainOnFailure: false,
     duckdbCliPath: "duckdb",
     duckdbMemoryLimit: "1GB",
@@ -117,6 +123,7 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     mergeCliTimeoutMs: 1_800_000,
     mergeOutOfProcess: true,
     mergeBatchSize: 5_000,
+    mergePromoteChunkRows: 250_000,
     mergeStagingRetainOnFailure: false,
     duckdbCliPath: "/usr/local/bin/duckdb",
     duckdbMemoryLimit: "8GB",
