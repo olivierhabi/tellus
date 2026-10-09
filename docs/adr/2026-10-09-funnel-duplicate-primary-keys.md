@@ -1,7 +1,7 @@
 # ADR — Duplicate primary keys within one source snapshot
 
 Date: 2026-10-09
-Status: **Accepted — phase 1 shipped in PR #85; phase 2 is a separate PR.**
+Status: **Accepted — phase 1 shipped in PR #85; phase 2 shipped as the per-object-type `indexing_data_policy` (see 2026-10-09-funnel-data-restrictions-and-incremental-indexing.md).**
 Scope: foundry-bridged CSV/TSV reader (`buildFoundryBridgedReader`),
 `changelogStage.ts`, data-health reporting.
 

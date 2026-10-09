@@ -205,6 +205,11 @@ describe("indexing close-out e2e: foundry CSV → changelog → merge → object
         duplicatePkRows: 2,
         nullOrEmptyPkRows: 0,
         duplicatePkSamples: ["1", "3"],
+        // Recorded with the object type's policy (migration 197; default
+        // lenient ⇒ the duplicates collapse instead of failing). The
+        // collapse also shows up as an OSv2 violation code.
+        policy: "lenient",
+        restrictions: [{ code: "duplicate_primary_key", count: 2, samples: ["1", "3"] }],
       });
       expect(merge.mergedRowCount).toBe(distinct);
       expect(merge.objectsIndexed).toBe(distinct);

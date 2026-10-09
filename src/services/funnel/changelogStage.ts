@@ -34,6 +34,14 @@ import {
 } from "./icebergCatalog";
 import { query } from "../../db";
 import {
+  RestrictionTracker,
+  enforceRestrictions,
+  mergeViolations,
+  primaryKeyTypeViolation,
+  type RestrictionSchema,
+  type RestrictionViolation,
+} from "./dataRestrictions";
+import {
   CHANGELOG_PARQUET_COLUMNS,
   changelogParquetKey,
   deleteOrphanParquetRef,
@@ -98,6 +106,11 @@ export interface SnapshotDiffReader {
    *  duplicate-PK collapses are visible (phase 1 of
    *  docs/adr/2026-10-09-funnel-duplicate-primary-keys.md). */
   sourceQuality?: () => FoundrySourceQuality | null;
+  /** True when the reader already ran the OSv2 value-level checks itself
+   *  (the CSV fast path does them in one DuckDB aggregate scan and reports
+   *  them in `sourceQuality().restrictions`), so computeChangelog skips its
+   *  per-row `RestrictionTracker`. */
+  valueRestrictionsChecked?: boolean;
 }
 
 /** What a pre-deduplicating reader collapsed. Palantir fails indexing on
@@ -109,6 +122,8 @@ export interface FoundrySourceQuality {
   duplicatePkRows: number;
   nullOrEmptyPkRows: number;
   duplicatePkSamples: string[];
+  /** OSv2 value-level violations the reader measured itself (CSV path). */
+  restrictions?: RestrictionViolation[];
 }
 
 export interface ComputeChangelogInput {
@@ -132,6 +147,9 @@ export interface ComputeChangelogInput {
    * tests and the PG dispatcher call sites are unaffected.
    */
   onRowsAdvanced?: (rowsStreamed: number) => void;
+  /** OSv2 data restrictions for this object type (policy + column types).
+   *  When omitted no value-level checks run (unit tests, legacy callers). */
+  restrictions?: RestrictionSchema | null;
 }
 
 export interface ComputeChangelogResult {
@@ -188,6 +206,19 @@ export async function computeChangelog(
   const distinctTxns = skipDupCheck ? new Set<string>() : null;
   const ownedProperties = new Set<string>();
   let idx = 0;
+  // OSv2 value-level checks (NaN/±Infinity, empty strings, nested arrays,
+  // null array elements, oversized strings/arrays). Skipped when no schema
+  // was supplied or the reader already checked in SQL.
+  const restrictionSchema = input.restrictions ?? null;
+  if (restrictionSchema?.policy === "strict") {
+    // Config-level: fail before reading a single row.
+    const pkType = primaryKeyTypeViolation(restrictionSchema);
+    if (pkType) enforceRestrictions(restrictionSchema, [pkType]);
+  }
+  const tracker =
+    restrictionSchema && !reader.valueRestrictionsChecked
+      ? new RestrictionTracker(restrictionSchema)
+      : null;
 
   // PASS-BY-REFERENCE (Option 2): stream the source rows straight into a
   // Parquet object in MinIO. The full row array is NEVER materialised in
@@ -234,6 +265,7 @@ export async function computeChangelog(
       }
 
       for (const k of Object.keys(r.properties)) ownedProperties.add(k);
+      tracker?.observe(r.primary_key, r.properties);
       idx++;
       if (idx % 5000 === 0) {
         try {
@@ -293,7 +325,41 @@ export async function computeChangelog(
         },
       ];
 
-  const sourceQuality = reader.sourceQuality?.() ?? null;
+  const readerQuality = reader.sourceQuality?.() ?? null;
+  // Palantir: a batch transaction that breaks the OSv2 restrictions fails
+  // indexing. Under 'strict' we fail HERE — the parquet is written but the
+  // snapshot never commits, so nothing downstream sees the transaction.
+  // Under 'lenient' the violations ride on summary_json.source_quality.
+  let violations: RestrictionViolation[] = [];
+  if (restrictionSchema) {
+    const pkType = primaryKeyTypeViolation(restrictionSchema);
+    violations = mergeViolations(
+      pkType ? [pkType] : [],
+      readerQuality ? sourceQualityViolations(readerQuality) : [],
+      tracker?.violations() ?? [],
+    );
+    try {
+      violations = enforceRestrictions(restrictionSchema, violations);
+    } catch (err) {
+      await deleteOrphanParquetRef(parquetRef);
+      throw err;
+    }
+    if (violations.length > 0) {
+      console.warn(
+        `[funnel] ${input.objectTypeApiName} OSv2 data-restriction violations ` +
+          `(policy=lenient, recorded in source_quality): ` +
+          violations.map((v) => `${v.code}=${v.count}`).join(", "),
+      );
+    }
+  }
+  const sourceQuality =
+    readerQuality || violations.length > 0 || restrictionSchema
+      ? {
+          ...(readerQuality ?? {}),
+          ...(restrictionSchema ? { policy: restrictionSchema.policy } : {}),
+          restrictions: violations,
+        }
+      : null;
   let snapshot;
   try {
     snapshot = await commitSnapshot({
@@ -434,4 +500,20 @@ export class ThroughputGuard {
     this.tokens = Math.min(this.capPerSec, this.tokens + elapsedSec * this.capPerSec);
     this.lastRefill = t;
   }
+}
+
+/** Duplicate / null-PK counts + reader-measured value checks, as violations. */
+export function sourceQualityViolations(q: FoundrySourceQuality): RestrictionViolation[] {
+  const out: RestrictionViolation[] = [];
+  if (q.duplicatePkRows > 0) {
+    out.push({
+      code: "duplicate_primary_key",
+      count: q.duplicatePkRows,
+      samples: q.duplicatePkSamples.slice(0, 5),
+    });
+  }
+  if (q.nullOrEmptyPkRows > 0) {
+    out.push({ code: "null_or_empty_primary_key", count: q.nullOrEmptyPkRows, samples: [] });
+  }
+  return [...out, ...(q.restrictions ?? [])];
 }

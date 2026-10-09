@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { query } from "../../../db";
+import { funnelRuntimeConfig } from "../../../config/funnelRuntime";
 import { observeHistogram, incCounter } from "../metrics";
 import {
   computeChangelog,
@@ -26,6 +27,7 @@ import { createTable, funnelNamespace, getTable, ManifestEntry } from "../iceber
 import {
   mergeChangesFromSnapshots,
   streamMergedRowsFromSnapshot,
+  loadMergedIndexingPlan,
 } from "../mergeStage";
 import {
   getPendingMergeEdits,
@@ -72,7 +74,24 @@ import {
   streamQuery,
   releaseConnection,
 } from "../../duckdb/pool";
-import type { FoundrySourceQuality } from "../changelogStage";
+import { sourceQualityViolations, type FoundrySourceQuality } from "../changelogStage";
+import {
+  decideIndexingMode,
+  parseIndexingPlan,
+  readIndexWatermark,
+  writeIndexWatermark,
+} from "../indexingPlan";
+import {
+  IndexingDataRestrictionError,
+  buildCsvRestrictionChecks,
+  csvRestrictionAggregateSql,
+  enforceRestrictions,
+  loadRestrictionSchema,
+  violationsFromCsvAggregate,
+  SAMPLE_LIMIT,
+  type RestrictionSchema,
+  type RestrictionViolation,
+} from "../dataRestrictions";
 import {
   runWithStageProgress,
   reportStageProgress,
@@ -304,6 +323,8 @@ async function runChangelogActivityImpl(
   // while also handling `.csv` / `.tsv` / `.json` so wizard-created OTs
   // index correctly on every save.
   let reader: SnapshotDiffReader;
+  // OSv2 data restrictions (policy + column types) for this object type.
+  const restrictions = await loadRestrictionSchema(input.objectTypeApiName);
   // Fail-closed zero-row gate (Blocker 4): true only when we positively
   // know the source file is non-empty. The pending-edit fallback keeps
   // sourceNonEmpty=false — a genuinely edit-less object type may
@@ -357,7 +378,7 @@ async function runChangelogActivityImpl(
           );
         }
         sourceNonEmpty = foundryHead.contentLength > 0;
-        reader = await buildFoundryBridgedReader(foundry);
+        reader = await buildFoundryBridgedReader(foundry, restrictions);
       }
     } else {
       const pending = await getPendingMergeEdits(input.objectTypeApiName);
@@ -395,8 +416,9 @@ async function runChangelogActivityImpl(
     input.ontologyId,
     input.objectTypeApiName,
   ).catch(() => null);
-  const result = await computeChangelog(
+  const result = await computeChangelogEnforced(
     {
+      restrictions,
       ontologyId: input.ontologyId,
       objectTypeApiName: input.objectTypeApiName,
       datasourceId: ZERO_UUID,
@@ -433,6 +455,26 @@ async function runChangelogActivityImpl(
     manifest: result.manifest,
     ownedProperties: result.ownedProperties,
   };
+}
+
+/** A strict-policy restriction failure can never be fixed by a retry —
+ *  only by fixing the source — so it surfaces as a NON-RETRYABLE failure. */
+async function computeChangelogEnforced(
+  ...args: Parameters<typeof computeChangelog>
+): ReturnType<typeof computeChangelog> {
+  try {
+    return await computeChangelog(...args);
+  } catch (err) {
+    if (err instanceof IndexingDataRestrictionError) {
+      throw ApplicationFailure.create({
+        message: err.message,
+        type: err.name,
+        nonRetryable: true,
+        details: [{ violations: err.violations }],
+      });
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +592,8 @@ export async function runIndexingActivityProxy(
      *  — they never cross the Temporal activity-boundary payload limit. */
     mergedSnapshotId: string;
     mergedRowCount: number;
+    /** User-requested full reindex (Palantir: "triggered manually"). */
+    forceFullReindex?: boolean;
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
   return withStageInstrumentation("indexing", input.objectTypeApiName, async () =>
@@ -561,6 +605,7 @@ async function runIndexingActivityProxyImpl(
   input: ObjectTypeCtx & {
   mergedSnapshotId: string;
   mergedRowCount: number;
+  forceFullReindex?: boolean;
   }
 ): Promise<{ editsIndexed: number; publishedSplitIds: string[]; quickwit: boolean }> {
   await fence(input);
@@ -576,10 +621,27 @@ async function runIndexingActivityProxyImpl(
   // applied_to_index_at) and the retry covers repairs via
   // buildFullIndexBatch (re-reads object_instances for edits merged by
   // earlier runs). See indexingStage.ts for the invariant.
-  if (editIds.length === 0) {
+  // Full vs incremental (Palantir funnel rule, see indexingPlan.ts). The
+  // merge recorded a plan from its delta; the watermark proves the serving
+  // index already holds the delta's base snapshot.
+  let decision = decideIndexingMode({
+    mergedSnapshotId: input.mergedSnapshotId,
+    plan: parseIndexingPlan(await loadMergedIndexingPlan(input.mergedSnapshotId)),
+    lastIndexedSnapshotId: await readIndexWatermark(input.ontologyId, input.objectTypeApiName),
+    incrementalEnabled: funnelRuntimeConfig().indexingIncremental,
+    forceFull: input.forceFullReindex === true,
+  });
+  // Source-only changes reach the serving index too (Palantir indexes every
+  // datasource transaction) — not only runs that carry pending user edits.
+  const hasUnindexedSource = input.mergedRowCount > 0 && !decision.alreadyIndexed;
+  if (editIds.length === 0 && !hasUnindexedSource) {
     updatePendingIndexGauges(input.objectTypeApiName, pending);
     return { editsIndexed: 0, publishedSplitIds: [], quickwit: false };
   }
+  console.log(
+    `[temporal/indexing] ${input.objectTypeApiName} mode=${decision.mode} ` +
+      `reason=${decision.reason} snapshot=${input.mergedSnapshotId} pendingEdits=${editIds.length}`,
+  );
 
   const reachable = await isQuickwitReachable();
   if (!reachable) {
@@ -592,7 +654,12 @@ async function runIndexingActivityProxyImpl(
   }
 
   try {
-    await ensureIndex({ objectTypeApiName: input.objectTypeApiName });
+    const ensured = await ensureIndex({ objectTypeApiName: input.objectTypeApiName });
+    if (ensured.created && input.mergedRowCount > 0) {
+      // A brand-new (or recreated) index holds nothing: the watermark no
+      // longer describes it, so a delta would leave it incomplete.
+      decision = { mode: "full", reason: "index_behind_base_snapshot", alreadyIndexed: false };
+    }
     // PASS-BY-REFERENCE: re-read the merged rows from the committed
     // merged snapshot by id (NOT from a Temporal activity return value).
     // Skipped entirely when this run merged nothing — the repair pass
@@ -623,8 +690,10 @@ async function runIndexingActivityProxyImpl(
         ontologyId: input.ontologyId,
         objectTypeApiName: input.objectTypeApiName,
         baseRows:
-          input.mergedRowCount > 0
-            ? streamMergedRowsFromSnapshot(input.mergedSnapshotId)
+          input.mergedRowCount > 0 && !decision.alreadyIndexed
+            ? streamMergedRowsFromSnapshot(input.mergedSnapshotId, {
+                delta: decision.mode === "incremental",
+              })
             : emptySource,
         pending,
       });
@@ -638,6 +707,15 @@ async function runIndexingActivityProxyImpl(
     });
     await markEditsAppliedToIndex(editIds);
     updatePendingIndexGauges(input.objectTypeApiName, []);
+    if (input.mergedRowCount > 0 && !decision.alreadyIndexed) {
+      await writeIndexWatermark({
+        ontologyId: input.ontologyId,
+        objectTypeApiName: input.objectTypeApiName,
+        mergedSnapshotId: input.mergedSnapshotId,
+        mode: decision.mode,
+        rowsPublished: out.rowsStreamed,
+      });
+    }
     return {
       editsIndexed: editIds.length,
       publishedSplitIds: out.publishedSplitIds,
@@ -1234,7 +1312,8 @@ async function buildIcebergBridgedReader(
 /** Exported for the streaming-dedup unit test (scripts/test-foundry-dedup.ts);
  *  not called outside this module in production. */
 export async function buildFoundryBridgedReader(
-  ds: FoundryBridgedDatasource
+  ds: FoundryBridgedDatasource,
+  restrictions: RestrictionSchema | null = null,
 ): Promise<SnapshotDiffReader> {
   const s3Key = stripFoundryTags(ds.filePath);
   if (!s3Key) {
@@ -1284,21 +1363,33 @@ export async function buildFoundryBridgedReader(
   // (Palantir fails indexing on duplicate PKs within one transaction) so
   // the count lands in the changelog snapshot summary as `source_quality`.
   let quality: FoundrySourceQuality | null = null;
+  const isCsv = ds.fileFormat === "csv" || ds.fileFormat === "tsv";
   return {
     readerKind: "foundry-bridged",
     sourceQuality: () => quality,
+    valueRestrictionsChecked: isCsv,
     async *read() {
       // CSV/TSV (the large-foundry-CSV case — OO7's 895 MiB / 5.6M-row
       // test04.csv) take the FAST path: DuckDB reads the file natively +
       // dedups in SQL (no per-row JS, no 11k multi-row INSERT statements).
       // JSONL/JSON stay on the general INSERT path (smaller volumes;
       // read_csv_auto is CSV-only).
-      if (ds.fileFormat === "csv" || ds.fileFormat === "tsv") {
-        yield* dedupFoundryCsvViaDuckDB(ds, s3Key, pkCol, txnId, ts, (q) => {
+      if (isCsv) {
+        yield* dedupFoundryCsvViaDuckDB(
+          ds,
+          s3Key,
+          pkCol,
+          txnId,
+          ts,
+          (q) => {
+            quality = q;
+          },
+          restrictions,
+        );
+      } else {
+        yield* dedupFoundryRows(streamFoundryRows(ds, s3Key), pkCol, txnId, ts, (q) => {
           quality = q;
         });
-      } else {
-        yield* dedupFoundryRows(streamFoundryRows(ds, s3Key), pkCol, txnId, ts);
       }
     },
   };
@@ -1326,6 +1417,7 @@ async function* dedupFoundryCsvViaDuckDB(
   txnId: string,
   ts: string,
   onQuality?: (q: FoundrySourceQuality) => void,
+  restrictions: RestrictionSchema | null = null,
 ): AsyncGenerator<SourceChangeRow> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fb-csv-"));
   const localPath = path.join(dir, "source.csv");
@@ -1346,13 +1438,44 @@ async function* dedupFoundryCsvViaDuckDB(
     if (onQuality) {
       // One aggregate scan (DuckDB's vectorised CSV reader: seconds at 5M
       // rows). Duplicate count = rows with a usable PK minus distinct PKs.
-      const agg = await queryAll<{ total: unknown; null_pk: unknown; distinct_pk: unknown }>(
+      // The OSv2 value checks (oversized strings, NaN/±Inf on numeric-typed
+      // columns) ride on the SAME scan.
+      const sourceColumns = restrictions
+        ? (
+            await queryAll<{ column_name: unknown }>(conn, `DESCRIBE SELECT * FROM ${src}`)
+          ).map((r) => String(r.column_name))
+        : [];
+      const checks = restrictions ? buildCsvRestrictionChecks(sourceColumns, restrictions) : [];
+      const checkSql = checks.length > 0 ? `, ${csvRestrictionAggregateSql(checks)}` : "";
+      const agg = await queryAll<
+        { total: unknown; null_pk: unknown; distinct_pk: unknown } & Record<string, unknown>
+      >(
         conn,
         `SELECT count(*) AS total, ` +
           `count(*) FILTER (WHERE ${pkQ} IS NULL OR ${pkQ} = '') AS null_pk, ` +
           `count(DISTINCT ${pkQ}) FILTER (WHERE ${pkQ} IS NOT NULL AND ${pkQ} <> '') AS distinct_pk ` +
-          `FROM ${src}`,
+          `${checkSql} FROM ${src}`,
       );
+      const valueViolations: RestrictionViolation[] = violationsFromCsvAggregate(
+        checks,
+        agg[0] ?? {},
+      );
+      // Samples only for codes that fired (extra scans only on bad data).
+      for (const v of valueViolations) {
+        const preds = checks
+          .filter((k) => k.code === v.code && (v.columns ?? []).includes(k.column))
+          .slice(0, 20);
+        if (preds.length === 0) continue;
+        const where = preds.map((k) => `(${k.predicate})`).join(" OR ");
+        const cases = preds
+          .map((k) => `WHEN ${k.predicate} THEN '${k.column.replace(/'/g, "''")}'`)
+          .join(" ");
+        const rows = await queryAll<{ pk: unknown; col: unknown }>(
+          conn,
+          `SELECT ${pkQ} AS pk, CASE ${cases} END AS col FROM ${src} WHERE ${where} LIMIT ${SAMPLE_LIMIT}`,
+        );
+        v.samples = rows.map((r) => `pk=${String(r.pk)} column=${String(r.col)}`);
+      }
       const total = Number(agg[0]?.total ?? 0);
       const nullPk = Number(agg[0]?.null_pk ?? 0);
       const distinctPk = Number(agg[0]?.distinct_pk ?? 0);
@@ -1370,13 +1493,20 @@ async function* dedupFoundryCsvViaDuckDB(
             `(collapsed last-wins; Palantir would fail this transaction). samples=${JSON.stringify(samples)}`,
         );
       }
-      onQuality({
+      const q: FoundrySourceQuality = {
         sourceRows: total,
         distinctPrimaryKeys: distinctPk,
         duplicatePkRows,
         nullOrEmptyPkRows: nullPk,
         duplicatePkSamples: samples,
-      });
+        ...(restrictions ? { restrictions: valueViolations } : {}),
+      };
+      onQuality(q);
+      // Strict policy: fail BEFORE the dedup sort + parquet write — the
+      // aggregate already has everything Palantir would reject.
+      if (restrictions?.policy === "strict") {
+        enforceRestrictions(restrictions, sourceQualityViolations(q));
+      }
     }
     const sql =
       `SELECT DISTINCT ON (${pkQ}) * FROM (` +
@@ -1476,6 +1606,7 @@ async function* dedupFoundryRows(
   pkCol: string,
   txnId: string,
   ts: string,
+  onQuality?: (q: FoundrySourceQuality) => void,
 ): AsyncGenerator<SourceChangeRow> {
   const conn = await acquireConnection({ skipHttpfs: true });
   const tempTable = `fb_dedup_${randomUUID().replace(/-/g, "_")}`;
@@ -1495,9 +1626,13 @@ async function* dedupFoundryRows(
       await runAll(conn, `INSERT INTO ${tempTable} VALUES ${batch.join(", ")}`);
       batch = [];
     };
+    let nullPk = 0;
     for await (const row of rows) {
       const pk = row[pkCol];
-      if (pk == null || pk === "") continue; // skip null-PK rows, mirror reindexService
+      if (pk == null || pk === "") {
+        nullPk++;
+        continue; // skip null-PK rows, mirror reindexService
+      }
       const key = String(pk);
       // `properties` is stored as a JSON string in the temp table and
       // JSON.parsed back to an object on the deduped read-out (computeChangelog
@@ -1517,6 +1652,33 @@ async function* dedupFoundryRows(
       }
     }
     await flush(); // final partial batch
+    if (onQuality) {
+      // Same measurement as the CSV path: rows with a usable PK minus
+      // distinct PKs = rows collapsed by the last-wins dedup below.
+      let distinct = 0;
+      let samples: string[] = [];
+      if (seq > 0) {
+        const d = await queryAll<{ d: unknown }>(
+          conn,
+          `SELECT CAST(count(DISTINCT primary_key) AS VARCHAR) AS d FROM ${tempTable}`,
+        );
+        distinct = Number(d[0]?.d ?? 0);
+        if (seq > distinct) {
+          const sm = await queryAll<{ pk: unknown }>(
+            conn,
+            `SELECT primary_key AS pk FROM ${tempTable} GROUP BY 1 HAVING count(*) > 1 ORDER BY 1 LIMIT 5`,
+          );
+          samples = sm.map((r) => String(r.pk));
+        }
+      }
+      onQuality({
+        sourceRows: seq + nullPk,
+        distinctPrimaryKeys: distinct,
+        duplicatePkRows: Math.max(0, seq - distinct),
+        nullOrEmptyPkRows: nullPk,
+        duplicatePkSamples: samples,
+      });
+    }
     if (seq === 0) return; // empty source — Parquet cannot represent zero rows
 
     // DISTINCT ON last-wins by file order (__seq DESC). Q1 proved ON CONFLICT

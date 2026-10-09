@@ -136,6 +136,15 @@ export function mergedParquetKey(
   return `merged/${objectTypeApiName}/${snapshotId}.parquet`;
 }
 
+/** MinIO key for the merge DELTA (rows new/changed vs the previous merged
+ *  snapshot). Read by incremental indexing via `delta_parquet_ref`. */
+export function mergedDeltaParquetKey(
+  objectTypeApiName: string,
+  snapshotId: string,
+): string {
+  return `merged/${objectTypeApiName}/${snapshotId}.delta.parquet`;
+}
+
 /**
  * Validate + normalise a `parquet_ref` read from `summary_json`. Rejects
  * unknown `refVersion` loudly. Returns `null` for a missing/invalid ref
