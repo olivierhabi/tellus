@@ -5,6 +5,7 @@ How each close-out checklist row is proven automatically on every PR.
 | Row | What is verified | Where |
 |---|---|---|
 | 4.1 | Malformed `#foundry-dataset:` marker fails the changelog loudly; object_instances untouched | `tests/unit/funnel/foundry-marker-loader-unit.test.ts`, `tests/funnel/integration/indexing-closeout-e2e-integration.test.ts` |
+| 1.7 | Registration refuses a malformed locator with `DATASOURCE_MARKER_INVALID` and writes nothing (reachable: Postgres accepts a hyphenless uuid id); a normal registration yields a locator the changelog parser and the invariant checker accept | `tests/funnel/integration/indexing-closeout-registration-integration.test.ts` |
 | 4.3 | `REINDEX_TOO_LARGE` returns 413 (not 500) | `tests/unit/funnel/reindex-too-large-route-unit.test.ts` |
 | 1.10 | Migrations 192–195 in the ledger; forward idempotent; `.down.sql` reverses (idempotently); forward re-applies — inside a rolled-back transaction | `tests/funnel/integration/indexing-closeout-migrations-integration.test.ts` |
 | §2/§3 (lite) | Real CSV in MinIO → changelog → merge → object_instances: distinct-key counts, last-wins duplicates, dataset provenance, no staging leftovers, idempotent re-run, updates/inserts, fast / general / bucketed merge shapes, unreachable object, zero-row gate | `tests/funnel/integration/indexing-closeout-e2e-integration.test.ts` |
