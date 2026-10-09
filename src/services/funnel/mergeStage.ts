@@ -31,6 +31,7 @@
 //     markings for that PK.
 // ---------------------------------------------------------------------------
 
+import { planIndexing } from "./indexingPlan";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -46,6 +47,7 @@ import { unionMarkings } from "../markingUnion";
 import {
   MERGED_PARQUET_COLUMNS,
   mergedParquetKey,
+  mergedDeltaParquetKey,
   deleteOrphanParquetRef,
   newSnapshotId,
   parquetRefToUri,
@@ -143,6 +145,97 @@ async function bestEffortLease(
 // the retired MERGE_DELTA env knob is ignored. Out-of-band PG drift is
 // self-healed by the materialized-count check (full tail on drift).
 const mergeDeltaEnabled = (): boolean => funnelRuntimeConfig().mergeDelta;
+
+export interface MergeDeltaInfo {
+  /** Local delta parquet (MERGED_PARQUET_COLUMNS). */
+  file: string;
+  rows: number;
+  prevSnapshotId: string;
+  /** Live (non-delete) rows in the previous merged snapshot — what PG must
+   *  hold for the delta to be applicable. */
+  prevActiveRows: number;
+}
+
+/**
+ * Rows of the new merged parquet that are new or differ from the previous
+ * merged snapshot (including new delete tombstones). Rows present in prev but
+ * absent from the new merged result were not live in PG (merged_result's key
+ * set includes every live object_instances row) and need no action. Returns
+ * null when there is no previous merged snapshot or anything fails.
+ */
+async function computeMergeDelta(args: {
+  conn: DuckDBConnection;
+  mergedTableId: string;
+  localMergedFile: string;
+  mergedDir: string;
+  downloads: { dir: string; localPath: string }[];
+  objectTypeApiName: string;
+  mergedRowCount: number;
+}): Promise<MergeDeltaInfo | null> {
+  try {
+    const tDelta = Date.now();
+    const prevRes = await query(
+      `SELECT snapshot_id, summary_json FROM funnel_snapshot
+        WHERE dataset_table_id = $1
+          AND jsonb_typeof(summary_json->'parquet_ref') = 'object'
+        ORDER BY committed_at DESC LIMIT 1`,
+      [args.mergedTableId],
+    );
+    const prevRow = prevRes.rows[0] as
+      | { snapshot_id: string; summary_json: Record<string, unknown> }
+      | undefined;
+    const prevRef = prevRow ? resolveParquetRef(prevRow.summary_json?.parquet_ref) : null;
+    if (!prevRow || !prevRef) return null;
+    const prevDl = await downloadParquetRefToLocal(prevRef);
+    args.downloads.push(prevDl); // freed by the caller's finally
+    const deltaFile = path.join(args.mergedDir, "delta.parquet");
+    const np = args.localMergedFile.replace(/'/g, "''");
+    const pp = prevDl.localPath.replace(/'/g, "''");
+    const dp = deltaFile.replace(/'/g, "''");
+    await runAll(
+      args.conn,
+      `COPY (
+        SELECT m.primary_key, m.properties, m.markings, m.operation,
+               m.source_datasource_id, m.source_transaction_id
+        FROM read_parquet('${np}') m
+        LEFT JOIN read_parquet('${pp}') p
+          ON p.primary_key = m.primary_key
+        WHERE p.primary_key IS NULL
+           OR m.operation             IS DISTINCT FROM p.operation
+           OR m.properties            IS DISTINCT FROM p.properties
+           OR m.markings              IS DISTINCT FROM p.markings
+           OR m.source_datasource_id  IS DISTINCT FROM p.source_datasource_id
+           OR m.source_transaction_id IS DISTINCT FROM p.source_transaction_id
+        ORDER BY m.primary_key
+      ) TO '${dp}' (FORMAT PARQUET, CODEC 'ZSTD', ROW_GROUP_SIZE 100000)`,
+    );
+    const [c] = await queryAll<{ d: string; p: string }>(
+      args.conn,
+      `SELECT
+         (SELECT CAST(count(*) AS VARCHAR) FROM read_parquet('${dp}')) AS d,
+         (SELECT CAST(count(*) AS VARCHAR) FROM read_parquet('${pp}')
+           WHERE operation IS DISTINCT FROM 'delete') AS p`,
+    );
+    const info: MergeDeltaInfo = {
+      file: deltaFile,
+      rows: Number(c?.d ?? 0),
+      prevSnapshotId: prevRow.snapshot_id,
+      prevActiveRows: Number(c?.p ?? 0),
+    };
+    console.log(
+      `[merge-sql] ${args.objectTypeApiName} delta merged=${args.mergedRowCount} ` +
+        `changed=${info.rows} prevSnapshot=${info.prevSnapshotId} ` +
+        `prevActive=${info.prevActiveRows} durMs=${Date.now() - tDelta}`,
+    );
+    return info;
+  } catch (err) {
+    console.warn(
+      `[merge-sql] ${args.objectTypeApiName} delta failed (non-fatal — ` +
+        `falling back to full PG tail + full reindex): ${(err as Error).message}`,
+    );
+    return null;
+  }
+}
 
 /**
  * Snapshot history can outlive `object_instances` (for example after a
@@ -984,6 +1077,9 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
   let mergedRowCount = 0;
   let activeRowCount = 0;
   let mergedParquetRef: ParquetRef | null = null;
+  let mergeDelta: MergeDeltaInfo | null = null;
+  let deltaParquetRef: ParquetRef | null = null;
+  let deltaUploadFailed = false;
   let upserts = 0;
   let deletes = 0;
   let lastPk: string | null = null;
@@ -1446,6 +1542,53 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
     //     keyed by runKey: committed=true after COMMIT lets a post-commit-crash
     //     retry SKIP the re-upsert; mid-transaction crash (committed=false)
     //     redoes the tail (idempotent).
+    // 13b. Delta vs the previous merged snapshot — feeds BOTH the PG tail
+    //      (O(changes) writes) and the indexing plan (Palantir: incremental
+    //      unless > 80% of rows changed). Both parquets come from THIS
+    //      DuckDB pipeline (identical serialisation), so plain string
+    //      comparison is exact. Any failure falls back to full (PG tail and
+    //      indexing) — correctness is never gated on the delta.
+    if (mergeDeltaEnabled() && mergedRowCount > 0) {
+      mergeDelta = await computeMergeDelta({
+        conn,
+        mergedTableId: input.mergedTableId,
+        localMergedFile,
+        mergedDir,
+        downloads,
+        objectTypeApiName: input.objectTypeApiName,
+        mergedRowCount,
+      });
+      if (mergeDelta) {
+        try {
+          const st = fs.statSync(mergeDelta.file);
+          if (mergeDelta.rows > 0) {
+            const up = await uploadObject(
+              mergedDeltaParquetKey(input.objectTypeApiName, preMergedSnapshotId),
+              fs.createReadStream(mergeDelta.file),
+              "application/vnd.apache.parquet",
+              undefined,
+              st.size,
+            );
+            deltaParquetRef = {
+              refVersion: 1,
+              bucket: up.bucket,
+              key: up.key,
+              rowCount: mergeDelta.rows,
+              sizeBytes: up.size,
+            };
+          }
+        } catch (err) {
+          // Indexing falls back to a full reindex without the delta object.
+          console.warn(
+            `[merge-sql] ${input.objectTypeApiName} delta upload failed (non-fatal — ` +
+              `indexing will run full): ${(err as Error).message}`,
+          );
+          deltaParquetRef = null;
+          deltaUploadFailed = true;
+        }
+      }
+    }
+
     const checkpoint = input.runKey ? await readMergeProgress(input.runKey) : null;
     const skipPgTail = checkpoint?.committed === true;
 
@@ -1458,13 +1601,11 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         });
       }
 
-      // Delta vs the previous merged snapshot. Both parquets were produced by
-      // THIS DuckDB pipeline (identical serialisation), so plain string
-      // comparison is exact. Rows present in prev but absent from the new
-      // merged_result were untouched this run and need no action. Any failure
-      // here falls back to the full-rewrite tail — correctness is never gated
-      // on the delta (and bulkUpsertInstances' IS DISTINCT FROM guard is the
-      // PG-side safety net against false positives).
+      // Delta PG tail (see `computeMergeDelta` above, step 13b). PG must
+      // equal the PREVIOUS merged snapshot's live set for the delta to be
+      // applicable — compare against that, not this run's count, so a run
+      // that only adds or deletes rows still ships O(changes) to PG. With no
+      // previous snapshot the old rule holds (first load ⇒ full tail).
       let tailFile = localMergedFile;
       let tailRowCount = mergedRowCount;
       const materializedCountRes = await query(
@@ -1474,7 +1615,8 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         [input.ontologyId, input.objectTypeApiName],
       );
       const materializedRows = Number(materializedCountRes.rows[0]?.n ?? 0);
-      const forceFullTail = requiresFullPgTail(activeRowCount, materializedRows);
+      const expectedLiveRows = mergeDelta ? mergeDelta.prevActiveRows : activeRowCount;
+      const forceFullTail = requiresFullPgTail(expectedLiveRows, materializedRows);
       if (forceFullTail) {
         if (materializedRows === 0) {
           // Empty live table: a first load (or a fully cleared type), not drift.
@@ -1485,74 +1627,17 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         } else {
           console.warn(
             `[merge-sql] ${input.objectTypeApiName} materialized-count drift ` +
-              `expected=${activeRowCount} actual=${materializedRows} — full PG tail`,
+              `expected=${expectedLiveRows} actual=${materializedRows} — full PG tail`,
           );
         }
       }
-      if (mergeDeltaEnabled() && !forceFullTail) {
-        try {
-          const tDelta = Date.now();
-          const prevRes = await query(
-            `SELECT snapshot_id, summary_json FROM funnel_snapshot
-              WHERE dataset_table_id = $1
-                AND jsonb_typeof(summary_json->'parquet_ref') = 'object'
-              ORDER BY committed_at DESC LIMIT 1`,
-            [input.mergedTableId],
-          );
-          const prevRow = prevRes.rows[0] as
-            | { snapshot_id: string; summary_json: Record<string, unknown> }
-            | undefined;
-          const prevRef = prevRow
-            ? resolveParquetRef(prevRow.summary_json?.parquet_ref)
-            : null;
-          if (prevRef) {
-            const prevDl = await downloadParquetRefToLocal(prevRef);
-            downloads.push(prevDl); // freed by the existing finally
-            const deltaFile = path.join(mergedDir, "delta.parquet");
-            const np = localMergedFile.replace(/'/g, "''");
-            const pp = prevDl.localPath.replace(/'/g, "''");
-            const dp = deltaFile.replace(/'/g, "''");
-            await runAll(
-              conn,
-              `COPY (
-                SELECT m.primary_key, m.properties, m.markings, m.operation,
-                       m.source_datasource_id, m.source_transaction_id
-                FROM read_parquet('${np}') m
-                LEFT JOIN read_parquet('${pp}') p
-                  ON p.primary_key = m.primary_key
-                WHERE p.primary_key IS NULL
-                   OR m.operation             IS DISTINCT FROM p.operation
-                   OR m.properties            IS DISTINCT FROM p.properties
-                   OR m.markings              IS DISTINCT FROM p.markings
-                   OR m.source_datasource_id  IS DISTINCT FROM p.source_datasource_id
-                   OR m.source_transaction_id IS DISTINCT FROM p.source_transaction_id
-                ORDER BY m.primary_key
-              ) TO '${dp}' (FORMAT PARQUET, CODEC 'ZSTD', ROW_GROUP_SIZE 100000)`,
-            );
-            const dc = await queryAll<{ c: string }>(
-              conn,
-              `SELECT CAST(count(*) AS VARCHAR) AS c FROM read_parquet('${dp}')`,
-            );
-            tailRowCount = Number(dc[0]?.c ?? 0);
-            tailFile = deltaFile;
-            console.log(
-              `[merge-sql] ${input.objectTypeApiName} delta merged=${mergedRowCount} ` +
-                `changed=${tailRowCount} prevSnapshot=${prevRow!.snapshot_id} ` +
-                `durMs=${Date.now() - tDelta}`,
-            );
-          } else {
-            console.log(
-              `[merge-sql] ${input.objectTypeApiName} no previous merged snapshot — full PG tail`,
-            );
-          }
-        } catch (err) {
-          console.warn(
-            `[merge-sql] ${input.objectTypeApiName} delta failed (non-fatal — ` +
-              `falling back to full PG tail): ${(err as Error).message}`,
-          );
-          tailFile = localMergedFile;
-          tailRowCount = mergedRowCount;
-        }
+      if (mergeDelta && !forceFullTail) {
+        tailFile = mergeDelta.file;
+        tailRowCount = mergeDelta.rows;
+      } else if (mergeDeltaEnabled() && !mergeDelta && !forceFullTail) {
+        console.log(
+          `[merge-sql] ${input.objectTypeApiName} no usable previous merged snapshot — full PG tail`,
+        );
       }
 
       if (tailRowCount === 0) {
@@ -1866,10 +1951,22 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
         contributions: input.contributions.map((c) => c.datasource_id),
         parquet_ref: mergedParquetRef,
         merge_path: mergePath,
+        // Palantir funnel rule: incremental indexing unless > 80% of the
+        // rows changed. The Indexing stage also checks that the serving
+        // index already reflects `base_snapshot_id` before going incremental.
+        indexing_plan: planIndexing({
+          totalRows: mergedRowCount,
+          delta: mergeDelta,
+          deltaRefAvailable: deltaParquetRef !== null || (mergeDelta?.rows ?? -1) === 0,
+          deltaUploadFailed,
+          fullReindexFraction: funnelRuntimeConfig().indexingFullReindexFraction,
+        }),
+        delta_parquet_ref: deltaParquetRef,
       },
     });
   } catch (err) {
     await deleteOrphanParquetRef(mergedParquetRef);
+    await deleteOrphanParquetRef(deltaParquetRef);
     throw err;
   }
 
@@ -2091,7 +2188,8 @@ export async function loadMergedRowsFromSnapshot(
  * so callers can switch without changing their mapping.
  */
 export async function* streamMergedRowsFromSnapshot(
-  snapshotId: string
+  snapshotId: string,
+  opts: { delta?: boolean } = {},
 ): AsyncGenerator<MergeResult["mergedRows"][number]> {
   const res = await query(
     `SELECT summary_json FROM funnel_snapshot WHERE snapshot_id = $1`,
@@ -2102,6 +2200,14 @@ export async function* streamMergedRowsFromSnapshot(
     | undefined;
   if (!row) return;
   const summary = row.summary_json ?? {};
+  if (opts.delta) {
+    // Incremental indexing: only the rows that changed vs the base snapshot.
+    // A missing ref means the delta had zero rows (planIndexing only plans
+    // incremental when the delta is readable).
+    const dref = resolveParquetRef(summary.delta_parquet_ref);
+    if (dref) yield* streamParquetRows<MergeResult["mergedRows"][number]>(dref, mergedRowFromParquet);
+    return;
+  }
   const ref = resolveParquetRef(summary.parquet_ref);
   if (ref) {
     yield* streamParquetRows<MergeResult["mergedRows"][number]>(ref, (r) => ({
@@ -2147,4 +2253,30 @@ async function loadExistingInstances(
     };
   }
   return out;
+}
+
+function mergedRowFromParquet(r: Record<string, unknown>): MergeResult["mergedRows"][number] {
+  return {
+    primary_key: String(r.primary_key ?? ""),
+    properties: parseJsonColumn(r.properties),
+    markings: parseJsonArrayColumn(r.markings),
+    operation: r.operation === "delete" ? "delete" : "upsert",
+    source_datasource_id:
+      r.source_datasource_id != null && r.source_datasource_id !== ""
+        ? String(r.source_datasource_id)
+        : null,
+    source_transaction_id:
+      r.source_transaction_id != null && r.source_transaction_id !== ""
+        ? String(r.source_transaction_id)
+        : null,
+  };
+}
+
+/** The merged snapshot's indexing plan (null for pre-plan snapshots). */
+export async function loadMergedIndexingPlan(snapshotId: string): Promise<unknown> {
+  const res = await query(
+    `SELECT summary_json->'indexing_plan' AS plan FROM funnel_snapshot WHERE snapshot_id = $1`,
+    [snapshotId],
+  );
+  return (res.rows[0] as { plan?: unknown } | undefined)?.plan ?? null;
 }

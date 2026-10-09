@@ -335,6 +335,17 @@ router.post(
       // ---------------------------------------------------------------
       // Step 6: Execute reindex
       // ---------------------------------------------------------------
+      // Force ⇒ the next funnel indexing pass is FULL (Palantir: a user-
+      // triggered reindex). Dropping the watermark makes incremental
+      // indexing impossible until a full pass re-establishes it.
+      if (force) {
+        try {
+          const { clearIndexWatermark } = await import("../services/funnel/indexingPlan");
+          await clearIndexWatermark(ontologyId, apiName);
+        } catch (err: any) {
+          console.warn(`[reindex] ${apiName}: clearing index watermark failed: ${err.message}`);
+        }
+      }
       // Phase 5 cutover (feature flag FUNNEL_OPENSEARCH_PIPELINE=1):
       // route CSV backings through the async, bounded-memory, checkpointed,
       // resumable OpenSearch pipeline instead of the synchronous
