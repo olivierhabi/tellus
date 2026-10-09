@@ -357,6 +357,7 @@ export async function syncObjectInstancesToOpenSearch(
     objectTypeApiName,
     resolvedOntologyId
   );
+  const propertyTypes = await buildPropertyTypeMap(objectTypeApiName, resolvedOntologyId);
 
   // ---- 2. Keyset-page through `object_instances` and bounded-bulk-index --
   //
@@ -464,6 +465,7 @@ export async function syncObjectInstancesToOpenSearch(
           row.properties as Record<string, unknown>,
           propertyAliases,
         ),
+        propertyTypes,
       );
       return {
         __pk: row.primary_key,
@@ -872,15 +874,100 @@ export async function buildPropertyAliasMap(
   return propertyAliases;
 }
 
+/** apiName → property base_type (e.g. "boolean", "long", "integer_array"). */
+export type PropertyTypeMap = Map<string, string>;
+
 /**
- * Coerce a property value into an OpenSearch-indexable shape. The funnel
- * merge stores PG-timestamp-shaped strings ('2026-02-24 10:30:00') in
- * object_instances.properties while date-mapped index fields require
- * ISO 8601 — uncoerced values are rejected by the date mapper (observed:
- * 278/449 RssbFraudSignal docs failing a full sync). Shared by the full
- * sync and the serving edit projector so both write identical documents.
+ * Load each property's base_type so values can be coerced to what the index
+ * mapping expects. Shared by the full sync and the serving edit projector.
  */
-export function toIndexablePropertyValue(value: unknown): unknown {
+export async function buildPropertyTypeMap(
+  objectTypeApiName: string,
+  ontologyId: string,
+): Promise<PropertyTypeMap> {
+  const res = await query(
+    `SELECT p.api_name, p.base_type, p.is_array
+       FROM property p
+       JOIN object_type ot ON ot.object_type_id = p.object_type_id
+      WHERE ot.api_name = $1 AND ot.ontology_id = $2`,
+    [objectTypeApiName, ontologyId],
+  );
+  const out: PropertyTypeMap = new Map();
+  for (const r of res.rows as Array<{ api_name: string; base_type: string | null; is_array?: boolean }>) {
+    if (!r.base_type) continue;
+    const base = String(r.base_type).toLowerCase();
+    out.set(r.api_name, r.is_array && !base.endsWith("_array") ? `${base}_array` : base);
+  }
+  return out;
+}
+
+const TRUE_STRINGS = new Set(["true", "t", "1", "yes", "y"]);
+const FALSE_STRINGS = new Set(["false", "f", "0", "no", "n"]);
+const INTEGER_TYPES = new Set(["integer", "long", "short", "byte"]);
+const FLOAT_TYPES = new Set(["double", "float", "decimal"]);
+
+function coerceBoolean(v: unknown): boolean | null | undefined {
+  if (v === null || v === undefined) return v as null | undefined;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v === 1 ? true : v === 0 ? false : null;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (TRUE_STRINGS.has(s)) return true;
+    if (FALSE_STRINGS.has(s)) return false;
+  }
+  // Unparseable: drop the field instead of letting OpenSearch reject the
+  // whole document (one bad cell must not hide the object from search).
+  return null;
+}
+
+function coerceNumber(v: unknown, integer: boolean): number | string | null | undefined {
+  if (v === null || v === undefined) return v as null | undefined;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (s === "") return null;
+    // Keep long-valued strings as strings (OpenSearch parses them exactly;
+    // a JS number would lose precision past 2^53).
+    if (integer && /^[+-]?\d+$/.test(s)) return s;
+    if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return integer ? s : Number(s);
+  }
+  return null;
+}
+
+function coerceScalar(value: unknown, baseType: string | undefined): unknown {
+  if (baseType === "boolean") return coerceBoolean(value);
+  if (baseType && INTEGER_TYPES.has(baseType)) return coerceNumber(value, true);
+  if (baseType && FLOAT_TYPES.has(baseType)) return coerceNumber(value, false);
+  return value;
+}
+
+/**
+ * Coerce a property value into an OpenSearch-indexable shape.
+ *
+ * Dates: the funnel merge stores PG-timestamp-shaped strings
+ * ('2026-02-24 10:30:00') in object_instances.properties while date-mapped
+ * index fields require ISO 8601 — uncoerced values are rejected by the date
+ * mapper (observed: 278/449 RssbFraudSignal docs failing a full sync).
+ *
+ * Typed fields: CSV-backed object types store raw cell text, so a boolean
+ * property arrives as "0"/"1" — which OpenSearch's boolean mapper rejects
+ * (observed: 6,353,307/6,353,307 OlivierPaysimDataset3 docs failing on
+ * `isfraud`). When `baseType` is known, values are coerced to the mapped
+ * type; unparseable cells become null rather than failing the document.
+ *
+ * Shared by the full sync and the serving edit projector so both write
+ * identical documents.
+ */
+export function toIndexablePropertyValue(value: unknown, baseType?: string): unknown {
+  if (baseType && baseType.endsWith("_array")) {
+    const el = baseType.slice(0, -"_array".length);
+    return Array.isArray(value) ? value.map((v) => coerceScalar(v, el)) : coerceScalar(value, el);
+  }
+  if (baseType) {
+    const coerced = coerceScalar(value, baseType);
+    if (coerced !== value) return coerced;
+  }
   if (
     typeof value === "string" &&
     /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(value)
@@ -891,12 +978,13 @@ export function toIndexablePropertyValue(value: unknown): unknown {
   return value;
 }
 
-/** Apply {@link toIndexablePropertyValue} across a property bag. */
+/** Apply {@link toIndexablePropertyValue} across a canonical property bag. */
 export function toIndexableProperties(
   props: Record<string, unknown>,
+  types?: PropertyTypeMap,
 ): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(props).map(([k, v]) => [k, toIndexablePropertyValue(v)]),
+    Object.entries(props).map(([k, v]) => [k, toIndexablePropertyValue(v, types?.get(k))]),
   );
 }
 

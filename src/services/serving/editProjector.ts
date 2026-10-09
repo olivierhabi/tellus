@@ -41,6 +41,7 @@ import { ensureDocumentSecurity } from "../security/documentSecurity";
 import {
   buildPropertyAliasMap,
   toCanonicalProperties,
+  buildPropertyTypeMap,
   toIndexableProperties,
 } from "../opensearch/syncFromInstances";
 import { collectBulkFailures, formatBulkFailures } from "./bulkResult";
@@ -122,6 +123,7 @@ async function projectObjectType(
   // Same document shape as the full sync: canonical property keys,
   // ISO __lastModified, PUBLIC default markings.
   const aliases = await buildPropertyAliasMap(objectTypeApiName, ontologyId);
+  const types = await buildPropertyTypeMap(objectTypeApiName, ontologyId);
 
   // Date coercion parity with the funnel index path is handled by the
   // shared toIndexableProperties helper (see syncFromInstances).
@@ -161,6 +163,7 @@ async function projectObjectType(
           r.properties as Record<string, unknown>,
           aliases,
         ),
+        types,
       ),
       _security: {
         markings:
