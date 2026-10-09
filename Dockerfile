@@ -14,6 +14,34 @@ FROM node:24-bookworm-slim AS builder
 
 WORKDIR /app
 
+# DuckDB CLI (out-of-process merge engine). The production funnel profile
+# enables the out-of-process merge (src/services/funnel/mergeCliRunner.ts
+# spawns `duckdb` with a SQL script so a merge OOM kills the child, not the
+# API/worker), so the CLI must ship in the runtime image. Fetched here in the
+# throwaway builder stage (keeps curl/unzip out of the runtime image), pinned
+# to the same version as the `duckdb` node binding and verified against the
+# release SHA-256 so a tampered or re-tagged asset fails the build.
+ARG TARGETARCH
+ARG DUCKDB_CLI_VERSION=1.4.4
+ARG DUCKDB_CLI_SHA256_AMD64=ea79eae4233f1aba9a020c8a61877de38a789bc62cdd37485d3589cd77dc0d3e
+ARG DUCKDB_CLI_SHA256_ARM64=97995363217ddef691fe53b26df3b55ff368d356613d9daaea5999bb7a637e60
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && arch="${TARGETARCH:-amd64}" \
+    && case "$arch" in \
+         amd64) sha="$DUCKDB_CLI_SHA256_AMD64" ;; \
+         arm64) sha="$DUCKDB_CLI_SHA256_ARM64" ;; \
+         *) echo "unsupported TARGETARCH=$arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL --retry 5 -o /tmp/duckdb.zip \
+         "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_CLI_VERSION}/duckdb_cli-linux-${arch}.zip" \
+    && echo "${sha}  /tmp/duckdb.zip" | sha256sum -c - \
+    && mkdir -p /opt/duckdb \
+    && unzip -o /tmp/duckdb.zip -d /opt/duckdb \
+    && chmod 0755 /opt/duckdb/duckdb \
+    && rm /tmp/duckdb.zip
+
 # pnpm is the single source of truth (CI is pnpm-native); enable via corepack
 # and pin to the v10 line so the scanned/installed tree matches what ships.
 RUN corepack enable && corepack prepare pnpm@latest-10 --activate
@@ -34,34 +62,6 @@ COPY schemas/ schemas/
 # src/migrations/*.sql (the migration ledger + forward SQL) and src/templates. Without this
 # the prod image has ZERO .sql migrations and the migration gate fails at boot.
 RUN pnpm exec tsc && bash scripts/copy-assets.sh
-
-# Stage 1b — DuckDB CLI (out-of-process merge engine)
-# The production funnel profile enables the out-of-process merge
-# (src/services/funnel/mergeCliRunner.ts spawns `duckdb` with a SQL script so
-# a merge OOM kills the child, not the API/worker). The CLI must therefore be
-# present in the runtime image. Pinned to the same version as the `duckdb`
-# node binding and verified against the release SHA-256 so a tampered or
-# re-tagged asset fails the build.
-FROM debian:bookworm-slim AS duckdb-cli
-ARG TARGETARCH
-ARG DUCKDB_CLI_VERSION=1.4.4
-ARG DUCKDB_CLI_SHA256_AMD64=ea79eae4233f1aba9a020c8a61877de38a789bc62cdd37485d3589cd77dc0d3e
-ARG DUCKDB_CLI_SHA256_ARM64=97995363217ddef691fe53b26df3b55ff368d356613d9daaea5999bb7a637e60
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates unzip \
-    && rm -rf /var/lib/apt/lists/* \
-    && arch="${TARGETARCH:-amd64}" \
-    && case "$arch" in \
-         amd64) sha="$DUCKDB_CLI_SHA256_AMD64" ;; \
-         arm64) sha="$DUCKDB_CLI_SHA256_ARM64" ;; \
-         *) echo "unsupported TARGETARCH=$arch" >&2; exit 1 ;; \
-       esac \
-    && curl -fsSL --retry 5 -o /tmp/duckdb.zip \
-         "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_CLI_VERSION}/duckdb_cli-linux-${arch}.zip" \
-    && echo "${sha}  /tmp/duckdb.zip" | sha256sum -c - \
-    && unzip -o /tmp/duckdb.zip -d / \
-    && chmod 0755 /duckdb \
-    && rm /tmp/duckdb.zip
 
 # Stage 2 — Production
 FROM node:24-bookworm-slim
@@ -94,7 +94,7 @@ COPY --from=builder /app/dist/ dist/
 COPY --from=builder /app/schemas/ schemas/
 # DuckDB CLI for the out-of-process merge (default DUCKDB_CLI_PATH=duckdb on
 # PATH). Fail the build if it cannot execute in this runtime (libc/libstdc++).
-COPY --from=duckdb-cli /duckdb /usr/local/bin/duckdb
+COPY --from=builder /opt/duckdb/duckdb /usr/local/bin/duckdb
 RUN /usr/local/bin/duckdb --version
 
 # Create data directories for datasource files and DuckDB's extension/cache
