@@ -58,3 +58,5 @@ generated/osdk/
 
 
 strix_runs/
+# run.sh post-deploy funnel invariant reports
+reports/

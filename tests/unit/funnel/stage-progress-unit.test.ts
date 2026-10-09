@@ -33,18 +33,23 @@ function state(over: Partial<StageProgressState> = {}): StageProgressState {
 }
 
 describe("stallAfterMs", () => {
-  it("defaults to 60s and rejects junk or non-positive overrides", () => {
-    delete process.env.FUNNEL_STAGE_STALL_AFTER_MS;
-    expect(stallAfterMs()).toBe(60_000);
-    process.env.FUNNEL_STAGE_STALL_AFTER_MS = "abc";
-    expect(stallAfterMs()).toBe(60_000);
-    process.env.FUNNEL_STAGE_STALL_AFTER_MS = "0";
-    expect(stallAfterMs()).toBe(60_000);
+  it("comes from the versioned profile: 60s on every profile", () => {
+    for (const env of [
+      {},
+      { NODE_ENV: "test", TELLUS_ENVIRONMENT_ID: "tellus-tests-main" },
+      { NODE_ENV: "production" },
+    ] as NodeJS.ProcessEnv[]) {
+      expect(stallAfterMs(env)).toBe(60_000);
+    }
   });
 
-  it("honours a positive override", () => {
+  it("ignores the retired FUNNEL_STAGE_STALL_AFTER_MS env knob (verification §5.3)", () => {
+    // A raised silence budget would let a wedged stage keep heartbeating;
+    // the value is versioned config, not operator state.
     process.env.FUNNEL_STAGE_STALL_AFTER_MS = "5000";
-    expect(stallAfterMs()).toBe(5_000);
+    expect(stallAfterMs()).toBe(60_000);
+    process.env.FUNNEL_STAGE_STALL_AFTER_MS = "86400000";
+    expect(stallAfterMs()).toBe(60_000);
   });
 });
 
@@ -67,10 +72,10 @@ describe("shouldHeartbeat", () => {
     expect(shouldHeartbeat(state({ lastProgressAt: 1_000 }), 60_000, 1_000)).toBe(false);
   });
 
-  it("uses stallAfterMs() when no window is passed", () => {
-    process.env.FUNNEL_STAGE_STALL_AFTER_MS = "100";
-    expect(shouldHeartbeat(state({ lastProgressAt: 1_000 }), 1_050)).toBe(true);
-    expect(shouldHeartbeat(state({ lastProgressAt: 1_000 }), 1_500)).toBe(false);
+  it("uses the versioned stallAfterMs() when no window is passed", () => {
+    process.env.FUNNEL_STAGE_STALL_AFTER_MS = "100"; // retired — must not apply
+    expect(shouldHeartbeat(state({ lastProgressAt: 1_000 }), 1_000 + 59_999)).toBe(true);
+    expect(shouldHeartbeat(state({ lastProgressAt: 1_000 }), 1_000 + 60_000)).toBe(false);
   });
 });
 

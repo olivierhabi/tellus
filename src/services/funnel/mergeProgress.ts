@@ -51,6 +51,7 @@
 // deadline (default 3s), and once it has failed it stays failed for the process.
 // ---------------------------------------------------------------------------
 
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
 import { connectRedisBounded, describeRedisError } from "../../lib/redisConnect";
 
 type RedisLike = {
@@ -107,7 +108,9 @@ async function getRedis(): Promise<RedisLike | null> {
 // TTL ≥ the longest expected merge PG tail (OO7 4.65M upserts ≈ minutes) +
 // Temporal retry backoff. Default 1h so the key outlives the activity and
 // self-cleans abandoned entries.
-const TTL_SECONDS = Number(process.env.MERGE_PROGRESS_TTL_SECONDS ?? 3600);
+// Versioned per profile (funnelRuntime.mergeProgressTtlSeconds); the
+// retired MERGE_PROGRESS_ttlSeconds() env knob is ignored.
+const ttlSeconds = (): number => funnelRuntimeConfig().mergeProgressTtlSeconds;
 const keyFor = (runKey: string) => `merge:progress:${runKey}`;
 
 /**
@@ -123,7 +126,7 @@ export async function recordMergeProgress(
     const redis = await getRedis();
     if (!redis) return;
     await redis.set(keyFor(runKey), JSON.stringify(payload), {
-      EX: TTL_SECONDS,
+      EX: ttlSeconds(),
     });
   } catch {
     /* fail open — checkpoint is advisory */

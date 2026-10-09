@@ -124,15 +124,37 @@ describe("verify + promote", () => {
     expect(flat(calls[0].sql)).toContain("staging_run_id = $1");
   });
 
-  it("promote upserts + deletes live, then drops the run staging", async () => {
-    const { calls, client } = fakeClient(() => ({ rows: [], rowCount: 3 }));
+  it("promote upserts + deletes live with the nested loop disabled, then drops the run staging", async () => {
+    const { calls, client } = fakeClient((sql) =>
+      sql.includes("SELECT EXISTS")
+        ? { rows: [{ any: true }], rowCount: 1 }
+        : sql.includes("current_setting")
+          ? { rows: [{ v: "on" }], rowCount: 1 }
+          : { rows: [], rowCount: 3 },
+    );
     const out = await promoteMergeStaging(client, SCOPE);
     expect(out).toEqual({ upserts: 3, deletes: 3 });
-    expect(calls).toHaveLength(3);
-    expect(flat(calls[0].sql)).toContain("INSERT INTO object_instances");
-    expect(flat(calls[0].sql)).toContain("FROM merge_staging_instances");
-    expect(flat(calls[1].sql)).toContain("DELETE FROM object_instances");
-    expect(flat(calls[1].sql)).toContain("USING merge_staging_instances");
-    expect(flat(calls[2].sql)).toContain("DELETE FROM merge_staging_instances");
+    const sqls = calls.map((c) => flat(c.sql));
+    expect(sqls[0]).toContain("INSERT INTO object_instances");
+    expect(sqls[0]).toContain("FROM merge_staging_instances");
+    expect(sqls[1]).toContain("operation = 'delete'");
+    const off = sqls.findIndex((q) => q.includes("set_config('enable_nestloop', 'off', true)"));
+    const del = sqls.findIndex((q) => q.startsWith("DELETE FROM object_instances"));
+    const restore = sqls.findIndex((q, i) => i > del && q.includes("set_config('enable_nestloop', $1, true)"));
+    expect(off).toBeGreaterThan(0);
+    expect(del).toBeGreaterThan(off);
+    expect(restore).toBeGreaterThan(del);
+    expect(calls[restore].params).toEqual(["on"]);
+    expect(sqls[sqls.length - 1]).toContain("DELETE FROM merge_staging_instances");
+  });
+
+  it("skips the live DELETE entirely when nothing is staged for deletion (first loads)", async () => {
+    const { calls, client } = fakeClient((sql) =>
+      sql.includes("SELECT EXISTS") ? { rows: [{ any: false }], rowCount: 1 } : { rows: [], rowCount: 7 },
+    );
+    const out = await promoteMergeStaging(client, SCOPE);
+    expect(out).toEqual({ upserts: 7, deletes: 0 });
+    expect(calls.some((c) => flat(c.sql).startsWith("DELETE FROM object_instances"))).toBe(false);
+    expect(calls.some((c) => c.sql.includes("enable_nestloop"))).toBe(false);
   });
 });

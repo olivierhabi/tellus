@@ -747,7 +747,14 @@ export async function applyEdits(
       // Scripted update: atomically increment __version and merge properties.
       // Uses OpenSearch Painless scripting to ensure the version counter is
       // always incremented exactly once per update, even under concurrency.
-      bulkBody.push({ update: { _index: indexName, _id: edit.primaryKey } });
+      // retry_on_conflict: a concurrent writer (reindex / projection
+      // worker) touching the same document between OpenSearch's get and
+      // put yields a 409 version_conflict. The script is re-run against
+      // the fresh source on retry, so __version is still bumped exactly
+      // once per edit — retrying is safe and avoids a spurious "partial".
+      bulkBody.push({
+        update: { _index: indexName, _id: edit.primaryKey, retry_on_conflict: 3 },
+      });
       bulkBody.push({
         script: {
           // F-P3-13: back-fill `__branch` on updates of legacy docs that

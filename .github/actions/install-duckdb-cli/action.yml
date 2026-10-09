@@ -1,0 +1,27 @@
+name: Install DuckDB CLI (checksum-pinned)
+description: >-
+  Installs the same DuckDB CLI the production image bundles (Dockerfile
+  DUCKDB_CLI_VERSION / DUCKDB_CLI_SHA256_AMD64) at /usr/local/bin/duckdb so
+  the out-of-process merge runs exactly as in production. Keep the version
+  and checksum in sync with the Dockerfile.
+inputs:
+  version:
+    default: "1.4.4"
+  sha256:
+    default: ea79eae4233f1aba9a020c8a61877de38a789bc62cdd37485d3589cd77dc0d3e
+runs:
+  using: composite
+  steps:
+    - name: Download, verify and install
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        curl -fsSL --retry 5 -o "$RUNNER_TEMP/duckdb.zip" \
+          "https://github.com/duckdb/duckdb/releases/download/v${VERSION}/duckdb_cli-linux-amd64.zip"
+        echo "${SHA256}  $RUNNER_TEMP/duckdb.zip" | sha256sum -c -
+        unzip -o "$RUNNER_TEMP/duckdb.zip" -d "$RUNNER_TEMP/duckdb"
+        sudo install -m 0755 "$RUNNER_TEMP/duckdb/duckdb" /usr/local/bin/duckdb
+        duckdb --version

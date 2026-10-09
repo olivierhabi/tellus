@@ -109,6 +109,30 @@ async function fetchObject(objectType: string, primaryKey: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: wait until a freshly-created object is readable (bounded poll)
+//
+// A fixed sleep after create raced the search projection under full-suite
+// CI load: the modify then hit OpenSearch before the created document was
+// visible, the scripted update failed to index and apply reported
+// "partial" instead of "success". Poll instead of guessing a delay.
+// ---------------------------------------------------------------------------
+
+async function waitForObject(
+  objectType: string,
+  primaryKey: string,
+  timeoutMs = 15_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let last = await fetchObject(objectType, primaryKey);
+  while (last.status !== 200 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 200));
+    last = await fetchObject(objectType, primaryKey);
+  }
+  expect(last.status).toBe(200);
+  return last;
+}
+
+// ---------------------------------------------------------------------------
 // Server reachability + ontology discovery
 // ---------------------------------------------------------------------------
 
@@ -291,8 +315,8 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
     });
     expect(createRes.status).toBe(200);
 
-    // Wait for OpenSearch to be searchable
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait until the created object is readable before modifying it
+    await waitForObject("Taxpayer", tin);
 
     // Modify without $expectedVersion — should work
     const modRes = await executeAction(MODIFY_ACTION, {
@@ -320,10 +344,8 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
     });
     expect(createRes.status).toBe(200);
 
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Fetch the object and get its __version
-    const obj = await fetchObject("Taxpayer", tin);
+    // Fetch the object (once readable) and get its __version
+    const obj = await waitForObject("Taxpayer", tin);
     expect(obj.status).toBe(200);
     const version = obj.body.__version;
     expect(version).toBe(1); // newly created = version 1
@@ -434,10 +456,9 @@ describe("Optimistic Concurrency Control (Task 22)", () => {
       fullName: "Refresh Test",
       riskScore: 100,
     });
-    await new Promise((r) => setTimeout(r, 500));
 
-    // Fetch version
-    const obj = await fetchObject("Taxpayer", tin);
+    // Fetch version (once readable)
+    const obj = await waitForObject("Taxpayer", tin);
     const v1 = obj.body.__version;
 
     // User A updates

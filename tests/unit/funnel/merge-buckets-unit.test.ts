@@ -43,6 +43,7 @@ import {
   isNarrowDedupEnabled,
   mergeBucketTargetRows,
 } from "../../../src/services/funnel/mergePrefixSql";
+import { setFunnelRuntimeOverridesForTesting } from "../../../src/config/funnelRuntime";
 
 const flat = (sql: string) => sql.replace(/\s+/g, " ").trim();
 
@@ -52,27 +53,28 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setFunnelRuntimeOverridesForTesting(null);
   delete process.env.MERGE_BUCKET_ROWS;
   delete process.env.MERGE_NARROW_DEDUP;
 });
 
-describe("env parsing", () => {
-  it("narrow dedup defaults ON; only explicit 0 disables", () => {
-    delete process.env.MERGE_NARROW_DEDUP;
+describe("versioned merge strategy config", () => {
+  it("narrow dedup defaults ON and ignores the retired MERGE_NARROW_DEDUP env knob", () => {
     expect(isNarrowDedupEnabled()).toBe(true);
     process.env.MERGE_NARROW_DEDUP = "0";
-    expect(isNarrowDedupEnabled()).toBe(false);
-    process.env.MERGE_NARROW_DEDUP = "nope";
     expect(isNarrowDedupEnabled()).toBe(true);
+    setFunnelRuntimeOverridesForTesting({ mergeNarrowDedup: false });
+    expect(isNarrowDedupEnabled()).toBe(false);
   });
 
-  it("bucket target defaults 1M; junk/non-positive disables bucketing", () => {
-    delete process.env.MERGE_BUCKET_ROWS;
+  it("bucket target defaults 1M, ignores MERGE_BUCKET_ROWS; non-positive disables bucketing", () => {
     expect(mergeBucketTargetRows()).toBe(1_000_000);
     process.env.MERGE_BUCKET_ROWS = "500000";
+    expect(mergeBucketTargetRows()).toBe(1_000_000);
+    setFunnelRuntimeOverridesForTesting({ mergeBucketTargetRows: 500_000 });
     expect(mergeBucketTargetRows()).toBe(500_000);
-    for (const v of ["0", "-3", "junk"]) {
-      process.env.MERGE_BUCKET_ROWS = v;
+    for (const v of [0, -3, Number.NaN]) {
+      setFunnelRuntimeOverridesForTesting({ mergeBucketTargetRows: v });
       expect(mergeBucketTargetRows()).toBe(0);
     }
   });
@@ -89,7 +91,7 @@ describe("planBucketCount", () => {
   });
 
   it("splits by target with ceiling", () => {
-    process.env.MERGE_BUCKET_ROWS = "1000";
+    setFunnelRuntimeOverridesForTesting({ mergeBucketTargetRows: 1000 });
     expect(planBucketCount([500])).toEqual({ bucketCount: 1, totalRows: 500 });
     expect(planBucketCount([1000])).toEqual({ bucketCount: 1, totalRows: 1000 });
     expect(planBucketCount([1001])).toEqual({ bucketCount: 2, totalRows: 1001 });
@@ -100,7 +102,7 @@ describe("planBucketCount", () => {
   });
 
   it("target <= 0 means one bucket", () => {
-    process.env.MERGE_BUCKET_ROWS = "0";
+    setFunnelRuntimeOverridesForTesting({ mergeBucketTargetRows: 0 });
     expect(planBucketCount([10_000_000]).bucketCount).toBe(1);
   });
 });

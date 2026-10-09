@@ -22,11 +22,12 @@
 //     directory: a per-run dir under workDir instead of the shared
 //     `/tmp/duckdb_spill`, so the watchdog attributes spill growth to THIS
 //     run and concurrent in-process DuckDB work cannot confuse it;
-//   * enforces a HARD timeout (default 30 min, `FUNNEL_MERGE_CLI_TIMEOUT_MS`)
+//   * enforces a HARD timeout (versioned per profile, 30 min —
+//     funnelRuntime.mergeCliTimeoutMs)
 //     with SIGTERM-then-SIGKILL escalation — SIGTERM alone cannot interrupt a
 //     thread blocked in native code (measured: Phase 0 needed SIGKILL);
 //   * enforces a PROGRESS watchdog: spill + watched-output bytes must grow
-//     within `FUNNEL_STAGE_STALL_AFTER_MS` (default 60 s, shared with
+//     within funnelRuntime.stageStallAfterMs (60 s, shared with
 //     stageProgress.ts), otherwise the child is killed and a CliStallError
 //     is thrown. A lease heartbeat on the JS thread would have stayed fresh
 //     through the Phase 0 deadlock, so liveness here is bytes-on-disk, not
@@ -132,19 +133,15 @@ export interface RunCliScriptOptions {
   onProgress?: (p: CliProgress) => void;
 }
 
-function positiveIntEnv(
-  value: string | undefined,
-  def: number,
-): number {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? n : def;
+/** Versioned hard timeout (per deployment profile — never `.env`). The
+ *  retired FUNNEL_MERGE_CLI_TIMEOUT_MS knob is deliberately ignored. */
+export function mergeCliTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return funnelRuntimeConfig(env).mergeCliTimeoutMs;
 }
 
-export function mergeCliTimeoutMs(): number {
-  return positiveIntEnv(
-    process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS,
-    MERGE_CLI_TIMEOUT_MS_DEFAULT,
-  );
+/** Versioned bytes-on-disk stall budget, shared with stageProgress.ts. */
+export function mergeCliStallAfterMs(env: NodeJS.ProcessEnv = process.env): number {
+  return funnelRuntimeConfig(env).stageStallAfterMs;
 }
 
 /** Versioned DuckDB CLI path (per deployment profile — never `.env`). */
@@ -316,12 +313,7 @@ export async function runDuckDbCliScript(
     onProgress,
   } = opts;
   const timeoutMs = opts.timeoutMs ?? mergeCliTimeoutMs();
-  const stallAfterMs =
-    opts.stallAfterMs ??
-    (() => {
-      const raw = Number(process.env.FUNNEL_STAGE_STALL_AFTER_MS ?? 60_000);
-      return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
-    })();
+  const stallAfterMs = opts.stallAfterMs ?? mergeCliStallAfterMs();
 
   fs.mkdirSync(workDir, { recursive: true });
   fs.mkdirSync(spillDir, { recursive: true });

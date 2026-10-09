@@ -371,7 +371,16 @@ describe("Automate repository and durable scheduling", () => {
       [trigger.rows[0].trigger_event_id, effect.id],
     );
 
-    const now = new Date();
+    // Derive "now" from the DATABASE clock, not the runner's: the effect row's
+    // next_attempt_at is stamped by Postgres now() (µs precision, container
+    // clock), while new Date() is ms-truncated on the runner. Within the same
+    // millisecond — or with any DB-ahead skew — `next_attempt_at <= now` was
+    // false and zero effects were claimed (flaky CI). The 1 s margin keeps the
+    // lease arithmetic below (+29 s still leased, +31 s recovered) intact.
+    const dbNow = await pool.query<{ now: Date }>(
+      "SELECT clock_timestamp() + interval '1 second' AS now",
+    );
+    const now = new Date(dbNow.rows[0].now);
     const concurrentClaims = await Promise.all([
       claimAutomateEffects({
         workerId: "worker-a",

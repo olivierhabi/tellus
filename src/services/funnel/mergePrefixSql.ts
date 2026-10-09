@@ -20,6 +20,8 @@
 // parquet natively).
 // ---------------------------------------------------------------------------
 
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
+
 export interface PrefixContribution {
   datasource_id: string;
   owned_properties: string[];
@@ -270,17 +272,18 @@ export function buildEditStatements(
 }
 
 /**
- * Kill switch for the narrow-key dedup (default ON). Precedent:
- * MERGE_DELTA=0, MERGE_FAST_PATH=0. Gates the SQL SHAPE (narrow vs legacy
- * wide sort), not execution — incident response, not rollout.
+ * Narrow-key dedup SQL shape (default ON) vs the legacy wide sort.
+ * Versioned per profile (funnelRuntime.mergeNarrowDedup); the retired
+ * MERGE_NARROW_DEDUP env knob is ignored.
  */
 export function isNarrowDedupEnabled(): boolean {
-  return process.env.MERGE_NARROW_DEDUP !== "0";
+  return funnelRuntimeConfig().mergeNarrowDedup;
 }
 
-/** Target rows per hash bucket; <= 0 or unset disables bucketing. */
+/** Target rows per hash bucket (versioned: funnelRuntime.mergeBucketTargetRows);
+ *  <= 0 disables bucketing. The retired MERGE_BUCKET_ROWS knob is ignored. */
 export function mergeBucketTargetRows(): number {
-  const raw = Number(process.env.MERGE_BUCKET_ROWS ?? 1_000_000);
+  const raw = funnelRuntimeConfig().mergeBucketTargetRows;
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
@@ -499,13 +502,12 @@ export function buildBucketChecksumStatement(
 }
 
 /**
- * Kill switch for the fast path (default ON). Precedent: MERGE_DELTA=0.
- * Unlike the out-of-process flag this gates an optimization, not an
- * execution environment — the precheck makes it provably equivalent, and
- * the switch exists for incident response, not rollout.
+ * Single-source fast path (default ON). The precheck makes it provably
+ * equivalent to the general path. Versioned per profile
+ * (funnelRuntime.mergeFastPath); the retired MERGE_FAST_PATH knob is ignored.
  */
 export function isFastPathEnabled(): boolean {
-  return process.env.MERGE_FAST_PATH !== "0";
+  return funnelRuntimeConfig().mergeFastPath;
 }
 
 export interface FastPathPrecheck {

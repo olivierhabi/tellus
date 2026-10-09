@@ -26,21 +26,20 @@ import {
   isFastPathPrecheckPass,
 } from "../../../src/services/funnel/mergePrefixSql";
 import { queryAll, runAll } from "../../../src/services/duckdb/pool";
+import { setFunnelRuntimeOverridesForTesting } from "../../../src/config/funnelRuntime";
 
 afterEach(() => {
+  setFunnelRuntimeOverridesForTesting(null);
   delete process.env.MERGE_FAST_PATH;
 });
 
 describe("isFastPathEnabled", () => {
-  it("defaults ON; only explicit 0 disables", () => {
-    delete process.env.MERGE_FAST_PATH;
+  it("defaults ON (versioned) and ignores the retired MERGE_FAST_PATH env knob", () => {
     expect(isFastPathEnabled()).toBe(true);
     process.env.MERGE_FAST_PATH = "0";
+    expect(isFastPathEnabled()).toBe(true);
+    setFunnelRuntimeOverridesForTesting({ mergeFastPath: false });
     expect(isFastPathEnabled()).toBe(false);
-    process.env.MERGE_FAST_PATH = "1";
-    expect(isFastPathEnabled()).toBe(true);
-    process.env.MERGE_FAST_PATH = "junk";
-    expect(isFastPathEnabled()).toBe(true);
   });
 });
 

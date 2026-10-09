@@ -54,9 +54,20 @@ export function resolveStagingRunId(
   return fallbackSnapshotId;
 }
 
-function asUuidOrNull(value: string | null | undefined): string | null {
+/**
+ * The staging provenance columns are uuid. A non-uuid id is downgraded to
+ * NULL (losing a breadcrumb beats failing the batch) and counted; promote
+ * COALESCEs a staged NULL with the live value, so a downgrade can never
+ * overwrite existing live provenance with NULL.
+ */
+export function asUuidOrNull(
+  value: string | null | undefined,
+  onDowngrade?: (value: string) => void,
+): string | null {
   if (value == null || value === "") return null;
-  return UUID_RE.test(value) ? value : null;
+  if (UUID_RE.test(value)) return value;
+  onDowngrade?.(value);
+  return null;
 }
 
 /** Drop any staging rows owned by this (ontology, object type). The funnel
@@ -95,6 +106,12 @@ export async function stageMergeRows(
 ): Promise<number> {
   if (rows.length === 0) return 0;
   const branchId = deriveMainBranchId(scope.ontologyId);
+  let downgraded = 0;
+  let sample: string | null = null;
+  const onDowngrade = (v: string) => {
+    downgraded++;
+    if (sample == null) sample = v;
+  };
   for (let i = 0; i < rows.length; i += STAGE_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + STAGE_CHUNK_SIZE);
     await client.query(
@@ -120,9 +137,16 @@ export async function stageMergeRows(
         chunk.map((r) => r.operation),
         chunk.map((r) => JSON.stringify(r.properties ?? {})),
         chunk.map((r) => JSON.stringify(r.markings ?? [])),
-        chunk.map((r) => asUuidOrNull(r.source_datasource_id)),
-        chunk.map((r) => asUuidOrNull(r.source_transaction_id)),
+        chunk.map((r) => asUuidOrNull(r.source_datasource_id, onDowngrade)),
+        chunk.map((r) => asUuidOrNull(r.source_transaction_id, onDowngrade)),
       ],
+    );
+  }
+  if (downgraded > 0) {
+    console.warn(
+      `[merge-staging] ${scope.objectTypeApiName}: ${downgraded} non-uuid ` +
+        `provenance id(s) staged as NULL (e.g. ${JSON.stringify(sample)}); ` +
+        `promote keeps the existing live provenance for those rows.`,
     );
   }
   return rows.length;
@@ -196,8 +220,12 @@ export async function promoteMergeStaging(
      DO UPDATE SET
        properties            = EXCLUDED.properties,
        markings              = EXCLUDED.markings,
-       source_datasource_id  = EXCLUDED.source_datasource_id,
-       source_transaction_id = EXCLUDED.source_transaction_id,
+       -- Provenance never regresses to NULL: a staged NULL (no breadcrumb,
+       -- or a non-uuid id downgraded by asUuidOrNull) keeps the live value.
+       source_datasource_id  = COALESCE(EXCLUDED.source_datasource_id,
+                                        object_instances.source_datasource_id),
+       source_transaction_id = COALESCE(EXCLUDED.source_transaction_id,
+                                        object_instances.source_transaction_id),
        last_modified_at      = now(),
        version               = object_instances.version + 1
      WHERE (object_instances.properties, object_instances.markings,
@@ -205,24 +233,50 @@ export async function promoteMergeStaging(
             object_instances.source_transaction_id)
        IS DISTINCT FROM
            (EXCLUDED.properties, EXCLUDED.markings,
-            EXCLUDED.source_datasource_id, EXCLUDED.source_transaction_id)`,
+            COALESCE(EXCLUDED.source_datasource_id, object_instances.source_datasource_id),
+            COALESCE(EXCLUDED.source_transaction_id, object_instances.source_transaction_id))`,
     [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName],
   );
-  const del = await client.query(
-    `DELETE FROM object_instances oi
-      USING merge_staging_instances st
-      WHERE st.staging_run_id = $1
-        AND st.ontology_id = $2 AND st.object_type_api_name = $3
-        AND st.operation = 'delete'
-        AND oi.ontology_id = st.ontology_id
-        AND oi.branch_id = st.branch_id
-        AND oi.object_type_api_name = st.object_type_api_name
-        AND oi.primary_key = st.primary_key`,
+  // Deletes: the old plain `DELETE … USING merge_staging_instances` join was
+  // planned against stale statistics — the staging rows were bulk-loaded
+  // seconds earlier and the upserts above are in this same transaction — as
+  // a nested loop over EVERY live row of the type × EVERY staged row of the
+  // run. Quadratic: 90k rows blew the 60 s statement_timeout in the O2/O3
+  // scale suites even with ZERO deletes. Now: skip when nothing is staged
+  // for deletion (every first load), otherwise forbid the nested loop for
+  // this one statement so Postgres hashes the staged keys (linear; 9k
+  // deletes over 90k live rows: ~0.1 s instead of ~10 s).
+  const pending = await client.query(
+    `SELECT EXISTS (SELECT 1 FROM merge_staging_instances
+                     WHERE staging_run_id = $1 AND ontology_id = $2
+                       AND object_type_api_name = $3 AND operation = 'delete') AS any`,
     [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName],
   );
+  let deleted = 0;
+  if (pending.rows[0]?.any === true) {
+    const prev = await client.query(`SELECT current_setting('enable_nestloop') AS v`);
+    await client.query(`SELECT set_config('enable_nestloop', 'off', true)`);
+    try {
+      const del = await client.query(
+        `DELETE FROM object_instances oi
+          USING merge_staging_instances st
+          WHERE st.staging_run_id = $1
+            AND st.ontology_id = $2 AND st.object_type_api_name = $3
+            AND st.operation = 'delete'
+            AND oi.ontology_id = st.ontology_id
+            AND oi.branch_id = st.branch_id
+            AND oi.object_type_api_name = st.object_type_api_name
+            AND oi.primary_key = st.primary_key`,
+        [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName],
+      );
+      deleted = (del.rowCount ?? 0) as number;
+    } finally {
+      await client.query(`SELECT set_config('enable_nestloop', $1, true)`, [String(prev.rows[0]?.v ?? "on")]);
+    }
+  }
   await clearMergeStagingRun(client, scope);
   return {
     upserts: (up.rowCount ?? 0) as number,
-    deletes: (del.rowCount ?? 0) as number,
+    deletes: deleted,
   };
 }

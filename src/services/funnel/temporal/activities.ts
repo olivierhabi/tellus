@@ -67,10 +67,12 @@ import { getObjectBuffer, getObjectStream, headObject } from "../../storageServi
 import { parseCsvReadable } from "../../indexing/streamingCsv";
 import {
   acquireConnection,
+  queryAll,
   runAll,
   streamQuery,
   releaseConnection,
 } from "../../duckdb/pool";
+import type { FoundrySourceQuality } from "../changelogStage";
 import {
   runWithStageProgress,
   reportStageProgress,
@@ -966,7 +968,7 @@ async function isQuickwitReachable(): Promise<boolean> {
 // row becomes an INSERT change keyed on the OT's primary-key column.
 // ---------------------------------------------------------------------------
 
-interface FoundryBridgedDatasource {
+export interface FoundryBridgedDatasource {
   filePath: string;
   fileFormat: string;
   primaryKeyColumn: string | null;
@@ -1020,52 +1022,100 @@ export function assertChangelogNonEmpty(args: {
   }
 }
 
-async function loadFoundryBridgedDatasource(
+/**
+ * Resolve the foundry-bridged backing datasource for an object type.
+ *
+ * Fail-closed contract (§4.1): a row registered through the foundry bridge
+ * (non-null foundry_dataset_id, or a `#foundry-dataset:` tag in file_path)
+ * MUST carry a well-formed marker. A malformed marker THROWS out of this
+ * function — it must never be swallowed into `null`, because the caller
+ * treats `null` as "no foundry source" and falls through to the pending-edit
+ * fallback with sourceNonEmpty=false, which disarms the zero-row gate and
+ * completes the run with zero rows silently.
+ *
+ * Only the catalog read itself is best-effort (unchanged behaviour): a
+ * failing lookup still resolves to `null`. Exported for unit tests.
+ */
+/** Bounded retry for the backing-datasource catalog read (fail closed after). */
+export const FOUNDRY_LOOKUP_ATTEMPTS = 3;
+const FOUNDRY_LOOKUP_BACKOFF_MS = process.env.NODE_ENV === "test" ? 1 : 200;
+
+export async function loadFoundryBridgedDatasource(
   objectTypeApiName: string
 ): Promise<FoundryBridgedDatasource | null> {
-  try {
-    const res = await query(
-      `SELECT bd.file_path, bd.file_format, bd.primary_key_column,
-              bd.foundry_dataset_id
-         FROM backing_datasource bd
-         JOIN object_type ot ON ot.object_type_id = bd.object_type_id
-        WHERE ot.api_name = $1
-          AND bd.file_path IS NOT NULL
-        LIMIT 1`,
-      [objectTypeApiName]
+  let row:
+    | {
+        file_path: string | null;
+        file_format: string | null;
+        primary_key_column: string | null;
+        foundry_dataset_id: string | null;
+      }
+    | undefined;
+  // Fail closed on lookup failure. A catalog read that ERRORS is not the
+  // same as "no backing row": returning null here would route a
+  // foundry-bridged type into the pending-edit fallback with
+  // sourceNonEmpty=false (zero-row gate disarmed) and complete the run with
+  // zero rows silently. Transient errors get a short bounded retry; a
+  // persistent failure throws so Temporal retries the whole activity.
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= FOUNDRY_LOOKUP_ATTEMPTS; attempt++) {
+    try {
+      const res = await query(
+        `SELECT bd.file_path, bd.file_format, bd.primary_key_column,
+                bd.foundry_dataset_id
+           FROM backing_datasource bd
+           JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+          WHERE ot.api_name = $1
+            AND bd.file_path IS NOT NULL
+          LIMIT 1`,
+        [objectTypeApiName]
+      );
+      row = res.rows[0];
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < FOUNDRY_LOOKUP_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, FOUNDRY_LOOKUP_BACKOFF_MS * attempt));
+      }
+    }
+  }
+  if (lastErr) {
+    throw new Error(
+      `backing datasource lookup for '${objectTypeApiName}' failed after ` +
+        `${FOUNDRY_LOOKUP_ATTEMPTS} attempts: ${(lastErr as Error)?.message ?? String(lastErr)} ` +
+        `— refusing to fall back to the pending-edit path (would emit zero rows silently).`,
     );
-    const row = res.rows[0];
-    if (!row) return null;
-    const filePath: string = row.file_path;
-    if (!filePath) return null;
-    const bridgedById = row.foundry_dataset_id != null;
-    // A row registered through the foundry bridge MUST carry a well-formed
-    // marker. Missing/malformed => fail here, never fall through to the
-    // pending-edit fallback (which would emit a silent zero-row changelog).
-    if (bridgedById || filePath.includes("#foundry-dataset:")) {
-      parseFoundryMarker(filePath);
-    } else {
-      // Legacy local-filesystem path — not a foundry-bridged source; the
-      // pending-edit fallback below owns it.
-      return null;
-    }
-    const explicitFormat = (row.file_format as string | null) ?? null;
-    let fileFormat = explicitFormat;
-    if (!fileFormat) {
-      const cleanPath = filePath.slice(0, filePath.indexOf("#"));
-      const ext = cleanPath.toLowerCase();
-      if (ext.endsWith(".json") || ext.endsWith(".jsonl")) fileFormat = "json";
-      else if (ext.endsWith(".tsv")) fileFormat = "tsv";
-      else fileFormat = "csv";
-    }
-    return {
-      filePath,
-      fileFormat,
-      primaryKeyColumn: (row.primary_key_column as string | null) ?? null,
-    };
-  } catch {
+  }
+  if (!row) return null;
+  const filePath: string = row.file_path ?? "";
+  if (!filePath) return null;
+  const bridgedById = row.foundry_dataset_id != null;
+  // A row registered through the foundry bridge MUST carry a well-formed
+  // marker. Missing/malformed => throw here (OUTSIDE the lookup try/catch),
+  // never fall through to the pending-edit fallback (which would emit a
+  // silent zero-row changelog).
+  if (bridgedById || filePath.includes("#foundry-dataset:")) {
+    parseFoundryMarker(filePath);
+  } else {
+    // Legacy local-filesystem path — not a foundry-bridged source; the
+    // pending-edit fallback below owns it.
     return null;
   }
+  const explicitFormat = row.file_format ?? null;
+  let fileFormat = explicitFormat;
+  if (!fileFormat) {
+    const cleanPath = filePath.slice(0, filePath.indexOf("#"));
+    const ext = cleanPath.toLowerCase();
+    if (ext.endsWith(".json") || ext.endsWith(".jsonl")) fileFormat = "json";
+    else if (ext.endsWith(".tsv")) fileFormat = "tsv";
+    else fileFormat = "csv";
+  }
+  return {
+    filePath,
+    fileFormat,
+    primaryKeyColumn: row.primary_key_column ?? null,
+  };
 }
 
 function stripFoundryTags(filePath: string): string {
@@ -1229,8 +1279,14 @@ export async function buildFoundryBridgedReader(
   // "foundry-bridged"` lets computeChangelog skip its own `seenInTxn` O(N)
   // Map (redundant + would re-introduce the heap wall). Iceberg + pending-
   // edit readers keep the hard-throw (they don't pre-dedupe).
+  // Phase 1 of docs/adr/2026-10-09-funnel-duplicate-primary-keys.md: the
+  // CSV path still dedups last-wins, but it now MEASURES what it collapsed
+  // (Palantir fails indexing on duplicate PKs within one transaction) so
+  // the count lands in the changelog snapshot summary as `source_quality`.
+  let quality: FoundrySourceQuality | null = null;
   return {
     readerKind: "foundry-bridged",
+    sourceQuality: () => quality,
     async *read() {
       // CSV/TSV (the large-foundry-CSV case — OO7's 895 MiB / 5.6M-row
       // test04.csv) take the FAST path: DuckDB reads the file natively +
@@ -1238,7 +1294,9 @@ export async function buildFoundryBridgedReader(
       // JSONL/JSON stay on the general INSERT path (smaller volumes;
       // read_csv_auto is CSV-only).
       if (ds.fileFormat === "csv" || ds.fileFormat === "tsv") {
-        yield* dedupFoundryCsvViaDuckDB(ds, s3Key, pkCol, txnId, ts);
+        yield* dedupFoundryCsvViaDuckDB(ds, s3Key, pkCol, txnId, ts, (q) => {
+          quality = q;
+        });
       } else {
         yield* dedupFoundryRows(streamFoundryRows(ds, s3Key), pkCol, txnId, ts);
       }
@@ -1267,6 +1325,7 @@ async function* dedupFoundryCsvViaDuckDB(
   pkCol: string,
   txnId: string,
   ts: string,
+  onQuality?: (q: FoundrySourceQuality) => void,
 ): AsyncGenerator<SourceChangeRow> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fb-csv-"));
   const localPath = path.join(dir, "source.csv");
@@ -1283,6 +1342,42 @@ async function* dedupFoundryCsvViaDuckDB(
     // Explicit delim matches the old parseFoundryRows/parseCsvReadable behavior
     // (CSV ',', TSV literal tab).
     const delim = ds.fileFormat === "tsv" ? "\t" : ",";
+    const src = `read_csv_auto('${lp}', delim='${delim}', PARALLEL=false, all_varchar=true)`;
+    if (onQuality) {
+      // One aggregate scan (DuckDB's vectorised CSV reader: seconds at 5M
+      // rows). Duplicate count = rows with a usable PK minus distinct PKs.
+      const agg = await queryAll<{ total: unknown; null_pk: unknown; distinct_pk: unknown }>(
+        conn,
+        `SELECT count(*) AS total, ` +
+          `count(*) FILTER (WHERE ${pkQ} IS NULL OR ${pkQ} = '') AS null_pk, ` +
+          `count(DISTINCT ${pkQ}) FILTER (WHERE ${pkQ} IS NOT NULL AND ${pkQ} <> '') AS distinct_pk ` +
+          `FROM ${src}`,
+      );
+      const total = Number(agg[0]?.total ?? 0);
+      const nullPk = Number(agg[0]?.null_pk ?? 0);
+      const distinctPk = Number(agg[0]?.distinct_pk ?? 0);
+      const duplicatePkRows = Math.max(0, total - nullPk - distinctPk);
+      let samples: string[] = [];
+      if (duplicatePkRows > 0) {
+        const s = await queryAll<{ pk: unknown }>(
+          conn,
+          `SELECT ${pkQ} AS pk FROM ${src} WHERE ${pkQ} IS NOT NULL AND ${pkQ} <> '' ` +
+            `GROUP BY 1 HAVING count(*) > 1 ORDER BY 1 LIMIT 5`,
+        );
+        samples = s.map((r) => String(r.pk));
+        console.warn(
+          `[funnel] foundry CSV '${s3Key}' has ${duplicatePkRows} duplicate-PK row(s) on '${pkCol}' ` +
+            `(collapsed last-wins; Palantir would fail this transaction). samples=${JSON.stringify(samples)}`,
+        );
+      }
+      onQuality({
+        sourceRows: total,
+        distinctPrimaryKeys: distinctPk,
+        duplicatePkRows,
+        nullOrEmptyPkRows: nullPk,
+        duplicatePkSamples: samples,
+      });
+    }
     const sql =
       `SELECT DISTINCT ON (${pkQ}) * FROM (` +
       `SELECT *, row_number() OVER () AS rn FROM read_csv_auto('${lp}', delim='${delim}', PARALLEL=false, all_varchar=true)` +

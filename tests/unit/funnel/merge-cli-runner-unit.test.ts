@@ -21,6 +21,7 @@ import {
   cliSettingsPreamble,
   resolveCliSettings,
   mergeCliTimeoutMs,
+  mergeCliStallAfterMs,
   duckDbCliPath,
   isDuckDbCliAvailable,
   resetCliAvailabilityCache,
@@ -176,14 +177,20 @@ describe("cliSettingsPreamble", () => {
 });
 
 describe("env parsing", () => {
-  it("mergeCliTimeoutMs defaults to 30 min and honours overrides", () => {
+  it("mergeCliTimeoutMs is versioned (30 min) and ignores the retired env knob", () => {
     delete process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS;
     expect(mergeCliTimeoutMs()).toBe(MERGE_CLI_TIMEOUT_MS_DEFAULT);
     expect(MERGE_CLI_TIMEOUT_MS_DEFAULT).toBe(30 * 60 * 1000);
+    expect(mergeCliTimeoutMs(TEST_ENV)).toBe(MERGE_CLI_TIMEOUT_MS_DEFAULT);
+    expect(mergeCliTimeoutMs(PROD_ENV)).toBe(MERGE_CLI_TIMEOUT_MS_DEFAULT);
     process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS = "60000";
-    expect(mergeCliTimeoutMs()).toBe(60_000);
-    process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS = "junk";
     expect(mergeCliTimeoutMs()).toBe(MERGE_CLI_TIMEOUT_MS_DEFAULT);
+  });
+
+  it("mergeCliStallAfterMs is the versioned stage stall budget (60 s)", () => {
+    process.env.FUNNEL_STAGE_STALL_AFTER_MS = "1";
+    expect(mergeCliStallAfterMs()).toBe(60_000);
+    expect(mergeCliStallAfterMs(PROD_ENV)).toBe(60_000);
   });
 
   it("duckDbCliPath comes from the versioned profile", () => {

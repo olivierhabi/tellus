@@ -20,8 +20,10 @@ import {
   buildPrefixAttachStatements,
   PREFIX_EXPORT_FILES,
 } from "../../../src/services/funnel/mergePrefixSql";
+import { setFunnelRuntimeOverridesForTesting } from "../../../src/config/funnelRuntime";
 
 afterEach(() => {
+  setFunnelRuntimeOverridesForTesting(null);
   delete process.env.MERGE_NARROW_DEDUP;
 });
 
@@ -77,7 +79,7 @@ describe("buildMergePrefixStatements", () => {
   });
 
   it("legacy wide sort runs only under MERGE_NARROW_DEDUP=0", () => {
-    process.env.MERGE_NARROW_DEDUP = "0";
+    setFunnelRuntimeOverridesForTesting({ mergeNarrowDedup: false });
     const stmts = buildMergePrefixStatements({
       contributions: CONTRIBS,
       localPaths: ["/tmp/c0.parquet", "/tmp/c1.parquet"],

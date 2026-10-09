@@ -119,6 +119,64 @@ jobs:
       timeout-minutes: 15
 
   # ---------------------------------------------------------------------------
+  # Full-history secret scan. `secret-scan` above only scans the PR's own
+  # commits; this job scans every reachable commit on every ref so a
+  # credential committed (and later "removed") anywhere in history fails CI.
+  # Uses the pinned gitleaks binary (checksum-verified) with the repo config.
+  # Findings are redacted and emitted as annotations (rule/file/commit only).
+  # ---------------------------------------------------------------------------
+  secret-scan-history:
+    name: Secret scan (full history)
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks 8.30.1 (checksum-verified)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          tgz="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/$tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tgz}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+      - name: Scan all commits on all refs
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*' || true
+          echo "commits in scope: $(git rev-list --all | wc -l)"
+          set +e
+          "$RUNNER_TEMP/gitleaks" git --log-opts="--all" --redact --no-banner \
+            --config .gitleaks.toml \
+            --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" \
+            --exit-code 1 .
+          rc=$?
+          set -e
+          if [ -s "$RUNNER_TEMP/gitleaks.json" ]; then
+            n="$(jq 'length' "$RUNNER_TEMP/gitleaks.json")"
+            echo "findings: $n"
+            jq -r '.[] | "::error file=\(.File),line=\(.StartLine),title=gitleaks \(.RuleID)::\(.RuleID) in commit \(.Commit[0:12]) (\(.File):\(.StartLine)) — secret redacted"' \
+              "$RUNNER_TEMP/gitleaks.json" | head -100
+            {
+              echo "### Full-history secret scan: $n finding(s)"
+              echo ""
+              echo "| Rule | File | Line | Commit |"
+              echo "|---|---|---|---|"
+              jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) | \(.Commit[0:12]) |"' "$RUNNER_TEMP/gitleaks.json" | head -200
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------
   # Tier 2/3/5 planner — decides selective vs full from changed paths
   # ---------------------------------------------------------------------------
   plan:
@@ -215,6 +273,74 @@ jobs:
       contents: read
     secrets: inherit
 
+  # ---------------------------------------------------------------------------
+  # Funnel out-of-process lane: the indexing close-out e2e, the simulated
+  # fleet + invariant checker, and O1–O3 at PR-lite size (100k rows) on the
+  # PRODUCTION funnel profile (OOP DuckDB CLI merge, asserted via merge_path)
+  # against Postgres 16 + MinIO. docs/adr/2026-10-09-funnel-fleet-simulation.md
+  # ---------------------------------------------------------------------------
+  funnel-oop:
+    name: Funnel OOP lane (prod profile)
+    needs: plan
+    if: needs.plan.outputs.integration == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: tellus
+      PGPASSWORD: tellus123
+      S3_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_FORCE_PATH_STYLE: "true"
+      MINIO_IMAGE: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+      TELLUS_DEPLOYMENT_STRICT: "1"
+      TELLUS_EXPECT_OOP_MERGE: "1"
+      TELLUS_SCALE_ROWS: "100000"
+      TELLUS_SCALE_REPORT_DIR: ${{ github.workspace }}/reports/funnel-scale
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_DB: tellus_db
+          POSTGRES_USER: tellus
+          POSTGRES_PASSWORD: tellus123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tellus -d tellus_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm + Node.js + install
+        uses: ./.github/actions/setup-pnpm
+      - name: Start MinIO
+        uses: ./.github/actions/start-lane-deps
+        with:
+          keycloak: "false"
+      - name: Install DuckDB CLI (same pin as the image)
+        uses: ./.github/actions/install-duckdb-cli
+      - name: Funnel OOP lane (e2e + simulated fleet + O1–O3 lite)
+        run: pnpm exec vitest run --config vitest.funnel-oop.config.ts
+      - name: Invariant report over the simulated fleet leftovers (smoke the CLI)
+        if: always()
+        run: mkdir -p reports && PGDATABASE=tellus_tests pnpm exec tsx scripts/funnel-invariants.ts --prefix __none__ > reports/invariants-smoke.json
+      - name: Upload scale reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: funnel-oop-reports
+          path: reports/
+          if-no-files-found: ignore
+
   docker-build:
     name: Docker build
     needs: plan
@@ -234,8 +360,26 @@ jobs:
           context: .
           push: false
           tags: tellus-api:ci-${{ github.sha }}
+          load: true
           cache-from: type=gha,scope=tellus-api
           cache-to: type=gha,mode=max,scope=tellus-api
+      # Production-image verification of the out-of-process merge engine:
+      # the prod funnel profile enables it, so the shipped image must contain
+      # a runnable DuckDB CLI and the compiled runner must actually select and
+      # drive it (no silent in-process fallback). Runs as the image's
+      # non-root user with NODE_ENV=production baked into the image.
+      - name: Verify bundled DuckDB CLI
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/local/bin/duckdb "tellus-api:ci-${{ github.sha }}" --version
+          # ./run.sh runs the post-deploy funnel invariant report from the image.
+          docker run --rm --entrypoint node "tellus-api:ci-${{ github.sha }}" -e "require.resolve('./dist/funnelInvariants.js')"
+      - name: Out-of-process merge smoke (production profile, real CLI)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/scripts/ci/docker-merge-cli-smoke.cjs:/smoke/docker-merge-cli-smoke.cjs:ro" \
+            --entrypoint node "tellus-api:ci-${{ github.sha }}" /smoke/docker-merge-cli-smoke.cjs
 
   # ---------------------------------------------------------------------------
   # Single required check. Passes only if every blocking job succeeded or was
@@ -249,11 +393,13 @@ jobs:
       - coverage
       - security-scan
       - secret-scan
+      - secret-scan-history
       - smoke
       - plan
       - integration
       - extended
       - docker-build
+      - funnel-oop
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

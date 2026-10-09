@@ -26,6 +26,7 @@
 #   ./run.sh --no-bootstrap  # skip the post-up bootstrap (migrations, realm,
 #                            # superadmin, passkey gate) — just up + health
 #   ./run.sh --logs          # tail app logs after it becomes healthy (full mode)
+#   ./run.sh --no-invariants # skip the post-deploy funnel invariant report
 #   ./run.sh -h | --help
 #
 # Service-subset override: set RUN_SERVICES to a space-separated service list
@@ -33,7 +34,10 @@
 # to bring up exactly that set instead of the full stack or the --core set.
 #
 # Overridable via env: COMPOSE_FILE, PROJECT_NAME, ENV_FILE, HEALTH_TIMEOUT,
-# RUN_BOOTSTRAP (default 1; set 0 to skip the bootstrap phase), RUN_SERVICES.
+# RUN_BOOTSTRAP (default 1; set 0 to skip the bootstrap phase), RUN_SERVICES,
+# RUN_INVARIANTS (warn = default: report funnel invariant violations after a
+# full deploy without failing it; strict = fail the deploy on any error-level
+# violation; 0 = skip). Reports land in INVARIANTS_REPORT_DIR (./reports).
 # =============================================================================
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -53,6 +57,8 @@ HEALTH_POLL="${HEALTH_POLL:-5}"           # poll interval, seconds
 DO_BUILD=1; DO_PULL=0; RECREATE=0; WAIT=1; FOLLOW_LOGS=0
 DO_BOOTSTRAP="${RUN_BOOTSTRAP:-1}"
 MODE="${RUN_MODE:-full}"
+RUN_INVARIANTS="${RUN_INVARIANTS:-warn}"
+INVARIANTS_REPORT_DIR="${INVARIANTS_REPORT_DIR:-reports}"
 
 # Daily-driver dev core (2026-08-13 container-diet pass): the only infra the
 # host backend (`pnpm dev`/nodemon) hard-requires. Everything else the app
@@ -91,7 +97,7 @@ die()  { printf '%s %s[err]%s %s\n'  "$(ts)" "$C_ERR" "$C_RST" "$*" >&2; exit 1;
 
 trap 'die "failed at line $LINENO (exit $?). Stack left as-is; inspect with: docker compose -p '"$PROJECT_NAME"' ps"' ERR
 
-usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # --- parse args --------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -103,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --no-wait)   WAIT=0 ;;
     --no-bootstrap) DO_BOOTSTRAP=0 ;;
     --logs)      FOLLOW_LOGS=1 ;;
+    --no-invariants) RUN_INVARIANTS=0 ;;
     -h|--help)   usage ;;
     *) die "unknown argument: $1 (try --help)" ;;
   esac
@@ -571,6 +578,39 @@ post_up_bootstrap() {
   ok "post-up bootstrap complete"
 }
 
+# --- post-deploy funnel invariant report ---------------------------------------
+# Runs the read-only checker (dist/funnelInvariants.js, same image) INSIDE the
+# deployed app container, so it sees exactly this deployment's Postgres and
+# object store: ghost runs (indexed with 0 objects while the source has rows),
+# malformed/dangling locators, dead or stalled indexing locks, orphan merge
+# staging, count drift, runs that still need a replay. docs/runbooks/
+# funnel-indexing-rollout.md. CI cannot do this: its databases are empty.
+#   warn   (default) report + warn, never fail the deploy — pre-existing legacy
+#          state must not block a deploy that is meant to fix it.
+#   strict fail the deploy when an error-level violation exists.
+post_deploy_invariants() {
+  [[ "$RUN_INVARIANTS" == "0" ]] && { log "funnel invariant report skipped (RUN_INVARIANTS=0)"; return 0; }
+  if [[ "$RUN_INVARIANTS" != "warn" && "$RUN_INVARIANTS" != "strict" ]]; then
+    die "RUN_INVARIANTS must be warn, strict or 0 (got '$RUN_INVARIANTS')"
+  fi
+  mkdir -p "$INVARIANTS_REPORT_DIR"
+  local out rc=0
+  out="$INVARIANTS_REPORT_DIR/funnel-invariants-$(date +%Y%m%dT%H%M%S).json"
+  log "funnel invariant report (read-only, mode=$RUN_INVARIANTS) → $out"
+  "${COMPOSE[@]}" exec -T app node dist/funnelInvariants.js --probe-storage >"$out" || rc=$?
+  case "$rc" in
+    0) ok "funnel invariants: no error-level violations" ;;
+    1) if [[ "$RUN_INVARIANTS" == "strict" ]]; then
+         die "funnel invariants: error-level violations (see $out); RUN_INVARIANTS=strict"
+       fi
+       warn "funnel invariants: error-level violations — see $out (deploy NOT failed; RUN_INVARIANTS=strict to gate)" ;;
+    *) if [[ "$RUN_INVARIANTS" == "strict" ]]; then
+         die "funnel invariant checker failed (exit $rc)"
+       fi
+       warn "funnel invariant checker failed (exit $rc) — continuing (RUN_INVARIANTS=warn)" ;;
+  esac
+}
+
 # --- core-mode summary -------------------------------------------------------
 summary_core() {
   echo
@@ -722,6 +762,7 @@ main() {
       else
         wait_for_health
       fi
+      post_deploy_invariants
     else
       warn "--no-wait set: not gating on health (bootstrap skipped)"
     fi

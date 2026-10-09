@@ -31,13 +31,14 @@
 //     markings for that PK.
 // ---------------------------------------------------------------------------
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import os from "os";
 import { pipeline } from "stream/promises";
 import { PoolClient } from "pg";
 import { query, getClient } from "../../db";
-import { bulkUpsertInstances, deleteInstance, UpsertInstanceInput } from "../../models/objectInstance";
+import type { UpsertInstanceInput } from "../../models/objectInstance";
 import { ChangelogRow } from "./changelogStage";
 import { commitSnapshot, ManifestEntry } from "./icebergCatalog";
 import { markEditsAppliedToMerge, OntologyEditRow } from "../../models/ontologyEdit";
@@ -134,9 +135,10 @@ async function bestEffortLease(
 // merged snapshot's parquet (same producer — DuckDB — so plain string
 // comparison is exact; no jsonb-canonicalisation pitfalls) and ship ONLY
 // changed/new/deleted rows to PG. Steady-state re-merges go from O(dataset)
-// writes to O(changes). Set MERGE_DELTA=0 to force the full-rewrite tail
-// (e.g. to self-heal out-of-band PG drift).
-const MERGE_DELTA = (process.env.MERGE_DELTA ?? "1") !== "0";
+// writes to O(changes). Versioned per profile (funnelRuntime.mergeDelta);
+// the retired MERGE_DELTA env knob is ignored. Out-of-band PG drift is
+// self-healed by the materialized-count check (full tail on drift).
+const mergeDeltaEnabled = (): boolean => funnelRuntimeConfig().mergeDelta;
 
 /**
  * Snapshot history can outlive `object_instances` (for example after a
@@ -466,11 +468,11 @@ export async function mergeChanges(input: MergeInput): Promise<MergeResult> {
   for (const bucket of editsByKey.values()) editIdsToStamp.push(...bucket.editIds);
 
   try {
+    // Same live-table contract as the SQL path (1.5/1.6): stage → verify →
+    // promote, all inside ONE transaction. promoteMergeStaging is the only
+    // writer to the live object_instances for funnel merges.
     await client.query("BEGIN");
-    if (upserts.length > 0) await bulkUpsertInstances(upserts, client);
-    for (const pk of deletes) {
-      await deleteInstance(input.ontologyId, input.objectTypeApiName, pk, client);
-    }
+    await commitMergedRowsViaStaging(client, input, mergedRows);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -655,6 +657,52 @@ async function downloadParquetRefToLocal(
   return { dir, localPath };
 }
 
+/**
+ * Pure-TS merge commit through the shared staging contract. Loads every
+ * merged row (upserts AND deletes) into merge_staging_instances under a
+ * fresh run id, runs the same count / distinct / null-empty gate as the
+ * SQL path (assertStagedTail), then promotes with promoteMergeStaging.
+ * Caller owns the transaction: any throw rolls back with the live table
+ * untouched. Exported for the integration test.
+ */
+export async function commitMergedRowsViaStaging(
+  client: PoolClient,
+  input: { ontologyId: string; objectTypeApiName: string },
+  mergedRows: Array<{
+    primary_key: string;
+    properties: Record<string, unknown>;
+    markings: string[];
+    operation: "upsert" | "delete";
+    source_datasource_id: string | null;
+    source_transaction_id: string | null;
+  }>,
+): Promise<{ upserts: number; deletes: number }> {
+  const scope: StagingScope = {
+    ontologyId: input.ontologyId,
+    objectTypeApiName: input.objectTypeApiName,
+    stagingRunId: crypto.randomUUID(),
+  };
+  await clearMergeStaging(client, scope);
+  if (mergedRows.length === 0) return { upserts: 0, deletes: 0 };
+  await stageMergeRows(
+    client,
+    scope,
+    mergedRows.map((r) => ({
+      ontology_id: input.ontologyId,
+      object_type_api_name: input.objectTypeApiName,
+      primary_key: r.primary_key,
+      operation: r.operation,
+      properties: r.properties,
+      markings: r.markings,
+      source_datasource_id: r.source_datasource_id,
+      source_transaction_id: r.source_transaction_id,
+    })),
+  );
+  const staged = await verifyMergeStaging(client, scope);
+  assertStagedTail(staged, mergedRows.length, input.objectTypeApiName);
+  return promoteMergeStaging(client, scope);
+}
+
 /** Staging gate: the staged set must equal the merged tail exactly —
  *  same cardinality, all-distinct PKs, no null/empty keys. Throws (live
  *  table untouched) on any deviation. Exported for unit tests. */
@@ -679,6 +727,22 @@ export function assertStagedTail(
       `[merge-sql] ${where} failed: nullPk=${staged.nullPk} emptyPk=${staged.emptyPk}`,
     );
   }
+}
+
+/** Key-order-independent JSON serialisation (objects' keys sorted
+ *  recursively; arrays keep their order). Exported for unit tests. */
+export function canonicalJson(value: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(norm);
+    if (v !== null && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(o).sort()) out[k] = norm(o[k]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(norm(value === undefined ? null : value));
 }
 
 /**
@@ -738,7 +802,12 @@ async function verifyStagedSample(
       );
     }
     const wantProps = JSON.parse(String(r.properties ?? "{}")) as unknown;
-    if (JSON.stringify(s.properties) !== JSON.stringify(wantProps)) {
+    // Postgres jsonb does NOT preserve object key order (it stores keys
+    // shortest-first), so a raw JSON.stringify comparison falsely rejected
+    // every row whose columns were not already in jsonb order (e.g. CSV
+    // header `id,name,qty` comes back as `id,qty,name`). Compare a
+    // key-order-independent canonical form instead.
+    if (canonicalJson(s.properties) !== canonicalJson(wantProps)) {
       throw new Error(
         `[merge-sql] staging sample failed for ${scope.objectTypeApiName}: pk ${pk} properties differ`,
       );
@@ -1408,7 +1477,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
             `expected=${activeRowCount} actual=${materializedRows} — full PG tail`,
         );
       }
-      if (MERGE_DELTA && !forceFullTail) {
+      if (mergeDeltaEnabled() && !forceFullTail) {
         try {
           const tDelta = Date.now();
           const prevRes = await query(

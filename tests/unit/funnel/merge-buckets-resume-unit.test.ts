@@ -56,6 +56,7 @@ import {
   buildBucketExportStatement,
 } from "../../../src/services/funnel/mergePrefixSql";
 import { runAll, queryAll } from "../../../src/services/duckdb/pool";
+import { setFunnelRuntimeOverridesForTesting } from "../../../src/config/funnelRuntime";
 
 type Conn = Parameters<typeof runAll>[0];
 
@@ -103,6 +104,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setFunnelRuntimeOverridesForTesting(null);
   delete process.env.MERGE_BUCKET_ROWS;
   delete process.env.MERGE_NARROW_DEDUP;
 });
