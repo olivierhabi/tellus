@@ -1,13 +1,15 @@
 // ---------------------------------------------------------------------------
 // Funnel runtime configuration — versioned per-environment config.
 //
-// The five non-secret funnel knobs below used to be tuned through `.env`
+// The non-secret funnel knobs below used to be tuned through `.env`
 // (FUNNEL_MERGE_OUT_OF_PROCESS, DUCKDB_CLI_PATH, DUCKDB_MEMORY_LIMIT,
 // FUNNEL_INDEXING_STALL_AFTER_MS / FUNNEL_INDEXING_BOOT_STALE_MS, and the
 // Lakekeeper/DuckDB S3 endpoint selection). That made production behaviour
 // depend on unversioned operator state: a raised stall ceiling or a
 // loopback S3 endpoint could hide a wedged run with no code change to
-// review. These values are now committed here, keyed by deployment
+// review. The stage-heartbeat stall budget (FUNNEL_STAGE_STALL_AFTER_MS)
+// and the merge-CLI hard timeout (FUNNEL_MERGE_CLI_TIMEOUT_MS) were retired
+// the same way. These values are now committed here, keyed by deployment
 // profile, so every change is reviewable and every environment's numbers
 // are stated in one place.
 //
@@ -32,8 +34,11 @@ export interface FunnelRuntimeConfig {
   indexingBootStaleMs: number;
   /** Dead-process budget: no lease_heartbeat_at for this long => owner dead. */
   indexingDeadAfterMs: number;
-  /** Progress-coupled Temporal heartbeat silence budget. */
+  /** Progress-coupled Temporal heartbeat silence budget. Also the
+   *  out-of-process merge CLI's bytes-on-disk stall budget. */
   stageStallAfterMs: number;
+  /** Hard wall-clock ceiling for ONE out-of-process merge CLI script. */
+  mergeCliTimeoutMs: number;
   /** Run merge steps 2–8 in a separate DuckDB CLI process. */
   mergeOutOfProcess: boolean;
   /** PG-tail batch size (rows per keyset page). */
@@ -56,6 +61,7 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     indexingBootStaleMs: 900_000,
     indexingDeadAfterMs: 900_000,
     stageStallAfterMs: 60_000,
+    mergeCliTimeoutMs: 1_800_000,
     mergeOutOfProcess: true,
     mergeBatchSize: 5_000,
     mergeStagingRetainOnFailure: false,
@@ -69,6 +75,7 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     indexingBootStaleMs: 900_000,
     indexingDeadAfterMs: 900_000,
     stageStallAfterMs: 60_000,
+    mergeCliTimeoutMs: 1_800_000,
     mergeOutOfProcess: false,
     mergeBatchSize: 5_000,
     mergeStagingRetainOnFailure: false,
@@ -82,6 +89,7 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     indexingBootStaleMs: 900_000,
     indexingDeadAfterMs: 900_000,
     stageStallAfterMs: 60_000,
+    mergeCliTimeoutMs: 1_800_000,
     mergeOutOfProcess: true,
     mergeBatchSize: 5_000,
     mergeStagingRetainOnFailure: false,

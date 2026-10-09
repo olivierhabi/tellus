@@ -40,6 +40,7 @@
 // ---------------------------------------------------------------------------
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { funnelRuntimeConfig } from "../../../config/funnelRuntime";
 
 export interface StageProgressState {
   /** Epoch ms of the most recent reportStageProgress() call. */
@@ -52,10 +53,15 @@ export interface StageProgressState {
 
 const storage = new AsyncLocalStorage<StageProgressState>();
 
-/** Grace period after the last progress report before we stop heartbeating. */
-export function stallAfterMs(): number {
-  const raw = Number(process.env.FUNNEL_STAGE_STALL_AFTER_MS ?? 60_000);
-  return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
+/**
+ * Grace period after the last progress report before we stop heartbeating.
+ * Versioned per deployment profile (funnelRuntime.stageStallAfterMs) — the
+ * retired FUNNEL_STAGE_STALL_AFTER_MS env knob is deliberately ignored, so a
+ * raised silence budget can never hide a wedged stage without a reviewed
+ * code change.
+ */
+export function stallAfterMs(env: NodeJS.ProcessEnv = process.env): number {
+  return funnelRuntimeConfig(env).stageStallAfterMs;
 }
 
 /**

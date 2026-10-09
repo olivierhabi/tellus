@@ -55,6 +55,32 @@ describe("funnelRuntimeConfig", () => {
     }
   });
 
+  it("versions the stage stall budget and merge-CLI timeout on every profile (§5.3)", () => {
+    const prev = {
+      s: process.env.FUNNEL_STAGE_STALL_AFTER_MS,
+      t: process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS,
+    };
+    // Retired knobs: setting them must change nothing.
+    process.env.FUNNEL_STAGE_STALL_AFTER_MS = "1";
+    process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS = "1";
+    try {
+      for (const env of [
+        {},
+        { NODE_ENV: "test", TELLUS_ENVIRONMENT_ID: "tellus-tests-main" },
+        { NODE_ENV: "production" },
+      ] as NodeJS.ProcessEnv[]) {
+        const merged = { ...env, FUNNEL_STAGE_STALL_AFTER_MS: "1", FUNNEL_MERGE_CLI_TIMEOUT_MS: "1" };
+        expect(funnelRuntimeConfig(merged).stageStallAfterMs).toBe(60_000);
+        expect(funnelRuntimeConfig(merged).mergeCliTimeoutMs).toBe(1_800_000);
+      }
+    } finally {
+      if (prev.s === undefined) delete process.env.FUNNEL_STAGE_STALL_AFTER_MS;
+      else process.env.FUNNEL_STAGE_STALL_AFTER_MS = prev.s;
+      if (prev.t === undefined) delete process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS;
+      else process.env.FUNNEL_MERGE_CLI_TIMEOUT_MS = prev.t;
+    }
+  });
+
   it("states merge + DuckDB + endpoint values per profile", () => {
     const dev = funnelRuntimeConfig({} as NodeJS.ProcessEnv);
     expect(dev.mergeOutOfProcess).toBe(true);

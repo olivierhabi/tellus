@@ -1,0 +1,27 @@
+# .gitleaksignore — reviewed false positives from the FULL-HISTORY scan
+# (ci.yml `secret-scan-history`). Each entry is an exact gitleaks fingerprint
+# (commit:file:rule:line), so only these specific historical matches are
+# suppressed; any new finding (same file or not) still fails CI.
+# Triage (2026-10, indexing close-out §5.1) — none is a live credential:
+#   * generic-api-key in api/docs/*, tasks/*  -> base64 pagination cursors in example JSON
+#   * generic-api-key in stemma-events admin-routes test -> base64("enc-secret") fixture
+#   * generic-api-key in strix_runs/*         -> pentest report prose / methodology text
+#   * curl-auth-header (vuln-0042, verify-keycloak, verify-auth-hardening)
+#                                             -> deliberately invalid tokens in negative-auth checks
+#   * curl-auth-header docs/reindex-debugging -> YOUR_TOKEN placeholder
+#   * curl-auth-user test-add-backing-datasource.sh -> OpenSearch local demo default (admin:admin), dev docker only
+2a3e147f08d4f66f61f02fb8dd8d2e33d96e77af:scripts/test-add-backing-datasource.sh:curl-auth-user:47
+2c23f3f4da6c10ac9d0568f5718730b784cb9962:strix_runs/tellus_bb6f/penetration_test_report.md:generic-api-key:39
+2c23f3f4da6c10ac9d0568f5718730b784cb9962:strix_runs/tellus_bb6f/run.json:generic-api-key:26559
+2c23f3f4da6c10ac9d0568f5718730b784cb9962:strix_runs/tellus_bb6f/vulnerabilities/vuln-0042.md:curl-auth-header:67
+57383d8af3d0e47fd12eb278fd80805f7781b460:api/docs/FUNCTIONS_REGISTRY_API.md:generic-api-key:78
+57383d8af3d0e47fd12eb278fd80805f7781b460:api/docs/STEMMA_EVENTS_API.md:generic-api-key:114
+57383d8af3d0e47fd12eb278fd80805f7781b460:tests/integration/code-repos/stemma-events/admin-routes-integration.test.ts:generic-api-key:363
+57383d8af3d0e47fd12eb278fd80805f7781b460:tests/integration/code-repos/stemma-events/admin-routes-integration.test.ts:generic-api-key:386
+5c5cd7fae8da8729b911ca677b2a535b3b4fb473:tasks/friday/task-09-audit-log-query-api.md:generic-api-key:53
+5c5cd7fae8da8729b911ca677b2a535b3b4fb473:tasks/saturday/task-04.md:generic-api-key:47
+5c5cd7fae8da8729b911ca677b2a535b3b4fb473:tasks/sunday/task-12.md:generic-api-key:62
+813d410328730d1bb6365be7a13540da13332285:scripts/verify-auth-hardening.sh:curl-auth-header:412
+813d410328730d1bb6365be7a13540da13332285:scripts/verify-keycloak.sh:curl-auth-header:124
+c2fd3fc6701fe5d420bd182d92a45a6803b555dc:docs/reindex-debugging.md:curl-auth-header:52
+df79eddaaad1bec1518b6118dfad18f37a81fcdc:tasks/wednesday/task-07.md:generic-api-key:42

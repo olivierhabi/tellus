@@ -119,6 +119,64 @@ jobs:
       timeout-minutes: 15
 
   # ---------------------------------------------------------------------------
+  # Full-history secret scan. `secret-scan` above only scans the PR's own
+  # commits; this job scans every reachable commit on every ref so a
+  # credential committed (and later "removed") anywhere in history fails CI.
+  # Uses the pinned gitleaks binary (checksum-verified) with the repo config.
+  # Findings are redacted and emitted as annotations (rule/file/commit only).
+  # ---------------------------------------------------------------------------
+  secret-scan-history:
+    name: Secret scan (full history)
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks 8.30.1 (checksum-verified)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          tgz="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/$tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tgz}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+      - name: Scan all commits on all refs
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*' || true
+          echo "commits in scope: $(git rev-list --all | wc -l)"
+          set +e
+          "$RUNNER_TEMP/gitleaks" git --log-opts="--all" --redact --no-banner \
+            --config .gitleaks.toml \
+            --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" \
+            --exit-code 1 .
+          rc=$?
+          set -e
+          if [ -s "$RUNNER_TEMP/gitleaks.json" ]; then
+            n="$(jq 'length' "$RUNNER_TEMP/gitleaks.json")"
+            echo "findings: $n"
+            jq -r '.[] | "::error file=\(.File),line=\(.StartLine),title=gitleaks \(.RuleID)::\(.RuleID) in commit \(.Commit[0:12]) (\(.File):\(.StartLine)) — secret redacted"' \
+              "$RUNNER_TEMP/gitleaks.json" | head -100
+            {
+              echo "### Full-history secret scan: $n finding(s)"
+              echo ""
+              echo "| Rule | File | Line | Commit |"
+              echo "|---|---|---|---|"
+              jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) | \(.Commit[0:12]) |"' "$RUNNER_TEMP/gitleaks.json" | head -200
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------
   # Tier 2/3/5 planner — decides selective vs full from changed paths
   # ---------------------------------------------------------------------------
   plan:
@@ -234,8 +292,24 @@ jobs:
           context: .
           push: false
           tags: tellus-api:ci-${{ github.sha }}
+          load: true
           cache-from: type=gha,scope=tellus-api
           cache-to: type=gha,mode=max,scope=tellus-api
+      # Production-image verification of the out-of-process merge engine:
+      # the prod funnel profile enables it, so the shipped image must contain
+      # a runnable DuckDB CLI and the compiled runner must actually select and
+      # drive it (no silent in-process fallback). Runs as the image's
+      # non-root user with NODE_ENV=production baked into the image.
+      - name: Verify bundled DuckDB CLI
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/local/bin/duckdb "tellus-api:ci-${{ github.sha }}" --version
+      - name: Out-of-process merge smoke (production profile, real CLI)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/scripts/ci/docker-merge-cli-smoke.cjs:/smoke/docker-merge-cli-smoke.cjs:ro" \
+            --entrypoint node "tellus-api:ci-${{ github.sha }}" /smoke/docker-merge-cli-smoke.cjs
 
   # ---------------------------------------------------------------------------
   # Single required check. Passes only if every blocking job succeeded or was
@@ -249,6 +323,7 @@ jobs:
       - coverage
       - security-scan
       - secret-scan
+      - secret-scan-history
       - smoke
       - plan
       - integration

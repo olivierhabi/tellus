@@ -681,6 +681,22 @@ export function assertStagedTail(
   }
 }
 
+/** Key-order-independent JSON serialisation (objects' keys sorted
+ *  recursively; arrays keep their order). Exported for unit tests. */
+export function canonicalJson(value: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(norm);
+    if (v !== null && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(o).sort()) out[k] = norm(o[k]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(norm(value === undefined ? null : value));
+}
+
 /**
  * 1 000-row field-by-field sample: the first 1 000 staged PKs (ordered)
  * must match the merged parquet on operation + properties + markings.
@@ -738,7 +754,12 @@ async function verifyStagedSample(
       );
     }
     const wantProps = JSON.parse(String(r.properties ?? "{}")) as unknown;
-    if (JSON.stringify(s.properties) !== JSON.stringify(wantProps)) {
+    // Postgres jsonb does NOT preserve object key order (it stores keys
+    // shortest-first), so a raw JSON.stringify comparison falsely rejected
+    // every row whose columns were not already in jsonb order (e.g. CSV
+    // header `id,name,qty` comes back as `id,qty,name`). Compare a
+    // key-order-independent canonical form instead.
+    if (canonicalJson(s.properties) !== canonicalJson(wantProps)) {
       throw new Error(
         `[merge-sql] staging sample failed for ${scope.objectTypeApiName}: pk ${pk} properties differ`,
       );
