@@ -15,7 +15,15 @@
 //     environments that don't run Redpanda/Kafka)
 // ---------------------------------------------------------------------------
 
-import { Kafka, type Producer, logLevel, CompressionTypes, CompressionCodecs } from "kafkajs";
+import {
+  Kafka,
+  type Producer,
+  type Message,
+  logLevel,
+  CompressionTypes,
+  CompressionCodecs,
+  Partitioners,
+} from "kafkajs";
 // kafkajs ships no codec implementations for Snappy/LZ4 — they must be
 // registered at process start or producer.send() with Snappy compression
 // throws "Snappy compression not implemented" at runtime. The audit's test
@@ -31,6 +39,27 @@ let producer: Producer | null = null;
 let connecting: Promise<void> | null = null;
 let disabled = !ENABLED;
 let monotonicOffset = Date.now();
+
+/**
+ * Partition chosen for each in-flight message, recorded by the wrapping
+ * partitioner below. kafkajs passes the caller's message objects through to
+ * the partitioner by reference, so a WeakMap gives the exact placement of
+ * every message in a batch without re-implementing murmur2 — which lets
+ * publishMergedDocs compute the true LAST offset per partition
+ * (baseOffset + messagesInPartition - 1) from one produce response.
+ */
+const assignedPartition = new WeakMap<Message, number>();
+
+function recordingPartitioner() {
+  // Same placement as before this wrapper: kafkajs 2.x's DefaultPartitioner
+  // (the producer's default when no createPartitioner is passed).
+  const inner = Partitioners.DefaultPartitioner();
+  return (args: Parameters<ReturnType<typeof Partitioners.DefaultPartitioner>>[0]) => {
+    const partition = inner(args);
+    assignedPartition.set(args.message, partition);
+    return partition;
+  };
+}
 
 async function getProducer(): Promise<Producer | null> {
   if (disabled) return null;
@@ -55,6 +84,7 @@ async function getProducer(): Promise<Producer | null> {
           // across retries.
           idempotent: true,
           maxInFlightRequests: 5,
+          createPartitioner: recordingPartitioner,
         });
         await p.connect();
         producer = p;
@@ -103,6 +133,67 @@ export async function publishMergedDoc(
       `[kafka/merged] publish failed on ${topic}: ${(err as Error).message}`
     );
     monotonicOffset += 1;
+    return monotonicOffset;
+  }
+}
+
+export interface MergedDocMessage {
+  key: string;
+  doc: Record<string, unknown>;
+}
+
+/**
+ * Publish many merged docs to `topic` in ONE produce request (one Snappy
+ * record batch per partition) and return the highest offset written — the
+ * exact last offset across the touched partitions, the same quantity the
+ * per-doc path's max(baseOffset) converged to. Callers keep each call well
+ * under the broker's message.max.bytes (see the indexing activity's byte
+ * cap). Failure semantics match publishMergedDoc: a broker error is logged
+ * and a monotonic stand-in offset (advanced by the batch size) is returned.
+ */
+export async function publishMergedDocs(
+  topic: string,
+  docs: MergedDocMessage[],
+): Promise<number> {
+  if (docs.length === 0) return 0;
+  const p = await getProducer();
+  if (!p) {
+    monotonicOffset += docs.length;
+    return monotonicOffset;
+  }
+  const messages: Message[] = docs.map((d) => ({
+    key: d.key,
+    value: JSON.stringify(d.doc),
+  }));
+  try {
+    const results = await p.send({
+      topic,
+      compression: CompressionTypes.Snappy,
+      messages,
+    });
+    const perPartition = new Map<number, number>();
+    for (const m of messages) {
+      const part = assignedPartition.get(m);
+      if (part !== undefined) perPartition.set(part, (perPartition.get(part) ?? 0) + 1);
+    }
+    let last = -1;
+    for (const r of results) {
+      const base = Number(r.baseOffset ?? r.offset ?? -1);
+      if (!Number.isFinite(base) || base < 0) continue;
+      const n = perPartition.get(r.partition) ?? 1;
+      last = Math.max(last, base + n - 1);
+    }
+    if (last < 0) {
+      monotonicOffset += docs.length;
+      return monotonicOffset;
+    }
+    if (last > monotonicOffset) monotonicOffset = last;
+    return last;
+  } catch (err) {
+    console.warn(
+      `[kafka/merged] batch publish (${docs.length} docs) failed on ${topic}: ${(err as Error).message}`
+    );
+    monotonicOffset += docs.length;
     return monotonicOffset;
   }
 }

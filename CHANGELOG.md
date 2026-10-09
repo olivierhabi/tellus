@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Palantir OSv2 data restrictions per object type** (migration 197,
+  `object_type.indexing_data_policy`, `lenient` default | `strict`) — see
+  `docs/adr/2026-10-09-funnel-data-restrictions-and-incremental-indexing.md`.
+  Strict fails the changelog non-retryably, before the snapshot commits, on
+  duplicate PKs within a transaction, null/empty PKs, forbidden PK types
+  (geopoint, geoshape, arrays, time series, decimal/double/float),
+  NaN/±Infinity, empty strings, nested arrays, null array elements, strings
+  > 12 MB and arrays > 100,000 elements, with counts + samples. Lenient keeps
+  today's behaviour and records every violation in
+  `source_quality.restrictions`. Phase 2 of the duplicate-PK ADR.
+- **Incremental indexing with Palantir's 80% rule**: merge records an
+  `indexing_plan` and uploads the delta parquet; indexing publishes only the
+  delta when ≤ 80% of rows changed and `funnel_index_watermark` shows the
+  index already holds the base snapshot, else full. Force Reindex forces
+  full; a new Quickwit index is always full. Source-only runs now reach the
+  serving index (previously only runs with pending user edits).
+
+### Changed
+- Merge delta PG tail now also applies when rows were added or deleted (the
+  drift check compares against the previous snapshot's live count). O1 1M
+  incremental merge 35.0 s → 18.4 s (PG tail 19.8 s → 1.8 s for 54k changes).
+- **Funnel moves data in bulk, Foundry-style (no per-row hot loops)** —
+  see `docs/adr/2026-10-09-funnel-foundry-bulk-path.md`:
+  - Changelog parquet (all-VARCHAR schemas) is written by ONE DuckDB
+    `COPY … FROM read_json(NDJSON spool)` instead of 500-row SQL-literal INSERTs
+    (~12.7k statements at 6.35M rows). Same NULL semantics, order and row-count check.
+  - Merge staging load: DuckDB renders the merged tail as a PG-ready CSV and
+    it is streamed with chunked `COPY merge_staging_instances FROM STDIN`
+    (`pg-copy-streams`, ≤ `mergePromoteChunkRows` rows per statement, one
+    transaction). Versioned flag `mergeStagingBulkCopy` (on); the row loop
+    stays as fallback. Integers > 2^53 in properties keep their digits.
+  - `merge_staging_instances` is UNLOGGED (migration 196) — scratch data.
+  - Indexing publishes merged docs to Kafka in batched produce requests
+    (`indexingPublishBatchSize` 1 000, ≤ 512 KiB) and returns the exact
+    last offset per partition.
+  - Measured locally (2 vCPU / 4 GB, PG 16, Kafka 4.2): O1 1M end-to-end
+    changelog 46.7 s → 9.0 s, full merge 37.4 s → 28.2 s (staging
+    17.9 s → 7.4 s); 6.35M rows: changelog parquet ~311 s → 32 s, staging
+    load 58 s, Kafka hand-off 200k docs 42.6 s → 2.7 s (6.35M in 70 s).
+
 ### Fixed
 - **Funnel merge promote no longer times out at multi-million-row scale**:
   `promoteMergeStaging` copied a whole staging run into `object_instances`
