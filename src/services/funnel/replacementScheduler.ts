@@ -169,6 +169,14 @@ async function detectMissingAutoTriggerTables(): Promise<string[]> {
   return missingTables;
 }
 
+/** ontologyId:apiName → last_run_at of the changelog emission already evaluated. */
+const evaluatedEmissions = new Map<string, string>();
+
+/** Test hook. */
+export function resetAutoTriggerStateForTesting(): void {
+  evaluatedEmissions.clear();
+}
+
 async function autoTriggerVolumeReplacements(): Promise<number> {
   // Per object type: compare the most recent changelog emission (from
   // the watermark table B4 populates) against the current merged row
@@ -185,38 +193,72 @@ async function autoTriggerVolumeReplacements(): Promise<number> {
     return 0;
   }
 
+  // Cheap candidate scan: NO per-type COUNT(*) here. The previous version
+  // counted object_instances for every object type on every 60s tick; with a
+  // 6.35M-row type that blew statement_timeout (57014) on each tick and the
+  // scan never completed. We only count rows for types that actually have a
+  // changelog emission the scheduler has not acted on yet:
+  //   * last_from_snapshot_id IS NOT NULL — without a base snapshot,
+  //     last_rows_emitted is the full source row count, not a change count
+  //     (initial loads, and the Temporal funnel path, which emits a full
+  //     snapshot every run), so it always reads as 100% changed. The
+  //     Temporal path's real >80% rule lives in the merge's indexing_plan;
+  //   * backfill not already started for this emission — otherwise the same
+  //     watermark re-triggered a replacement after every cutover.
   const candidates = await query(
-    `SELECT ot.api_name                 AS object_type_api_name,
-            COALESCE(w.last_rows_emitted, 0)::bigint AS rows_changed,
-            (SELECT COUNT(*)::bigint FROM object_instances oi
-              WHERE oi.object_type_api_name = ot.api_name)
-                                        AS total_rows,
-            COALESCE(v.state, 'LIVE')   AS state
+    `SELECT ot.api_name                       AS object_type_api_name,
+            ot.ontology_id                    AS ontology_id,
+            w.last_rows_emitted::bigint       AS rows_changed,
+            w.last_run_at::text               AS last_run_at,
+            COALESCE(v.state, 'LIVE')         AS state
        FROM object_type ot
-       LEFT JOIN LATERAL (
-         SELECT last_rows_emitted
+       JOIN LATERAL (
+         SELECT last_rows_emitted, last_from_snapshot_id, last_run_at
            FROM funnel_changelog_watermark fw
           WHERE fw.object_type_api_name = ot.api_name
+            AND fw.ontology_id = ot.ontology_id
           ORDER BY fw.last_run_at DESC
           LIMIT 1
        ) w ON TRUE
        LEFT JOIN object_type_active_index_version v
-              ON v.object_type_api_name = ot.api_name`
+              ON v.object_type_api_name = ot.api_name
+      WHERE w.last_rows_emitted > 0
+        AND w.last_from_snapshot_id IS NOT NULL
+        AND COALESCE(v.state, 'LIVE') IN ('LIVE', 'CUTOVER_COMPLETE')
+        AND (v.backfill_started_at IS NULL OR v.backfill_started_at < w.last_run_at)`
   );
   let triggered = 0;
   for (const row of candidates.rows as Array<{
     object_type_api_name: string;
+    ontology_id: string;
     rows_changed: number | string | null;
-    total_rows: number | string | null;
+    last_run_at: string;
     state: string;
   }>) {
     if (row.state !== "LIVE" && row.state !== "CUTOVER_COMPLETE") continue;
     const rowsChanged = Number(row.rows_changed ?? 0);
-    const totalRows = Number(row.total_rows ?? 0);
-    if (totalRows <= 0 || rowsChanged <= 0) continue;
-    const verdict = shouldTriggerReplacementForVolume({ rowsChanged, totalRows });
-    if (!verdict.shouldTrigger) continue;
+    if (rowsChanged <= 0) continue;
+    // Below-threshold emissions don't stamp backfill_started_at; remember
+    // them so the count runs once per emission, not once per tick.
+    const emissionKey = `${row.ontology_id}:${row.object_type_api_name}`;
+    if (evaluatedEmissions.get(emissionKey) === row.last_run_at) continue;
     try {
+      // ratio > T  ⇔  totalRows < rowsChanged / T, so stop counting once
+      // the count proves the ratio is at or below the threshold.
+      const cap = Math.floor(rowsChanged / AUTO_TRIGGER_THRESHOLD) + 1;
+      const countRes = await query(
+        `SELECT count(*)::bigint AS n FROM (
+           SELECT 1 FROM object_instances
+            WHERE ontology_id = $1 AND object_type_api_name = $2
+            LIMIT $3) c`,
+        [row.ontology_id, row.object_type_api_name, cap]
+      );
+      const totalRows = Number((countRes.rows[0] as { n?: number | string } | undefined)?.n ?? 0);
+      evaluatedEmissions.set(emissionKey, row.last_run_at);
+      if (totalRows <= 0) continue;
+      const verdict = shouldTriggerReplacementForVolume({ rowsChanged, totalRows });
+      if (!verdict.shouldTrigger) continue;
+
       await beginReplacementBackfill(row.object_type_api_name);
       console.info(
         `[replacement/scheduler] auto-trigger ${row.object_type_api_name}: ` +
