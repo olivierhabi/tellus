@@ -196,6 +196,83 @@ async function releaseIndexingLock(
 }
 
 // ---------------------------------------------------------------------------
+// Detached execution helpers (POST /)
+// ---------------------------------------------------------------------------
+
+/** How long POST / waits for the reindex before answering 202. Must stay
+ *  under the 5s request budget (requestTimeout.ts). */
+export function reindexSyncWaitMs(): number {
+  const raw = Number(process.env.REINDEX_SYNC_WAIT_MS ?? 3_000);
+  return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 4_000) : 3_000;
+}
+
+/** Keep the lock fresh while a detached run works, so force's stale-steal
+ *  (forceStealStaleMs) never takes a lock from a live run. */
+const REINDEX_LOCK_HEARTBEAT_MS = 60_000;
+
+async function touchIndexingLock(objectTypeId: string): Promise<void> {
+  try {
+    await query(
+      `UPDATE funnel_state SET updated_at = now(), lease_heartbeat_at = now()
+        WHERE object_type_id = $1 AND status = 'indexing'`,
+      [objectTypeId],
+    );
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** A completed funnel run with objects ⇒ object_instances is the system of
+ *  record for this type and the serving index is rebuilt from it. */
+async function isFunnelManaged(ontologyId: string, apiName: string): Promise<boolean> {
+  try {
+    const r = await query(
+      `SELECT 1 FROM funnel_run
+        WHERE ontology_id = $1 AND object_type_api_name = $2
+          AND status = 'completed' AND objects_indexed > 0
+        LIMIT 1`,
+      [ontologyId, apiName],
+    );
+    return r.rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Stream object_instances into OpenSearch (bounded memory) and record the
+ *  terminal funnel_state. Throws when nothing could be indexed. */
+export async function rebuildServingIndexFromInstances(
+  ontologyId: string,
+  apiName: string,
+  objectTypeId: string,
+): Promise<unknown> {
+  const started = Date.now();
+  const { syncObjectInstancesToOpenSearch } = await import("../services/opensearch/syncFromInstances");
+  const out = await syncObjectInstancesToOpenSearch(apiName, ontologyId);
+  if (out.rowsRead > 0 && out.rowsIndexed === 0) {
+    throw Object.assign(
+      new Error(`OpenSearch rejected all ${out.rowsFailed} document(s) for '${apiName}' (see [os-sync] logs)`),
+      { details: { failedAtStep: "sync_opensearch", durationMs: Date.now() - started } },
+    );
+  }
+  await query(
+    `UPDATE funnel_state
+        SET status = 'indexed', objects_indexed = $2, last_indexed_at = now(),
+            last_index_duration_ms = $3,
+            error_message = $4, index_name = $5, updated_at = now()
+      WHERE object_type_id = $1`,
+    [
+      objectTypeId,
+      out.rowsIndexed,
+      Date.now() - started,
+      out.rowsFailed > 0 ? `${out.rowsFailed} document(s) failed to index` : null,
+      out.indexName,
+    ],
+  );
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Route 1: POST / — Trigger full reindex
 //
 // Synchronous reindex for week 1. Includes smart skip logic and atomic
@@ -387,31 +464,79 @@ router.post(
         }
       }
 
-      try {
-        const result = await reindexObjectType(ontologyId, apiName);
+      // A full reindex of a large type takes minutes (6.35M rows ≈ 12 min),
+      // far past the 5s data-plane request budget — the client got a 504
+      // while the work kept running unobserved. Run it detached: answer with
+      // the real result if it finishes within the sync window (small types,
+      // fast failures), otherwise 202 + the status URL to poll.
+      //
+      // Funnel-managed types (a completed funnel run populated
+      // object_instances) rebuild the serving index by streaming
+      // object_instances — the same bounded-memory sync the funnel uses —
+      // instead of the legacy datasource path, which merges in heap and
+      // refuses > REINDEX_MAX_MERGED_OBJECTS rows (REINDEX_TOO_LARGE).
+      const funnelManaged = await isFunnelManaged(ontologyId, apiName);
+      const objectTypeId = objectType.object_type_id as string;
+      const heartbeat = setInterval(() => {
+        void touchIndexingLock(objectTypeId);
+      }, REINDEX_LOCK_HEARTBEAT_MS);
+      heartbeat.unref?.();
+      const run: Promise<unknown> = (
+        funnelManaged
+          ? rebuildServingIndexFromInstances(ontologyId, apiName, objectTypeId)
+          : reindexObjectType(ontologyId, apiName)
+      ).finally(() => clearInterval(heartbeat));
 
+      type Outcome = { kind: "ok"; result: unknown } | { kind: "err"; err: any } | { kind: "pending" };
+      let waitTimer: NodeJS.Timeout | undefined;
+      const outcome: Outcome = await Promise.race([
+        run.then(
+          (result): Outcome => ({ kind: "ok", result }),
+          (err): Outcome => ({ kind: "err", err }),
+        ),
+        new Promise<Outcome>((resolve) => {
+          waitTimer = setTimeout(() => resolve({ kind: "pending" }), reindexSyncWaitMs());
+        }),
+      ]);
+      clearTimeout(waitTimer);
+
+      if (outcome.kind === "pending") {
+        run.then(
+          () => console.log(`[reindex] ${apiName}: background reindex completed`),
+          async (err: any) => {
+            console.error(`[reindex] ${apiName}: background reindex failed: ${err?.message ?? err}`);
+            await releaseIndexingLock(objectTypeId, String(err?.message ?? err));
+          },
+        );
+        return res.status(202).json({
+          success: true,
+          data: {
+            status: "accepted",
+            objectType: apiName,
+            pipeline: funnelManaged ? "opensearch-from-instances" : "datasource-reindex",
+            statusUrl: `${req.baseUrl}/status`,
+          },
+        });
+      }
+
+      if (outcome.kind === "ok") {
         // Step 7: Success response
         return sendSuccess(res, {
           status: "completed",
           objectType: apiName,
-          result,
+          result: outcome.result,
         });
-      } catch (err: any) {
+      }
+
+      {
+        const err = outcome.err;
         // Step 8: Failure response
         const durationMs = err.details?.durationMs || 0;
         const failedAtStep = err.details?.failedAtStep || "unknown";
 
         // Ensure funnel_state is reset from 'indexing' on failure
         // (reindexService should handle this, but be defensive)
-        try {
-          await query(
-            `UPDATE funnel_state SET status = 'failed', error_message = $1, updated_at = now()
-             WHERE object_type_id = $2 AND status = 'indexing'`,
-            [err.message, objectType.object_type_id]
-          );
-        } catch {
-          // Best-effort
-        }
+        await releaseIndexingLock(objectTypeId, err.message);
 
         // Status-carrying guard errors (e.g. REINDEX_TOO_LARGE → 413) keep
         // their mapped status — never collapse them into a 500.
@@ -423,20 +548,6 @@ router.post(
           });
         }
 
-        // If it's a known error, return structured response
-        if (err.code && KNOWN_CODES.has(err.code)) {
-          return res.status(500).json({
-            error: "REINDEX_FAILED",
-            message: `Reindex failed for object type '${apiName}': ${err.message}`,
-            details: {
-              objectType: apiName,
-              durationMs,
-              failedAtStep,
-            },
-          });
-        }
-
-        // Generic error
         return res.status(500).json({
           error: "REINDEX_FAILED",
           message: `Reindex failed for object type '${apiName}': ${err.message}`,
