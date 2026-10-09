@@ -4,6 +4,15 @@
 # Production funnel profile (out-of-process DuckDB CLI merge) against
 # Postgres 16 + MinIO; reports (wall time, maxRSS, buckets, kill points) are
 # uploaded as an artifact and judged against tests/funnel/scale/budgets.json.
+#
+# Runner: GitHub-hosted `ubuntu-latest` — on a PUBLIC repository that is the
+# standard 4 vCPU / 16 GB RAM Linux runner. The "Runner capacity" step fails
+# fast if the job ever lands on a smaller machine, so budget results are only
+# ever judged on that hardware.
+#
+# NOTE: `runner.*` is not available in job-level `env` (GitHub rejects the
+# whole file — 0 jobs). Paths derived from runner.temp are exported from the
+# first step via $GITHUB_ENV instead.
 # =============================================================================
 name: funnel-scale
 
@@ -48,10 +57,10 @@ jobs:
       TELLUS_EXPECT_OOP_MERGE: "1"
       TELLUS_FUNNEL_LANE: scale
       TELLUS_SCALE_ROWS: ${{ matrix.rows }}
-      TELLUS_SCALE_WORKDIR: ${{ runner.temp }}/tellus-scale
       TELLUS_SCALE_REPORT_DIR: ${{ github.workspace }}/reports/funnel-scale
       # PG_STATEMENT_TIMEOUT_MS deliberately left at the shipped 60 s default:
-      # a promote that cannot finish within it at 5M/10M rows is a finding.
+      # the chunked promote must keep every statement under it at 5M/10M rows;
+      # a 57014 here is a finding, never something to raise the timeout for.
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     services:
       postgres:
@@ -68,6 +77,20 @@ jobs:
           --health-timeout=5s
           --health-retries=10
     steps:
+      - name: Runner capacity (expect 4 vCPU / 16 GB public-repo runner)
+        run: |
+          cpus=$(nproc)
+          mem_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+          echo "vCPU=${cpus} RAM=${mem_gb}GB"
+          echo "### runner: ${cpus} vCPU, ${mem_gb} GB RAM" >> "$GITHUB_STEP_SUMMARY"
+          # MemTotal reports slightly under the nominal 16 GB.
+          if [ "$cpus" -lt 4 ] || [ "$mem_gb" -lt 15 ]; then
+            echo "::error::funnel-scale needs a 4 vCPU / 16 GB runner, got ${cpus} vCPU / ${mem_gb} GB"
+            exit 1
+          fi
+      - name: Scale workdir
+        # runner.temp is only valid at step level — see header note.
+        run: echo "TELLUS_SCALE_WORKDIR=${RUNNER_TEMP}/tellus-scale" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup pnpm + Node.js + install

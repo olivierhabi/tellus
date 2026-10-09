@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Funnel merge promote no longer times out at multi-million-row scale**:
+  `promoteMergeStaging` copied a whole staging run into `object_instances`
+  in ONE statement; at 6,353,307 rows it hit the 60 s
+  `PG_STATEMENT_TIMEOUT_MS` (`57014`) and, being silent, starved the
+  progress-coupled Temporal heartbeat. Verify, promote and staging cleanup
+  now walk the run in primary-key chunks (`mergePromoteChunkRows`,
+  250k) inside the caller's single transaction (still all-or-nothing),
+  deletes go through an index-keyed `primary_key = ANY(...)` instead of a
+  join, and progress is reported after every chunk. Measured on Postgres 16
+  (2 vCPU / 4 GB) with the default 60 s timeout: 6.35M-row first load
+  promoted in 133 s, slowest chunk 5.7 s.
+- **`funnel-scale.yml` never ran** (0 jobs on every push): job-level `env`
+  used `${{ runner.temp }}`, which GitHub rejects. The workdir is now set at
+  step level, and the job asserts it runs on the 4 vCPU / 16 GB public-repo
+  runner.
+- Merge log says "first load" instead of "materialized-count drift" when the
+  live table is empty.
+
 ### Added
 - **God-file breakup, second wave (behavior-preserving, no logic changes)**:
   - `src/services/transformService.ts` (2726 LOC) → chain replay
