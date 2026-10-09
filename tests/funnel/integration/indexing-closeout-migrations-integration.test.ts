@@ -3,7 +3,7 @@
 //
 // Against the live CI Postgres (the same database the app booted and
 // migrated):
-//   1. the ledger records every close-out migration (192–195) as applied;
+//   1. the ledger records every close-out migration (192–196) as applied;
 //   2. each forward migration is idempotent (re-applying is a no-op);
 //   3. each .down.sql really reverses its forward migration, is itself
 //      idempotent, and the forward migration re-applies cleanly afterwards.
@@ -69,6 +69,15 @@ const MIGRATIONS: CloseoutMigration[] = [
       (await tableExists(c, "merge_staging_instances")) &&
       (await indexExists(c, "idx_merge_staging_instances_owner")),
   },
+  {
+    name: "196_merge_staging_unlogged",
+    present: async (c) => {
+      const r = await c.query(
+        `SELECT relpersistence FROM pg_class WHERE oid = to_regclass('merge_staging_instances')`,
+      );
+      return r.rows[0]?.relpersistence === "u";
+    },
+  },
 ];
 
 function readSql(file: string): string {
@@ -81,7 +90,7 @@ beforeAll(async () => {
   db = await import("../../../src/db");
 });
 
-describe("indexing close-out migrations (192–195)", () => {
+describe("indexing close-out migrations (192–196)", () => {
   it("every close-out migration has forward + down SQL on disk", () => {
     for (const m of MIGRATIONS) {
       expect(fs.existsSync(path.join(MIGRATIONS_DIR, `${m.name}.sql`)), `${m.name}.sql`).toBe(true);

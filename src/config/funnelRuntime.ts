@@ -54,6 +54,11 @@ export interface FunnelRuntimeConfig {
   mergePromoteChunkRows: number;
   /** Keep the staging table on promotion failure for forensics. */
   mergeStagingRetainOnFailure: boolean;
+  /** Load the merge tail into staging with DuckDB CSV export + PG
+   *  `COPY FROM STDIN` (bulk) instead of the per-row keyset loop. */
+  mergeStagingBulkCopy: boolean;
+  /** Merged docs per Kafka produce request in the indexing stage. */
+  indexingPublishBatchSize: number;
   /** DuckDB CLI binary for the out-of-process path. */
   duckdbCliPath: string;
   /** DuckDB memory_limit for merge work. */
@@ -85,6 +90,8 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     mergeBatchSize: 5_000,
     mergePromoteChunkRows: 250_000,
     mergeStagingRetainOnFailure: false,
+    mergeStagingBulkCopy: true,
+    indexingPublishBatchSize: 1_000,
     duckdbCliPath: "duckdb",
     duckdbMemoryLimit: "8GB",
     icebergContainerEndpoint: "http://minio:9000",
@@ -105,6 +112,8 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     mergeBatchSize: 5_000,
     mergePromoteChunkRows: 250_000,
     mergeStagingRetainOnFailure: false,
+    mergeStagingBulkCopy: true,
+    indexingPublishBatchSize: 1_000,
     duckdbCliPath: "duckdb",
     duckdbMemoryLimit: "1GB",
     icebergContainerEndpoint: "http://minio:9000",
@@ -125,6 +134,8 @@ const CONFIG: Record<FunnelRuntimeProfile, Omit<FunnelRuntimeConfig, "profile">>
     mergeBatchSize: 5_000,
     mergePromoteChunkRows: 250_000,
     mergeStagingRetainOnFailure: false,
+    mergeStagingBulkCopy: true,
+    indexingPublishBatchSize: 1_000,
     duckdbCliPath: "/usr/local/bin/duckdb",
     duckdbMemoryLimit: "8GB",
     icebergContainerEndpoint: "http://minio:9000",

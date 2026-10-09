@@ -22,7 +22,8 @@
 // ---------------------------------------------------------------------------
 
 import { query } from "../../db";
-import { publishMergedDoc } from "./mergedKafkaProducer";
+import { publishMergedDocs, type MergedDocMessage } from "./mergedKafkaProducer";
+import { funnelRuntimeConfig } from "../../config/funnelRuntime";
 import { getQuickwitClient, QuickwitClient, QuickwitSplit } from "./client";
 import { getQuickwitIndexId } from "./docMapping";
 import { buildQuickwitDoc, MergedRow } from "./docBuilder";
@@ -49,9 +50,24 @@ export interface IndexingActivityInput {
   publishPollMs?: number;
   /** Inject a test client. */
   client?: QuickwitClient;
-  /** Inject a test publisher. */
+  /** Inject a test publisher (one doc per call — the legacy shape). When set
+   *  and `publishDocs` is not, docs are published one at a time. */
   publishDoc?: (topic: string, key: string, doc: Record<string, unknown>) => Promise<number>;
+  /** Inject a batch publisher: publish all docs in one produce request and
+   *  return the highest offset written. Default: publishMergedDocs. */
+  publishDocs?: (topic: string, docs: MergedDocMessage[]) => Promise<number>;
+  /** Docs per produce request (default: funnelRuntimeConfig().indexingPublishBatchSize). */
+  publishBatchSize?: number;
 }
+
+/**
+ * Upper bound on serialized doc bytes per produce request. The broker's
+ * default message.max.bytes (~1 MiB) applies to a whole (compressed) record
+ * batch; capping the uncompressed payload at half of that keeps a batch of
+ * unusually wide docs from being rejected while ordinary docs still go
+ * ~1 000 per request.
+ */
+export const PUBLISH_BATCH_MAX_BYTES = 512 * 1024;
 
 export interface IndexingActivityResult {
   indexId: string;
@@ -74,11 +90,35 @@ export async function runIndexingActivity(
   const client = input.client ?? getQuickwitClient();
   const indexId = getQuickwitIndexId(input.objectTypeApiName);
   const topic = input.kafkaTopic ?? `merged.${input.objectTypeApiName.toLowerCase()}`;
-  const publishDoc = input.publishDoc ?? defaultPublisher;
+  // Foundry-style bulk hand-off: docs go to Kafka in batched produce
+  // requests (one Snappy record batch per partition, ~1 000 docs each)
+  // instead of one awaited round trip per doc. A test-injected per-doc
+  // publisher keeps the legacy one-at-a-time shape.
+  const publishDocs: (topic: string, docs: MergedDocMessage[]) => Promise<number> =
+    input.publishDocs ??
+    (input.publishDoc
+      ? perDocPublisher(input.publishDoc)
+      : (t, docs) => publishMergedDocs(t, docs));
+  const batchSize = Math.max(
+    1,
+    Math.floor(input.publishBatchSize ?? funnelRuntimeConfig().indexingPublishBatchSize),
+  );
 
   let rowsStreamed = 0;
   let lastKafkaOffset = 0;
   const editIds = new Set<string>();
+
+  let pending: MergedDocMessage[] = [];
+  let pendingBytes = 0;
+  const flush = async () => {
+    if (pending.length === 0) return;
+    const docs = pending;
+    pending = [];
+    pendingBytes = 0;
+    const offset = await publishDocs(topic, docs);
+    if (offset > lastKafkaOffset) lastKafkaOffset = offset;
+    rowsStreamed += docs.length;
+  };
 
   // 1 + 2: read merged rows and stream into Kafka.
   for await (const batch of input.reader()) {
@@ -88,10 +128,19 @@ export async function runIndexingActivity(
         primaryKeyApiName: input.primaryKeyApiName,
         row,
       });
-      const offset = await publishDoc(topic, row.primary_key, doc);
-      if (offset > lastKafkaOffset) lastKafkaOffset = offset;
-      rowsStreamed++;
+      // Rough serialized size; only used to bound the request, so the
+      // ~2x overestimate for non-ASCII is harmless.
+      const bytes = estimateDocBytes(doc) + row.primary_key.length;
+      if (pending.length > 0 && pendingBytes + bytes > PUBLISH_BATCH_MAX_BYTES) {
+        await flush();
+      }
+      pending.push({ key: row.primary_key, doc });
+      pendingBytes += bytes;
+      if (pending.length >= batchSize) await flush();
     }
+    // Flush at reader-batch boundaries so edit ids and kafkaOffsetHigh are
+    // never ahead of the docs actually produced.
+    await flush();
     for (const id of batch.editIds) editIds.add(id);
     if (typeof batch.kafkaOffsetHigh === "number" && batch.kafkaOffsetHigh > lastKafkaOffset) {
       lastKafkaOffset = batch.kafkaOffsetHigh;
@@ -126,16 +175,31 @@ export async function runIndexingActivity(
   };
 }
 
-// ---------------------------------------------------------------------------
-// defaultPublisher — reuses kafkaProducer.ts; returns the new offset.
-// ---------------------------------------------------------------------------
+/** Adapt a per-doc publisher to the batch shape (sequential, max offset). */
+function perDocPublisher(
+  publishDoc: (topic: string, key: string, doc: Record<string, unknown>) => Promise<number>,
+): (topic: string, docs: MergedDocMessage[]) => Promise<number> {
+  return async (topic, docs) => {
+    let max = 0;
+    for (const d of docs) {
+      const offset = await publishDoc(topic, d.key, d.doc);
+      if (offset > max) max = offset;
+    }
+    return max;
+  };
+}
 
-async function defaultPublisher(
-  topic: string,
-  key: string,
-  doc: Record<string, unknown>
-): Promise<number> {
-  return publishMergedDoc(topic, key, doc);
+function estimateDocBytes(doc: Record<string, unknown>): number {
+  let n = 2;
+  for (const k in doc) {
+    const v = doc[k];
+    n += k.length + 4;
+    if (v === null || v === undefined) n += 4;
+    else if (typeof v === "string") n += v.length * 2 + 2;
+    else if (typeof v === "number" || typeof v === "boolean") n += 24;
+    else n += JSON.stringify(v).length;
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Funnel moves data in bulk, Foundry-style (no per-row hot loops)** —
+  see `docs/adr/2026-10-09-funnel-foundry-bulk-path.md`:
+  - Changelog parquet (all-VARCHAR schemas) is written by ONE DuckDB
+    `COPY … FROM read_json(NDJSON spool)` instead of 500-row SQL-literal INSERTs
+    (~12.7k statements at 6.35M rows). Same NULL semantics, order and row-count check.
+  - Merge staging load: DuckDB renders the merged tail as a PG-ready CSV and
+    it is streamed with chunked `COPY merge_staging_instances FROM STDIN`
+    (`pg-copy-streams`, ≤ `mergePromoteChunkRows` rows per statement, one
+    transaction). Versioned flag `mergeStagingBulkCopy` (on); the row loop
+    stays as fallback. Integers > 2^53 in properties keep their digits.
+  - `merge_staging_instances` is UNLOGGED (migration 196) — scratch data.
+  - Indexing publishes merged docs to Kafka in batched produce requests
+    (`indexingPublishBatchSize` 1 000, ≤ 512 KiB) and returns the exact
+    last offset per partition.
+  - Measured locally (2 vCPU / 4 GB, PG 16, Kafka 4.2): O1 1M end-to-end
+    changelog 46.7 s → 9.0 s, full merge 37.4 s → 28.2 s (staging
+    17.9 s → 7.4 s); 6.35M rows: changelog parquet ~311 s → 32 s, staging
+    load 58 s, Kafka hand-off 200k docs 42.6 s → 2.7 s (6.35M in 70 s).
+
 ### Fixed
 - **Funnel merge promote no longer times out at multi-million-row scale**:
   `promoteMergeStaging` copied a whole staging run into `object_instances`

@@ -1,0 +1,13 @@
+-- 196_merge_staging_unlogged.sql
+--
+-- merge_staging_instances is a per-run scratch area: the merge tail bulk
+-- loads it, verifies it, promotes it into object_instances in one
+-- transaction and then deletes it. Nothing in it must survive a crash — a
+-- crash before promote already discards the run (the verify step fails on a
+-- short staging set and the run restages), and a crash after promote has
+-- nothing left to lose. Writing it to the WAL only doubled the I/O of every
+-- multi-million-row load (and shipped it to replicas that never read it).
+-- UNLOGGED is the Postgres equivalent of Foundry's scratch datasets.
+--
+-- Idempotent: SET UNLOGGED on an already-unlogged table is a no-op.
+ALTER TABLE IF EXISTS merge_staging_instances SET UNLOGGED;

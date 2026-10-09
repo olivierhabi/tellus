@@ -18,7 +18,7 @@ import {
   runIndexingActivity,
 } from "../indexingActivity";
 import { resolveWriteTargets } from "./versionManager";
-import { publishMergedDoc } from "../mergedKafkaProducer";
+import { publishMergedDocs } from "../mergedKafkaProducer";
 
 export interface DualIndexingInput
   extends Omit<IndexingActivityInput, "kafkaTopic"> {
@@ -73,12 +73,15 @@ export async function runDualIndexingActivity(
       ...input,
       reader: siblingReader,
       kafkaTopic: siblingTopic,
-      // Pin to the sibling's publish; B6 default uses kafkaProducer which
-      // keys by PK and returns broker offset.
-      publishDoc:
-        input.publishDoc ??
-        (async (_topic, key, doc) =>
-          publishMergedDoc(siblingTopic, key, doc)),
+      // Pin to the sibling's publish; B6 default uses the batched merged
+      // producer, which keys by PK and returns the broker's last offset.
+      // An injected publisher (either shape) is passed through by ...input.
+      ...(input.publishDoc || input.publishDocs
+        ? {}
+        : {
+            publishDocs: (_topic: string, docs: Parameters<typeof publishMergedDocs>[1]) =>
+              publishMergedDocs(siblingTopic, docs),
+          }),
     }),
   ]);
 

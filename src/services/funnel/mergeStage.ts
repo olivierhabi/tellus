@@ -108,6 +108,9 @@ import {
   verifyMergeStaging,
   promoteMergeStaging,
   resolveStagingRunId,
+  buildStagingCsvExportSql,
+  buildStagingParquetStatsSql,
+  copyStagingCsv,
   type StagedRowInput,
   type StagingVerification,
   type StagingScope,
@@ -1588,9 +1591,67 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
           }
         },
       };
+      let pgTailCommitted = false;
+      if (funnelRuntimeConfig().mergeStagingBulkCopy) {
+        // Phase 1 (bulk) — Foundry-style: build the load artifact in one
+        // vectorised pass, then bulk-load it. DuckDB renders the merged
+        // tail parquet as a PG-ready CSV (BEFORE opening the PG transaction,
+        // so the session never sits idle-in-transaction), then the CSV is
+        // streamed into STAGING with chunked `COPY … FROM STDIN` inside one
+        // transaction. Same atomicity as the row loop: a kill rolls the
+        // staging transaction back and object_instances is untouched.
+        const csvPath = path.join(path.dirname(tailFile), "staging-load.csv");
+        try {
+          const tExport = Date.now();
+          await runAll(conn, buildStagingCsvExportSql(stagingScope, tailFile, csvPath));
+          const [stats] = await queryAll<{
+            rows: string;
+            max_pk: string | null;
+            downgraded: string;
+            downgrade_sample: string | null;
+          }>(conn, buildStagingParquetStatsSql(tailFile));
+          rowsProcessed = Number(stats?.rows ?? 0);
+          lastPk = stats?.max_pk ?? null;
+          const downgraded = Number(stats?.downgraded ?? 0);
+          if (downgraded > 0) {
+            console.warn(
+              `[merge-staging] ${input.objectTypeApiName}: ${downgraded} non-uuid ` +
+                `provenance id(s) staged as NULL (e.g. ${JSON.stringify(stats?.downgrade_sample)}); ` +
+                `promote keeps the existing live provenance for those rows.`,
+            );
+          }
+          const exportMs = Date.now() - tExport;
+          reportStageProgress(`merge staging-export rows=${rowsProcessed}`);
+          const client = await getClient();
+          try {
+            await client.query("BEGIN");
+            await clearMergeStaging(client, stagingScope, stagingChunkOpts);
+            const tCopy = Date.now();
+            const copied = await copyStagingCsv(client, csvPath, stagingChunkOpts);
+            if (copied !== rowsProcessed) {
+              throw new Error(
+                `[merge-sql] ${input.objectTypeApiName} bulk staging copied=${copied} ` +
+                  `expected=${rowsProcessed}`,
+              );
+            }
+            await client.query("COMMIT");
+            console.log(
+              `[merge-sql] ${input.objectTypeApiName} staging rows=${rowsProcessed} ` +
+                `mode=copy exportMs=${exportMs} copyMs=${Date.now() - tCopy} ` +
+                `durMs=${Date.now() - tTail}`,
+            );
+          } catch (err) {
+            await client.query("ROLLBACK");
+            throw err;
+          } finally {
+            client.release();
+          }
+        } finally {
+          fs.rmSync(csvPath, { force: true });
+        }
+      } else {
       const client = await getClient();
       const stageBuf: StagedRowInput[] = [];
-      let pgTailCommitted = false;
       // Phase 1 — load the merged tail into STAGING (never the live table).
       // A kill here rolls the staging transaction back; object_instances
       // is untouched until the verified promote in Phase 3.
@@ -1689,6 +1750,7 @@ export async function mergeChangesSQL(input: MergeSQLInput): Promise<MergeResult
       } finally {
         client.release();
       }
+      } // end row-loop staging (mergeStagingBulkCopy=false)
       // Phase 2 — verify staging BEFORE touching the live table. Count +
       // distinct + null/empty over the staged rows, plus a 1 000-row
       // field-by-field sample against the merged parquet. Any failure here

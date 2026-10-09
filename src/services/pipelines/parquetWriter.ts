@@ -198,6 +198,9 @@ export async function writeRowsToParquet(
 export async function writeRowsToParquetStream(
   input: WriteParquetStreamInput,
 ): Promise<WriteParquetResult | null> {
+  if (input.columns.every((c) => mapToDuckDBType(c.type) === "VARCHAR")) {
+    return writeVarcharRowsViaNdjson(input);
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-b3-parquet-"));
   const outPath = path.join(dir, "part-00000.parquet");
   const conn = await acquireConnection({ skipHttpfs: true });
@@ -283,6 +286,137 @@ export async function writeRowsToParquetStream(
       /* ignore — connection is being released anyway */
     }
     releaseConnection(conn);
+  }
+}
+
+/** Flush the NDJSON spool to disk once this many characters are buffered. */
+const NDJSON_FLUSH_CHARS = 4 * 1024 * 1024;
+
+/**
+ * Bulk path for all-VARCHAR schemas (the funnel changelog + merged parquet
+ * shapes): spool rows as NDJSON to a local file, then let DuckDB's
+ * vectorised, multi-threaded JSON reader write the Parquet in ONE COPY.
+ *
+ * The generic path below renders every row into SQL literals and runs one
+ * `INSERT … VALUES` per 500 rows — ~12.7k statements DuckDB must parse for a
+ * 6.35M-row changelog. This is the "build the artifact in bulk" shape
+ * Foundry's Funnel uses (each stage writes a dataset, never row-at-a-time).
+ *
+ * Value semantics are identical to `toSqlLiteral` for VARCHAR: null,
+ * undefined and "" become NULL; everything else is `String(value)`.
+ * Insertion order is preserved (DuckDB's default preserve_insertion_order).
+ */
+async function writeVarcharRowsViaNdjson(
+  input: WriteParquetStreamInput,
+): Promise<WriteParquetResult | null> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-b3-parquet-"));
+  const outPath = path.join(dir, "part-00000.parquet");
+  const spoolPath = path.join(dir, "rows.ndjson");
+  const names = input.columns.map((c) => c.name);
+  let inserted = 0;
+  let maxLineChars = 0;
+  try {
+    const out = fs.createWriteStream(spoolPath, { encoding: "utf8" });
+    const closed = new Promise<void>((resolve, reject) => {
+      out.once("finish", () => resolve());
+      out.once("error", reject);
+    });
+    const write = (chunk: string): Promise<void> =>
+      out.write(chunk)
+        ? Promise.resolve()
+        : new Promise<void>((resolve, reject) => {
+            const onDrain = () => {
+              out.off("error", onError);
+              resolve();
+            };
+            const onError = (e: Error) => {
+              out.off("drain", onDrain);
+              reject(e);
+            };
+            out.once("drain", onDrain);
+            out.once("error", onError);
+          });
+    let buf = "";
+    try {
+      for await (const row of input.rows) {
+        const rec: Record<string, string | null> = {};
+        for (const n of names) {
+          const v = row[n];
+          rec[n] = v === null || v === undefined || v === "" ? null : String(v);
+        }
+        const line = JSON.stringify(rec);
+        if (line.length > maxLineChars) maxLineChars = line.length;
+        buf += line + "\n";
+        inserted++;
+        if (buf.length >= NDJSON_FLUSH_CHARS) {
+          await write(buf);
+          buf = "";
+        }
+      }
+      if (buf) await write(buf);
+    } finally {
+      out.end();
+      await closed;
+    }
+    if (inserted === 0) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return null;
+    }
+
+    const conn = await acquireConnection({ skipHttpfs: true });
+    try {
+      const cols = input.columns
+        .map((c) => `'${c.name.replace(/'/g, "''")}': 'VARCHAR'`)
+        .join(", ");
+      const sp = spoolPath.replace(/'/g, "''");
+      // DuckDB sizes its JSON read buffer from maximum_object_size (2x), so
+      // a fixed huge value would blow small memory_limits. Size it to the
+      // widest spooled row instead (UTF-8 is at most 3 bytes per UTF-16
+      // unit), never below DuckDB's 16 MiB default.
+      const maxObjectBytes = Math.max(16 * 1024 * 1024, maxLineChars * 3 + 1);
+      const op = outPath.replace(/'/g, "''");
+      await runAll(
+        conn,
+        `COPY (SELECT ${input.columns.map((c) => quoteIdent(c.name)).join(", ")}
+                 FROM read_json('${sp}', format = 'newline_delimited',
+                                columns = {${cols}},
+                                maximum_object_size = ${maxObjectBytes}))
+           TO '${op}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)`,
+      );
+      const rc = await queryAll<{ c: bigint | number }>(
+        conn,
+        `SELECT COUNT(*) AS c FROM parquet_scan('${op}')`,
+      );
+      const rowCountExact = Number(rc[0]?.c ?? 0);
+      if (rowCountExact !== inserted) {
+        throw new Error(
+          `[parquet-writer] NDJSON bulk write row mismatch: spooled=${inserted} parquet=${rowCountExact}`,
+        );
+      }
+      const schemaRows = await queryAll<{
+        name: string;
+        type: string;
+        logical_type: string | null;
+      }>(conn, `SELECT name, type, logical_type FROM parquet_schema('${op}')`);
+      const columnLogicalTypes = schemaRows
+        .filter((r) => r.name && r.name !== "schema")
+        .map((r) => ({
+          name: r.name,
+          logicalType: r.logical_type ?? r.type ?? "UNKNOWN",
+        }));
+      fs.rmSync(spoolPath, { force: true });
+      const sizeBytes = fs.statSync(outPath).size;
+      return { localPath: outPath, sizeBytes, rowCountExact, columnLogicalTypes };
+    } finally {
+      releaseConnection(conn);
+    }
+  } catch (err) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+    throw err;
   }
 }
 

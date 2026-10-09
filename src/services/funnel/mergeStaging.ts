@@ -10,16 +10,21 @@
 // leaves the live table unchanged; the staging rows are dropped on success
 // (or kept for forensics when the versioned config retains them).
 //
-// Bulk loading reuses the chunked unnest pattern from
-// models/objectInstance.bulkUpsertInstances (NOT raw COPY): COPY would need
-// either a server-visible file or a copy-stream dependency, while the
-// chunked unnest stays under PG's 65 535 bind ceiling with one round trip
-// per 1 000-row chunk. Promotion is set-based per chunk (INSERT .. SELECT
+// Bulk loading (the merge tail) is Foundry-style: DuckDB turns the merged
+// parquet into a PG-ready CSV in ONE vectorised COPY
+// (buildStagingCsvExportSql), and copyStagingCsv streams it into staging
+// with `COPY … FROM STDIN` (pg-copy-streams), split into statements of at
+// most `chunkRows` records so none nears statement_timeout. No per-row JS,
+// no JSON.parse/JSON.stringify round trip, no 1 000-row bind arrays.
+// stageMergeRows (chunked unnest) remains for small in-memory row sets.
+// Promotion is set-based per chunk (INSERT .. SELECT
 // for upserts, index-keyed DELETE for deletes) and atomic because every
 // chunk runs inside the caller's single transaction.
 // ---------------------------------------------------------------------------
 
+import fs from "fs";
 import type { PoolClient } from "pg";
+import { from as copyFrom } from "pg-copy-streams";
 import { deriveMainBranchId } from "../branchContext";
 
 export interface StagedRowInput {
@@ -82,7 +87,7 @@ export function asUuidOrNull(
  */
 export const DEFAULT_STAGING_CHUNK_ROWS = 250_000;
 
-export type StagingChunkPhase = "verify" | "promote" | "cleanup";
+export type StagingChunkPhase = "stage" | "verify" | "promote" | "cleanup";
 
 export interface StagingChunkProgress {
   phase: StagingChunkPhase;
@@ -293,6 +298,189 @@ export async function stageMergeRows(
     );
   }
   return rows.length;
+}
+
+// ---------------------------------------------------------------------------
+// Bulk staging load: merged parquet -> CSV (DuckDB) -> COPY FROM STDIN (PG).
+// ---------------------------------------------------------------------------
+
+/** Column order of the CSV written by buildStagingCsvExportSql and read by
+ *  copyStagingCsv. staged_at keeps its DEFAULT now(). */
+export const STAGING_COPY_COLUMNS = [
+  "staging_run_id",
+  "ontology_id",
+  "branch_id",
+  "object_type_api_name",
+  "primary_key",
+  "operation",
+  "properties",
+  "markings",
+  "source_datasource_id",
+  "source_transaction_id",
+] as const;
+
+const DUCK_UUID_RE =
+  "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+function duckStr(v: string): string {
+  return `'${v.replace(/'/g, "''")}'`;
+}
+
+/** DuckDB expression: provenance id kept only when it is a canonical uuid
+ *  (same rule as asUuidOrNull); '' / NULL / non-uuid -> NULL. */
+function duckUuidOrNull(col: string): string {
+  return `CASE WHEN regexp_full_match(${col}, '${DUCK_UUID_RE}') THEN ${col} END`;
+}
+
+function duckDowngraded(col: string): string {
+  return `(NULLIF(${col}, '') IS NOT NULL AND NOT regexp_full_match(${col}, '${DUCK_UUID_RE}'))`;
+}
+
+/**
+ * DuckDB COPY that renders one merged-tail parquet (MERGED_PARQUET_COLUMNS:
+ * all VARCHAR; properties/markings JSON text; '' for null provenance) as a
+ * CSV whose columns are STAGING_COPY_COLUMNS, ready for
+ * `COPY merge_staging_instances FROM STDIN (FORMAT csv)`.
+ *
+ * Value semantics match the row path (parseJsonColumn / parseJsonArrayColumn
+ * / asUuidOrNull / stageMergeRows):
+ *   - operation: 'delete' stays 'delete', anything else is 'upsert'
+ *   - properties: a JSON object passes through verbatim (PG's jsonb parse
+ *     normalises it); NULL / invalid / non-object -> '{}'
+ *   - markings: JSON array -> PG text[] literal (elements quoted + escaped,
+ *     JSON null -> NULL element); NULL / invalid / non-array -> '{}'
+ *   - provenance ids: canonical uuid kept, anything else -> NULL
+ * DuckDB writes NULL as an empty unquoted field and '' as `""`, which is
+ * exactly PG CSV's NULL / empty-string distinction.
+ */
+export function buildStagingCsvExportSql(
+  scope: StagingScope,
+  parquetPath: string,
+  csvPath: string,
+): string {
+  const branchId = deriveMainBranchId(scope.ontologyId);
+  const pq = duckStr(parquetPath);
+  const isJson = (c: string, t: string) =>
+    `(${c} IS NOT NULL AND json_valid(${c}) AND json_type(CAST(${c} AS JSON)) = '${t}')`;
+  const pgArrayElem = `CASE WHEN m IS NULL THEN 'NULL' ELSE '"' || replace(replace(m, '\\', '\\\\'), '"', '\\"') || '"' END`;
+  return `COPY (
+  SELECT ${duckStr(scope.stagingRunId)} AS staging_run_id,
+         ${duckStr(scope.ontologyId)} AS ontology_id,
+         ${duckStr(branchId)} AS branch_id,
+         ${duckStr(scope.objectTypeApiName)} AS object_type_api_name,
+         primary_key,
+         CASE WHEN operation = 'delete' THEN 'delete' ELSE 'upsert' END AS operation,
+         CASE WHEN ${isJson("properties", "OBJECT")} THEN properties ELSE '{}' END AS properties,
+         CASE WHEN ${isJson("markings", "ARRAY")}
+              THEN '{' || COALESCE(array_to_string(
+                     list_transform(from_json(markings, '["VARCHAR"]'), m -> ${pgArrayElem}),
+                     ','), '') || '}'
+              ELSE '{}' END AS markings,
+         ${duckUuidOrNull("source_datasource_id")} AS source_datasource_id,
+         ${duckUuidOrNull("source_transaction_id")} AS source_transaction_id
+    FROM read_parquet(${pq})
+) TO ${duckStr(csvPath)} (FORMAT CSV, HEADER false)`;
+}
+
+/** DuckDB query over the same parquet: exact row count, max key (the resume
+ *  cursor the row path tracked as lastPk) and non-uuid provenance downgrades. */
+export function buildStagingParquetStatsSql(parquetPath: string): string {
+  return `SELECT CAST(count(*) AS VARCHAR) AS rows,
+       max(primary_key) AS max_pk,
+       CAST(count(*) FILTER (WHERE ${duckDowngraded("source_datasource_id")}
+                                OR ${duckDowngraded("source_transaction_id")}) AS VARCHAR) AS downgraded,
+       min(CASE WHEN ${duckDowngraded("source_datasource_id")} THEN source_datasource_id
+                WHEN ${duckDowngraded("source_transaction_id")} THEN source_transaction_id END) AS downgrade_sample
+  FROM read_parquet(${duckStr(parquetPath)})`;
+}
+
+type CopyStream = ReturnType<typeof copyFrom>;
+
+/**
+ * Stream a CSV produced by buildStagingCsvExportSql into
+ * merge_staging_instances with `COPY … FROM STDIN`, one COPY statement per
+ * `chunkRows` CSV records (record boundaries found with a quote-aware byte
+ * scan, so values containing newlines are never split). Runs inside the
+ * caller's transaction, so a failure anywhere leaves staging unchanged once
+ * the caller rolls back. Returns the number of rows PG reports as copied.
+ */
+export async function copyStagingCsv(
+  client: PoolClient,
+  csvPath: string,
+  opts?: StagingChunkOptions,
+): Promise<number> {
+  const n = chunkRowsOf(opts);
+  const sql =
+    `COPY merge_staging_instances (${STAGING_COPY_COLUMNS.join(", ")}) ` +
+    `FROM STDIN WITH (FORMAT csv)`;
+  let total = 0;
+  let copy: CopyStream | null = null;
+  let done: Promise<void> | null = null;
+
+  const open = (): CopyStream => {
+    const s = client.query(copyFrom(sql));
+    done = new Promise<void>((resolve, reject) => {
+      s.once("finish", () => resolve());
+      // `on`, not `once`: a failed COPY can emit more than one error and an
+      // unhandled second emission would crash the process.
+      s.on("error", reject);
+    });
+    // Surface a COPY error even while we are waiting on 'drain'.
+    done.catch(() => {});
+    copy = s;
+    return s;
+  };
+  const write = async (chunk: Buffer): Promise<void> => {
+    if (chunk.length === 0) return;
+    const s = copy ?? open();
+    if (!s.write(chunk)) {
+      await Promise.race([
+        new Promise<void>((resolve) => s.once("drain", () => resolve())),
+        done,
+      ]);
+    }
+  };
+  const finishChunk = async (): Promise<void> => {
+    if (!copy) return;
+    const s: CopyStream = copy;
+    s.end();
+    await done;
+    total += Number(s.rowCount ?? 0);
+    copy = null;
+    done = null;
+    reportChunk(opts, "stage", total);
+  };
+
+  try {
+    let inQuote = false;
+    let records = 0;
+    const input = fs.createReadStream(csvPath, { highWaterMark: 1 << 20 });
+    for await (const raw of input) {
+      const buf = raw as Buffer;
+      let start = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const b = buf[i];
+        if (b === 0x22) {
+          inQuote = !inQuote; // "" inside a quoted field toggles twice
+        } else if (b === 0x0a && !inQuote && ++records >= n) {
+          await write(buf.subarray(start, i + 1));
+          await finishChunk();
+          start = i + 1;
+          records = 0;
+        }
+      }
+      if (start < buf.length) await write(buf.subarray(start));
+    }
+    await finishChunk();
+    return total;
+  } catch (err) {
+    const s = copy as CopyStream | null;
+    if (s) {
+      s.destroy(err as Error); // sends CopyFail so the connection stays usable
+      await (done as Promise<void> | null)?.catch(() => {});
+    }
+    throw err;
+  }
 }
 
 export interface StagingVerification {
