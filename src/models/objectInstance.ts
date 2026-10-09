@@ -73,8 +73,9 @@ function asUuidOrNull(value: string | null | undefined, field: string): string |
     warnedNonUuid.add(value);
     console.warn(
       `[objectInstance] ${field}=${JSON.stringify(value)} is not a uuid — ` +
-        `storing NULL. Provenance for these rows is lost, but the batch is ` +
-        `preserved. Fix the caller to pass null for synthetic transactions.`,
+        `storing NULL. The upsert keeps the existing live provenance for ` +
+        `these rows (COALESCE); fix the caller to pass null for synthetic ` +
+        `transactions.`,
     );
   }
   return null;
@@ -176,10 +177,14 @@ export async function bulkUpsertInstances(
          DO UPDATE SET
            properties            = EXCLUDED.properties,
            markings              = EXCLUDED.markings,
-           source_datasource_id  = EXCLUDED.source_datasource_id,
-           source_transaction_id = EXCLUDED.source_transaction_id,
+           source_datasource_id  = COALESCE(EXCLUDED.source_datasource_id,
+                                            object_instances.source_datasource_id),
+           source_transaction_id = COALESCE(EXCLUDED.source_transaction_id,
+                                            object_instances.source_transaction_id),
            last_modified_at      = now(),
            version               = object_instances.version + 1
+         -- Provenance never regresses to NULL (a NULL/non-uuid incoming id
+         -- keeps the live breadcrumb) — same rule as promoteMergeStaging.
          -- No-op guard: skip the UPDATE when the row content is identical.
          -- Without this, a re-merge of unchanged data creates a dead tuple,
          -- rewrites the JSONB into TOAST, touches every index, and spuriously
@@ -191,7 +196,8 @@ export async function bulkUpsertInstances(
                 object_instances.source_transaction_id)
            IS DISTINCT FROM
                (EXCLUDED.properties, EXCLUDED.markings,
-                EXCLUDED.source_datasource_id, EXCLUDED.source_transaction_id)`,
+                COALESCE(EXCLUDED.source_datasource_id, object_instances.source_datasource_id),
+                COALESCE(EXCLUDED.source_transaction_id, object_instances.source_transaction_id))`,
         [
           chunk.map((r) => r.ontology_id),
           chunk.map((r) => r.object_type_api_name),

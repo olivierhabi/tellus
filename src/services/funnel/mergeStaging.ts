@@ -54,9 +54,20 @@ export function resolveStagingRunId(
   return fallbackSnapshotId;
 }
 
-function asUuidOrNull(value: string | null | undefined): string | null {
+/**
+ * The staging provenance columns are uuid. A non-uuid id is downgraded to
+ * NULL (losing a breadcrumb beats failing the batch) and counted; promote
+ * COALESCEs a staged NULL with the live value, so a downgrade can never
+ * overwrite existing live provenance with NULL.
+ */
+export function asUuidOrNull(
+  value: string | null | undefined,
+  onDowngrade?: (value: string) => void,
+): string | null {
   if (value == null || value === "") return null;
-  return UUID_RE.test(value) ? value : null;
+  if (UUID_RE.test(value)) return value;
+  onDowngrade?.(value);
+  return null;
 }
 
 /** Drop any staging rows owned by this (ontology, object type). The funnel
@@ -95,6 +106,12 @@ export async function stageMergeRows(
 ): Promise<number> {
   if (rows.length === 0) return 0;
   const branchId = deriveMainBranchId(scope.ontologyId);
+  let downgraded = 0;
+  let sample: string | null = null;
+  const onDowngrade = (v: string) => {
+    downgraded++;
+    if (sample == null) sample = v;
+  };
   for (let i = 0; i < rows.length; i += STAGE_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + STAGE_CHUNK_SIZE);
     await client.query(
@@ -120,9 +137,16 @@ export async function stageMergeRows(
         chunk.map((r) => r.operation),
         chunk.map((r) => JSON.stringify(r.properties ?? {})),
         chunk.map((r) => JSON.stringify(r.markings ?? [])),
-        chunk.map((r) => asUuidOrNull(r.source_datasource_id)),
-        chunk.map((r) => asUuidOrNull(r.source_transaction_id)),
+        chunk.map((r) => asUuidOrNull(r.source_datasource_id, onDowngrade)),
+        chunk.map((r) => asUuidOrNull(r.source_transaction_id, onDowngrade)),
       ],
+    );
+  }
+  if (downgraded > 0) {
+    console.warn(
+      `[merge-staging] ${scope.objectTypeApiName}: ${downgraded} non-uuid ` +
+        `provenance id(s) staged as NULL (e.g. ${JSON.stringify(sample)}); ` +
+        `promote keeps the existing live provenance for those rows.`,
     );
   }
   return rows.length;
@@ -196,8 +220,12 @@ export async function promoteMergeStaging(
      DO UPDATE SET
        properties            = EXCLUDED.properties,
        markings              = EXCLUDED.markings,
-       source_datasource_id  = EXCLUDED.source_datasource_id,
-       source_transaction_id = EXCLUDED.source_transaction_id,
+       -- Provenance never regresses to NULL: a staged NULL (no breadcrumb,
+       -- or a non-uuid id downgraded by asUuidOrNull) keeps the live value.
+       source_datasource_id  = COALESCE(EXCLUDED.source_datasource_id,
+                                        object_instances.source_datasource_id),
+       source_transaction_id = COALESCE(EXCLUDED.source_transaction_id,
+                                        object_instances.source_transaction_id),
        last_modified_at      = now(),
        version               = object_instances.version + 1
      WHERE (object_instances.properties, object_instances.markings,
@@ -205,7 +233,8 @@ export async function promoteMergeStaging(
             object_instances.source_transaction_id)
        IS DISTINCT FROM
            (EXCLUDED.properties, EXCLUDED.markings,
-            EXCLUDED.source_datasource_id, EXCLUDED.source_transaction_id)`,
+            COALESCE(EXCLUDED.source_datasource_id, object_instances.source_datasource_id),
+            COALESCE(EXCLUDED.source_transaction_id, object_instances.source_transaction_id))`,
     [scope.stagingRunId, scope.ontologyId, scope.objectTypeApiName],
   );
   // Deletes: the old plain `DELETE … USING merge_staging_instances` join was

@@ -31,13 +31,14 @@
 //     markings for that PK.
 // ---------------------------------------------------------------------------
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import os from "os";
 import { pipeline } from "stream/promises";
 import { PoolClient } from "pg";
 import { query, getClient } from "../../db";
-import { bulkUpsertInstances, deleteInstance, UpsertInstanceInput } from "../../models/objectInstance";
+import type { UpsertInstanceInput } from "../../models/objectInstance";
 import { ChangelogRow } from "./changelogStage";
 import { commitSnapshot, ManifestEntry } from "./icebergCatalog";
 import { markEditsAppliedToMerge, OntologyEditRow } from "../../models/ontologyEdit";
@@ -467,11 +468,11 @@ export async function mergeChanges(input: MergeInput): Promise<MergeResult> {
   for (const bucket of editsByKey.values()) editIdsToStamp.push(...bucket.editIds);
 
   try {
+    // Same live-table contract as the SQL path (1.5/1.6): stage → verify →
+    // promote, all inside ONE transaction. promoteMergeStaging is the only
+    // writer to the live object_instances for funnel merges.
     await client.query("BEGIN");
-    if (upserts.length > 0) await bulkUpsertInstances(upserts, client);
-    for (const pk of deletes) {
-      await deleteInstance(input.ontologyId, input.objectTypeApiName, pk, client);
-    }
+    await commitMergedRowsViaStaging(client, input, mergedRows);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -654,6 +655,52 @@ async function downloadParquetRefToLocal(
   const stream = await getObjectStream(ref.key);
   await pipeline(stream, fs.createWriteStream(localPath));
   return { dir, localPath };
+}
+
+/**
+ * Pure-TS merge commit through the shared staging contract. Loads every
+ * merged row (upserts AND deletes) into merge_staging_instances under a
+ * fresh run id, runs the same count / distinct / null-empty gate as the
+ * SQL path (assertStagedTail), then promotes with promoteMergeStaging.
+ * Caller owns the transaction: any throw rolls back with the live table
+ * untouched. Exported for the integration test.
+ */
+export async function commitMergedRowsViaStaging(
+  client: PoolClient,
+  input: { ontologyId: string; objectTypeApiName: string },
+  mergedRows: Array<{
+    primary_key: string;
+    properties: Record<string, unknown>;
+    markings: string[];
+    operation: "upsert" | "delete";
+    source_datasource_id: string | null;
+    source_transaction_id: string | null;
+  }>,
+): Promise<{ upserts: number; deletes: number }> {
+  const scope: StagingScope = {
+    ontologyId: input.ontologyId,
+    objectTypeApiName: input.objectTypeApiName,
+    stagingRunId: crypto.randomUUID(),
+  };
+  await clearMergeStaging(client, scope);
+  if (mergedRows.length === 0) return { upserts: 0, deletes: 0 };
+  await stageMergeRows(
+    client,
+    scope,
+    mergedRows.map((r) => ({
+      ontology_id: input.ontologyId,
+      object_type_api_name: input.objectTypeApiName,
+      primary_key: r.primary_key,
+      operation: r.operation,
+      properties: r.properties,
+      markings: r.markings,
+      source_datasource_id: r.source_datasource_id,
+      source_transaction_id: r.source_transaction_id,
+    })),
+  );
+  const staged = await verifyMergeStaging(client, scope);
+  assertStagedTail(staged, mergedRows.length, input.objectTypeApiName);
+  return promoteMergeStaging(client, scope);
 }
 
 /** Staging gate: the staged set must equal the merged tail exactly —

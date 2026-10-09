@@ -10,18 +10,21 @@
 //   * malformed / missing marker on a foundry-bridged row => THROWS;
 //   * well-formed marker => resolves the datasource;
 //   * legacy (non-bridged) path => null (pending-edit fallback owns it);
-//   * catalog lookup failure => null (unchanged best-effort behaviour).
+//   * catalog lookup failure => bounded retry, then THROWS (a DB error is
+//     not "no backing row"; null would disarm the zero-row gate).
 // ---------------------------------------------------------------------------
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let respond: () => { rows: Record<string, unknown>[] } = () => ({ rows: [] });
+let calls = 0;
 
 vi.mock("../../../src/db", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
     query: async () => {
+      calls++;
       const { rows } = respond();
       return { rowCount: rows.length, rows };
     },
@@ -44,6 +47,7 @@ function row(filePath: string, foundryDatasetId: string | null = null) {
 }
 
 beforeEach(() => {
+  calls = 0;
   respond = () => ({ rows: [] });
 });
 
@@ -89,10 +93,28 @@ describe("loadFoundryBridgedDatasource — fail-closed marker", () => {
     await expect(loadFoundryBridgedDatasource("Account")).resolves.toBeNull();
   });
 
-  it("returns null when the catalog lookup itself fails", async () => {
+  it("throws (never null) when the catalog lookup keeps failing", async () => {
     respond = () => {
       throw new Error("connection refused");
     };
-    await expect(loadFoundryBridgedDatasource("Account")).resolves.toBeNull();
+    await expect(loadFoundryBridgedDatasource("Account")).rejects.toThrow(
+      /lookup for 'Account' failed after 3 attempts: connection refused/,
+    );
+    expect(calls).toBe(3);
+  });
+
+  it("recovers from a transient lookup failure via the bounded retry", async () => {
+    let n = 0;
+    respond = () => {
+      n++;
+      if (n === 1) throw new Error("ECONNRESET");
+      return { rows: [row(GOOD, DS)] };
+    };
+    await expect(loadFoundryBridgedDatasource("Account")).resolves.toEqual({
+      filePath: GOOD,
+      fileFormat: "csv",
+      primaryKeyColumn: "account_id",
+    });
+    expect(calls).toBe(2);
   });
 });

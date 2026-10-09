@@ -1036,6 +1036,10 @@ export function assertChangelogNonEmpty(args: {
  * Only the catalog read itself is best-effort (unchanged behaviour): a
  * failing lookup still resolves to `null`. Exported for unit tests.
  */
+/** Bounded retry for the backing-datasource catalog read (fail closed after). */
+export const FOUNDRY_LOOKUP_ATTEMPTS = 3;
+const FOUNDRY_LOOKUP_BACKOFF_MS = process.env.NODE_ENV === "test" ? 1 : 200;
+
 export async function loadFoundryBridgedDatasource(
   objectTypeApiName: string
 ): Promise<FoundryBridgedDatasource | null> {
@@ -1047,20 +1051,41 @@ export async function loadFoundryBridgedDatasource(
         foundry_dataset_id: string | null;
       }
     | undefined;
-  try {
-    const res = await query(
-      `SELECT bd.file_path, bd.file_format, bd.primary_key_column,
-              bd.foundry_dataset_id
-         FROM backing_datasource bd
-         JOIN object_type ot ON ot.object_type_id = bd.object_type_id
-        WHERE ot.api_name = $1
-          AND bd.file_path IS NOT NULL
-        LIMIT 1`,
-      [objectTypeApiName]
+  // Fail closed on lookup failure. A catalog read that ERRORS is not the
+  // same as "no backing row": returning null here would route a
+  // foundry-bridged type into the pending-edit fallback with
+  // sourceNonEmpty=false (zero-row gate disarmed) and complete the run with
+  // zero rows silently. Transient errors get a short bounded retry; a
+  // persistent failure throws so Temporal retries the whole activity.
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= FOUNDRY_LOOKUP_ATTEMPTS; attempt++) {
+    try {
+      const res = await query(
+        `SELECT bd.file_path, bd.file_format, bd.primary_key_column,
+                bd.foundry_dataset_id
+           FROM backing_datasource bd
+           JOIN object_type ot ON ot.object_type_id = bd.object_type_id
+          WHERE ot.api_name = $1
+            AND bd.file_path IS NOT NULL
+          LIMIT 1`,
+        [objectTypeApiName]
+      );
+      row = res.rows[0];
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < FOUNDRY_LOOKUP_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, FOUNDRY_LOOKUP_BACKOFF_MS * attempt));
+      }
+    }
+  }
+  if (lastErr) {
+    throw new Error(
+      `backing datasource lookup for '${objectTypeApiName}' failed after ` +
+        `${FOUNDRY_LOOKUP_ATTEMPTS} attempts: ${(lastErr as Error)?.message ?? String(lastErr)} ` +
+        `— refusing to fall back to the pending-edit path (would emit zero rows silently).`,
     );
-    row = res.rows[0];
-  } catch {
-    return null;
   }
   if (!row) return null;
   const filePath: string = row.file_path ?? "";
